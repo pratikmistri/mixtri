@@ -10,11 +10,19 @@ public sealed class AppSettings
     private static readonly Lazy<AppSettings> _instance = new(() => new AppSettings());
     public static AppSettings Instance => _instance.Value;
 
-    private readonly ApplicationDataContainer _settings;
+    private readonly ApplicationDataContainer? _settings;
 
     private AppSettings()
     {
-        _settings = ApplicationData.Current.LocalSettings;
+        try
+        {
+            _settings = ApplicationData.Current.LocalSettings;
+        }
+        catch
+        {
+            // App may not have package identity — fall back to in-memory defaults
+            _settings = null;
+        }
     }
 
     public string Theme
@@ -62,6 +70,7 @@ public sealed class AppSettings
 
     public T Get<T>(string key, T defaultValue)
     {
+        if (_settings is null) return defaultValue;
         if (_settings.Values.TryGetValue(key, out var value) && value is T typed)
             return typed;
 
@@ -70,6 +79,7 @@ public sealed class AppSettings
 
     public void Set<T>(string key, T value)
     {
+        if (_settings is null) return;
         _settings.Values[key] = value;
     }
 }

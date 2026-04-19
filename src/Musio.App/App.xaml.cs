@@ -37,37 +37,43 @@ public partial class App : Application
         _window = new MainWindow();
         _window.Activate();
 
-        _trayService = new SystemTrayService();
-        _trayService.Initialize(_window);
-        _trayService.Show();
+        // System tray and hotkeys are optional — app works without them
+        try
+        {
+            _trayService = new SystemTrayService();
+            _trayService.Initialize(_window);
+            _trayService.Show();
+            _trayService.ShowWindowRequested += OnShowWindowRequested;
+            _trayService.ExitRequested += OnExitRequested;
+            _window.AppWindow.Closing += OnWindowClosing;
+        }
+        catch (Exception)
+        {
+            // System tray not available — continue without it
+            _trayService = null;
+        }
 
-        _trayService.ShowWindowRequested += OnShowWindowRequested;
-        _trayService.ExitRequested += OnExitRequested;
-
-        // Global hotkeys
-        _hotkeyService = new GlobalHotkeyService();
-        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-        _hotkeyService.Initialize(hwnd);
-
-        // Ctrl+Shift+R → Start/Stop Recording (VK_R = 0x52)
-        _hotkeyService.RegisterHotkey(
-            GlobalHotkeyService.StartStopRecording,
-            ModifierKeys.Ctrl | ModifierKeys.Shift, 0x52);
-
-        // Ctrl+Shift+P → Pause/Resume Recording (VK_P = 0x50)
-        _hotkeyService.RegisterHotkey(
-            GlobalHotkeyService.PauseResumeRecording,
-            ModifierKeys.Ctrl | ModifierKeys.Shift, 0x50);
-
-        // Ctrl+Shift+S → Take Screenshot (VK_S = 0x53)
-        _hotkeyService.RegisterHotkey(
-            GlobalHotkeyService.TakeScreenshot,
-            ModifierKeys.Ctrl | ModifierKeys.Shift, 0x53);
-
-        _hotkeyService.HotkeyPressed += OnHotkeyPressed;
-
-        // Minimize to tray instead of closing
-        _window.AppWindow.Closing += OnWindowClosing;
+        try
+        {
+            _hotkeyService = new GlobalHotkeyService();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+            _hotkeyService.Initialize(hwnd);
+            _hotkeyService.RegisterHotkey(
+                GlobalHotkeyService.StartStopRecording,
+                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x52);
+            _hotkeyService.RegisterHotkey(
+                GlobalHotkeyService.PauseResumeRecording,
+                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x50);
+            _hotkeyService.RegisterHotkey(
+                GlobalHotkeyService.TakeScreenshot,
+                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x53);
+            _hotkeyService.HotkeyPressed += OnHotkeyPressed;
+        }
+        catch (Exception)
+        {
+            // Global hotkeys not available — continue without them
+            _hotkeyService = null;
+        }
     }
 
     private void OnShowWindowRequested(object? sender, EventArgs e)
