@@ -366,7 +366,7 @@ public sealed partial class TimelineControl : UserControl
                 : isEditable ? ZoomSegmentFill
                 : ZoomSegmentAutoFill;
 
-            var roundedRect = CreateRoundedRect(x1, segY, segW, segH, ZoomSegmentCornerRadius);
+            var roundedRect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(roundedRect, fillColor);
 
             // Border
@@ -410,7 +410,7 @@ public sealed partial class TimelineControl : UserControl
             float cy = ZoomSegmentVerticalPadding;
             float ch = h - ZoomSegmentVerticalPadding * 2;
 
-            var previewRect = CreateRoundedRect(cx1, cy, cw, ch, ZoomSegmentCornerRadius);
+            var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
             ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
                 new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
@@ -419,12 +419,6 @@ public sealed partial class TimelineControl : UserControl
         // Playhead
         float px = (float)TimeToX(PlayheadPosition);
         ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
-    }
-
-    private static CanvasGeometry CreateRoundedRect(float x, float y, float width, float height, float radius)
-    {
-        // Create a rounded rectangle using CanvasGeometry
-        return CanvasGeometry.CreateRoundedRectangle(null, x, y, width, height, radius, radius);
     }
 
     /// <summary>

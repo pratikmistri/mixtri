@@ -489,6 +489,7 @@ public sealed partial class EditorPage : Page
 
     private void UpdateZoomPanelVisibility()
     {
+        if (Timeline is null || ZoomSegmentPanel is null || ZoomHintText is null) return;
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
