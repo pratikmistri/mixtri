@@ -141,9 +141,8 @@ public sealed class VideoWriter : IDisposable
 
         await tcs.Task;
 
-        // Clean up temp frame images
-        try { Directory.Delete(_framesDir, recursive: true); }
-        catch { /* best-effort cleanup */ }
+        // Keep frame images for editor preview — they'll be cleaned up
+        // when the project is explicitly deleted or on next recording.
     }
 
     public void Dispose()
@@ -155,9 +154,7 @@ public sealed class VideoWriter : IDisposable
 
         if (!_finalized)
         {
-            // Best-effort cleanup without assembling (caller should call FinalizeAsync first)
-            try { Directory.Delete(_framesDir, recursive: true); }
-            catch { /* best-effort */ }
+            // Frames directory is kept for editor preview
         }
     }
 }
