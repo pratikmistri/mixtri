@@ -90,7 +90,7 @@
                     Padding="8,6"
                     Command="{x:Bind ViewModel.SplitAtPlayheadCommand}"
                     ToolTipService.ToolTip="Split at Playhead (S)">
-                    <FontIcon FontSize="16" Glyph="&#xE8E6;" />
+                    <FontIcon FontSize="16" Glyph="&#xEC4A;" />
                 </Button>
                 <Button
                     Padding="8,6"
