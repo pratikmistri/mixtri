@@ -33,16 +33,25 @@ public class CursorSmoother
 
         int frameCount = Math.Max(1, (int)Math.Round(durationSeconds * targetFps));
 
-        if (Algorithm == SmoothingAlgorithm.None || Strength == SmoothingStrength.None)
-            return GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq);
+        List<SmoothedPosition> result;
 
-        return Algorithm switch
-        {
-            SmoothingAlgorithm.SpringPhysics => SmoothSpringPhysics(rawData, targetFps, frameCount, startTick, tickFreq),
-            SmoothingAlgorithm.OneEuroFilter => SmoothOneEuroFilter(rawData, targetFps, frameCount, startTick, tickFreq),
-            SmoothingAlgorithm.CatmullRomSpline => SmoothCatmullRom(rawData, targetFps, frameCount, startTick, tickFreq),
-            _ => GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq),
-        };
+        if (Algorithm == SmoothingAlgorithm.None || Strength == SmoothingStrength.None)
+            result = GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq);
+        else
+            result = Algorithm switch
+            {
+                SmoothingAlgorithm.SpringPhysics => SmoothSpringPhysics(rawData, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.OneEuroFilter => SmoothOneEuroFilter(rawData, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.CatmullRomSpline => SmoothCatmullRom(rawData, targetFps, frameCount, startTick, tickFreq),
+                _ => GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq),
+            };
+
+        // Snap cursor to raw position on click events so the smoothed cursor
+        // is at the correct location when click animations play.
+        if (Algorithm != SmoothingAlgorithm.None && Strength != SmoothingStrength.None)
+            SnapToClickPositions(result, rawData, targetFps, startTick, tickFreq);
+
+        return result;
     }
 
     // Returns raw positions sampled at the target frame rate without any smoothing.
@@ -92,10 +101,21 @@ public class CursorSmoother
         var result = new List<SmoothedPosition>(frameCount);
         double dt = 1.0 / targetFps;
 
-        // Initialize to first sample position
+        // Initialize to first sample position with estimated initial velocity
+        // so the spring doesn't start from rest when the mouse is already moving.
         double posX = samples[0].X;
         double posY = samples[0].Y;
         double velX = 0, velY = 0;
+
+        if (samples.Count >= 2)
+        {
+            double timeDelta = (samples[1].TimestampTicks - samples[0].TimestampTicks) / tickFreq;
+            if (timeDelta > 0)
+            {
+                velX = (samples[1].X - samples[0].X) / timeDelta;
+                velY = (samples[1].Y - samples[0].Y) / timeDelta;
+            }
+        }
 
         for (int i = 0; i < frameCount; i++)
         {
@@ -373,6 +393,65 @@ public class CursorSmoother
     #endregion
 
     #region Shared Helpers
+
+    /// <summary>
+    /// Snaps the smoothed cursor to the raw mouse position around click-down events.
+    /// Smoothing algorithms introduce positional lag, which makes the cursor appear
+    /// behind the actual click location. This blends the smoothed path toward the
+    /// raw position over a short window before each click, arriving exactly at the
+    /// click position on the click frame.
+    /// </summary>
+    private static void SnapToClickPositions(
+        List<SmoothedPosition> positions,
+        MouseRecordingData rawData,
+        int targetFps,
+        long startTick,
+        double tickFreq)
+    {
+        if (positions.Count == 0 || rawData.Clicks.Count == 0)
+            return;
+
+        double dt = 1.0 / targetFps;
+        var samples = rawData.Samples;
+
+        // Number of frames to ease into the raw position before the click.
+        // This avoids a jarring "teleport" by smoothly blending over ~100ms.
+        int easeInFrames = Math.Max(1, (int)(0.1 * targetFps)); // ~3 frames at 30fps
+
+        foreach (var click in rawData.Clicks)
+        {
+            if (!click.IsDown) continue;
+
+            double clickTimeSeconds = (click.TimestampTicks - startTick) / tickFreq;
+            int clickFrame = (int)Math.Round(clickTimeSeconds * targetFps);
+
+            if (clickFrame < 0 || clickFrame >= positions.Count)
+                continue;
+
+            // Get the raw cursor position at click time
+            var (rawX, rawY) = InterpolateRawPosition(samples, click.TimestampTicks);
+
+            // Blend frames leading up to the click toward the raw position
+            int blendStart = Math.Max(0, clickFrame - easeInFrames);
+            for (int i = blendStart; i <= clickFrame && i < positions.Count; i++)
+            {
+                // t goes from 0 (start of blend) to 1 (click frame)
+                float t = (float)(i - blendStart) / Math.Max(1, clickFrame - blendStart);
+                // Ease-in curve for smooth acceleration toward target
+                float blend = t * t;
+
+                var pos = positions[i];
+                positions[i] = new SmoothedPosition
+                {
+                    X = pos.X + (rawX - pos.X) * blend,
+                    Y = pos.Y + (rawY - pos.Y) * blend,
+                    TimestampSeconds = pos.TimestampSeconds,
+                    VelocityX = pos.VelocityX,
+                    VelocityY = pos.VelocityY,
+                };
+            }
+        }
+    }
 
     /// <summary>
     /// Linearly interpolates the raw sample position at a given tick timestamp.

@@ -42,10 +42,10 @@ public class CursorRenderer
     /// <summary>Tick frequency from the recording (from MouseRecordingData.TickFrequency).</summary>
     public double TickFrequency { get; set; } = 1.0;
 
-    private const float ClickDownDurationSeconds = 0.08f;    // 80ms snap down
-    private const float ClickUpDurationSeconds = 0.35f;     // 350ms bouncy spring back
+    private const float ClickDownDurationSeconds = 0.04f;    // 40ms snap down
+    private const float ClickUpDurationSeconds = 0.11f;     // 110ms bouncy spring back
     private const float ClickDownScale = 0.55f;             // scale to 55% on press
-    private const float RippleDurationSeconds = 0.6f;       // 600ms ripple
+    private const float RippleDurationSeconds = 0.35f;      // 350ms ripple
     private const float RippleInitialOpacity = 0.7f;
     private const float RippleStrokeWidth = 3f;
     private const float MotionBlurVelocityThreshold = 200f; // px/s
