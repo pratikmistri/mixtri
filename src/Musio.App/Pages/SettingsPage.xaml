@@ -9,7 +9,7 @@
     mc:Ignorable="d">
 
     <ScrollViewer Padding="16">
-        <StackPanel MaxWidth="800" Spacing="8">
+        <StackPanel MaxWidth="800" HorizontalAlignment="Center" Spacing="8">
             <StackPanel.ChildrenTransitions>
                 <EntranceThemeTransition FromVerticalOffset="40" />
             </StackPanel.ChildrenTransitions>
