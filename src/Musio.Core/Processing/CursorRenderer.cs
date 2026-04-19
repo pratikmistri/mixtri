@@ -92,7 +92,7 @@ public class CursorRenderer
             ? GetClickScale(currentTimeSeconds, activeClicks, TickFrequency)
             : 1.0f;
 
-        float finalScale = Math.Clamp(_style.Scale, 0.5f, 3.0f) * clickScale;
+        float finalScale = Math.Clamp(_style.Scale, 0.5f, 8.0f) * clickScale;
 
         // Click highlight ripples (drawn behind cursor)
         if (_style.ClickHighlightEnabled)

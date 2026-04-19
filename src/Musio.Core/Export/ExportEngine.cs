@@ -53,11 +53,17 @@ public class ExportEngine
         // Resolve output dimensions from settings
         var (resW, resH) = GetResolutionDimensions(settings.Resolution);
 
-        // Override composition with export settings
+        // Override composition with export settings — match editor preview defaults
+        // for cursor visibility (large, no click ripple)
         var exportComposition = enrichedComposition with
         {
             OutputFps = settings.Fps,
             AspectRatio = settings.AspectRatio,
+            Cursor = enrichedComposition.Cursor with
+            {
+                Scale = Math.Max(enrichedComposition.Cursor.Scale, 4.0f),
+                ClickHighlightEnabled = false,
+            },
         };
 
         // Build timeline mapper if timeline edits are present

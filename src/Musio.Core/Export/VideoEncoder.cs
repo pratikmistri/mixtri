@@ -302,9 +302,20 @@ public class VideoEncoder : IDisposable
 
             try
             {
-                // Get raw pixels and create media sample (no temp file!)
+                // Get raw pixels — Win2D returns top-down row order, but
+                // MediaStreamSource with Bgra8 expects bottom-up. Flip rows.
                 var pixelBytes = outputFrame.GetPixelBytes();
-                var buffer = CryptographicBuffer.CreateFromByteArray(pixelBytes);
+                int frameW = (int)outputFrame.SizeInPixels.Width;
+                int frameH = (int)outputFrame.SizeInPixels.Height;
+                int stride = frameW * 4;
+
+                byte[] flipped = new byte[pixelBytes.Length];
+                for (int y = 0; y < frameH; y++)
+                {
+                    Buffer.BlockCopy(pixelBytes, y * stride, flipped, (frameH - 1 - y) * stride, stride);
+                }
+
+                var buffer = CryptographicBuffer.CreateFromByteArray(flipped);
                 var timestamp = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
                 var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
                 sample.Duration = frameDuration;
