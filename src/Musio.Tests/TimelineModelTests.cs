@@ -134,8 +134,9 @@ public sealed class TimelineModelTests
     [TestMethod]
     public void ZoomKeyframe_RecordEquality_WorksOnValues()
     {
-        var a = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1), ZoomLevel = 2.0, CenterX = 0.5, CenterY = 0.5 };
-        var b = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1), ZoomLevel = 2.0, CenterX = 0.5, CenterY = 0.5 };
+        var id = "test-id";
+        var a = new ZoomKeyframe { Id = id, Timestamp = TimeSpan.FromSeconds(1), ZoomLevel = 2.0, CenterX = 0.5, CenterY = 0.5 };
+        var b = new ZoomKeyframe { Id = id, Timestamp = TimeSpan.FromSeconds(1), ZoomLevel = 2.0, CenterX = 0.5, CenterY = 0.5 };
 
         Assert.AreEqual(a, b);
     }

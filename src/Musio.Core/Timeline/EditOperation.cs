@@ -277,3 +277,64 @@ public class SpeedChangeOperation : IEditOperation
         model.SpeedSegments.AddRange(_previousSegments);
     }
 }
+
+public class MoveZoomKeyframeOperation : IEditOperation
+{
+    private readonly string _keyframeId;
+    private readonly TimeSpan _newTimestamp;
+    private TimeSpan _previousTimestamp;
+
+    public string Description => "Move Zoom Point";
+
+    public MoveZoomKeyframeOperation(string keyframeId, TimeSpan newTimestamp)
+    {
+        _keyframeId = keyframeId;
+        _newTimestamp = newTimestamp;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+        _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp };
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp };
+    }
+}
+
+public class RemoveZoomKeyframeOperation : IEditOperation
+{
+    private readonly string _keyframeId;
+    private ZoomKeyframe? _removedKeyframe;
+    private int _removedIndex;
+
+    public string Description => "Remove Zoom Point";
+
+    public RemoveZoomKeyframeOperation(string keyframeId)
+    {
+        _keyframeId = keyframeId;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _removedIndex = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (_removedIndex < 0) return;
+        _removedKeyframe = model.ZoomKeyframes[_removedIndex];
+        model.ZoomKeyframes.RemoveAt(_removedIndex);
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_removedKeyframe is not null)
+        {
+            int insertIdx = Math.Min(_removedIndex, model.ZoomKeyframes.Count);
+            model.ZoomKeyframes.Insert(insertIdx, _removedKeyframe);
+        }
+    }
+}

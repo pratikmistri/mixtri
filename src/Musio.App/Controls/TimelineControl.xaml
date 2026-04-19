@@ -73,7 +73,10 @@
             Grid.Row="3"
             Grid.Column="1"
             Draw="ZoomTrackCanvas_Draw"
-            PointerPressed="Track_PointerPressed" />
+            PointerPressed="ZoomTrack_PointerPressed"
+            PointerMoved="ZoomTrack_PointerMoved"
+            PointerReleased="ZoomTrack_PointerReleased"
+            RightTapped="ZoomTrack_RightTapped" />
 
         <canvas:CanvasControl
             x:Name="AudioTrackCanvas"

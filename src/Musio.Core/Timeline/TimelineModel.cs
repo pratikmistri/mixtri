@@ -38,6 +38,9 @@ public record TimelineClip(TimeSpan Start, TimeSpan End, string Label);
 
 public record ZoomKeyframe
 {
+    /// <summary>Stable identity for selection and undo/redo tracking.</summary>
+    public string Id { get; init; } = Guid.NewGuid().ToString("N");
+
     public TimeSpan Timestamp { get; init; }
     public double ZoomLevel { get; init; } = 2.0;
     public double CenterX { get; init; } // normalized 0-1

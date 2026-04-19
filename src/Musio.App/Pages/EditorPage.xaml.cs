@@ -8,6 +8,7 @@ using Musio.Core.Capture;
 using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Timeline;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 
@@ -59,12 +60,17 @@ public sealed partial class EditorPage : Page
             DispatcherQueue.TryEnqueue(() =>
             {
                 _timelineMapper = null;
+                Timeline.ClearZoomSelection();
                 Preview.Duration = GetMappedDuration();
                 Timeline.Refresh();
                 ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
                 _ = InitializePreviewAsync();
             });
         };
+
+        // Zoom keyframe interaction events
+        Timeline.ZoomKeyframeMoved += OnZoomKeyframeMoved;
+        Timeline.ZoomKeyframeRemoveRequested += OnZoomKeyframeRemoveRequested;
 
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
@@ -279,7 +285,11 @@ public sealed partial class EditorPage : Page
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
-        DispatcherQueue.TryEnqueue(InvalidatePreview);
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            Timeline.ClearZoomSelection();
+            InvalidatePreview();
+        });
     }
 
     private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -317,6 +327,16 @@ public sealed partial class EditorPage : Page
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        // If a zoom keyframe is selected, remove it instead of deleting a clip segment
+        if (Timeline.SelectedZoomKeyframeId is { } selectedId)
+        {
+            var operation = new RemoveZoomKeyframeOperation(selectedId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            Timeline.ClearZoomSelection();
+            args.Handled = true;
+            return;
+        }
+
         ViewModel.DeleteSelectedCommand.Execute(null);
         args.Handled = true;
     }
@@ -377,23 +397,46 @@ public sealed partial class EditorPage : Page
 
     private void RemoveZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
+        // Prefer removing the selected keyframe if there is one
+        if (Timeline.SelectedZoomKeyframeId is { } selectedId)
+        {
+            var operation = new RemoveZoomKeyframeOperation(selectedId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            Timeline.ClearZoomSelection();
+            return;
+        }
+
+        // Fallback: remove the manual keyframe closest to playhead (within 1 second)
         var playhead = ViewModel.Model.PlayheadPosition;
         var keyframes = ViewModel.Model.ZoomKeyframes;
         if (keyframes.Count == 0) return;
 
-        // Remove the keyframe closest to playhead (within 1 second)
-        int bestIdx = -1;
+        string? bestId = null;
         double bestDist = 1.0;
-        for (int i = 0; i < keyframes.Count; i++)
+        foreach (var kf in keyframes)
         {
-            double dist = Math.Abs((keyframes[i].Timestamp - playhead).TotalSeconds);
-            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+            if (!kf.IsManual) continue;
+            double dist = Math.Abs((kf.Timestamp - playhead).TotalSeconds);
+            if (dist < bestDist) { bestDist = dist; bestId = kf.Id; }
         }
-        if (bestIdx >= 0)
+        if (bestId is not null)
         {
-            keyframes.RemoveAt(bestIdx);
-            InvalidatePreview();
+            var operation = new RemoveZoomKeyframeOperation(bestId);
+            ViewModel.UndoRedoManager.Execute(operation);
         }
+    }
+
+    private void OnZoomKeyframeMoved(object? sender, (string Id, TimeSpan NewTimestamp) e)
+    {
+        var operation = new MoveZoomKeyframeOperation(e.Id, e.NewTimestamp);
+        ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    private void OnZoomKeyframeRemoveRequested(object? sender, string keyframeId)
+    {
+        var operation = new RemoveZoomKeyframeOperation(keyframeId);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.ClearZoomSelection();
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
