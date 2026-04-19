@@ -27,6 +27,10 @@ public sealed class VideoWriter : IDisposable
     private readonly List<TimeSpan> _frameTimestamps = new(1000);
     private readonly object _tsLock = new();
 
+    // Serializes all frame writes (WriteFrame + FillGapFrames) so concurrent
+    // capture callbacks cannot interleave frame indices.
+    private readonly object _writeLock = new();
+
     public string OutputPath => _outputPath;
     public int Width => _width;
     public int Height => _height;
@@ -101,24 +105,72 @@ public sealed class VideoWriter : IDisposable
         {
             using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
 
-            long index = Interlocked.Increment(ref _frameCount) - 1;
-
-            // Record actual timestamp for this frame
-            lock (_tsLock)
+            lock (_writeLock)
             {
-                _frameTimestamps.Add(timestamp);
+                long index = Interlocked.Increment(ref _frameCount) - 1;
+
+                lock (_tsLock)
+                {
+                    _frameTimestamps.Add(timestamp);
+                }
+
+                string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
+
+                using var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write);
+                bitmap.SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, 0.85f)
+                      .AsTask().GetAwaiter().GetResult();
             }
-
-            string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
-
-            using var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write);
-            bitmap.SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, 0.85f)
-                  .AsTask().GetAwaiter().GetResult();
         }
         catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             // Log frame write failures prominently for debugging
             System.Diagnostics.Debug.WriteLine($"[VideoWriter] ERROR frame {Interlocked.Read(ref _frameCount)}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Fills missed frame slots by duplicating the most recently written JPEG.
+    /// This preserves true CFR timing so frame N always corresponds to
+    /// wall-clock time N/fps after the first frame. Must be called BEFORE
+    /// <see cref="WriteFrame"/> for the current frame.
+    /// </summary>
+    public void FillGapFrames(int count)
+    {
+        if (count <= 0) return;
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_writeLock)
+        {
+            long prevIndex = Interlocked.Read(ref _frameCount) - 1;
+            if (prevIndex < 0) return;
+
+            string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
+            if (!File.Exists(srcPath)) return;
+
+            for (int i = 0; i < count; i++)
+            {
+                long gapIndex = Interlocked.Increment(ref _frameCount) - 1;
+                string dstPath = Path.Combine(_framesDir, $"frame_{gapIndex:D8}.jpg");
+
+                try
+                {
+                    File.Copy(srcPath, dstPath, overwrite: true);
+
+                    // Synthetic timestamp: interpolate between previous and next slot
+                    lock (_tsLock)
+                    {
+                        var lastTs = _frameTimestamps.Count > 0
+                            ? _frameTimestamps[^1]
+                            : TimeSpan.Zero;
+                        _frameTimestamps.Add(lastTs + TimeSpan.FromSeconds(1.0 / _fps));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[VideoWriter] Gap fill failed at index {gapIndex}: {ex.Message}");
+                }
+            }
         }
     }
 

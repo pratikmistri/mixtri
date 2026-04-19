@@ -9,11 +9,18 @@ public class CapturedFrameEventArgs : EventArgs
     public int Width { get; }
     public int Height { get; }
 
-    public CapturedFrameEventArgs(IDirect3DSurface surface, TimeSpan timestamp, int width, int height)
+    /// <summary>
+    /// Number of frame slots that were missed between the previous emitted frame
+    /// and this one. Zero means no gap. Used to fill CFR gaps with duplicate frames.
+    /// </summary>
+    public int SkippedSlots { get; }
+
+    public CapturedFrameEventArgs(IDirect3DSurface surface, TimeSpan timestamp, int width, int height, int skippedSlots = 0)
     {
         Surface = surface;
         Timestamp = timestamp;
         Width = width;
         Height = height;
+        SkippedSlots = skippedSlots;
     }
 }

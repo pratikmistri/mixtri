@@ -384,16 +384,21 @@ public class RecordingSession : IDisposable
             // Lazily create the video writer once we know capture dimensions
             if (_videoWriter is null)
             {
+                // Record the absolute time of the first video frame BEFORE
+                // the VideoWriter constructor (which does disk I/O + device
+                // creation) so the mouse→video offset is as accurate as possible.
+                _firstVideoFrameTicks = Stopwatch.GetTimestamp();
+
                 _captureWidth = e.Width;
                 _captureHeight = e.Height;
                 _videoWriter = new VideoWriter(_videoFilePath, e.Width, e.Height, _config.Fps,
                     _screenEngine?.Device);
-
-                // Record the absolute time of the first video frame so the
-                // mouse→video offset is anchored to the actual video content,
-                // not the StartCapture() call (which may have startup latency).
-                _firstVideoFrameTicks = Stopwatch.GetTimestamp();
             }
+
+            // Fill any missed frame slots with duplicates of the previous frame
+            // so the CFR output stays synchronized with wall-clock time.
+            if (e.SkippedSlots > 0)
+                _videoWriter.FillGapFrames(e.SkippedSlots);
 
             _videoWriter.WriteFrame(e.Surface, e.Timestamp);
         }

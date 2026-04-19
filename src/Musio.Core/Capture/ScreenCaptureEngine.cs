@@ -181,13 +181,19 @@ public sealed class ScreenCaptureEngine : IDisposable
 
             var surface = frame.Surface;
 
+            // Compute how many slots were missed since the last emitted frame.
+            // Skip gap-fill for the very first frame (startup latency is
+            // handled by MouseToVideoOffsetSeconds, not by frame duplication).
+            int skippedSlots = previousSlot >= 0 ? (int)(slot - previousSlot - 1) : 0;
+
             Interlocked.Increment(ref _framesCaptured);
 
             FrameCaptured?.Invoke(this, new CapturedFrameEventArgs(
                 surface,
                 timestamp,
                 size.Width,
-                size.Height));
+                size.Height,
+                skippedSlots));
         }
         catch (Exception ex)
         {
