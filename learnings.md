@@ -57,7 +57,10 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - New edit operations: `AddZoomSegmentOperation`, `ResizeZoomSegmentOperation`, `UpdateZoomSegmentPropertiesOperation`.
 - Properties panel toggles visibility based on selection state.
 
-**What didn't work:** N/A (first approach succeeded).
+**What didn't work:**
+- `CanvasGeometry.CreateRoundedRectangle(null, ...)` compiles but throws `COMException: Objects used together must be created from the same factory instance` at runtime. Must pass a valid `ICanvasResourceCreator` (e.g., `ds` from the Draw handler).
+- XAML `SelectionChanged`/`ValueChanged` events fire during `InitializeComponent()` before `x:Name` controls are assigned — null guard needed for controls referenced in those handlers.
+- After changing XAML element names/structure, stale `.g.cs` files cause `COMException: Element not found` at runtime → blank page. Fix: delete `bin/obj` and clean rebuild.
 
 **Key design decisions:**
 - Auto-generated (non-manual) zoom segments from clicks are visible but not editable — they don't match AutoZoomEngine's merged segments exactly.
