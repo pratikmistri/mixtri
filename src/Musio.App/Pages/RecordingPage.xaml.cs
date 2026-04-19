@@ -1,7 +1,7 @@
 using System;
-using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio_App.Controls;
@@ -107,23 +107,16 @@ public sealed partial class RecordingPage : Page
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        CaptureModeSelector.SelectedIndex = (int)ViewModel.CaptureMode;
         UpdateRegionPanelVisibility();
     }
 
-    private void CaptureMode_Checked(object sender, RoutedEventArgs e)
+    private void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is RadioButton rb && rb.Tag is string tag)
+        if (CaptureModeSelector?.SelectedItem is FrameworkElement item && item.Tag is string tag)
         {
             ViewModel.CaptureMode = Enum.Parse<CaptureMode>(tag);
             UpdateRegionPanelVisibility();
-        }
-    }
-
-    private void Fps_Checked(object sender, RoutedEventArgs e)
-    {
-        if (sender is RadioButton rb && rb.Tag is string tag)
-        {
-            ViewModel.Fps = int.Parse(tag);
         }
     }
 
@@ -146,7 +139,7 @@ public sealed partial class RecordingPage : Page
                 : Visibility.Collapsed;
 
             if (ViewModel.CaptureMode == CaptureMode.Window)
-                UpdateWindowInfoDisplay();
+                _ = RefreshWindowListAsync();
         }
     }
 
@@ -187,95 +180,27 @@ public sealed partial class RecordingPage : Page
         }
     }
 
-    private async void SelectWindowButton_Click(object sender, RoutedEventArgs e)
+    private void WindowComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        var windows = _regionSelector.GetVisibleWindows();
-
-        // Filter out Musio's own windows
-        var currentPid = (uint)Process.GetCurrentProcess().Id;
-        var filteredWindows = windows
-            .Where(w =>
-            {
-                try
-                {
-                    GetWindowThreadProcessId(w.Handle, out uint pid);
-                    return pid != currentPid;
-                }
-                catch { return true; }
-            })
-            .OrderBy(w => w.Title)
-            .ToList();
-
-        if (filteredWindows.Count == 0)
-        {
-            var noWindowsDialog = new ContentDialog
-            {
-                Title = "No Windows Found",
-                Content = "No capturable windows were found.",
-                CloseButtonText = "OK",
-                XamlRoot = XamlRoot,
-            };
-            await noWindowsDialog.ShowAsync();
-            return;
-        }
-
-        var listView = new ListView
-        {
-            ItemsSource = filteredWindows,
-            SelectionMode = ListViewSelectionMode.Single,
-            MaxHeight = 400,
-        };
-        listView.ItemTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load(
-            @"<DataTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
-                            xmlns:capture=""using:Musio.Core.Capture"">
-                <StackPanel Orientation=""Horizontal"" Spacing=""12"" Padding=""4"">
-                    <FontIcon Glyph=""&#xE737;"" FontSize=""16"" VerticalAlignment=""Center"" />
-                    <StackPanel Spacing=""2"">
-                        <TextBlock Text=""{Binding Title}"" TextTrimming=""CharacterEllipsis"" MaxWidth=""350"" />
-                        <TextBlock Text=""{Binding ProcessName}"" FontSize=""12""
-                                   Foreground=""{ThemeResource TextFillColorSecondaryBrush}"" />
-                    </StackPanel>
-                </StackPanel>
-            </DataTemplate>");
-
-        var dialog = new ContentDialog
-        {
-            Title = "Select a Window",
-            Content = listView,
-            PrimaryButtonText = "Select",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = XamlRoot,
-        };
-
-        // Enable the primary button only when a window is selected
-        dialog.IsPrimaryButtonEnabled = false;
-        listView.SelectionChanged += (_, _) =>
-        {
-            dialog.IsPrimaryButtonEnabled = listView.SelectedItem is not null;
-        };
-
-        var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary && listView.SelectedItem is WindowInfo selected)
-        {
-            ViewModel.SelectedWindow = selected;
-            UpdateWindowInfoDisplay();
-        }
+        if (WindowComboBox?.SelectedItem is WindowItem item)
+            ViewModel.SelectedWindow = item.Info;
     }
 
-    private void UpdateWindowInfoDisplay()
+    private async void RefreshWindows_Click(object sender, RoutedEventArgs e)
     {
-        if (WindowInfoText is null) return;
+        await RefreshWindowListAsync();
+    }
 
-        if (ViewModel.SelectedWindow is not null)
+    private async Task RefreshWindowListAsync()
+    {
+        await ViewModel.RefreshAvailableWindowsAsync();
+
+        // Restore ComboBox selection if the ViewModel still has a selected window
+        if (ViewModel.SelectedWindow is not null && WindowComboBox is not null)
         {
-            var w = ViewModel.SelectedWindow;
-            WindowInfoText.Text = $"{w.Title} ({w.ProcessName}) — {w.Width}×{w.Height}";
-            WindowInfoText.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            WindowInfoText.Visibility = Visibility.Collapsed;
+            var match = ViewModel.AvailableWindows
+                .FirstOrDefault(w => w.Info.Handle == ViewModel.SelectedWindow.Handle);
+            WindowComboBox.SelectedItem = match;
         }
     }
 
@@ -284,7 +209,4 @@ public sealed partial class RecordingPage : Page
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 }

@@ -93,6 +93,65 @@
                 </StackPanel>
             </Border>
 
+            <!-- Audio -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Audio" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="16">
+                    <ToggleSwitch
+                        Header="System Audio"
+                        IsOn="True"
+                        ToolTipService.ToolTip="Capture desktop audio output" />
+                    <ComboBox
+                        Header="System Audio Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default output"
+                        ToolTipService.ToolTip="Select audio output device" />
+                    <ToggleSwitch
+                        Header="Microphone"
+                        ToolTipService.ToolTip="Record microphone input" />
+                    <ComboBox
+                        Header="Microphone Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default microphone"
+                        ToolTipService.ToolTip="Select microphone input device" />
+                </StackPanel>
+            </Border>
+
+            <!-- Webcam -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Webcam" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="16">
+                    <ToggleSwitch
+                        Header="Enable Webcam"
+                        ToolTipService.ToolTip="Show webcam overlay in recording" />
+                    <ComboBox
+                        Header="Webcam Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default camera"
+                        ToolTipService.ToolTip="Select webcam device" />
+                </StackPanel>
+            </Border>
+
             <!-- Hotkeys -->
             <TextBlock
                 Margin="0,16,0,8"

@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -66,6 +67,10 @@ public partial class RecordingViewModel : ObservableObject
     [ObservableProperty]
     private WindowInfo? _selectedWindow;
 
+    public ObservableCollection<WindowItem> AvailableWindows { get; } = new();
+
+    private CancellationTokenSource? _windowRefreshCts;
+
     public bool HasSelectedWindow => SelectedWindow is not null;
 
     public bool IsWindowMode => CaptureMode == CaptureMode.Window;
@@ -73,6 +78,64 @@ public partial class RecordingViewModel : ObservableObject
     partial void OnSelectedWindowChanged(WindowInfo? value)
     {
         OnPropertyChanged(nameof(HasSelectedWindow));
+    }
+
+    /// <summary>
+    /// Enumerates visible windows (excluding Musio), populates <see cref="AvailableWindows"/>,
+    /// and loads app icons in the background. Preserves the current selection if the window
+    /// is still alive.
+    /// </summary>
+    public async Task RefreshAvailableWindowsAsync()
+    {
+        // Cancel any previous refresh still loading icons
+        _windowRefreshCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _windowRefreshCts = cts;
+
+        var regionSelector = new RegionSelector();
+        var windows = regionSelector.GetVisibleWindows();
+
+        var currentPid = (uint)Process.GetCurrentProcess().Id;
+        var filtered = windows
+            .Where(w =>
+            {
+                try
+                {
+                    GetWindowThreadProcessId(w.Handle, out uint pid);
+                    return pid != currentPid;
+                }
+                catch { return true; }
+            })
+            .OrderBy(w => w.Title)
+            .ToList();
+
+        // Remember the previously selected handle so we can restore it
+        var previousHandle = SelectedWindow?.Handle;
+
+        AvailableWindows.Clear();
+        WindowItem? restoredItem = null;
+
+        foreach (var w in filtered)
+        {
+            var item = new WindowItem(w);
+            AvailableWindows.Add(item);
+            if (previousHandle is not null && w.Handle == previousHandle)
+                restoredItem = item;
+        }
+
+        // Restore selection if the window is still in the list
+        if (restoredItem is not null)
+            SelectedWindow = restoredItem.Info;
+        else if (previousHandle is not null)
+            SelectedWindow = null; // previously selected window is gone
+
+        // Load icons in parallel (best-effort, cancellable)
+        try
+        {
+            var tasks = AvailableWindows.Select(w => w.LoadIconAsync(cts.Token));
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) { }
     }
 
     [ObservableProperty]
@@ -301,4 +364,7 @@ public partial class RecordingViewModel : ObservableObject
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 }

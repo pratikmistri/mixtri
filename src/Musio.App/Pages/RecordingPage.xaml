@@ -6,18 +6,9 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:Musio_App.Pages"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
     xmlns:vm="using:Musio_App.ViewModels"
     mc:Ignorable="d">
-
-    <Page.Resources>
-        <Style x:Key="OptionCard" TargetType="Border">
-            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
-            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="8" />
-            <Setter Property="Padding" Value="20" />
-        </Style>
-    </Page.Resources>
 
     <Grid>
         <VisualStateManager.VisualStateGroups>
@@ -57,22 +48,12 @@
             IsClosable="True"
             Severity="Informational" />
 
-        <ScrollViewer Grid.Row="1" Padding="16" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel HorizontalAlignment="Stretch" Spacing="12">
+        <ScrollViewer Grid.Row="1" Padding="16" HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel HorizontalAlignment="Stretch" VerticalAlignment="Center" Spacing="24">
                 <StackPanel.ChildrenTransitions>
                     <EntranceThemeTransition FromVerticalOffset="40" />
                 </StackPanel.ChildrenTransitions>
-
-                <!-- Page header -->
-                <StackPanel Spacing="4" Margin="0,0,0,8">
-                    <TextBlock
-                        FontSize="28"
-                        FontWeight="SemiBold"
-                        Text="Record" />
-                    <TextBlock
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="Configure your screen capture settings and start recording" />
-                </StackPanel>
 
                 <!-- Hero: Start / Stop Recording -->
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="16">
@@ -80,6 +61,7 @@
                         x:Name="StartRecordButton"
                         Height="64"
                         MinWidth="64"
+                        Padding="24,0"
                         Command="{x:Bind ViewModel.StartRecordingCommand}"
                         CornerRadius="32"
                         IsEnabled="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
@@ -100,6 +82,7 @@
                         x:Name="StopRecordButton"
                         Height="64"
                         MinWidth="64"
+                        Padding="24,0"
                         Command="{x:Bind ViewModel.StopRecordingCommand}"
                         CornerRadius="32"
                         Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
@@ -133,135 +116,93 @@
                     IsLightDismissEnabled="True"
                     PreferredPlacement="Bottom" />
 
-                <!-- Option Cards Grid (disabled during recording) -->
-                <Grid ColumnSpacing="16" RowSpacing="16"
-                      IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
-                      Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
+                <!-- Capture Mode (disabled during recording) -->
+                <StackPanel
+                    HorizontalAlignment="Center"
+                    MaxWidth="480"
+                    Spacing="12"
+                    IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
+                    Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
+                    <ctk:Segmented
+                        x:Name="CaptureModeSelector"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="CaptureModeSelector_SelectionChanged">
+                        <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
+                            <ctk:SegmentedItem.Icon>
+                                <FontIcon Glyph="&#xE740;" />
+                            </ctk:SegmentedItem.Icon>
+                        </ctk:SegmentedItem>
+                        <ctk:SegmentedItem Content="Window" Tag="Window">
+                            <ctk:SegmentedItem.Icon>
+                                <FontIcon Glyph="&#xE737;" />
+                            </ctk:SegmentedItem.Icon>
+                        </ctk:SegmentedItem>
+                        <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
+                            <ctk:SegmentedItem.Icon>
+                                <FontIcon Glyph="&#xE7A8;" />
+                            </ctk:SegmentedItem.Icon>
+                        </ctk:SegmentedItem>
+                    </ctk:Segmented>
 
-                    <!-- Capture Mode -->
-                    <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource OptionCard}">
-                        <StackPanel Spacing="12">
-                            <TextBlock FontWeight="SemiBold" Text="Capture Mode" />
-                            <RadioButtons>
-                                <RadioButton
-                                    Content="Full Screen"
-                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.FullScreen), Mode=OneWay}"
-                                    Tag="FullScreen"
-                                    Checked="CaptureMode_Checked" />
-                                <RadioButton
-                                    Content="Window"
-                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.Window), Mode=OneWay}"
-                                    Tag="Window"
-                                    Checked="CaptureMode_Checked" />
-                                <RadioButton
-                                    Content="Custom Region"
-                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.CustomRegion), Mode=OneWay}"
-                                    Tag="CustomRegion"
-                                    Checked="CaptureMode_Checked" />
-                            </RadioButtons>
+                    <!-- Region selection (visible when Custom Region is selected) -->
+                    <StackPanel x:Name="RegionPanel" Spacing="8" Visibility="Collapsed">
+                        <Button
+                            x:Name="SelectRegionButton"
+                            HorizontalAlignment="Stretch"
+                            Click="SelectRegionButton_Click"
+                            Content="Select Region"
+                            ToolTipService.ToolTip="Click to select a custom screen region" />
+                        <TextBlock
+                            x:Name="RegionInfoText"
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            TextWrapping="Wrap"
+                            Visibility="Collapsed" />
+                    </StackPanel>
 
-                            <!-- Region selection (visible when Custom Region is selected) -->
-                            <StackPanel x:Name="RegionPanel" Spacing="8" Visibility="Collapsed">
-                                <Button
-                                    x:Name="SelectRegionButton"
-                                    HorizontalAlignment="Stretch"
-                                    Click="SelectRegionButton_Click"
-                                    Content="Select Region"
-                                    ToolTipService.ToolTip="Click to select a custom screen region" />
-                                <TextBlock
-                                    x:Name="RegionInfoText"
-                                    FontSize="12"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap"
-                                    Visibility="Collapsed" />
-                            </StackPanel>
-
-                            <!-- Window selection (visible when Window is selected) -->
-                            <StackPanel x:Name="WindowPanel" Spacing="8" Visibility="Collapsed">
-                                <Button
-                                    x:Name="SelectWindowButton"
-                                    HorizontalAlignment="Stretch"
-                                    Click="SelectWindowButton_Click"
-                                    Content="Select Window"
-                                    ToolTipService.ToolTip="Click to choose which window to record" />
-                                <TextBlock
-                                    x:Name="WindowInfoText"
-                                    FontSize="12"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap"
-                                    Visibility="Collapsed" />
-                            </StackPanel>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Audio -->
-                    <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource OptionCard}">
-                        <StackPanel Spacing="12">
-                            <TextBlock FontWeight="SemiBold" Text="Audio" />
-                            <ToggleSwitch
-                                Header="System Audio"
-                                IsOn="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
-                                ToolTipService.ToolTip="Capture desktop audio output" />
+                    <!-- Window selection (visible when Window is selected) -->
+                    <StackPanel x:Name="WindowPanel" Spacing="8" Visibility="Collapsed">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
                             <ComboBox
-                                Header="System Audio Device"
+                                x:Name="WindowComboBox"
+                                Grid.Column="0"
                                 HorizontalAlignment="Stretch"
-                                PlaceholderText="Default output"
-                                ToolTipService.ToolTip="Select audio output device" />
-                            <ToggleSwitch
-                                Header="Microphone"
-                                IsOn="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
-                                ToolTipService.ToolTip="Record microphone input" />
-                            <ComboBox
-                                Header="Microphone Device"
-                                HorizontalAlignment="Stretch"
-                                PlaceholderText="Default microphone"
-                                ToolTipService.ToolTip="Select microphone input device" />
-                        </StackPanel>
-                    </Border>
-
-                    <!-- FPS -->
-                    <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource OptionCard}">
-                        <StackPanel Spacing="12">
-                            <TextBlock FontWeight="SemiBold" Text="Frame Rate" />
-                            <RadioButtons>
-                                <RadioButton
-                                    Content="30 fps"
-                                    IsChecked="{x:Bind ViewModel.Fps.Equals(30), Mode=OneWay}"
-                                    Tag="30"
-                                    Checked="Fps_Checked" />
-                                <RadioButton
-                                    Content="60 fps"
-                                    IsChecked="{x:Bind ViewModel.Fps.Equals(60), Mode=OneWay}"
-                                    Tag="60"
-                                    Checked="Fps_Checked" />
-                            </RadioButtons>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Webcam -->
-                    <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource OptionCard}">
-                        <StackPanel Spacing="12">
-                            <TextBlock FontWeight="SemiBold" Text="Webcam" />
-                            <ToggleSwitch
-                                Header="Enable Webcam"
-                                IsOn="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
-                                ToolTipService.ToolTip="Show webcam overlay in recording" />
-                            <ComboBox
-                                Header="Webcam Device"
-                                HorizontalAlignment="Stretch"
-                                PlaceholderText="Default camera"
-                                ToolTipService.ToolTip="Select webcam device" />
-                        </StackPanel>
-                    </Border>
-                </Grid>
+                                PlaceholderText="Select a window…"
+                                ItemsSource="{x:Bind ViewModel.AvailableWindows}"
+                                SelectionChanged="WindowComboBox_SelectionChanged">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:WindowItem">
+                                        <StackPanel Orientation="Horizontal" Spacing="10" Padding="2">
+                                            <Grid Width="20" Height="20" VerticalAlignment="Center">
+                                                <FontIcon Glyph="&#xE737;" FontSize="16" />
+                                                <Image Source="{x:Bind Icon, Mode=OneWay}" Width="20" Height="20" />
+                                            </Grid>
+                                            <StackPanel Spacing="1" VerticalAlignment="Center">
+                                                <TextBlock Text="{x:Bind Title}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           MaxWidth="280" />
+                                                <TextBlock Text="{x:Bind ProcessName}"
+                                                           FontSize="11"
+                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                            <Button
+                                Grid.Column="1"
+                                VerticalAlignment="Stretch"
+                                Click="RefreshWindows_Click"
+                                ToolTipService.ToolTip="Refresh window list">
+                                <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                            </Button>
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
             </StackPanel>
         </ScrollViewer>
 

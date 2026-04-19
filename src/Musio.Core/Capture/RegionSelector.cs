@@ -6,7 +6,7 @@ namespace Musio.Core.Capture;
 
 public record MonitorInfo(string Id, string Name, int X, int Y, int Width, int Height, bool IsPrimary);
 
-public record WindowInfo(IntPtr Handle, string Title, string ProcessName, int X, int Y, int Width, int Height);
+public record WindowInfo(IntPtr Handle, string Title, string ProcessName, int X, int Y, int Width, int Height, string? ExecutablePath = null);
 
 /// <summary>
 /// Provides screen region selection helpers: monitor enumeration, window lookup, and region persistence.
@@ -111,6 +111,7 @@ public class RegionSelector
             string title = titleLen > 0 ? new string(titleBuffer, 0, titleLen) : string.Empty;
 
             string processName = string.Empty;
+            string? exePath = null;
             try
             {
                 GetWindowThreadProcessId(hwnd, out uint processId);
@@ -118,6 +119,7 @@ public class RegionSelector
                 {
                     using var process = Process.GetProcessById((int)processId);
                     processName = process.ProcessName;
+                    try { exePath = process.MainModule?.FileName; } catch { }
                 }
             }
             catch
@@ -132,7 +134,8 @@ public class RegionSelector
                 rect.Left,
                 rect.Top,
                 rect.Right - rect.Left,
-                rect.Bottom - rect.Top);
+                rect.Bottom - rect.Top,
+                exePath);
         }
         catch
         {

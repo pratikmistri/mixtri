@@ -98,6 +98,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(false, false);
+            presenter.IsAlwaysOnTop = true;
             presenter.Maximize();
         }
 

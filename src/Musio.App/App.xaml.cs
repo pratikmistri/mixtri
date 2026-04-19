@@ -57,6 +57,7 @@ public partial class App : Application
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
+        _window.Closed += OnWindowClosed;
         _window.Activate();
 
         // System tray and hotkeys are optional — app works without them
@@ -128,6 +129,10 @@ public partial class App : Application
         _hotkeyService?.Dispose();
         _trayService?.Dispose();
         _window?.Close();
+        // WinUI 3 may not terminate after the last window closes, and
+        // Window.Closed may not fire reliably for hidden windows.
+        // Force exit so the process never lingers in the task manager.
+        Environment.Exit(0);
     }
 
     private void OnWindowClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
@@ -138,6 +143,15 @@ public partial class App : Application
         args.Cancel = true;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         ShowWindow(hwnd, SW_HIDE);
+    }
+
+    private void OnWindowClosed(object sender, WindowEventArgs args)
+    {
+        // WinUI 3 does not terminate the process when the last window closes.
+        // Handles the non-tray exit path (no OnExitRequested).
+        // Skip service disposal here — the OS reclaims all resources on exit,
+        // and Dispose during window teardown can be unreliable.
+        Environment.Exit(0);
     }
 
     private const int SW_HIDE = 0;
