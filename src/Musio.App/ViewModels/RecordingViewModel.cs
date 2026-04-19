@@ -19,6 +19,22 @@ public partial class RecordingViewModel : ObservableObject
 {
     private RecordingSession? _session;
     private System.Threading.Timer? _elapsedTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
+
+    /// <summary>
+    /// Must be called from the UI thread (e.g. in page constructor) to enable
+    /// thread-safe property updates from background recording callbacks.
+    /// </summary>
+    public void SetDispatcher(Microsoft.UI.Dispatching.DispatcherQueue dispatcher)
+        => _dispatcher = dispatcher;
+
+    private void RunOnUI(Action action)
+    {
+        if (_dispatcher is not null && !_dispatcher.HasThreadAccess)
+            _dispatcher.TryEnqueue(() => action());
+        else
+            action();
+    }
 
     [ObservableProperty]
     private CaptureMode _captureMode = CaptureMode.FullScreen;
@@ -205,14 +221,17 @@ public partial class RecordingViewModel : ObservableObject
 
     private void OnStatsUpdated(object? sender, RecordingStatsEventArgs e)
     {
-        FramesCaptured = e.FramesCaptured;
-        CurrentFps = e.CurrentFps;
+        RunOnUI(() =>
+        {
+            FramesCaptured = e.FramesCaptured;
+            CurrentFps = e.CurrentFps;
+        });
     }
 
     private void OnSessionError(object? sender, string message)
     {
         Debug.WriteLine($"[RecordingSession] Error: {message}");
-        RecordingStatus = $"Error: {message}";
+        RunOnUI(() => RecordingStatus = $"Error: {message}");
     }
 
     private void OnSessionStateChanged(object? sender, RecordingState state)
@@ -225,11 +244,15 @@ public partial class RecordingViewModel : ObservableObject
         if (_session is null) return;
 
         var elapsed = _session.Elapsed;
-        ElapsedTime = elapsed.TotalHours >= 1
+        var timeStr = elapsed.TotalHours >= 1
             ? elapsed.ToString(@"hh\:mm\:ss")
             : elapsed.ToString(@"mm\:ss");
 
-        RecordingStatus = $"Recording — {ElapsedTime} · {FramesCaptured} frames · {CurrentFps:F0} fps";
+        RunOnUI(() =>
+        {
+            ElapsedTime = timeStr;
+            RecordingStatus = $"Recording — {ElapsedTime} · {FramesCaptured} frames · {CurrentFps:F0} fps";
+        });
     }
 
     private void CleanupSession()

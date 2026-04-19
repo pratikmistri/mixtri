@@ -16,6 +16,7 @@ public sealed partial class RecordingPage : Page
     public RecordingPage()
     {
         InitializeComponent();
+        ViewModel.SetDispatcher(DispatcherQueue);
         Loaded += OnLoaded;
 
         // After a recording stops successfully, navigate to the Editor page
