@@ -252,6 +252,72 @@ public sealed partial class EditorPage : Page
         args.Handled = true;
     }
 
+    private void AddZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        double zoomLevel = 2.0;
+        if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
+            double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
+            zoomLevel = z;
+
+        var playhead = ViewModel.Model.PlayheadPosition;
+
+        // Use cursor position at playhead time as zoom center (normalized 0-1)
+        double cx = 0.5, cy = 0.5;
+        if (ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
+        {
+            var project = ProjectService.Instance.CurrentProject;
+            int sourceW = project?.Width > 0 ? project.Width : 1920;
+            int sourceH = project?.Height > 0 ? project.Height : 1080;
+            float dpiX = GetDpiScale(sourceW);
+            float dpiY = GetDpiScale(sourceH, isWidth: false);
+
+            // Find closest sample to playhead time
+            double targetTime = playhead.TotalSeconds;
+            double tickFreq = cursorData.TickFrequency;
+            long startTick = cursorData.StartTimestampTicks;
+            Musio.Core.Models.MouseSample closest = cursorData.Samples[0];
+            double bestDist = double.MaxValue;
+            foreach (var s in cursorData.Samples)
+            {
+                double sTime = (s.TimestampTicks - startTick) / tickFreq;
+                double dist = Math.Abs(sTime - targetTime);
+                if (dist < bestDist) { bestDist = dist; closest = s; }
+            }
+            cx = (closest.X * dpiX) / sourceW;
+            cy = (closest.Y * dpiY) / sourceH;
+        }
+
+        ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+        {
+            Timestamp = playhead,
+            ZoomLevel = zoomLevel,
+            CenterX = Math.Clamp(cx, 0, 1),
+            CenterY = Math.Clamp(cy, 0, 1),
+        });
+        Timeline.Refresh();
+    }
+
+    private void RemoveZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        var playhead = ViewModel.Model.PlayheadPosition;
+        var keyframes = ViewModel.Model.ZoomKeyframes;
+        if (keyframes.Count == 0) return;
+
+        // Remove the keyframe closest to playhead (within 1 second)
+        int bestIdx = -1;
+        double bestDist = 1.0;
+        for (int i = 0; i < keyframes.Count; i++)
+        {
+            double dist = Math.Abs((keyframes[i].Timestamp - playhead).TotalSeconds);
+            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestIdx >= 0)
+        {
+            keyframes.RemoveAt(bestIdx);
+            Timeline.Refresh();
+        }
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 

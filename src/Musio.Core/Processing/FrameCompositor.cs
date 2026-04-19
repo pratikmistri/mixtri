@@ -279,8 +279,16 @@ public class FrameCompositor : IDisposable
         double timeSeconds = _smoothedPositions[frameIndex].TimestampSeconds;
         var cursorPos = _smoothedPositions[frameIndex];
 
-        // Get zoom viewport in source coordinates
+        // Get zoom state — use smoothed cursor position as center hint
+        // so the viewport always keeps the cursor in view
         var zoomState = _zoomEngine.GetZoomState(timeSeconds);
+        if (zoomState.ZoomLevel > 1.01f)
+        {
+            // Override zoom center with actual cursor position
+            // This ensures the cursor is ALWAYS visible in the zoomed view
+            zoomState = _zoomEngine.ComputeViewportForCenter(
+                zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
+        }
 
         // Adjust viewport for target aspect ratio (center-crop within viewport)
         var viewport = ComputeEffectiveViewport(zoomState);

@@ -112,6 +112,41 @@
                 Orientation="Horizontal"
                 Spacing="8"
                 VerticalAlignment="Center">
+
+                <!-- Zoom controls -->
+                <TextBlock VerticalAlignment="Center" Text="Zoom:" />
+                <ComboBox
+                    x:Name="ZoomLevelCombo"
+                    Width="80"
+                    SelectedIndex="1"
+                    ToolTipService.ToolTip="Zoom level for new keyframes">
+                    <ComboBoxItem Content="1.5x" Tag="1.5" />
+                    <ComboBoxItem Content="2x" Tag="2" />
+                    <ComboBoxItem Content="2.5x" Tag="2.5" />
+                    <ComboBoxItem Content="3x" Tag="3" />
+                    <ComboBoxItem Content="4x" Tag="4" />
+                </ComboBox>
+                <Button
+                    Padding="8,6"
+                    Click="AddZoomKeyframe_Click"
+                    ToolTipService.ToolTip="Add zoom point at playhead">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE710;" />
+                        <TextBlock Text="Zoom" />
+                    </StackPanel>
+                </Button>
+                <Button
+                    Padding="8,6"
+                    Click="RemoveZoomKeyframe_Click"
+                    ToolTipService.ToolTip="Remove nearest zoom point">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE738;" />
+                        <TextBlock Text="Zoom" />
+                    </StackPanel>
+                </Button>
+
+                <AppBarSeparator />
+
                 <TextBlock
                     VerticalAlignment="Center"
                     Text="Speed:" />

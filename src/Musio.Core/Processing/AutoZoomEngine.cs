@@ -316,22 +316,25 @@ public class AutoZoomEngine
     /// Compute the visible viewport rectangle from zoom level and center, clamped to source bounds.
     /// </summary>
     private ZoomState ComputeViewport((float zoom, float cx, float cy) state)
+        => ComputeViewportForCenter(state.zoom, state.cx, state.cy);
+
+    /// <summary>
+    /// Public API: compute viewport for a given zoom level and center point.
+    /// Used by FrameCompositor to override zoom center with cursor position.
+    /// </summary>
+    public ZoomState ComputeViewportForCenter(float zoom, float cx, float cy)
     {
-        float zoom = Math.Max(state.zoom, 1.0f);
+        zoom = Math.Max(zoom, 1.0f);
         float vpWidth = _sourceWidth / zoom;
         float vpHeight = _sourceHeight / zoom;
 
-        // Position viewport so the click point is at a consistent relative position.
-        // Instead of always centering, bias toward keeping the click visible
-        // by clamping the click's position within the viewport to 20%-80% range.
-        float vpX = state.cx - vpWidth / 2f;
-        float vpY = state.cy - vpHeight / 2f;
+        float vpX = cx - vpWidth / 2f;
+        float vpY = cy - vpHeight / 2f;
 
         // Clamp viewport to source bounds
         vpX = Math.Clamp(vpX, 0f, Math.Max(0f, _sourceWidth - vpWidth));
         vpY = Math.Clamp(vpY, 0f, Math.Max(0f, _sourceHeight - vpHeight));
 
-        // Recompute actual center after clamping (so downstream code uses the real center)
         float actualCx = vpX + vpWidth / 2f;
         float actualCy = vpY + vpHeight / 2f;
 
