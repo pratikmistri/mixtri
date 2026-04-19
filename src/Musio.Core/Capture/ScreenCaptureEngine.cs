@@ -31,6 +31,7 @@ public sealed class ScreenCaptureEngine : IDisposable
     public int Fps => _fps;
     public long FramesCaptured => Interlocked.Read(ref _framesCaptured);
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+    public IDirect3DDevice Device => _device;
 
     public event EventHandler<CapturedFrameEventArgs>? FrameCaptured;
     public event EventHandler? CaptureStarted;

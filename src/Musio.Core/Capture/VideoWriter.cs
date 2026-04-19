@@ -29,13 +29,18 @@ public sealed class VideoWriter : IDisposable
     public int Fps => _fps;
     public long FrameCount => Interlocked.Read(ref _frameCount);
 
-    public VideoWriter(string outputPath, int width, int height, int fps)
+    public VideoWriter(string outputPath, int width, int height, int fps, IDirect3DDevice? captureDevice = null)
     {
         _outputPath = outputPath;
         _width = width;
         _height = height;
         _fps = fps;
-        _device = CanvasDevice.GetSharedDevice();
+
+        // Use the same D3D device as the capture engine to avoid cross-device failures
+        if (captureDevice is not null)
+            _device = CanvasDevice.CreateFromDirect3D11Device(captureDevice);
+        else
+            _device = CanvasDevice.GetSharedDevice();
 
         _framesDir = Path.Combine(Path.GetDirectoryName(outputPath)!, ".frames");
         Directory.CreateDirectory(_framesDir);
@@ -65,8 +70,8 @@ public sealed class VideoWriter : IDisposable
         }
         catch (Exception ex) when (ex is not ObjectDisposedException)
         {
-            // Surface may have been disposed between capture and copy — skip this frame
-            System.Diagnostics.Debug.WriteLine($"[VideoWriter] Frame write skipped: {ex.Message}");
+            // Log frame write failures prominently for debugging
+            System.Diagnostics.Debug.WriteLine($"[VideoWriter] ERROR frame {Interlocked.Read(ref _frameCount)}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

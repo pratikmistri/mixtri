@@ -339,7 +339,8 @@ public class RecordingSession : IDisposable
             {
                 _captureWidth = e.Width;
                 _captureHeight = e.Height;
-                _videoWriter = new VideoWriter(_videoFilePath, e.Width, e.Height, _config.Fps);
+                _videoWriter = new VideoWriter(_videoFilePath, e.Width, e.Height, _config.Fps,
+                    _screenEngine?.Device);
             }
 
             _videoWriter.WriteFrame(e.Surface, e.Timestamp);
