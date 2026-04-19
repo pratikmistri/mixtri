@@ -90,7 +90,10 @@ public class VideoEncoder : IDisposable
         using var compositor = new FrameCompositor(compositionConfig);
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration);
 
-        int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
+        // Total output frames based on the EXPORT fps, not the compositor's
+        // internal fps (which is capped at 30 for cursor/click timing).
+        int totalFrames = timelineMapper?.TotalOutputFrames
+            ?? (int)(project.Duration.TotalSeconds * _settings.Fps);
         int compositorWidth = compositor.OutputWidth;
         int compositorHeight = compositor.OutputHeight;
         bool needsScaling = compositorWidth != targetWidth || compositorHeight != targetHeight;
