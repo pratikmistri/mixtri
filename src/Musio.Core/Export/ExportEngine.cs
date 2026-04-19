@@ -137,7 +137,18 @@ public class ExportEngine
         int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
         int fps = settings.Fps;
 
-        // Webcam source for overlay
+        // Fast path: read JPEG frames from .frames/ directory
+        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
+
+        // Slow path fallback: reuse a single MediaComposition for seeking
+        MediaComposition? sourceComp = null;
+        if (frameReader is null)
+        {
+            sourceComp = new MediaComposition();
+            sourceComp.Clips.Add(sourceClip);
+        }
+
+        // Webcam source for overlay (opened once, reused per frame)
         MediaComposition? webcamComp = null;
         int webcamWidth = 0, webcamHeight = 0;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
@@ -151,34 +162,71 @@ public class ExportEngine
             webcamComp.Clips.Add(webcamClip);
         }
 
-        var gifEncoder = new GifEncoder();
-        await gifEncoder.ExportGifAsync(
-            compositor,
-            async frameIndex =>
-            {
-                double timeSeconds = timelineMapper is not null
-                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                    : (double)frameIndex / fps;
-                var timeSpan = TimeSpan.FromSeconds(timeSeconds);
-
-                // Extract webcam frame and set on compositor
-                if (webcamComp is not null)
+        try
+        {
+            var gifEncoder = new GifEncoder();
+            await gifEncoder.ExportGifAsync(
+                compositor,
+                async frameIndex =>
                 {
-                    using var webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan, webcamWidth, webcamHeight);
-                    compositor.SetWebcamFrame(webcamFrame);
-                }
+                    double timeSeconds = timelineMapper is not null
+                        ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
+                        : (double)frameIndex / fps;
+                    var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
-                return await ExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
-            },
-            totalFrames,
-            fps,
-            outputPath,
-            progress,
-            ct);
+                    // Extract webcam frame and set on compositor
+                    if (webcamComp is not null)
+                    {
+                        using var webcamFrame = await ExtractFrameFromCompositionAsync(
+                            device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                        compositor.SetWebcamFrame(webcamFrame);
+                    }
+
+                    // Fast path: JPEG frames; slow path: reusable composition
+                    if (frameReader is not null)
+                    {
+                        return await frameReader.LoadFrameAtTimeAsync(timeSpan)
+                            ?? await FallbackExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
+                    }
+
+                    return await ExtractFrameFromCompositionAsync(
+                        device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+                },
+                totalFrames,
+                fps,
+                outputPath,
+                progress,
+                ct);
+        }
+        finally
+        {
+            frameReader?.Dispose();
+        }
     }
 
-    private static async Task<CanvasBitmap> ExtractFrameAsync(
+    /// <summary>
+    /// Extracts a frame from a pre-built <see cref="MediaComposition"/> at the given position.
+    /// Reusing the same composition avoids re-opening the source file on every frame.
+    /// </summary>
+    private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
+        CanvasDevice device, MediaComposition composition, TimeSpan position,
+        int width, int height)
+    {
+        var clampedPosition = position;
+        if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
+            clampedPosition = composition.Duration;
+
+        var thumbnail = await composition.GetThumbnailAsync(
+            clampedPosition, width, height, VideoFramePrecision.NearestFrame);
+
+        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+    }
+
+    /// <summary>
+    /// Last-resort fallback: opens the video file from scratch to extract a single frame.
+    /// </summary>
+    private static async Task<CanvasBitmap> FallbackExtractFrameAsync(
         CanvasDevice device, string videoPath, TimeSpan position,
         int width, int height)
     {
@@ -329,25 +377,5 @@ public class ExportEngine
         }
 
         return composition;
-    }
-
-    /// <summary>
-    /// Extracts a frame from a pre-built <see cref="MediaComposition"/> at the given position.
-    /// Used for webcam overlay frame extraction.
-    /// </summary>
-    private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
-        CanvasDevice device, MediaComposition composition, TimeSpan position,
-        int width, int height)
-    {
-        // Clamp position to the composition's duration
-        var clampedPosition = position;
-        if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
-            clampedPosition = composition.Duration;
-
-        var thumbnail = await composition.GetThumbnailAsync(
-            clampedPosition, width, height, VideoFramePrecision.NearestFrame);
-
-        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 }
