@@ -165,14 +165,6 @@
                         ToolTipService.ToolTip="Vertical zoom center"
                         ValueChanged="ZoomCenterSlider_ValueChanged" />
                     <Button
-                        x:Name="ApplyZoomButton"
-                        Padding="8,6"
-                        Click="ApplyZoomChanges_Click"
-                        Content="Apply"
-                        Visibility="Collapsed"
-                        Style="{ThemeResource AccentButtonStyle}"
-                        ToolTipService.ToolTip="Apply zoom changes" />
-                    <Button
                         Padding="8,6"
                         Click="RemoveZoomSegment_Click"
                         ToolTipService.ToolTip="Remove selected zoom segment">

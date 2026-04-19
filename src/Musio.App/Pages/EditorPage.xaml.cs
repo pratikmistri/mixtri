@@ -538,37 +538,25 @@ public sealed partial class EditorPage : Page
     {
         if (_suppressZoomPropertyUpdate) return;
         if (Timeline is null) return;
-        if (Timeline.SelectedZoomKeyframeId is null) return;
-        if (ApplyZoomButton is not null)
-            ApplyZoomButton.Visibility = Visibility.Visible;
+        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+        if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
+        if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
+        ViewModel.UndoRedoManager.Execute(operation);
     }
 
     private void ZoomCenterSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
         if (Timeline is null) return;
-        if (Timeline.SelectedZoomKeyframeId is null) return;
-        if (ApplyZoomButton is not null)
-            ApplyZoomButton.Visibility = Visibility.Visible;
-    }
-
-    private void ApplyZoomChanges_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
-    {
         if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
-
-        double? zoomLevel = null;
-        if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
-            double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
-            zoomLevel = z;
 
         double cx = ZoomCenterXSlider.Value / 100.0;
         double cy = ZoomCenterYSlider.Value / 100.0;
 
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId,
-            zoomLevel: zoomLevel, centerX: cx, centerY: cy);
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, centerX: cx, centerY: cy);
         ViewModel.UndoRedoManager.Execute(operation);
-
-        ApplyZoomButton.Visibility = Visibility.Collapsed;
     }
 
     private void UpdateZoomPanelVisibility()
@@ -577,8 +565,6 @@ public sealed partial class EditorPage : Page
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
-        if (ApplyZoomButton is not null)
-            ApplyZoomButton.Visibility = Visibility.Collapsed;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
