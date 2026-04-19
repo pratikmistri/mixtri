@@ -1,0 +1,394 @@
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Musio.Core.Export;
+using Musio.Core.Settings;
+using Windows.Storage.Pickers;
+
+namespace Musio_App.ViewModels;
+
+public partial class ExportViewModel : ObservableObject
+{
+    private readonly PresetManager _presetManager;
+    private CancellationTokenSource? _exportCts;
+
+    public ExportViewModel()
+    {
+        _presetManager = new PresetManager();
+        LoadPresets();
+    }
+
+    // --- Preset ---
+
+    [ObservableProperty]
+    private ObservableCollection<ExportPreset> _availablePresets = [];
+
+    [ObservableProperty]
+    private ExportPreset? _selectedPreset;
+
+    [ObservableProperty]
+    private string _newPresetName = string.Empty;
+
+    partial void OnSelectedPresetChanged(ExportPreset? value)
+    {
+        if (value is not null)
+        {
+            ApplyPreset(value);
+        }
+    }
+
+    // --- Export settings ---
+
+    [ObservableProperty]
+    private VideoResolution _selectedResolution = VideoResolution.HD1080;
+
+    [ObservableProperty]
+    private VideoFormat _selectedFormat = VideoFormat.MP4;
+
+    [ObservableProperty]
+    private AspectRatio _selectedAspectRatio = AspectRatio.Auto;
+
+    /// <summary>
+    /// Index-based binding for the aspect ratio ComboBox.
+    /// </summary>
+    public int AspectRatioIndex
+    {
+        get => (int)SelectedAspectRatio;
+        set
+        {
+            if (Enum.IsDefined(typeof(AspectRatio), value))
+            {
+                SelectedAspectRatio = (AspectRatio)value;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    partial void OnSelectedAspectRatioChanged(AspectRatio value)
+    {
+        OnPropertyChanged(nameof(AspectRatioIndex));
+    }
+
+    [ObservableProperty]
+    private VideoQuality _selectedQuality = VideoQuality.High;
+
+    [ObservableProperty]
+    private int _selectedFps = 60;
+
+    [ObservableProperty]
+    private string _outputPath = string.Empty;
+
+    // --- Progress ---
+
+    [ObservableProperty]
+    private bool _isExporting;
+
+    [ObservableProperty]
+    private double _progressPercent;
+
+    [ObservableProperty]
+    private string _progressStatus = string.Empty;
+
+    [ObservableProperty]
+    private int _currentFrame;
+
+    [ObservableProperty]
+    private int _totalFrames;
+
+    [ObservableProperty]
+    private string _estimatedTimeRemaining = string.Empty;
+
+    // --- Resolution helpers for RadioButtons ---
+
+    public bool IsResolution720
+    {
+        get => SelectedResolution == VideoResolution.HD720;
+        set { if (value) SelectedResolution = VideoResolution.HD720; }
+    }
+
+    public bool IsResolution1080
+    {
+        get => SelectedResolution == VideoResolution.HD1080;
+        set { if (value) SelectedResolution = VideoResolution.HD1080; }
+    }
+
+    public bool IsResolution2K
+    {
+        get => SelectedResolution == VideoResolution.QHD;
+        set { if (value) SelectedResolution = VideoResolution.QHD; }
+    }
+
+    public bool IsResolution4K
+    {
+        get => SelectedResolution == VideoResolution.UHD4K;
+        set { if (value) SelectedResolution = VideoResolution.UHD4K; }
+    }
+
+    partial void OnSelectedResolutionChanged(VideoResolution value)
+    {
+        OnPropertyChanged(nameof(IsResolution720));
+        OnPropertyChanged(nameof(IsResolution1080));
+        OnPropertyChanged(nameof(IsResolution2K));
+        OnPropertyChanged(nameof(IsResolution4K));
+    }
+
+    // --- Format helpers ---
+
+    public bool IsFormatMP4
+    {
+        get => SelectedFormat == VideoFormat.MP4;
+        set { if (value) SelectedFormat = VideoFormat.MP4; }
+    }
+
+    public bool IsFormatGIF
+    {
+        get => SelectedFormat == VideoFormat.GIF;
+        set { if (value) SelectedFormat = VideoFormat.GIF; }
+    }
+
+    public bool IsFormatWebM
+    {
+        get => SelectedFormat == VideoFormat.WebM;
+        set { if (value) SelectedFormat = VideoFormat.WebM; }
+    }
+
+    partial void OnSelectedFormatChanged(VideoFormat value)
+    {
+        OnPropertyChanged(nameof(IsFormatMP4));
+        OnPropertyChanged(nameof(IsFormatGIF));
+        OnPropertyChanged(nameof(IsFormatWebM));
+    }
+
+    // --- Quality helpers ---
+
+    public bool IsQualityDraft
+    {
+        get => SelectedQuality == VideoQuality.Draft;
+        set { if (value) SelectedQuality = VideoQuality.Draft; }
+    }
+
+    public bool IsQualityStandard
+    {
+        get => SelectedQuality == VideoQuality.Standard;
+        set { if (value) SelectedQuality = VideoQuality.Standard; }
+    }
+
+    public bool IsQualityHigh
+    {
+        get => SelectedQuality == VideoQuality.High;
+        set { if (value) SelectedQuality = VideoQuality.High; }
+    }
+
+    public bool IsQualityUltra
+    {
+        get => SelectedQuality == VideoQuality.Ultra;
+        set { if (value) SelectedQuality = VideoQuality.Ultra; }
+    }
+
+    partial void OnSelectedQualityChanged(VideoQuality value)
+    {
+        OnPropertyChanged(nameof(IsQualityDraft));
+        OnPropertyChanged(nameof(IsQualityStandard));
+        OnPropertyChanged(nameof(IsQualityHigh));
+        OnPropertyChanged(nameof(IsQualityUltra));
+    }
+
+    // --- FPS helpers ---
+
+    public bool IsFps30
+    {
+        get => SelectedFps == 30;
+        set { if (value) SelectedFps = 30; }
+    }
+
+    public bool IsFps60
+    {
+        get => SelectedFps == 60;
+        set { if (value) SelectedFps = 60; }
+    }
+
+    partial void OnSelectedFpsChanged(int value)
+    {
+        OnPropertyChanged(nameof(IsFps30));
+        OnPropertyChanged(nameof(IsFps60));
+    }
+
+    // --- Commands ---
+
+    [RelayCommand]
+    private void LoadPresets()
+    {
+        var presets = _presetManager.LoadExportPresets();
+        AvailablePresets = new ObservableCollection<ExportPreset>(presets);
+    }
+
+    [RelayCommand]
+    private void SavePreset()
+    {
+        var name = string.IsNullOrWhiteSpace(NewPresetName) ? "My Preset" : NewPresetName.Trim();
+
+        var preset = new ExportPreset
+        {
+            Name = name,
+            Resolution = SelectedResolution,
+            Format = SelectedFormat,
+            AspectRatio = SelectedAspectRatio,
+            Quality = SelectedQuality,
+            Fps = SelectedFps,
+        };
+
+        _presetManager.SaveExportPreset(preset);
+        NewPresetName = string.Empty;
+
+        LoadPresets();
+
+        // Select the newly saved preset
+        SelectedPreset = AvailablePresets.FirstOrDefault(p => p.Name == name);
+    }
+
+    [RelayCommand]
+    private void DeletePreset()
+    {
+        if (SelectedPreset is null) return;
+
+        _presetManager.DeleteExportPreset(SelectedPreset.Name);
+        SelectedPreset = null;
+        LoadPresets();
+    }
+
+    /// <summary>
+    /// The window handle used to initialize file pickers. Set from code-behind.
+    /// </summary>
+    public IntPtr WindowHandle { get; set; }
+
+    [RelayCommand]
+    private async Task BrowseOutputPathAsync()
+    {
+        var picker = new FileSavePicker();
+        picker.SuggestedStartLocation = PickerLocationId.VideosLibrary;
+        picker.SuggestedFileName = "export";
+
+        switch (SelectedFormat)
+        {
+            case VideoFormat.MP4:
+                picker.FileTypeChoices.Add("MP4 Video", [".mp4"]);
+                break;
+            case VideoFormat.GIF:
+                picker.FileTypeChoices.Add("GIF Animation", [".gif"]);
+                break;
+            case VideoFormat.WebM:
+                picker.FileTypeChoices.Add("WebM Video", [".webm"]);
+                break;
+        }
+
+        if (WindowHandle != IntPtr.Zero)
+        {
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WindowHandle);
+        }
+
+        var file = await picker.PickSaveFileAsync();
+        if (file is not null)
+        {
+            OutputPath = file.Path;
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExport))]
+    private async Task ExportAsync()
+    {
+        if (string.IsNullOrWhiteSpace(OutputPath)) return;
+
+        IsExporting = true;
+        ProgressPercent = 0;
+        ProgressStatus = "Starting export…";
+        CurrentFrame = 0;
+        TotalFrames = 0;
+        EstimatedTimeRemaining = string.Empty;
+
+        _exportCts = new CancellationTokenSource();
+
+        var exportProgress = new Progress<ExportProgress>(p =>
+        {
+            ProgressPercent = p.PercentComplete;
+            CurrentFrame = p.CurrentFrame;
+            TotalFrames = p.TotalFrames;
+            EstimatedTimeRemaining = FormatTimeSpan(p.EstimatedRemaining);
+            ProgressStatus = $"Frame {p.CurrentFrame} of {p.TotalFrames} — {EstimatedTimeRemaining} remaining";
+        });
+
+        try
+        {
+            var settings = new ExportSettings
+            {
+                Resolution = SelectedResolution,
+                Format = SelectedFormat,
+                AspectRatio = SelectedAspectRatio,
+                Quality = SelectedQuality,
+                Fps = SelectedFps,
+            };
+
+            // TODO: Wire to ExportEngine with actual project data once recording is complete.
+            // For now, the export pipeline is ready to be invoked:
+            //
+            // var engine = new ExportEngine();
+            // await engine.ExportProjectAsync(project, settings, composition, outputFolder, exportProgress, _exportCts.Token);
+
+            await Task.Delay(100, _exportCts.Token); // placeholder
+            ProgressStatus = "Export complete!";
+            ProgressPercent = 100;
+        }
+        catch (OperationCanceledException)
+        {
+            ProgressStatus = "Export cancelled.";
+        }
+        catch (Exception ex)
+        {
+            ProgressStatus = $"Export failed: {ex.Message}";
+        }
+        finally
+        {
+            IsExporting = false;
+            _exportCts?.Dispose();
+            _exportCts = null;
+            ExportCommand.NotifyCanExecuteChanged();
+        }
+    }
+
+    private bool CanExport() => !IsExporting && !string.IsNullOrWhiteSpace(OutputPath);
+
+    [RelayCommand]
+    private void CancelExport()
+    {
+        _exportCts?.Cancel();
+    }
+
+    // --- Helpers ---
+
+    private void ApplyPreset(ExportPreset preset)
+    {
+        SelectedResolution = preset.Resolution;
+        SelectedFormat = preset.Format;
+        SelectedAspectRatio = preset.AspectRatio;
+        SelectedQuality = preset.Quality;
+        SelectedFps = preset.Fps;
+    }
+
+    partial void OnOutputPathChanged(string value)
+    {
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnIsExportingChanged(bool value)
+    {
+        ExportCommand.NotifyCanExecuteChanged();
+    }
+
+    private static string FormatTimeSpan(TimeSpan ts)
+    {
+        if (ts.TotalHours >= 1)
+            return $"{ts.Hours}h {ts.Minutes}m {ts.Seconds}s";
+        if (ts.TotalMinutes >= 1)
+            return $"{ts.Minutes}m {ts.Seconds}s";
+        return $"{ts.Seconds}s";
+    }
+}

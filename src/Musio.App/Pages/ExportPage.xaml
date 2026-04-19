@@ -6,23 +6,243 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:Musio_App.Pages"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Musio_App.ViewModels"
     mc:Ignorable="d">
 
-    <Grid>
-        <StackPanel
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            Spacing="16">
-            <FontIcon
-                HorizontalAlignment="Center"
-                FontSize="48"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Glyph="&#xE898;" />
+    <ScrollViewer Padding="32,24,32,32">
+        <StackPanel MaxWidth="640" Spacing="24">
+
+            <!-- Page header -->
             <TextBlock
-                HorizontalAlignment="Center"
-                FontSize="18"
-                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                Text="Record or edit a video first, then export here" />
+                FontSize="28"
+                FontWeight="SemiBold"
+                Text="Export" />
+
+            <!-- Preset selector -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="PRESET" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox
+                        Grid.Column="0"
+                        HorizontalAlignment="Stretch"
+                        DisplayMemberPath="Name"
+                        ItemsSource="{x:Bind ViewModel.AvailablePresets, Mode=OneWay}"
+                        PlaceholderText="Select a preset…"
+                        SelectedItem="{x:Bind ViewModel.SelectedPreset, Mode=TwoWay}" />
+                    <Button
+                        Grid.Column="1"
+                        Command="{x:Bind ViewModel.DeletePresetCommand}"
+                        Content="&#xE74D;"
+                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                        ToolTipService.ToolTip="Delete preset" />
+                    <Button Grid.Column="2">
+                        <Button.Content>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontSize="14" Glyph="&#xE74E;" />
+                                <TextBlock Text="Save Preset" />
+                            </StackPanel>
+                        </Button.Content>
+                        <Button.Flyout>
+                            <Flyout>
+                                <StackPanel Spacing="12" MinWidth="240">
+                                    <TextBlock FontWeight="SemiBold" Text="Save current settings as preset" />
+                                    <TextBox
+                                        PlaceholderText="Preset name"
+                                        Text="{x:Bind ViewModel.NewPresetName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button
+                                        HorizontalAlignment="Right"
+                                        Command="{x:Bind ViewModel.SavePresetCommand}"
+                                        Content="Save"
+                                        Style="{ThemeResource AccentButtonStyle}" />
+                                </StackPanel>
+                            </Flyout>
+                        </Button.Flyout>
+                    </Button>
+                </Grid>
+            </StackPanel>
+
+            <!-- Resolution -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="RESOLUTION" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <RadioButton
+                        Content="720p"
+                        GroupName="Resolution"
+                        IsChecked="{x:Bind ViewModel.IsResolution720, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="1080p"
+                        GroupName="Resolution"
+                        IsChecked="{x:Bind ViewModel.IsResolution1080, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="2K"
+                        GroupName="Resolution"
+                        IsChecked="{x:Bind ViewModel.IsResolution2K, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="4K"
+                        GroupName="Resolution"
+                        IsChecked="{x:Bind ViewModel.IsResolution4K, Mode=TwoWay}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Format -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="FORMAT" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <RadioButton
+                        Content="MP4"
+                        GroupName="Format"
+                        IsChecked="{x:Bind ViewModel.IsFormatMP4, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="GIF"
+                        GroupName="Format"
+                        IsChecked="{x:Bind ViewModel.IsFormatGIF, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="WebM"
+                        GroupName="Format"
+                        IsChecked="{x:Bind ViewModel.IsFormatWebM, Mode=TwoWay}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Aspect Ratio -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="ASPECT RATIO" />
+                <ComboBox
+                    HorizontalAlignment="Stretch"
+                    SelectedIndex="{x:Bind ViewModel.AspectRatioIndex, Mode=TwoWay}">
+                    <ComboBoxItem Content="Auto" />
+                    <ComboBoxItem Content="16:9 (Landscape)" />
+                    <ComboBoxItem Content="9:16 (Portrait)" />
+                    <ComboBoxItem Content="1:1 (Square)" />
+                    <ComboBoxItem Content="4:3 (Classic)" />
+                    <ComboBoxItem Content="3:4 (Tall)" />
+                </ComboBox>
+            </StackPanel>
+
+            <!-- Quality -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="QUALITY" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <RadioButton
+                        Content="Draft"
+                        GroupName="Quality"
+                        IsChecked="{x:Bind ViewModel.IsQualityDraft, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="Standard"
+                        GroupName="Quality"
+                        IsChecked="{x:Bind ViewModel.IsQualityStandard, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="High"
+                        GroupName="Quality"
+                        IsChecked="{x:Bind ViewModel.IsQualityHigh, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="Ultra"
+                        GroupName="Quality"
+                        IsChecked="{x:Bind ViewModel.IsQualityUltra, Mode=TwoWay}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- FPS -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="FRAME RATE" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <RadioButton
+                        Content="30 FPS"
+                        GroupName="Fps"
+                        IsChecked="{x:Bind ViewModel.IsFps30, Mode=TwoWay}" />
+                    <RadioButton
+                        Content="60 FPS"
+                        GroupName="Fps"
+                        IsChecked="{x:Bind ViewModel.IsFps60, Mode=TwoWay}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Output path -->
+            <StackPanel Spacing="8">
+                <TextBlock
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="OUTPUT" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Grid.Column="0"
+                        PlaceholderText="Choose output location…"
+                        Text="{x:Bind ViewModel.OutputPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button
+                        Grid.Column="1"
+                        Command="{x:Bind ViewModel.BrowseOutputPathCommand}"
+                        Content="Browse…" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Export / Cancel buttons -->
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button
+                    Grid.Column="0"
+                    HorizontalAlignment="Stretch"
+                    Command="{x:Bind ViewModel.ExportCommand}"
+                    Style="{ThemeResource AccentButtonStyle}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon FontSize="16" Glyph="&#xE898;" />
+                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="Export Video" />
+                    </StackPanel>
+                </Button>
+                <Button
+                    Grid.Column="1"
+                    Command="{x:Bind ViewModel.CancelExportCommand}"
+                    Content="Cancel"
+                    Visibility="{x:Bind ViewModel.IsExporting, Mode=OneWay}" />
+            </Grid>
+
+            <!-- Progress section -->
+            <StackPanel
+                Spacing="8"
+                Visibility="{x:Bind ViewModel.IsExporting, Mode=OneWay}">
+                <ProgressBar
+                    Maximum="100"
+                    Value="{x:Bind ViewModel.ProgressPercent, Mode=OneWay}" />
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="{x:Bind ViewModel.ProgressStatus, Mode=OneWay}" />
+            </StackPanel>
+
         </StackPanel>
-    </Grid>
+    </ScrollViewer>
 </Page>
