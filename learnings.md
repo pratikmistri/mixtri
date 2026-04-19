@@ -80,3 +80,23 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 2. **Manual ICO generation with PNG-encoded entries** — Worked. Built multi-resolution ICO (16–256px) by writing the ICO binary header + PNG payloads directly via `BinaryWriter`. ✅
 
 **What worked:** Using the largest source image (`Musio.png` 640x640) and resizing to all required targets: StoreLogo (50x50), Square44x44 (88x88, 24x24), Square150x150 (300x300), LockScreen (48x48), Wide310x150 (620x300 centered), SplashScreen (1240x600 centered), AppIcon.ico (multi-res). All existing references in Package.appxmanifest, MainWindow.xaml, csproj, and SystemTrayService.cs already pointed to the standard asset names — no code changes needed.
+
+---
+
+## Zoom Track — Making Auto-Generated Segments Selectable & Editable
+
+**Feature/area:** Timeline zoom track (TimelineControl, EditOperation)
+
+**Approaches tried:**
+
+1. **Removed `IsManual` gate from hit testing + added `IsManual = true` promotion on edit** — Worked. Auto-generated (click-tracking) segments become selectable, draggable, and resizable. On any modification (move, resize, property change), the segment is promoted to `IsManual = true` so it gets sent to the compositor as a manual override. Undo restores the original `IsManual` state. ✅
+
+**What worked:**
+- Removing `if (!kf.IsManual) continue;` from `HitTestZoomSegment` to allow selection.
+- Changing resize handle condition from `isSelected && isEditable` to `isSelected`.
+- Adding `IsManual = true` to all `with` expressions in `MoveZoomKeyframeOperation`, `ResizeZoomSegmentOperation`, and `UpdateZoomSegmentPropertiesOperation`.
+- Saving `_previousIsManual` in `MoveZoomKeyframeOperation` for proper undo (resize/update ops already save the full previous keyframe).
+
+**Key design decisions:**
+- Auto segments keep their lighter fill color (`ZoomSegmentAutoFill`) until modified, at which point promotion to `IsManual` gives them the standard fill.
+- Promotion to manual means the compositor receives the segment as a user override that takes priority over the auto-zoom engine's generated segments.

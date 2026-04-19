@@ -320,6 +320,7 @@ public class MoveZoomKeyframeOperation : IEditOperation
     private readonly string _keyframeId;
     private readonly TimeSpan _newTimestamp;
     private TimeSpan _previousTimestamp;
+    private bool _previousIsManual;
 
     public string Description => "Move Zoom Point";
 
@@ -334,14 +335,15 @@ public class MoveZoomKeyframeOperation : IEditOperation
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
-        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp };
+        _previousIsManual = model.ZoomKeyframes[index].IsManual;
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp, IsManual = true };
     }
 
     public void Undo(TimelineModel model)
     {
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
-        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp };
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp, IsManual = _previousIsManual };
     }
 }
 
@@ -455,11 +457,12 @@ public class ResizeZoomSegmentOperation : IEditOperation
                     Timestamp = newTimestamp,
                     PreDuration = TimeSpan.FromMilliseconds(50),
                     HoldDuration = newHold,
+                    IsManual = true,
                 };
             }
             else
             {
-                model.ZoomKeyframes[index] = kf with { PreDuration = newPre };
+                model.ZoomKeyframes[index] = kf with { PreDuration = newPre, IsManual = true };
             }
         }
         else
@@ -483,7 +486,7 @@ public class ResizeZoomSegmentOperation : IEditOperation
                 newPost = totalAfterTimestamp;
             }
 
-            model.ZoomKeyframes[index] = kf with { HoldDuration = newHold, PostDuration = newPost };
+            model.ZoomKeyframes[index] = kf with { HoldDuration = newHold, PostDuration = newPost, IsManual = true };
         }
     }
 
@@ -528,6 +531,7 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             ZoomLevel = _newZoomLevel ?? kf.ZoomLevel,
             CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
             CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
+            IsManual = true,
         };
     }
 

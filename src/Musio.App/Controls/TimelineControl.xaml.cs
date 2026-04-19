@@ -387,8 +387,8 @@ public sealed partial class TimelineControl : UserControl
                     });
             }
 
-            // Resize handles (visible when selected or editable)
-            if (isSelected && isEditable)
+            // Resize handles (visible when selected)
+            if (isSelected)
             {
                 float handleW = 3;
                 float handleH = segH * 0.5f;
@@ -490,8 +490,6 @@ public sealed partial class TimelineControl : UserControl
         for (int i = sorted.Count - 1; i >= 0; i--)
         {
             var kf = sorted[i];
-            if (!kf.IsManual) continue;
-
             float x1 = (float)TimeToX(kf.Start);
             float x2 = (float)TimeToX(kf.End);
 
