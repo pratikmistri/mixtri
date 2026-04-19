@@ -20,6 +20,29 @@
     </Page.Resources>
 
     <Grid>
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="640" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="StartRecordText.Visibility" Value="Visible" />
+                        <Setter Target="StopRecordText.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Narrow">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="StartRecordText.Visibility" Value="Collapsed" />
+                        <Setter Target="StopRecordText.Visibility" Value="Collapsed" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -34,8 +57,8 @@
             IsClosable="True"
             Severity="Informational" />
 
-        <ScrollViewer Grid.Row="1" Padding="16">
-            <StackPanel MaxWidth="900" Spacing="12">
+        <ScrollViewer Grid.Row="1" Padding="16" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel HorizontalAlignment="Stretch" Spacing="12">
                 <StackPanel.ChildrenTransitions>
                     <EntranceThemeTransition FromVerticalOffset="40" />
                 </StackPanel.ChildrenTransitions>
@@ -52,12 +75,11 @@
                 </StackPanel>
 
                 <!-- Hero: Start / Stop Recording -->
-                <StackPanel HorizontalAlignment="Center" Spacing="16">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="16">
                     <Button
                         x:Name="StartRecordButton"
-                        Width="240"
                         Height="64"
-                        HorizontalAlignment="Center"
+                        MinWidth="64"
                         Command="{x:Bind ViewModel.StartRecordingCommand}"
                         CornerRadius="32"
                         IsEnabled="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
@@ -66,6 +88,7 @@
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <FontIcon FontSize="22" Glyph="&#xE7C8;" />
                             <TextBlock
+                                x:Name="StartRecordText"
                                 VerticalAlignment="Center"
                                 FontSize="16"
                                 FontWeight="SemiBold"
@@ -75,9 +98,8 @@
 
                     <Button
                         x:Name="StopRecordButton"
-                        Width="240"
                         Height="64"
-                        HorizontalAlignment="Center"
+                        MinWidth="64"
                         Command="{x:Bind ViewModel.StopRecordingCommand}"
                         CornerRadius="32"
                         Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
@@ -85,6 +107,7 @@
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <FontIcon FontSize="22" Foreground="Red" Glyph="&#xE71A;" />
                             <TextBlock
+                                x:Name="StopRecordText"
                                 VerticalAlignment="Center"
                                 FontSize="16"
                                 FontWeight="SemiBold"
@@ -94,7 +117,7 @@
 
                     <!-- Elapsed timer shown during recording -->
                     <TextBlock
-                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
                         FontSize="20"
                         FontWeight="SemiBold"
                         Foreground="Red"
