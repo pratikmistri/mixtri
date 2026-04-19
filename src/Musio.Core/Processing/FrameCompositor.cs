@@ -112,9 +112,9 @@ public class FrameCompositor : IDisposable
         _tickFrequency = mouseData.TickFrequency;
 
         // Detect DPI scale: mouse hook reports logical coords, capture is physical pixels.
-        // Estimate scale by comparing max mouse range to source dimensions.
-        float coordScaleX = DetectCoordinateScale(mouseData, sourceWidth, isX: true);
-        float coordScaleY = DetectCoordinateScale(mouseData, sourceHeight, isX: false);
+        // Use actual screen metrics for reliable scale detection.
+        float coordScaleX = GetSystemDpiScale(sourceWidth, isWidth: true);
+        float coordScaleY = GetSystemDpiScale(sourceHeight, isWidth: false);
         _coordScaleX = coordScaleX;
         _coordScaleY = coordScaleY;
 
@@ -173,40 +173,31 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Detects the scale factor between mouse hook coordinates (logical) and
-    /// capture frame dimensions (physical). Returns the multiplier to convert
-    /// logical → physical coordinates.
+    /// Gets the system DPI scale factor by comparing logical screen size to
+    /// the capture frame dimensions. Uses P/Invoke to get actual screen bounds.
     /// </summary>
-    private static float DetectCoordinateScale(MouseRecordingData mouseData, int sourceDimension, bool isX)
+    private static float GetSystemDpiScale(int capturedDimension, bool isWidth)
     {
-        if (mouseData.Samples.Count == 0) return 1.0f;
-
-        // Find the max coordinate in the mouse data
-        int maxCoord = 0;
-        foreach (var sample in mouseData.Samples)
+        try
         {
-            int coord = isX ? sample.X : sample.Y;
-            if (coord > maxCoord) maxCoord = coord;
+            // Get the primary monitor's logical resolution
+            int logicalSize = isWidth
+                ? GetSystemMetrics(SM_CXSCREEN)
+                : GetSystemMetrics(SM_CYSCREEN);
+
+            if (logicalSize > 0 && capturedDimension > logicalSize)
+                return (float)capturedDimension / logicalSize;
         }
+        catch { }
 
-        if (maxCoord <= 0) return 1.0f;
-
-        // If max mouse coord is significantly less than source dimension,
-        // there's a DPI scale factor in play
-        float ratio = (float)sourceDimension / maxCoord;
-
-        // Round to nearest common scale: 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0
-        if (ratio > 0.9f && ratio < 1.1f) return 1.0f;
-        if (ratio > 1.15f && ratio < 1.35f) return 1.25f;
-        if (ratio > 1.35f && ratio < 1.65f) return 1.5f;
-        if (ratio > 1.65f && ratio < 1.85f) return 1.75f;
-        if (ratio > 1.85f && ratio < 2.15f) return 2.0f;
-        if (ratio > 2.35f && ratio < 2.65f) return 2.5f;
-        if (ratio > 2.85f && ratio < 3.15f) return 3.0f;
-
-        // Fallback: use the raw ratio
-        return ratio;
+        return 1.0f;
     }
+
+    private const int SM_CXSCREEN = 0;
+    private const int SM_CYSCREEN = 1;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     /// <summary>
     /// Adjusts the smoothed positions list to match the desired frame count.

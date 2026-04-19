@@ -95,6 +95,25 @@ public sealed partial class EditorPage : Page
 
         // Feed cursor data to timeline for track visualization
         ViewModel.Model.CursorData = mouseData;
+
+        // Build zoom keyframes from click events so they appear on the timeline
+        int sourceW = project.Width > 0 ? project.Width : 1920;
+        int sourceH = project.Height > 0 ? project.Height : 1080;
+        float dpiScaleX = GetDpiScale(sourceW);
+        float dpiScaleY = GetDpiScale(sourceH, isWidth: false);
+        ViewModel.Model.ZoomKeyframes.Clear();
+        foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
+        {
+            double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency;
+            ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(clickTime),
+                ZoomLevel = 2.0,
+                CenterX = (click.X * dpiScaleX) / sourceW,
+                CenterY = (click.Y * dpiScaleY) / sourceH,
+            });
+        }
+
         Timeline.Refresh();
 
         // Build composition config with cursor effects enabled
@@ -230,5 +249,20 @@ public sealed partial class EditorPage : Page
     {
         ViewModel.CutSelectionCommand.Execute(null);
         args.Handled = true;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    private static float GetDpiScale(int capturedDimension, bool isWidth = true)
+    {
+        try
+        {
+            int logical = GetSystemMetrics(isWidth ? 0 : 1); // SM_CXSCREEN=0, SM_CYSCREEN=1
+            if (logical > 0 && capturedDimension > logical)
+                return (float)capturedDimension / logical;
+        }
+        catch { }
+        return 1.0f;
     }
 }
