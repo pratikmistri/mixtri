@@ -1,6 +1,9 @@
 using System.Globalization;
+using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.Processing;
+using Musio_App.Services;
 using Musio_App.ViewModels;
 
 namespace Musio_App.Pages;
@@ -8,6 +11,8 @@ namespace Musio_App.Pages;
 public sealed partial class EditorPage : Page
 {
     public EditorViewModel ViewModel { get; }
+    private VideoFrameReader? _frameReader;
+    private int _lastRenderedFrameIndex = -1;
 
     public EditorPage()
     {
@@ -17,6 +22,9 @@ public sealed partial class EditorPage : Page
         // Set initial duration on preview
         Preview.Duration = ViewModel.Model.EffectiveDuration;
 
+        // Try to load recorded frames for preview
+        LoadFrameReader();
+
         // Sync playhead: when timeline scrubs, update preview
         Timeline.RegisterPropertyChangedCallback(
             Controls.TimelineControl.PlayheadPositionProperty,
@@ -24,6 +32,7 @@ public sealed partial class EditorPage : Page
             {
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
+                _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
             });
 
         // Sync playhead: when preview plays, update timeline
@@ -31,6 +40,7 @@ public sealed partial class EditorPage : Page
         {
             Timeline.PlayheadPosition = Preview.PlayheadPosition;
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
+            _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -42,10 +52,50 @@ public sealed partial class EditorPage : Page
             {
                 Preview.Duration = ViewModel.Model.EffectiveDuration;
                 Timeline.Refresh();
-                // Re-subscribe to the new UndoRedoManager
                 ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
+                LoadFrameReader();
             });
         };
+
+        // Show first frame
+        _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
+    }
+
+    private void LoadFrameReader()
+    {
+        _frameReader?.Dispose();
+        _frameReader = null;
+        _lastRenderedFrameIndex = -1;
+
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
+            return;
+
+        _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, project.Fps > 0 ? project.Fps : 30);
+    }
+
+    private async Task UpdatePreviewFrameAsync(TimeSpan position)
+    {
+        if (_frameReader is null) return;
+
+        int frameIndex = _frameReader.GetFrameIndex(position);
+        if (frameIndex == _lastRenderedFrameIndex) return;
+        _lastRenderedFrameIndex = frameIndex;
+
+        var bitmap = await _frameReader.LoadFrameAtTimeAsync(position);
+        if (bitmap is null) return;
+
+        // Create a render target from the bitmap for the preview canvas
+        var device = CanvasDevice.GetSharedDevice();
+        var renderTarget = new CanvasRenderTarget(device,
+            bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+        using (var ds = renderTarget.CreateDrawingSession())
+        {
+            ds.DrawImage(bitmap);
+        }
+        bitmap.Dispose();
+
+        Preview.SetFrame(renderTarget);
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
