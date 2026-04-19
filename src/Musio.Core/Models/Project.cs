@@ -16,7 +16,7 @@ public class Project
     public TimeSpan Duration { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
-    public int Fps { get; set; } = 60;
+    public int Fps { get; set; } = 30;
 
     /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.

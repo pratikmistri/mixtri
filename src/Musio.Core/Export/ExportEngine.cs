@@ -79,7 +79,7 @@ public class ExportEngine
         TimelineMapper? timelineMapper = null;
         if (timeline is not null)
         {
-            timelineMapper = new TimelineMapper(timeline, settings.Fps);
+            timelineMapper = new TimelineMapper(timeline, exportFps);
         }
 
         // Build output file path

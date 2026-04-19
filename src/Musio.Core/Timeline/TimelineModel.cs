@@ -5,7 +5,7 @@ namespace Musio.Core.Timeline;
 public class TimelineModel
 {
     public TimeSpan Duration { get; set; }
-    public int Fps { get; set; } = 60;
+    public int Fps { get; set; } = 30;
     public TimeSpan PlayheadPosition { get; set; }
     public double ZoomLevel { get; set; } = 1.0; // 1.0 = fit to width
     public double ScrollOffset { get; set; } // horizontal scroll in seconds

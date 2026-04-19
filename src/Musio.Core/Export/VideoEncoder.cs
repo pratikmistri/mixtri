@@ -18,7 +18,7 @@ namespace Musio.Core.Export;
 public record ExportSettings
 {
     public VideoResolution Resolution { get; init; } = VideoResolution.HD1080;
-    public int Fps { get; init; } = 60;
+    public int Fps { get; init; } = 30;
     public VideoFormat Format { get; init; } = VideoFormat.MP4;
     public VideoQuality Quality { get; init; } = VideoQuality.High;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;

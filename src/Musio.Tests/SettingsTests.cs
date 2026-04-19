@@ -16,7 +16,7 @@ public sealed class SettingsTests
 
         Assert.AreEqual(string.Empty, preset.Name);
         Assert.AreEqual(VideoResolution.HD1080, preset.Resolution);
-        Assert.AreEqual(60, preset.Fps);
+        Assert.AreEqual(30, preset.Fps);
         Assert.AreEqual(VideoFormat.MP4, preset.Format);
         Assert.AreEqual(AspectRatio.Auto, preset.AspectRatio);
         Assert.AreEqual(VideoQuality.High, preset.Quality);

@@ -16,6 +16,7 @@ public sealed class ScreenCaptureEngine : IDisposable
     private readonly IDirect3DDevice _device;
     private readonly GraphicsCaptureItem _captureItem;
     private readonly int _fps;
+    private readonly TimeSpan _frameInterval;
 
     private Direct3D11CaptureFramePool? _framePool;
     private GraphicsCaptureSession? _session;
@@ -24,13 +25,18 @@ public sealed class ScreenCaptureEngine : IDisposable
     private SizeInt32 _lastSize;
     private long _framesCaptured;
     private long _droppedFrames;
+    private long _throttledFrames;
     private volatile bool _isPaused;
     private bool _disposed;
+
+    // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
+    private long _lastEmittedSlot = -1;
 
     public bool IsRecording { get; private set; }
     public int Fps => _fps;
     public long FramesCaptured => Interlocked.Read(ref _framesCaptured);
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+    public long ThrottledFrames => Interlocked.Read(ref _throttledFrames);
     public IDirect3DDevice Device => _device;
 
     public event EventHandler<CapturedFrameEventArgs>? FrameCaptured;
@@ -43,12 +49,13 @@ public sealed class ScreenCaptureEngine : IDisposable
         _device = device;
         _captureItem = item;
         _fps = fps;
+        _frameInterval = TimeSpan.FromSeconds(1.0 / fps);
     }
 
     /// <summary>
     /// Creates a capture engine targeting a specific monitor.
     /// </summary>
-    public static ScreenCaptureEngine CreateForMonitor(IntPtr hMonitor, int fps = 60)
+    public static ScreenCaptureEngine CreateForMonitor(IntPtr hMonitor, int fps = 30)
     {
         var device = Direct3DDeviceHelper.CreateDevice();
         var item = CreateCaptureItemForMonitor(hMonitor);
@@ -58,7 +65,7 @@ public sealed class ScreenCaptureEngine : IDisposable
     /// <summary>
     /// Creates a capture engine targeting a specific window.
     /// </summary>
-    public static ScreenCaptureEngine CreateForWindow(IntPtr hwnd, int fps = 60)
+    public static ScreenCaptureEngine CreateForWindow(IntPtr hwnd, int fps = 30)
     {
         var device = Direct3DDeviceHelper.CreateDevice();
         var item = CreateCaptureItemForWindow(hwnd);
@@ -87,6 +94,8 @@ public sealed class ScreenCaptureEngine : IDisposable
 
         Interlocked.Exchange(ref _framesCaptured, 0);
         Interlocked.Exchange(ref _droppedFrames, 0);
+        Interlocked.Exchange(ref _throttledFrames, 0);
+        _lastEmittedSlot = -1;
         _isPaused = false;
 
         _stopwatch.Restart();
@@ -156,8 +165,21 @@ public sealed class ScreenCaptureEngine : IDisposable
                     size);
             }
 
-            var surface = frame.Surface;
             var timestamp = _stopwatch.Elapsed;
+
+            // Frame-slot gating: compute which slot this frame belongs to
+            // and only emit one frame per slot for consistent CFR pacing.
+            long slot = (long)(timestamp.TotalSeconds / _frameInterval.TotalSeconds);
+            long previousSlot = Interlocked.Exchange(ref _lastEmittedSlot, slot);
+            if (slot <= previousSlot)
+            {
+                // Already emitted a frame for this slot — skip
+                Interlocked.Exchange(ref _lastEmittedSlot, previousSlot);
+                Interlocked.Increment(ref _throttledFrames);
+                return;
+            }
+
+            var surface = frame.Surface;
 
             Interlocked.Increment(ref _framesCaptured);
 

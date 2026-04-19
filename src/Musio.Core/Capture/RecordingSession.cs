@@ -19,7 +19,7 @@ public enum RecordingState
 public record RecordingSessionConfig
 {
     public CaptureTarget Target { get; init; } = default!;
-    public int Fps { get; init; } = 60;
+    public int Fps { get; init; } = 30;
     public bool SystemAudioEnabled { get; init; } = true;
     public bool MicEnabled { get; init; } = false;
     public string? SystemAudioDeviceId { get; init; }
@@ -289,9 +289,10 @@ public class RecordingSession : IDisposable
                     / Stopwatch.Frequency;
             }
 
-            // Build project — use actual video duration and FPS from VideoWriter
-            var actualDuration = _videoWriter?.ActualDuration ?? _elapsedWatch.Elapsed;
-            var actualFps = _videoWriter?.ActualFps ?? _config.Fps;
+            // Build project — use CFR duration and configured FPS for consistent timing.
+            // CfrDuration = frameCount / fps gives exact CFR playback duration.
+            // ActualDuration/ActualFps are kept on VideoWriter for diagnostics only.
+            var cfrDuration = _videoWriter?.CfrDuration ?? _elapsedWatch.Elapsed;
 
             _project = new Project
             {
@@ -301,10 +302,10 @@ public class RecordingSession : IDisposable
                 KeyboardDataFilePath = _keyboardDataFilePath,
                 WebcamFilePath = _webcamEngine?.OutputFilePath,
                 AudioFilePaths = audioFilePaths,
-                Duration = actualDuration,
+                Duration = cfrDuration,
                 Width = _captureWidth,
                 Height = _captureHeight,
-                Fps = (int)Math.Round(actualFps),
+                Fps = _config.Fps,
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
             };
 

@@ -33,7 +33,7 @@ public sealed class AppSettings
 
     public int DefaultFps
     {
-        get => Get(nameof(DefaultFps), 60);
+        get => Get(nameof(DefaultFps), 30);
         set => Set(nameof(DefaultFps), value);
     }
 

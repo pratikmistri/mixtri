@@ -40,7 +40,7 @@ public class ExportPreset
 {
     public string Name { get; set; } = string.Empty;
     public VideoResolution Resolution { get; set; } = VideoResolution.HD1080;
-    public int Fps { get; set; } = 60;
+    public int Fps { get; set; } = 30;
     public VideoFormat Format { get; set; } = VideoFormat.MP4;
     public AspectRatio AspectRatio { get; set; } = AspectRatio.Auto;
     public VideoQuality Quality { get; set; } = VideoQuality.High;

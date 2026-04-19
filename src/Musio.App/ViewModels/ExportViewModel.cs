@@ -145,7 +145,7 @@ public partial class ExportViewModel : ObservableObject
     private VideoQuality _selectedQuality = VideoQuality.High;
 
     [ObservableProperty]
-    private int _selectedFps = 60;
+    private int _selectedFps = 30;
 
     [ObservableProperty]
     private string _outputPath = string.Empty;
@@ -160,12 +160,6 @@ public partial class ExportViewModel : ObservableObject
 
     [ObservableProperty]
     private string _progressStatus = string.Empty;
-
-    [ObservableProperty]
-    private int _currentFrame;
-
-    [ObservableProperty]
-    private int _totalFrames;
 
     [ObservableProperty]
     private string _estimatedTimeRemaining = string.Empty;
@@ -389,8 +383,6 @@ public partial class ExportViewModel : ObservableObject
         ErrorMessage = string.Empty;
         ProgressPercent = 0;
         ProgressStatus = "Starting export…";
-        CurrentFrame = 0;
-        TotalFrames = 0;
         EstimatedTimeRemaining = string.Empty;
 
         _exportCts = new CancellationTokenSource();
@@ -398,10 +390,8 @@ public partial class ExportViewModel : ObservableObject
         var exportProgress = new Progress<ExportProgress>(p =>
         {
             ProgressPercent = p.PercentComplete;
-            CurrentFrame = p.CurrentFrame;
-            TotalFrames = p.TotalFrames;
             EstimatedTimeRemaining = FormatTimeSpan(p.EstimatedRemaining);
-            ProgressStatus = $"Frame {p.CurrentFrame} of {p.TotalFrames} — {EstimatedTimeRemaining} remaining";
+            ProgressStatus = $"{EstimatedTimeRemaining} remaining";
         });
 
         try

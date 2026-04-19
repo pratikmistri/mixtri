@@ -14,7 +14,7 @@ public record CompositionConfig
     public AutoZoomConfig Zoom { get; init; } = new();
     public SmoothingAlgorithm SmoothingAlgorithm { get; init; } = SmoothingAlgorithm.SpringPhysics;
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
-    public int OutputFps { get; init; } = 60;
+    public int OutputFps { get; init; } = 30;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
     public WebcamOverlayStyle? WebcamStyle { get; init; }
     public KeyboardOverlayStyle? KeyboardStyle { get; init; }

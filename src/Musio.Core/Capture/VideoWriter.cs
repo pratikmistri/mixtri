@@ -33,7 +33,7 @@ public sealed class VideoWriter : IDisposable
     public int Fps => _fps;
     public long FrameCount => Interlocked.Read(ref _frameCount);
 
-    /// <summary>Actual recording duration based on frame timestamps.</summary>
+    /// <summary>Actual recording duration based on frame timestamps (diagnostic only).</summary>
     public TimeSpan ActualDuration
     {
         get
@@ -54,7 +54,7 @@ public sealed class VideoWriter : IDisposable
         }
     }
 
-    /// <summary>Actual average FPS based on frame timestamps.</summary>
+    /// <summary>Actual average FPS based on frame timestamps (diagnostic only).</summary>
     public double ActualFps
     {
         get
@@ -63,6 +63,11 @@ public sealed class VideoWriter : IDisposable
             return dur > 0 ? (FrameCount - 1) / dur : _fps;
         }
     }
+
+    /// <summary>CFR duration: FrameCount / FPS. Use this for project metadata.</summary>
+    public TimeSpan CfrDuration => _fps > 0
+        ? TimeSpan.FromSeconds((double)Interlocked.Read(ref _frameCount) / _fps)
+        : TimeSpan.Zero;
 
     public VideoWriter(string outputPath, int width, int height, int fps, IDirect3DDevice? captureDevice = null)
     {
@@ -135,15 +140,10 @@ public sealed class VideoWriter : IDisposable
 
         var composition = new MediaComposition();
 
-        // Use actual per-frame durations from recorded timestamps
-        // This ensures the MP4 plays at the real capture speed
-        List<TimeSpan> timestamps;
-        lock (_tsLock)
-        {
-            timestamps = new List<TimeSpan>(_frameTimestamps);
-        }
-
-        var fallbackDuration = TimeSpan.FromSeconds(1.0 / _fps);
+        // Use constant frame duration for true CFR output.
+        // The slot-based capture throttling ensures frames arrive at ~1/fps intervals,
+        // so constant duration matches real wall-clock time.
+        var constantDuration = TimeSpan.FromSeconds(1.0 / _fps);
 
         for (long i = 0; i < totalFrames; i++)
         {
@@ -151,22 +151,8 @@ public sealed class VideoWriter : IDisposable
             if (!File.Exists(framePath))
                 continue;
 
-            // Compute this frame's duration from actual timestamps
-            TimeSpan duration;
-            if (i < timestamps.Count - 1)
-            {
-                duration = timestamps[(int)(i + 1)] - timestamps[(int)i];
-                // Clamp to reasonable range (1ms to 500ms)
-                if (duration.TotalMilliseconds < 1) duration = fallbackDuration;
-                if (duration.TotalMilliseconds > 500) duration = fallbackDuration;
-            }
-            else
-            {
-                duration = fallbackDuration;
-            }
-
             var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
-            var clip = await MediaClip.CreateFromImageFileAsync(file, duration);
+            var clip = await MediaClip.CreateFromImageFileAsync(file, constantDuration);
             composition.Clips.Add(clip);
         }
 

@@ -81,7 +81,7 @@ public sealed class TimelineModelTests
         var model = new TimelineModel();
 
         Assert.AreEqual(TimeSpan.Zero, model.Duration);
-        Assert.AreEqual(60, model.Fps);
+        Assert.AreEqual(30, model.Fps);
         Assert.AreEqual(TimeSpan.Zero, model.PlayheadPosition);
         Assert.AreEqual(1.0, model.ZoomLevel);
         Assert.AreEqual(0.0, model.ScrollOffset);
