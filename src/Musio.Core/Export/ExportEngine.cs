@@ -50,8 +50,11 @@ public class ExportEngine
         // Load keyboard data if available and enrich composition config
         var enrichedComposition = EnrichCompositionWithOverlays(project, composition);
 
-        // Resolve output dimensions from settings
-        var (resW, resH) = GetResolutionDimensions(settings.Resolution);
+        // Resolve output dimensions from the source recording so the export
+        // matches the editor preview's aspect ratio. Fixed resolution targets
+        // (e.g. 1920x1080) would stretch non-16:9 recordings.
+        int resW = project.Width > 0 ? project.Width : 1920;
+        int resH = project.Height > 0 ? project.Height : 1080;
 
         // Override composition with export settings — match editor preview defaults.
         // The export video FPS must match the compositor FPS to keep cursor/click
