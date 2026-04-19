@@ -2,19 +2,15 @@
 
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-  xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:uap6="http://schemas.microsoft.com/appx/manifest/uap/windows10/6"
-  xmlns:systemai="http://schemas.microsoft.com/appx/manifest/systemai/windows10"
-  IgnorableNamespaces="uap rescap uap6 systemai">
+  IgnorableNamespaces="uap rescap uap6">
 
   <Identity
     Name="80BD9A48-1365-4BA3-8FE7-9A3D2BF7EA4B"
     Publisher="CN=AppPublisher"
     Version="1.0.0.0" />
-
-  <mp:PhoneIdentity PhoneProductId="80BD9A48-1365-4BA3-8FE7-9A3D2BF7EA4B" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
 
   <Properties>
     <DisplayName>Musio</DisplayName>
@@ -23,7 +19,6 @@
   </Properties>
 
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
   </Dependencies>
 
@@ -49,7 +44,6 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
-    <systemai:Capability Name="systemAIModels"/>
     <uap6:Capability Name="graphicsCapture" />
     <DeviceCapability Name="microphone" />
     <DeviceCapability Name="webcam" />

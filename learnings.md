@@ -181,3 +181,47 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Used native Win32 windows instead of WinUI windows — avoids transparency/compositor complexity and is lightweight.
 - Click-through (`WS_EX_TRANSPARENT`) so the user can still interact with content under the border.
 - Excluded from capture so the border never appears in the recorded video.
+
+---
+
+## Microsoft Store Submission — Manifest Cleanup
+
+**Feature/area:** Package.appxmanifest / Store readiness
+
+**Approaches tried:**
+
+1. **Removed `systemAIModels` capability** — Was declared but never used in code. Restricted capabilities require justification and delay certification. ✅
+2. **Removed `mp:PhoneIdentity` element and `mp` namespace** — Boilerplate for phone apps, not applicable to desktop WinUI 3. ✅
+3. **Removed `Windows.Universal` TargetDeviceFamily** — WinUI 3 with `runFullTrust` is desktop-only; keeping `Windows.Universal` can cause Store validation issues. Kept only `Windows.Desktop`. ✅
+
+**What worked:** All three changes applied cleanly. Build succeeded with no new errors.
+
+**Key notes for Store submission (non-code):**
+- Must associate app with Store in VS (right-click → Publish → Associate App with the Store) to update Identity Name/Publisher.
+- Privacy policy URL required (app uses webcam, microphone, screen capture).
+- `runFullTrust` requires justification in Partner Center (screen capture needs full trust).
+- Store signs MSIX packages automatically on submission — no `.pfx` needed for Store builds.
+
+---
+
+## Main Window — Minimize Instead of Hide from Capture
+
+**Feature/area:** MainWindow capture behavior during recording
+
+**Approaches tried:**
+
+1. **Removed `WDA_EXCLUDEFROMCAPTURE` from MainWindow** — The main window was permanently hidden from all screen capture (screenshots, recordings, etc.). Removed `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` and the unused `WDA_EXCLUDEFROMCAPTURE` constant / `SetWindowDisplayAffinity` P/Invoke from `MainWindow.xaml.cs`. The minimize-on-record and restore-on-stop behavior already existed in `RecordingPage.xaml.cs`. ✅
+
+**What worked:** Simply removing the capture exclusion from `MainWindow`. The existing minimize/restore logic in `RecordingPage.ShowRecordingOverlay` / `CloseRecordingOverlay` already handles keeping the window out of the way during recording. The recording overlay and region border highlight retain their `WDA_EXCLUDEFROMCAPTURE` since they are recording-specific UI.
+
+---
+
+## Recording — Minimize Before Capture Starts
+
+**Feature/area:** Recording startup sequence (RecordingPage)
+
+**Approaches tried:**
+
+1. **Moved minimize logic from `ShowRecordingOverlay` to a new `StartRecordButton_Click` handler with a 600ms delay** — Worked. Changed the Start Recording button from `Command="{x:Bind ViewModel.StartRecordingCommand}"` to `Click="StartRecordButton_Click"`. The click handler minimizes the main window first, waits 600ms for the animation to complete, then calls `ViewModel.StartRecordingCommand.Execute(null)`. This ensures the minimize animation is never captured in the recording. ✅
+
+**What worked:** Decoupling minimize from the `ShowRecordingOverlay` method (which fires after recording starts) and moving it to a pre-recording click handler with an animation delay. The `ShowRecordingOverlay` now only handles the overlay and region border.

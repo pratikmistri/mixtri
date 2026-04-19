@@ -25,8 +25,7 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new SizeInt32((int)(1024 * scale), (int)(768 * scale)));
         SetMinSize(1024, 768, scale);
 
-        // Exclude this window from screen capture so it never appears in recordings
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+
     }
 
     private void SetMinSize(int minWidth, int minHeight, double scale)
@@ -76,13 +75,8 @@ public sealed partial class MainWindow : Window
     }
 
     private const int GWLP_WNDPROC = -4;
-    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int GetDpiForWindow(IntPtr hwnd);
-
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
 
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int nIndex, IntPtr dwNewLong);

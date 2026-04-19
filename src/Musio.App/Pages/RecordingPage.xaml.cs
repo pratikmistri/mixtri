@@ -48,17 +48,25 @@ public sealed partial class RecordingPage : Page
         };
     }
 
-    private void ShowRecordingOverlay()
+    private async void StartRecordButton_Click(object sender, RoutedEventArgs e)
     {
-        // Minimize the main window so it doesn't occlude the screen
+        // Minimize the main window before recording starts so the
+        // minimize animation is never captured in the recording.
         var mainWindow = App.Current.MainAppWindow;
         if (mainWindow is not null)
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
             ShowWindow(hwnd, SW_MINIMIZE);
             _recordingMinimizedWindow = true;
+            // Wait for the minimize animation to finish
+            await Task.Delay(600);
         }
 
+        ViewModel.StartRecordingCommand.Execute(null);
+    }
+
+    private void ShowRecordingOverlay()
+    {
         // Show a border around the selected region so the user can see
         // what area is being captured.
         if (ViewModel.CaptureMode == CaptureMode.CustomRegion

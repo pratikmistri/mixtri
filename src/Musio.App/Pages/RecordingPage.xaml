@@ -62,7 +62,7 @@
                         Height="64"
                         MinWidth="64"
                         Padding="24,0"
-                        Command="{x:Bind ViewModel.StartRecordingCommand}"
+                        Click="StartRecordButton_Click"
                         CornerRadius="32"
                         IsEnabled="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
                         Style="{StaticResource AccentButtonStyle}"
