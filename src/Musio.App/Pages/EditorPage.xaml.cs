@@ -465,6 +465,7 @@ public sealed partial class EditorPage : Page
     private void ZoomLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
+        if (Timeline is null) return;
         if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
         if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
         if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
@@ -476,6 +477,7 @@ public sealed partial class EditorPage : Page
     private void ZoomCenterSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
+        if (Timeline is null) return;
         if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
 
         double cx = ZoomCenterXSlider.Value / 100.0;
