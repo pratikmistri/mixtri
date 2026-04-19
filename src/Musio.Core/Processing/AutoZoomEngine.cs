@@ -93,8 +93,8 @@ public class AutoZoomEngine
                 HoldEnd = clickTime + _config.HoldDuration,
                 ZoomOutEnd = clickTime + _config.HoldDuration + _config.EaseOutDuration,
                 TargetZoom = _config.DefaultZoomLevel,
-                CenterX = click.X * coordScaleX,
-                CenterY = click.Y * coordScaleY,
+                CenterX = Math.Clamp(click.X * coordScaleX, 0f, sourceWidth - 1f),
+                CenterY = Math.Clamp(click.Y * coordScaleY, 0f, sourceHeight - 1f),
             });
         }
 
@@ -321,17 +321,25 @@ public class AutoZoomEngine
         float vpWidth = _sourceWidth / zoom;
         float vpHeight = _sourceHeight / zoom;
 
+        // Position viewport so the click point is at a consistent relative position.
+        // Instead of always centering, bias toward keeping the click visible
+        // by clamping the click's position within the viewport to 20%-80% range.
         float vpX = state.cx - vpWidth / 2f;
         float vpY = state.cy - vpHeight / 2f;
 
+        // Clamp viewport to source bounds
         vpX = Math.Clamp(vpX, 0f, Math.Max(0f, _sourceWidth - vpWidth));
         vpY = Math.Clamp(vpY, 0f, Math.Max(0f, _sourceHeight - vpHeight));
+
+        // Recompute actual center after clamping (so downstream code uses the real center)
+        float actualCx = vpX + vpWidth / 2f;
+        float actualCy = vpY + vpHeight / 2f;
 
         return new ZoomState
         {
             ZoomLevel = zoom,
-            CenterX = state.cx,
-            CenterY = state.cy,
+            CenterX = actualCx,
+            CenterY = actualCy,
             ViewportX = vpX,
             ViewportY = vpY,
             ViewportWidth = vpWidth,
