@@ -23,11 +23,39 @@ public sealed class VideoWriter : IDisposable
     private bool _finalized;
     private bool _disposed;
 
+    // Track actual timestamps for each frame to handle variable capture rate
+    private readonly List<TimeSpan> _frameTimestamps = new(1000);
+    private readonly object _tsLock = new();
+
     public string OutputPath => _outputPath;
     public int Width => _width;
     public int Height => _height;
     public int Fps => _fps;
     public long FrameCount => Interlocked.Read(ref _frameCount);
+
+    /// <summary>Actual recording duration based on frame timestamps.</summary>
+    public TimeSpan ActualDuration
+    {
+        get
+        {
+            lock (_tsLock)
+            {
+                return _frameTimestamps.Count > 1
+                    ? _frameTimestamps[^1] - _frameTimestamps[0]
+                    : TimeSpan.Zero;
+            }
+        }
+    }
+
+    /// <summary>Actual average FPS based on frame timestamps.</summary>
+    public double ActualFps
+    {
+        get
+        {
+            var dur = ActualDuration.TotalSeconds;
+            return dur > 0 ? (FrameCount - 1) / dur : _fps;
+        }
+    }
 
     public VideoWriter(string outputPath, int width, int height, int fps, IDirect3DDevice? captureDevice = null)
     {
@@ -62,6 +90,13 @@ public sealed class VideoWriter : IDisposable
             using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
 
             long index = Interlocked.Increment(ref _frameCount) - 1;
+
+            // Record actual timestamp for this frame
+            lock (_tsLock)
+            {
+                _frameTimestamps.Add(timestamp);
+            }
+
             string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
 
             using var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write);
@@ -92,7 +127,16 @@ public sealed class VideoWriter : IDisposable
             return;
 
         var composition = new MediaComposition();
-        var frameDuration = TimeSpan.FromSeconds(1.0 / _fps);
+
+        // Use actual per-frame durations from recorded timestamps
+        // This ensures the MP4 plays at the real capture speed
+        List<TimeSpan> timestamps;
+        lock (_tsLock)
+        {
+            timestamps = new List<TimeSpan>(_frameTimestamps);
+        }
+
+        var fallbackDuration = TimeSpan.FromSeconds(1.0 / _fps);
 
         for (long i = 0; i < totalFrames; i++)
         {
@@ -100,8 +144,22 @@ public sealed class VideoWriter : IDisposable
             if (!File.Exists(framePath))
                 continue;
 
+            // Compute this frame's duration from actual timestamps
+            TimeSpan duration;
+            if (i < timestamps.Count - 1)
+            {
+                duration = timestamps[(int)(i + 1)] - timestamps[(int)i];
+                // Clamp to reasonable range (1ms to 500ms)
+                if (duration.TotalMilliseconds < 1) duration = fallbackDuration;
+                if (duration.TotalMilliseconds > 500) duration = fallbackDuration;
+            }
+            else
+            {
+                duration = fallbackDuration;
+            }
+
             var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
-            var clip = await MediaClip.CreateFromImageFileAsync(file, frameDuration);
+            var clip = await MediaClip.CreateFromImageFileAsync(file, duration);
             composition.Clips.Add(clip);
         }
 

@@ -286,7 +286,10 @@ public class RecordingSession : IDisposable
                     / Stopwatch.Frequency;
             }
 
-            // Build project
+            // Build project — use actual video duration and FPS from VideoWriter
+            var actualDuration = _videoWriter?.ActualDuration ?? _elapsedWatch.Elapsed;
+            var actualFps = _videoWriter?.ActualFps ?? _config.Fps;
+
             _project = new Project
             {
                 Name = $"Recording {DateTime.Now:yyyy-MM-dd HH:mm}",
@@ -295,10 +298,10 @@ public class RecordingSession : IDisposable
                 KeyboardDataFilePath = _keyboardDataFilePath,
                 WebcamFilePath = _webcamEngine?.OutputFilePath,
                 AudioFilePaths = audioFilePaths,
-                Duration = _elapsedWatch.Elapsed,
+                Duration = actualDuration,
                 Width = _captureWidth,
                 Height = _captureHeight,
-                Fps = _config.Fps,
+                Fps = (int)Math.Round(actualFps),
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
             };
 
