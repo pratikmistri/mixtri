@@ -132,7 +132,7 @@ public class CursorSmoother
             SmoothingStrength.Subtle => (400, 28, 1.0),
             SmoothingStrength.Medium => (250, 22, 1.0),
             SmoothingStrength.Smooth => (150, 16, 1.0),
-            SmoothingStrength.UltraSmooth => (40, 8, 1.0),
+            SmoothingStrength.UltraSmooth => (80, 12, 1.0),
             _ => (400, 28, 1.0),
         };
 
