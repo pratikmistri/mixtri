@@ -167,11 +167,15 @@ public class FrameCompositor : IDisposable
         _videoStartTick = mouseData.StartTimestampTicks
             + (long)(mouseToVideoOffsetSeconds * mouseData.TickFrequency);
 
-        // Compute TotalFrames from the authoritative duration (video/project)
+        // Compute TotalFrames from the authoritative duration (video/project).
+        // Keep enough smoothed positions so the cursor has valid data for
+        // the entire video, including positions that are offset-shifted.
+        // Without the extra positions, the cursor freezes near the video end.
         if (duration.HasValue && duration.Value.TotalSeconds > 0)
         {
             TotalFrames = (int)(duration.Value.TotalSeconds * _config.OutputFps);
-            AdjustSmoothedPositionsToFrameCount(TotalFrames);
+            int requiredPositions = TotalFrames + Math.Max(0, _videoFrameOffset);
+            AdjustSmoothedPositionsToFrameCount(requiredPositions);
         }
         else
         {

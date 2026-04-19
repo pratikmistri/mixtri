@@ -75,6 +75,12 @@ public class RecordingSession : IDisposable
     private int _captureHeight;
     private long _videoStartTicks;
 
+    // Absolute Stopwatch timestamp when the first video frame was actually
+    // emitted by the capture API. This is the true video time 0 — any
+    // startup latency between StartCapture() and the first frame must not
+    // be included in the mouse→video offset.
+    private long _firstVideoFrameTicks;
+
     // Result
     private Project? _project;
     private RecordingState _state = RecordingState.Idle;
@@ -277,16 +283,22 @@ public class RecordingSession : IDisposable
                     audioFilePaths.Add(micPath);
             }
 
-            // Compute mouse→video time offset
+            // Compute mouse→video time offset from the first ACTUAL frame,
+            // not from when StartCapture() was called. Capture APIs often have
+            // startup latency (frame pool creation, first vsync, etc.) that
+            // would otherwise shift all cursor/click/zoom overlays late.
             double mouseToVideoOffset = 0;
             if (_mouseRecorder is not null)
             {
                 var mouseData = _mouseRecorder.GetRecordedData();
-                // Mouse started at mouseData.StartTimestampTicks
-                // Video started at _videoStartTicks
-                // Offset = (videoStart - mouseStart) / frequency
-                mouseToVideoOffset = (double)(_videoStartTicks - mouseData.StartTimestampTicks)
+                long videoOriginTicks = _firstVideoFrameTicks != 0
+                    ? _firstVideoFrameTicks
+                    : _videoStartTicks; // fallback if no frames were captured
+                mouseToVideoOffset = (double)(videoOriginTicks - mouseData.StartTimestampTicks)
                     / Stopwatch.Frequency;
+                Debug.WriteLine(
+                    $"[RecordingSession] Mouse→video offset: {mouseToVideoOffset:F4}s " +
+                    $"(capture startup latency: {(_firstVideoFrameTicks - _videoStartTicks) / (double)Stopwatch.Frequency:F4}s)");
             }
 
             // Build project — use CFR duration and configured FPS for consistent timing.
@@ -376,6 +388,11 @@ public class RecordingSession : IDisposable
                 _captureHeight = e.Height;
                 _videoWriter = new VideoWriter(_videoFilePath, e.Width, e.Height, _config.Fps,
                     _screenEngine?.Device);
+
+                // Record the absolute time of the first video frame so the
+                // mouse→video offset is anchored to the actual video content,
+                // not the StartCapture() call (which may have startup latency).
+                _firstVideoFrameTicks = Stopwatch.GetTimestamp();
             }
 
             _videoWriter.WriteFrame(e.Surface, e.Timestamp);
