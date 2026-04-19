@@ -99,13 +99,10 @@ public class VideoEncoder : IDisposable
         int compositorHeight = compositor.OutputHeight;
         bool needsScaling = compositorWidth != targetWidth || compositorHeight != targetHeight;
 
-        // The compositor uses a capped FPS (≤30) for cursor smoothing to match
-        // the editor preview, while the output video may be higher FPS (e.g. 60).
-        // Compute the compositor's actual FPS for correct frame index mapping.
-        int compositorFps = compositionConfig.OutputFps;
-
-        // Load source frames from .frames/ JPEGs (same as editor preview)
-        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, _settings.Fps);
+        // Load source frames from .frames/ JPEGs using the RECORDING FPS so
+        // frame indices map correctly to the on-disk frame numbering.
+        int sourceFps = project.Fps > 0 ? project.Fps : _settings.Fps;
+        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, sourceFps);
 
         // Fallback: reuse single MediaComposition for seeking
         MediaComposition? sourceComp = null;
@@ -180,7 +177,7 @@ public class VideoEncoder : IDisposable
                 currentFrame++;
                 _ = ProduceSampleAsync(
                     args.Request, deferral, frame, totalFrames,
-                    compositor, compositorFps, frameReader, sourceComp, webcamComp,
+                    compositor, frameReader, sourceComp, webcamComp,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
                     compositorWidth, compositorHeight, targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
@@ -236,7 +233,6 @@ public class VideoEncoder : IDisposable
         MediaStreamSourceSampleRequestDeferral deferral,
         int frameIndex, int totalFrames,
         FrameCompositor compositor,
-        int compositorFps,
         VideoFrameReader? frameReader,
         MediaComposition? sourceComp,
         MediaComposition? webcamComp,
@@ -261,13 +257,6 @@ public class VideoEncoder : IDisposable
             var timeSpan = TimeSpan.FromSeconds(timeSeconds);
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
-            // Compositor frame index uses its internal FPS (capped at 30),
-            // NOT the output video FPS — this keeps click animations aligned
-            // with source frames, matching the editor preview timing.
-            int compositorFrameIndex = Math.Clamp(
-                (int)(timeSeconds * compositorFps),
-                0, Math.Max(0, compositor.TotalFrames - 1));
-
             // Webcam overlay
             if (webcamComp is not null)
             {
@@ -291,8 +280,9 @@ public class VideoEncoder : IDisposable
                     ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
                 : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
 
-            // Composite (same as editor preview)
-            using var composedFrame = compositor.ComposeFrame(sourceFrame, compositorFrameIndex);
+            // Composite using the exact source time so cursor, click, and zoom
+            // effects are precisely synchronized with the visual frame content.
+            using var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
 
             // Scale if needed
             CanvasRenderTarget outputFrame;

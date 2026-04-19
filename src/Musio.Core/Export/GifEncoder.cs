@@ -87,9 +87,16 @@ public class GifEncoder
     /// Exports directly from a compositor, composing each frame on the fly.
     /// More memory-efficient than pre-rendering all frames.
     /// </summary>
+    /// <param name="getSourceTime">
+    /// Optional function that maps an output frame index to the source time
+    /// in seconds (video-relative). When provided, the compositor uses the
+    /// exact source time for cursor, click, and zoom synchronization.
+    /// When null, time is derived as <c>frameIndex / fps</c>.
+    /// </param>
     public async Task ExportGifAsync(
         FrameCompositor compositor,
         Func<int, Task<CanvasBitmap>> getSourceFrame,
+        Func<int, double>? getSourceTime,
         int totalFrames,
         int fps,
         string outputPath,
@@ -123,7 +130,8 @@ public class GifEncoder
             ct.ThrowIfCancellationRequested();
 
             using var sourceFrame = await getSourceFrame(i);
-            using var composedFrame = compositor.ComposeFrame(sourceFrame, i);
+            double sourceTime = getSourceTime?.Invoke(i) ?? (double)i / fps;
+            using var composedFrame = compositor.ComposeFrame(sourceFrame, sourceTime);
 
             var pixelBytes = composedFrame.GetPixelBytes();
             uint width = (uint)composedFrame.SizeInPixels.Width;

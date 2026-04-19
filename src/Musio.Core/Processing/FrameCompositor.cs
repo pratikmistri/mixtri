@@ -288,22 +288,32 @@ public class FrameCompositor : IDisposable
     /// </summary>
     public CanvasRenderTarget ComposeFrame(CanvasBitmap sourceFrame, int frameIndex)
     {
+        if (frameIndex < 0 || frameIndex >= TotalFrames)
+            throw new ArgumentOutOfRangeException(nameof(frameIndex));
+
+        double timeSeconds = (double)frameIndex / _config.OutputFps;
+        return ComposeFrame(sourceFrame, timeSeconds);
+    }
+
+    /// <summary>
+    /// Compose a single output frame at an explicit source time (in seconds,
+    /// relative to video start). Use this overload during export to avoid
+    /// frame-index truncation drift between the visual frame and effects.
+    /// </summary>
+    public CanvasRenderTarget ComposeFrame(CanvasBitmap sourceFrame, double sourceTimeSeconds)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_initialized)
             throw new InvalidOperationException("Call InitializeAsync before compositing frames.");
         ArgumentNullException.ThrowIfNull(sourceFrame);
-        if (frameIndex < 0 || frameIndex >= TotalFrames)
-            throw new ArgumentOutOfRangeException(nameof(frameIndex));
 
-        // Use true video time for all animation/overlay timing.
-        // This matches the timebase used by click events, zoom segments, and
-        // keyboard events — all of which are already video-relative.
-        double timeSeconds = (double)frameIndex / _config.OutputFps;
+        double timeSeconds = sourceTimeSeconds;
 
-        // Smoothed positions are indexed by mouse frame number (starting from
-        // mouse recording start). Offset to the corresponding video frame.
+        // Compute cursor index from source time directly, avoiding integer
+        // frame-index truncation. Mouse frame = (videoTime + offset) * fps.
         int cursorIndex = Math.Clamp(
-            frameIndex + _videoFrameOffset, 0, _smoothedPositions.Count - 1);
+            (int)Math.Round((sourceTimeSeconds + _mouseTimeOffset) * _config.OutputFps),
+            0, _smoothedPositions.Count - 1);
         var cursorPos = _smoothedPositions[cursorIndex];
 
         // Get zoom state — use smoothed cursor position as center hint

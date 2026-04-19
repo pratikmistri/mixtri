@@ -152,8 +152,10 @@ public class ExportEngine
         int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
         int fps = settings.Fps;
 
-        // Fast path: read JPEG frames from .frames/ directory
-        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
+        // Fast path: read JPEG frames from .frames/ directory.
+        // Use the RECORDING FPS for correct frame-index mapping to on-disk JPEGs.
+        int sourceFps = project.Fps > 0 ? project.Fps : fps;
+        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, sourceFps);
 
         // Slow path fallback: reuse a single MediaComposition for seeking
         MediaComposition? sourceComp = null;
@@ -207,6 +209,9 @@ public class ExportEngine
                     return await ExtractFrameFromCompositionAsync(
                         device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
                 },
+                frameIndex => timelineMapper is not null
+                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
+                    : (double)frameIndex / fps,
                 totalFrames,
                 fps,
                 outputPath,
