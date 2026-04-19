@@ -322,44 +322,58 @@ public sealed partial class EditorPage : Page
         });
     }
 
+    private bool _suppressSpeedApply;
+
     private void OnVideoClipSelected(object? sender, int? clipIndex)
     {
         ViewModel.SelectedClipIndex = clipIndex;
         UpdateSpeedPanelVisibility();
 
-        // If a clip is selected and has a non-default speed, update the combo to match
+        // Sync combo to match selected clip's current speed
         if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
         {
             var clip = ViewModel.Model.Clips[idx];
-            if (Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
+            _suppressSpeedApply = true;
+            for (int i = 0; i < SpeedComboBox.Items.Count; i++)
             {
-                for (int i = 0; i < SpeedComboBox.Items.Count; i++)
+                if (SpeedComboBox.Items[i] is ComboBoxItem item &&
+                    double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
+                    Math.Abs(s - clip.SpeedFactor) < 0.01)
                 {
-                    if (SpeedComboBox.Items[i] is ComboBoxItem item &&
-                        double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
-                        Math.Abs(s - clip.SpeedFactor) < 0.01)
-                    {
-                        SpeedComboBox.SelectedIndex = i;
-                        break;
-                    }
+                    SpeedComboBox.SelectedIndex = i;
+                    break;
                 }
             }
+            _suppressSpeedApply = false;
+        }
+        else
+        {
+            // Reset to 1x when deselected
+            _suppressSpeedApply = true;
+            SpeedComboBox.SelectedIndex = 2;
+            _suppressSpeedApply = false;
         }
     }
 
     private void UpdateSpeedPanelVisibility()
     {
-        if (SpeedPanel is null) return;
+        if (SpeedComboBox is null) return;
         bool hasClipSelection = ViewModel.SelectedClipIndex is not null;
-        SpeedPanel.Visibility = hasClipSelection ? Visibility.Visible : Visibility.Collapsed;
+        SpeedComboBox.Visibility = hasClipSelection ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressSpeedApply) return;
         if (SpeedComboBox.SelectedItem is ComboBoxItem item &&
             double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double speed))
         {
             ViewModel.SelectedSpeed = speed;
+
+            if (ViewModel.SelectedClipIndex is not null)
+            {
+                ViewModel.ApplySpeedCommand.Execute(null);
+            }
         }
     }
 
