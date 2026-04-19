@@ -45,6 +45,12 @@ public record ZoomKeyframe
     public TimeSpan PreDuration { get; init; } = TimeSpan.FromMilliseconds(300);
     public TimeSpan HoldDuration { get; init; } = TimeSpan.FromMilliseconds(500);
     public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// True for keyframes added by the user via the editor UI.
+    /// False for keyframes auto-generated from click events (visualization only).
+    /// </summary>
+    public bool IsManual { get; init; }
 }
 
 public record SpeedSegment(TimeSpan Start, TimeSpan End, double Speed);

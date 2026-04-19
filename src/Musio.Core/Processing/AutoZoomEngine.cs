@@ -149,6 +149,20 @@ public class AutoZoomEngine
     }
 
     /// <summary>
+    /// Replaces all manual keyframes with the provided list.
+    /// Auto-generated segments from <see cref="BuildZoomTimeline"/> are not affected.
+    /// </summary>
+    public void SetManualKeyframes(IReadOnlyList<ZoomKeyframe> keyframes)
+    {
+        _manualKeyframes.Clear();
+        if (keyframes is { Count: > 0 })
+        {
+            _manualKeyframes.AddRange(keyframes);
+            _manualKeyframes.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+        }
+    }
+
+    /// <summary>
     /// Get the zoom state at any timestamp. Manual keyframes override auto-zoom.
     /// </summary>
     public ZoomState GetZoomState(double timeSeconds)

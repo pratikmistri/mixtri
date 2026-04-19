@@ -3,6 +3,7 @@ using Musio.Core.AI;
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Settings;
+using Musio.Core.Timeline;
 using Windows.Foundation;
 
 namespace Musio.Core.Processing;
@@ -284,6 +285,15 @@ public class FrameCompositor : IDisposable
     public void SetWebcamFrame(CanvasBitmap? webcamFrame)
     {
         _webcamFrame = webcamFrame;
+    }
+
+    /// <summary>
+    /// Replaces the zoom engine's manual keyframes with the provided list.
+    /// Call this when the user adds or removes zoom keyframes in the editor.
+    /// </summary>
+    public void SyncManualZoomKeyframes(IReadOnlyList<Timeline.ZoomKeyframe> keyframes)
+    {
+        _zoomEngine.SetManualKeyframes(keyframes);
     }
 
     /// <summary>

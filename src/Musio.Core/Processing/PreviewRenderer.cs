@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
+using Musio.Core.Timeline;
 
 namespace Musio.Core.Processing;
 
@@ -62,6 +63,16 @@ public class PreviewRenderer : IDisposable
         if (_compositor is null || TotalFrames <= 0) return null;
 
         return _compositor.ComposeFrame(sourceFrame, position.TotalSeconds);
+    }
+
+    /// <summary>
+    /// Syncs manual zoom keyframes from the editor model to the compositor's zoom engine.
+    /// Call this when zoom keyframes are added, removed, or changed (including undo/redo).
+    /// </summary>
+    public void UpdateZoomKeyframes(IReadOnlyList<Timeline.ZoomKeyframe> keyframes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _compositor?.SyncManualZoomKeyframes(keyframes);
     }
 
     public void Dispose()

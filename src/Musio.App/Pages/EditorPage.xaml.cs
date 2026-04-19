@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Musio.Core.Capture;
+using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio_App.Services;
@@ -18,6 +19,7 @@ public sealed partial class EditorPage : Page
     public ExportViewModel ExportVM { get; }
     private VideoFrameReader? _frameReader;
     private PreviewRenderer? _previewRenderer;
+    private TimelineMapper? _timelineMapper;
     private bool _compositorReady;
     private int _lastRenderedFrameIndex = -1;
 
@@ -27,7 +29,7 @@ public sealed partial class EditorPage : Page
         ExportVM = new ExportViewModel();
         InitializeComponent();
 
-        Preview.Duration = ViewModel.Model.EffectiveDuration;
+        Preview.Duration = GetMappedDuration();
 
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
@@ -56,7 +58,8 @@ public sealed partial class EditorPage : Page
         {
             DispatcherQueue.TryEnqueue(() =>
             {
-                Preview.Duration = ViewModel.Model.EffectiveDuration;
+                _timelineMapper = null;
+                Preview.Duration = GetMappedDuration();
                 Timeline.Refresh();
                 ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
                 _ = InitializePreviewAsync();
@@ -167,21 +170,24 @@ public sealed partial class EditorPage : Page
         _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
 
-    private async Task UpdatePreviewFrameAsync(TimeSpan position)
+    private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
     {
         if (_frameReader is null) return;
 
-        int frameIndex = _frameReader.GetFrameIndex(position);
-        if (frameIndex == _lastRenderedFrameIndex) return;
+        // Map output (playhead) time to source time, accounting for speed/cut/trim edits
+        TimeSpan sourcePosition = MapToSourceTime(position);
 
-        var bitmap = await _frameReader.LoadFrameAtTimeAsync(position);
+        int frameIndex = _frameReader.GetFrameIndex(sourcePosition);
+        if (!force && frameIndex == _lastRenderedFrameIndex) return;
+
+        var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourcePosition);
         if (bitmap is null) return;
 
         try
         {
             if (_compositorReady && _previewRenderer is not null)
             {
-                var composed = _previewRenderer.RenderPreviewFrame(bitmap, position);
+                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
                 bitmap.Dispose();
 
                 if (composed is not null)
@@ -212,13 +218,68 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    /// <summary>
+    /// Maps an output (playhead) time to source time using the current timeline mapper.
+    /// Falls back to identity mapping when no speed/cut edits are present.
+    /// </summary>
+    private TimeSpan MapToSourceTime(TimeSpan outputPosition)
+    {
+        var mapper = EnsureTimelineMapper();
+        if (mapper is null) return outputPosition;
+
+        int fps = _frameReader?.Fps ?? 30;
+        int outputFrame = (int)(outputPosition.TotalSeconds * fps);
+        double sourceSeconds = mapper.GetSourceTimeForOutputFrame(outputFrame);
+        return TimeSpan.FromSeconds(sourceSeconds);
+    }
+
+    private TimelineMapper? EnsureTimelineMapper()
+    {
+        if (_timelineMapper is not null) return _timelineMapper;
+
+        int fps = _frameReader?.Fps ?? ProjectService.Instance.CurrentProject?.Fps ?? 30;
+        if (fps <= 0) fps = 30;
+
+        _timelineMapper = new TimelineMapper(ViewModel.Model, fps);
+        return _timelineMapper;
+    }
+
+    /// <summary>
+    /// Returns the effective preview duration, accounting for speed segments.
+    /// </summary>
+    private TimeSpan GetMappedDuration()
+    {
+        var mapper = EnsureTimelineMapper();
+        return mapper?.EffectiveDuration ?? ViewModel.Model.EffectiveDuration;
+    }
+
+    /// <summary>
+    /// Invalidates the preview state after timeline edits (speed, zoom, cut, undo/redo).
+    /// Rebuilds the timeline mapper, syncs zoom keyframes to the compositor, and forces a re-render.
+    /// </summary>
+    private void InvalidatePreview()
+    {
+        _timelineMapper = null;
+        _lastRenderedFrameIndex = -1;
+
+        Preview.Duration = GetMappedDuration();
+
+        // Sync user-added zoom keyframes to the compositor
+        if (_compositorReady && _previewRenderer is not null)
+        {
+            var manualKeyframes = ViewModel.Model.ZoomKeyframes
+                .Where(k => k.IsManual)
+                .ToList();
+            _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
+        }
+
+        Timeline.Refresh();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            Preview.Duration = ViewModel.Model.EffectiveDuration;
-            Timeline.Refresh();
-        });
+        DispatcherQueue.TryEnqueue(InvalidatePreview);
     }
 
     private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -309,8 +370,9 @@ public sealed partial class EditorPage : Page
             ZoomLevel = zoomLevel,
             CenterX = Math.Clamp(cx, 0, 1),
             CenterY = Math.Clamp(cy, 0, 1),
+            IsManual = true,
         });
-        Timeline.Refresh();
+        InvalidatePreview();
     }
 
     private void RemoveZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
@@ -330,7 +392,7 @@ public sealed partial class EditorPage : Page
         if (bestIdx >= 0)
         {
             keyframes.RemoveAt(bestIdx);
-            Timeline.Refresh();
+            InvalidatePreview();
         }
     }
 
