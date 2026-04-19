@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Musio Recording">
 
-    <Grid Padding="14,8">
+    <Grid Padding="14,8" CornerRadius="26">
         <Grid.Background>
             <AcrylicBrush
                 TintColor="#1E1E1E"

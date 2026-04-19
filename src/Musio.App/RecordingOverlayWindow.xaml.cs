@@ -62,6 +62,10 @@ public sealed partial class RecordingOverlayWindow : Window
         style &= ~(WS_BORDER | WS_DLGFRAME);
         SetWindowLong(hwnd, GWL_STYLE, style);
 
+        // Round the window corners at the OS level for a pill shape
+        uint roundPreference = DWMWCP_ROUND;
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
+
         // Size the overlay(device pixels, scaled for DPI)
         var dpi = GetDpiForWindow(hwnd);
         var scale = dpi / 96.0;
@@ -134,6 +138,8 @@ public sealed partial class RecordingOverlayWindow : Window
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
     private const int DWMWA_BORDER_COLOR = 34;
     private const int DWMWA_CAPTION_COLOR = 35;
+    private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    private const uint DWMWCP_ROUND = 2;
     private const uint DWMWA_COLOR_NONE = 0xFFFFFFFE;
     private const int GWL_STYLE = -16;
     private const int WS_BORDER = 0x00800000;
