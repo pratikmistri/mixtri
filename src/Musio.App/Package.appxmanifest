@@ -8,13 +8,13 @@
   IgnorableNamespaces="uap rescap uap6">
 
   <Identity
-    Name="80BD9A48-1365-4BA3-8FE7-9A3D2BF7EA4B"
-    Publisher="CN=AppPublisher"
+    Name="PratikMistri.Musio"
+    Publisher="CN=DB824FDD-FEC0-4A79-9296-AFAF43C81090"
     Version="1.0.0.0" />
 
   <Properties>
     <DisplayName>Musio</DisplayName>
-    <PublisherDisplayName>Musio</PublisherDisplayName>
+    <PublisherDisplayName>Pratik Mistri</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
