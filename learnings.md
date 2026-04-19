@@ -83,6 +83,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
+## Region Capture — Crop Not Applied to Recording
+
+**Feature/area:** Recording pipeline (RecordingSession, VideoWriter, Project)
+
+**Approaches tried:**
+
+1. **Crop in `VideoWriter.WriteFrame` using Win2D `CanvasRenderTarget`** — Worked. Added optional `Rect? cropRect` to `VideoWriter` constructor. When set, each frame is cropped via `CanvasRenderTarget.DrawImage(source, destRect, sourceRect)` before saving as JPEG. Reuses a single `CanvasRenderTarget` across frames to avoid per-frame GPU allocation. ✅
+2. **DPI-aware crop rect conversion in `RecordingSession.OnFrameCaptured`** — Worked. Used `GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI)` to get the monitor's DPI scale, then multiplied overlay coordinates (logical/DIP pixels) by the scale to get physical pixel coordinates for the capture texture. Clamped to frame bounds for safety. ✅
+3. **Added `CropOffsetX/Y` to `Project` model** — Persists the crop origin in physical pixels so downstream cursor/zoom alignment can subtract the offset. ✅
+
+**What worked:**
+- `VideoWriter` accepts a crop `Rect?` and applies it using `CanvasRenderTarget.DrawImage(bitmap, destRect, sourceRect)` with a reusable render target.
+- `RecordingSession` computes the DPI-scaled physical crop rect on first frame arrival, uses crop dimensions for `_captureWidth/_captureHeight` and passes the crop rect to `VideoWriter`.
+- `Project.CropOffsetX/Y` stores the origin for downstream use.
+
+**What didn't work / known limitations:**
+- Cursor and zoom alignment in the editor is not yet adjusted for region recordings — `FrameCompositor.GetSystemDpiScale` detects DPI by comparing captured dimensions vs monitor logical size, which fails for region captures (crop width < logical width → returns 1.0). A future fix should pass the DPI scale through Project and subtract `CropOffsetX/Y` from mouse positions.
+- The region overlay uses `Stretch="Fill"` on a full virtual desktop screenshot in a single-monitor-maximized window, so region coordinates on multi-monitor setups may be inaccurate (pre-existing issue in the region selector UI, not the recording pipeline).
+
+---
+
 ## Zoom Track — Making Auto-Generated Segments Selectable & Editable
 
 **Feature/area:** Timeline zoom track (TimelineControl, EditOperation)

@@ -1,4 +1,5 @@
 using Microsoft.Graphics.Canvas;
+using Windows.Foundation;
 using Windows.Graphics.DirectX.Direct3D11;
 using Windows.Media.Editing;
 using Windows.Media.MediaProperties;
@@ -18,6 +19,9 @@ public sealed class VideoWriter : IDisposable
     private readonly int _height;
     private readonly int _fps;
     private readonly CanvasDevice _device;
+    private readonly Rect? _cropRect;
+
+    private CanvasRenderTarget? _cropTarget;
 
     private long _frameCount;
     private bool _finalized;
@@ -73,12 +77,14 @@ public sealed class VideoWriter : IDisposable
         ? TimeSpan.FromSeconds((double)Interlocked.Read(ref _frameCount) / _fps)
         : TimeSpan.Zero;
 
-    public VideoWriter(string outputPath, int width, int height, int fps, IDirect3DDevice? captureDevice = null)
+    public VideoWriter(string outputPath, int width, int height, int fps,
+        IDirect3DDevice? captureDevice = null, Rect? cropRect = null)
     {
         _outputPath = outputPath;
         _width = width;
         _height = height;
         _fps = fps;
+        _cropRect = cropRect;
 
         // Use the same D3D device as the capture engine to avoid cross-device failures
         if (captureDevice is not null)
@@ -105,6 +111,25 @@ public sealed class VideoWriter : IDisposable
         {
             using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
 
+            // Determine the image to save: cropped or full frame
+            CanvasBitmap imageToSave;
+            if (_cropRect is Rect crop)
+            {
+                _cropTarget ??= new CanvasRenderTarget(_device, _width, _height, 96);
+                using (var ds = _cropTarget.CreateDrawingSession())
+                {
+                    ds.Clear(Windows.UI.Color.FromArgb(255, 0, 0, 0));
+                    ds.DrawImage(bitmap,
+                        new Rect(0, 0, _width, _height),
+                        crop);
+                }
+                imageToSave = _cropTarget;
+            }
+            else
+            {
+                imageToSave = bitmap;
+            }
+
             lock (_writeLock)
             {
                 long index = Interlocked.Increment(ref _frameCount) - 1;
@@ -117,7 +142,7 @@ public sealed class VideoWriter : IDisposable
                 string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
 
                 using var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write);
-                bitmap.SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, 0.85f)
+                imageToSave.SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, 0.85f)
                       .AsTask().GetAwaiter().GetResult();
             }
         }
@@ -254,6 +279,9 @@ public sealed class VideoWriter : IDisposable
             return;
 
         _disposed = true;
+
+        _cropTarget?.Dispose();
+        _cropTarget = null;
 
         if (!_finalized)
         {

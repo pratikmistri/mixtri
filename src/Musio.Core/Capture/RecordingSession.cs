@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Musio.Core.Models;
+using Windows.Foundation;
 
 namespace Musio.Core.Capture;
 
@@ -74,6 +76,7 @@ public class RecordingSession : IDisposable
     private int _captureWidth;
     private int _captureHeight;
     private long _videoStartTicks;
+    private Rect? _physicalCropRect;
 
     // Absolute Stopwatch timestamp when the first video frame was actually
     // emitted by the capture API. This is the true video time 0 — any
@@ -319,6 +322,8 @@ public class RecordingSession : IDisposable
                 Height = _captureHeight,
                 Fps = _config.Fps,
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
+                CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
+                CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
             };
 
             State = RecordingState.Stopped;
@@ -389,10 +394,44 @@ public class RecordingSession : IDisposable
                 // creation) so the mouse→video offset is as accurate as possible.
                 _firstVideoFrameTicks = Stopwatch.GetTimestamp();
 
-                _captureWidth = e.Width;
-                _captureHeight = e.Height;
-                _videoWriter = new VideoWriter(_videoFilePath, e.Width, e.Height, _config.Fps,
-                    _screenEngine?.Device);
+                // For region mode, compute the DPI-adjusted crop rect in physical pixels
+                if (_config.Target.Type == CaptureTargetType.Region
+                    && _config.Target.CropRect is Rect logicalCrop)
+                {
+                    float dpiScale = GetMonitorDpiScale(_config.Target.Handle);
+                    var physCrop = new Rect(
+                        logicalCrop.X * dpiScale,
+                        logicalCrop.Y * dpiScale,
+                        logicalCrop.Width * dpiScale,
+                        logicalCrop.Height * dpiScale);
+
+                    // Clamp to frame bounds
+                    double x = Math.Max(0, Math.Min(physCrop.X, e.Width));
+                    double y = Math.Max(0, Math.Min(physCrop.Y, e.Height));
+                    double w = Math.Min(physCrop.Width, e.Width - x);
+                    double h = Math.Min(physCrop.Height, e.Height - y);
+
+                    if (w > 0 && h > 0)
+                    {
+                        _physicalCropRect = new Rect(x, y, w, h);
+                        _captureWidth = (int)w;
+                        _captureHeight = (int)h;
+                    }
+                    else
+                    {
+                        _captureWidth = e.Width;
+                        _captureHeight = e.Height;
+                    }
+                }
+                else
+                {
+                    _captureWidth = e.Width;
+                    _captureHeight = e.Height;
+                }
+
+                _videoWriter = new VideoWriter(
+                    _videoFilePath, _captureWidth, _captureHeight, _config.Fps,
+                    _screenEngine?.Device, _physicalCropRect);
             }
 
             // Fill any missed frame slots with duplicates of the previous frame
@@ -507,6 +546,24 @@ public class RecordingSession : IDisposable
         }
         return events;
     }
+
+    // ── DPI helpers ───────────────────────────────────────────────────
+
+    private static float GetMonitorDpiScale(IntPtr hMonitor)
+    {
+        try
+        {
+            int hr = GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            if (hr == 0 && dpiX > 0)
+                return dpiX / 96.0f;
+        }
+        catch { }
+
+        return 1.0f;
+    }
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     // ── IDisposable ─────────────────────────────────────────────────
 
