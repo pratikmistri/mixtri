@@ -122,7 +122,7 @@ public sealed partial class EditorPage : Page
         {
             OutputFps = Math.Min(fps, 30),
             SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
-            SmoothingStrength = SmoothingStrength.Smooth,
+            SmoothingStrength = SmoothingStrength.UltraSmooth,
             Cursor = new CursorStyle
             {
                 Scale = 2.0f,
