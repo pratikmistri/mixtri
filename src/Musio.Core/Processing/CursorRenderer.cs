@@ -1,7 +1,6 @@
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Musio.Core.Models;
-using System.Globalization;
 using System.Numerics;
 using Windows.Foundation;
 using Windows.UI;
@@ -21,9 +20,6 @@ public record CursorStyle
     public float AutoHideDelaySeconds { get; init; } = 2.0f;
     public float AutoHideFadeDuration { get; init; } = 0.3f;
     public bool ClickAnimationEnabled { get; init; } = true;
-    public bool ClickHighlightEnabled { get; init; } = true;
-    public string ClickHighlightColor { get; init; } = "#3B82F6"; // blue
-    public float ClickHighlightRadius { get; init; } = 30f;
 }
 
 /// <summary>
@@ -45,9 +41,6 @@ public class CursorRenderer
     private const float ClickDownDurationSeconds = 0.04f;    // 40ms snap down
     private const float ClickUpDurationSeconds = 0.11f;     // 110ms bouncy spring back
     private const float ClickDownScale = 0.55f;             // scale to 55% on press
-    private const float RippleDurationSeconds = 0.35f;      // 350ms ripple
-    private const float RippleInitialOpacity = 0.7f;
-    private const float RippleStrokeWidth = 3f;
     private const float MotionBlurVelocityThreshold = 200f; // px/s
     private const int MotionBlurGhostCount = 4;
 
@@ -93,12 +86,6 @@ public class CursorRenderer
             : 1.0f;
 
         float finalScale = Math.Clamp(_style.Scale, 0.5f, 8.0f) * clickScale;
-
-        // Click highlight ripples (drawn behind cursor)
-        if (_style.ClickHighlightEnabled)
-        {
-            RenderRipples(session, activeClicks, currentTimeSeconds);
-        }
 
         // Motion blur ghosts (drawn behind cursor)
         if (_style.MotionBlurEnabled)
@@ -169,39 +156,6 @@ public class CursorRenderer
 
         return ClickDownScale; // fully pressed, held down
     }
-
-    #region Ripple Rendering
-
-    private void RenderRipples(CanvasDrawingSession session, List<ClickEvent> clicks, double currentTimeSeconds)
-    {
-        if (clicks == null) return;
-
-        Color highlightBase = ParseHexColor(_style.ClickHighlightColor);
-
-        foreach (var click in clicks)
-        {
-            if (!click.IsDown) continue;
-
-            double clickTime = (click.TimestampTicks - StartTimestampTicks) / TickFrequency;
-            double elapsed = currentTimeSeconds - clickTime;
-
-            if (elapsed < 0 || elapsed > RippleDurationSeconds) continue;
-
-            float progress = (float)(elapsed / RippleDurationSeconds);
-            float radius = _style.ClickHighlightRadius * progress;
-            float opacity = RippleInitialOpacity * (1f - progress);
-
-            var color = Color.FromArgb(
-                (byte)(opacity * 255),
-                highlightBase.R,
-                highlightBase.G,
-                highlightBase.B);
-
-            session.DrawCircle(click.X, click.Y, radius, color, RippleStrokeWidth);
-        }
-    }
-
-    #endregion
 
     #region Motion Blur
 
@@ -327,22 +281,6 @@ public class CursorRenderer
         builder.EndFigure(CanvasFigureLoop.Closed);
 
         return CanvasGeometry.CreatePath(builder);
-    }
-
-    #endregion
-
-    #region Helpers
-
-    private static Color ParseHexColor(string hex)
-    {
-        ReadOnlySpan<char> span = hex.AsSpan().TrimStart('#');
-        if (span.Length < 6)
-            return Color.FromArgb(255, 59, 130, 246); // fallback to default blue
-
-        byte r = byte.Parse(span[..2], NumberStyles.HexNumber);
-        byte g = byte.Parse(span[2..4], NumberStyles.HexNumber);
-        byte b = byte.Parse(span[4..6], NumberStyles.HexNumber);
-        return Color.FromArgb(255, r, g, b);
     }
 
     #endregion

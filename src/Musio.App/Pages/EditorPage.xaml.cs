@@ -127,7 +127,6 @@ public sealed partial class EditorPage : Page
             {
                 Scale = 2.0f,
                 ClickAnimationEnabled = true,
-                ClickHighlightEnabled = false,
                 AutoHideEnabled = true,
                 AutoHideDelaySeconds = 3.0f,
             },

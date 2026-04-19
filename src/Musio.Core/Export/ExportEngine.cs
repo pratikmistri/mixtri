@@ -68,7 +68,6 @@ public class ExportEngine
             Cursor = enrichedComposition.Cursor with
             {
                 Scale = Math.Max(enrichedComposition.Cursor.Scale, 2.0f),
-                ClickHighlightEnabled = false,
             },
         };
 
