@@ -2,7 +2,10 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Musio.Core.Export;
+using Musio.Core.Models;
+using Musio.Core.Processing;
 using Musio.Core.Settings;
+using Musio_App.Services;
 using Windows.Storage.Pickers;
 
 namespace Musio_App.ViewModels;
@@ -10,12 +13,26 @@ namespace Musio_App.ViewModels;
 public partial class ExportViewModel : ObservableObject
 {
     private readonly PresetManager _presetManager;
+    private readonly ExportEngine _exportEngine;
     private CancellationTokenSource? _exportCts;
 
     public ExportViewModel()
     {
         _presetManager = new PresetManager();
+        _exportEngine = new ExportEngine();
         LoadPresets();
+
+        // Pull current state from the shared ProjectService
+        CurrentProject = ProjectService.Instance.CurrentProject;
+        CompositionConfig = ProjectService.Instance.CurrentComposition;
+
+        ProjectService.Instance.ProjectChanged += OnProjectChanged;
+    }
+
+    private void OnProjectChanged(object? sender, EventArgs e)
+    {
+        CurrentProject = ProjectService.Instance.CurrentProject;
+        CompositionConfig = ProjectService.Instance.CurrentComposition;
     }
 
     // --- Preset ---
@@ -35,6 +52,25 @@ public partial class ExportViewModel : ObservableObject
         {
             ApplyPreset(value);
         }
+    }
+
+    // --- Project & composition context ---
+
+    /// <summary>
+    /// The current project to export. Set from navigation or code-behind.
+    /// </summary>
+    [ObservableProperty]
+    private Project? _currentProject;
+
+    /// <summary>
+    /// The composition configuration from the editor. Set from navigation or code-behind.
+    /// </summary>
+    [ObservableProperty]
+    private CompositionConfig _compositionConfig = new();
+
+    partial void OnCurrentProjectChanged(Project? value)
+    {
+        ExportCommand.NotifyCanExecuteChanged();
     }
 
     // --- Export settings ---
@@ -97,6 +133,18 @@ public partial class ExportViewModel : ObservableObject
 
     [ObservableProperty]
     private string _estimatedTimeRemaining = string.Empty;
+
+    [ObservableProperty]
+    private bool _exportSucceeded;
+
+    [ObservableProperty]
+    private string _exportedFilePath = string.Empty;
+
+    [ObservableProperty]
+    private bool _exportFailed;
+
+    [ObservableProperty]
+    private string _errorMessage = string.Empty;
 
     // --- Resolution helpers for RadioButtons ---
 
@@ -296,9 +344,13 @@ public partial class ExportViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanExport))]
     private async Task ExportAsync()
     {
-        if (string.IsNullOrWhiteSpace(OutputPath)) return;
+        if (string.IsNullOrWhiteSpace(OutputPath) || CurrentProject is null) return;
 
         IsExporting = true;
+        ExportSucceeded = false;
+        ExportFailed = false;
+        ExportedFilePath = string.Empty;
+        ErrorMessage = string.Empty;
         ProgressPercent = 0;
         ProgressStatus = "Starting export…";
         CurrentFrame = 0;
@@ -327,13 +379,19 @@ public partial class ExportViewModel : ObservableObject
                 Fps = SelectedFps,
             };
 
-            // TODO: Wire to ExportEngine with actual project data once recording is complete.
-            // For now, the export pipeline is ready to be invoked:
-            //
-            // var engine = new ExportEngine();
-            // await engine.ExportProjectAsync(project, settings, composition, outputFolder, exportProgress, _exportCts.Token);
+            string outputFolder = Path.GetDirectoryName(OutputPath) ?? OutputPath;
 
-            await Task.Delay(100, _exportCts.Token); // placeholder
+            string exportedPath = await _exportEngine.ExportProjectAsync(
+                CurrentProject,
+                settings,
+                CompositionConfig,
+                outputFolder,
+                timeline: ProjectService.Instance.CurrentTimeline,
+                progress: exportProgress,
+                ct: _exportCts.Token);
+
+            ExportedFilePath = exportedPath;
+            ExportSucceeded = true;
             ProgressStatus = "Export complete!";
             ProgressPercent = 100;
         }
@@ -343,6 +401,8 @@ public partial class ExportViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            ExportFailed = true;
+            ErrorMessage = ex.Message;
             ProgressStatus = $"Export failed: {ex.Message}";
         }
         finally
@@ -354,7 +414,8 @@ public partial class ExportViewModel : ObservableObject
         }
     }
 
-    private bool CanExport() => !IsExporting && !string.IsNullOrWhiteSpace(OutputPath);
+    private bool CanExport() =>
+        !IsExporting && !string.IsNullOrWhiteSpace(OutputPath) && CurrentProject is not null;
 
     [RelayCommand]
     private void CancelExport()
@@ -363,6 +424,16 @@ public partial class ExportViewModel : ObservableObject
     }
 
     // --- Helpers ---
+
+    [RelayCommand]
+    private void OpenOutputFolder()
+    {
+        if (string.IsNullOrWhiteSpace(ExportedFilePath) || !File.Exists(ExportedFilePath))
+            return;
+
+        // Open folder in Explorer with the exported file selected
+        System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{ExportedFilePath}\"");
+    }
 
     private void ApplyPreset(ExportPreset preset)
     {

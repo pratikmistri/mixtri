@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Musio_App.Controls.RegionSelectorOverlay"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    IsTabStop="True">
+
+    <Grid
+        x:Name="RootGrid"
+        Background="Transparent"
+        PointerPressed="Grid_PointerPressed"
+        PointerMoved="Grid_PointerMoved"
+        PointerReleased="Grid_PointerReleased">
+
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="Escape" Invoked="OnEscapePressed" />
+            <KeyboardAccelerator Key="Enter" Invoked="OnEnterPressed" />
+        </Grid.KeyboardAccelerators>
+
+        <!-- Visual overlay layer (no hit test — pointer events handled by Grid) -->
+        <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
+            <!-- Four dark mask rectangles forming the overlay around the selection -->
+            <Rectangle x:Name="TopMask" Fill="#4D000000" />
+            <Rectangle x:Name="BottomMask" Fill="#4D000000" />
+            <Rectangle x:Name="LeftMask" Fill="#4D000000" />
+            <Rectangle x:Name="RightMask" Fill="#4D000000" />
+
+            <!-- Selection rectangle outline -->
+            <Rectangle
+                x:Name="SelectionRect"
+                Fill="Transparent"
+                Stroke="#FF0078D4"
+                StrokeThickness="2"
+                Visibility="Collapsed" />
+
+            <!-- Resize handles (corners + edges) -->
+            <Rectangle x:Name="HandleTL" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleT"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleTR" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleL"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleR"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleBL" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleB"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleBR" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+
+            <!-- Dimension label -->
+            <Border
+                x:Name="DimensionLabel"
+                Background="#CC000000"
+                CornerRadius="4"
+                Padding="8,4"
+                Visibility="Collapsed">
+                <TextBlock
+                    x:Name="DimensionText"
+                    FontFamily="Consolas"
+                    FontSize="12"
+                    Foreground="White" />
+            </Border>
+        </Canvas>
+
+        <!-- Instruction text -->
+        <TextBlock
+            HorizontalAlignment="Center"
+            VerticalAlignment="Top"
+            Margin="0,40,0,0"
+            Padding="16,8"
+            FontSize="16"
+            Foreground="White"
+            IsHitTestVisible="False"
+            Text="Click and drag to select region. Press Escape to cancel." />
+
+        <!-- Action buttons (visible after selection is drawn) -->
+        <StackPanel
+            x:Name="ButtonPanel"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Bottom"
+            Margin="0,0,0,40"
+            Orientation="Horizontal"
+            Spacing="12"
+            Visibility="Collapsed">
+            <Button
+                x:Name="ConfirmButton"
+                MinWidth="100"
+                Click="ConfirmButton_Click"
+                Content="Confirm"
+                Style="{StaticResource AccentButtonStyle}" />
+            <Button
+                x:Name="UseLastButton"
+                MinWidth="120"
+                Click="UseLastButton_Click"
+                Content="Use Last Region"
+                Visibility="Collapsed" />
+            <Button
+                x:Name="CancelButton"
+                MinWidth="100"
+                Click="CancelButton_Click"
+                Content="Cancel" />
+        </StackPanel>
+    </Grid>
+</UserControl>

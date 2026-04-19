@@ -40,17 +40,24 @@
                 <NavigationViewItem
                     Content="Record"
                     IsSelected="True"
-                    Tag="record">
+                    Tag="record"
+                    ToolTipService.ToolTip="Configure and start screen recording">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE7C8;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Editor" Tag="editor">
+                <NavigationViewItem
+                    Content="Editor"
+                    Tag="editor"
+                    ToolTipService.ToolTip="Edit your recorded clips">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE90F;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Export" Tag="export">
+                <NavigationViewItem
+                    Content="Export"
+                    Tag="export"
+                    ToolTipService.ToolTip="Export your final video">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE898;" />
                     </NavigationViewItem.Icon>

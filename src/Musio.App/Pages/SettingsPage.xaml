@@ -8,14 +8,22 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <ScrollViewer Padding="40,24,40,24">
+    <ScrollViewer Padding="16">
         <StackPanel MaxWidth="800" Spacing="8">
+            <StackPanel.ChildrenTransitions>
+                <EntranceThemeTransition FromVerticalOffset="40" />
+            </StackPanel.ChildrenTransitions>
 
-            <TextBlock
-                Margin="0,0,0,12"
-                FontSize="28"
-                FontWeight="SemiBold"
-                Text="Settings" />
+            <!-- Page header -->
+            <StackPanel Spacing="4" Margin="0,0,0,8">
+                <TextBlock
+                    FontSize="28"
+                    FontWeight="SemiBold"
+                    Text="Settings" />
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="Customize Musio to fit your workflow" />
+            </StackPanel>
 
             <!-- General -->
             <TextBlock
@@ -36,7 +44,8 @@
                         Header="Theme"
                         HorizontalAlignment="Stretch"
                         SelectedIndex="2"
-                        SelectionChanged="ThemeSelector_SelectionChanged">
+                        SelectionChanged="ThemeSelector_SelectionChanged"
+                        ToolTipService.ToolTip="Choose app color theme">
                         <ComboBoxItem Content="Light" />
                         <ComboBoxItem Content="Dark" />
                         <ComboBoxItem Content="System default" />
@@ -45,7 +54,8 @@
                         Header="Default save location"
                         HorizontalAlignment="Stretch"
                         PlaceholderText="C:\Users\Videos\Musio"
-                        IsReadOnly="True" />
+                        IsReadOnly="True"
+                        ToolTipService.ToolTip="Default folder for saved recordings" />
                 </StackPanel>
             </Border>
 
@@ -66,14 +76,16 @@
                     <ComboBox
                         Header="Default FPS"
                         HorizontalAlignment="Stretch"
-                        SelectedIndex="0">
+                        SelectedIndex="0"
+                        ToolTipService.ToolTip="Default frame rate for new recordings">
                         <ComboBoxItem Content="30 fps" />
                         <ComboBoxItem Content="60 fps" />
                     </ComboBox>
                     <ComboBox
                         Header="Default capture mode"
                         HorizontalAlignment="Stretch"
-                        SelectedIndex="0">
+                        SelectedIndex="0"
+                        ToolTipService.ToolTip="Default screen capture mode">
                         <ComboBoxItem Content="Full Screen" />
                         <ComboBoxItem Content="Window" />
                         <ComboBoxItem Content="Custom Region" />
@@ -94,9 +106,11 @@
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
                 CornerRadius="8">
-                <TextBlock
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="Hotkey configuration coming soon" />
+                <InfoBar
+                    IsOpen="True"
+                    IsClosable="False"
+                    Severity="Informational"
+                    Message="Hotkey configuration coming soon" />
             </Border>
 
             <!-- About -->
@@ -120,7 +134,7 @@
                     <TextBlock
                         Margin="0,4,0,0"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="A screen recording and editing tool for Windows."
+                        Text="Professional screen recording with cinematic cursor effects, auto-zoom, and beautiful backgrounds."
                         TextWrapping="Wrap" />
                 </StackPanel>
             </Border>

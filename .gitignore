@@ -1,0 +1,35 @@
+# Build artifacts
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.userprefs
+
+# Visual Studio
+.vs/
+*.rsuser
+
+# MSIX / AppX packages
+*.appx
+*.msix
+*.msixbundle
+*.appxbundle
+*.appxupload
+AppPackages/
+BundleArtifacts/
+
+# NuGet
+*.nupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+
+# Rider
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db

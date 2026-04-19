@@ -4,6 +4,7 @@ using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
+using Musio.Core.Timeline;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Media.Core;
 using Windows.Media.Editing;
@@ -27,6 +28,7 @@ public class ExportEngine
         ExportSettings settings,
         CompositionConfig composition,
         string outputFolder,
+        TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default)
     {
@@ -45,15 +47,25 @@ public class ExportEngine
         // Load cursor data using the canonical binary format from MouseHookRecorder
         var mouseData = LoadMouseData(project.CursorDataFilePath);
 
+        // Load keyboard data if available and enrich composition config
+        var enrichedComposition = EnrichCompositionWithOverlays(project, composition);
+
         // Resolve output dimensions from settings
         var (resW, resH) = GetResolutionDimensions(settings.Resolution);
 
         // Override composition with export settings
-        var exportComposition = composition with
+        var exportComposition = enrichedComposition with
         {
             OutputFps = settings.Fps,
             AspectRatio = settings.AspectRatio,
         };
+
+        // Build timeline mapper if timeline edits are present
+        TimelineMapper? timelineMapper = null;
+        if (timeline is not null)
+        {
+            timelineMapper = new TimelineMapper(timeline, settings.Fps);
+        }
 
         // Build output file path
         // WebM is not natively supported by Windows Media APIs — fall back to MP4
@@ -81,18 +93,19 @@ public class ExportEngine
         if (effectiveFormat == VideoFormat.GIF)
         {
             await ExportGifAsync(
-                project.VideoFilePath, mouseData, exportComposition,
-                effectiveSettings, outputPath, progress, ct);
+                project, mouseData, exportComposition,
+                effectiveSettings, timelineMapper, outputPath, progress, ct);
         }
         else
         {
             using var videoEncoder = new VideoEncoder(effectiveSettings);
             await videoEncoder.ExportAsync(
-                project.VideoFilePath,
+                project,
                 mouseData,
                 exportComposition,
                 resW, resH,
                 outputPath,
+                timelineMapper,
                 progress,
                 ct);
         }
@@ -101,10 +114,11 @@ public class ExportEngine
     }
 
     private async Task ExportGifAsync(
-        string sourceVideoPath,
+        Project project,
         MouseRecordingData mouseData,
         CompositionConfig composition,
         ExportSettings settings,
+        TimelineMapper? timelineMapper,
         string outputPath,
         IProgress<ExportProgress>? progress,
         CancellationToken ct)
@@ -112,25 +126,50 @@ public class ExportEngine
         var device = CanvasDevice.GetSharedDevice();
         using var compositor = new FrameCompositor(composition);
 
-        var sourceFile = await StorageFile.GetFileFromPathAsync(sourceVideoPath);
+        var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
         var sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
         var sourceProps = sourceClip.GetVideoEncodingProperties();
         int sourceWidth = (int)sourceProps.Width;
         int sourceHeight = (int)sourceProps.Height;
 
-        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight);
+        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration);
 
-        int totalFrames = compositor.TotalFrames;
+        int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
         int fps = settings.Fps;
+
+        // Webcam source for overlay
+        MediaComposition? webcamComp = null;
+        int webcamWidth = 0, webcamHeight = 0;
+        if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
+        {
+            var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+            var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
+            var webcamProps = webcamClip.GetVideoEncodingProperties();
+            webcamWidth = (int)webcamProps.Width;
+            webcamHeight = (int)webcamProps.Height;
+            webcamComp = new MediaComposition();
+            webcamComp.Clips.Add(webcamClip);
+        }
 
         var gifEncoder = new GifEncoder();
         await gifEncoder.ExportGifAsync(
             compositor,
             async frameIndex =>
             {
-                double timeSeconds = (double)frameIndex / fps;
+                double timeSeconds = timelineMapper is not null
+                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
+                    : (double)frameIndex / fps;
                 var timeSpan = TimeSpan.FromSeconds(timeSeconds);
-                return await ExtractFrameAsync(device, sourceVideoPath, timeSpan, sourceWidth, sourceHeight);
+
+                // Extract webcam frame and set on compositor
+                if (webcamComp is not null)
+                {
+                    using var webcamFrame = await ExtractFrameFromCompositionAsync(
+                        device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                    compositor.SetWebcamFrame(webcamFrame);
+                }
+
+                return await ExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
             },
             totalFrames,
             fps,
@@ -250,5 +289,65 @@ public class ExportEngine
         while (File.Exists(candidate));
 
         return candidate;
+    }
+
+    /// <summary>
+    /// Enriches the composition config with overlay data from the project:
+    /// keyboard events and subtitle segments, if their data files exist.
+    /// </summary>
+    private static CompositionConfig EnrichCompositionWithOverlays(
+        Project project, CompositionConfig composition)
+    {
+        var keyboardEvents = composition.KeyboardEvents;
+        var subtitles = composition.Subtitles;
+
+        // Load keyboard data if the project has it and the config expects keyboard overlay
+        if (composition.KeyboardStyle is not null &&
+            !string.IsNullOrWhiteSpace(project.KeyboardDataFilePath) &&
+            File.Exists(project.KeyboardDataFilePath))
+        {
+            try
+            {
+                var loadedEvents = RecordingSession.LoadKeyboardData(project.KeyboardDataFilePath);
+                if (loadedEvents.Count > 0)
+                    keyboardEvents = loadedEvents;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ExportEngine] Failed to load keyboard data: {ex.Message}");
+            }
+        }
+
+        // Return enriched config if anything changed
+        if (keyboardEvents != composition.KeyboardEvents || subtitles != composition.Subtitles)
+        {
+            return composition with
+            {
+                KeyboardEvents = keyboardEvents,
+                Subtitles = subtitles,
+            };
+        }
+
+        return composition;
+    }
+
+    /// <summary>
+    /// Extracts a frame from a pre-built <see cref="MediaComposition"/> at the given position.
+    /// Used for webcam overlay frame extraction.
+    /// </summary>
+    private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
+        CanvasDevice device, MediaComposition composition, TimeSpan position,
+        int width, int height)
+    {
+        // Clamp position to the composition's duration
+        var clampedPosition = position;
+        if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
+            clampedPosition = composition.Duration;
+
+        var thumbnail = await composition.GetThumbnailAsync(
+            clampedPosition, width, height, VideoFramePrecision.NearestFrame);
+
+        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 }

@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Musio.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Musio.App (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

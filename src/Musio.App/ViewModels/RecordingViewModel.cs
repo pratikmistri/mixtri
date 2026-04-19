@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.Input;
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Settings;
+using Musio_App.Services;
 
 namespace Musio_App.ViewModels;
 
@@ -95,6 +96,7 @@ public partial class RecordingViewModel : ObservableObject
                 Fps = Fps,
                 SystemAudioEnabled = IsSystemAudioEnabled,
                 MicEnabled = IsMicEnabled,
+                IsWebcamEnabled = IsWebcamEnabled,
                 OutputFolder = outputFolder,
             };
 
@@ -133,6 +135,10 @@ public partial class RecordingViewModel : ObservableObject
             await _session.StopAsync();
 
             LastProject = _session.GetProject();
+            if (LastProject is not null)
+            {
+                ProjectService.Instance.SetProject(LastProject);
+            }
             RecordingStatus = "Recording saved";
         }
         catch (Exception ex)

@@ -17,6 +17,20 @@ public sealed partial class RecordingPage : Page
     {
         InitializeComponent();
         Loaded += OnLoaded;
+
+        // After a recording stops successfully, navigate to the Editor page
+        ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(RecordingViewModel.IsRecording)
+                && !ViewModel.IsRecording
+                && ViewModel.LastProject is not null)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    Frame.Navigate(typeof(EditorPage));
+                });
+            }
+        };
     }
 
     // x:Bind helper: invert boolean

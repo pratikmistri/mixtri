@@ -1,0 +1,180 @@
+using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.UI.Xaml;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Windows.Foundation;
+
+namespace Musio_App.Controls;
+
+public sealed partial class PreviewCanvas : UserControl
+{
+    private CanvasRenderTarget? _previewFrame;
+    private DispatcherTimer? _playbackTimer;
+    private bool _isPlaying;
+
+    /// <summary>
+    /// Raised each time the playback timer ticks so the host can supply a new composed frame.
+    /// </summary>
+    public event EventHandler? PlaybackTick;
+
+    /// <summary>
+    /// Raised when play/pause state changes.
+    /// </summary>
+    public event EventHandler<bool>? IsPlayingChanged;
+
+    public static readonly DependencyProperty PlayheadPositionProperty =
+        DependencyProperty.Register(nameof(PlayheadPosition), typeof(TimeSpan), typeof(PreviewCanvas),
+            new PropertyMetadata(TimeSpan.Zero, OnPlayheadPositionChanged));
+
+    public static readonly DependencyProperty DurationProperty =
+        DependencyProperty.Register(nameof(Duration), typeof(TimeSpan), typeof(PreviewCanvas),
+            new PropertyMetadata(TimeSpan.Zero, OnDurationChanged));
+
+    public TimeSpan PlayheadPosition
+    {
+        get => (TimeSpan)GetValue(PlayheadPositionProperty);
+        set => SetValue(PlayheadPositionProperty, value);
+    }
+
+    public TimeSpan Duration
+    {
+        get => (TimeSpan)GetValue(DurationProperty);
+        set => SetValue(DurationProperty, value);
+    }
+
+    public bool IsPlaying
+    {
+        get => _isPlaying;
+        private set
+        {
+            if (_isPlaying == value) return;
+            _isPlaying = value;
+            // Play icon &#xE768; / Pause icon &#xE769;
+            PlayPauseIcon.Glyph = _isPlaying ? "\uE769" : "\uE768";
+            IsPlayingChanged?.Invoke(this, _isPlaying);
+        }
+    }
+
+    /// <summary>Preview FPS (lower than export for performance).</summary>
+    public int PreviewFps { get; set; } = 24;
+
+    public PreviewCanvas()
+    {
+        InitializeComponent();
+        UpdateTimeDisplay();
+    }
+
+    /// <summary>
+    /// Sets the current frame to display and invalidates the canvas.
+    /// The caller retains ownership of previous frames and must dispose them.
+    /// </summary>
+    public void SetFrame(CanvasRenderTarget? frame)
+    {
+        var old = _previewFrame;
+        _previewFrame = frame;
+        old?.Dispose();
+        PreviewSurface.Invalidate();
+    }
+
+    /// <summary>Starts or resumes playback.</summary>
+    public void Play()
+    {
+        if (IsPlaying) return;
+        EnsureTimer();
+        _playbackTimer!.Start();
+        IsPlaying = true;
+    }
+
+    /// <summary>Pauses playback.</summary>
+    public void Pause()
+    {
+        _playbackTimer?.Stop();
+        IsPlaying = false;
+    }
+
+    private void PlayPause_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsPlaying)
+            Pause();
+        else
+            Play();
+    }
+
+    private void EnsureTimer()
+    {
+        if (_playbackTimer is not null) return;
+
+        _playbackTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(1000.0 / PreviewFps)
+        };
+        _playbackTimer.Tick += OnPlaybackTick;
+    }
+
+    private void OnPlaybackTick(object? sender, object e)
+    {
+        if (Duration.TotalSeconds <= 0) return;
+
+        // Advance playhead by one timer interval
+        var newPosition = PlayheadPosition + _playbackTimer!.Interval;
+        if (newPosition >= Duration)
+        {
+            newPosition = TimeSpan.Zero; // loop
+        }
+
+        PlayheadPosition = newPosition;
+        PlaybackTick?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void PreviewSurface_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        var ds = args.DrawingSession;
+        ds.Clear(Windows.UI.Color.FromArgb(255, 20, 20, 20));
+
+        if (_previewFrame is null) return;
+
+        float canvasW = (float)sender.ActualWidth;
+        float canvasH = (float)sender.ActualHeight;
+        float frameW = (float)_previewFrame.SizeInPixels.Width;
+        float frameH = (float)_previewFrame.SizeInPixels.Height;
+
+        if (frameW <= 0 || frameH <= 0) return;
+
+        // Scale to fit while maintaining aspect ratio
+        float scale = Math.Min(canvasW / frameW, canvasH / frameH);
+        float destW = frameW * scale;
+        float destH = frameH * scale;
+        float destX = (canvasW - destW) / 2f;
+        float destY = (canvasH - destH) / 2f;
+
+        ds.DrawImage(_previewFrame,
+            new Rect(destX, destY, destW, destH),
+            new Rect(0, 0, frameW, frameH));
+    }
+
+    private static void OnPlayheadPositionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is PreviewCanvas canvas)
+            canvas.UpdateTimeDisplay();
+    }
+
+    private static void OnDurationChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is PreviewCanvas canvas)
+            canvas.UpdateTimeDisplay();
+    }
+
+    private void UpdateTimeDisplay()
+    {
+        if (TimeDisplay is null) return;
+        TimeDisplay.Text = $"{FormatTime(PlayheadPosition)} / {FormatTime(Duration)}";
+    }
+
+    private static string FormatTime(TimeSpan t)
+    {
+        if (t.TotalMinutes >= 1)
+            return $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
+        return $"0:{t.Seconds:D2}";
+    }
+}
