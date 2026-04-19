@@ -95,16 +95,21 @@ public sealed partial class EditorPage : Page
 
         // Feed cursor data to timeline for track visualization
         ViewModel.Model.CursorData = mouseData;
+        ViewModel.Model.MouseToVideoOffsetSeconds = project.MouseToVideoOffsetSeconds;
 
-        // Build zoom keyframes from click events so they appear on the timeline
+        // Build zoom keyframes from click events so they appear on the timeline.
+        // Subtract MouseToVideoOffsetSeconds to convert mouse-relative time to video time.
         int sourceW = project.Width > 0 ? project.Width : 1920;
         int sourceH = project.Height > 0 ? project.Height : 1080;
         float dpiScaleX = GetDpiScale(sourceW);
         float dpiScaleY = GetDpiScale(sourceH, isWidth: false);
+        double mouseOffset = project.MouseToVideoOffsetSeconds;
         ViewModel.Model.ZoomKeyframes.Clear();
         foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
         {
-            double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency;
+            double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
+                - mouseOffset;
+            if (clickTime < 0) continue; // skip pre-roll clicks before video started
             ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
             {
                 Timestamp = TimeSpan.FromSeconds(clickTime),
@@ -272,8 +277,10 @@ public sealed partial class EditorPage : Page
             float dpiX = GetDpiScale(sourceW);
             float dpiY = GetDpiScale(sourceH, isWidth: false);
 
-            // Find closest sample to playhead time
-            double targetTime = playhead.TotalSeconds;
+            // Find closest sample to playhead time.
+            // Playhead is in video time; convert to mouse-relative time for lookup.
+            double mouseOffset = ProjectService.Instance.CurrentProject?.MouseToVideoOffsetSeconds ?? 0;
+            double targetTime = playhead.TotalSeconds + mouseOffset;
             double tickFreq = cursorData.TickFrequency;
             long startTick = cursorData.StartTimestampTicks;
             Musio.Core.Models.MouseSample closest = cursorData.Samples[0];

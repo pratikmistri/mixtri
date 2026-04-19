@@ -21,6 +21,12 @@ public class TimelineModel
     // Cursor recording data for cursor-path visualization track
     public MouseRecordingData? CursorData { get; set; }
 
+    /// <summary>
+    /// Time offset in seconds between mouse recording start and video frame 0.
+    /// Used to align cursor-path and click visualizations with the video track.
+    /// </summary>
+    public double MouseToVideoOffsetSeconds { get; set; }
+
     // Audio waveform peak samples (normalized 0..1) for waveform rendering
     public float[]? AudioWaveformSamples { get; set; }
 

@@ -482,6 +482,7 @@ public sealed partial class TimelineControl : UserControl
         float drawHeight = h - margin * 2;
         double tickFreq = cursorData.TickFrequency > 0 ? cursorData.TickFrequency : 1.0;
         long startTicks = cursorData.StartTimestampTicks;
+        double mouseOffset = model.MouseToVideoOffsetSeconds;
 
         // Draw X-position path (blue) and Y-position path (orange)
         if (cursorData.Samples.Count > 1)
@@ -492,7 +493,7 @@ public sealed partial class TimelineControl : UserControl
 
             foreach (var sample in cursorData.Samples)
             {
-                double timeSec = (sample.TimestampTicks - startTicks) / tickFreq;
+                double timeSec = (sample.TimestampTicks - startTicks) / tickFreq - mouseOffset;
                 float px = (float)TimeToX(TimeSpan.FromSeconds(timeSec));
                 if (px < -1 || px > w + 1) continue;
 
@@ -524,7 +525,7 @@ public sealed partial class TimelineControl : UserControl
         foreach (var click in cursorData.Clicks)
         {
             if (!click.IsDown) continue;
-            double timeSec = (click.TimestampTicks - startTicks) / tickFreq;
+            double timeSec = (click.TimestampTicks - startTicks) / tickFreq - mouseOffset;
             float cx = (float)TimeToX(TimeSpan.FromSeconds(timeSec));
             if (cx < -4 || cx > w + 4) continue;
 
