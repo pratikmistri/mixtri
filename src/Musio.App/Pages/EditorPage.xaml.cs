@@ -161,7 +161,6 @@ public sealed partial class EditorPage : Page
 
         int frameIndex = _frameReader.GetFrameIndex(position);
         if (frameIndex == _lastRenderedFrameIndex) return;
-        _lastRenderedFrameIndex = frameIndex;
 
         var bitmap = await _frameReader.LoadFrameAtTimeAsync(position);
         if (bitmap is null) return;
@@ -170,12 +169,12 @@ public sealed partial class EditorPage : Page
         {
             if (_compositorReady && _previewRenderer is not null)
             {
-                // Run frame through compositor — applies cursor, zoom, background
-                var composed = _previewRenderer.RenderPreviewFrame(bitmap, frameIndex);
+                var composed = _previewRenderer.RenderPreviewFrame(bitmap, position);
                 bitmap.Dispose();
 
                 if (composed is not null)
                 {
+                    _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
                 }
@@ -190,10 +189,13 @@ public sealed partial class EditorPage : Page
                 ds.DrawImage(bitmap);
             }
             bitmap.Dispose();
+            _lastRenderedFrameIndex = frameIndex;
             Preview.SetFrame(renderTarget);
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Preview frame error at {position}: {ex.Message}");
             bitmap.Dispose();
         }
     }

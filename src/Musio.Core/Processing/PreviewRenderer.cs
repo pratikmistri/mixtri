@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
 
@@ -9,6 +10,7 @@ namespace Musio.Core.Processing;
 public class PreviewRenderer : IDisposable
 {
     private FrameCompositor? _compositor;
+    private int _outputFps;
     private bool _disposed;
 
     /// <summary>Preview output width (half of full export resolution).</summary>
@@ -41,6 +43,7 @@ public class PreviewRenderer : IDisposable
         {
             OutputFps = Math.Min(config.OutputFps, 30)
         };
+        _outputFps = previewConfig.OutputFps;
 
         _compositor?.Dispose();
         _compositor = new FrameCompositor(previewConfig);
@@ -48,13 +51,18 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
-    /// Renders a single preview frame at the given frame index.
+    /// Renders a single preview frame at the given playback position.
+    /// Computes the correct compositor frame index from the position using the
+    /// preview output FPS, avoiding mismatches with the source video's FPS.
     /// Returns a <see cref="CanvasRenderTarget"/> the caller must dispose, or null if not initialized.
     /// </summary>
-    public CanvasRenderTarget? RenderPreviewFrame(CanvasBitmap sourceFrame, int frameIndex)
+    public CanvasRenderTarget? RenderPreviewFrame(CanvasBitmap sourceFrame, TimeSpan position)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_compositor is null) return null;
+        if (_compositor is null || TotalFrames <= 0) return null;
+
+        int frameIndex = (int)(position.TotalSeconds * _outputFps);
+        frameIndex = Math.Clamp(frameIndex, 0, TotalFrames - 1);
 
         return _compositor.ComposeFrame(sourceFrame, frameIndex);
     }

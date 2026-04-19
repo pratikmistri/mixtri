@@ -40,9 +40,16 @@ public sealed class VideoWriter : IDisposable
         {
             lock (_tsLock)
             {
-                return _frameTimestamps.Count > 1
-                    ? _frameTimestamps[^1] - _frameTimestamps[0]
-                    : TimeSpan.Zero;
+                if (_frameTimestamps.Count <= 1)
+                    return TimeSpan.Zero;
+
+                // Include the last frame's display time so the duration covers
+                // all captured frames, not just the span between first and last.
+                var frameDuration = _frameTimestamps.Count >= 2
+                    ? _frameTimestamps[^1] - _frameTimestamps[^2]
+                    : TimeSpan.FromSeconds(1.0 / _fps);
+
+                return _frameTimestamps[^1] - _frameTimestamps[0] + frameDuration;
             }
         }
     }
