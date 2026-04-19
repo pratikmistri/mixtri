@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Musio_App.Pages.EditorPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Musio_App.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid>
+        <StackPanel
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="16">
+            <FontIcon
+                HorizontalAlignment="Center"
+                FontSize="48"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Glyph="&#xE90F;" />
+            <TextBlock
+                HorizontalAlignment="Center"
+                FontSize="18"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Text="Open a recording to begin editing" />
+            <Button
+                HorizontalAlignment="Center"
+                Content="Open Recording"
+                Style="{StaticResource AccentButtonStyle}" />
+        </StackPanel>
+    </Grid>
+</Page>

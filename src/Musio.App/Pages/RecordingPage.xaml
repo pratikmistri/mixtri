@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Musio_App.Pages.RecordingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Musio_App.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:Musio_App.ViewModels"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <Style x:Key="OptionCard" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="20" />
+        </Style>
+    </Page.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0" Padding="40,24,40,24">
+            <StackPanel MaxWidth="900" Spacing="28">
+
+                <!-- Hero: Start Recording -->
+                <StackPanel HorizontalAlignment="Center" Spacing="16">
+                    <Button
+                        Width="240"
+                        Height="64"
+                        HorizontalAlignment="Center"
+                        Command="{x:Bind ViewModel.StartRecordingCommand}"
+                        CornerRadius="32"
+                        Style="{StaticResource AccentButtonStyle}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <FontIcon FontSize="22" Glyph="&#xE7C8;" />
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="16"
+                                FontWeight="SemiBold"
+                                Text="Start Recording" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+
+                <!-- Option Cards Grid -->
+                <Grid ColumnSpacing="16" RowSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Capture Mode -->
+                    <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource OptionCard}">
+                        <StackPanel Spacing="12">
+                            <TextBlock FontWeight="SemiBold" Text="Capture Mode" />
+                            <RadioButtons>
+                                <RadioButton
+                                    Content="Full Screen"
+                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.FullScreen), Mode=OneWay}"
+                                    Tag="FullScreen"
+                                    Checked="CaptureMode_Checked" />
+                                <RadioButton
+                                    Content="Window"
+                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.Window), Mode=OneWay}"
+                                    Tag="Window"
+                                    Checked="CaptureMode_Checked" />
+                                <RadioButton
+                                    Content="Custom Region"
+                                    IsChecked="{x:Bind ViewModel.CaptureMode.Equals(vm:CaptureMode.CustomRegion), Mode=OneWay}"
+                                    Tag="CustomRegion"
+                                    Checked="CaptureMode_Checked" />
+                            </RadioButtons>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Audio -->
+                    <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource OptionCard}">
+                        <StackPanel Spacing="12">
+                            <TextBlock FontWeight="SemiBold" Text="Audio" />
+                            <ToggleSwitch
+                                Header="System Audio"
+                                IsOn="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}" />
+                            <ComboBox
+                                Header="System Audio Device"
+                                HorizontalAlignment="Stretch"
+                                PlaceholderText="Default output" />
+                            <ToggleSwitch
+                                Header="Microphone"
+                                IsOn="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}" />
+                            <ComboBox
+                                Header="Microphone Device"
+                                HorizontalAlignment="Stretch"
+                                PlaceholderText="Default microphone" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- FPS -->
+                    <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource OptionCard}">
+                        <StackPanel Spacing="12">
+                            <TextBlock FontWeight="SemiBold" Text="Frame Rate" />
+                            <RadioButtons>
+                                <RadioButton
+                                    Content="30 fps"
+                                    IsChecked="{x:Bind ViewModel.Fps.Equals(30), Mode=OneWay}"
+                                    Tag="30"
+                                    Checked="Fps_Checked" />
+                                <RadioButton
+                                    Content="60 fps"
+                                    IsChecked="{x:Bind ViewModel.Fps.Equals(60), Mode=OneWay}"
+                                    Tag="60"
+                                    Checked="Fps_Checked" />
+                            </RadioButtons>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Webcam -->
+                    <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource OptionCard}">
+                        <StackPanel Spacing="12">
+                            <TextBlock FontWeight="SemiBold" Text="Webcam" />
+                            <ToggleSwitch
+                                Header="Enable Webcam"
+                                IsOn="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}" />
+                            <ComboBox
+                                Header="Webcam Device"
+                                HorizontalAlignment="Stretch"
+                                PlaceholderText="Default camera" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Status Bar -->
+        <Border
+            Grid.Row="1"
+            Padding="20,10"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0,1,0,0">
+            <StackPanel
+                HorizontalAlignment="Left"
+                Orientation="Horizontal"
+                Spacing="8">
+                <Ellipse
+                    Width="8"
+                    Height="8"
+                    VerticalAlignment="Center"
+                    Fill="{ThemeResource SystemFillColorSuccessBrush}" />
+                <TextBlock
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="{x:Bind ViewModel.RecordingStatus, Mode=OneWay}" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

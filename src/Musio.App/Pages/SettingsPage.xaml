@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Musio_App.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Musio_App.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer Padding="40,24,40,24">
+        <StackPanel MaxWidth="800" Spacing="8">
+
+            <TextBlock
+                Margin="0,0,0,12"
+                FontSize="28"
+                FontWeight="SemiBold"
+                Text="Settings" />
+
+            <!-- General -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="General" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        x:Name="ThemeSelector"
+                        Header="Theme"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="2"
+                        SelectionChanged="ThemeSelector_SelectionChanged">
+                        <ComboBoxItem Content="Light" />
+                        <ComboBoxItem Content="Dark" />
+                        <ComboBoxItem Content="System default" />
+                    </ComboBox>
+                    <TextBox
+                        Header="Default save location"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="C:\Users\Videos\Musio"
+                        IsReadOnly="True" />
+                </StackPanel>
+            </Border>
+
+            <!-- Recording Defaults -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Recording Defaults" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        Header="Default FPS"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="0">
+                        <ComboBoxItem Content="30 fps" />
+                        <ComboBoxItem Content="60 fps" />
+                    </ComboBox>
+                    <ComboBox
+                        Header="Default capture mode"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="0">
+                        <ComboBoxItem Content="Full Screen" />
+                        <ComboBoxItem Content="Window" />
+                        <ComboBoxItem Content="Custom Region" />
+                    </ComboBox>
+                </StackPanel>
+            </Border>
+
+            <!-- Hotkeys -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Hotkeys" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="Hotkey configuration coming soon" />
+            </Border>
+
+            <!-- About -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="About" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="4">
+                    <TextBlock FontWeight="SemiBold" Text="Musio" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Version 0.1.0" />
+                    <TextBlock
+                        Margin="0,4,0,0"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="A screen recording and editing tool for Windows."
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>
