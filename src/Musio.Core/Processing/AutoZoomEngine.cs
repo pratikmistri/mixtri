@@ -53,12 +53,16 @@ public class AutoZoomEngine
 
     /// <summary>
     /// Pre-compute zoom timeline from click events and manual keyframes.
+    /// <paramref name="coordScaleX"/> and <paramref name="coordScaleY"/> convert
+    /// mouse hook coordinates (logical pixels) to capture frame coordinates (physical pixels).
     /// </summary>
     public void BuildZoomTimeline(
         MouseRecordingData mouseData,
         int sourceWidth,
         int sourceHeight,
-        double tickFrequency)
+        double tickFrequency,
+        float coordScaleX = 1.0f,
+        float coordScaleY = 1.0f)
     {
         ArgumentNullException.ThrowIfNull(mouseData);
         _sourceWidth = sourceWidth;
@@ -88,8 +92,8 @@ public class AutoZoomEngine
                 HoldEnd = clickTime + _config.HoldDuration,
                 ZoomOutEnd = clickTime + _config.HoldDuration + _config.EaseOutDuration,
                 TargetZoom = _config.DefaultZoomLevel,
-                CenterX = click.X,
-                CenterY = click.Y,
+                CenterX = click.X * coordScaleX,
+                CenterY = click.Y * coordScaleY,
             });
         }
 

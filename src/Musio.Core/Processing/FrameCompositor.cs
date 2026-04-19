@@ -54,6 +54,8 @@ public class FrameCompositor : IDisposable
     private int _contentHeight;
     private bool _initialized;
     private bool _disposed;
+    private float _coordScaleX = 1.0f;
+    private float _coordScaleY = 1.0f;
 
     public int TotalFrames { get; private set; }
     public int OutputWidth { get; private set; }
@@ -109,6 +111,13 @@ public class FrameCompositor : IDisposable
         _sourceHeight = sourceHeight;
         _tickFrequency = mouseData.TickFrequency;
 
+        // Detect DPI scale: mouse hook reports logical coords, capture is physical pixels.
+        // Estimate scale by comparing max mouse range to source dimensions.
+        float coordScaleX = DetectCoordinateScale(mouseData, sourceWidth, isX: true);
+        float coordScaleY = DetectCoordinateScale(mouseData, sourceHeight, isX: false);
+        _coordScaleX = coordScaleX;
+        _coordScaleY = coordScaleY;
+
         // Compute content dimensions based on aspect ratio (center-crop)
         ComputeContentDimensions();
 
@@ -118,11 +127,25 @@ public class FrameCompositor : IDisposable
         OutputWidth = outW;
         OutputHeight = outH;
 
-        // Smooth cursor path at the target FPS (based on mouse data duration)
+        // Smooth cursor path at the target FPS, then scale to physical coordinates
         _smoothedPositions = _smoother.SmoothPath(mouseData, _config.OutputFps);
+        if (coordScaleX != 1.0f || coordScaleY != 1.0f)
+        {
+            for (int i = 0; i < _smoothedPositions.Count; i++)
+            {
+                var p = _smoothedPositions[i];
+                _smoothedPositions[i] = new SmoothedPosition
+                {
+                    X = p.X * coordScaleX,
+                    Y = p.Y * coordScaleY,
+                    TimestampSeconds = p.TimestampSeconds,
+                    VelocityX = p.VelocityX * coordScaleX,
+                    VelocityY = p.VelocityY * coordScaleY,
+                };
+            }
+        }
 
-        // Compute TotalFrames from the authoritative duration (video/project),
-        // not from the mouse data length
+        // Compute TotalFrames from the authoritative duration (video/project)
         if (duration.HasValue && duration.Value.TotalSeconds > 0)
         {
             TotalFrames = (int)(duration.Value.TotalSeconds * _config.OutputFps);
@@ -136,9 +159,10 @@ public class FrameCompositor : IDisposable
         // Precompute per-frame "last move" timestamps for cursor auto-hide
         PrecomputeLastMoveTimes();
 
-        // Build auto-zoom timeline from click events
+        // Build auto-zoom timeline with scaled coordinates
         _zoomEngine.BuildZoomTimeline(
-            mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency);
+            mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency,
+            coordScaleX, coordScaleY);
 
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;
@@ -146,6 +170,42 @@ public class FrameCompositor : IDisposable
         await _cursorRenderer.LoadCursorAsync(_device);
 
         _initialized = true;
+    }
+
+    /// <summary>
+    /// Detects the scale factor between mouse hook coordinates (logical) and
+    /// capture frame dimensions (physical). Returns the multiplier to convert
+    /// logical → physical coordinates.
+    /// </summary>
+    private static float DetectCoordinateScale(MouseRecordingData mouseData, int sourceDimension, bool isX)
+    {
+        if (mouseData.Samples.Count == 0) return 1.0f;
+
+        // Find the max coordinate in the mouse data
+        int maxCoord = 0;
+        foreach (var sample in mouseData.Samples)
+        {
+            int coord = isX ? sample.X : sample.Y;
+            if (coord > maxCoord) maxCoord = coord;
+        }
+
+        if (maxCoord <= 0) return 1.0f;
+
+        // If max mouse coord is significantly less than source dimension,
+        // there's a DPI scale factor in play
+        float ratio = (float)sourceDimension / maxCoord;
+
+        // Round to nearest common scale: 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0
+        if (ratio > 0.9f && ratio < 1.1f) return 1.0f;
+        if (ratio > 1.15f && ratio < 1.35f) return 1.25f;
+        if (ratio > 1.35f && ratio < 1.65f) return 1.5f;
+        if (ratio > 1.65f && ratio < 1.85f) return 1.75f;
+        if (ratio > 1.85f && ratio < 2.15f) return 2.0f;
+        if (ratio > 2.35f && ratio < 2.65f) return 2.5f;
+        if (ratio > 2.85f && ratio < 3.15f) return 3.0f;
+
+        // Fallback: use the raw ratio
+        return ratio;
     }
 
     /// <summary>
@@ -420,9 +480,9 @@ public class FrameCompositor : IDisposable
             if (Math.Abs(clickTime - timeSeconds) > windowSeconds)
                 continue;
 
-            // Transform click position to output space
-            int cx = (int)((click.X - viewport.X) * scaleX + padding);
-            int cy = (int)((click.Y - viewport.Y) * scaleY + padding);
+            // Transform click position from logical to physical, then to output space
+            int cx = (int)((click.X * _coordScaleX - viewport.X) * scaleX + padding);
+            int cy = (int)((click.Y * _coordScaleY - viewport.Y) * scaleY + padding);
 
             result.Add(new ClickEvent(click.TimestampTicks, cx, cy, click.Button, click.IsDown));
         }
