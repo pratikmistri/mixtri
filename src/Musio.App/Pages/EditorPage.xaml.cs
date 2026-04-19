@@ -106,9 +106,11 @@ public sealed partial class EditorPage : Page
             SmoothingStrength = SmoothingStrength.Smooth,
             Cursor = new CursorStyle
             {
+                Scale = 2.0f,
                 ClickAnimationEnabled = true,
-                ClickHighlightEnabled = true,
+                ClickHighlightEnabled = false,
                 AutoHideEnabled = true,
+                AutoHideDelaySeconds = 3.0f,
             },
             Zoom = new AutoZoomConfig { Enabled = true },
         };

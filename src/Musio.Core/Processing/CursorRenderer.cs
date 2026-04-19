@@ -42,11 +42,12 @@ public class CursorRenderer
     /// <summary>Tick frequency from the recording (from MouseRecordingData.TickFrequency).</summary>
     public double TickFrequency { get; set; } = 1.0;
 
-    private const float ClickDownDurationSeconds = 0.1f;   // 100ms press
-    private const float ClickUpDurationSeconds = 0.2f;     // 200ms release
-    private const float RippleDurationSeconds = 0.4f;      // 400ms ripple
-    private const float RippleInitialOpacity = 0.6f;
-    private const float RippleStrokeWidth = 2f;
+    private const float ClickDownDurationSeconds = 0.08f;    // 80ms snap down
+    private const float ClickUpDurationSeconds = 0.35f;     // 350ms bouncy spring back
+    private const float ClickDownScale = 0.55f;             // scale to 55% on press
+    private const float RippleDurationSeconds = 0.6f;       // 600ms ripple
+    private const float RippleInitialOpacity = 0.7f;
+    private const float RippleStrokeWidth = 3f;
     private const float MotionBlurVelocityThreshold = 200f; // px/s
     private const int MotionBlurGhostCount = 4;
 
@@ -142,29 +143,31 @@ public class CursorRenderer
 
         if (latestDownTime == double.MinValue) return 1.0f;
 
-        // Button was released after the most recent press — spring back
+        // Button was released after the most recent press — bouncy spring back
         if (latestUpTime > latestDownTime)
         {
             double upElapsed = currentTime - latestUpTime;
             if (upElapsed < ClickUpDurationSeconds)
             {
                 float t = Math.Clamp((float)(upElapsed / ClickUpDurationSeconds), 0f, 1f);
+                // Spring overshoot: goes past 1.0 then settles
                 float eased = CubicBezierEasing.SpringOut(t);
-                return 0.8f + 0.2f * eased;
+                float overshoot = 1.0f + 0.15f * MathF.Sin(t * MathF.PI); // slight bounce past 100%
+                return ClickDownScale + (overshoot - ClickDownScale) * eased;
             }
-            return 1.0f; // animation complete
+            return 1.0f;
         }
 
-        // Button is still held — press animation
+        // Button is still held — quick snap down
         double downElapsed = currentTime - latestDownTime;
         if (downElapsed < ClickDownDurationSeconds)
         {
             float t = Math.Clamp((float)(downElapsed / ClickDownDurationSeconds), 0f, 1f);
             float eased = CubicBezierEasing.EaseInOut(t);
-            return 1.0f - 0.2f * eased;
+            return 1.0f - (1.0f - ClickDownScale) * eased;
         }
 
-        return 0.8f; // fully pressed, held down
+        return ClickDownScale; // fully pressed, held down
     }
 
     #region Ripple Rendering
