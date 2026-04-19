@@ -97,7 +97,13 @@ public class VideoEncoder : IDisposable
             ?? (int)(project.Duration.TotalSeconds * _settings.Fps);
         int compositorWidth = compositor.OutputWidth;
         int compositorHeight = compositor.OutputHeight;
-        bool needsScaling = compositorWidth != targetWidth || compositorHeight != targetHeight;
+
+        // Encode at compositor output dimensions to preserve aspect ratio.
+        // The compositor already handles background padding and aspect-ratio
+        // cropping, so its output size is the correct final frame size.
+        targetWidth = compositorWidth;
+        targetHeight = compositorHeight;
+        bool needsScaling = false;
 
         // Load source frames from .frames/ JPEGs using the RECORDING FPS so
         // frame indices map correctly to the on-disk frame numbering.

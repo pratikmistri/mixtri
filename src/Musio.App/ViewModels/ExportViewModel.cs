@@ -31,6 +31,23 @@ public partial class ExportViewModel : ObservableObject
 
     private void OnProjectChanged(object? sender, EventArgs e)
     {
+        PrepareForExport();
+    }
+
+    /// <summary>
+    /// Resets export state and generates a fresh output path for a new export.
+    /// Called when starting a new export or when the project changes.
+    /// </summary>
+    public void PrepareForExport()
+    {
+        ExportSucceeded = false;
+        ExportFailed = false;
+        ErrorMessage = string.Empty;
+        ExportedFilePath = string.Empty;
+        ProgressPercent = 0;
+        ProgressStatus = string.Empty;
+        EstimatedTimeRemaining = string.Empty;
+
         CurrentProject = ProjectService.Instance.CurrentProject;
         CompositionConfig = ProjectService.Instance.CurrentComposition;
         PrefillOutputPath();

@@ -55,14 +55,6 @@
                         <FontIcon Glyph="&#xE90F;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem
-                    Content="Export"
-                    Tag="export"
-                    ToolTipService.ToolTip="Export your final video">
-                    <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE898;" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
             </NavigationView.MenuItems>
             <Frame x:Name="NavFrame" />
         </NavigationView>

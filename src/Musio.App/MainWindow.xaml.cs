@@ -116,9 +116,6 @@ public sealed partial class MainWindow : Window
                 case "editor":
                     NavFrame.Navigate(typeof(EditorPage));
                     break;
-                case "export":
-                    NavFrame.Navigate(typeof(ExportPage));
-                    break;
                 default:
                     throw new InvalidOperationException($"Unknown navigation item tag: {item.Tag}");
             }

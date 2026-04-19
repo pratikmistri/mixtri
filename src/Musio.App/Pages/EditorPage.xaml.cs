@@ -1,5 +1,7 @@
+using System.ComponentModel;
 using System.Globalization;
 using Microsoft.Graphics.Canvas;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Musio.Core.Capture;
@@ -13,6 +15,7 @@ namespace Musio_App.Pages;
 public sealed partial class EditorPage : Page
 {
     public EditorViewModel ViewModel { get; }
+    public ExportViewModel ExportVM { get; }
     private VideoFrameReader? _frameReader;
     private PreviewRenderer? _previewRenderer;
     private bool _compositorReady;
@@ -21,6 +24,7 @@ public sealed partial class EditorPage : Page
     public EditorPage()
     {
         ViewModel = new EditorViewModel();
+        ExportVM = new ExportViewModel();
         InitializeComponent();
 
         Preview.Duration = ViewModel.Model.EffectiveDuration;
@@ -58,6 +62,10 @@ public sealed partial class EditorPage : Page
                 _ = InitializePreviewAsync();
             });
         };
+
+        // Export flyout state management
+        ExportFlyout.Opened += ExportFlyout_Opened;
+        ExportVM.PropertyChanged += ExportVM_PropertyChanged;
     }
 
     private async Task InitializePreviewAsync()
@@ -339,5 +347,97 @@ public sealed partial class EditorPage : Page
         }
         catch { }
         return 1.0f;
+    }
+
+    // --- Export flyout ---
+
+    private async void ExportFlyout_Opened(object? sender, object e)
+    {
+        if (ExportVM.IsExporting)
+        {
+            ShowExportingState();
+            return;
+        }
+
+        if (ExportVM.ExportSucceeded)
+        {
+            ShowExportedState();
+            return;
+        }
+
+        if (ExportVM.ExportFailed)
+        {
+            ShowErrorState();
+            return;
+        }
+
+        // Start new export
+        ExportVM.PrepareForExport();
+        if (!ExportVM.ExportCommand.CanExecute(null))
+        {
+            ExportFlyout.Hide();
+            EditorInfoBar.Message = "No recording available to export.";
+            EditorInfoBar.Severity = InfoBarSeverity.Warning;
+            EditorInfoBar.IsOpen = true;
+            return;
+        }
+
+        ShowExportingState();
+        await ExportVM.ExportCommand.ExecuteAsync(null);
+    }
+
+    private void ExportVM_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ExportViewModel.IsExporting) && !ExportVM.IsExporting)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (ExportVM.ExportSucceeded)
+                    ShowExportedState();
+                else if (ExportVM.ExportFailed)
+                    ShowErrorState();
+                else
+                    ExportFlyout.Hide(); // Cancelled
+            });
+        }
+    }
+
+    private void ShowExportingState()
+    {
+        ExportingPanel.Visibility = Visibility.Visible;
+        ExportedPanel.Visibility = Visibility.Collapsed;
+        ExportErrorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowExportedState()
+    {
+        ExportingPanel.Visibility = Visibility.Collapsed;
+        ExportedPanel.Visibility = Visibility.Visible;
+        ExportErrorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowErrorState()
+    {
+        ExportingPanel.Visibility = Visibility.Collapsed;
+        ExportedPanel.Visibility = Visibility.Collapsed;
+        ExportErrorPanel.Visibility = Visibility.Visible;
+    }
+
+    private void OpenFileLocation_Click(object sender, RoutedEventArgs e)
+    {
+        ExportVM.OpenOutputFolderCommand.Execute(null);
+    }
+
+    private void CancelExport_Click(object sender, RoutedEventArgs e)
+    {
+        ExportVM.CancelExportCommand.Execute(null);
+    }
+
+    private void CloseFlyout_Click(object sender, RoutedEventArgs e)
+    {
+        ExportFlyout.Hide();
+        // Reset state so next open starts a fresh export
+        ExportVM.PrepareForExport();
+        ShowExportingState();
     }
 }

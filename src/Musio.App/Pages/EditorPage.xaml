@@ -167,6 +167,109 @@
                     Command="{x:Bind ViewModel.ApplySpeedCommand}"
                     Content="Apply"
                     ToolTipService.ToolTip="Apply speed change to selected segment" />
+
+                <AppBarSeparator />
+
+                <Button
+                    x:Name="ExportButton"
+                    Padding="8,6"
+                    Style="{ThemeResource AccentButtonStyle}"
+                    ToolTipService.ToolTip="Export recording">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE898;" />
+                        <TextBlock Text="Export" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="ExportFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="16" Padding="8">
+                                <!-- Exporting state -->
+                                <StackPanel
+                                    x:Name="ExportingPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Visible">
+                                    <ProgressRing
+                                        Width="80"
+                                        Height="80"
+                                        IsIndeterminate="False"
+                                        Maximum="100"
+                                        Value="{x:Bind ExportVM.ProgressPercent, Mode=OneWay}" />
+                                    <TextBlock
+                                        FontSize="14"
+                                        TextAlignment="Center"
+                                        Text="Exporting…" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CancelExport_Click"
+                                        Content="Cancel" />
+                                </StackPanel>
+
+                                <!-- Success state -->
+                                <StackPanel
+                                    x:Name="ExportedPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                        Glyph="&#xE73E;" />
+                                    <TextBlock
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Exported!" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        IsTextSelectionEnabled="True"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ExportedFilePath, Mode=OneWay}" />
+                                    <StackPanel
+                                        HorizontalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                        <Button
+                                            Click="OpenFileLocation_Click"
+                                            Style="{ThemeResource AccentButtonStyle}"
+                                            Content="Open file location" />
+                                        <Button
+                                            Click="CloseFlyout_Click"
+                                            Content="Close" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Error state -->
+                                <StackPanel
+                                    x:Name="ExportErrorPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                        Glyph="&#xE783;" />
+                                    <TextBlock
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Export Failed" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ErrorMessage, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CloseFlyout_Click"
+                                        Content="Close" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
             </StackPanel>
         </Grid>
 
