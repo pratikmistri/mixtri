@@ -2,6 +2,8 @@ using System.Globalization;
 using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.Capture;
+using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio_App.Services;
 using Musio_App.ViewModels;
@@ -12,6 +14,8 @@ public sealed partial class EditorPage : Page
 {
     public EditorViewModel ViewModel { get; }
     private VideoFrameReader? _frameReader;
+    private PreviewRenderer? _previewRenderer;
+    private bool _compositorReady;
     private int _lastRenderedFrameIndex = -1;
 
     public EditorPage()
@@ -19,11 +23,10 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         InitializeComponent();
 
-        // Set initial duration on preview
         Preview.Duration = ViewModel.Model.EffectiveDuration;
 
-        // Try to load recorded frames for preview
-        LoadFrameReader();
+        // Load frames and initialize compositor with cursor effects
+        _ = InitializePreviewAsync();
 
         // Sync playhead: when timeline scrubs, update preview
         Timeline.RegisterPropertyChangedCallback(
@@ -45,7 +48,6 @@ public sealed partial class EditorPage : Page
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
 
-        // When a new project is loaded, re-bind timeline and preview
         ViewModel.ModelReloaded += (_, _) =>
         {
             DispatcherQueue.TryEnqueue(() =>
@@ -53,25 +55,78 @@ public sealed partial class EditorPage : Page
                 Preview.Duration = ViewModel.Model.EffectiveDuration;
                 Timeline.Refresh();
                 ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
-                LoadFrameReader();
+                _ = InitializePreviewAsync();
             });
         };
-
-        // Show first frame
-        _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
 
-    private void LoadFrameReader()
+    private async Task InitializePreviewAsync()
     {
         _frameReader?.Dispose();
+        _previewRenderer?.Dispose();
         _frameReader = null;
+        _previewRenderer = null;
+        _compositorReady = false;
         _lastRenderedFrameIndex = -1;
 
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
             return;
 
-        _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, project.Fps > 0 ? project.Fps : 30);
+        int fps = project.Fps > 0 ? project.Fps : 30;
+        _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
+        if (_frameReader is null)
+            return;
+
+        // Load mouse data for cursor smoothing + click animations
+        MouseRecordingData? mouseData = null;
+        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
+        {
+            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
+            catch { /* no cursor data — still show raw frames */ }
+        }
+
+        if (mouseData is null)
+        {
+            // No cursor data — just show raw frames
+            _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
+            return;
+        }
+
+        // Build composition config with cursor effects enabled
+        var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+        config = config with
+        {
+            OutputFps = Math.Min(fps, 30),
+            SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
+            SmoothingStrength = SmoothingStrength.Smooth,
+            Cursor = new CursorStyle
+            {
+                ClickAnimationEnabled = true,
+                ClickHighlightEnabled = true,
+                AutoHideEnabled = true,
+            },
+            Zoom = new AutoZoomConfig { Enabled = true },
+        };
+
+        try
+        {
+            _previewRenderer = new PreviewRenderer();
+            await _previewRenderer.InitializeAsync(
+                mouseData, config,
+                project.Width > 0 ? project.Width : 1920,
+                project.Height > 0 ? project.Height : 1080,
+                project.Duration);
+            _compositorReady = true;
+        }
+        catch
+        {
+            // Compositor init failed — fall back to raw frames
+            _previewRenderer?.Dispose();
+            _previewRenderer = null;
+        }
+
+        _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
 
     private async Task UpdatePreviewFrameAsync(TimeSpan position)
@@ -85,17 +140,36 @@ public sealed partial class EditorPage : Page
         var bitmap = await _frameReader.LoadFrameAtTimeAsync(position);
         if (bitmap is null) return;
 
-        // Create a render target from the bitmap for the preview canvas
-        var device = CanvasDevice.GetSharedDevice();
-        var renderTarget = new CanvasRenderTarget(device,
-            bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
-        using (var ds = renderTarget.CreateDrawingSession())
+        try
         {
-            ds.DrawImage(bitmap);
-        }
-        bitmap.Dispose();
+            if (_compositorReady && _previewRenderer is not null)
+            {
+                // Run frame through compositor — applies cursor, zoom, background
+                var composed = _previewRenderer.RenderPreviewFrame(bitmap, frameIndex);
+                bitmap.Dispose();
 
-        Preview.SetFrame(renderTarget);
+                if (composed is not null)
+                {
+                    Preview.SetFrame(composed);
+                    return;
+                }
+            }
+
+            // Fallback: show raw frame without effects
+            var device = CanvasDevice.GetSharedDevice();
+            var renderTarget = new CanvasRenderTarget(device,
+                bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+            using (var ds = renderTarget.CreateDrawingSession())
+            {
+                ds.DrawImage(bitmap);
+            }
+            bitmap.Dispose();
+            Preview.SetFrame(renderTarget);
+        }
+        catch
+        {
+            bitmap.Dispose();
+        }
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
