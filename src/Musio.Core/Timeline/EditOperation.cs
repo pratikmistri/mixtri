@@ -200,6 +200,7 @@ public class SplitOperation : IEditOperation
 {
     private readonly TimeSpan _splitPosition;
     private int _splitClipIndex = -1;
+    private bool _createdDefaultClip;
 
     public string Description => "Split";
 
@@ -210,14 +211,39 @@ public class SplitOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        // If no clips exist, create a default clip covering the full timeline
+        if (model.Clips.Count == 0)
+        {
+            model.Clips.Add(new TimelineClip(TimeSpan.Zero, model.Duration, "Clip 1"));
+            _createdDefaultClip = true;
+        }
+
         for (int i = 0; i < model.Clips.Count; i++)
         {
             var clip = model.Clips[i];
             if (_splitPosition > clip.Start && _splitPosition < clip.End)
             {
                 _splitClipIndex = i;
-                var first = new TimelineClip(clip.Start, _splitPosition, clip.Label);
-                var second = new TimelineClip(_splitPosition, clip.End, clip.Label);
+                var first = new TimelineClip(clip.Start, _splitPosition, clip.Label)
+                {
+                    SpeedFactor = clip.SpeedFactor,
+                    SourceStart = clip.SourceStart,
+                };
+
+                // Compute second clip's SourceStart for speed-adjusted clips
+                TimeSpan? secondSourceStart = null;
+                if (clip.SpeedFactor != 1.0 || clip.SourceStart.HasValue)
+                {
+                    secondSourceStart = clip.EffectiveSourceStart + TimeSpan.FromTicks(
+                        (long)((_splitPosition - clip.Start).Ticks * clip.SpeedFactor));
+                }
+
+                var second = new TimelineClip(_splitPosition, clip.End, clip.Label)
+                {
+                    SpeedFactor = clip.SpeedFactor,
+                    SourceStart = secondSourceStart,
+                };
+
                 model.Clips[i] = first;
                 model.Clips.Insert(i + 1, second);
                 return;
@@ -232,9 +258,19 @@ public class SplitOperation : IEditOperation
 
         var first = model.Clips[_splitClipIndex];
         var second = model.Clips[_splitClipIndex + 1];
-        var merged = new TimelineClip(first.Start, second.End, first.Label);
+        var merged = new TimelineClip(first.Start, second.End, first.Label)
+        {
+            SpeedFactor = first.SpeedFactor,
+            SourceStart = first.SourceStart,
+        };
         model.Clips[_splitClipIndex] = merged;
         model.Clips.RemoveAt(_splitClipIndex + 1);
+
+        if (_createdDefaultClip)
+        {
+            model.Clips.Clear();
+            _createdDefaultClip = false;
+        }
     }
 }
 
@@ -541,5 +577,214 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
         model.ZoomKeyframes[index] = _previousKeyframe;
+    }
+}
+
+public class ApplyClipSpeedOperation : IEditOperation
+{
+    private readonly int _clipIndex;
+    private readonly double _newSpeed;
+
+    private List<TimelineClip> _previousClips = [];
+    private List<ZoomKeyframe> _previousKeyframes = [];
+    private List<SpeedSegment> _previousSpeedSegments = [];
+    private TimeSpan _previousDuration;
+    private TimeSpan _previousTrimEnd;
+    private TimeSpan _previousPlayhead;
+
+    public string Description => "Change Speed";
+
+    public ApplyClipSpeedOperation(int clipIndex, double newSpeed)
+    {
+        _clipIndex = clipIndex;
+        _newSpeed = newSpeed;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _previousClips = model.Clips.Select(c => new TimelineClip(c.Start, c.End, c.Label)
+            { SpeedFactor = c.SpeedFactor, SourceStart = c.SourceStart }).ToList();
+        _previousKeyframes = [.. model.ZoomKeyframes];
+        _previousSpeedSegments = [.. model.SpeedSegments];
+        _previousDuration = model.Duration;
+        _previousTrimEnd = model.TrimEnd;
+        _previousPlayhead = model.PlayheadPosition;
+
+        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
+
+        var clip = model.Clips[_clipIndex];
+        var oldEnd = clip.End;
+        var oldOutputDuration = clip.End - clip.Start;
+
+        // Source duration = output duration * current speed factor
+        double sourceDurationTicks = oldOutputDuration.Ticks * clip.SpeedFactor;
+        var newOutputDuration = TimeSpan.FromTicks((long)(sourceDurationTicks / _newSpeed));
+        var newEnd = clip.Start + newOutputDuration;
+        var delta = oldOutputDuration - newOutputDuration;
+
+        model.Clips[_clipIndex] = new TimelineClip(clip.Start, newEnd, clip.Label)
+        {
+            SpeedFactor = _newSpeed,
+            SourceStart = clip.SourceStart ?? clip.Start,
+        };
+
+        // Shift subsequent clips
+        for (int i = _clipIndex + 1; i < model.Clips.Count; i++)
+        {
+            var c = model.Clips[i];
+            model.Clips[i] = new TimelineClip(c.Start - delta, c.End - delta, c.Label)
+            {
+                SpeedFactor = c.SpeedFactor,
+                SourceStart = c.SourceStart,
+            };
+        }
+
+        // Scale zoom keyframes within the clip, shift those after
+        for (int i = model.ZoomKeyframes.Count - 1; i >= 0; i--)
+        {
+            var kf = model.ZoomKeyframes[i];
+            if (kf.Timestamp >= oldEnd)
+            {
+                model.ZoomKeyframes[i] = kf with { Timestamp = kf.Timestamp - delta };
+            }
+            else if (kf.Timestamp > clip.Start && kf.Timestamp < oldEnd)
+            {
+                var offsetInClip = kf.Timestamp - clip.Start;
+                var scaledOffset = TimeSpan.FromTicks(
+                    (long)(offsetInClip.Ticks * (newOutputDuration.Ticks / (double)oldOutputDuration.Ticks)));
+                model.ZoomKeyframes[i] = kf with { Timestamp = clip.Start + scaledOffset };
+            }
+        }
+
+        // Update speed segments
+        var newSpeedSegs = new List<SpeedSegment>();
+        foreach (var seg in model.SpeedSegments)
+        {
+            if (seg.End <= clip.Start)
+                newSpeedSegs.Add(seg);
+            else if (seg.Start >= oldEnd)
+                newSpeedSegs.Add(new SpeedSegment(seg.Start - delta, seg.End - delta, seg.Speed));
+        }
+        if (Math.Abs(_newSpeed - 1.0) > 0.001)
+            newSpeedSegs.Add(new SpeedSegment(clip.Start, newEnd, _newSpeed));
+        newSpeedSegs.Sort((a, b) => a.Start.CompareTo(b.Start));
+        model.SpeedSegments.Clear();
+        model.SpeedSegments.AddRange(newSpeedSegs);
+
+        model.Duration -= delta;
+        if (model.TrimEnd > model.Duration)
+            model.TrimEnd = model.Duration;
+
+        if (model.PlayheadPosition > oldEnd)
+            model.PlayheadPosition -= delta;
+        else if (model.PlayheadPosition > clip.Start && model.PlayheadPosition < oldEnd)
+        {
+            var offset = model.PlayheadPosition - clip.Start;
+            var scaled = TimeSpan.FromTicks(
+                (long)(offset.Ticks * (newOutputDuration.Ticks / (double)oldOutputDuration.Ticks)));
+            model.PlayheadPosition = clip.Start + scaled;
+        }
+        if (model.PlayheadPosition > model.Duration)
+            model.PlayheadPosition = model.Duration;
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Clips.Clear();
+        model.Clips.AddRange(_previousClips);
+        model.ZoomKeyframes.Clear();
+        model.ZoomKeyframes.AddRange(_previousKeyframes);
+        model.SpeedSegments.Clear();
+        model.SpeedSegments.AddRange(_previousSpeedSegments);
+        model.Duration = _previousDuration;
+        model.TrimEnd = _previousTrimEnd;
+        model.PlayheadPosition = _previousPlayhead;
+    }
+}
+
+public class RippleDeleteOperation : IEditOperation
+{
+    private readonly int _clipIndex;
+
+    private List<TimelineClip> _previousClips = [];
+    private List<ZoomKeyframe> _previousKeyframes = [];
+    private List<SpeedSegment> _previousSpeedSegments = [];
+    private TimeSpan _previousDuration;
+    private TimeSpan _previousTrimEnd;
+    private TimeSpan _previousPlayhead;
+
+    public string Description => "Cut";
+
+    public RippleDeleteOperation(int clipIndex)
+    {
+        _clipIndex = clipIndex;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _previousClips = model.Clips.Select(c => new TimelineClip(c.Start, c.End, c.Label)
+            { SpeedFactor = c.SpeedFactor, SourceStart = c.SourceStart }).ToList();
+        _previousKeyframes = [.. model.ZoomKeyframes];
+        _previousSpeedSegments = [.. model.SpeedSegments];
+        _previousDuration = model.Duration;
+        _previousTrimEnd = model.TrimEnd;
+        _previousPlayhead = model.PlayheadPosition;
+
+        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
+
+        var clip = model.Clips[_clipIndex];
+        var clipDuration = clip.End - clip.Start;
+
+        model.Clips.RemoveAt(_clipIndex);
+
+        for (int i = _clipIndex; i < model.Clips.Count; i++)
+        {
+            var c = model.Clips[i];
+            model.Clips[i] = new TimelineClip(c.Start - clipDuration, c.End - clipDuration, c.Label)
+            {
+                SpeedFactor = c.SpeedFactor,
+                SourceStart = c.SourceStart,
+            };
+        }
+
+        for (int i = model.ZoomKeyframes.Count - 1; i >= 0; i--)
+        {
+            var kf = model.ZoomKeyframes[i];
+            if (kf.Timestamp >= clip.End)
+                model.ZoomKeyframes[i] = kf with { Timestamp = kf.Timestamp - clipDuration };
+            else if (kf.Timestamp >= clip.Start && kf.Timestamp < clip.End)
+                model.ZoomKeyframes.RemoveAt(i);
+        }
+
+        var newSpeedSegs = new List<SpeedSegment>();
+        foreach (var seg in model.SpeedSegments)
+        {
+            if (seg.End <= clip.Start)
+                newSpeedSegs.Add(seg);
+            else if (seg.Start >= clip.End)
+                newSpeedSegs.Add(new SpeedSegment(seg.Start - clipDuration, seg.End - clipDuration, seg.Speed));
+        }
+        model.SpeedSegments.Clear();
+        model.SpeedSegments.AddRange(newSpeedSegs);
+
+        model.Duration -= clipDuration;
+        if (model.TrimEnd > model.Duration)
+            model.TrimEnd = model.Duration;
+
+        model.PlayheadPosition = TimeSpan.FromTicks(
+            Math.Min(clip.Start.Ticks, Math.Max(0, model.Duration.Ticks)));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Clips.Clear();
+        model.Clips.AddRange(_previousClips);
+        model.ZoomKeyframes.Clear();
+        model.ZoomKeyframes.AddRange(_previousKeyframes);
+        model.SpeedSegments.Clear();
+        model.SpeedSegments.AddRange(_previousSpeedSegments);
+        model.Duration = _previousDuration;
+        model.TrimEnd = _previousTrimEnd;
+        model.PlayheadPosition = _previousPlayhead;
     }
 }

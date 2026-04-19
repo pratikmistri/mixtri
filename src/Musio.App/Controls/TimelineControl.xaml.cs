@@ -39,6 +39,34 @@ public sealed partial class TimelineControl : UserControl
     private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate }
     private DragMode _dragMode = DragMode.None;
 
+    // Video clip selection
+    private int? _selectedClipIndex;
+
+    /// <summary>Raised when a video clip is selected or deselected (null = deselected).</summary>
+    public event EventHandler<int?>? VideoClipSelected;
+
+    /// <summary>The index of the currently selected video clip, or null.</summary>
+    public int? SelectedClipIndex
+    {
+        get => _selectedClipIndex;
+        set
+        {
+            if (_selectedClipIndex == value) return;
+            _selectedClipIndex = value;
+            VideoTrackCanvas?.Invalidate();
+        }
+    }
+
+    /// <summary>Clears the video clip selection.</summary>
+    public void ClearClipSelection()
+    {
+        if (_selectedClipIndex is not null)
+        {
+            SelectedClipIndex = null;
+            VideoClipSelected?.Invoke(this, null);
+        }
+    }
+
     // Zoom segment selection & drag state
     private string? _selectedZoomKeyframeId;
     private double _zoomDragStartX = double.NaN;
@@ -59,6 +87,8 @@ public sealed partial class TimelineControl : UserControl
     private static readonly Color RulerTextColor = Color.FromArgb(255, 200, 200, 200);
     private static readonly Color VideoTrackBackground = Color.FromArgb(255, 30, 30, 30);
     private static readonly Color VideoClipColor = Color.FromArgb(255, 60, 120, 200);
+    private static readonly Color VideoClipSelectedColor = Color.FromArgb(255, 90, 155, 235);
+    private static readonly Color VideoClipSelectedBorder = Color.FromArgb(255, 180, 210, 255);
     private static readonly Color SpeedUpOverlayColor = Color.FromArgb(200, 230, 160, 50);
     private static readonly Color SlowDownOverlayColor = Color.FromArgb(200, 60, 130, 230);
     private static readonly Color TrimHandleColor = Color.FromArgb(255, 255, 255, 255);
@@ -266,12 +296,35 @@ public sealed partial class TimelineControl : UserControl
             return;
 
         // Draw clips
-        foreach (var clip in model.Clips)
+        for (int idx = 0; idx < model.Clips.Count; idx++)
         {
+            var clip = model.Clips[idx];
             float x1 = (float)TimeToX(clip.Start);
             float x2 = (float)TimeToX(clip.End);
             if (x2 < 0 || x1 > w) continue;
-            ds.FillRectangle(x1, 4, x2 - x1, h - 8, VideoClipColor);
+
+            bool isSelected = idx == _selectedClipIndex;
+            var clipColor = isSelected ? VideoClipSelectedColor : VideoClipColor;
+            ds.FillRectangle(x1, 4, x2 - x1, h - 8, clipColor);
+
+            if (isSelected)
+                ds.DrawRectangle(x1, 4, x2 - x1, h - 8, VideoClipSelectedBorder, 2f);
+
+            // Speed indicator for clips with non-default SpeedFactor
+            if (Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
+            {
+                var segColor = clip.SpeedFactor > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
+                ds.FillRectangle(x1, 4, x2 - x1, h - 8, segColor);
+
+                string speedLabel = $"{clip.SpeedFactor:0.##}x";
+                ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, Colors.White,
+                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                    {
+                        FontSize = 12,
+                        FontFamily = "Segoe UI",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                    });
+            }
         }
 
         // If no clips, draw the full duration as one clip
@@ -936,8 +989,31 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
-        // Otherwise, move playhead
-        PlayheadPosition = XToTime(pos.X);
+        // Hit-test clips for selection
+        var clickTime = XToTime(pos.X);
+        int? hitClipIndex = null;
+        for (int i = 0; i < model.Clips.Count; i++)
+        {
+            var clip = model.Clips[i];
+            if (clickTime >= clip.Start && clickTime < clip.End)
+            {
+                hitClipIndex = i;
+                break;
+            }
+        }
+
+        if (hitClipIndex is not null)
+        {
+            SelectedClipIndex = hitClipIndex;
+            VideoClipSelected?.Invoke(this, hitClipIndex);
+        }
+        else if (_selectedClipIndex is not null)
+        {
+            ClearClipSelection();
+        }
+
+        // Always move playhead on click
+        PlayheadPosition = clickTime;
         _dragMode = DragMode.Playhead;
         canvas.CapturePointer(e.Pointer);
     }

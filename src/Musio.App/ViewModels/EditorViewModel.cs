@@ -36,6 +36,9 @@ public partial class EditorViewModel : ObservableObject
     private double _selectedSpeed = 1.0;
 
     [ObservableProperty]
+    private int? _selectedClipIndex;
+
+    [ObservableProperty]
     private bool _canUndo;
 
     [ObservableProperty]
@@ -68,11 +71,10 @@ public partial class EditorViewModel : ObservableObject
     [RelayCommand]
     private void ApplySpeed()
     {
-        var start = _model.TrimStart;
-        var end = _model.TrimEnd > TimeSpan.Zero ? _model.TrimEnd : _model.Duration;
-        if (end <= start) return;
+        if (SelectedClipIndex is not { } clipIndex) return;
+        if (clipIndex < 0 || clipIndex >= _model.Clips.Count) return;
 
-        var operation = new SpeedChangeOperation(start, end, SelectedSpeed);
+        var operation = new ApplyClipSpeedOperation(clipIndex, SelectedSpeed);
         _undoRedoManager.Execute(operation);
     }
 
@@ -89,22 +91,40 @@ public partial class EditorViewModel : ObservableObject
     [RelayCommand]
     private void DeleteSelected()
     {
+        if (_model.Clips.Count == 0) return;
+
+        // If a clip is selected, delete it
+        if (SelectedClipIndex is { } selectedIdx && selectedIdx >= 0 && selectedIdx < _model.Clips.Count)
+        {
+            var operation = new DeleteSegmentOperation(selectedIdx);
+            _undoRedoManager.Execute(operation);
+            SelectedClipIndex = null;
+            return;
+        }
+
+        // Otherwise delete clip at playhead
         var playhead = _model.PlayheadPosition;
         int clipIndex = _model.Clips.FindIndex(c => playhead >= c.Start && playhead < c.End);
         if (clipIndex < 0) return;
 
-        var operation = new DeleteSegmentOperation(clipIndex);
-        _undoRedoManager.Execute(operation);
+        var op = new DeleteSegmentOperation(clipIndex);
+        _undoRedoManager.Execute(op);
     }
 
     [RelayCommand]
     private void CutSelection()
     {
-        var start = _model.TrimStart;
-        var end = _model.TrimEnd > TimeSpan.Zero ? _model.TrimEnd : _model.Duration;
-        if (end <= start) return;
+        // If no clips exist, create a default clip first
+        if (_model.Clips.Count == 0)
+        {
+            _model.Clips.Add(new TimelineClip(TimeSpan.Zero, _model.Duration, "Clip 1"));
+        }
 
-        var operation = new CutOperation(start, end);
+        var playhead = _model.PlayheadPosition;
+        int clipIndex = _model.Clips.FindIndex(c => playhead >= c.Start && playhead < c.End);
+        if (clipIndex < 0) return;
+
+        var operation = new RippleDeleteOperation(clipIndex);
         _undoRedoManager.Execute(operation);
     }
 

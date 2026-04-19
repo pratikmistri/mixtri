@@ -61,6 +61,8 @@ public sealed partial class EditorPage : Page
             {
                 _timelineMapper = null;
                 Timeline.ClearZoomSelection();
+                Timeline.ClearClipSelection();
+                UpdateSpeedPanelVisibility();
                 Preview.Duration = GetMappedDuration();
                 Timeline.Refresh();
                 ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -74,6 +76,9 @@ public sealed partial class EditorPage : Page
         Timeline.ZoomSegmentResized += OnZoomSegmentResized;
         Timeline.ZoomSegmentCreated += OnZoomSegmentCreated;
         Timeline.ZoomSegmentRemoveRequested += OnZoomSegmentRemoveRequested;
+
+        // Video clip selection events
+        Timeline.VideoClipSelected += OnVideoClipSelected;
 
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
@@ -310,9 +315,43 @@ public sealed partial class EditorPage : Page
         DispatcherQueue.TryEnqueue(() =>
         {
             Timeline.ClearZoomSelection();
+            Timeline.ClearClipSelection();
             UpdateZoomPanelVisibility();
+            UpdateSpeedPanelVisibility();
             InvalidatePreview();
         });
+    }
+
+    private void OnVideoClipSelected(object? sender, int? clipIndex)
+    {
+        ViewModel.SelectedClipIndex = clipIndex;
+        UpdateSpeedPanelVisibility();
+
+        // If a clip is selected and has a non-default speed, update the combo to match
+        if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
+        {
+            var clip = ViewModel.Model.Clips[idx];
+            if (Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
+            {
+                for (int i = 0; i < SpeedComboBox.Items.Count; i++)
+                {
+                    if (SpeedComboBox.Items[i] is ComboBoxItem item &&
+                        double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
+                        Math.Abs(s - clip.SpeedFactor) < 0.01)
+                    {
+                        SpeedComboBox.SelectedIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    private void UpdateSpeedPanelVisibility()
+    {
+        if (SpeedPanel is null) return;
+        bool hasClipSelection = ViewModel.SelectedClipIndex is not null;
+        SpeedPanel.Visibility = hasClipSelection ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)

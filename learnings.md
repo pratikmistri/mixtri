@@ -225,3 +225,36 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 1. **Moved minimize logic from `ShowRecordingOverlay` to a new `StartRecordButton_Click` handler with a 600ms delay** — Worked. Changed the Start Recording button from `Command="{x:Bind ViewModel.StartRecordingCommand}"` to `Click="StartRecordButton_Click"`. The click handler minimizes the main window first, waits 600ms for the animation to complete, then calls `ViewModel.StartRecordingCommand.Execute(null)`. This ensures the minimize animation is never captured in the recording. ✅
 
 **What worked:** Decoupling minimize from the `ShowRecordingOverlay` method (which fires after recording starts) and moving it to a pre-recording click handler with an animation delay. The `ShowRecordingOverlay` now only handles the overlay and region border.
+
+---
+
+## Timeline Editor — Video Clip Selection, Speed Width, Split/Cut Fixes
+
+**Feature/area:** Timeline editor (TimelineControl, EditorPage, EditorViewModel, EditOperation, TimelineMapper)
+
+**Approaches tried:**
+
+1. **Video clip selection via hit-testing in `VideoTrack_PointerPressed`** — Worked. Added `SelectedClipIndex` property and `VideoClipSelected` event to `TimelineControl`. Clips are hit-tested by converting click X to time and checking against clip `Start/End` ranges. Selected clip is highlighted with a brighter fill and white border. ✅
+2. **Speed panel conditional visibility** — Worked. Wrapped speed controls in a `SpeedPanel` StackPanel (initially `Collapsed`). `UpdateSpeedPanelVisibility()` toggles based on `SelectedClipIndex`. Speed ComboBox updates to match selected clip's current SpeedFactor. ✅
+3. **Speed changes clip width via `ApplyClipSpeedOperation`** — Worked. New operation adjusts clip `End` based on speed, shifts subsequent clips/zoom keyframes/speed segments, and updates `Duration`. Full state snapshot for undo. Added `SpeedFactor` and `SourceStart` properties to `TimelineClip` record for source-time mapping. ✅
+4. **Split fix: create default clip if `Clips` is empty** — Worked. `SplitOperation.Execute` now creates a `[0, Duration]` default clip when `model.Clips.Count == 0` before splitting. Undo removes the default clip if it was created. ✅
+5. **Cut fix: `RippleDeleteOperation` at playhead** — Worked. Changed `CutSelection()` to find the clip at the playhead position and remove it with `RippleDeleteOperation`, which also shifts subsequent clips to close the gap. ✅
+6. **TimelineMapper: clips as kept regions** — Worked. When `Clips` exist, `BuildFromClips()` creates output segments directly from clip data (using `EffectiveSourceStart` and `SpeedFactor`). When no clips exist, falls back to original trim-range logic. Fixed `IsDeleted()` to check if source time is outside any clip's source range. ✅
+
+**What worked:**
+- Adding `SpeedFactor` (default 1.0) and `SourceStart` (nullable, defaults to `Start`) to `TimelineClip` preserves backward compatibility — all existing `new TimelineClip(start, end, label)` calls continue to work.
+- Full state snapshot (Clips, ZoomKeyframes, SpeedSegments, Duration, TrimEnd, PlayheadPosition) in both `ApplyClipSpeedOperation` and `RippleDeleteOperation` makes undo reliable.
+- Scaling zoom keyframes within sped-up clips + shifting those after maintains zoom timing consistency.
+- The mapper's two-mode approach (clips-based vs trim-range) avoids breaking the no-clips case while fixing the clips-as-kept-regions semantics.
+
+**What didn't work / pitfalls:**
+- Original `CutOperation` used `TrimStart`/`TrimEnd` as the cut range, which defaulted to the full timeline — cutting everything instead of just a segment.
+- Original `SplitOperation` silently did nothing when `Clips` was empty (no error, just no-op).
+- `TimelineMapper` originally treated Clips as *deleted* regions (inverted semantics) — any content inside a clip was skipped in output. This contradicted the editor's visual representation where clips are drawn as *kept* content.
+- Mixing source-time and output-time in the same model fields is dangerous. The solution keeps positions in output time after speed changes, with `SourceStart`/`SpeedFactor` providing the mapping back to source time for the mapper.
+
+**Key design decisions:**
+- Speed controls only appear when a video clip is selected (split first, then apply speed).
+- Cut (Ctrl+X) = ripple delete (removes clip + closes gap). Delete = simple removal.
+- `CutSelection` auto-creates a default clip if none exist, so Ctrl+X always works.
+

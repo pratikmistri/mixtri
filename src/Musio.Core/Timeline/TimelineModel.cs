@@ -34,7 +34,24 @@ public class TimelineModel
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
 }
 
-public record TimelineClip(TimeSpan Start, TimeSpan End, string Label);
+public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)
+{
+    /// <summary>Speed factor applied to this clip. 1.0 = normal, 2.0 = 2x fast, 0.5 = half speed.</summary>
+    public double SpeedFactor { get; init; } = 1.0;
+
+    /// <summary>
+    /// Original source time position for the first frame of this clip.
+    /// Used by the mapper when speed changes have shifted clip boundaries.
+    /// When null, defaults to Start (no speed adjustment has occurred).
+    /// </summary>
+    public TimeSpan? SourceStart { get; init; }
+
+    /// <summary>The effective source start position.</summary>
+    public TimeSpan EffectiveSourceStart => SourceStart ?? Start;
+
+    /// <summary>Source duration (how much source content this clip represents).</summary>
+    public TimeSpan SourceDuration => TimeSpan.FromTicks((long)((End - Start).Ticks * SpeedFactor));
+}
 
 public record ZoomKeyframe
 {

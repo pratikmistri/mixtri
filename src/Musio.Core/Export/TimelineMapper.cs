@@ -67,21 +67,24 @@ public class TimelineMapper
     }
 
     /// <summary>
-    /// Checks if a given source time (in seconds) falls within a deleted/cut segment.
-    /// Deleted segments are timeline clips (cuts) that should be skipped.
+    /// Checks if a given source time (in seconds) falls within a gap between kept clips.
+    /// When clips exist, only content within clips is kept; everything else is deleted.
+    /// When no clips exist, nothing is deleted (full video plays).
     /// </summary>
     public bool IsDeleted(double sourceTimeSeconds)
     {
-        // Clips in the timeline represent cut/removed regions
+        if (_timeline.Clips.Count == 0)
+            return false;
+
+        // Content is kept only if it falls within a clip's source range
         foreach (var clip in _timeline.Clips)
         {
-            if (sourceTimeSeconds >= clip.Start.TotalSeconds &&
-                sourceTimeSeconds < clip.End.TotalSeconds)
-            {
-                return true;
-            }
+            double sourceStart = clip.EffectiveSourceStart.TotalSeconds;
+            double sourceEnd = sourceStart + clip.SourceDuration.TotalSeconds;
+            if (sourceTimeSeconds >= sourceStart && sourceTimeSeconds < sourceEnd)
+                return false;
         }
-        return false;
+        return true;
     }
 
     /// <summary>
@@ -104,6 +107,44 @@ public class TimelineMapper
     /// </summary>
     private List<OutputSegment> BuildOutputSegments()
     {
+        // When clips exist, use them directly as kept segments
+        if (_timeline.Clips.Count > 0)
+            return BuildFromClips();
+
+        return BuildFromTrimRange();
+    }
+
+    /// <summary>
+    /// Builds output segments from explicit clips with their SpeedFactor.
+    /// Each clip defines an output segment; gaps between clips are skipped.
+    /// </summary>
+    private List<OutputSegment> BuildFromClips()
+    {
+        var result = new List<OutputSegment>();
+        foreach (var clip in _timeline.Clips.OrderBy(c => c.Start))
+        {
+            double outputDuration = (clip.End - clip.Start).TotalSeconds;
+            if (outputDuration <= 0) continue;
+
+            double sourceStart = clip.EffectiveSourceStart.TotalSeconds;
+            double sourceDuration = outputDuration * clip.SpeedFactor;
+
+            result.Add(new OutputSegment
+            {
+                SourceStart = sourceStart,
+                SourceDuration = sourceDuration,
+                Speed = clip.SpeedFactor,
+                OutputDuration = outputDuration,
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Original approach: builds segments from trim range + speed segments (no clips).
+    /// </summary>
+    private List<OutputSegment> BuildFromTrimRange()
+    {
         double trimStartSec = _timeline.TrimStart.TotalSeconds;
         double trimEndSec = _timeline.TrimEnd.TotalSeconds;
 
@@ -112,18 +153,6 @@ public class TimelineMapper
 
         // Collect all boundary points in the trimmed range
         var boundaries = new SortedSet<double> { trimStartSec, trimEndSec };
-
-        // Add clip (cut) boundaries
-        foreach (var clip in _timeline.Clips)
-        {
-            double cs = Math.Max(clip.Start.TotalSeconds, trimStartSec);
-            double ce = Math.Min(clip.End.TotalSeconds, trimEndSec);
-            if (cs < ce)
-            {
-                boundaries.Add(cs);
-                boundaries.Add(ce);
-            }
-        }
 
         // Add speed segment boundaries
         foreach (var seg in _timeline.SpeedSegments)
@@ -148,28 +177,12 @@ public class TimelineMapper
 
             if (sourceDuration <= 0) continue;
 
-            // Check if this sub-range is deleted (inside a cut clip)
-            bool deleted = false;
-            foreach (var clip in _timeline.Clips)
-            {
-                double cs = clip.Start.TotalSeconds;
-                double ce = clip.End.TotalSeconds;
-                // Segment is fully inside a cut
-                if (segStart >= cs && segEnd <= ce)
-                {
-                    deleted = true;
-                    break;
-                }
-            }
-            if (deleted) continue;
-
             // Determine speed for this sub-range
             double speed = 1.0;
             foreach (var speedSeg in _timeline.SpeedSegments)
             {
                 double ss = speedSeg.Start.TotalSeconds;
                 double se = speedSeg.End.TotalSeconds;
-                // If this sub-range overlaps the speed segment
                 if (segStart >= ss && segEnd <= se)
                 {
                     speed = speedSeg.Speed;
