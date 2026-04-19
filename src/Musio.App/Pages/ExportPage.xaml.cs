@@ -17,14 +17,10 @@ public sealed partial class ExportPage : Page
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        // Pass window handle to ViewModel for file picker initialization
-        var window = (Application.Current as App)?.GetType()
-            .GetField("_window", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            ?.GetValue(Application.Current) as Window;
-
-        if (window is not null)
+        var mainWindow = App.Current.MainAppWindow;
+        if (mainWindow is not null)
         {
-            ViewModel.WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            ViewModel.WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
         }
     }
 }

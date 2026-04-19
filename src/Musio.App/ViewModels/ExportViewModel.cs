@@ -20,11 +20,11 @@ public partial class ExportViewModel : ObservableObject
     {
         _presetManager = new PresetManager();
         _exportEngine = new ExportEngine();
-        LoadPresets();
 
         // Pull current state from the shared ProjectService
         CurrentProject = ProjectService.Instance.CurrentProject;
         CompositionConfig = ProjectService.Instance.CurrentComposition;
+        PrefillOutputPath();
 
         ProjectService.Instance.ProjectChanged += OnProjectChanged;
     }
@@ -33,6 +33,42 @@ public partial class ExportViewModel : ObservableObject
     {
         CurrentProject = ProjectService.Instance.CurrentProject;
         CompositionConfig = ProjectService.Instance.CurrentComposition;
+        PrefillOutputPath();
+    }
+
+    /// <summary>
+    /// Auto-generates an output path from the project name into the Videos folder.
+    /// </summary>
+    private void PrefillOutputPath()
+    {
+        if (CurrentProject is null) return;
+
+        string videosDir = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+        string musioDir = Path.Combine(videosDir, "Musio");
+        Directory.CreateDirectory(musioDir);
+
+        string safeName = SanitizeFileName(CurrentProject.Name);
+        if (string.IsNullOrWhiteSpace(safeName))
+            safeName = $"recording_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+        string path = Path.Combine(musioDir, $"{safeName}.mp4");
+
+        // Ensure unique filename
+        int counter = 1;
+        while (File.Exists(path))
+        {
+            path = Path.Combine(musioDir, $"{safeName} ({counter}).mp4");
+            counter++;
+        }
+
+        OutputPath = path;
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        char[] invalid = Path.GetInvalidFileNameChars();
+        return new string(name.Select(c => Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray());
     }
 
     // --- Preset ---
