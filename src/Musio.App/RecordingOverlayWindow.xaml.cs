@@ -51,7 +51,18 @@ public sealed partial class RecordingOverlayWindow : Window
         // Exclude overlay from screen capture
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
-        // Size the overlay (device pixels, scaled for DPI)
+        // Remove DWM-drawn border and caption
+        uint colorNone = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
+        uint colorCaption = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref colorCaption, sizeof(uint));
+
+        // Strip WS_BORDER and WS_DLGFRAME from the window style
+        var style = GetWindowLong(hwnd, GWL_STYLE);
+        style &= ~(WS_BORDER | WS_DLGFRAME);
+        SetWindowLong(hwnd, GWL_STYLE, style);
+
+        // Size the overlay(device pixels, scaled for DPI)
         var dpi = GetDpiForWindow(hwnd);
         var scale = dpi / 96.0;
         int width = (int)(240 * scale);
@@ -121,10 +132,25 @@ public sealed partial class RecordingOverlayWindow : Window
     }
 
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+    private const int DWMWA_BORDER_COLOR = 34;
+    private const int DWMWA_CAPTION_COLOR = 35;
+    private const uint DWMWA_COLOR_NONE = 0xFFFFFFFE;
+    private const int GWL_STYLE = -16;
+    private const int WS_BORDER = 0x00800000;
+    private const int WS_DLGFRAME = 0x00400000;
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
 
     [DllImport("user32.dll")]
     private static extern int GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern int GetWindowLong(IntPtr hwnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern int SetWindowLong(IntPtr hwnd, int nIndex, int dwNewLong);
 }

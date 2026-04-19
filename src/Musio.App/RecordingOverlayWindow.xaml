@@ -5,8 +5,15 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Musio Recording">
 
-    <Grid Background="#E01E1E1E" Padding="14,8">
-        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+    <Grid Padding="14,8">
+        <Grid.Background>
+            <AcrylicBrush
+                TintColor="#1E1E1E"
+                TintOpacity="0.8"
+                FallbackColor="#E01E1E1E" />
+        </Grid.Background>
+
+        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Left">
             <!-- Recording indicator dot -->
             <Ellipse
                 Width="10"
@@ -24,21 +31,22 @@
                 FontFamily="Consolas"
                 VerticalAlignment="Center"
                 MinWidth="48" />
-
-            <!-- Stop button -->
-            <Button
-                x:Name="StopButton"
-                Click="Stop_Click"
-                CornerRadius="14"
-                Padding="12,5"
-                Background="#40FF3B30"
-                BorderBrush="#60FF3B30"
-                ToolTipService.ToolTip="Stop recording">
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="#FFFF3B30" />
-                    <TextBlock Text="Stop" FontSize="13" Foreground="White" />
-                </StackPanel>
-            </Button>
         </StackPanel>
+
+        <!-- Stop icon button aligned to right -->
+        <Button
+            x:Name="StopButton"
+            Click="Stop_Click"
+            Width="32"
+            Height="32"
+            CornerRadius="16"
+            Padding="0"
+            Background="#40FF3B30"
+            BorderBrush="#60FF3B30"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            ToolTipService.ToolTip="Stop recording">
+            <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="#FFFF3B30" />
+        </Button>
     </Grid>
 </Window>
