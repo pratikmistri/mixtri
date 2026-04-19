@@ -34,14 +34,14 @@ public sealed partial class RecordingPage : Page
     }
 
     // x:Bind helper: invert boolean
-    public static bool InvertBool(bool value) => !value;
+    public bool InvertBool(bool value) => !value;
 
     // x:Bind helper: bool → Visibility
-    public static Visibility BoolToVisibility(bool value) =>
+    public Visibility BoolToVisibility(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
 
     // x:Bind helper: dim options grid while recording
-    public static double RecordingOpacity(bool isRecording) =>
+    public double RecordingOpacity(bool isRecording) =>
         isRecording ? 0.4 : 1.0;
 
     private void OnLoaded(object sender, RoutedEventArgs e)
