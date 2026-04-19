@@ -20,6 +20,11 @@
             <KeyboardAccelerator Key="Enter" Invoked="OnEnterPressed" />
         </Grid.KeyboardAccelerators>
 
+        <!-- Desktop screenshot background (set programmatically before showing) -->
+        <Image x:Name="ScreenshotImage"
+               Stretch="Fill"
+               IsHitTestVisible="False" />
+
         <!-- Visual overlay layer (no hit test — pointer events handled by Grid) -->
         <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
             <!-- Four dark mask rectangles forming the overlay around the selection -->

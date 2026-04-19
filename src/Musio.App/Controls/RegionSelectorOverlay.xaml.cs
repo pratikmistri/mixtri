@@ -1,11 +1,15 @@
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
 using Windows.Foundation;
+using Windows.Graphics.Imaging;
 
 namespace Musio_App.Controls;
 
@@ -70,6 +74,21 @@ public sealed partial class RegionSelectorOverlay : UserControl
     {
         _tcs = new TaskCompletionSource<CaptureRegion?>();
 
+        // Minimize Musio so it doesn't appear in the screenshot
+        bool didMinimize = false;
+        IntPtr mainHwnd = IntPtr.Zero;
+        var mainWindow = Musio_App.App.Current.MainAppWindow;
+        if (mainWindow is not null)
+        {
+            mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+            ShowWindow(mainHwnd, SW_MINIMIZE);
+            didMinimize = true;
+            await Task.Delay(300); // let the minimize animation complete
+        }
+
+        // Capture the virtual desktop screenshot
+        var screenshotSource = await CaptureDesktopScreenshotAsync();
+
         _hostWindow = new Window();
         _hostWindow.Content = this;
         _hostWindow.ExtendsContentIntoTitleBar = true;
@@ -82,6 +101,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
             presenter.Maximize();
         }
 
+        // Set the screenshot as background
+        if (screenshotSource is not null)
+            ScreenshotImage.Source = screenshotSource;
+
         _hostWindow.Closed += (_, _) => _tcs.TrySetResult(null);
         _hostWindow.Activate();
 
@@ -91,7 +114,72 @@ public sealed partial class RegionSelectorOverlay : UserControl
         catch { /* already closed */ }
         _hostWindow = null;
 
+        // Restore Musio if we minimized it
+        if (didMinimize && mainHwnd != IntPtr.Zero)
+        {
+            ShowWindow(mainHwnd, SW_RESTORE);
+            mainWindow?.Activate();
+        }
+
         return result;
+    }
+
+    /// <summary>
+    /// Captures the full virtual desktop as a SoftwareBitmapSource via GDI BitBlt.
+    /// </summary>
+    private static async Task<SoftwareBitmapSource?> CaptureDesktopScreenshotAsync()
+    {
+        try
+        {
+            int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+            if (width <= 0 || height <= 0)
+                return null;
+
+            var hdcScreen = GetDC(IntPtr.Zero);
+            var hdcMem = CreateCompatibleDC(hdcScreen);
+            var hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            var oldObj = SelectObject(hdcMem, hBitmap);
+
+            BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY);
+
+            SelectObject(hdcMem, oldObj);
+
+            // Read pixel data from the HBITMAP
+            var bmi = new BITMAPINFO
+            {
+                biSize = 40,
+                biWidth = width,
+                biHeight = -height, // top-down
+                biPlanes = 1,
+                biBitCount = 32,
+                biCompression = 0, // BI_RGB
+            };
+
+            var pixelData = new byte[width * height * 4];
+            GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+
+            // Clean up GDI resources
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(IntPtr.Zero, hdcScreen);
+
+            // Convert BGRA pixel data to SoftwareBitmap
+            var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
+            softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
+
+            var source = new SoftwareBitmapSource();
+            await source.SetBitmapAsync(softwareBitmap);
+
+            return source;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     #region Overlay drawing
@@ -399,6 +487,69 @@ public sealed partial class RegionSelectorOverlay : UserControl
         SelectionCancelled?.Invoke(this, EventArgs.Empty);
         _tcs?.TrySetResult(null);
     }
+
+    #endregion
+
+    #region P/Invoke
+
+    private const int SW_MINIMIZE = 6;
+    private const int SW_RESTORE = 9;
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
+    private const uint SRCCOPY = 0x00CC0020;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFO
+    {
+        public int biSize;
+        public int biWidth;
+        public int biHeight;
+        public short biPlanes;
+        public short biBitCount;
+        public int biCompression;
+        public int biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public int biClrUsed;
+        public int biClrImportant;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
+        IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint lines,
+        [Out] byte[] bits, ref BITMAPINFO bmi, uint usage);
 
     #endregion
 }

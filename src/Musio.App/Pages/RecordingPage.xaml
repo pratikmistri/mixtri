@@ -183,6 +183,22 @@
                                     TextWrapping="Wrap"
                                     Visibility="Collapsed" />
                             </StackPanel>
+
+                            <!-- Window selection (visible when Window is selected) -->
+                            <StackPanel x:Name="WindowPanel" Spacing="8" Visibility="Collapsed">
+                                <Button
+                                    x:Name="SelectWindowButton"
+                                    HorizontalAlignment="Stretch"
+                                    Click="SelectWindowButton_Click"
+                                    Content="Select Window"
+                                    ToolTipService.ToolTip="Click to choose which window to record" />
+                                <TextBlock
+                                    x:Name="WindowInfoText"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    TextWrapping="Wrap"
+                                    Visibility="Collapsed" />
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 

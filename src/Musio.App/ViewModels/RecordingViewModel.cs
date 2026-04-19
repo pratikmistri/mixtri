@@ -64,6 +64,18 @@ public partial class RecordingViewModel : ObservableObject
     private bool _hasSelectedRegion;
 
     [ObservableProperty]
+    private WindowInfo? _selectedWindow;
+
+    public bool HasSelectedWindow => SelectedWindow is not null;
+
+    public bool IsWindowMode => CaptureMode == CaptureMode.Window;
+
+    partial void OnSelectedWindowChanged(WindowInfo? value)
+    {
+        OnPropertyChanged(nameof(HasSelectedWindow));
+    }
+
+    [ObservableProperty]
     private bool _isRecording;
 
     [ObservableProperty]
@@ -85,6 +97,7 @@ public partial class RecordingViewModel : ObservableObject
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsCustomRegionMode));
+        OnPropertyChanged(nameof(IsWindowMode));
     }
 
     [RelayCommand]
@@ -180,9 +193,24 @@ public partial class RecordingViewModel : ObservableObject
             }
             case CaptureMode.Window:
             {
-                // TODO: Wire up a window picker dialog. For now capture primary monitor.
-                var monitors = MonitorEnumerator.GetAllMonitors();
-                return monitors.FirstOrDefault();
+                if (SelectedWindow is null)
+                {
+                    RecordingStatus = "No window selected — please select a window first";
+                    return null;
+                }
+
+                // Validate the window handle is still valid
+                if (!IsWindow(SelectedWindow.Handle))
+                {
+                    RecordingStatus = "Selected window is no longer available";
+                    SelectedWindow = null;
+                    return null;
+                }
+
+                return new CaptureTarget(
+                    CaptureTargetType.Window,
+                    SelectedWindow.Handle,
+                    SelectedWindow.Title);
             }
             case CaptureMode.CustomRegion:
             {
@@ -198,9 +226,10 @@ public partial class RecordingViewModel : ObservableObject
                     return null;
                 }
 
-                // Capture the full monitor containing the region, with a crop rect
+                // Resolve the monitor that owns this region by MonitorId
                 var allMonitors = MonitorEnumerator.GetAllMonitors();
-                var monitor = allMonitors.FirstOrDefault();
+                var monitor = allMonitors.FirstOrDefault(m => m.DisplayName.Contains(SelectedRegion.MonitorId))
+                    ?? allMonitors.FirstOrDefault();
                 if (monitor is null)
                     return null;
 
@@ -269,4 +298,7 @@ public partial class RecordingViewModel : ObservableObject
             _session = null;
         }
     }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hwnd);
 }
