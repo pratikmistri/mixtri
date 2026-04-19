@@ -21,22 +21,48 @@
 
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <ScrollViewer Grid.Row="0" Padding="40,24,40,24">
-            <StackPanel MaxWidth="900" Spacing="28">
+        <!-- InfoBar for recording status -->
+        <InfoBar
+            x:Name="RecordingInfoBar"
+            Grid.Row="0"
+            IsOpen="False"
+            IsClosable="True"
+            Severity="Informational" />
 
-                <!-- Hero: Start Recording -->
+        <ScrollViewer Grid.Row="1" Padding="16">
+            <StackPanel MaxWidth="900" Spacing="12">
+                <StackPanel.ChildrenTransitions>
+                    <EntranceThemeTransition FromVerticalOffset="40" />
+                </StackPanel.ChildrenTransitions>
+
+                <!-- Page header -->
+                <StackPanel Spacing="4" Margin="0,0,0,8">
+                    <TextBlock
+                        FontSize="28"
+                        FontWeight="SemiBold"
+                        Text="Record" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Configure your screen capture settings and start recording" />
+                </StackPanel>
+
+                <!-- Hero: Start / Stop Recording -->
                 <StackPanel HorizontalAlignment="Center" Spacing="16">
                     <Button
+                        x:Name="StartRecordButton"
                         Width="240"
                         Height="64"
                         HorizontalAlignment="Center"
                         Command="{x:Bind ViewModel.StartRecordingCommand}"
                         CornerRadius="32"
-                        Style="{StaticResource AccentButtonStyle}">
+                        IsEnabled="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        ToolTipService.ToolTip="Start a new screen recording (Ctrl+Shift+R)">
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <FontIcon FontSize="22" Glyph="&#xE7C8;" />
                             <TextBlock
@@ -46,10 +72,48 @@
                                 Text="Start Recording" />
                         </StackPanel>
                     </Button>
+
+                    <Button
+                        x:Name="StopRecordButton"
+                        Width="240"
+                        Height="64"
+                        HorizontalAlignment="Center"
+                        Command="{x:Bind ViewModel.StopRecordingCommand}"
+                        CornerRadius="32"
+                        Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
+                        ToolTipService.ToolTip="Stop the current recording">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <FontIcon FontSize="22" Foreground="Red" Glyph="&#xE71A;" />
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="16"
+                                FontWeight="SemiBold"
+                                Text="Stop Recording" />
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Elapsed timer shown during recording -->
+                    <TextBlock
+                        HorizontalAlignment="Center"
+                        FontSize="20"
+                        FontWeight="SemiBold"
+                        Foreground="Red"
+                        Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}"
+                        Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
                 </StackPanel>
 
-                <!-- Option Cards Grid -->
-                <Grid ColumnSpacing="16" RowSpacing="16">
+                <!-- TeachingTip for first-run -->
+                <TeachingTip
+                    x:Name="QuickRecordTip"
+                    Title="Quick Record"
+                    Subtitle="Press Ctrl+Shift+R to start recording instantly from anywhere."
+                    IsLightDismissEnabled="True"
+                    PreferredPlacement="Bottom" />
+
+                <!-- Option Cards Grid (disabled during recording) -->
+                <Grid ColumnSpacing="16" RowSpacing="16"
+                      IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
+                      Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
@@ -80,6 +144,22 @@
                                     Tag="CustomRegion"
                                     Checked="CaptureMode_Checked" />
                             </RadioButtons>
+
+                            <!-- Region selection (visible when Custom Region is selected) -->
+                            <StackPanel x:Name="RegionPanel" Spacing="8" Visibility="Collapsed">
+                                <Button
+                                    x:Name="SelectRegionButton"
+                                    HorizontalAlignment="Stretch"
+                                    Click="SelectRegionButton_Click"
+                                    Content="Select Region"
+                                    ToolTipService.ToolTip="Click to select a custom screen region" />
+                                <TextBlock
+                                    x:Name="RegionInfoText"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    TextWrapping="Wrap"
+                                    Visibility="Collapsed" />
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 
@@ -89,18 +169,22 @@
                             <TextBlock FontWeight="SemiBold" Text="Audio" />
                             <ToggleSwitch
                                 Header="System Audio"
-                                IsOn="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}" />
+                                IsOn="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
+                                ToolTipService.ToolTip="Capture desktop audio output" />
                             <ComboBox
                                 Header="System Audio Device"
                                 HorizontalAlignment="Stretch"
-                                PlaceholderText="Default output" />
+                                PlaceholderText="Default output"
+                                ToolTipService.ToolTip="Select audio output device" />
                             <ToggleSwitch
                                 Header="Microphone"
-                                IsOn="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}" />
+                                IsOn="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
+                                ToolTipService.ToolTip="Record microphone input" />
                             <ComboBox
                                 Header="Microphone Device"
                                 HorizontalAlignment="Stretch"
-                                PlaceholderText="Default microphone" />
+                                PlaceholderText="Default microphone"
+                                ToolTipService.ToolTip="Select microphone input device" />
                         </StackPanel>
                     </Border>
 
@@ -129,11 +213,13 @@
                             <TextBlock FontWeight="SemiBold" Text="Webcam" />
                             <ToggleSwitch
                                 Header="Enable Webcam"
-                                IsOn="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}" />
+                                IsOn="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
+                                ToolTipService.ToolTip="Show webcam overlay in recording" />
                             <ComboBox
                                 Header="Webcam Device"
                                 HorizontalAlignment="Stretch"
-                                PlaceholderText="Default camera" />
+                                PlaceholderText="Default camera"
+                                ToolTipService.ToolTip="Select webcam device" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -142,25 +228,39 @@
 
         <!-- Status Bar -->
         <Border
-            Grid.Row="1"
-            Padding="20,10"
+            Grid.Row="2"
+            Padding="16,10"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0">
-            <StackPanel
-                HorizontalAlignment="Left"
-                Orientation="Horizontal"
-                Spacing="8">
-                <Ellipse
-                    Width="8"
-                    Height="8"
-                    VerticalAlignment="Center"
-                    Fill="{ThemeResource SystemFillColorSuccessBrush}" />
-                <TextBlock
-                    VerticalAlignment="Center"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="{x:Bind ViewModel.RecordingStatus, Mode=OneWay}" />
-            </StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel
+                    Grid.Column="0"
+                    HorizontalAlignment="Left"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <Ellipse
+                        Width="8"
+                        Height="8"
+                        VerticalAlignment="Center"
+                        Fill="{ThemeResource SystemFillColorSuccessBrush}" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="{x:Bind ViewModel.RecordingStatus, Mode=OneWay}" />
+                </StackPanel>
+                <ProgressRing
+                    x:Name="RecordingProgressRing"
+                    Grid.Column="1"
+                    Width="20"
+                    Height="20"
+                    IsActive="{x:Bind ViewModel.IsRecording, Mode=OneWay}"
+                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
+            </Grid>
         </Border>
     </Grid>
 </Page>
