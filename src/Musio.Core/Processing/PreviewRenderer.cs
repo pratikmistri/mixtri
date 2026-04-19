@@ -29,15 +29,14 @@ public class PreviewRenderer : IDisposable
         CompositionConfig config,
         int sourceWidth,
         int sourceHeight,
-        TimeSpan? duration = null)
+        TimeSpan? duration = null,
+        double mouseToVideoOffsetSeconds = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Use full source resolution so frames composite correctly
         PreviewWidth = sourceWidth;
         PreviewHeight = sourceHeight;
 
-        // Create a config tuned for preview: lower FPS
         var previewConfig = config with
         {
             OutputFps = Math.Min(config.OutputFps, 30)
@@ -45,7 +44,7 @@ public class PreviewRenderer : IDisposable
 
         _compositor?.Dispose();
         _compositor = new FrameCompositor(previewConfig);
-        await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration);
+        await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration, mouseToVideoOffsetSeconds);
     }
 
     /// <summary>

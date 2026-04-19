@@ -62,7 +62,8 @@ public class AutoZoomEngine
         int sourceHeight,
         double tickFrequency,
         float coordScaleX = 1.0f,
-        float coordScaleY = 1.0f)
+        float coordScaleY = 1.0f,
+        double timeOffsetSeconds = 0)
     {
         ArgumentNullException.ThrowIfNull(mouseData);
         _sourceWidth = sourceWidth;
@@ -83,7 +84,7 @@ public class AutoZoomEngine
         var rawSegments = new List<ZoomSegment>();
         foreach (var click in clicks)
         {
-            double clickTime = (click.TimestampTicks - startTick) / tickFrequency;
+            double clickTime = (click.TimestampTicks - startTick) / tickFrequency - timeOffsetSeconds;
 
             rawSegments.Add(new ZoomSegment
             {

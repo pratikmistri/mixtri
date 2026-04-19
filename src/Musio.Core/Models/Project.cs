@@ -17,4 +17,11 @@ public class Project
     public int Width { get; set; }
     public int Height { get; set; }
     public int Fps { get; set; } = 60;
+
+    /// <summary>
+    /// Time offset in seconds between mouse recording start and video frame 0.
+    /// Positive means mouse started before video. Subtract from mouse timestamps
+    /// to align with video frames.
+    /// </summary>
+    public double MouseToVideoOffsetSeconds { get; set; }
 }

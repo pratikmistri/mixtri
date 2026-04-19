@@ -141,7 +141,8 @@ public sealed partial class EditorPage : Page
                 mouseData, config,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
-                project.Duration);
+                project.Duration,
+                project.MouseToVideoOffsetSeconds);
             _compositorReady = true;
         }
         catch

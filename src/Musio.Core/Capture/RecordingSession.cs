@@ -73,6 +73,7 @@ public class RecordingSession : IDisposable
     // Capture dimensions (set once first frame arrives)
     private int _captureWidth;
     private int _captureHeight;
+    private long _videoStartTicks;
 
     // Result
     private Project? _project;
@@ -177,10 +178,24 @@ public class RecordingSession : IDisposable
                 };
             }
 
-            // Start all engines
-            _screenEngine.StartCapture();
+            // Record a shared reference timestamp BEFORE starting any engine.
+            // This becomes the common t=0 for video frames and mouse data.
+            long sharedStartTicks = Stopwatch.GetTimestamp();
+
+            // Start mouse + keyboard FIRST (they record absolute Stopwatch ticks)
             _mouseRecorder.StartRecording();
             _keyboardRecorder.StartRecording();
+
+            // Start screen capture (its internal stopwatch starts here)
+            _screenEngine.StartCapture();
+
+            // Store the offset between mouse start and screen capture start
+            // so we can align them during composition.
+            // Mouse started at _mouseRecorder's _startTicks (≈ sharedStartTicks).
+            // Video frame 0 corresponds to ScreenCaptureEngine._stopwatch.Elapsed = 0
+            // which is when StartCapture() was called (a few ms after mouse start).
+            _videoStartTicks = Stopwatch.GetTimestamp();
+
             _audioEngine?.StartRecording(_sessionFolder);
 
             if (_webcamEngine is not null)
@@ -259,6 +274,18 @@ public class RecordingSession : IDisposable
                     audioFilePaths.Add(micPath);
             }
 
+            // Compute mouse→video time offset
+            double mouseToVideoOffset = 0;
+            if (_mouseRecorder is not null)
+            {
+                var mouseData = _mouseRecorder.GetRecordedData();
+                // Mouse started at mouseData.StartTimestampTicks
+                // Video started at _videoStartTicks
+                // Offset = (videoStart - mouseStart) / frequency
+                mouseToVideoOffset = (double)(_videoStartTicks - mouseData.StartTimestampTicks)
+                    / Stopwatch.Frequency;
+            }
+
             // Build project
             _project = new Project
             {
@@ -272,6 +299,7 @@ public class RecordingSession : IDisposable
                 Width = _captureWidth,
                 Height = _captureHeight,
                 Fps = _config.Fps,
+                MouseToVideoOffsetSeconds = mouseToVideoOffset,
             };
 
             State = RecordingState.Stopped;

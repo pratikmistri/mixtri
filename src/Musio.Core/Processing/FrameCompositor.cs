@@ -56,6 +56,7 @@ public class FrameCompositor : IDisposable
     private bool _disposed;
     private float _coordScaleX = 1.0f;
     private float _coordScaleY = 1.0f;
+    private double _mouseTimeOffset;
 
     public int TotalFrames { get; private set; }
     public int OutputWidth { get; private set; }
@@ -99,7 +100,8 @@ public class FrameCompositor : IDisposable
         MouseRecordingData mouseData,
         int sourceWidth,
         int sourceHeight,
-        TimeSpan? duration = null)
+        TimeSpan? duration = null,
+        double mouseToVideoOffsetSeconds = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(mouseData);
@@ -128,22 +130,23 @@ public class FrameCompositor : IDisposable
         OutputHeight = outH;
 
         // Smooth cursor path at the target FPS, then scale to physical coordinates
+        // and apply time offset to align mouse timeline with video frames
         _smoothedPositions = _smoother.SmoothPath(mouseData, _config.OutputFps);
-        if (coordScaleX != 1.0f || coordScaleY != 1.0f)
+        for (int i = 0; i < _smoothedPositions.Count; i++)
         {
-            for (int i = 0; i < _smoothedPositions.Count; i++)
+            var p = _smoothedPositions[i];
+            _smoothedPositions[i] = new SmoothedPosition
             {
-                var p = _smoothedPositions[i];
-                _smoothedPositions[i] = new SmoothedPosition
-                {
-                    X = p.X * coordScaleX,
-                    Y = p.Y * coordScaleY,
-                    TimestampSeconds = p.TimestampSeconds,
-                    VelocityX = p.VelocityX * coordScaleX,
-                    VelocityY = p.VelocityY * coordScaleY,
-                };
-            }
+                X = p.X * coordScaleX,
+                Y = p.Y * coordScaleY,
+                TimestampSeconds = p.TimestampSeconds - mouseToVideoOffsetSeconds,
+                VelocityX = p.VelocityX * coordScaleX,
+                VelocityY = p.VelocityY * coordScaleY,
+            };
         }
+
+        // Store offset for click timestamp alignment
+        _mouseTimeOffset = mouseToVideoOffsetSeconds;
 
         // Compute TotalFrames from the authoritative duration (video/project)
         if (duration.HasValue && duration.Value.TotalSeconds > 0)
@@ -159,10 +162,10 @@ public class FrameCompositor : IDisposable
         // Precompute per-frame "last move" timestamps for cursor auto-hide
         PrecomputeLastMoveTimes();
 
-        // Build auto-zoom timeline with scaled coordinates
+        // Build auto-zoom timeline with scaled coordinates and time offset
         _zoomEngine.BuildZoomTimeline(
             mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency,
-            coordScaleX, coordScaleY);
+            coordScaleX, coordScaleY, mouseToVideoOffsetSeconds);
 
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;
