@@ -333,10 +333,10 @@ public class FrameCompositor : IDisposable
         // Get zoom state — use smoothed cursor position as center hint
         // so the viewport always keeps the cursor in view
         var zoomState = _zoomEngine.GetZoomState(timeSeconds);
-        if (zoomState.ZoomLevel > 1.01f)
+        if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
         {
-            // Override zoom center with actual cursor position
-            // This ensures the cursor is ALWAYS visible in the zoomed view
+            // Override zoom center with actual cursor position for auto segments.
+            // Manual segments keep their user-defined center.
             zoomState = _zoomEngine.ComputeViewportForCenter(
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
         }

@@ -258,3 +258,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Cut (Ctrl+X) = ripple delete (removes clip + closes gap). Delete = simple removal.
 - `CutSelection` auto-creates a default clip if none exist, so Ctrl+X always works.
 
+---
+
+## Zoom Region — Draggable Visual Positioning
+
+**Feature/area:** Zoom region editor (EditorPage, AutoZoomEngine, FrameCompositor)
+
+**Approaches tried:**
+
+1. **X/Y Sliders in toolbar** — Original approach. Two problems: (a) every slider ValueChanged fired UndoRedoManager.Execute, which triggered StateChanged → ClearZoomSelection, dismissing the controls; (b) FrameCompositor always overrode manual zoom center with cursor position, so changes were invisible in preview. ✗
+2. **Draggable zoom region overlay on PreviewCanvas** — Worked. Shows raw source frame (no compositor) with a XAML rectangle overlay representing the zoom viewport. 4 dim rectangles surround the viewport for contrast. User drags to reposition, clicks Apply to commit via single `UpdateZoomSegmentPropertiesOperation`. ✅
+
+**What worked:**
+- `ZoomState.IsManualOverride` flag set in `AutoZoomEngine.GetZoomState()` when manual keyframe is active. `FrameCompositor.ComposeFrame` skips cursor-position override when flag is true.
+- `_zoomRegionEditMode` flag in EditorPage skips compositor in `UpdatePreviewFrameAsync` to show raw frame during positioning.
+- Zoom region rectangle accounts for output aspect ratio via `ComputeEffectiveViewport` logic (duplicated as `GetAspectRatioValue` helper).
+- Viewport coordinates are clamped during drag so the rectangle stays within source bounds.
+- `OnUndoRedoStateChanged` now only clears zoom selection if the selected keyframe no longer exists in the model (was previously clearing unconditionally).
+- Auto-enters edit mode on segment creation; existing segments use "Edit Region" button.
+
+**What didn't work / pitfalls:**
+- Auto-entering edit mode on every segment selection is too disruptive (pauses playback, seeks playhead). Better to use explicit "Edit Region" button for existing segments and only auto-enter on creation.
+- `AspectRatio` enum lives in `Musio.Core.Settings` namespace — must add `using Musio.Core.Settings;` when referencing it from the App layer.
+- Canvas dim rectangles must use `IsHitTestVisible="False"` so pointer events pass through to the viewport rectangle.
+

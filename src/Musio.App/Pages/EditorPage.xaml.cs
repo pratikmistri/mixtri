@@ -8,9 +8,11 @@ using Musio.Core.Capture;
 using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Services;
 using Musio_App.ViewModels;
+using Windows.Foundation;
 
 namespace Musio_App.Pages;
 
@@ -218,7 +220,7 @@ public sealed partial class EditorPage : Page
 
         try
         {
-            if (_compositorReady && _previewRenderer is not null)
+            if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
             {
                 var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
                 bitmap.Dispose();
@@ -314,7 +316,16 @@ public sealed partial class EditorPage : Page
     {
         DispatcherQueue.TryEnqueue(() =>
         {
-            Timeline.ClearZoomSelection();
+            if (_zoomRegionEditMode)
+                ExitZoomRegionEditMode();
+
+            // Only clear zoom selection if the selected segment was removed
+            if (Timeline.SelectedZoomKeyframeId is { } id &&
+                !ViewModel.Model.ZoomKeyframes.Any(k => k.Id == id))
+            {
+                Timeline.ClearZoomSelection();
+            }
+
             Timeline.ClearClipSelection();
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
@@ -430,6 +441,9 @@ public sealed partial class EditorPage : Page
 
     private void OnZoomSegmentSelected(object? sender, string? segmentId)
     {
+        if (_zoomRegionEditMode)
+            ExitZoomRegionEditMode();
+
         UpdateZoomPanelVisibility();
 
         if (segmentId is not null)
@@ -450,10 +464,6 @@ public sealed partial class EditorPage : Page
                         break;
                     }
                 }
-
-                // Update center sliders
-                ZoomCenterXSlider.Value = kf.CenterX * 100;
-                ZoomCenterYSlider.Value = kf.CenterY * 100;
 
                 _suppressZoomPropertyUpdate = false;
             }
@@ -510,9 +520,13 @@ public sealed partial class EditorPage : Page
             Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1));
         ViewModel.UndoRedoManager.Execute(operation);
 
-        // Select the newly created segment
+        // Select the newly created segment and enter zoom region edit mode
         Timeline.SelectedZoomKeyframeId = operation.CreatedId;
         OnZoomSegmentSelected(this, operation.CreatedId);
+
+        var createdKf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == operation.CreatedId);
+        if (createdKf is not null)
+            EnterZoomRegionEditMode(operation.CreatedId, createdKf);
     }
 
     private void OnZoomSegmentRemoveRequested(object? sender, string keyframeId)
@@ -542,21 +556,242 @@ public sealed partial class EditorPage : Page
         if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
         if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
 
+        if (_zoomRegionEditMode)
+        {
+            // Update the overlay rectangle size without committing
+            _zoomRegionZoomLevel = zoomLevel;
+            UpdateZoomRegionRect();
+            return;
+        }
+
         var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
-    private void ZoomCenterSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    // --- Zoom Region Edit Mode ---
+
+    private bool _zoomRegionEditMode;
+    private string? _zoomRegionKeyframeId;
+    private double _zoomRegionCenterX, _zoomRegionCenterY;
+    private double _zoomRegionZoomLevel;
+    private int _zoomRegionSourceW, _zoomRegionSourceH;
+    private double _frameDisplayX, _frameDisplayY, _frameDisplayW, _frameDisplayH;
+    private bool _isDraggingZoomRegion;
+    private Point _dragStartPoint;
+    private double _dragStartCenterX, _dragStartCenterY;
+
+    private void EditZoomRegion_Click(object sender, RoutedEventArgs e)
     {
-        if (_suppressZoomPropertyUpdate) return;
-        if (Timeline is null) return;
         if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+        var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == selectedId);
+        if (kf is null) return;
+        EnterZoomRegionEditMode(selectedId, kf);
+    }
 
-        double cx = ZoomCenterXSlider.Value / 100.0;
-        double cy = ZoomCenterYSlider.Value / 100.0;
+    private void EnterZoomRegionEditMode(string keyframeId, ZoomKeyframe kf)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
 
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, centerX: cx, centerY: cy);
+        _zoomRegionEditMode = true;
+        _zoomRegionKeyframeId = keyframeId;
+        _zoomRegionCenterX = kf.CenterX;
+        _zoomRegionCenterY = kf.CenterY;
+        _zoomRegionZoomLevel = kf.ZoomLevel;
+        _zoomRegionSourceW = project.Width > 0 ? project.Width : 1920;
+        _zoomRegionSourceH = project.Height > 0 ? project.Height : 1080;
+
+        // Pause playback and move to segment timestamp for context
+        Preview.Pause();
+        var pos = kf.Timestamp;
+        Timeline.PlayheadPosition = pos;
+        Preview.PlayheadPosition = pos;
+        ViewModel.Model.PlayheadPosition = pos;
+
+        // Re-render without compositor (raw frame for positioning)
+        _ = UpdatePreviewFrameAsync(pos, force: true);
+
+        ZoomRegionOverlay.Visibility = Visibility.Visible;
+        UpdateZoomRegionRect();
+    }
+
+    private void ExitZoomRegionEditMode()
+    {
+        _zoomRegionEditMode = false;
+        _isDraggingZoomRegion = false;
+        _zoomRegionKeyframeId = null;
+        ZoomRegionOverlay.Visibility = Visibility.Collapsed;
+
+        // Re-render with compositor
+        _lastRenderedFrameIndex = -1;
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void UpdateZoomRegionRect()
+    {
+        if (!_zoomRegionEditMode) return;
+
+        double canvasW = ZoomRegionCanvas.ActualWidth;
+        double canvasH = ZoomRegionCanvas.ActualHeight;
+        if (canvasW <= 0 || canvasH <= 0) return;
+
+        // Compute raw frame display rect (aspect-fit centered)
+        double scale = Math.Min(canvasW / _zoomRegionSourceW, canvasH / _zoomRegionSourceH);
+        _frameDisplayW = _zoomRegionSourceW * scale;
+        _frameDisplayH = _zoomRegionSourceH * scale;
+        _frameDisplayX = (canvasW - _frameDisplayW) / 2;
+        _frameDisplayY = (canvasH - _frameDisplayH) / 2;
+
+        // Compute zoom viewport in source pixels
+        double vpW = _zoomRegionSourceW / _zoomRegionZoomLevel;
+        double vpH = _zoomRegionSourceH / _zoomRegionZoomLevel;
+
+        // Adjust for output aspect ratio if set
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is not null && config.AspectRatio != AspectRatio.Auto)
+        {
+            double contentRatio = GetAspectRatioValue(config.AspectRatio);
+            if (contentRatio > 0)
+            {
+                double vpRatio = vpW / vpH;
+                if (vpRatio > contentRatio)
+                    vpW = vpH * contentRatio;
+                else
+                    vpH = vpW / contentRatio;
+            }
+        }
+
+        double vpX = _zoomRegionCenterX * _zoomRegionSourceW - vpW / 2;
+        double vpY = _zoomRegionCenterY * _zoomRegionSourceH - vpH / 2;
+
+        // Clamp viewport to source bounds
+        vpX = Math.Clamp(vpX, 0, Math.Max(0, _zoomRegionSourceW - vpW));
+        vpY = Math.Clamp(vpY, 0, Math.Max(0, _zoomRegionSourceH - vpH));
+
+        // Map to display coordinates
+        double rectX = _frameDisplayX + (vpX / _zoomRegionSourceW) * _frameDisplayW;
+        double rectY = _frameDisplayY + (vpY / _zoomRegionSourceH) * _frameDisplayH;
+        double rectW = (vpW / _zoomRegionSourceW) * _frameDisplayW;
+        double rectH = (vpH / _zoomRegionSourceH) * _frameDisplayH;
+
+        Canvas.SetLeft(ZoomRegionRect, rectX);
+        Canvas.SetTop(ZoomRegionRect, rectY);
+        ZoomRegionRect.Width = rectW;
+        ZoomRegionRect.Height = rectH;
+
+        // Dim overlays constrained to frame display area
+        double fX = _frameDisplayX, fY = _frameDisplayY;
+        double fW = _frameDisplayW, fH = _frameDisplayH;
+
+        Canvas.SetLeft(DimTop, fX);
+        Canvas.SetTop(DimTop, fY);
+        DimTop.Width = fW;
+        DimTop.Height = Math.Max(0, rectY - fY);
+
+        Canvas.SetLeft(DimBottom, fX);
+        Canvas.SetTop(DimBottom, rectY + rectH);
+        DimBottom.Width = fW;
+        DimBottom.Height = Math.Max(0, (fY + fH) - (rectY + rectH));
+
+        Canvas.SetLeft(DimLeft, fX);
+        Canvas.SetTop(DimLeft, rectY);
+        DimLeft.Width = Math.Max(0, rectX - fX);
+        DimLeft.Height = rectH;
+
+        Canvas.SetLeft(DimRight, rectX + rectW);
+        Canvas.SetTop(DimRight, rectY);
+        DimRight.Width = Math.Max(0, (fX + fW) - (rectX + rectW));
+        DimRight.Height = rectH;
+    }
+
+    private static double GetAspectRatioValue(AspectRatio ratio) => ratio switch
+    {
+        AspectRatio.Landscape16x9 => 16.0 / 9.0,
+        AspectRatio.Portrait9x16 => 9.0 / 16.0,
+        AspectRatio.Square1x1 => 1.0,
+        AspectRatio.Classic4x3 => 4.0 / 3.0,
+        AspectRatio.Tall3x4 => 3.0 / 4.0,
+        _ => -1.0,
+    };
+
+    private void ZoomRegionCanvas_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_zoomRegionEditMode) return;
+
+        var point = e.GetCurrentPoint(ZoomRegionCanvas);
+        double rectX = Canvas.GetLeft(ZoomRegionRect);
+        double rectY = Canvas.GetTop(ZoomRegionRect);
+
+        if (point.Position.X >= rectX && point.Position.X <= rectX + ZoomRegionRect.Width &&
+            point.Position.Y >= rectY && point.Position.Y <= rectY + ZoomRegionRect.Height)
+        {
+            _isDraggingZoomRegion = true;
+            _dragStartPoint = point.Position;
+            _dragStartCenterX = _zoomRegionCenterX;
+            _dragStartCenterY = _zoomRegionCenterY;
+            ZoomRegionCanvas.CapturePointer(e.Pointer);
+            e.Handled = true;
+        }
+    }
+
+    private void ZoomRegionCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDraggingZoomRegion) return;
+
+        var point = e.GetCurrentPoint(ZoomRegionCanvas);
+        double deltaX = point.Position.X - _dragStartPoint.X;
+        double deltaY = point.Position.Y - _dragStartPoint.Y;
+
+        if (_frameDisplayW > 0 && _frameDisplayH > 0)
+        {
+            double deltaNormX = deltaX / _frameDisplayW;
+            double deltaNormY = deltaY / _frameDisplayH;
+
+            // Clamp center so the viewport stays within source bounds
+            double halfW = 1.0 / (_zoomRegionZoomLevel * 2.0);
+            double halfH = 1.0 / (_zoomRegionZoomLevel * 2.0);
+            _zoomRegionCenterX = Math.Clamp(_dragStartCenterX + deltaNormX, halfW, 1.0 - halfW);
+            _zoomRegionCenterY = Math.Clamp(_dragStartCenterY + deltaNormY, halfH, 1.0 - halfH);
+
+            UpdateZoomRegionRect();
+        }
+
+        e.Handled = true;
+    }
+
+    private void ZoomRegionCanvas_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_isDraggingZoomRegion)
+        {
+            _isDraggingZoomRegion = false;
+            ZoomRegionCanvas.ReleasePointerCapture(e.Pointer);
+            e.Handled = true;
+        }
+    }
+
+    private void ZoomRegionCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_zoomRegionEditMode)
+            UpdateZoomRegionRect();
+    }
+
+    private void ZoomRegionApply_Click(object sender, RoutedEventArgs e)
+    {
+        if (_zoomRegionKeyframeId is null) return;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(
+            _zoomRegionKeyframeId,
+            zoomLevel: _zoomRegionZoomLevel,
+            centerX: _zoomRegionCenterX,
+            centerY: _zoomRegionCenterY);
         ViewModel.UndoRedoManager.Execute(operation);
+
+        ExitZoomRegionEditMode();
+    }
+
+    private void ZoomRegionCancel_Click(object sender, RoutedEventArgs e)
+    {
+        ExitZoomRegionEditMode();
     }
 
     private void UpdateZoomPanelVisibility()

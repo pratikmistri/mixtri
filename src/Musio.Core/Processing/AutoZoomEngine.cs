@@ -25,6 +25,8 @@ public struct ZoomState
     public float ViewportY;
     public float ViewportWidth;
     public float ViewportHeight;
+    /// <summary>True when the zoom center comes from a manual keyframe and should not be overridden.</summary>
+    public bool IsManualOverride;
 }
 
 public class AutoZoomEngine
@@ -170,7 +172,11 @@ public class AutoZoomEngine
         // Manual keyframes take priority over auto-generated segments
         var manualResult = EvaluateManualKeyframes(timeSeconds);
         if (manualResult.HasValue)
-            return ComputeViewport(manualResult.Value);
+        {
+            var state = ComputeViewport(manualResult.Value);
+            state.IsManualOverride = true;
+            return state;
+        }
 
         var autoResult = EvaluateAutoSegments(timeSeconds);
         return ComputeViewport(autoResult);
