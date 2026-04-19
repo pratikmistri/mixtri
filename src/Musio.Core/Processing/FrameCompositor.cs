@@ -58,13 +58,6 @@ public class FrameCompositor : IDisposable
     private float _coordScaleY = 1.0f;
     private double _mouseTimeOffset;
 
-    /// <summary>
-    /// Extra delay (seconds) added to click/cursor events to compensate for
-    /// screen capture latency — the visual result of a click appears in frames
-    /// a few frames after the input event.
-    /// </summary>
-    private const double ScreenCaptureLatencySeconds = 0.1; // ~100ms = ~3 frames at 30fps
-
     public int TotalFrames { get; private set; }
     public int OutputWidth { get; private set; }
     public int OutputHeight { get; private set; }
@@ -146,7 +139,7 @@ public class FrameCompositor : IDisposable
             {
                 X = p.X * coordScaleX,
                 Y = p.Y * coordScaleY,
-                TimestampSeconds = p.TimestampSeconds - mouseToVideoOffsetSeconds + ScreenCaptureLatencySeconds,
+                TimestampSeconds = p.TimestampSeconds - mouseToVideoOffsetSeconds,
                 VelocityX = p.VelocityX * coordScaleX,
                 VelocityY = p.VelocityY * coordScaleY,
             };
@@ -172,7 +165,7 @@ public class FrameCompositor : IDisposable
         // Build auto-zoom timeline with scaled coordinates and time offset + capture latency
         _zoomEngine.BuildZoomTimeline(
             mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency,
-            coordScaleX, coordScaleY, mouseToVideoOffsetSeconds - ScreenCaptureLatencySeconds);
+            coordScaleX, coordScaleY, mouseToVideoOffsetSeconds);
 
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;
@@ -491,8 +484,7 @@ public class FrameCompositor : IDisposable
             // 3. Add capture latency so click animation matches when the
             //    screen visually updates (click effect appears a few frames late)
             double clickTime = (click.TimestampTicks - startTick) / tickFreq
-                - _mouseTimeOffset
-                + ScreenCaptureLatencySeconds;
+                - _mouseTimeOffset;
 
             if (Math.Abs(clickTime - timeSeconds) > windowSeconds)
                 continue;
@@ -503,8 +495,7 @@ public class FrameCompositor : IDisposable
 
             // Create adjusted click event with shifted timestamp for the renderer
             long adjustedTicks = click.TimestampTicks
-                - (long)(_mouseTimeOffset * tickFreq)
-                + (long)(ScreenCaptureLatencySeconds * tickFreq);
+                - (long)(_mouseTimeOffset * tickFreq);
 
             result.Add(new ClickEvent(adjustedTicks, cx, cy, click.Button, click.IsDown));
         }

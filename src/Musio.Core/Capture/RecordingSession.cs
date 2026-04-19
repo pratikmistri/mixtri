@@ -240,8 +240,11 @@ public class RecordingSession : IDisposable
             // Stop elapsed timer
             _elapsedWatch.Stop();
 
-            // Stop all engines
+            // Stop screen capture first, then wait briefly for in-flight
+            // frame writes to complete before finalizing
             _screenEngine?.StopCapture();
+            await Task.Delay(500); // let queued frame writes finish
+
             _mouseRecorder?.StopRecording();
             _keyboardRecorder?.StopRecording();
             _audioEngine?.StopRecording();
