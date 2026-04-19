@@ -23,8 +23,8 @@
             <!-- Video track -->
             <RowDefinition Height="40" />
             <!-- Cursor path track -->
-            <RowDefinition Height="40" />
-            <!-- Zoom keyframes track -->
+            <RowDefinition Height="50" />
+            <!-- Zoom segments track -->
             <RowDefinition Height="50" />
             <!-- Audio waveform track -->
         </Grid.RowDefinitions>

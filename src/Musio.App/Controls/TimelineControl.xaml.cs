@@ -36,13 +36,22 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomKeyframe }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate }
     private DragMode _dragMode = DragMode.None;
 
-    // Zoom keyframe selection & drag state
+    // Zoom segment selection & drag state
     private string? _selectedZoomKeyframeId;
+    private double _zoomDragStartX = double.NaN;
     private double _zoomDragCurrentX = double.NaN;
     private TimeSpan _zoomDragOriginalTimestamp;
+    private TimeSpan _zoomDragOriginalStart;
+    private TimeSpan _zoomDragOriginalEnd;
+
+    // Drag-to-create state
+    private TimeSpan _zoomCreateStart;
+    private TimeSpan _zoomCreateEnd;
+    private bool _zoomCreateActive;
+    private const double ZoomCreateDragThreshold = 5.0; // pixels before creating
 
     // Colors
     private static readonly Color RulerBackground = Color.FromArgb(255, 40, 40, 40);
@@ -54,10 +63,14 @@ public sealed partial class TimelineControl : UserControl
     private static readonly Color SlowDownOverlayColor = Color.FromArgb(200, 60, 130, 230);
     private static readonly Color TrimHandleColor = Color.FromArgb(255, 255, 255, 255);
     private static readonly Color ZoomTrackBackground = Color.FromArgb(255, 35, 35, 35);
-    private static readonly Color ZoomKeyframeColor = Color.FromArgb(255, 100, 200, 100);
-    private static readonly Color ZoomKeyframeSelectedColor = Color.FromArgb(255, 140, 255, 140);
-    private static readonly Color ZoomKeyframeSelectedOutline = Color.FromArgb(255, 255, 255, 100);
-    private static readonly Color ZoomCurveColor = Color.FromArgb(180, 100, 200, 100);
+    private static readonly Color ZoomSegmentFill = Color.FromArgb(200, 60, 160, 80);
+    private static readonly Color ZoomSegmentAutoFill = Color.FromArgb(120, 60, 140, 70);
+    private static readonly Color ZoomSegmentSelectedFill = Color.FromArgb(230, 80, 200, 100);
+    private static readonly Color ZoomSegmentBorder = Color.FromArgb(255, 100, 200, 100);
+    private static readonly Color ZoomSegmentSelectedBorder = Color.FromArgb(255, 180, 255, 180);
+    private static readonly Color ZoomSegmentHandleColor = Color.FromArgb(255, 220, 255, 220);
+    private static readonly Color ZoomSegmentCreatePreview = Color.FromArgb(100, 100, 200, 100);
+    private static readonly Color ZoomSegmentTextColor = Color.FromArgb(255, 240, 255, 240);
     private static readonly Color AudioTrackBackground = Color.FromArgb(255, 35, 35, 35);
     private static readonly Color AudioPlaceholderColor = Color.FromArgb(255, 80, 160, 80);
     private static readonly Color AudioWaveformColor = Color.FromArgb(220, 80, 180, 80);
@@ -76,16 +89,22 @@ public sealed partial class TimelineControl : UserControl
         InitializeComponent();
     }
 
-    /// <summary>Raised when a zoom keyframe is selected or deselected (null = deselected).</summary>
-    public event EventHandler<string?>? ZoomKeyframeSelected;
+    /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
+    public event EventHandler<string?>? ZoomSegmentSelected;
 
-    /// <summary>Raised when a zoom keyframe drag completes. Carries the keyframe Id and new timestamp.</summary>
-    public event EventHandler<(string Id, TimeSpan NewTimestamp)>? ZoomKeyframeMoved;
+    /// <summary>Raised when a zoom segment drag completes. Carries the keyframe Id and new timestamp.</summary>
+    public event EventHandler<(string Id, TimeSpan NewTimestamp)>? ZoomSegmentMoved;
 
-    /// <summary>Raised when the user requests removal of a zoom keyframe (via context menu or Delete key).</summary>
-    public event EventHandler<string>? ZoomKeyframeRemoveRequested;
+    /// <summary>Raised when a zoom segment is resized. Carries the keyframe Id, whether it was the start edge, and the new edge time.</summary>
+    public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? ZoomSegmentResized;
 
-    /// <summary>The Id of the currently selected zoom keyframe, or null.</summary>
+    /// <summary>Raised when a new zoom segment is created by dragging. Carries the start and end times.</summary>
+    public event EventHandler<(TimeSpan Start, TimeSpan End)>? ZoomSegmentCreated;
+
+    /// <summary>Raised when the user requests removal of a zoom segment.</summary>
+    public event EventHandler<string>? ZoomSegmentRemoveRequested;
+
+    /// <summary>The Id of the currently selected zoom segment, or null.</summary>
     public string? SelectedZoomKeyframeId
     {
         get => _selectedZoomKeyframeId;
@@ -309,7 +328,11 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Zoom Track ---
 
-    // --- Zoom Track (enhanced with intensity markers) ---
+    // --- Zoom Track (segment-based rendering) ---
+
+    private const double ZoomSegmentEdgeHitWidth = 8;
+    private const float ZoomSegmentCornerRadius = 4;
+    private const float ZoomSegmentVerticalPadding = 6;
 
     private void ZoomTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
@@ -320,75 +343,77 @@ public sealed partial class TimelineControl : UserControl
 
         ds.Clear(ZoomTrackBackground);
 
-        if (model is null || model.ZoomKeyframes.Count == 0)
-        {
-            ds.DrawLine(0, h - 2, w, h - 2, ZoomCurveColor, 1);
+        if (model is null || model.Duration.TotalSeconds <= 0)
             return;
-        }
 
-        // Baseline (1x zoom)
-        ds.DrawLine(0, h - 2, w, h - 2, ZoomCurveColor, 0.5f);
-
+        // Draw zoom segments as rounded rectangles
         var sorted = model.ZoomKeyframes.OrderBy(k => k.Timestamp).ToList();
-        if (sorted.Count > 1)
-        {
-            var pathBuilder = new CanvasPathBuilder(sender);
-            float firstX = GetZoomKeyframeX(sorted[0]);
-            float firstY = ZoomLevelToY(sorted[0].ZoomLevel, h);
-            pathBuilder.BeginFigure(firstX, firstY);
-
-            for (int i = 1; i < sorted.Count; i++)
-            {
-                float nx = GetZoomKeyframeX(sorted[i]);
-                float ny = ZoomLevelToY(sorted[i].ZoomLevel, h);
-                float cx = (firstX + nx) / 2;
-                pathBuilder.AddCubicBezier(
-                    new Vector2(cx, firstY),
-                    new Vector2(cx, ny),
-                    new Vector2(nx, ny));
-                firstX = nx;
-                firstY = ny;
-            }
-
-            pathBuilder.EndFigure(CanvasFigureLoop.Open);
-            var geometry = CanvasGeometry.CreatePath(pathBuilder);
-            ds.DrawGeometry(geometry, ZoomCurveColor, 2);
-        }
-
-        // Diamond markers with selection highlight
         foreach (var kf in sorted)
         {
-            float cx = GetZoomKeyframeX(kf);
-            float cy = ZoomLevelToY(kf.ZoomLevel, h);
+            float x1 = (float)GetZoomSegmentStartX(kf);
+            float x2 = (float)GetZoomSegmentEndX(kf);
+            if (x2 < 0 || x1 > w) continue;
+
+            float segW = Math.Max(2, x2 - x1);
+            float segY = ZoomSegmentVerticalPadding;
+            float segH = h - ZoomSegmentVerticalPadding * 2;
+
             bool isSelected = kf.Id == _selectedZoomKeyframeId;
             bool isEditable = kf.IsManual;
 
-            // Size scales with zoom level: higher zoom = larger marker
-            float size = (float)(4 + Math.Clamp((kf.ZoomLevel - 1.0) / 3.0, 0, 1) * 8);
-            if (isSelected) size += 2;
+            // Fill
+            var fillColor = isSelected ? ZoomSegmentSelectedFill
+                : isEditable ? ZoomSegmentFill
+                : ZoomSegmentAutoFill;
 
-            var pathBuilder = new CanvasPathBuilder(sender);
-            pathBuilder.BeginFigure(cx, cy - size);
-            pathBuilder.AddLine(cx + size, cy);
-            pathBuilder.AddLine(cx, cy + size);
-            pathBuilder.AddLine(cx - size, cy);
-            pathBuilder.EndFigure(CanvasFigureLoop.Closed);
+            var roundedRect = CreateRoundedRect(x1, segY, segW, segH, ZoomSegmentCornerRadius);
+            ds.FillGeometry(roundedRect, fillColor);
 
-            var diamond = CanvasGeometry.CreatePath(pathBuilder);
+            // Border
+            var borderColor = isSelected ? ZoomSegmentSelectedBorder : ZoomSegmentBorder;
+            float borderWidth = isSelected ? 1.5f : 1f;
+            ds.DrawGeometry(roundedRect, borderColor, borderWidth);
 
-            if (isSelected)
+            // Zoom level text
+            if (segW > 30)
             {
-                // Selection glow
-                ds.FillGeometry(diamond, ZoomKeyframeSelectedColor);
-                ds.DrawGeometry(diamond, ZoomKeyframeSelectedOutline, 2.5f);
+                string label = $"{kf.ZoomLevel:0.#}x";
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, ZoomSegmentTextColor,
+                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                    {
+                        FontSize = 11,
+                        FontFamily = "Segoe UI",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    });
             }
-            else
+
+            // Resize handles (visible when selected or editable)
+            if (isSelected && isEditable)
             {
-                byte alpha = (byte)(150 + Math.Clamp((kf.ZoomLevel - 1.0) / 3.0, 0, 1) * 105);
-                var fillColor = Color.FromArgb(alpha, ZoomKeyframeColor.R, ZoomKeyframeColor.G, ZoomKeyframeColor.B);
-                ds.FillGeometry(diamond, fillColor);
-                ds.DrawGeometry(diamond, isEditable ? Colors.White : Colors.Gray, 1);
+                float handleW = 3;
+                float handleH = segH * 0.5f;
+                float handleY = segY + (segH - handleH) / 2;
+
+                // Left handle
+                ds.FillRoundedRectangle(x1 + 1, handleY, handleW, handleH, 1, 1, ZoomSegmentHandleColor);
+                // Right handle
+                ds.FillRoundedRectangle(x2 - handleW - 1, handleY, handleW, handleH, 1, 1, ZoomSegmentHandleColor);
             }
+        }
+
+        // Draw create-preview if dragging to create
+        if (_zoomCreateActive && _dragMode == DragMode.ZoomSegmentCreate)
+        {
+            float cx1 = (float)TimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd);
+            float cx2 = (float)TimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart);
+            float cw = Math.Max(2, cx2 - cx1);
+            float cy = ZoomSegmentVerticalPadding;
+            float ch = h - ZoomSegmentVerticalPadding * 2;
+
+            var previewRect = CreateRoundedRect(cx1, cy, cw, ch, ZoomSegmentCornerRadius);
+            ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
+            ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
+                new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
         }
 
         // Playhead
@@ -396,57 +421,101 @@ public sealed partial class TimelineControl : UserControl
         ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
-    /// <summary>
-    /// Returns the X position for a zoom keyframe, using the transient drag position
-    /// if the keyframe is currently being dragged.
-    /// </summary>
-    private float GetZoomKeyframeX(ZoomKeyframe kf)
+    private static CanvasGeometry CreateRoundedRect(float x, float y, float width, float height, float radius)
     {
-        if (_dragMode == DragMode.ZoomKeyframe && kf.Id == _selectedZoomKeyframeId && !double.IsNaN(_zoomDragCurrentX))
-            return (float)_zoomDragCurrentX;
-        return (float)TimeToX(kf.Timestamp);
+        // Create a rounded rectangle using CanvasGeometry
+        return CanvasGeometry.CreateRoundedRectangle(null, x, y, width, height, radius, radius);
     }
 
-    private static float ZoomLevelToY(double zoomLevel, float trackHeight)
+    /// <summary>
+    /// Returns the X position for a zoom segment's start edge, using the transient drag
+    /// position if the segment is currently being dragged.
+    /// </summary>
+    private double GetZoomSegmentStartX(ZoomKeyframe kf)
     {
-        // Map zoom 1.0 → bottom, zoom 4.0 → top
-        double normalized = Math.Clamp((zoomLevel - 1.0) / 3.0, 0, 1);
-        return (float)(trackHeight - 4 - normalized * (trackHeight - 8));
+        if (kf.Id == _selectedZoomKeyframeId && !double.IsNaN(_zoomDragCurrentX))
+        {
+            if (_dragMode == DragMode.ZoomSegmentBody)
+            {
+                double deltaX = _zoomDragCurrentX - _zoomDragStartX;
+                return TimeToX(_zoomDragOriginalStart) + deltaX;
+            }
+            if (_dragMode == DragMode.ZoomSegmentLeftEdge)
+            {
+                return _zoomDragCurrentX;
+            }
+        }
+        return TimeToX(kf.Start);
+    }
+
+    /// <summary>
+    /// Returns the X position for a zoom segment's end edge, using the transient drag
+    /// position if the segment is currently being dragged.
+    /// </summary>
+    private double GetZoomSegmentEndX(ZoomKeyframe kf)
+    {
+        if (kf.Id == _selectedZoomKeyframeId && !double.IsNaN(_zoomDragCurrentX))
+        {
+            if (_dragMode == DragMode.ZoomSegmentBody)
+            {
+                double deltaX = _zoomDragCurrentX - _zoomDragStartX;
+                return TimeToX(_zoomDragOriginalEnd) + deltaX;
+            }
+            if (_dragMode == DragMode.ZoomSegmentRightEdge)
+            {
+                return _zoomDragCurrentX;
+            }
+        }
+        return TimeToX(kf.End);
     }
 
     // --- Zoom Track Interaction ---
 
-    private const double ZoomHitRadius = 14;
+    private enum ZoomHitTarget { None, Body, LeftEdge, RightEdge }
 
     /// <summary>
-    /// Hit-test zoom keyframes at the given X position.
-    /// Only manual (user-editable) keyframes can be hit.
-    /// Returns the Id of the hit keyframe, or null.
+    /// Hit-test zoom segments at the given position.
+    /// Only manual (user-editable) segments can be hit for drag/resize.
+    /// Returns the Id and hit target.
     /// </summary>
-    private string? HitTestZoomKeyframe(double posX, double posY)
+    private (string? Id, ZoomHitTarget Target) HitTestZoomSegment(double posX, double posY)
     {
         var model = Model;
-        if (model is null) return null;
+        if (model is null) return (null, ZoomHitTarget.None);
 
         float h = (float)ZoomTrackCanvas.ActualHeight;
-        double bestDist = ZoomHitRadius;
-        string? bestId = null;
+        float segY = ZoomSegmentVerticalPadding;
+        float segH = h - ZoomSegmentVerticalPadding * 2;
 
-        foreach (var kf in model.ZoomKeyframes)
+        // Check if Y is within segment vertical bounds
+        if (posY < segY || posY > segY + segH)
+            return (null, ZoomHitTarget.None);
+
+        // Check segments in reverse order (last drawn = on top)
+        var sorted = model.ZoomKeyframes.OrderBy(k => k.Timestamp).ToList();
+        for (int i = sorted.Count - 1; i >= 0; i--)
         {
+            var kf = sorted[i];
             if (!kf.IsManual) continue;
 
-            float kx = (float)TimeToX(kf.Timestamp);
-            float ky = ZoomLevelToY(kf.ZoomLevel, h);
-            double dist = Math.Sqrt((posX - kx) * (posX - kx) + (posY - ky) * (posY - ky));
-            if (dist < bestDist)
+            float x1 = (float)TimeToX(kf.Start);
+            float x2 = (float)TimeToX(kf.End);
+
+            // Check edges first (only if selected)
+            if (kf.Id == _selectedZoomKeyframeId)
             {
-                bestDist = dist;
-                bestId = kf.Id;
+                if (Math.Abs(posX - x1) <= ZoomSegmentEdgeHitWidth)
+                    return (kf.Id, ZoomHitTarget.LeftEdge);
+                if (Math.Abs(posX - x2) <= ZoomSegmentEdgeHitWidth)
+                    return (kf.Id, ZoomHitTarget.RightEdge);
             }
+
+            // Check body
+            if (posX >= x1 && posX <= x2)
+                return (kf.Id, ZoomHitTarget.Body);
         }
 
-        return bestId;
+        return (null, ZoomHitTarget.None);
     }
 
     private void ZoomTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -454,33 +523,57 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
-        var hitId = HitTestZoomKeyframe(pos.X, pos.Y);
+        var (hitId, hitTarget) = HitTestZoomSegment(pos.X, pos.Y);
 
         if (hitId is not null)
         {
-            // Select and start drag
+            // Select the segment
             SelectedZoomKeyframeId = hitId;
-            ZoomKeyframeSelected?.Invoke(this, hitId);
+            ZoomSegmentSelected?.Invoke(this, hitId);
 
             var kf = Model?.ZoomKeyframes.FirstOrDefault(k => k.Id == hitId);
-            if (kf is not null)
+            if (kf is null) return;
+
+            _zoomDragStartX = pos.X;
+            _zoomDragCurrentX = pos.X;
+            _zoomDragOriginalTimestamp = kf.Timestamp;
+            _zoomDragOriginalStart = kf.Start;
+            _zoomDragOriginalEnd = kf.End;
+
+            switch (hitTarget)
             {
-                _zoomDragOriginalTimestamp = kf.Timestamp;
-                _zoomDragCurrentX = pos.X;
-                _dragMode = DragMode.ZoomKeyframe;
-                canvas.CapturePointer(e.Pointer);
+                case ZoomHitTarget.LeftEdge:
+                    _dragMode = DragMode.ZoomSegmentLeftEdge;
+                    SetCursor(InputSystemCursorShape.SizeWestEast);
+                    break;
+                case ZoomHitTarget.RightEdge:
+                    _dragMode = DragMode.ZoomSegmentRightEdge;
+                    SetCursor(InputSystemCursorShape.SizeWestEast);
+                    break;
+                case ZoomHitTarget.Body:
+                    _dragMode = DragMode.ZoomSegmentBody;
+                    SetCursor(InputSystemCursorShape.SizeAll);
+                    break;
             }
+
+            canvas.CapturePointer(e.Pointer);
         }
         else
         {
-            // Deselect and move playhead
+            // Deselect any selected segment
             if (_selectedZoomKeyframeId is not null)
             {
                 SelectedZoomKeyframeId = null;
-                ZoomKeyframeSelected?.Invoke(this, null);
+                ZoomSegmentSelected?.Invoke(this, null);
             }
-            PlayheadPosition = XToTime(pos.X);
-            _dragMode = DragMode.Playhead;
+
+            // Start potential drag-to-create or playhead scrub
+            _zoomDragStartX = pos.X;
+            _zoomDragCurrentX = pos.X;
+            _zoomCreateActive = false;
+            _zoomCreateStart = XToTime(pos.X);
+            _dragMode = DragMode.ZoomSegmentCreate;
+            PlayheadPosition = _zoomCreateStart;
             canvas.CapturePointer(e.Pointer);
         }
     }
@@ -490,24 +583,51 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
-        if (_dragMode == DragMode.ZoomKeyframe && _selectedZoomKeyframeId is not null)
+        switch (_dragMode)
         {
-            // Clamp drag X to canvas bounds
-            _zoomDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
-            SetCursor(InputSystemCursorShape.SizeWestEast);
-            InvalidateAll();
-        }
-        else if (_dragMode == DragMode.Playhead)
-        {
-            PlayheadPosition = XToTime(pos.X);
-        }
-        else
-        {
-            // Hover cursor feedback
-            var hitId = HitTestZoomKeyframe(pos.X, pos.Y);
-            SetCursor(hitId is not null
-                ? InputSystemCursorShape.Hand
-                : InputSystemCursorShape.Arrow);
+            case DragMode.ZoomSegmentBody:
+                _zoomDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeAll);
+                InvalidateAll();
+                break;
+
+            case DragMode.ZoomSegmentLeftEdge:
+            case DragMode.ZoomSegmentRightEdge:
+                _zoomDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                InvalidateAll();
+                break;
+
+            case DragMode.ZoomSegmentCreate:
+                double dragDistance = Math.Abs(pos.X - _zoomDragStartX);
+                if (dragDistance >= ZoomCreateDragThreshold)
+                {
+                    _zoomCreateActive = true;
+                    _zoomCreateEnd = XToTime(pos.X);
+                    InvalidateAll();
+                }
+                else
+                {
+                    // Still within threshold — scrub playhead
+                    PlayheadPosition = XToTime(pos.X);
+                }
+                break;
+
+            case DragMode.None:
+                // Hover cursor feedback
+                var (hitId, hitTarget) = HitTestZoomSegment(pos.X, pos.Y);
+                SetCursor(hitTarget switch
+                {
+                    ZoomHitTarget.LeftEdge or ZoomHitTarget.RightEdge => InputSystemCursorShape.SizeWestEast,
+                    ZoomHitTarget.Body => InputSystemCursorShape.Hand,
+                    _ => InputSystemCursorShape.Arrow,
+                });
+                break;
+
+            default:
+                if (_dragMode == DragMode.Playhead)
+                    PlayheadPosition = XToTime(pos.X);
+                break;
         }
     }
 
@@ -515,21 +635,59 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas) return;
 
-        if (_dragMode == DragMode.ZoomKeyframe && _selectedZoomKeyframeId is not null)
+        switch (_dragMode)
         {
-            var newTimestamp = XToTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
-
-            // Only fire move event if the keyframe actually moved
-            if (newTimestamp != _zoomDragOriginalTimestamp)
+            case DragMode.ZoomSegmentBody when _selectedZoomKeyframeId is not null:
             {
-                ZoomKeyframeMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                double deltaX = _zoomDragCurrentX - _zoomDragStartX;
+                var deltaTime = XToTime(_zoomDragStartX + deltaX) - XToTime(_zoomDragStartX);
+                var newTimestamp = _zoomDragOriginalTimestamp + deltaTime;
+
+                // Only fire move event if the segment actually moved
+                if (Math.Abs(deltaX) > 1)
+                {
+                    ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                }
+                break;
             }
 
-            _zoomDragCurrentX = double.NaN;
-            SetCursor(InputSystemCursorShape.Arrow);
+            case DragMode.ZoomSegmentLeftEdge when _selectedZoomKeyframeId is not null:
+            {
+                var newEdgeTime = XToTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdgeTime != _zoomDragOriginalStart)
+                {
+                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime));
+                }
+                break;
+            }
+
+            case DragMode.ZoomSegmentRightEdge when _selectedZoomKeyframeId is not null:
+            {
+                var newEdgeTime = XToTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdgeTime != _zoomDragOriginalEnd)
+                {
+                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime));
+                }
+                break;
+            }
+
+            case DragMode.ZoomSegmentCreate when _zoomCreateActive:
+            {
+                var start = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd;
+                var end = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart;
+                if ((end - start) >= ZoomKeyframe.MinSegmentDuration)
+                {
+                    ZoomSegmentCreated?.Invoke(this, (start, end));
+                }
+                _zoomCreateActive = false;
+                break;
+            }
         }
 
+        _zoomDragStartX = double.NaN;
+        _zoomDragCurrentX = double.NaN;
         _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
         InvalidateAll();
     }
@@ -539,35 +697,35 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetPosition(canvas);
 
-        var hitId = HitTestZoomKeyframe(pos.X, pos.Y);
+        var (hitId, _) = HitTestZoomSegment(pos.X, pos.Y);
         if (hitId is null) return;
 
-        // Select the right-clicked keyframe
+        // Select the right-clicked segment
         SelectedZoomKeyframeId = hitId;
-        ZoomKeyframeSelected?.Invoke(this, hitId);
+        ZoomSegmentSelected?.Invoke(this, hitId);
 
         // Show context menu
         var menu = new MenuFlyout();
         var removeItem = new MenuFlyoutItem
         {
-            Text = "Remove Zoom Point",
+            Text = "Remove Zoom Segment",
             Icon = new FontIcon { Glyph = "\uE74D" },
         };
         removeItem.Click += (_, _) =>
         {
-            ZoomKeyframeRemoveRequested?.Invoke(this, hitId);
+            ZoomSegmentRemoveRequested?.Invoke(this, hitId);
         };
         menu.Items.Add(removeItem);
         menu.ShowAt(canvas, pos);
     }
 
-    /// <summary>Clears the selected zoom keyframe.</summary>
+    /// <summary>Clears the selected zoom segment.</summary>
     public void ClearZoomSelection()
     {
         if (_selectedZoomKeyframeId is not null)
         {
             SelectedZoomKeyframeId = null;
-            ZoomKeyframeSelected?.Invoke(this, null);
+            ZoomSegmentSelected?.Invoke(this, null);
         }
     }
 

@@ -38,6 +38,9 @@ public record TimelineClip(TimeSpan Start, TimeSpan End, string Label);
 
 public record ZoomKeyframe
 {
+    /// <summary>Minimum total segment duration to prevent degenerate segments.</summary>
+    public static readonly TimeSpan MinSegmentDuration = TimeSpan.FromMilliseconds(200);
+
     /// <summary>Stable identity for selection and undo/redo tracking.</summary>
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
 
@@ -54,6 +57,43 @@ public record ZoomKeyframe
     /// False for keyframes auto-generated from click events (visualization only).
     /// </summary>
     public bool IsManual { get; init; }
+
+    /// <summary>When the zoom-in animation begins.</summary>
+    public TimeSpan Start => Timestamp - PreDuration;
+
+    /// <summary>When the zoom-out animation completes.</summary>
+    public TimeSpan End => Timestamp + HoldDuration + PostDuration;
+
+    /// <summary>Total segment duration from Start to End.</summary>
+    public TimeSpan TotalDuration => PreDuration + HoldDuration + PostDuration;
+
+    /// <summary>
+    /// Creates a ZoomKeyframe from a segment start/end range, using default ease durations.
+    /// </summary>
+    public static ZoomKeyframe FromRange(TimeSpan start, TimeSpan end, double zoomLevel,
+        double centerX = 0.5, double centerY = 0.5)
+    {
+        var total = end - start;
+        if (total < MinSegmentDuration)
+            total = MinSegmentDuration;
+
+        var pre = TimeSpan.FromMilliseconds(Math.Min(300, total.TotalMilliseconds * 0.2));
+        var post = TimeSpan.FromMilliseconds(Math.Min(500, total.TotalMilliseconds * 0.3));
+        var hold = total - pre - post;
+        if (hold < TimeSpan.Zero) hold = TimeSpan.Zero;
+
+        return new ZoomKeyframe
+        {
+            Timestamp = start + pre,
+            ZoomLevel = zoomLevel,
+            CenterX = Math.Clamp(centerX, 0, 1),
+            CenterY = Math.Clamp(centerY, 0, 1),
+            PreDuration = pre,
+            HoldDuration = hold,
+            PostDuration = post,
+            IsManual = true,
+        };
+    }
 }
 
 public record SpeedSegment(TimeSpan Start, TimeSpan End, double Speed);

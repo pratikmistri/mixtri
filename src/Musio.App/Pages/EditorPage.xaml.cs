@@ -68,9 +68,12 @@ public sealed partial class EditorPage : Page
             });
         };
 
-        // Zoom keyframe interaction events
-        Timeline.ZoomKeyframeMoved += OnZoomKeyframeMoved;
-        Timeline.ZoomKeyframeRemoveRequested += OnZoomKeyframeRemoveRequested;
+        // Zoom segment interaction events
+        Timeline.ZoomSegmentSelected += OnZoomSegmentSelected;
+        Timeline.ZoomSegmentMoved += OnZoomSegmentMoved;
+        Timeline.ZoomSegmentResized += OnZoomSegmentResized;
+        Timeline.ZoomSegmentCreated += OnZoomSegmentCreated;
+        Timeline.ZoomSegmentRemoveRequested += OnZoomSegmentRemoveRequested;
 
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
@@ -288,6 +291,7 @@ public sealed partial class EditorPage : Page
         DispatcherQueue.TryEnqueue(() =>
         {
             Timeline.ClearZoomSelection();
+            UpdateZoomPanelVisibility();
             InvalidatePreview();
         });
     }
@@ -327,12 +331,13 @@ public sealed partial class EditorPage : Page
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        // If a zoom keyframe is selected, remove it instead of deleting a clip segment
+        // If a zoom segment is selected, remove it instead of deleting a clip segment
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {
             var operation = new RemoveZoomKeyframeOperation(selectedId);
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
+            UpdateZoomPanelVisibility();
             args.Handled = true;
             return;
         }
@@ -347,17 +352,64 @@ public sealed partial class EditorPage : Page
         args.Handled = true;
     }
 
-    private void AddZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    // --- Zoom Segment Handlers ---
+
+    private bool _suppressZoomPropertyUpdate;
+
+    private void OnZoomSegmentSelected(object? sender, string? segmentId)
+    {
+        UpdateZoomPanelVisibility();
+
+        if (segmentId is not null)
+        {
+            var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == segmentId);
+            if (kf is not null)
+            {
+                _suppressZoomPropertyUpdate = true;
+
+                // Update zoom level combo to match selected segment
+                for (int i = 0; i < ZoomLevelCombo.Items.Count; i++)
+                {
+                    if (ZoomLevelCombo.Items[i] is ComboBoxItem item &&
+                        double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z) &&
+                        Math.Abs(z - kf.ZoomLevel) < 0.01)
+                    {
+                        ZoomLevelCombo.SelectedIndex = i;
+                        break;
+                    }
+                }
+
+                // Update center sliders
+                ZoomCenterXSlider.Value = kf.CenterX * 100;
+                ZoomCenterYSlider.Value = kf.CenterY * 100;
+
+                _suppressZoomPropertyUpdate = false;
+            }
+        }
+    }
+
+    private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e)
+    {
+        var operation = new MoveZoomKeyframeOperation(e.Id, e.NewTimestamp);
+        ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    private void OnZoomSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+    {
+        var operation = new ResizeZoomSegmentOperation(e.Id, e.IsStartEdge, e.NewEdgeTime);
+        ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
     {
         double zoomLevel = 2.0;
         if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
             double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
             zoomLevel = z;
 
-        var playhead = ViewModel.Model.PlayheadPosition;
-
-        // Use cursor position at playhead time as zoom center (normalized 0-1)
+        // Use cursor position at segment midpoint as zoom center
         double cx = 0.5, cy = 0.5;
+        var midpoint = e.Start + (e.End - e.Start) / 2;
         if (ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
         {
             var project = ProjectService.Instance.CurrentProject;
@@ -366,10 +418,8 @@ public sealed partial class EditorPage : Page
             float dpiX = GetDpiScale(sourceW);
             float dpiY = GetDpiScale(sourceH, isWidth: false);
 
-            // Find closest sample to playhead time.
-            // Playhead is in video time; convert to mouse-relative time for lookup.
-            double mouseOffset = ProjectService.Instance.CurrentProject?.MouseToVideoOffsetSeconds ?? 0;
-            double targetTime = playhead.TotalSeconds + mouseOffset;
+            double mouseOffset = project?.MouseToVideoOffsetSeconds ?? 0;
+            double targetTime = midpoint.TotalSeconds + mouseOffset;
             double tickFreq = cursorData.TickFrequency;
             long startTick = cursorData.StartTimestampTicks;
             Musio.Core.Models.MouseSample closest = cursorData.Samples[0];
@@ -384,59 +434,62 @@ public sealed partial class EditorPage : Page
             cy = (closest.Y * dpiY) / sourceH;
         }
 
-        ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
-        {
-            Timestamp = playhead,
-            ZoomLevel = zoomLevel,
-            CenterX = Math.Clamp(cx, 0, 1),
-            CenterY = Math.Clamp(cy, 0, 1),
-            IsManual = true,
-        });
-        InvalidatePreview();
+        var operation = new AddZoomSegmentOperation(e.Start, e.End, zoomLevel,
+            Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1));
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        // Select the newly created segment
+        Timeline.SelectedZoomKeyframeId = operation.CreatedId;
+        OnZoomSegmentSelected(this, operation.CreatedId);
     }
 
-    private void RemoveZoomKeyframe_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    private void OnZoomSegmentRemoveRequested(object? sender, string keyframeId)
     {
-        // Prefer removing the selected keyframe if there is one
+        var operation = new RemoveZoomKeyframeOperation(keyframeId);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.ClearZoomSelection();
+        UpdateZoomPanelVisibility();
+    }
+
+    private void RemoveZoomSegment_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {
             var operation = new RemoveZoomKeyframeOperation(selectedId);
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
-            return;
-        }
-
-        // Fallback: remove the manual keyframe closest to playhead (within 1 second)
-        var playhead = ViewModel.Model.PlayheadPosition;
-        var keyframes = ViewModel.Model.ZoomKeyframes;
-        if (keyframes.Count == 0) return;
-
-        string? bestId = null;
-        double bestDist = 1.0;
-        foreach (var kf in keyframes)
-        {
-            if (!kf.IsManual) continue;
-            double dist = Math.Abs((kf.Timestamp - playhead).TotalSeconds);
-            if (dist < bestDist) { bestDist = dist; bestId = kf.Id; }
-        }
-        if (bestId is not null)
-        {
-            var operation = new RemoveZoomKeyframeOperation(bestId);
-            ViewModel.UndoRedoManager.Execute(operation);
+            UpdateZoomPanelVisibility();
         }
     }
 
-    private void OnZoomKeyframeMoved(object? sender, (string Id, TimeSpan NewTimestamp) e)
+    private void ZoomLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        var operation = new MoveZoomKeyframeOperation(e.Id, e.NewTimestamp);
+        if (_suppressZoomPropertyUpdate) return;
+        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+        if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
+        if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
-    private void OnZoomKeyframeRemoveRequested(object? sender, string keyframeId)
+    private void ZoomCenterSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        var operation = new RemoveZoomKeyframeOperation(keyframeId);
+        if (_suppressZoomPropertyUpdate) return;
+        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        double cx = ZoomCenterXSlider.Value / 100.0;
+        double cy = ZoomCenterYSlider.Value / 100.0;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, centerX: cx, centerY: cy);
         ViewModel.UndoRedoManager.Execute(operation);
-        Timeline.ClearZoomSelection();
+    }
+
+    private void UpdateZoomPanelVisibility()
+    {
+        bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
+        ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
+        ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]

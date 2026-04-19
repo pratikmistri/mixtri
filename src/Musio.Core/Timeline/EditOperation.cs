@@ -107,15 +107,52 @@ public class CutOperation : IEditOperation
         model.Clips.Clear();
         model.Clips.AddRange(newClips);
 
-        // Adjust zoom keyframes
+        // Adjust zoom keyframes using full segment span (Start/End)
         var newKeyframes = new List<ZoomKeyframe>();
         foreach (var kf in model.ZoomKeyframes)
         {
-            if (kf.Timestamp < _cutStart)
+            if (kf.End <= _cutStart)
+            {
+                // Entirely before cut — keep unchanged
                 newKeyframes.Add(kf);
-            else if (kf.Timestamp >= _cutEnd)
+            }
+            else if (kf.Start >= _cutEnd)
+            {
+                // Entirely after cut — shift back
                 newKeyframes.Add(kf with { Timestamp = kf.Timestamp - cutDuration });
-            // else: within cut range — removed
+            }
+            else if (kf.Start < _cutStart && kf.End > _cutEnd)
+            {
+                // Segment spans entire cut — shrink HoldDuration to absorb the cut
+                var holdReduction = cutDuration;
+                var newHold = kf.HoldDuration - holdReduction;
+                if (newHold < TimeSpan.Zero) newHold = TimeSpan.Zero;
+                newKeyframes.Add(kf with { HoldDuration = newHold });
+            }
+            else if (kf.Start < _cutStart && kf.End <= _cutEnd)
+            {
+                // Overlaps start of cut — trim the end (reduce HoldDuration/PostDuration)
+                var newEnd = _cutStart;
+                var totalAfterTimestamp = newEnd - kf.Timestamp;
+                if (totalAfterTimestamp < TimeSpan.Zero) totalAfterTimestamp = TimeSpan.Zero;
+                var newPost = TimeSpan.FromMilliseconds(Math.Min(kf.PostDuration.TotalMilliseconds,
+                    totalAfterTimestamp.TotalMilliseconds * 0.4));
+                var newHold = totalAfterTimestamp - newPost;
+                if (newHold < TimeSpan.Zero) { newHold = TimeSpan.Zero; newPost = totalAfterTimestamp; }
+                newKeyframes.Add(kf with { HoldDuration = newHold, PostDuration = newPost });
+            }
+            else if (kf.Start >= _cutStart && kf.End > _cutEnd)
+            {
+                // Overlaps end of cut — trim start, shift back
+                var oldStart = kf.Start;
+                var newStart = _cutStart;
+                var overlap = _cutEnd - oldStart;
+                var newPre = kf.PreDuration - overlap;
+                if (newPre < TimeSpan.Zero) newPre = TimeSpan.Zero;
+                var newTimestamp = newStart + newPre;
+                newKeyframes.Add(kf with { Timestamp = newTimestamp, PreDuration = newPre });
+            }
+            // else: entirely within cut range — removed
         }
         model.ZoomKeyframes.Clear();
         model.ZoomKeyframes.AddRange(newKeyframes);
@@ -314,7 +351,7 @@ public class RemoveZoomKeyframeOperation : IEditOperation
     private ZoomKeyframe? _removedKeyframe;
     private int _removedIndex;
 
-    public string Description => "Remove Zoom Point";
+    public string Description => "Remove Zoom Segment";
 
     public RemoveZoomKeyframeOperation(string keyframeId)
     {
@@ -336,5 +373,169 @@ public class RemoveZoomKeyframeOperation : IEditOperation
             int insertIdx = Math.Min(_removedIndex, model.ZoomKeyframes.Count);
             model.ZoomKeyframes.Insert(insertIdx, _removedKeyframe);
         }
+    }
+}
+
+public class AddZoomSegmentOperation : IEditOperation
+{
+    private readonly ZoomKeyframe _keyframe;
+
+    public string Description => "Add Zoom Segment";
+
+    public AddZoomSegmentOperation(TimeSpan start, TimeSpan end, double zoomLevel,
+        double centerX = 0.5, double centerY = 0.5)
+    {
+        _keyframe = ZoomKeyframe.FromRange(start, end, zoomLevel, centerX, centerY);
+    }
+
+    public AddZoomSegmentOperation(ZoomKeyframe keyframe)
+    {
+        _keyframe = keyframe;
+    }
+
+    /// <summary>The Id of the created keyframe, available after Execute.</summary>
+    public string CreatedId => _keyframe.Id;
+
+    public void Execute(TimelineModel model)
+    {
+        model.ZoomKeyframes.Add(_keyframe);
+        model.ZoomKeyframes.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.ZoomKeyframes.RemoveAll(k => k.Id == _keyframe.Id);
+    }
+}
+
+public class ResizeZoomSegmentOperation : IEditOperation
+{
+    private readonly string _keyframeId;
+    private readonly bool _resizeStart; // true = left edge, false = right edge
+    private readonly TimeSpan _newEdgeTime;
+    private ZoomKeyframe? _previousKeyframe;
+
+    public string Description => "Resize Zoom Segment";
+
+    public ResizeZoomSegmentOperation(string keyframeId, bool resizeStart, TimeSpan newEdgeTime)
+    {
+        _keyframeId = keyframeId;
+        _resizeStart = resizeStart;
+        _newEdgeTime = newEdgeTime;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+
+        _previousKeyframe = model.ZoomKeyframes[index];
+        var kf = _previousKeyframe;
+
+        if (_resizeStart)
+        {
+            // Moving left edge: change Start → recalculate PreDuration and Timestamp
+            var newStart = _newEdgeTime;
+            if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+
+            // Clamp: new Start can't go past the hold-end point
+            var holdEnd = kf.Timestamp + kf.HoldDuration;
+            if (newStart > holdEnd - ZoomKeyframe.MinSegmentDuration)
+                newStart = holdEnd - ZoomKeyframe.MinSegmentDuration;
+
+            var newPre = kf.Timestamp - newStart;
+            if (newPre < TimeSpan.Zero)
+            {
+                // Dragged past the timestamp — shift timestamp and reduce hold
+                var newTimestamp = newStart + TimeSpan.FromMilliseconds(50);
+                var newHold = holdEnd - newTimestamp;
+                if (newHold < TimeSpan.Zero) newHold = TimeSpan.Zero;
+                model.ZoomKeyframes[index] = kf with
+                {
+                    Timestamp = newTimestamp,
+                    PreDuration = TimeSpan.FromMilliseconds(50),
+                    HoldDuration = newHold,
+                };
+            }
+            else
+            {
+                model.ZoomKeyframes[index] = kf with { PreDuration = newPre };
+            }
+        }
+        else
+        {
+            // Moving right edge: change End → recalculate HoldDuration (keep PostDuration fixed)
+            var newEnd = _newEdgeTime;
+
+            // Clamp: new End can't go before Timestamp + minimum
+            var minEnd = kf.Timestamp + ZoomKeyframe.MinSegmentDuration;
+            if (newEnd < minEnd) newEnd = minEnd;
+
+            // Clamp to timeline duration
+            if (newEnd > model.Duration) newEnd = model.Duration;
+
+            var totalAfterTimestamp = newEnd - kf.Timestamp;
+            var newPost = kf.PostDuration;
+            var newHold = totalAfterTimestamp - newPost;
+            if (newHold < TimeSpan.Zero)
+            {
+                newHold = TimeSpan.Zero;
+                newPost = totalAfterTimestamp;
+            }
+
+            model.ZoomKeyframes[index] = kf with { HoldDuration = newHold, PostDuration = newPost };
+        }
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_previousKeyframe is null) return;
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+        model.ZoomKeyframes[index] = _previousKeyframe;
+    }
+}
+
+public class UpdateZoomSegmentPropertiesOperation : IEditOperation
+{
+    private readonly string _keyframeId;
+    private readonly double? _newZoomLevel;
+    private readonly double? _newCenterX;
+    private readonly double? _newCenterY;
+    private ZoomKeyframe? _previousKeyframe;
+
+    public string Description => "Update Zoom Properties";
+
+    public UpdateZoomSegmentPropertiesOperation(string keyframeId,
+        double? zoomLevel = null, double? centerX = null, double? centerY = null)
+    {
+        _keyframeId = keyframeId;
+        _newZoomLevel = zoomLevel;
+        _newCenterX = centerX;
+        _newCenterY = centerY;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+
+        _previousKeyframe = model.ZoomKeyframes[index];
+        var kf = _previousKeyframe;
+
+        model.ZoomKeyframes[index] = kf with
+        {
+            ZoomLevel = _newZoomLevel ?? kf.ZoomLevel,
+            CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
+            CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
+        };
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_previousKeyframe is null) return;
+        int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
+        if (index < 0) return;
+        model.ZoomKeyframes[index] = _previousKeyframe;
     }
 }
