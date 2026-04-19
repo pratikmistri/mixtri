@@ -23,9 +23,26 @@ public partial class App : Application
     /// Initializes the singleton application object.  This is the first line of authored code
     /// executed, and as such is the logical equivalent of main() or WinMain().
     /// </summary>
+    private static readonly string LogPath = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Musio", "crash.log");
+
     public App()
     {
         InitializeComponent();
+        UnhandledException += OnUnhandledException;
+    }
+
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        try
+        {
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
+            System.IO.File.AppendAllText(LogPath,
+                $"[{DateTime.Now:O}] {e.Exception.GetType().Name}: {e.Exception.Message}\n{e.Exception.StackTrace}\n\n");
+        }
+        catch { }
+        e.Handled = true;
     }
 
     /// <summary>

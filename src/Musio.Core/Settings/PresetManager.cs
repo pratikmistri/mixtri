@@ -18,7 +18,18 @@ public class PresetManager
 
     public PresetManager()
     {
-        var localFolder = ApplicationData.Current.LocalFolder.Path;
+        string localFolder;
+        try
+        {
+            localFolder = ApplicationData.Current.LocalFolder.Path;
+        }
+        catch
+        {
+            // Unpackaged app — use AppData\Local\Musio instead
+            localFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Musio");
+        }
+
         _exportPresetsFolder = Path.Combine(localFolder, "ExportPresets");
         _brandPresetsFolder = Path.Combine(localFolder, "BrandPresets");
 

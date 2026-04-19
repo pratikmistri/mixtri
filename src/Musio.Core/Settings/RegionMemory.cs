@@ -11,20 +11,29 @@ public sealed class RegionMemory
 {
     private const string CompositeKey = "LastCaptureRegion";
 
-    private readonly ApplicationDataContainer _settings;
+    private readonly ApplicationDataContainer? _settings;
 
     public RegionMemory()
     {
-        _settings = ApplicationData.Current.LocalSettings;
+        try
+        {
+            _settings = ApplicationData.Current.LocalSettings;
+        }
+        catch
+        {
+            _settings = null;
+        }
     }
 
     public bool HasSavedRegion
     {
-        get => _settings.Values.ContainsKey(CompositeKey);
+        get => _settings is not null && _settings.Values.ContainsKey(CompositeKey);
     }
 
     public void SaveRegion(int x, int y, int w, int h, string monitorId)
     {
+        if (_settings is null) return;
+
         var composite = new ApplicationDataCompositeValue
         {
             ["X"] = x,
@@ -39,6 +48,8 @@ public sealed class RegionMemory
 
     public CaptureRegion? LoadRegion()
     {
+        if (_settings is null) return null;
+
         if (_settings.Values.TryGetValue(CompositeKey, out var value)
             && value is ApplicationDataCompositeValue composite)
         {
