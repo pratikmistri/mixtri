@@ -22,6 +22,13 @@ public class TimelineModel
     public MouseRecordingData? CursorData { get; set; }
 
     /// <summary>
+    /// Source click ticks whose auto-zoom segments have been suppressed (deleted or
+    /// converted to manual by the user). Persisted so the suppression survives
+    /// undo/redo and is applied during both preview and export.
+    /// </summary>
+    public HashSet<long> SuppressedClickTicks { get; } = [];
+
+    /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.
     /// Used to align cursor-path and click visualizations with the video track.
     /// </summary>
@@ -74,6 +81,14 @@ public record ZoomKeyframe
     /// False for keyframes auto-generated from click events (visualization only).
     /// </summary>
     public bool IsManual { get; init; }
+
+    /// <summary>
+    /// The raw <see cref="ClickEvent.TimestampTicks"/> of the source click that
+    /// generated this auto-zoom keyframe. Null for manually-added keyframes.
+    /// Used as a stable identity to suppress the corresponding auto-zoom segment
+    /// when the user deletes or edits this keyframe.
+    /// </summary>
+    public long? SourceClickTicks { get; init; }
 
     /// <summary>When the zoom-in animation begins.</summary>
     public TimeSpan Start => Timestamp - PreDuration;

@@ -282,3 +282,20 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `AspectRatio` enum lives in `Musio.Core.Settings` namespace — must add `using Musio.Core.Settings;` when referencing it from the App layer.
 - Canvas dim rectangles must use `IsHitTestVisible="False"` so pointer events pass through to the viewport rectangle.
 
+---
+
+## Auto-Zoom Segment Deletion — Suppressing Click-Driven Auto-Zoom
+
+**Feature/area:** AutoZoomEngine, EditOperations, FrameCompositor, PreviewRenderer, ExportEngine, VideoEncoder
+
+**Approaches tried:**
+
+1. **Track suppressed source click ticks** — Auto-generated ZoomKeyframes now carry `SourceClickTicks` (the raw `ClickEvent.TimestampTicks`). When deleted or converted to manual via edit operations, the source tick is added to `TimelineModel.SuppressedClickTicks`. `AutoZoomEngine.BuildZoomTimeline()` caches build parameters and `SetSuppressedClickTicks()` rebuilds auto segments, filtering out suppressed clicks before merging. This is robust because `long` ticks are exact — no floating-point tolerance needed. ✅
+
+**What worked:** Storing source click identity on auto-generated keyframes and suppressing at the click level before segment merging. The fix covers preview (via `InvalidatePreview` syncing), export (both `ExportEngine` GIF path and `VideoEncoder` MP4 path), and undo/redo (operations add/remove from suppressed set symmetrically).
+
+**What didn't work / pitfalls:**
+- Using `TimeSpan`-based timestamps as suppression keys is fragile — round-trip through `TimeSpan.FromSeconds()` introduces 100ns-tick quantization, and timeline edits (cut/speed) shift display timestamps without affecting source clicks. Use `TimestampTicks` (raw `long`) instead.
+- The export path (`VideoEncoder.ExportAsync`) previously didn't sync any zoom state at all — needed `TimelineModel?` parameter added.
+- Edit operations that set `IsManual = true` (Move, Resize, UpdateProperties) must also suppress the original auto click, otherwise both the manual keyframe and the auto segment fire.
+

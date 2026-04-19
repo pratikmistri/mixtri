@@ -3,6 +3,7 @@ using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
+using Musio.Core.Timeline;
 using Windows.Media.Core;
 using Windows.Media.Editing;
 using Windows.Media.MediaProperties;
@@ -64,6 +65,7 @@ public class VideoEncoder : IDisposable
         int targetHeight,
         string outputPath,
         TimelineMapper? timelineMapper = null,
+        TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default)
     {
@@ -90,6 +92,18 @@ public class VideoEncoder : IDisposable
         using var compositor = new FrameCompositor(compositionConfig);
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
             project.MouseToVideoOffsetSeconds);
+
+        // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
+        if (timeline is not null)
+        {
+            var manualKeyframes = timeline.ZoomKeyframes
+                .Where(k => k.IsManual)
+                .ToList();
+            compositor.SyncManualZoomKeyframes(manualKeyframes);
+
+            if (timeline.SuppressedClickTicks.Count > 0)
+                compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
+        }
 
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).

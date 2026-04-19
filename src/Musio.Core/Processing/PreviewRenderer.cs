@@ -75,6 +75,16 @@ public class PreviewRenderer : IDisposable
         _compositor?.SyncManualZoomKeyframes(keyframes);
     }
 
+    /// <summary>
+    /// Syncs the set of suppressed auto-zoom click ticks to the compositor.
+    /// Call this when auto-generated zoom segments are deleted or restored (undo).
+    /// </summary>
+    public void UpdateSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _compositor?.SyncSuppressedClickTicks(suppressedTicks);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

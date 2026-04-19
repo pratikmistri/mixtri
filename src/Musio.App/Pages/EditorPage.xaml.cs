@@ -143,6 +143,7 @@ public sealed partial class EditorPage : Page
                 ZoomLevel = 2.0,
                 CenterX = (click.X * dpiScaleX) / sourceW,
                 CenterY = (click.Y * dpiScaleY) / sourceH,
+                SourceClickTicks = click.TimestampTicks,
             });
         }
 
@@ -306,6 +307,7 @@ public sealed partial class EditorPage : Page
                 .Where(k => k.IsManual)
                 .ToList();
             _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
+            _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
         }
 
         Timeline.Refresh();

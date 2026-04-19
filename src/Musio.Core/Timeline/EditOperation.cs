@@ -373,12 +373,22 @@ public class MoveZoomKeyframeOperation : IEditOperation
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
         model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp, IsManual = true };
+
+        // When converting an auto-generated keyframe to manual, suppress the
+        // original auto-zoom click so it doesn't double-fire.
+        if (!_previousIsManual && model.ZoomKeyframes[index].SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Add(ticks);
     }
 
     public void Undo(TimelineModel model)
     {
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
+
+        // Restore suppression state before reverting the keyframe
+        if (!_previousIsManual && model.ZoomKeyframes[index].SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Remove(ticks);
+
         model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp, IsManual = _previousIsManual };
     }
 }
@@ -402,6 +412,11 @@ public class RemoveZoomKeyframeOperation : IEditOperation
         if (_removedIndex < 0) return;
         _removedKeyframe = model.ZoomKeyframes[_removedIndex];
         model.ZoomKeyframes.RemoveAt(_removedIndex);
+
+        // Suppress the underlying auto-zoom click so the engine no longer
+        // generates a zoom segment for it during preview or export.
+        if (!_removedKeyframe.IsManual && _removedKeyframe.SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Add(ticks);
     }
 
     public void Undo(TimelineModel model)
@@ -410,6 +425,10 @@ public class RemoveZoomKeyframeOperation : IEditOperation
         {
             int insertIdx = Math.Min(_removedIndex, model.ZoomKeyframes.Count);
             model.ZoomKeyframes.Insert(insertIdx, _removedKeyframe);
+
+            // Restore the auto-zoom click suppression
+            if (!_removedKeyframe.IsManual && _removedKeyframe.SourceClickTicks is long ticks)
+                model.SuppressedClickTicks.Remove(ticks);
         }
     }
 }
@@ -469,6 +488,10 @@ public class ResizeZoomSegmentOperation : IEditOperation
 
         _previousKeyframe = model.ZoomKeyframes[index];
         var kf = _previousKeyframe;
+
+        // Suppress the auto-zoom click when converting auto→manual via resize
+        if (!kf.IsManual && kf.SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Add(ticks);
 
         if (_resizeStart)
         {
@@ -531,6 +554,11 @@ public class ResizeZoomSegmentOperation : IEditOperation
         if (_previousKeyframe is null) return;
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
+
+        // Restore suppression state
+        if (!_previousKeyframe.IsManual && _previousKeyframe.SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Remove(ticks);
+
         model.ZoomKeyframes[index] = _previousKeyframe;
     }
 }
@@ -562,6 +590,10 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         _previousKeyframe = model.ZoomKeyframes[index];
         var kf = _previousKeyframe;
 
+        // Suppress the auto-zoom click when converting auto→manual via property edit
+        if (!kf.IsManual && kf.SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Add(ticks);
+
         model.ZoomKeyframes[index] = kf with
         {
             ZoomLevel = _newZoomLevel ?? kf.ZoomLevel,
@@ -576,6 +608,11 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         if (_previousKeyframe is null) return;
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (index < 0) return;
+
+        // Restore suppression state
+        if (!_previousKeyframe.IsManual && _previousKeyframe.SourceClickTicks is long ticks)
+            model.SuppressedClickTicks.Remove(ticks);
+
         model.ZoomKeyframes[index] = _previousKeyframe;
     }
 }

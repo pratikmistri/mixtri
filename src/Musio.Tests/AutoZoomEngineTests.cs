@@ -197,6 +197,87 @@ public sealed class AutoZoomEngineTests
     }
 
     [TestMethod]
+    public void GetZoomState_SuppressedClick_SkipsAutoZoom()
+    {
+        var config = new AutoZoomConfig { DefaultZoomLevel = 2.0f };
+        var engine = new AutoZoomEngine(config);
+        // Click at t=2.0s with source tick = 2.0 * TickFrequency
+        long clickTicks = (long)(2.0 * TickFrequency);
+        var recording = BuildRecordingWithClicks(5.0, [(2.0, 500, 400)]);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency);
+
+        // Before suppression: zoom is active at click time
+        var before = engine.GetZoomState(2.1);
+        Assert.AreEqual(2.0f, before.ZoomLevel, 0.01f,
+            "Expected zoom = 2.0 at click time before suppression");
+
+        // Suppress the click
+        engine.SetSuppressedClickTicks([clickTicks]);
+
+        // After suppression: zoom should be 1.0
+        var after = engine.GetZoomState(2.1);
+        Assert.AreEqual(1.0f, after.ZoomLevel, 0.01f,
+            "Zoom should be 1.0 after suppressing the auto-zoom click");
+    }
+
+    [TestMethod]
+    public void GetZoomState_SuppressOneOfTwoClicks_OnlyOneZooms()
+    {
+        var config = new AutoZoomConfig
+        {
+            DefaultZoomLevel = 2.0f,
+            MinTimeBetweenZooms = 0.5f,
+        };
+        var engine = new AutoZoomEngine(config);
+        // Two clicks far apart: t=1.0 and t=4.0
+        long click1Ticks = (long)(1.0 * TickFrequency);
+        var recording = BuildRecordingWithClicks(6.0, [(1.0, 200, 200), (4.0, 800, 600)]);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency);
+
+        // Both clicks produce zoom before suppression
+        Assert.AreEqual(2.0f, engine.GetZoomState(1.1).ZoomLevel, 0.01f);
+        Assert.AreEqual(2.0f, engine.GetZoomState(4.1).ZoomLevel, 0.01f);
+
+        // Suppress only the first click
+        engine.SetSuppressedClickTicks([click1Ticks]);
+
+        // First click: no zoom; second click: still zoomed
+        Assert.AreEqual(1.0f, engine.GetZoomState(1.1).ZoomLevel, 0.01f,
+            "Suppressed click should not produce zoom");
+        Assert.AreEqual(2.0f, engine.GetZoomState(4.1).ZoomLevel, 0.01f,
+            "Non-suppressed click should still zoom");
+    }
+
+    [TestMethod]
+    public void RemoveZoomKeyframeOperation_SuppressesAutoClick()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(10) };
+        long clickTicks = 20_000_000; // 2.0s at 10MHz
+
+        model.ZoomKeyframes.Add(new ZoomKeyframe
+        {
+            Timestamp = TimeSpan.FromSeconds(2.0),
+            ZoomLevel = 2.0,
+            CenterX = 0.5,
+            CenterY = 0.5,
+            SourceClickTicks = clickTicks,
+        });
+
+        var op = new Core.Timeline.RemoveZoomKeyframeOperation(model.ZoomKeyframes[0].Id);
+        op.Execute(model);
+
+        Assert.AreEqual(0, model.ZoomKeyframes.Count, "Keyframe should be removed");
+        Assert.IsTrue(model.SuppressedClickTicks.Contains(clickTicks),
+            "Source click should be suppressed after removing auto keyframe");
+
+        // Undo should restore both the keyframe and remove the suppression
+        op.Undo(model);
+        Assert.AreEqual(1, model.ZoomKeyframes.Count, "Keyframe should be restored on undo");
+        Assert.IsFalse(model.SuppressedClickTicks.Contains(clickTicks),
+            "Suppression should be removed on undo");
+    }
+
+    [TestMethod]
     public void SpringInterpolate_ConvergesToTarget()
     {
         float current = 1.0f;

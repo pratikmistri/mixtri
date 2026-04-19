@@ -297,6 +297,15 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Updates which auto-generated click zooms are suppressed (i.e. deleted by the user).
+    /// Triggers a rebuild of the auto-zoom segments, excluding suppressed clicks.
+    /// </summary>
+    public void SyncSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
+    {
+        _zoomEngine.SetSuppressedClickTicks(suppressedTicks);
+    }
+
+    /// <summary>
     /// Compose a single output frame at the given frame index.
     /// Returns a <see cref="CanvasRenderTarget"/> that the caller must dispose.
     /// </summary>

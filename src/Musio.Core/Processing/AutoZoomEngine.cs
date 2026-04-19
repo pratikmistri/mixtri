@@ -37,6 +37,14 @@ public class AutoZoomEngine
     private int _sourceWidth;
     private int _sourceHeight;
 
+    // Stored build parameters for rebuilding auto segments when suppressed set changes
+    private MouseRecordingData? _lastMouseData;
+    private double _lastTickFrequency;
+    private float _lastCoordScaleX = 1f;
+    private float _lastCoordScaleY = 1f;
+    private double _lastTimeOffsetSeconds;
+    private HashSet<long> _suppressedClickTicks = [];
+
     private struct ZoomSegment
     {
         public double ZoomInStart;
@@ -70,23 +78,49 @@ public class AutoZoomEngine
         ArgumentNullException.ThrowIfNull(mouseData);
         _sourceWidth = sourceWidth;
         _sourceHeight = sourceHeight;
+
+        // Cache build parameters for rebuilding when suppressed set changes
+        _lastMouseData = mouseData;
+        _lastTickFrequency = tickFrequency;
+        _lastCoordScaleX = coordScaleX;
+        _lastCoordScaleY = coordScaleY;
+        _lastTimeOffsetSeconds = timeOffsetSeconds;
+
+        RebuildAutoSegments();
+    }
+
+    /// <summary>
+    /// Sets the source click ticks that should be suppressed (excluded) from
+    /// auto-zoom segment generation. Triggers a rebuild of auto segments.
+    /// </summary>
+    public void SetSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
+    {
+        _suppressedClickTicks = suppressedTicks is HashSet<long> hs
+            ? new HashSet<long>(hs)
+            : [.. suppressedTicks];
+        if (_lastMouseData is not null)
+            RebuildAutoSegments();
+    }
+
+    private void RebuildAutoSegments()
+    {
         _autoSegments.Clear();
 
-        if (!_config.Enabled) return;
+        if (!_config.Enabled || _lastMouseData is null) return;
 
-        var clicks = mouseData.Clicks
-            .Where(c => c.IsDown)
+        var clicks = _lastMouseData.Clicks
+            .Where(c => c.IsDown && !_suppressedClickTicks.Contains(c.TimestampTicks))
             .OrderBy(c => c.TimestampTicks)
             .ToList();
 
         if (clicks.Count == 0) return;
 
-        long startTick = mouseData.StartTimestampTicks;
+        long startTick = _lastMouseData.StartTimestampTicks;
 
         var rawSegments = new List<ZoomSegment>();
         foreach (var click in clicks)
         {
-            double clickTime = (click.TimestampTicks - startTick) / tickFrequency - timeOffsetSeconds;
+            double clickTime = (click.TimestampTicks - startTick) / _lastTickFrequency - _lastTimeOffsetSeconds;
 
             rawSegments.Add(new ZoomSegment
             {
@@ -95,8 +129,8 @@ public class AutoZoomEngine
                 HoldEnd = clickTime + _config.HoldDuration,
                 ZoomOutEnd = clickTime + _config.HoldDuration + _config.EaseOutDuration,
                 TargetZoom = _config.DefaultZoomLevel,
-                CenterX = Math.Clamp(click.X * coordScaleX, 0f, sourceWidth - 1f),
-                CenterY = Math.Clamp(click.Y * coordScaleY, 0f, sourceHeight - 1f),
+                CenterX = Math.Clamp(click.X * _lastCoordScaleX, 0f, _sourceWidth - 1f),
+                CenterY = Math.Clamp(click.Y * _lastCoordScaleY, 0f, _sourceHeight - 1f),
             });
         }
 

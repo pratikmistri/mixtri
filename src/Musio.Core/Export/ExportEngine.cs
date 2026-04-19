@@ -108,7 +108,7 @@ public class ExportEngine
         {
             await ExportGifAsync(
                 project, mouseData, exportComposition,
-                effectiveSettings, timelineMapper, outputPath, progress, ct);
+                effectiveSettings, timelineMapper, timeline, outputPath, progress, ct);
         }
         else
         {
@@ -120,6 +120,7 @@ public class ExportEngine
                 resW, resH,
                 outputPath,
                 timelineMapper,
+                timeline,
                 progress,
                 ct);
         }
@@ -133,6 +134,7 @@ public class ExportEngine
         CompositionConfig composition,
         ExportSettings settings,
         TimelineMapper? timelineMapper,
+        TimelineModel? timeline,
         string outputPath,
         IProgress<ExportProgress>? progress,
         CancellationToken ct)
@@ -148,6 +150,9 @@ public class ExportEngine
 
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
             project.MouseToVideoOffsetSeconds);
+
+        // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
+        SyncTimelineZoomState(compositor, timeline);
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
         int fps = settings.Fps;
@@ -397,5 +402,22 @@ public class ExportEngine
         }
 
         return composition;
+    }
+
+    /// <summary>
+    /// Syncs manual zoom keyframes and suppressed auto-zoom clicks from the
+    /// timeline model into the compositor so exports match the editor preview.
+    /// </summary>
+    private static void SyncTimelineZoomState(FrameCompositor compositor, TimelineModel? timeline)
+    {
+        if (timeline is null) return;
+
+        var manualKeyframes = timeline.ZoomKeyframes
+            .Where(k => k.IsManual)
+            .ToList();
+        compositor.SyncManualZoomKeyframes(manualKeyframes);
+
+        if (timeline.SuppressedClickTicks.Count > 0)
+            compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
     }
 }
