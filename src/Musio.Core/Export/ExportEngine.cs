@@ -53,12 +53,14 @@ public class ExportEngine
         // Resolve output dimensions from settings
         var (resW, resH) = GetResolutionDimensions(settings.Resolution);
 
-        // Override composition with export settings — match editor preview defaults
-        // for cursor visibility and timing. Cap compositor FPS at 30 to match
-        // preview — this keeps click animations aligned with source frames.
+        // Override composition with export settings — match editor preview defaults.
+        // The export video FPS must match the compositor FPS to keep cursor/click
+        // animations perfectly aligned with source frames. The preview runs at 30fps
+        // and so should the export.
+        int exportFps = Math.Min(settings.Fps, 30);
         var exportComposition = enrichedComposition with
         {
-            OutputFps = Math.Min(settings.Fps, 30),
+            OutputFps = exportFps,
             AspectRatio = settings.AspectRatio,
             Cursor = enrichedComposition.Cursor with
             {
@@ -66,6 +68,9 @@ public class ExportEngine
                 ClickHighlightEnabled = false,
             },
         };
+
+        // Use the same FPS for the encoder so video duration matches compositor
+        var exportSettings = settings with { Fps = exportFps };
 
         // Build timeline mapper if timeline edits are present
         TimelineMapper? timelineMapper = null;
@@ -90,11 +95,11 @@ public class ExportEngine
 
         var effectiveSettings = new ExportSettings
         {
-            Resolution = settings.Resolution,
-            Fps = settings.Fps,
+            Resolution = exportSettings.Resolution,
+            Fps = exportSettings.Fps,
             Format = effectiveFormat,
-            Quality = settings.Quality,
-            AspectRatio = settings.AspectRatio,
+            Quality = exportSettings.Quality,
+            AspectRatio = exportSettings.AspectRatio,
         };
 
         if (effectiveFormat == VideoFormat.GIF)
