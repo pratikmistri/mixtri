@@ -67,3 +67,16 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Left edge resize changes PreDuration+Timestamp; right edge changes HoldDuration.
 - `ZoomKeyframe.MinSegmentDuration` = 200ms prevents degenerate segments.
 - Build requires VS MSBuild (`dotnet build` fails due to PriGen tooling issue).
+
+---
+
+## App Logo — Generating MSIX Assets from Source Logo
+
+**Feature/area:** App branding / Assets
+
+**Approaches tried:**
+
+1. **PowerShell + System.Drawing to resize source PNG (640x640) into all required MSIX assets** — Worked. Used `HighQualityBicubic` interpolation for clean downscaling. ✅
+2. **Manual ICO generation with PNG-encoded entries** — Worked. Built multi-resolution ICO (16–256px) by writing the ICO binary header + PNG payloads directly via `BinaryWriter`. ✅
+
+**What worked:** Using the largest source image (`Musio.png` 640x640) and resizing to all required targets: StoreLogo (50x50), Square44x44 (88x88, 24x24), Square150x150 (300x300), LockScreen (48x48), Wide310x150 (620x300 centered), SplashScreen (1240x600 centered), AppIcon.ico (multi-res). All existing references in Package.appxmanifest, MainWindow.xaml, csproj, and SystemTrayService.cs already pointed to the standard asset names — no code changes needed.
