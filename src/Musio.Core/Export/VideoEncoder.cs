@@ -88,7 +88,8 @@ public class VideoEncoder : IDisposable
 
         // Initialize compositor (same pipeline as editor preview)
         using var compositor = new FrameCompositor(compositionConfig);
-        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration);
+        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
+            project.MouseToVideoOffsetSeconds);
 
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).

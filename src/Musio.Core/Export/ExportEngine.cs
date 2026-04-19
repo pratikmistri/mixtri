@@ -147,7 +147,8 @@ public class ExportEngine
         int sourceWidth = (int)sourceProps.Width;
         int sourceHeight = (int)sourceProps.Height;
 
-        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration);
+        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
+            project.MouseToVideoOffsetSeconds);
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
         int fps = settings.Fps;

@@ -37,17 +37,20 @@ public class KeyboardOverlayRenderer
 
     /// <summary>
     /// Renders any active key combo at the given timestamp onto the canvas.
+    /// <paramref name="baseTimestampTicks"/> is the tick value that corresponds to
+    /// video time 0, aligning keyboard event timestamps with the video timeline.
     /// </summary>
     public void RenderKeyOverlay(CanvasDrawingSession session, List<KeyPressEvent> events,
                                   double currentTimeSeconds, double tickFrequency,
-                                  int canvasWidth, int canvasHeight)
+                                  int canvasWidth, int canvasHeight,
+                                  long baseTimestampTicks = 0)
     {
         ArgumentNullException.ThrowIfNull(session);
         if (events is null || events.Count == 0 || tickFrequency <= 0)
             return;
 
         // Find the most recent combo to display
-        var combo = FindActiveCombo(events, currentTimeSeconds, tickFrequency);
+        var combo = FindActiveCombo(events, currentTimeSeconds, tickFrequency, baseTimestampTicks);
         if (combo is null)
             return;
 
@@ -62,11 +65,16 @@ public class KeyboardOverlayRenderer
     /// Scans events to find the most recent displayable key combo and its timing.
     /// </summary>
     private (string text, double elapsed, double duration)? FindActiveCombo(
-        List<KeyPressEvent> events, double currentTimeSeconds, double tickFrequency)
+        List<KeyPressEvent> events, double currentTimeSeconds, double tickFrequency,
+        long baseTimestampTicks)
     {
         // Walk events in reverse to find the most recent key-down event
         // that qualifies for display.
-        long firstEventTick = events.Count > 0 ? events[0].TimestampTicks : 0;
+        // Use the caller-provided base tick as t=0 so keyboard events align
+        // with the video timeline. Falls back to first event if no base given.
+        long originTick = baseTimestampTicks != 0
+            ? baseTimestampTicks
+            : (events.Count > 0 ? events[0].TimestampTicks : 0);
 
         string? bestComboText = null;
         double bestComboTime = double.MinValue;
@@ -76,7 +84,7 @@ public class KeyboardOverlayRenderer
             var evt = events[i];
             if (!evt.IsDown) continue;
 
-            double eventTime = (evt.TimestampTicks - firstEventTick) / tickFrequency;
+            double eventTime = (evt.TimestampTicks - originTick) / tickFrequency;
 
             // Only consider events within the display window
             double elapsed = currentTimeSeconds - eventTime;

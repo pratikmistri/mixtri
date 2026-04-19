@@ -58,6 +58,14 @@ public class FrameCompositor : IDisposable
     private float _coordScaleY = 1.0f;
     private double _mouseTimeOffset;
 
+    // Tick value corresponding to video time 0, for rebasing keyboard events.
+    private long _videoStartTick;
+
+    // Offset between mouse-frame indices and video-frame indices.
+    // smoothedPositions[videoFrame + _videoFrameOffset] gives the cursor
+    // position at video time = videoFrame / outputFps.
+    private int _videoFrameOffset;
+
     public int TotalFrames { get; private set; }
     public int OutputWidth { get; private set; }
     public int OutputHeight { get; private set; }
@@ -147,6 +155,17 @@ public class FrameCompositor : IDisposable
 
         // Store offset for click timestamp alignment
         _mouseTimeOffset = mouseToVideoOffsetSeconds;
+
+        // Compute the index offset between mouse frames and video frames.
+        // Mouse frame 0 = mouse start; video frame 0 = video start.
+        // Video frame N needs the cursor at mouse time (N/fps + offset),
+        // which is mouse frame (N + offset*fps).
+        _videoFrameOffset = (int)Math.Round(mouseToVideoOffsetSeconds * _config.OutputFps);
+
+        // Compute the tick corresponding to video time 0 for keyboard overlay alignment.
+        // Video t=0 is mouseStart + offset in tick space.
+        _videoStartTick = mouseData.StartTimestampTicks
+            + (long)(mouseToVideoOffsetSeconds * mouseData.TickFrequency);
 
         // Compute TotalFrames from the authoritative duration (video/project)
         if (duration.HasValue && duration.Value.TotalSeconds > 0)
@@ -276,8 +295,16 @@ public class FrameCompositor : IDisposable
         if (frameIndex < 0 || frameIndex >= TotalFrames)
             throw new ArgumentOutOfRangeException(nameof(frameIndex));
 
-        double timeSeconds = _smoothedPositions[frameIndex].TimestampSeconds;
-        var cursorPos = _smoothedPositions[frameIndex];
+        // Use true video time for all animation/overlay timing.
+        // This matches the timebase used by click events, zoom segments, and
+        // keyboard events — all of which are already video-relative.
+        double timeSeconds = (double)frameIndex / _config.OutputFps;
+
+        // Smoothed positions are indexed by mouse frame number (starting from
+        // mouse recording start). Offset to the corresponding video frame.
+        int cursorIndex = Math.Clamp(
+            frameIndex + _videoFrameOffset, 0, _smoothedPositions.Count - 1);
+        var cursorPos = _smoothedPositions[cursorIndex];
 
         // Get zoom state — use smoothed cursor position as center hint
         // so the viewport always keeps the cursor in view
@@ -305,7 +332,7 @@ public class FrameCompositor : IDisposable
                 ds, croppedFrame, OutputWidth, OutputHeight, _config.Background);
 
             // Cursor overlay with position transformed to output space
-            RenderCursorOverlay(ds, cursorPos, viewport, timeSeconds, frameIndex);
+            RenderCursorOverlay(ds, cursorPos, viewport, timeSeconds, cursorIndex);
 
             // Webcam overlay
             if (_webcamCompositor is not null && _webcamFrame is not null)
@@ -318,7 +345,7 @@ public class FrameCompositor : IDisposable
             {
                 _keyboardRenderer.RenderKeyOverlay(
                     ds, _keyboardEvents, timeSeconds, _tickFrequency,
-                    OutputWidth, OutputHeight);
+                    OutputWidth, OutputHeight, _videoStartTick);
             }
 
             // Subtitle overlay
@@ -519,8 +546,12 @@ public class FrameCompositor : IDisposable
             double speed = Math.Sqrt(
                 pos.VelocityX * pos.VelocityX + pos.VelocityY * pos.VelocityY);
 
+            // Use video-relative time so auto-hide is consistent with
+            // the video timebase used for all other animations.
+            double videoTime = (double)(i - _videoFrameOffset) / _config.OutputFps;
+
             if (speed > velocityThreshold)
-                lastMove = pos.TimestampSeconds;
+                lastMove = videoTime;
 
             _lastMoveTimes[i] = lastMove;
         }
