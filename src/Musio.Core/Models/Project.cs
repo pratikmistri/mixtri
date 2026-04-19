@@ -1,3 +1,5 @@
+using Musio.Core.Capture;
+
 namespace Musio.Core.Models;
 
 /// <summary>
@@ -32,4 +34,10 @@ public class Project
     /// </summary>
     public int CropOffsetX { get; set; }
     public int CropOffsetY { get; set; }
+
+    /// <summary>
+    /// How the recording was captured. Used to decide whether background
+    /// styling (padding, shadow, rounded corners) should be applied.
+    /// </summary>
+    public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;
 }

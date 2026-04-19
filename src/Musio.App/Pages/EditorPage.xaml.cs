@@ -158,6 +158,25 @@ public sealed partial class EditorPage : Page
             Zoom = new AutoZoomConfig { Enabled = true },
         };
 
+        // Only apply background fill for window captures — region and
+        // full-screen recordings render without padding/shadow.
+        if (project.CaptureType != CaptureTargetType.Window)
+        {
+            config = config with
+            {
+                Background = config.Background with
+                {
+                    Padding = 0,
+                    ShadowEnabled = false,
+                    CornerRadius = 0,
+                    BorderEnabled = false,
+                },
+            };
+        }
+
+        // Persist so the export pipeline uses the same config
+        ProjectService.Instance.CurrentComposition = config;
+
         try
         {
             _previewRenderer = new PreviewRenderer();

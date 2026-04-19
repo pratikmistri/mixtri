@@ -5,8 +5,10 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio_App.Controls;
+using Musio_App.Services;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
+using Musio.Core.Settings;
 
 namespace Musio_App.Pages;
 
@@ -16,6 +18,7 @@ public sealed partial class RecordingPage : Page
 
     private readonly RegionSelector _regionSelector = new();
     private RecordingOverlayWindow? _overlayWindow;
+    private RegionBorderHighlight? _regionBorder;
     private bool _recordingMinimizedWindow;
 
     public RecordingPage()
@@ -56,6 +59,16 @@ public sealed partial class RecordingPage : Page
             _recordingMinimizedWindow = true;
         }
 
+        // Show a border around the selected region so the user can see
+        // what area is being captured.
+        if (ViewModel.CaptureMode == CaptureMode.CustomRegion
+            && ViewModel.SelectedRegion is CaptureRegion region
+            && region.Width > 0 && region.Height > 0)
+        {
+            _regionBorder = new RegionBorderHighlight();
+            _regionBorder.Show(region.X, region.Y, region.Width, region.Height);
+        }
+
         // Create and show the compact overlay
         _overlayWindow = new RecordingOverlayWindow(ViewModel);
         _overlayWindow.StopRequested += OnOverlayStopRequested;
@@ -70,6 +83,9 @@ public sealed partial class RecordingPage : Page
             _overlayWindow.CloseOverlay();
             _overlayWindow = null;
         }
+
+        _regionBorder?.Dispose();
+        _regionBorder = null;
 
         // Restore main window only if recording was what minimized it
         if (_recordingMinimizedWindow)

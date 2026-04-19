@@ -269,9 +269,21 @@ public class RecordingSession : IDisposable
             if (_keyboardRecorder is not null)
                 SaveKeyboardData(_keyboardDataFilePath, _keyboardRecorder.GetRecordedEvents());
 
-            // Finalize video writer
+            // Finalize video writer (encode MP4 from frames)
+            // If encoding fails, the session still completes — the editor can
+            // work directly from the .frames/ JPEG directory.
             if (_videoWriter is not null)
-                await _videoWriter.FinalizeAsync();
+            {
+                try
+                {
+                    await _videoWriter.FinalizeAsync();
+                }
+                catch (Exception finEx)
+                {
+                    Debug.WriteLine(
+                        $"[RecordingSession] MP4 finalization failed (frames preserved): {finEx.Message}");
+                }
+            }
 
             // Collect audio file paths
             var audioFilePaths = new List<string>();
@@ -324,6 +336,7 @@ public class RecordingSession : IDisposable
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
                 CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
                 CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
+                CaptureType = _config.Target.Type,
             };
 
             State = RecordingState.Stopped;
@@ -413,21 +426,38 @@ public class RecordingSession : IDisposable
 
                     if (w > 0 && h > 0)
                     {
-                        _physicalCropRect = new Rect(x, y, w, h);
-                        _captureWidth = (int)w;
-                        _captureHeight = (int)h;
+                        // H.264 requires even dimensions — round down to nearest multiple of 2
+                        int evenW = (int)w & ~1;
+                        int evenH = (int)h & ~1;
+                        if (evenW < 2) evenW = 2;
+                        if (evenH < 2) evenH = 2;
+
+                        _physicalCropRect = new Rect(x, y, evenW, evenH);
+                        _captureWidth = evenW;
+                        _captureHeight = evenH;
                     }
                     else
                     {
-                        _captureWidth = e.Width;
-                        _captureHeight = e.Height;
+                        _captureWidth = e.Width & ~1;
+                        _captureHeight = e.Height & ~1;
                     }
                 }
                 else
                 {
-                    _captureWidth = e.Width;
-                    _captureHeight = e.Height;
+                    _captureWidth = e.Width & ~1;
+                    _captureHeight = e.Height & ~1;
                 }
+
+                if (_captureWidth < 2) _captureWidth = 2;
+                if (_captureHeight < 2) _captureHeight = 2;
+
+                Debug.WriteLine(
+                    $"[RecordingSession] Creating VideoWriter: " +
+                    $"captureW={_captureWidth}, captureH={_captureHeight}, " +
+                    $"frameW={e.Width}, frameH={e.Height}, " +
+                    $"cropRect={_physicalCropRect}, " +
+                    $"targetType={_config.Target.Type}, " +
+                    $"logicalCrop={_config.Target.CropRect}");
 
                 _videoWriter = new VideoWriter(
                     _videoFilePath, _captureWidth, _captureHeight, _config.Fps,

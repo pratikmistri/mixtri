@@ -215,6 +215,17 @@ public sealed class VideoWriter : IDisposable
         if (totalFrames == 0)
             return;
 
+        // Log diagnostic info to file for debugging
+        string logPath = Path.Combine(Path.GetDirectoryName(_outputPath)!, "finalize_debug.log");
+        try
+        {
+            File.WriteAllText(logPath,
+                $"Width={_width}, Height={_height}, FPS={_fps}, TotalFrames={totalFrames}\n" +
+                $"CropRect={_cropRect}\n" +
+                $"OutputPath={_outputPath}\n");
+        }
+        catch { /* best effort */ }
+
         var composition = new MediaComposition();
 
         // Use constant frame duration for true CFR output.
@@ -236,16 +247,29 @@ public sealed class VideoWriter : IDisposable
         if (composition.Clips.Count == 0)
             return;
 
-        // Encode to MP4
-        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD1080p);
-        if (profile.Video is not null)
+        // H.264 requires even dimensions
+        uint profileWidth = (uint)(_width & ~1);
+        uint profileHeight = (uint)(_height & ~1);
+        if (profileWidth < 2) profileWidth = 2;
+        if (profileHeight < 2) profileHeight = 2;
+
+        // Encode to MP4 — use Auto quality so the profile dimensions aren't
+        // constrained to a preset resolution, then set them explicitly.
+        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
+        profile.Video ??= new VideoEncodingProperties();
+        profile.Video.Subtype = "H264";
+        profile.Video.Width = profileWidth;
+        profile.Video.Height = profileHeight;
+        profile.Video.FrameRate.Numerator = (uint)_fps;
+        profile.Video.FrameRate.Denominator = 1;
+        profile.Video.Bitrate = 20_000_000;
+
+        try
         {
-            profile.Video.Width = (uint)_width;
-            profile.Video.Height = (uint)_height;
-            profile.Video.FrameRate.Numerator = (uint)_fps;
-            profile.Video.FrameRate.Denominator = 1;
-            profile.Video.Bitrate = 20_000_000;
+            File.AppendAllText(logPath,
+                $"Profile: {profileWidth}x{profileHeight}, Clips={composition.Clips.Count}\n");
         }
+        catch { }
 
         string dir = Path.GetDirectoryName(_outputPath)!;
         var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
@@ -259,12 +283,21 @@ public sealed class VideoWriter : IDisposable
         renderOp.Completed = (info, status) =>
         {
             if (status == Windows.Foundation.AsyncStatus.Completed)
+            {
                 tcs.TrySetResult(null);
+            }
             else if (status == Windows.Foundation.AsyncStatus.Canceled)
+            {
                 tcs.TrySetCanceled();
+            }
             else
+            {
+                var err = info.ErrorCode;
+                try { File.AppendAllText(logPath, $"RenderToFile FAILED: {err}\n"); }
+                catch { }
                 tcs.TrySetException(
-                    info.ErrorCode ?? new InvalidOperationException("MP4 render failed."));
+                    err ?? new InvalidOperationException("MP4 render failed."));
+            }
         };
 
         await tcs.Task;

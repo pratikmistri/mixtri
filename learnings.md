@@ -121,3 +121,63 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **Key design decisions:**
 - Auto segments keep their lighter fill color (`ZoomSegmentAutoFill`) until modified, at which point promotion to `IsManual` gives them the standard fill.
 - Promotion to manual means the compositor receives the segment as a user override that takes priority over the auto-zoom engine's generated segments.
+
+---
+
+## Region Capture — MediaEncodingProfile Invalid Width/Height
+
+**Feature/area:** Recording pipeline (RecordingSession, VideoWriter)
+
+**Approaches tried:**
+
+1. **Round capture dimensions to even numbers (`& ~1`) after DPI scaling** — Necessary fix. H.264 encoding requires width and height to be multiples of 2. After DPI-scaling the logical crop rect and truncating to int, dimensions could be odd (e.g., 150% DPI on a 746px logical region → 1119px physical). Applied `& ~1` rounding on all capture dimension paths (region crop, monitor, window) in `RecordingSession.OnFrameCaptured`. Also added matching rounding in `VideoWriter.FinalizeAsync` profile dimensions. ✅
+2. **Changed `MediaEncodingProfile.CreateMp4(HD1080p)` to `Auto` quality** — Done. Using `Auto` avoids the profile being constrained to a preset resolution when custom dimensions are applied. Set `Subtype = "H264"` explicitly. ✅
+3. **Made `FinalizeAsync` failure non-fatal in `RecordingSession.StopAsync`** — Wrapped `FinalizeAsync()` in try/catch so the recording session still completes and the project is created even if MP4 encoding fails. The editor can work directly from the `.frames/` JPEG directory. ✅
+
+**What worked:**
+- Even-dimension rounding with `& ~1` and minimum of 2 in both `RecordingSession` and `VideoWriter`.
+- Using `VideoEncodingQuality.Auto` instead of `HD1080p` for the recording MP4 profile, then explicitly setting all video properties.
+- Making `FinalizeAsync` failure non-fatal so region recordings always produce a usable project.
+
+**What didn't work / pitfalls:**
+- `Add-AppxPackage -Register` can silently fail if the previous registration's files were deleted (clean rebuild). Must `Remove-AppxPackage` first, then re-register.
+- Deleting `bin/obj` for clean rebuild requires NuGet restore (`/restore` flag or separate `msbuild /t:Restore`).
+- The `.frames/` JPEG directory confirmed the actual cropped dimensions (1119×454 = odd width from 150% DPI on a 746px region). This was the smoking gun proving H.264 rejection of odd dimensions.
+
+---
+
+## Compositor — Skip Background Fill for Non-Window Captures
+
+**Feature/area:** Compositor pipeline (FrameCompositor, BackgroundCompositor, EditorPage, Project)
+
+**Approaches tried:**
+
+1. **Added `CaptureTargetType CaptureType` to `Project`, override `BackgroundStyle` in editor** — Worked. In `EditorPage.xaml.cs`, when `project.CaptureType != CaptureTargetType.Window`, the background style is overridden to `Padding=0, ShadowEnabled=false, CornerRadius=0, BorderEnabled=false`. Updated config is stored back to `ProjectService.CurrentComposition` so export uses the same settings. ✅
+
+**What worked:**
+- `Project.CaptureType` set from `_config.Target.Type` in `RecordingSession.StopAsync`.
+- `EditorPage` conditionally strips background styling for region/full-screen recordings.
+- `ProjectService.CurrentComposition` is updated so the export pipeline inherits the same config.
+
+**Key design decisions:**
+- Background fill (padding, shadow, rounded corners, border) only applies to window captures. Region and full-screen captures render raw content.
+
+---
+
+## Region Recording — Border Highlight Around Selected Region
+
+**Feature/area:** Recording overlay (RecordingPage, RegionBorderHighlight)
+
+**Approaches tried:**
+
+1. **Four thin native Win32 popup windows (top, right, bottom, left edges)** — Worked. Each window is `WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED`, with `WDA_EXCLUDEFROMCAPTURE` so the border doesn't appear in the recording. Click-through via `WS_EX_TRANSPARENT`. ✅
+
+**What worked:**
+- `RegionBorderHighlight` class in `Musio.App\Services` creates 4 thin (3px) native windows with a red (#FF3030) background brush, positioned along the edges of the selected region.
+- Shown in `RecordingPage.ShowRecordingOverlay` when `CaptureMode.CustomRegion` is active.
+- Disposed in `CloseRecordingOverlay` when recording stops.
+
+**Key design decisions:**
+- Used native Win32 windows instead of WinUI windows — avoids transparency/compositor complexity and is lightweight.
+- Click-through (`WS_EX_TRANSPARENT`) so the user can still interact with content under the border.
+- Excluded from capture so the border never appears in the recorded video.
