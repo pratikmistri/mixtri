@@ -93,6 +93,10 @@ public sealed partial class EditorPage : Page
             return;
         }
 
+        // Feed cursor data to timeline for track visualization
+        ViewModel.Model.CursorData = mouseData;
+        Timeline.Refresh();
+
         // Build composition config with cursor effects enabled
         var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
         config = config with

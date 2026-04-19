@@ -21,7 +21,8 @@ public class PreviewRenderer : IDisposable
     public int TotalFrames => _compositor?.TotalFrames ?? 0;
 
     /// <summary>
-    /// Initializes the preview pipeline with reduced resolution for real-time performance.
+    /// Initializes the preview pipeline. Uses the full source resolution
+    /// for correct compositing — performance is managed via lower FPS.
     /// </summary>
     public async Task InitializeAsync(
         MouseRecordingData mouseData,
@@ -32,11 +33,11 @@ public class PreviewRenderer : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Use half resolution for preview performance
-        PreviewWidth = sourceWidth / 2;
-        PreviewHeight = sourceHeight / 2;
+        // Use full source resolution so frames composite correctly
+        PreviewWidth = sourceWidth;
+        PreviewHeight = sourceHeight;
 
-        // Create a config tuned for preview: lower FPS, same visual settings
+        // Create a config tuned for preview: lower FPS
         var previewConfig = config with
         {
             OutputFps = Math.Min(config.OutputFps, 30)
@@ -44,7 +45,7 @@ public class PreviewRenderer : IDisposable
 
         _compositor?.Dispose();
         _compositor = new FrameCompositor(previewConfig);
-        await _compositor.InitializeAsync(mouseData, PreviewWidth, PreviewHeight, duration);
+        await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration);
     }
 
     /// <summary>
