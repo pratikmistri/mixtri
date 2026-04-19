@@ -19,6 +19,11 @@ public partial class App : Application
     private GlobalHotkeyService? _hotkeyService;
     private bool _isExiting;
 
+    /// <summary>The main application window, accessible for minimize/restore operations.</summary>
+    public Window? MainAppWindow => _window;
+
+    public static new App Current => (App)Application.Current;
+
     /// <summary>
     /// Initializes the singleton application object.  This is the first line of authored code
     /// executed, and as such is the logical equivalent of main() or WinMain().

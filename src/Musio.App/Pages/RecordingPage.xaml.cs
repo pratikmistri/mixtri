@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio_App.Controls;
@@ -12,6 +13,8 @@ public sealed partial class RecordingPage : Page
     public RecordingViewModel ViewModel { get; } = new();
 
     private readonly RegionSelector _regionSelector = new();
+    private RecordingOverlayWindow? _overlayWindow;
+    private bool _recordingMinimizedWindow;
 
     public RecordingPage()
     {
@@ -19,19 +22,74 @@ public sealed partial class RecordingPage : Page
         ViewModel.SetDispatcher(DispatcherQueue);
         Loaded += OnLoaded;
 
-        // After a recording stops successfully, navigate to the Editor page
         ViewModel.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName == nameof(RecordingViewModel.IsRecording)
-                && !ViewModel.IsRecording
-                && ViewModel.LastProject is not null)
+            if (e.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
+
+            DispatcherQueue.TryEnqueue(() =>
             {
-                DispatcherQueue.TryEnqueue(() =>
+                if (ViewModel.IsRecording)
                 {
-                    Frame.Navigate(typeof(EditorPage));
-                });
-            }
+                    ShowRecordingOverlay();
+                }
+                else
+                {
+                    CloseRecordingOverlay();
+
+                    if (ViewModel.LastProject is not null)
+                        Frame.Navigate(typeof(EditorPage));
+                }
+            });
         };
+    }
+
+    private void ShowRecordingOverlay()
+    {
+        // Minimize the main window so it doesn't occlude the screen
+        var mainWindow = App.Current.MainAppWindow;
+        if (mainWindow is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+            ShowWindow(hwnd, SW_MINIMIZE);
+            _recordingMinimizedWindow = true;
+        }
+
+        // Create and show the compact overlay
+        _overlayWindow = new RecordingOverlayWindow(ViewModel);
+        _overlayWindow.StopRequested += OnOverlayStopRequested;
+        _overlayWindow.Activate();
+    }
+
+    private void CloseRecordingOverlay()
+    {
+        if (_overlayWindow is not null)
+        {
+            _overlayWindow.StopRequested -= OnOverlayStopRequested;
+            _overlayWindow.CloseOverlay();
+            _overlayWindow = null;
+        }
+
+        // Restore main window only if recording was what minimized it
+        if (_recordingMinimizedWindow)
+        {
+            _recordingMinimizedWindow = false;
+            var mainWindow = App.Current.MainAppWindow;
+            if (mainWindow is not null)
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+                ShowWindow(hwnd, SW_RESTORE);
+                mainWindow.Activate();
+            }
+        }
+    }
+
+    private void OnOverlayStopRequested(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (ViewModel.IsRecording)
+                ViewModel.StopRecordingCommand.Execute(null);
+        });
     }
 
     // x:Bind helper: invert boolean
@@ -118,4 +176,10 @@ public sealed partial class RecordingPage : Page
             UpdateRegionInfoDisplay();
         }
     }
+
+    private const int SW_MINIMIZE = 6;
+    private const int SW_RESTORE = 9;
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 }
