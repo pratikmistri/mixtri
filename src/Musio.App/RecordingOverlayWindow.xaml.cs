@@ -73,6 +73,11 @@ public sealed partial class RecordingOverlayWindow : Window
         int height = (int)(52 * scale);
         AppWindow.Resize(new SizeInt32(width, height));
 
+        // Clip the window to a pill-shaped region so the black window background
+        // doesn't peek out behind the rounded Grid content
+        var region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
+        SetWindowRgn(hwnd, region, true);
+
         // Position at bottom-right of primary monitor work area
         PositionBottomRight(width, height);
 
@@ -159,4 +164,10 @@ public sealed partial class RecordingOverlayWindow : Window
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern int SetWindowLong(IntPtr hwnd, int nIndex, int dwNewLong);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int cx, int cy);
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowRgn(IntPtr hwnd, IntPtr hRgn, bool bRedraw);
 }
