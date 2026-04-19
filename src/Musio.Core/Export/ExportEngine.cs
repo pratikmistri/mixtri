@@ -54,14 +54,15 @@ public class ExportEngine
         var (resW, resH) = GetResolutionDimensions(settings.Resolution);
 
         // Override composition with export settings — match editor preview defaults
-        // for cursor visibility (large, no click ripple)
+        // for cursor visibility and timing. Cap compositor FPS at 30 to match
+        // preview — this keeps click animations aligned with source frames.
         var exportComposition = enrichedComposition with
         {
-            OutputFps = settings.Fps,
+            OutputFps = Math.Min(settings.Fps, 30),
             AspectRatio = settings.AspectRatio,
             Cursor = enrichedComposition.Cursor with
             {
-                Scale = Math.Max(enrichedComposition.Cursor.Scale, 4.0f),
+                Scale = Math.Max(enrichedComposition.Cursor.Scale, 2.0f),
                 ClickHighlightEnabled = false,
             },
         };

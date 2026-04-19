@@ -95,6 +95,11 @@ public class VideoEncoder : IDisposable
         int compositorHeight = compositor.OutputHeight;
         bool needsScaling = compositorWidth != targetWidth || compositorHeight != targetHeight;
 
+        // The compositor uses a capped FPS (≤30) for cursor smoothing to match
+        // the editor preview, while the output video may be higher FPS (e.g. 60).
+        // Compute the compositor's actual FPS for correct frame index mapping.
+        int compositorFps = compositionConfig.OutputFps;
+
         // Load source frames from .frames/ JPEGs (same as editor preview)
         var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, _settings.Fps);
 
@@ -171,7 +176,7 @@ public class VideoEncoder : IDisposable
                 currentFrame++;
                 _ = ProduceSampleAsync(
                     args.Request, deferral, frame, totalFrames,
-                    compositor, frameReader, sourceComp, webcamComp,
+                    compositor, compositorFps, frameReader, sourceComp, webcamComp,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
                     compositorWidth, compositorHeight, targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
@@ -227,6 +232,7 @@ public class VideoEncoder : IDisposable
         MediaStreamSourceSampleRequestDeferral deferral,
         int frameIndex, int totalFrames,
         FrameCompositor compositor,
+        int compositorFps,
         VideoFrameReader? frameReader,
         MediaComposition? sourceComp,
         MediaComposition? webcamComp,
@@ -251,8 +257,11 @@ public class VideoEncoder : IDisposable
             var timeSpan = TimeSpan.FromSeconds(timeSeconds);
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
+            // Compositor frame index uses its internal FPS (capped at 30),
+            // NOT the output video FPS — this keeps click animations aligned
+            // with source frames, matching the editor preview timing.
             int compositorFrameIndex = Math.Clamp(
-                (int)(timeSeconds * _settings.Fps),
+                (int)(timeSeconds * compositorFps),
                 0, Math.Max(0, compositor.TotalFrames - 1));
 
             // Webcam overlay
