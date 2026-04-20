@@ -299,3 +299,20 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - The export path (`VideoEncoder.ExportAsync`) previously didn't sync any zoom state at all — needed `TimelineModel?` parameter added.
 - Edit operations that set `IsManual = true` (Move, Resize, UpdateProperties) must also suppress the original auto click, otherwise both the manual keyframe and the auto segment fire.
 
+---
+
+## Export — H.264 Odd Dimensions Failure
+
+**Feature/area:** VideoEncoder (export pipeline)
+
+**Approaches tried:**
+
+1. **Enforce even dimensions with `& ~1` at the target dimension assignment** — Worked. Applied the same fix pattern already used in `VideoWriter.FinalizeAsync` (recording pipeline) to `VideoEncoder.ExportAsync`. Reuses the existing scaling path (`needsScaling`) to downscale compositor frames when odd→even adjustment changes dimensions. ✅
+
+**What worked:** Rounding `targetWidth` and `targetHeight` down to even with `& ~1` right where they're assigned from compositor output (lines 118-121 of VideoEncoder.cs). The existing `needsScaling` branch already handles the dimension mismatch, so no new rendering code was needed.
+
+**What didn't work / pitfalls:**
+- The recording pipeline (`VideoWriter.FinalizeAsync`) had this fix but the export pipeline (`VideoEncoder`) did not — the fix must be applied in BOTH places.
+- Region captures at fractional DPI (125%, 150%, 175%) produce physical pixel dimensions that are often odd. Aspect ratio cropping via `Math.Round()` in `ComputeContentDimensions` can also produce odd content dimensions.
+- H.264 silently rejects odd dimensions — the `MediaTranscoder.PrepareMediaStreamSourceTranscodeAsync` returns `CanTranscode = false` with no descriptive message, making root cause hard to diagnose.
+

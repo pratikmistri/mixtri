@@ -115,9 +115,12 @@ public class VideoEncoder : IDisposable
         // Encode at compositor output dimensions to preserve aspect ratio.
         // The compositor already handles background padding and aspect-ratio
         // cropping, so its output size is the correct final frame size.
-        targetWidth = compositorWidth;
-        targetHeight = compositorHeight;
-        bool needsScaling = false;
+        // H.264 requires even dimensions — round down to nearest even number.
+        targetWidth = compositorWidth & ~1;
+        targetHeight = compositorHeight & ~1;
+        if (targetWidth < 2) targetWidth = 2;
+        if (targetHeight < 2) targetHeight = 2;
+        bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
 
         // Load source frames from .frames/ JPEGs using the RECORDING FPS so
         // frame indices map correctly to the on-disk frame numbering.
