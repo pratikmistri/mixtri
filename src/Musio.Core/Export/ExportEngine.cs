@@ -142,11 +142,25 @@ public class ExportEngine
         var device = CanvasDevice.GetSharedDevice();
         using var compositor = new FrameCompositor(composition);
 
-        var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
-        var sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
-        var sourceProps = sourceClip.GetVideoEncodingProperties();
-        int sourceWidth = (int)sourceProps.Width;
-        int sourceHeight = (int)sourceProps.Height;
+        // Open source video for dimensions. If the MP4 is missing or corrupt,
+        // fall back to project metadata — JPEG frames can still provide visuals.
+        MediaClip? sourceClip = null;
+        int sourceWidth = project.Width > 0 ? project.Width : 1920;
+        int sourceHeight = project.Height > 0 ? project.Height : 1080;
+
+        try
+        {
+            var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
+            sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
+            var sourceProps = sourceClip.GetVideoEncodingProperties();
+            sourceWidth = (int)sourceProps.Width;
+            sourceHeight = (int)sourceProps.Height;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"[ExportEngine] Failed to open source video (will use JPEG frames): {ex.Message}");
+        }
 
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
             project.MouseToVideoOffsetSeconds);
@@ -164,11 +178,15 @@ public class ExportEngine
 
         // Slow path fallback: reuse a single MediaComposition for seeking
         MediaComposition? sourceComp = null;
-        if (frameReader is null)
+        if (frameReader is null && sourceClip is not null)
         {
             sourceComp = new MediaComposition();
             sourceComp.Clips.Add(sourceClip);
         }
+
+        if (frameReader is null && sourceComp is null)
+            throw new InvalidOperationException(
+                "Cannot export GIF: no JPEG frames or valid source video found.");
 
         // Webcam source for overlay (opened once, reused per frame)
         MediaComposition? webcamComp = null;

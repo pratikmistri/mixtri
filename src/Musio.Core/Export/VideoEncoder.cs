@@ -81,12 +81,26 @@ public class VideoEncoder : IDisposable
         var stopwatch = Stopwatch.StartNew();
         var device = CanvasDevice.GetSharedDevice();
 
-        // Open source video once for dimensions and audio tracks
-        var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
-        var sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
-        var sourceProps = sourceClip.GetVideoEncodingProperties();
-        int sourceWidth = (int)sourceProps.Width;
-        int sourceHeight = (int)sourceProps.Height;
+        // Open source video for dimensions and audio tracks.
+        // If the MP4 is missing or corrupt (FinalizeAsync failure during recording),
+        // fall back to project metadata — JPEG frames can still provide visuals.
+        MediaClip? sourceClip = null;
+        int sourceWidth = project.Width > 0 ? project.Width : 1920;
+        int sourceHeight = project.Height > 0 ? project.Height : 1080;
+
+        try
+        {
+            var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
+            sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
+            var sourceProps = sourceClip.GetVideoEncodingProperties();
+            sourceWidth = (int)sourceProps.Width;
+            sourceHeight = (int)sourceProps.Height;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"[VideoEncoder] Failed to open source video (will use JPEG frames): {ex.Message}");
+        }
 
         // Initialize compositor (same pipeline as editor preview)
         using var compositor = new FrameCompositor(compositionConfig);
@@ -129,11 +143,23 @@ public class VideoEncoder : IDisposable
 
         // Fallback: reuse single MediaComposition for seeking
         MediaComposition? sourceComp = null;
-        if (frameReader is null)
+        if (frameReader is null && sourceClip is not null)
         {
-            sourceComp = new MediaComposition();
-            sourceComp.Clips.Add(await MediaClip.CreateFromFileAsync(sourceFile));
+            try
+            {
+                var fallbackFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
+                sourceComp = new MediaComposition();
+                sourceComp.Clips.Add(await MediaClip.CreateFromFileAsync(fallbackFile));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[VideoEncoder] Fallback composition failed: {ex.Message}");
+            }
         }
+
+        if (frameReader is null && sourceComp is null)
+            throw new InvalidOperationException(
+                "Cannot export: no JPEG frames or valid source video found.");
 
         // Prepare webcam source (opened once, reused per frame)
         MediaComposition? webcamComp = null;
@@ -157,7 +183,7 @@ public class VideoEncoder : IDisposable
         }
 
         // Determine if we need an audio mux pass
-        bool hasAudio = sourceClip.EmbeddedAudioTracks.Count > 0
+        bool hasAudio = (sourceClip?.EmbeddedAudioTracks.Count > 0)
             || (project.AudioFilePaths is { Count: > 0 });
 
         // Video-only output path (audio muxed in second pass if needed)
@@ -381,7 +407,7 @@ public class VideoEncoder : IDisposable
     /// </summary>
     private async Task MuxAudioAsync(
         string videoOnlyPath, string finalOutputPath,
-        MediaClip sourceClip, Project project,
+        MediaClip? sourceClip, Project project,
         TimelineMapper? timelineMapper, CancellationToken ct)
     {
         var muxComp = new MediaComposition();
@@ -392,7 +418,7 @@ public class VideoEncoder : IDisposable
         muxComp.Clips.Add(videoClip);
 
         // Add embedded audio from the source recording
-        if (sourceClip.EmbeddedAudioTracks.Count > 0)
+        if (sourceClip is not null && sourceClip.EmbeddedAudioTracks.Count > 0)
         {
             var audioTrack = sourceClip.EmbeddedAudioTracks.First();
             var bgAudioTrack = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(audioTrack);

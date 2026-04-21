@@ -316,3 +316,23 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Region captures at fractional DPI (125%, 150%, 175%) produce physical pixel dimensions that are often odd. Aspect ratio cropping via `Math.Round()` in `ComputeContentDimensions` can also produce odd content dimensions.
 - H.264 silently rejects odd dimensions — the `MediaTranscoder.PrepareMediaStreamSourceTranscodeAsync` returns `CanTranscode = false` with no descriptive message, making root cause hard to diagnose.
 
+---
+
+## Export — Handle Corrupt/Missing Source MP4
+
+**Feature/area:** VideoEncoder, ExportEngine (export pipeline)
+
+**Approaches tried:**
+
+1. **Wrap `MediaClip.CreateFromFileAsync` in try-catch, fall back to project metadata** — Worked. When the source `video.mp4` is corrupt or empty (because `VideoWriter.FinalizeAsync` failed during recording), `CreateFromFileAsync` throws "The parameter is incorrect." The fix catches this and uses `project.Width`/`project.Height` for dimensions instead. JPEG frames from `.frames/` still provide visuals. ✅
+
+**What worked:**
+- Made `sourceClip` nullable in both `VideoEncoder.ExportAsync` and `ExportEngine.ExportGifAsync`.
+- Fall back to `project.Width`/`project.Height` when the video can't be opened.
+- Skip embedded audio from sourceClip when null; separately recorded audio files still work.
+- Guard `frameReader is null && sourceComp is null` to give a clear error when no frame source is available at all.
+
+**What didn't work / pitfalls:**
+- `RecordingSession.StopAsync` makes `FinalizeAsync` non-fatal, so a corrupt `video.mp4` is expected. But the export pipeline assumed it was always valid — every `CreateFromFileAsync` call was unguarded.
+- The error "The parameter is incorrect" from `MediaClip.CreateFromFileAsync` is unhelpful — wrapping it gives a better user experience.
+
