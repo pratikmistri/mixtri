@@ -141,6 +141,8 @@ public partial class RecordingViewModel : ObservableObject
     [ObservableProperty]
     private bool _isRecording;
 
+    private bool _isStopping;
+
     [ObservableProperty]
     private string _elapsedTime = "00:00";
 
@@ -218,8 +220,10 @@ public partial class RecordingViewModel : ObservableObject
     [RelayCommand]
     private async Task StopRecordingAsync()
     {
-        if (!IsRecording || _session is null)
+        if (!IsRecording || _session is null || _isStopping)
             return;
+
+        _isStopping = true;
 
         try
         {
@@ -242,6 +246,7 @@ public partial class RecordingViewModel : ObservableObject
         {
             CleanupSession();
             IsRecording = false;
+            _isStopping = false;
         }
     }
 
