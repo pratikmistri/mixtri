@@ -28,33 +28,33 @@
         <!-- Visual overlay layer (no hit test — pointer events handled by Grid) -->
         <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
             <!-- Four dark mask rectangles forming the overlay around the selection -->
-            <Rectangle x:Name="TopMask" Fill="#4D000000" />
-            <Rectangle x:Name="BottomMask" Fill="#4D000000" />
-            <Rectangle x:Name="LeftMask" Fill="#4D000000" />
-            <Rectangle x:Name="RightMask" Fill="#4D000000" />
+            <Rectangle x:Name="TopMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="BottomMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="LeftMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
 
             <!-- Selection rectangle outline -->
             <Rectangle
                 x:Name="SelectionRect"
                 Fill="Transparent"
-                Stroke="#FF0078D4"
+                Stroke="{ThemeResource RegionSelectionStrokeBrush}"
                 StrokeThickness="2"
                 Visibility="Collapsed" />
 
             <!-- Resize handles (corners + edges) -->
-            <Rectangle x:Name="HandleTL" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleT"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleTR" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleL"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleR"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleBL" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleB"  Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
-            <Rectangle x:Name="HandleBR" Width="8" Height="8" Fill="White" Stroke="#FF0078D4" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleTL" Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleT"  Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleTR" Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleL"  Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleR"  Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleBL" Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleB"  Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
+            <Rectangle x:Name="HandleBR" Width="8" Height="8" Fill="{ThemeResource RegionHandleFillBrush}" Stroke="{ThemeResource RegionSelectionStrokeBrush}" StrokeThickness="1" Visibility="Collapsed" />
 
             <!-- Dimension label -->
             <Border
                 x:Name="DimensionLabel"
-                Background="#CC000000"
+                Background="{ThemeResource RegionLabelBackgroundBrush}"
                 CornerRadius="4"
                 Padding="8,4"
                 Visibility="Collapsed">
@@ -62,7 +62,7 @@
                     x:Name="DimensionText"
                     FontFamily="Consolas"
                     FontSize="12"
-                    Foreground="White" />
+                    Foreground="{ThemeResource OverlayForegroundBrush}" />
             </Border>
         </Canvas>
 
@@ -73,7 +73,7 @@
             Margin="0,40,0,0"
             Padding="16,8"
             FontSize="16"
-            Foreground="White"
+            Foreground="{ThemeResource OverlayForegroundBrush}"
             IsHitTestVisible="False"
             Text="Click and drag to select region. Press Escape to cancel." />
 

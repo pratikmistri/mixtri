@@ -336,3 +336,66 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `RecordingSession.StopAsync` makes `FinalizeAsync` non-fatal, so a corrupt `video.mp4` is expected. But the export pipeline assumed it was always valid — every `CreateFromFileAsync` call was unguarded.
 - The error "The parameter is incorrect" from `MediaClip.CreateFromFileAsync` is unhelpful — wrapping it gives a better user experience.
 
+---
+
+## MSIX Store Packaging — Building Unsigned Packages
+
+**Feature/area:** MSIX packaging for Microsoft Store submission
+
+**Approaches tried:**
+
+1. **MSBuild with `GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`** — Worked. Produces unsigned `.msix` files per architecture (x64, ARM64) suitable for Store submission (Store signs packages automatically). ✅
+
+**What worked:**
+- Must use VS MSBuild (not `dotnet build`) due to PriGen tooling issue.
+- Kill any running Musio.App process before cleaning — locked DLLs prevent `bin/obj` deletion.
+- Delete `bin/obj` folders for a truly clean build (MSBuild `/t:Clean` alone may leave stale artifacts).
+- Build command: `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`
+- Output location: `bin\{Platform}\Release\net9.0-windows10.0.26100.0\win-{rid}\AppPackages\Musio.App_{version}_{arch}_Test\Musio.App_{version}_{arch}.msix`
+
+**What didn't work / pitfalls:**
+- If Musio.App is running (check by PID in MSB3061 warnings), files are locked and clean fails silently with warnings.
+- `dotnet build` fails for this project due to PriGen tooling — always use VS MSBuild.
+
+---
+
+## Accessibility Audit — Full App Pass
+
+**Feature/area:** Accessibility across all UI (XAML pages, custom controls, code-behind, ViewModels, services)
+
+**Approaches tried:**
+
+1. **Parallel audit of all UI layers** — Used 4 parallel agents to audit XAML pages, custom controls, code-behind, and ViewModels/services independently. Compiled into `ACCESSIBILITY_ISSUES.md`. ✅
+
+**What worked:** Systematic category-based audit covering WCAG 2.1 Level AA criteria (keyboard access, screen reader support, color contrast, live regions, semantic structure, focus management). Found 47 issues (7 Critical, 18 Major, 22 Minor).
+
+**Key findings:**
+- Biggest gaps: custom-drawn controls (TimelineControl, RegionSelectorOverlay, PreviewCanvas) have no AutomationPeers and are pointer-only.
+- All dynamic status areas (recording timer, export progress, playback time) lack live-region support.
+- Many icon-only buttons lack `AutomationProperties.Name`.
+- Hard-coded colors in timeline and controls won't adapt to High Contrast mode.
+- System tray is not keyboard-accessible.
+
+---
+
+## Hard-Coded Colors — Theme Resource Migration
+
+**Feature/area:** Accessibility — High Contrast support (TimelineControl, PreviewCanvas, RegionSelectorOverlay, RecordingOverlayWindow, EditorPage)
+
+**Approaches tried:**
+
+1. **Created `Themes/AppColors.xaml` resource dictionary with `ThemeDictionaries`** — Defined ~44 `SolidColorBrush` (and one `AcrylicBrush`) resources in Default and HighContrast theme dictionaries. Default theme preserves the exact original hard-coded color values. HighContrast maps to system colors (`SystemColorWindowColor`, `SystemColorWindowTextColor`, `SystemColorHighlightColor`, `SystemColorHotlightColor`, `SystemColorHighlightTextColor`, `SystemColorGrayTextColor`, `SystemColorButtonFaceColor`, `SystemColorButtonTextColor`). ✅
+2. **XAML files: replaced inline colors with `{ThemeResource}`** — All 5 affected XAML files (TimelineControl, PreviewCanvas, RegionSelectorOverlay, RecordingOverlayWindow, EditorPage) now use `{ThemeResource ResourceName}` which auto-resolves on theme/HC change. ✅
+3. **Code-behind (Win2D): resolved colors from theme resources** — Changed 29 `static readonly Color` fields in `TimelineControl.xaml.cs` to instance fields resolved via `GetBrushColor(key, fallback)` from XAML resources. Added `ResolveThemeColors()` called in constructor and on `ActualThemeChanged`. Same pattern for `PreviewCanvas.xaml.cs` clear color. ✅
+
+**What worked:**
+- `SolidColorBrush` resources work for both XAML `{ThemeResource}` binding and code-behind `.Color` extraction.
+- In HighContrast theme dictionaries, `Color="{StaticResource SystemColorXxxColor}"` correctly references system HC colors.
+- `AcrylicBrush` in Default / `SolidColorBrush` in HighContrast for the same key works because both derive from `Brush`.
+- `ActualThemeChanged` fires for both Light↔Dark and High Contrast toggles; `InvalidateAllCanvases()` redraws Win2D surfaces with new colors.
+- Merged dictionary via `<ResourceDictionary Source="Themes/AppColors.xaml" />` in App.xaml keeps the main file clean.
+
+**What didn't work / pitfalls:**
+- `using Microsoft.UI;` (for `Colors` class) is no longer needed after removing `Colors.White` references — remove to avoid unused-using warnings.
+- Can't use `{ThemeResource}` inside a `Color` value directly in resource dictionaries; must wrap in `SolidColorBrush` and extract `.Color` in code-behind.
+

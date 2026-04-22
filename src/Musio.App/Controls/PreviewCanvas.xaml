@@ -19,7 +19,7 @@
             HorizontalAlignment="Center"
             Orientation="Horizontal"
             Padding="8"
-            Background="#80000000"
+            Background="{ThemeResource OverlayDimBrush}"
             CornerRadius="4,4,0,0">
             <Button
                 x:Name="PlayPauseButton"
@@ -30,14 +30,14 @@
                 <FontIcon
                     x:Name="PlayPauseIcon"
                     Glyph="&#xE768;"
-                    Foreground="White"
+                    Foreground="{ThemeResource OverlayForegroundBrush}"
                     FontSize="18" />
             </Button>
             <TextBlock
                 x:Name="TimeDisplay"
                 VerticalAlignment="Center"
                 Margin="12,0"
-                Foreground="White"
+                Foreground="{ThemeResource OverlayForegroundBrush}"
                 Text="0:00 / 0:00" />
         </StackPanel>
     </Grid>

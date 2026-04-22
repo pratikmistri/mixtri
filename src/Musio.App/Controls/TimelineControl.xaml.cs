@@ -2,7 +2,6 @@ using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.UI.Xaml;
-using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -81,42 +80,105 @@ public sealed partial class TimelineControl : UserControl
     private bool _zoomCreateActive;
     private const double ZoomCreateDragThreshold = 5.0; // pixels before creating
 
-    // Colors
-    private static readonly Color RulerBackground = Color.FromArgb(255, 40, 40, 40);
-    private static readonly Color RulerTickColor = Color.FromArgb(255, 160, 160, 160);
-    private static readonly Color RulerTextColor = Color.FromArgb(255, 200, 200, 200);
-    private static readonly Color VideoTrackBackground = Color.FromArgb(255, 30, 30, 30);
-    private static readonly Color VideoClipColor = Color.FromArgb(255, 60, 120, 200);
-    private static readonly Color VideoClipSelectedColor = Color.FromArgb(255, 90, 155, 235);
-    private static readonly Color VideoClipSelectedBorder = Color.FromArgb(255, 180, 210, 255);
-    private static readonly Color SpeedUpOverlayColor = Color.FromArgb(200, 230, 160, 50);
-    private static readonly Color SlowDownOverlayColor = Color.FromArgb(200, 60, 130, 230);
-    private static readonly Color TrimHandleColor = Color.FromArgb(255, 255, 255, 255);
-    private static readonly Color ZoomTrackBackground = Color.FromArgb(255, 35, 35, 35);
-    private static readonly Color ZoomSegmentFill = Color.FromArgb(200, 60, 160, 80);
-    private static readonly Color ZoomSegmentAutoFill = Color.FromArgb(120, 60, 140, 70);
-    private static readonly Color ZoomSegmentSelectedFill = Color.FromArgb(230, 80, 200, 100);
-    private static readonly Color ZoomSegmentBorder = Color.FromArgb(255, 100, 200, 100);
-    private static readonly Color ZoomSegmentSelectedBorder = Color.FromArgb(255, 180, 255, 180);
-    private static readonly Color ZoomSegmentHandleColor = Color.FromArgb(255, 220, 255, 220);
-    private static readonly Color ZoomSegmentCreatePreview = Color.FromArgb(100, 100, 200, 100);
-    private static readonly Color ZoomSegmentTextColor = Color.FromArgb(255, 240, 255, 240);
-    private static readonly Color AudioTrackBackground = Color.FromArgb(255, 35, 35, 35);
-    private static readonly Color AudioPlaceholderColor = Color.FromArgb(255, 80, 160, 80);
-    private static readonly Color AudioWaveformColor = Color.FromArgb(220, 80, 180, 80);
-    private static readonly Color AudioEnvelopeColor = Color.FromArgb(100, 120, 220, 120);
-    private static readonly Color PlayheadColor = Color.FromArgb(255, 255, 50, 50);
-    private static readonly Color CutLineColor = Color.FromArgb(200, 255, 255, 100);
-    private static readonly Color CursorTrackBackground = Color.FromArgb(255, 35, 35, 35);
-    private static readonly Color CursorPathXColor = Color.FromArgb(220, 100, 180, 255);
-    private static readonly Color CursorPathYColor = Color.FromArgb(220, 255, 160, 100);
-    private static readonly Color CursorClickColor = Color.FromArgb(255, 255, 80, 80);
+    // Colors — resolved from theme resources (see Themes/AppColors.xaml)
+    private Color RulerBackground;
+    private Color RulerTickColor;
+    private Color RulerTextColor;
+    private Color VideoTrackBackground;
+    private Color VideoClipColor;
+    private Color VideoClipSelectedColor;
+    private Color VideoClipSelectedBorder;
+    private Color SpeedUpOverlayColor;
+    private Color SlowDownOverlayColor;
+    private Color TrimHandleColor;
+    private Color TrimHandleBorderColor;
+    private Color ZoomTrackBackground;
+    private Color ZoomSegmentFill;
+    private Color ZoomSegmentAutoFill;
+    private Color ZoomSegmentSelectedFill;
+    private Color ZoomSegmentBorder;
+    private Color ZoomSegmentSelectedBorder;
+    private Color ZoomSegmentHandleColor;
+    private Color ZoomSegmentCreatePreview;
+    private Color ZoomSegmentTextColor;
+    private Color AudioTrackBackground;
+    private Color AudioPlaceholderColor;
+    private Color AudioWaveformColor;
+    private Color AudioEnvelopeColor;
+    private Color PlayheadColor;
+    private Color CutLineColor;
+    private Color CursorTrackBackground;
+    private Color CursorPathXColor;
+    private Color CursorPathYColor;
+    private Color CursorClickColor;
+    private Color SpeedLabelTextColor;
+    private Color TrackCenterLineColor;
+    private Color TrackEmptyLineColor;
 
     private const double TrimHandleWidth = 8;
 
     public TimelineControl()
     {
         InitializeComponent();
+        ResolveThemeColors();
+        ActualThemeChanged += (_, _) => { ResolveThemeColors(); InvalidateAllCanvases(); };
+    }
+
+    private Color GetBrushColor(string key, Color fallback)
+    {
+        try
+        {
+            if (Resources.TryGetValue(key, out var val) && val is Microsoft.UI.Xaml.Media.SolidColorBrush brush)
+                return brush.Color;
+        }
+        catch { /* resource not found — use fallback */ }
+        return fallback;
+    }
+
+    private void ResolveThemeColors()
+    {
+        RulerBackground          = GetBrushColor("TimelineRulerBackgroundBrush", Color.FromArgb(255, 40, 40, 40));
+        RulerTickColor           = GetBrushColor("TimelineRulerTickBrush", Color.FromArgb(255, 160, 160, 160));
+        RulerTextColor           = GetBrushColor("TimelineTrackLabelForegroundBrush", Color.FromArgb(255, 200, 200, 200));
+        VideoTrackBackground     = GetBrushColor("TimelineTrackPrimaryBackgroundBrush", Color.FromArgb(255, 30, 30, 30));
+        VideoClipColor           = GetBrushColor("TimelineVideoClipBrush", Color.FromArgb(255, 60, 120, 200));
+        VideoClipSelectedColor   = GetBrushColor("TimelineVideoClipSelectedBrush", Color.FromArgb(255, 90, 155, 235));
+        VideoClipSelectedBorder  = GetBrushColor("TimelineVideoClipSelectedBorderBrush", Color.FromArgb(255, 180, 210, 255));
+        SpeedUpOverlayColor      = GetBrushColor("TimelineSpeedUpOverlayBrush", Color.FromArgb(200, 230, 160, 50));
+        SlowDownOverlayColor     = GetBrushColor("TimelineSlowDownOverlayBrush", Color.FromArgb(200, 60, 130, 230));
+        TrimHandleColor          = GetBrushColor("TimelineTrimHandleBrush", Color.FromArgb(255, 255, 255, 255));
+        TrimHandleBorderColor    = GetBrushColor("TimelineTrimHandleBorderBrush", Color.FromArgb(255, 100, 100, 100));
+        ZoomTrackBackground      = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
+        ZoomSegmentFill          = GetBrushColor("TimelineZoomSegmentBrush", Color.FromArgb(200, 60, 160, 80));
+        ZoomSegmentAutoFill      = GetBrushColor("TimelineZoomSegmentAutoBrush", Color.FromArgb(120, 60, 140, 70));
+        ZoomSegmentSelectedFill  = GetBrushColor("TimelineZoomSegmentSelectedBrush", Color.FromArgb(230, 80, 200, 100));
+        ZoomSegmentBorder        = GetBrushColor("TimelineZoomSegmentBorderBrush", Color.FromArgb(255, 100, 200, 100));
+        ZoomSegmentSelectedBorder = GetBrushColor("TimelineZoomSegmentSelectedBorderBrush", Color.FromArgb(255, 180, 255, 180));
+        ZoomSegmentHandleColor   = GetBrushColor("TimelineZoomSegmentHandleBrush", Color.FromArgb(255, 220, 255, 220));
+        ZoomSegmentCreatePreview = GetBrushColor("TimelineZoomSegmentCreatePreviewBrush", Color.FromArgb(100, 100, 200, 100));
+        ZoomSegmentTextColor     = GetBrushColor("TimelineZoomSegmentTextBrush", Color.FromArgb(255, 240, 255, 240));
+        AudioTrackBackground     = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
+        AudioPlaceholderColor    = GetBrushColor("TimelineAudioPlaceholderBrush", Color.FromArgb(255, 80, 160, 80));
+        AudioWaveformColor       = GetBrushColor("TimelineAudioWaveformBrush", Color.FromArgb(220, 80, 180, 80));
+        AudioEnvelopeColor       = GetBrushColor("TimelineAudioEnvelopeBrush", Color.FromArgb(100, 120, 220, 120));
+        PlayheadColor            = GetBrushColor("TimelinePlayheadBrush", Color.FromArgb(255, 255, 50, 50));
+        CutLineColor             = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
+        CursorTrackBackground    = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
+        CursorPathXColor         = GetBrushColor("TimelineCursorPathXBrush", Color.FromArgb(220, 100, 180, 255));
+        CursorPathYColor         = GetBrushColor("TimelineCursorPathYBrush", Color.FromArgb(220, 255, 160, 100));
+        CursorClickColor         = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
+        SpeedLabelTextColor      = GetBrushColor("TimelineSpeedLabelTextBrush", Color.FromArgb(255, 255, 255, 255));
+        TrackCenterLineColor     = GetBrushColor("TimelineTrackCenterLineBrush", Color.FromArgb(100, 255, 255, 255));
+        TrackEmptyLineColor      = GetBrushColor("TimelineTrackEmptyLineBrush", Color.FromArgb(60, 255, 255, 255));
+    }
+
+    private void InvalidateAllCanvases()
+    {
+        TimeRulerCanvas?.Invalidate();
+        VideoTrackCanvas?.Invalidate();
+        CursorTrackCanvas?.Invalidate();
+        ZoomTrackCanvas?.Invalidate();
+        AudioTrackCanvas?.Invalidate();
     }
 
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
@@ -317,7 +379,7 @@ public sealed partial class TimelineControl : UserControl
                 ds.FillRectangle(x1, 4, x2 - x1, h - 8, segColor);
 
                 string speedLabel = $"{clip.SpeedFactor:0.##}x";
-                ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, Colors.White,
+                ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                     {
                         FontSize = 12,
@@ -346,7 +408,7 @@ public sealed partial class TimelineControl : UserControl
             ds.FillRectangle(x1, 4, x2 - x1, h - 8, segColor);
 
             string speedLabel = $"{seg.Speed:0.##}x";
-            ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, Colors.White,
+            ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
                 new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                 {
                     FontSize = 12,
@@ -376,7 +438,7 @@ public sealed partial class TimelineControl : UserControl
         float x = (float)TimeToX(time);
         ds.FillRectangle(x - (float)TrimHandleWidth / 2, 0, (float)TrimHandleWidth, trackHeight, TrimHandleColor);
         ds.DrawRectangle(x - (float)TrimHandleWidth / 2, 0, (float)TrimHandleWidth, trackHeight,
-            Color.FromArgb(255, 100, 100, 100), 1);
+            TrimHandleBorderColor, 1);
     }
 
     // --- Zoom Track ---
@@ -840,7 +902,7 @@ public sealed partial class TimelineControl : UserControl
         }
 
         // Center line
-        ds.DrawLine(x1, centerY, x2, centerY, Color.FromArgb(100, 255, 255, 255), 0.5f);
+        ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
 
         // Playhead
         float px = (float)TimeToX(PlayheadPosition);
@@ -860,7 +922,7 @@ public sealed partial class TimelineControl : UserControl
 
         if (model is null || model.Duration.TotalSeconds <= 0)
         {
-            ds.DrawLine(0, h / 2, w, h / 2, Color.FromArgb(60, 255, 255, 255), 0.5f);
+            ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
             float ppx = (float)TimeToX(PlayheadPosition);
             ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
@@ -869,7 +931,7 @@ public sealed partial class TimelineControl : UserControl
         var cursorData = model.CursorData;
         if (cursorData is null || cursorData.Samples.Count == 0)
         {
-            ds.DrawLine(0, h / 2, w, h / 2, Color.FromArgb(60, 255, 255, 255), 0.5f);
+            ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
             float ppx = (float)TimeToX(PlayheadPosition);
             ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
@@ -942,7 +1004,7 @@ public sealed partial class TimelineControl : UserControl
             float normY = (float)(click.Y - minY) / rangeY;
             float cy = margin + normY * drawHeight;
             ds.FillCircle(cx, cy, 3f, CursorClickColor);
-            ds.DrawCircle(cx, cy, 3f, Colors.White, 0.8f);
+            ds.DrawCircle(cx, cy, 3f, SpeedLabelTextColor, 0.8f);
         }
 
         // Playhead

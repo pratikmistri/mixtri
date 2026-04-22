@@ -4,6 +4,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Foundation;
+using Windows.UI;
 
 namespace Musio_App.Controls;
 
@@ -12,6 +13,7 @@ public sealed partial class PreviewCanvas : UserControl
     private CanvasRenderTarget? _previewFrame;
     private DispatcherTimer? _playbackTimer;
     private bool _isPlaying;
+    private Color _previewClearColor = Color.FromArgb(255, 20, 20, 20);
 
     /// <summary>
     /// Raised each time the playback timer ticks so the host can supply a new composed frame.
@@ -62,7 +64,20 @@ public sealed partial class PreviewCanvas : UserControl
     public PreviewCanvas()
     {
         InitializeComponent();
+        ResolveThemeColors();
+        ActualThemeChanged += (_, _) => { ResolveThemeColors(); PreviewSurface.Invalidate(); };
         UpdateTimeDisplay();
+    }
+
+    private void ResolveThemeColors()
+    {
+        try
+        {
+            if (Resources.TryGetValue("PreviewSurfaceClearBrush", out var val)
+                && val is Microsoft.UI.Xaml.Media.SolidColorBrush brush)
+                _previewClearColor = brush.Color;
+        }
+        catch { /* use default */ }
     }
 
     /// <summary>
@@ -130,7 +145,7 @@ public sealed partial class PreviewCanvas : UserControl
     private void PreviewSurface_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
         var ds = args.DrawingSession;
-        ds.Clear(Windows.UI.Color.FromArgb(255, 20, 20, 20));
+        ds.Clear(_previewClearColor);
 
         if (_previewFrame is null) return;
 
