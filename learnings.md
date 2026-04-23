@@ -414,3 +414,25 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `DispatcherTimer` at 1.5s interval cycles through 8 Star Trek-themed phrases.
 - Timer disposed in `CloseOverlay()` before window closes.
 
+---
+
+## Editor Preview — Stutter Fix (Render Coalescing + Buffer Reuse)
+
+**Feature/area:** Preview playback pipeline (EditorPage, PreviewCanvas, FrameCompositor, PreviewRenderer)
+
+**Approaches tried:**
+
+1. **Render coalescing gate in EditorPage** — Worked. Added `_isRendering` flag with `_pendingRenderPosition`/`_pendingRenderForce` fields. `UpdatePreviewFrameAsync` skips if a render is already in-flight and stores the latest position. A drain-loop in the active render picks up the pending position when done. Preserves `force` flag via `|=` merge. ✅
+2. **Reusable cropped buffer in FrameCompositor** — Worked. Added `_croppedBuffer` field to `CropSourceFrame` that's reused when dimensions match. Removed `using` from the call site in `ComposeFrame`. Buffer is compositor-owned and disposed in `Dispose()`. Halves per-frame GPU allocations. ✅
+3. **Binary search in GetActiveClicks** — Worked. Sorted clicks by `TimestampTicks` during `InitializeAsync`. Replaced `foreach` over all clicks with binary search to find the ±1s window start, then iterate only matching clicks. O(log n + k) instead of O(n). ✅
+4. **Preview FPS matching project capture FPS** — Worked. `PreviewCanvas.PreviewFps` setter now updates `_playbackTimer.Interval` immediately. `EditorPage.InitializePreviewAsync` sets it from project FPS (capped at 30). Removed redundant 30fps cap from `PreviewRenderer`. ✅
+
+**What worked:**
+- Drain-loop pattern (not recursive fire-and-forget) for render coalescing — ensures at most one render is in-flight, the latest position is always rendered next, and no renders pile up.
+- `_croppedBuffer` field-level reuse with dimension check — safe because `CropSourceFrame` is only called within `ComposeFrame` scope.
+- Sorting clicks once at init time guarantees binary search correctness without relying on recorder ordering.
+
+**What didn't work / considerations:**
+- The output `CanvasRenderTarget` from `ComposeFrame` is still allocated fresh each frame because `SetFrame` takes ownership and disposes the previous frame. Reusing would require a buffer pool or API contract change — not worth the complexity with the render gate limiting throughput to one at a time.
+- 60fps preview needs architectural changes: `CompositionTarget.Rendering` (DispatcherTimer can't sustain 16.67ms), frame read-ahead cache (zero caching on JPEG decode currently), and off-thread composition.
+- The rubber-duck review flagged that `PreviewFps` setter didn't update an existing timer — fixed by updating `_playbackTimer.Interval` in the setter.
