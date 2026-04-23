@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.Input;
 using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Services;
 using Musio.Core.Settings;
 using Musio_App.Services;
 using Windows.Storage.Pickers;
@@ -437,6 +438,18 @@ public partial class ExportViewModel : ObservableObject
             ExportSucceeded = true;
             ProgressStatus = "Export complete!";
             ProgressPercent = 100;
+
+            // Clean up raw frames to reclaim disk space.
+            // The exported file is self-contained; .frames/ is no longer needed.
+            if (CurrentProject is not null)
+            {
+                var sessionDir = Path.GetDirectoryName(CurrentProject.VideoFilePath);
+                if (sessionDir is not null)
+                {
+                    SessionCleanupService.MarkSessionExported(sessionDir);
+                    _ = Task.Run(() => SessionCleanupService.CleanupSession(sessionDir));
+                }
+            }
         }
         catch (OperationCanceledException)
         {

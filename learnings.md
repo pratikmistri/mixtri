@@ -453,3 +453,25 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What didn't work / known limitations:**
 - On multi-monitor setups with `Stretch="Fill"`, the region selector coordinates are already distorted (pre-existing issue documented above). The DPI fix only helps single-monitor or same-DPI multi-monitor setups.
+
+---
+
+## Session Folder Disk Cleanup
+
+**Feature/area:** Recording session storage (SessionCleanupService, ExportViewModel, App.xaml.cs)
+
+**Approaches tried:**
+
+1. **`SessionCleanupService` that deletes `.frames/` directories from exported sessions** — Worked. Each session folder's `.frames/` dir (thousands of JPEG files) is the dominant space consumer. After successful export, the service writes an `exported.marker` file, then deletes `.frames/` and `finalize_debug.log`. On app startup, a background `Task.Run` cleans all sessions with the marker. ✅
+
+**What worked:**
+- `exported.marker` file distinguishes exported sessions from freshly-recorded ones (avoids cleaning sessions that haven't been exported yet).
+- `HasValidVideo()` checks video.mp4 exists and is non-zero before deleting frames.
+- Post-export cleanup in `ExportViewModel.ExportAsync()` runs via `Task.Run` after export succeeds.
+- Startup cleanup in `App.OnLaunched()` runs fire-and-forget for all marked sessions.
+- All deletion is wrapped in try-catch so failures are non-fatal.
+
+**Key design decisions:**
+- Only sessions with `exported.marker` are cleaned (not just any session with video.mp4, since MP4 is created during recording before any export).
+- `.frames/` deletion means the editor can't re-open that recording for editing. Acceptable tradeoff — the user has their export.
+- `video.mp4`, cursor, keyboard, and audio files are preserved for future capture history feature.

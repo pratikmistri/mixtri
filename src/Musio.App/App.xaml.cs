@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio_App.Services;
 using Musio.Core.Services;
+using Musio.Core.Settings;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -59,6 +60,11 @@ public partial class App : Application
         _window = new MainWindow();
         _window.Closed += OnWindowClosed;
         _window.Activate();
+
+        // Clean up .frames/ from previously-exported sessions in the background
+        var savePath = AppSettings.Instance.DefaultSavePath;
+        _ = System.Threading.Tasks.Task.Run(() =>
+            SessionCleanupService.CleanupExportedSessions(savePath));
 
         // System tray and hotkeys are optional — app works without them
         try
