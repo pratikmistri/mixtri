@@ -228,7 +228,11 @@ public partial class RecordingViewModel : ObservableObject
         try
         {
             RecordingStatus = "Stopping…";
-            await _session.StopAsync();
+
+            // Run heavy stop work on a background thread so the UI stays responsive
+            // (overlay spinner/messages keep animating)
+            var session = _session;
+            await Task.Run(async () => await session.StopAsync());
 
             LastProject = _session.GetProject();
             if (LastProject is not null)

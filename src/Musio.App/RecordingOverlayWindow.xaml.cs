@@ -16,6 +16,20 @@ public sealed partial class RecordingOverlayWindow : Window
     private readonly RecordingViewModel _viewModel;
     private bool _isClosingProgrammatically;
 
+    private static readonly string[] StoppingPhrases =
+    [
+        "Engaging…",
+        "Standby…",
+        "Energizing…",
+        "Processing…",
+        "Computing…",
+        "Make it…",
+        "Hold steady",
+        "All stop",
+    ];
+    private DispatcherTimer? _phraseTimer;
+    private int _phraseIndex;
+
     /// <summary>Raised when the user requests to stop recording (Stop button or closing the overlay).</summary>
     public event EventHandler? StopRequested;
 
@@ -114,16 +128,43 @@ public sealed partial class RecordingOverlayWindow : Window
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e)
+    private async void Stop_Click(object sender, RoutedEventArgs e)
     {
+        StopButton.IsEnabled = false;
+        ShowStoppingState();
+
+        // Yield to let the UI render the stopping state before the heavy stop work begins
+        await Task.Delay(50);
+
         StopRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    private void OnOverlayClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    private void ShowStoppingState()
+    {
+        // Swap to the stopping UI
+        RecordingPanel.Visibility = Visibility.Collapsed;
+        StopButton.Visibility = Visibility.Collapsed;
+        StoppingPanel.Visibility = Visibility.Visible;
+
+        // Cycle through phrases
+        _phraseIndex = 0;
+        StoppingText.Text = StoppingPhrases[0];
+        _phraseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+        _phraseTimer.Tick += (_, _) =>
+        {
+            _phraseIndex = (_phraseIndex + 1) % StoppingPhrases.Length;
+            StoppingText.Text = StoppingPhrases[_phraseIndex];
+        };
+        _phraseTimer.Start();
+    }
+
+    private async void OnOverlayClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (!_isClosingProgrammatically)
         {
-            // User manually closed the overlay (Alt+F4, etc.) — stop recording
+            args.Cancel = true;
+            ShowStoppingState();
+            await Task.Delay(50);
             StopRequested?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -134,6 +175,8 @@ public sealed partial class RecordingOverlayWindow : Window
     /// </summary>
     public void CloseOverlay()
     {
+        _phraseTimer?.Stop();
+        _phraseTimer = null;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _isClosingProgrammatically = true;
         try { Close(); }

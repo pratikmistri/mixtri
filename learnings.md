@@ -399,3 +399,18 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `using Microsoft.UI;` (for `Colors` class) is no longer needed after removing `Colors.White` references — remove to avoid unused-using warnings.
 - Can't use `{ThemeResource}` inside a `Color` value directly in resource dictionaries; must wrap in `SolidColorBrush` and extract `.Color` in code-behind.
 
+---
+
+## Recording Overlay — Stop Button Feedback (Rolling Star Trek Phrases)
+
+**Feature/area:** RecordingOverlayWindow (stop button UX)
+
+**Approaches tried:**
+
+1. **Swap overlay to "stopping" state with rolling 2-word Star Trek phrases** — Worked. On Stop_Click, hide RecordingPanel + StopButton, show StoppingPanel with a ProgressRing and a TextBlock cycling through phrases ("Engaging…", "Standby…", "Energizing…", etc.) every 1.5s via DispatcherTimer. Timer cleaned up in CloseOverlay. ✅
+
+**What worked:**
+- Split XAML into named `RecordingPanel` (dot + elapsed) and `StoppingPanel` (ring + phrase), toggling visibility on stop.
+- `DispatcherTimer` at 1.5s interval cycles through 8 Star Trek-themed phrases.
+- Timer disposed in `CloseOverlay()` before window closes.
+

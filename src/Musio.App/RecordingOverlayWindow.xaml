@@ -8,15 +8,14 @@
     <Grid Padding="14,8" CornerRadius="26"
           Background="{ThemeResource RecordingOverlayBackgroundBrush}">
 
-        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Left">
-            <!-- Recording indicator dot -->
+        <!-- Recording state: indicator dot + elapsed time + stop button -->
+        <StackPanel x:Name="RecordingPanel" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Left">
             <Ellipse
                 Width="10"
                 Height="10"
                 Fill="{ThemeResource RecordingIndicatorBrush}"
                 VerticalAlignment="Center" />
 
-            <!-- Elapsed time (bound to RecordingViewModel.ElapsedTime) -->
             <TextBlock
                 x:Name="ElapsedText"
                 Text="00:00"
@@ -28,7 +27,6 @@
                 MinWidth="48" />
         </StackPanel>
 
-        <!-- Stop icon button aligned to right -->
         <Button
             x:Name="StopButton"
             Click="Stop_Click"
@@ -43,5 +41,20 @@
             ToolTipService.ToolTip="Stop recording">
             <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="{ThemeResource RecordingIndicatorBrush}" />
         </Button>
+
+        <!-- Stopping state: rolling Star Trek status message -->
+        <StackPanel x:Name="StoppingPanel" Orientation="Horizontal" Spacing="10"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Visibility="Collapsed">
+            <ProgressRing Width="18" Height="18" IsActive="True"
+                          Foreground="{ThemeResource OverlayForegroundBrush}" />
+            <TextBlock
+                x:Name="StoppingText"
+                Text="Engaging…"
+                Foreground="{ThemeResource OverlayForegroundBrush}"
+                FontSize="14"
+                FontWeight="SemiBold"
+                VerticalAlignment="Center" />
+        </StackPanel>
     </Grid>
 </Window>
