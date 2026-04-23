@@ -436,3 +436,20 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - The output `CanvasRenderTarget` from `ComposeFrame` is still allocated fresh each frame because `SetFrame` takes ownership and disposes the previous frame. Reusing would require a buffer pool or API contract change — not worth the complexity with the render gate limiting throughput to one at a time.
 - 60fps preview needs architectural changes: `CompositionTarget.Rendering` (DispatcherTimer can't sustain 16.67ms), frame read-ahead cache (zero caching on JPEG decode currently), and off-thread composition.
 - The rubber-duck review flagged that `PreviewFps` setter didn't update an existing timer — fixed by updating `_playbackTimer.Interval` in the setter.
+
+---
+
+## Region Border Highlight — DPI Scaling Mismatch
+
+**Feature/area:** Region recording border overlay (RecordingPage, RegionBorderHighlight)
+
+**Approaches tried:**
+
+1. **Scale region DIP coordinates to physical pixels using monitor DPI** — Worked. `RegionSelectorOverlay` produces coordinates in WinUI DIP (logical pixels), but `RegionBorderHighlight.Show()` creates native Win32 popup windows via `CreateWindowEx`, which expects physical screen coordinates in a per-monitor DPI-aware v2 process. Added `GetRegionMonitorDpiScale()` in `RecordingPage` that resolves the monitor handle via `MonitorEnumerator` (same as `BuildCaptureTarget()`) and calls `GetDpiForMonitor` to get the scale. Multiplied region X/Y/Width/Height by the DPI scale before passing to `Show()`. ✅
+
+**What worked:**
+- Using the same monitor-matching logic as `RecordingViewModel.BuildCaptureTarget()` to find the correct monitor handle, then `GetDpiForMonitor` for the scale.
+- This matches the DPI conversion already done in `RecordingSession.OnFrameCaptured` for the capture crop rect.
+
+**What didn't work / known limitations:**
+- On multi-monitor setups with `Stretch="Fill"`, the region selector coordinates are already distorted (pre-existing issue documented above). The DPI fix only helps single-monitor or same-DPI multi-monitor setups.

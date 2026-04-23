@@ -9,6 +9,7 @@ using Musio_App.Services;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
+using Windows.Foundation;
 
 namespace Musio_App.Pages;
 
@@ -68,13 +69,20 @@ public sealed partial class RecordingPage : Page
     private void ShowRecordingOverlay()
     {
         // Show a border around the selected region so the user can see
-        // what area is being captured.
+        // what area is being captured. The region coordinates are in DIP
+        // (logical pixels) from the selector overlay, so scale them to
+        // physical screen pixels for the native Win32 border windows.
         if (ViewModel.CaptureMode == CaptureMode.CustomRegion
             && ViewModel.SelectedRegion is CaptureRegion region
             && region.Width > 0 && region.Height > 0)
         {
             _regionBorder = new RegionBorderHighlight();
-            _regionBorder.Show(region.X, region.Y, region.Width, region.Height);
+            float dpiScale = GetRegionMonitorDpiScale(region);
+            int px = (int)(region.X * dpiScale);
+            int py = (int)(region.Y * dpiScale);
+            int pw = (int)(region.Width * dpiScale);
+            int ph = (int)(region.Height * dpiScale);
+            _regionBorder.Show(px, py, pw, ph);
         }
 
         // Create and show the compact overlay
@@ -233,4 +241,27 @@ public sealed partial class RecordingPage : Page
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+    /// <summary>
+    /// Resolves the DPI scale for the monitor that owns the given region.
+    /// Uses the same monitor-matching logic as <see cref="RecordingViewModel.BuildCaptureTarget"/>.
+    /// </summary>
+    private static float GetRegionMonitorDpiScale(CaptureRegion region)
+    {
+        var monitors = MonitorEnumerator.GetAllMonitors();
+        var monitor = monitors.FirstOrDefault(m => m.DisplayName.Contains(region.MonitorId))
+            ?? monitors.FirstOrDefault();
+
+        if (monitor is not null && monitor.Handle != IntPtr.Zero)
+        {
+            int hr = GetDpiForMonitor(monitor.Handle, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            if (hr == 0 && dpiX > 0)
+                return dpiX / 96.0f;
+        }
+
+        return 1.0f;
+    }
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 }
