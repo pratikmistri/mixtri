@@ -25,6 +25,9 @@ public sealed partial class EditorPage : Page
     private TimelineMapper? _timelineMapper;
     private bool _compositorReady;
     private int _lastRenderedFrameIndex = -1;
+    private bool _isRendering;
+    private TimeSpan? _pendingRenderPosition;
+    private bool _pendingRenderForce;
 
     public EditorPage()
     {
@@ -101,6 +104,9 @@ public sealed partial class EditorPage : Page
             return;
 
         int fps = project.Fps > 0 ? project.Fps : 30;
+        int previewFps = Math.Min(fps, 30);
+        Preview.PreviewFps = previewFps;
+
         _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
         if (_frameReader is null)
             return;
@@ -153,7 +159,7 @@ public sealed partial class EditorPage : Page
         var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
         config = config with
         {
-            OutputFps = Math.Min(fps, 30),
+            OutputFps = previewFps,
             SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
             SmoothingStrength = SmoothingStrength.Smooth,
             Cursor = new CursorStyle
@@ -207,6 +213,51 @@ public sealed partial class EditorPage : Page
     }
 
     private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
+    {
+        if (_frameReader is null) return;
+
+        // Coalesce overlapping render requests: if a render is already in
+        // flight, record the latest requested position and let the active
+        // render pick it up when it finishes.
+        if (_isRendering)
+        {
+            _pendingRenderPosition = position;
+            _pendingRenderForce |= force;
+            return;
+        }
+
+        _isRendering = true;
+        try
+        {
+            // Drain loop: render the current request, then check if a newer
+            // position arrived while we were rendering and handle it too.
+            TimeSpan currentPos = position;
+            bool currentForce = force;
+            do
+            {
+                await RenderFrameAtAsync(currentPos, currentForce);
+
+                // Consume any pending request that arrived during rendering
+                if (_pendingRenderPosition.HasValue)
+                {
+                    currentPos = _pendingRenderPosition.Value;
+                    currentForce = _pendingRenderForce;
+                    _pendingRenderPosition = null;
+                    _pendingRenderForce = false;
+                }
+                else
+                {
+                    break;
+                }
+            } while (true);
+        }
+        finally
+        {
+            _isRendering = false;
+        }
+    }
+
+    private async Task RenderFrameAtAsync(TimeSpan position, bool force)
     {
         if (_frameReader is null) return;
 

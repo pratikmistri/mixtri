@@ -39,15 +39,10 @@ public class PreviewRenderer : IDisposable
 
         PreviewWidth = sourceWidth;
         PreviewHeight = sourceHeight;
-
-        var previewConfig = config with
-        {
-            OutputFps = Math.Min(config.OutputFps, 30)
-        };
-        _outputFps = previewConfig.OutputFps;
+        _outputFps = config.OutputFps;
 
         _compositor?.Dispose();
-        _compositor = new FrameCompositor(previewConfig);
+        _compositor = new FrameCompositor(config);
         await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration, mouseToVideoOffsetSeconds);
     }
 

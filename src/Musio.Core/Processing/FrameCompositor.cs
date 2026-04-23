@@ -59,6 +59,9 @@ public class FrameCompositor : IDisposable
     private float _coordScaleY = 1.0f;
     private double _mouseTimeOffset;
 
+    // Reusable scratch buffer for CropSourceFrame to avoid per-frame GPU allocation
+    private CanvasRenderTarget? _croppedBuffer;
+
     // Tick value corresponding to video time 0, for rebasing keyboard events.
     private long _videoStartTick;
 
@@ -118,6 +121,10 @@ public class FrameCompositor : IDisposable
         if (sourceHeight <= 0) throw new ArgumentOutOfRangeException(nameof(sourceHeight));
 
         _mouseData = mouseData;
+
+        // Ensure clicks are sorted by timestamp for binary search in GetActiveClicks
+        _mouseData.Clicks.Sort((a, b) => a.TimestampTicks.CompareTo(b.TimestampTicks));
+
         _sourceWidth = sourceWidth;
         _sourceHeight = sourceHeight;
         _tickFrequency = mouseData.TickFrequency;
@@ -354,7 +361,7 @@ public class FrameCompositor : IDisposable
         var viewport = ComputeEffectiveViewport(zoomState);
 
         // Crop source frame to the effective viewport, scaled to content dimensions
-        using var croppedFrame = CropSourceFrame(sourceFrame, viewport);
+        var croppedFrame = CropSourceFrame(sourceFrame, viewport);
 
         // Create output render target
         var output = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
@@ -474,15 +481,23 @@ public class FrameCompositor : IDisposable
     #region Source Cropping
 
     /// <summary>
-    /// Draws the viewport region of the source frame into a content-sized render target.
+    /// Draws the viewport region of the source frame into a reusable content-sized render target.
+    /// The returned target is owned by the compositor — callers must NOT dispose it.
     /// </summary>
     private CanvasRenderTarget CropSourceFrame(CanvasBitmap source, Rect viewport)
     {
-        var cropped = new CanvasRenderTarget(_device, _contentWidth, _contentHeight, 96);
-        using var ds = cropped.CreateDrawingSession();
+        if (_croppedBuffer is null
+            || _croppedBuffer.SizeInPixels.Width != (uint)_contentWidth
+            || _croppedBuffer.SizeInPixels.Height != (uint)_contentHeight)
+        {
+            _croppedBuffer?.Dispose();
+            _croppedBuffer = new CanvasRenderTarget(_device, _contentWidth, _contentHeight, 96);
+        }
+
+        using var ds = _croppedBuffer.CreateDrawingSession();
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
         ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport);
-        return cropped;
+        return _croppedBuffer;
     }
 
     #endregion
@@ -523,6 +538,7 @@ public class FrameCompositor : IDisposable
     /// <summary>
     /// Returns click events within ±1 second of the current time, with positions
     /// transformed from source coordinates to output coordinates.
+    /// Uses binary search for efficient lookup (clicks are sorted by TimestampTicks).
     /// </summary>
     private List<ClickEvent> GetActiveClicks(
         double timeSeconds, Rect viewport,
@@ -532,22 +548,35 @@ public class FrameCompositor : IDisposable
 
         const double windowSeconds = 1.0;
         var result = new List<ClickEvent>();
+        var clicks = _mouseData.Clicks;
+        if (clicks.Count == 0) return result;
 
         long startTick = _mouseData.StartTimestampTicks;
         double tickFreq = _mouseData.TickFrequency;
 
-        foreach (var click in _mouseData.Clicks)
-        {
-            // Convert click timestamp to video time:
-            // 1. Subtract mouse start to get relative time
-            // 2. Subtract mouse→video offset to align timelines
-            // 3. Add capture latency so click animation matches when the
-            //    screen visually updates (click effect appears a few frames late)
-            double clickTime = (click.TimestampTicks - startTick) / tickFreq
-                - _mouseTimeOffset;
+        // Convert time window to tick space for binary search
+        double windowStartTime = timeSeconds - windowSeconds + _mouseTimeOffset;
+        double windowEndTime = timeSeconds + windowSeconds + _mouseTimeOffset;
+        long windowStartTicks = startTick + (long)(windowStartTime * tickFreq);
+        long windowEndTicks = startTick + (long)(windowEndTime * tickFreq);
 
-            if (Math.Abs(clickTime - timeSeconds) > windowSeconds)
-                continue;
+        // Binary search for the first click in the window
+        int lo = 0, hi = clicks.Count - 1;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            if (clicks[mid].TimestampTicks < windowStartTicks)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        // Iterate only the clicks within the time window
+        for (int i = lo; i < clicks.Count; i++)
+        {
+            var click = clicks[i];
+            if (click.TimestampTicks > windowEndTicks)
+                break;
 
             // Transform click position from logical to physical, then to output space
             int cx = (int)((click.X * _coordScaleX - viewport.X) * scaleX + padding);
@@ -596,6 +625,8 @@ public class FrameCompositor : IDisposable
     {
         if (!_disposed)
         {
+            _croppedBuffer?.Dispose();
+            _croppedBuffer = null;
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

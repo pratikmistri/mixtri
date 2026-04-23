@@ -58,8 +58,18 @@ public sealed partial class PreviewCanvas : UserControl
         }
     }
 
-    /// <summary>Preview FPS (lower than export for performance).</summary>
-    public int PreviewFps { get; set; } = 24;
+    /// <summary>Preview FPS — set from project capture FPS (capped at 30).</summary>
+    public int PreviewFps
+    {
+        get => _previewFps;
+        set
+        {
+            _previewFps = value;
+            if (_playbackTimer is not null)
+                _playbackTimer.Interval = TimeSpan.FromMilliseconds(1000.0 / _previewFps);
+        }
+    }
+    private int _previewFps = 30;
 
     public PreviewCanvas()
     {
@@ -122,7 +132,7 @@ public sealed partial class PreviewCanvas : UserControl
 
         _playbackTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(1000.0 / PreviewFps)
+            Interval = TimeSpan.FromMilliseconds(1000.0 / _previewFps)
         };
         _playbackTimer.Tick += OnPlaybackTick;
     }
