@@ -42,19 +42,23 @@
             <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="{ThemeResource RecordingIndicatorBrush}" />
         </Button>
 
-        <!-- Stopping state: rolling Star Trek status message -->
-        <StackPanel x:Name="StoppingPanel" Orientation="Horizontal" Spacing="10"
-                    VerticalAlignment="Center" HorizontalAlignment="Center"
-                    Visibility="Collapsed">
-            <ProgressRing Width="18" Height="18" IsActive="True"
-                          Foreground="{ThemeResource OverlayForegroundBrush}" />
-            <TextBlock
-                x:Name="StoppingText"
-                Text="Engaging…"
-                Foreground="{ThemeResource OverlayForegroundBrush}"
-                FontSize="14"
-                FontWeight="SemiBold"
-                VerticalAlignment="Center" />
-        </StackPanel>
+        <!-- Stopping state: text left-aligned (where timer was), spinner right-aligned (where stop button was) -->
+        <TextBlock
+            x:Name="StoppingText"
+            Text="Engaging…"
+            Foreground="{ThemeResource OverlayForegroundBrush}"
+            FontSize="14"
+            FontWeight="SemiBold"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Center"
+            Visibility="Collapsed" />
+        <ProgressRing
+            x:Name="StoppingSpinner"
+            Width="18" Height="18"
+            IsActive="True"
+            Foreground="{ThemeResource OverlayForegroundBrush}"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            Visibility="Collapsed" />
     </Grid>
 </Window>

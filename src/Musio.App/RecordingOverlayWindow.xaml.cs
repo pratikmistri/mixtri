@@ -144,7 +144,8 @@ public sealed partial class RecordingOverlayWindow : Window
         // Swap to the stopping UI
         RecordingPanel.Visibility = Visibility.Collapsed;
         StopButton.Visibility = Visibility.Collapsed;
-        StoppingPanel.Visibility = Visibility.Visible;
+        StoppingText.Visibility = Visibility.Visible;
+        StoppingSpinner.Visibility = Visibility.Visible;
 
         // Cycle through phrases
         _phraseIndex = 0;
