@@ -496,4 +496,5 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / pitfalls:**
 - The recording pipeline (`VideoWriter.FinalizeAsync`) already fixed this by using `Auto`, but the fix was never propagated to the export pipeline (`VideoEncoder`). Both pipelines must use the same approach.
 - The issue is resolution-dependent, not GPU-vendor-specific: any display exceeding ~1920×1088 can exceed Level 4.0 limits. NVIDIA may auto-promote the Level silently, masking the bug; AMD AMF is stricter.
+- `VideoEncodingQuality.Auto` cannot be used in the export pipeline because it produces incomplete Video/Audio properties — `MediaComposition.RenderToFileAsync` in the audio mux pass throws `MF_E_INVALIDMEDIATYPE (0xC00D36E6)`. Instead, use `HD1080p` as a well-formed template and override Width/Height/Bitrate/FPS/Subtype. The encoder auto-selects the correct Level from actual dimensions.
 - `MediaEncodingProfile.CreateMp4(HD1080p)` sets internal H.264 parameters (Level, profile, DPB) that overriding Width/Height alone does NOT update.

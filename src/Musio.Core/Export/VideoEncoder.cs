@@ -492,13 +492,13 @@ public class VideoEncoder : IDisposable
 
     private MediaEncodingProfile CreateEncodingProfile(int width, int height)
     {
-        // Use Auto quality so the encoder determines the appropriate H.264
-        // Level from the actual dimensions. Preset qualities (HD1080p, etc.)
-        // constrain Level/DPB to that resolution, causing corruption when
-        // the compositor output exceeds it (e.g. 2.8K displays → Level 5.1+).
-        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
-        profile.Video ??= new VideoEncodingProperties();
-        profile.Video.Width = (uint)width;
+        // Use HD1080p as a well-formed template with valid Video + Audio
+        // properties. Override all resolution-dependent fields explicitly.
+        // The encoder auto-selects the correct H.264 Level for the actual
+        // dimensions (Level 5.1+ for 2.8K/4K). The scaled bitrate ensures
+        // high-res exports have adequate quality.
+        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD1080p);
+        profile.Video!.Width = (uint)width;
         profile.Video.Height = (uint)height;
         profile.Video.FrameRate.Numerator = (uint)_settings.Fps;
         profile.Video.FrameRate.Denominator = 1;

@@ -10,7 +10,7 @@
   <Identity
     Name="PratikMistri.Musio"
     Publisher="CN=DB824FDD-FEC0-4A79-9296-AFAF43C81090"
-    Version="1.0.0.0" />
+    Version="1.0.1.0" />
 
   <Properties>
     <DisplayName>Musio</DisplayName>
