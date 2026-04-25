@@ -498,3 +498,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - The issue is resolution-dependent, not GPU-vendor-specific: any display exceeding ~1920×1088 can exceed Level 4.0 limits. NVIDIA may auto-promote the Level silently, masking the bug; AMD AMF is stricter.
 - `VideoEncodingQuality.Auto` cannot be used in the export pipeline because it produces incomplete Video/Audio properties — `MediaComposition.RenderToFileAsync` in the audio mux pass throws `MF_E_INVALIDMEDIATYPE (0xC00D36E6)`. Instead, use `HD1080p` as a well-formed template and override Width/Height/Bitrate/FPS/Subtype. The encoder auto-selects the correct Level from actual dimensions.
 - `MediaEncodingProfile.CreateMp4(HD1080p)` sets internal H.264 parameters (Level, profile, DPB) that overriding Width/Height alone does NOT update.
+
+---
+
+## Region Recording — Mouse Click Misalignment Fix
+
+**Feature/area:** Compositor pipeline (FrameCompositor, AutoZoomEngine, PreviewRenderer, EditorPage, ExportEngine, VideoEncoder, Project)
+
+**Approaches tried:**
+
+1. **Store DPI scale in Project + subtract CropOffsetX/Y from all mouse coordinate transforms** — Worked. Two root causes: (a) `GetSystemDpiScale()` compared cropped region size to full monitor logical size, always returning 1.0 for region captures; (b) `CropOffsetX/Y` (physical pixel origin of the crop region) were stored but never subtracted from mouse coordinates. ✅
+
+**What worked:**
+- Added `Project.DpiScale` (float) — set from `GetMonitorDpiScale(hMonitor)` during recording. Zero = auto-detect fallback for backward compatibility with old projects.
+- `FrameCompositor.InitializeAsync` accepts `cropOffsetX`, `cropOffsetY`, `dpiScale` parameters. When `dpiScale > 0`, uses it directly instead of the broken `GetSystemDpiScale()` heuristic.
+- Smoothed cursor positions: `X = logical * dpiScale - cropOffsetX` (applied once during init).
+- Click positions in `GetActiveClicks`: `cx = (click.X * coordScale - cropOffset - viewport.X) * scaleX + padding`.
+- `AutoZoomEngine.BuildZoomTimeline` accepts crop offsets; subtracts them from zoom center positions.
+- `EditorPage` zoom keyframe creation: `CenterX = (click.X * dpiScale - cropOffX) / sourceW`.
+- All callers (PreviewRenderer, ExportEngine, VideoEncoder, EditorPage) pass `project.CropOffsetX/Y` and `project.DpiScale`.
+
+**What didn't work / known limitations:**
+- `GetSystemDpiScale(capturedDimension)` compares dimension to `GetSystemMetrics(SM_CXSCREEN)`. For region captures, the cropped dimension is always smaller than the monitor logical size, so the comparison `capturedDimension > logicalSize` fails and returns 1.0. This heuristic only works for full-monitor captures.
+- Old region-capture projects without `DpiScale` stored will still use the broken auto-detect path (acceptable as legacy behavior).
+- Window captures may have a similar class of bug (no origin offset stored), but are out of scope for this fix.
