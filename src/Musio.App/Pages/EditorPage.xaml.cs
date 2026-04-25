@@ -134,8 +134,10 @@ public sealed partial class EditorPage : Page
         // Subtract MouseToVideoOffsetSeconds to convert mouse-relative time to video time.
         int sourceW = project.Width > 0 ? project.Width : 1920;
         int sourceH = project.Height > 0 ? project.Height : 1080;
-        float dpiScaleX = project.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceW);
-        float dpiScaleY = project.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceH, isWidth: false);
+        // Mouse hook (WH_MOUSE_LL) in PerMonitorV2 reports physical pixels —
+        // no DPI scaling needed for click coordinate transforms.
+        float dpiScaleX = 1.0f;
+        float dpiScaleY = 1.0f;
         int cropOffX = project.CropOffsetX;
         int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
@@ -555,8 +557,9 @@ public sealed partial class EditorPage : Page
             var project = ProjectService.Instance.CurrentProject;
             int sourceW = project?.Width > 0 ? project.Width : 1920;
             int sourceH = project?.Height > 0 ? project.Height : 1080;
-            float dpiX = project?.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceW);
-            float dpiY = project?.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceH, isWidth: false);
+            // Mouse hook coords are already physical (PerMonitorV2) — no DPI scaling
+            float dpiX = 1.0f;
+            float dpiY = 1.0f;
             int cropOffX = project?.CropOffsetX ?? 0;
             int cropOffY = project?.CropOffsetY ?? 0;
 

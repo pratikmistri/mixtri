@@ -65,8 +65,9 @@ public class AutoZoomEngine
 
     /// <summary>
     /// Pre-compute zoom timeline from click events and manual keyframes.
-    /// <paramref name="coordScaleX"/> and <paramref name="coordScaleY"/> convert
-    /// mouse hook coordinates (logical pixels) to capture frame coordinates (physical pixels).
+    /// Mouse hook coordinates are already in physical pixels (PerMonitorV2),
+    /// so <paramref name="coordScaleX"/> and <paramref name="coordScaleY"/> should
+    /// normally be 1.0f — no DPI scaling is required.
     /// </summary>
     public void BuildZoomTimeline(
         MouseRecordingData mouseData,

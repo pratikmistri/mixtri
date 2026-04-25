@@ -134,11 +134,11 @@ public class FrameCompositor : IDisposable
         _sourceHeight = sourceHeight;
         _tickFrequency = mouseData.TickFrequency;
 
-        // Detect DPI scale: mouse hook reports logical coords, capture is physical pixels.
-        // Use explicit DPI scale if provided (from recording session), otherwise
-        // fall back to heuristic based on screen metrics.
-        float coordScaleX = dpiScale > 0 ? dpiScale : GetSystemDpiScale(sourceWidth, isWidth: true);
-        float coordScaleY = dpiScale > 0 ? dpiScale : GetSystemDpiScale(sourceHeight, isWidth: false);
+        // Mouse hook (WH_MOUSE_LL) in a PerMonitorV2 process reports physical
+        // screen coordinates, and crop offsets are already physical pixels.
+        // No DPI scaling is needed — both are in the same coordinate space.
+        float coordScaleX = 1.0f;
+        float coordScaleY = 1.0f;
         _coordScaleX = coordScaleX;
         _coordScaleY = coordScaleY;
         _cropOffsetX = cropOffsetX;
@@ -153,8 +153,9 @@ public class FrameCompositor : IDisposable
         OutputWidth = outW;
         OutputHeight = outH;
 
-        // Smooth cursor path at the target FPS, then scale to physical coordinates,
-        // subtract crop offset for region recordings, and apply time offset
+        // Smooth cursor path at the target FPS, subtract crop offset for
+        // region recordings, and apply time offset. Mouse hook coordinates
+        // are already in physical pixels (PerMonitorV2), matching the capture frame space.
         _smoothedPositions = _smoother.SmoothPath(mouseData, _config.OutputFps);
         for (int i = 0; i < _smoothedPositions.Count; i++)
         {
