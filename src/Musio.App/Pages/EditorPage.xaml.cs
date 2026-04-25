@@ -134,8 +134,10 @@ public sealed partial class EditorPage : Page
         // Subtract MouseToVideoOffsetSeconds to convert mouse-relative time to video time.
         int sourceW = project.Width > 0 ? project.Width : 1920;
         int sourceH = project.Height > 0 ? project.Height : 1080;
-        float dpiScaleX = GetDpiScale(sourceW);
-        float dpiScaleY = GetDpiScale(sourceH, isWidth: false);
+        float dpiScaleX = project.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceW);
+        float dpiScaleY = project.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceH, isWidth: false);
+        int cropOffX = project.CropOffsetX;
+        int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
         ViewModel.Model.ZoomKeyframes.Clear();
         foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
@@ -147,8 +149,8 @@ public sealed partial class EditorPage : Page
             {
                 Timestamp = TimeSpan.FromSeconds(clickTime),
                 ZoomLevel = 2.0,
-                CenterX = (click.X * dpiScaleX) / sourceW,
-                CenterY = (click.Y * dpiScaleY) / sourceH,
+                CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
+                CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
                 SourceClickTicks = click.TimestampTicks,
             });
         }
@@ -199,7 +201,10 @@ public sealed partial class EditorPage : Page
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
                 project.Duration,
-                project.MouseToVideoOffsetSeconds);
+                project.MouseToVideoOffsetSeconds,
+                project.CropOffsetX,
+                project.CropOffsetY,
+                project.DpiScale);
             _compositorReady = true;
         }
         catch
@@ -550,8 +555,10 @@ public sealed partial class EditorPage : Page
             var project = ProjectService.Instance.CurrentProject;
             int sourceW = project?.Width > 0 ? project.Width : 1920;
             int sourceH = project?.Height > 0 ? project.Height : 1080;
-            float dpiX = GetDpiScale(sourceW);
-            float dpiY = GetDpiScale(sourceH, isWidth: false);
+            float dpiX = project?.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceW);
+            float dpiY = project?.DpiScale > 0 ? project.DpiScale : GetDpiScale(sourceH, isWidth: false);
+            int cropOffX = project?.CropOffsetX ?? 0;
+            int cropOffY = project?.CropOffsetY ?? 0;
 
             double mouseOffset = project?.MouseToVideoOffsetSeconds ?? 0;
             double targetTime = midpoint.TotalSeconds + mouseOffset;
@@ -565,8 +572,8 @@ public sealed partial class EditorPage : Page
                 double dist = Math.Abs(sTime - targetTime);
                 if (dist < bestDist) { bestDist = dist; closest = s; }
             }
-            cx = (closest.X * dpiX) / sourceW;
-            cy = (closest.Y * dpiY) / sourceH;
+            cx = (closest.X * dpiX - cropOffX) / sourceW;
+            cy = (closest.Y * dpiY - cropOffY) / sourceH;
         }
 
         var operation = new AddZoomSegmentOperation(e.Start, e.End, zoomLevel,

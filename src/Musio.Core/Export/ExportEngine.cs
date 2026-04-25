@@ -163,7 +163,7 @@ public class ExportEngine
         }
 
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
-            project.MouseToVideoOffsetSeconds);
+            project.MouseToVideoOffsetSeconds, project.CropOffsetX, project.CropOffsetY, project.DpiScale);
 
         // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
         SyncTimelineZoomState(compositor, timeline);

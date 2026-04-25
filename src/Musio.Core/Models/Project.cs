@@ -36,6 +36,13 @@ public class Project
     public int CropOffsetY { get; set; }
 
     /// <summary>
+    /// DPI scale factor of the monitor where the recording was made.
+    /// Used to convert mouse hook coordinates (logical pixels) to physical pixels.
+    /// Zero means auto-detect from source dimensions at compositor time.
+    /// </summary>
+    public float DpiScale { get; set; }
+
+    /// <summary>
     /// How the recording was captured. Used to decide whether background
     /// styling (padding, shadow, rounded corners) should be applied.
     /// </summary>

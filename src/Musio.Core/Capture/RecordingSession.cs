@@ -77,6 +77,7 @@ public class RecordingSession : IDisposable
     private int _captureHeight;
     private long _videoStartTicks;
     private Rect? _physicalCropRect;
+    private float _recordingDpiScale;
 
     // Absolute Stopwatch timestamp when the first video frame was actually
     // emitted by the capture API. This is the true video time 0 — any
@@ -336,6 +337,7 @@ public class RecordingSession : IDisposable
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
                 CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
                 CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
+                DpiScale = _recordingDpiScale,
                 CaptureType = _config.Target.Type,
             };
 
@@ -412,6 +414,7 @@ public class RecordingSession : IDisposable
                     && _config.Target.CropRect is Rect logicalCrop)
                 {
                     float dpiScale = GetMonitorDpiScale(_config.Target.Handle);
+                    _recordingDpiScale = dpiScale;
                     var physCrop = new Rect(
                         logicalCrop.X * dpiScale,
                         logicalCrop.Y * dpiScale,

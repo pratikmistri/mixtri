@@ -109,7 +109,7 @@ public class VideoEncoder : IDisposable
         // Initialize compositor (same pipeline as editor preview)
         using var compositor = new FrameCompositor(compositionConfig);
         await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
-            project.MouseToVideoOffsetSeconds);
+            project.MouseToVideoOffsetSeconds, project.CropOffsetX, project.CropOffsetY, project.DpiScale);
 
         // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
         if (timeline is not null)

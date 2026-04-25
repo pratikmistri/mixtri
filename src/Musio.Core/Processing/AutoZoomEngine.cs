@@ -42,6 +42,8 @@ public class AutoZoomEngine
     private double _lastTickFrequency;
     private float _lastCoordScaleX = 1f;
     private float _lastCoordScaleY = 1f;
+    private float _lastCropOffsetX;
+    private float _lastCropOffsetY;
     private double _lastTimeOffsetSeconds;
     private HashSet<long> _suppressedClickTicks = [];
 
@@ -73,7 +75,9 @@ public class AutoZoomEngine
         double tickFrequency,
         float coordScaleX = 1.0f,
         float coordScaleY = 1.0f,
-        double timeOffsetSeconds = 0)
+        double timeOffsetSeconds = 0,
+        float cropOffsetX = 0,
+        float cropOffsetY = 0)
     {
         ArgumentNullException.ThrowIfNull(mouseData);
         _sourceWidth = sourceWidth;
@@ -84,6 +88,8 @@ public class AutoZoomEngine
         _lastTickFrequency = tickFrequency;
         _lastCoordScaleX = coordScaleX;
         _lastCoordScaleY = coordScaleY;
+        _lastCropOffsetX = cropOffsetX;
+        _lastCropOffsetY = cropOffsetY;
         _lastTimeOffsetSeconds = timeOffsetSeconds;
 
         RebuildAutoSegments();
@@ -129,8 +135,8 @@ public class AutoZoomEngine
                 HoldEnd = clickTime + _config.HoldDuration,
                 ZoomOutEnd = clickTime + _config.HoldDuration + _config.EaseOutDuration,
                 TargetZoom = _config.DefaultZoomLevel,
-                CenterX = Math.Clamp(click.X * _lastCoordScaleX, 0f, _sourceWidth - 1f),
-                CenterY = Math.Clamp(click.Y * _lastCoordScaleY, 0f, _sourceHeight - 1f),
+                CenterX = Math.Clamp(click.X * _lastCoordScaleX - _lastCropOffsetX, 0f, _sourceWidth - 1f),
+                CenterY = Math.Clamp(click.Y * _lastCoordScaleY - _lastCropOffsetY, 0f, _sourceHeight - 1f),
             });
         }
 

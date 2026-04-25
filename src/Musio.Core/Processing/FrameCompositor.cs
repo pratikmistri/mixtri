@@ -57,6 +57,8 @@ public class FrameCompositor : IDisposable
     private bool _disposed;
     private float _coordScaleX = 1.0f;
     private float _coordScaleY = 1.0f;
+    private float _cropOffsetX;
+    private float _cropOffsetY;
     private double _mouseTimeOffset;
 
     // Reusable scratch buffer for CropSourceFrame to avoid per-frame GPU allocation
@@ -113,7 +115,10 @@ public class FrameCompositor : IDisposable
         int sourceWidth,
         int sourceHeight,
         TimeSpan? duration = null,
-        double mouseToVideoOffsetSeconds = 0)
+        double mouseToVideoOffsetSeconds = 0,
+        int cropOffsetX = 0,
+        int cropOffsetY = 0,
+        float dpiScale = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(mouseData);
@@ -130,11 +135,14 @@ public class FrameCompositor : IDisposable
         _tickFrequency = mouseData.TickFrequency;
 
         // Detect DPI scale: mouse hook reports logical coords, capture is physical pixels.
-        // Use actual screen metrics for reliable scale detection.
-        float coordScaleX = GetSystemDpiScale(sourceWidth, isWidth: true);
-        float coordScaleY = GetSystemDpiScale(sourceHeight, isWidth: false);
+        // Use explicit DPI scale if provided (from recording session), otherwise
+        // fall back to heuristic based on screen metrics.
+        float coordScaleX = dpiScale > 0 ? dpiScale : GetSystemDpiScale(sourceWidth, isWidth: true);
+        float coordScaleY = dpiScale > 0 ? dpiScale : GetSystemDpiScale(sourceHeight, isWidth: false);
         _coordScaleX = coordScaleX;
         _coordScaleY = coordScaleY;
+        _cropOffsetX = cropOffsetX;
+        _cropOffsetY = cropOffsetY;
 
         // Compute content dimensions based on aspect ratio (center-crop)
         ComputeContentDimensions();
@@ -145,16 +153,16 @@ public class FrameCompositor : IDisposable
         OutputWidth = outW;
         OutputHeight = outH;
 
-        // Smooth cursor path at the target FPS, then scale to physical coordinates
-        // and apply time offset to align mouse timeline with video frames
+        // Smooth cursor path at the target FPS, then scale to physical coordinates,
+        // subtract crop offset for region recordings, and apply time offset
         _smoothedPositions = _smoother.SmoothPath(mouseData, _config.OutputFps);
         for (int i = 0; i < _smoothedPositions.Count; i++)
         {
             var p = _smoothedPositions[i];
             _smoothedPositions[i] = new SmoothedPosition
             {
-                X = p.X * coordScaleX,
-                Y = p.Y * coordScaleY,
+                X = p.X * coordScaleX - cropOffsetX,
+                Y = p.Y * coordScaleY - cropOffsetY,
                 TimestampSeconds = p.TimestampSeconds - mouseToVideoOffsetSeconds,
                 VelocityX = p.VelocityX * coordScaleX,
                 VelocityY = p.VelocityY * coordScaleY,
@@ -196,7 +204,8 @@ public class FrameCompositor : IDisposable
         // Build auto-zoom timeline with scaled coordinates and time offset + capture latency
         _zoomEngine.BuildZoomTimeline(
             mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency,
-            coordScaleX, coordScaleY, mouseToVideoOffsetSeconds);
+            coordScaleX, coordScaleY, mouseToVideoOffsetSeconds,
+            cropOffsetX, cropOffsetY);
 
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;
@@ -578,9 +587,9 @@ public class FrameCompositor : IDisposable
             if (click.TimestampTicks > windowEndTicks)
                 break;
 
-            // Transform click position from logical to physical, then to output space
-            int cx = (int)((click.X * _coordScaleX - viewport.X) * scaleX + padding);
-            int cy = (int)((click.Y * _coordScaleY - viewport.Y) * scaleY + padding);
+            // Transform click position from logical to physical, subtract crop offset, then to output space
+            int cx = (int)((click.X * _coordScaleX - _cropOffsetX - viewport.X) * scaleX + padding);
+            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY - viewport.Y) * scaleY + padding);
 
             // Create adjusted click event with shifted timestamp for the renderer
             long adjustedTicks = click.TimestampTicks

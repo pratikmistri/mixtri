@@ -33,7 +33,10 @@ public class PreviewRenderer : IDisposable
         int sourceWidth,
         int sourceHeight,
         TimeSpan? duration = null,
-        double mouseToVideoOffsetSeconds = 0)
+        double mouseToVideoOffsetSeconds = 0,
+        int cropOffsetX = 0,
+        int cropOffsetY = 0,
+        float dpiScale = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -43,7 +46,8 @@ public class PreviewRenderer : IDisposable
 
         _compositor?.Dispose();
         _compositor = new FrameCompositor(config);
-        await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration, mouseToVideoOffsetSeconds);
+        await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration,
+            mouseToVideoOffsetSeconds, cropOffsetX, cropOffsetY, dpiScale);
     }
 
     /// <summary>
