@@ -46,6 +46,10 @@ public class VideoEncoder : IDisposable
     private readonly ExportSettings _settings;
     private bool _disposed;
 
+    // Reusable buffers to avoid per-frame allocation during export
+    private byte[]? _flipBuffer;
+    private CanvasRenderTarget? _scaleTarget;
+
     public VideoEncoder(ExportSettings settings)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -333,52 +337,53 @@ public class VideoEncoder : IDisposable
             // effects are precisely synchronized with the visual frame content.
             using var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
 
-            // Scale if needed
+            // Scale if needed (reuse render target across frames)
             CanvasRenderTarget outputFrame;
-            bool disposeOutput = false;
             if (needsScaling)
             {
-                outputFrame = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
-                using (var ds = outputFrame.CreateDrawingSession())
+                if (_scaleTarget is null
+                    || _scaleTarget.SizeInPixels.Width != (uint)targetWidth
+                    || _scaleTarget.SizeInPixels.Height != (uint)targetHeight)
+                {
+                    _scaleTarget?.Dispose();
+                    _scaleTarget = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
+                }
+                using (var ds = _scaleTarget.CreateDrawingSession())
                 {
                     ds.DrawImage(composedFrame,
                         new Windows.Foundation.Rect(0, 0, targetWidth, targetHeight),
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));
                 }
-                disposeOutput = true;
+                outputFrame = _scaleTarget;
             }
             else
             {
                 outputFrame = composedFrame;
             }
 
-            try
+            // Get raw pixels — Win2D returns top-down row order, but
+            // MediaStreamSource with Bgra8 expects bottom-up. Flip rows.
+            var pixelBytes = outputFrame.GetPixelBytes();
+            int frameW = (int)outputFrame.SizeInPixels.Width;
+            int frameH = (int)outputFrame.SizeInPixels.Height;
+            int stride = frameW * 4;
+
+            // Reuse flip buffer across frames to avoid per-frame allocation (~22MB at 3K)
+            int requiredSize = stride * frameH;
+            if (_flipBuffer is null || _flipBuffer.Length != requiredSize)
+                _flipBuffer = new byte[requiredSize];
+
+            for (int y = 0; y < frameH; y++)
             {
-                // Get raw pixels — Win2D returns top-down row order, but
-                // MediaStreamSource with Bgra8 expects bottom-up. Flip rows.
-                var pixelBytes = outputFrame.GetPixelBytes();
-                int frameW = (int)outputFrame.SizeInPixels.Width;
-                int frameH = (int)outputFrame.SizeInPixels.Height;
-                int stride = frameW * 4;
-
-                byte[] flipped = new byte[pixelBytes.Length];
-                for (int y = 0; y < frameH; y++)
-                {
-                    Buffer.BlockCopy(pixelBytes, y * stride, flipped, (frameH - 1 - y) * stride, stride);
-                }
-
-                var buffer = CryptographicBuffer.CreateFromByteArray(flipped);
-                var timestamp = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
-                var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
-                sample.Duration = frameDuration;
-
-                request.Sample = sample;
+                Buffer.BlockCopy(pixelBytes, y * stride, _flipBuffer, (frameH - 1 - y) * stride, stride);
             }
-            finally
-            {
-                if (disposeOutput)
-                    outputFrame.Dispose();
-            }
+
+            var buffer = CryptographicBuffer.CreateFromByteArray(_flipBuffer);
+            var timestamp = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
+            var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
+            sample.Duration = frameDuration;
+
+            request.Sample = sample;
 
             // Report progress
             if (progress is not null)
@@ -487,38 +492,43 @@ public class VideoEncoder : IDisposable
 
     private MediaEncodingProfile CreateEncodingProfile(int width, int height)
     {
-        var profile = MediaEncodingProfile.CreateMp4(GetProfileQuality());
-
-        if (profile.Video is not null)
-        {
-            profile.Video.Width = (uint)width;
-            profile.Video.Height = (uint)height;
-            profile.Video.FrameRate.Numerator = (uint)_settings.Fps;
-            profile.Video.FrameRate.Denominator = 1;
-            profile.Video.Bitrate = GetBitrate();
-            profile.Video.Subtype = "H264";
-        }
+        // Use Auto quality so the encoder determines the appropriate H.264
+        // Level from the actual dimensions. Preset qualities (HD1080p, etc.)
+        // constrain Level/DPB to that resolution, causing corruption when
+        // the compositor output exceeds it (e.g. 2.8K displays → Level 5.1+).
+        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
+        profile.Video ??= new VideoEncodingProperties();
+        profile.Video.Width = (uint)width;
+        profile.Video.Height = (uint)height;
+        profile.Video.FrameRate.Numerator = (uint)_settings.Fps;
+        profile.Video.FrameRate.Denominator = 1;
+        profile.Video.Bitrate = ComputeBitrate(width, height);
+        profile.Video.Subtype = "H264";
 
         return profile;
     }
 
-    private VideoEncodingQuality GetProfileQuality() => _settings.Quality switch
+    /// <summary>
+    /// Scales bitrate proportionally to pixel count relative to 1080p so
+    /// high-resolution exports (2.8K, 4K) receive adequate bitrate.
+    /// </summary>
+    private uint ComputeBitrate(int width, int height)
     {
-        VideoQuality.Draft => VideoEncodingQuality.Wvga,
-        VideoQuality.Standard => VideoEncodingQuality.HD720p,
-        VideoQuality.High => VideoEncodingQuality.HD1080p,
-        VideoQuality.Ultra => VideoEncodingQuality.Uhd2160p,
-        _ => VideoEncodingQuality.HD1080p,
-    };
+        uint baseBitrate = _settings.Quality switch
+        {
+            VideoQuality.Draft => 5_000_000,
+            VideoQuality.Standard => 10_000_000,
+            VideoQuality.High => 20_000_000,
+            VideoQuality.Ultra => 50_000_000,
+            _ => 20_000_000,
+        };
 
-    private uint GetBitrate() => _settings.Quality switch
-    {
-        VideoQuality.Draft => 5_000_000,
-        VideoQuality.Standard => 10_000_000,
-        VideoQuality.High => 20_000_000,
-        VideoQuality.Ultra => 50_000_000,
-        _ => 20_000_000,
-    };
+        const double baselinePixels = 1920.0 * 1080.0;
+        double actualPixels = (double)width * height;
+        double scale = Math.Max(1.0, actualPixels / baselinePixels);
+
+        return (uint)(baseBitrate * scale);
+    }
 
     private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
         CanvasDevice device, MediaComposition composition, TimeSpan position,
@@ -563,6 +573,9 @@ public class VideoEncoder : IDisposable
     {
         if (!_disposed)
         {
+            _scaleTarget?.Dispose();
+            _scaleTarget = null;
+            _flipBuffer = null;
             _disposed = true;
             GC.SuppressFinalize(this);
         }

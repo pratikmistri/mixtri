@@ -475,3 +475,25 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Only sessions with `exported.marker` are cleaned (not just any session with video.mp4, since MP4 is created during recording before any export).
 - `.frames/` deletion means the editor can't re-open that recording for editing. Acceptable tradeoff — the user has their export.
 - `video.mp4`, cursor, keyboard, and audio files are preserved for future capture history feature.
+
+---
+
+## Export — H.264 Corruption on High-DPI Displays (2.8K+)
+
+**Feature/area:** VideoEncoder (export pipeline)
+
+**Approaches tried:**
+
+1. **Replaced `MediaEncodingProfile.CreateMp4(GetProfileQuality())` with `VideoEncodingQuality.Auto`** — Worked. The previous code used quality presets (`HD1080p`, `HD720p`, etc.) that constrain H.264 Level/DPB to the preset resolution. On high-DPI displays (2.8K → ~2976×1896 compositor output), the Level 4.0 macroblock limit (8,192) was exceeded by 2.7× (22,134 actual), causing the AMD AMF encoder to produce corrupted reference frames → ghosting/trailing artifacts. Using `Auto` lets the encoder auto-determine the correct Level (5.1+). ✅
+2. **Scaled bitrate proportionally to pixel count** — The fixed 20 Mbps bitrate was tight for ~3K output. New `ComputeBitrate(width, height)` scales the base bitrate by `actualPixels / (1920×1080)`, so high-res exports get adequate bitrate. ✅
+3. **Reused flip buffer and scale render target across frames** — Per-frame allocation of `byte[~22MB]` and `CanvasRenderTarget` at ~3K caused excessive GC pressure and memory throughput on integrated GPUs with shared memory. Added `_flipBuffer` and `_scaleTarget` fields, allocated once and reused. ✅
+
+**What worked:**
+- `VideoEncodingQuality.Auto` + explicit Width/Height/Bitrate/FPS/Subtype — same pattern already used in `VideoWriter.FinalizeAsync` (recording pipeline).
+- Bitrate scaling ensures high-res exports don't get starved. Formula: `baseBitrate * max(1.0, actualPixels / baselinePixels)`.
+- Buffer reuse eliminates ~44MB/frame of allocation (flip buffer + scale target), significant at 30fps on integrated GPU.
+
+**What didn't work / pitfalls:**
+- The recording pipeline (`VideoWriter.FinalizeAsync`) already fixed this by using `Auto`, but the fix was never propagated to the export pipeline (`VideoEncoder`). Both pipelines must use the same approach.
+- The issue is resolution-dependent, not GPU-vendor-specific: any display exceeding ~1920×1088 can exceed Level 4.0 limits. NVIDIA may auto-promote the Level silently, masking the bug; AMD AMF is stricter.
+- `MediaEncodingProfile.CreateMp4(HD1080p)` sets internal H.264 parameters (Level, profile, DPB) that overriding Width/Height alone does NOT update.
