@@ -8,7 +8,6 @@ using Windows.Media.Core;
 using Windows.Media.Editing;
 using Windows.Media.MediaProperties;
 using Windows.Media.Transcoding;
-using Windows.Security.Cryptography;
 using Windows.Storage;
 
 namespace Musio.Core.Export;
@@ -46,9 +45,10 @@ public class VideoEncoder : IDisposable
     private readonly ExportSettings _settings;
     private bool _disposed;
 
-    // Reusable buffers to avoid per-frame allocation during export
-    private byte[]? _flipBuffer;
-    private CanvasRenderTarget? _scaleTarget;
+    // Serializes frame compositing so shared state (compositor, frameReader)
+    // is never accessed concurrently by overlapping SampleRequested callbacks
+    // from the MediaStreamSource pipeline.
+    private readonly SemaphoreSlim _frameSemaphore = new(1, 1);
 
     public VideoEncoder(ExportSettings settings)
     {
@@ -133,11 +133,12 @@ public class VideoEncoder : IDisposable
         // Encode at compositor output dimensions to preserve aspect ratio.
         // The compositor already handles background padding and aspect-ratio
         // cropping, so its output size is the correct final frame size.
-        // H.264 requires even dimensions — round down to nearest even number.
-        targetWidth = compositorWidth & ~1;
-        targetHeight = compositorHeight & ~1;
-        if (targetWidth < 2) targetWidth = 2;
-        if (targetHeight < 2) targetHeight = 2;
+        // H.264 uses 16×16 macroblocks — round down to mod-16 to avoid
+        // hardware encoder alignment issues that cause horizontal banding.
+        targetWidth = (compositorWidth / 16) * 16;
+        targetHeight = (compositorHeight / 16) * 16;
+        if (targetWidth < 16) targetWidth = 16;
+        if (targetHeight < 16) targetHeight = 16;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
 
         // Load source frames from .frames/ JPEGs using the RECORDING FPS so
@@ -199,6 +200,8 @@ public class VideoEncoder : IDisposable
         {
             // ── Pass 1: Direct composited-frame encoding (no temp files) ──
             int currentFrame = 0;
+            var pendingSamples = new List<Task>();
+            var pendingSamplesLock = new object();
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
             // Create uncompressed video stream for the MediaStreamSource
@@ -206,6 +209,9 @@ public class VideoEncoder : IDisposable
                 MediaEncodingSubtypes.Bgra8, (uint)targetWidth, (uint)targetHeight);
             videoProps.FrameRate.Numerator = (uint)_settings.Fps;
             videoProps.FrameRate.Denominator = 1;
+
+            Debug.WriteLine($"[VideoEncoder] Dimensions: {targetWidth}x{targetHeight}");
+
             var videoDesc = new VideoStreamDescriptor(videoProps);
 
             var streamSource = new MediaStreamSource(videoDesc);
@@ -219,25 +225,33 @@ public class VideoEncoder : IDisposable
 
             streamSource.SampleRequested += (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
             {
-                if (currentFrame >= totalFrames)
+                // Atomically reserve a frame index to avoid duplicate/skipped frames
+                int frame = Interlocked.Increment(ref currentFrame) - 1;
+                if (frame >= totalFrames)
                 {
                     args.Request.Sample = null; // end of stream
                     return;
                 }
 
                 var deferral = args.Request.GetDeferral();
-                int frame = currentFrame;
-                currentFrame++;
-                _ = ProduceSampleAsync(
+                var task = ProduceSampleAsync(
                     args.Request, deferral, frame, totalFrames,
                     compositor, frameReader, sourceComp, webcamComp,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
                     compositorWidth, compositorHeight, targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
+
+                lock (pendingSamplesLock)
+                {
+                    pendingSamples.Add(task);
+                }
             };
 
             // Transcode: composited BGRA8 frames → H.264 MP4
+            // Use software encoding to avoid hardware encoder quirks with
+            // non-standard dimensions and D3D surface interop.
             var transcoder = new MediaTranscoder();
+            transcoder.HardwareAccelerationEnabled = false;
             var profile = CreateEncodingProfile(targetWidth, targetHeight);
 
             // Remove audio from first-pass profile
@@ -254,6 +268,14 @@ public class VideoEncoder : IDisposable
                     $"Transcoder cannot encode: {prepResult.FailureReason}");
 
             await prepResult.TranscodeAsync().AsTask(ct);
+
+            // Drain any still-running sample tasks before disposing shared state
+            Task[] snapshot;
+            lock (pendingSamplesLock)
+            {
+                snapshot = pendingSamples.ToArray();
+            }
+            await Task.WhenAll(snapshot).ConfigureAwait(false);
 
             // ── Pass 2: Mux audio (fast — no frame re-compositing) ──
             if (hasAudio)
@@ -304,6 +326,13 @@ public class VideoEncoder : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
+            // Serialize compositing: shared state (compositor, _flipBuffer,
+            // _scaleTarget) is not thread-safe and will corrupt frames if
+            // accessed concurrently by overlapping SampleRequested callbacks.
+            await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+
             double timeSeconds = timelineMapper is not null
                 ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
                 : (double)frameIndex / _settings.Fps;
@@ -335,55 +364,45 @@ public class VideoEncoder : IDisposable
 
             // Composite using the exact source time so cursor, click, and zoom
             // effects are precisely synchronized with the visual frame content.
-            using var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
+            var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
 
-            // Scale if needed (reuse render target across frames)
-            CanvasRenderTarget outputFrame;
+            // Build the output surface. For scaling we need a separate render
+            // target; otherwise the composed frame IS the output surface.
+            // Each frame gets its own surface so the encoder can read it async
+            // after we release the semaphore.
+            CanvasRenderTarget outputSurface;
             if (needsScaling)
             {
-                if (_scaleTarget is null
-                    || _scaleTarget.SizeInPixels.Width != (uint)targetWidth
-                    || _scaleTarget.SizeInPixels.Height != (uint)targetHeight)
-                {
-                    _scaleTarget?.Dispose();
-                    _scaleTarget = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
-                }
-                using (var ds = _scaleTarget.CreateDrawingSession())
+                outputSurface = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
+                using (var ds = outputSurface.CreateDrawingSession())
                 {
                     ds.DrawImage(composedFrame,
                         new Windows.Foundation.Rect(0, 0, targetWidth, targetHeight),
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));
                 }
-                outputFrame = _scaleTarget;
+                composedFrame.Dispose();
             }
             else
             {
-                outputFrame = composedFrame;
+                outputSurface = composedFrame;
             }
 
-            // Get raw pixels — Win2D returns top-down row order, but
-            // MediaStreamSource with Bgra8 expects bottom-up. Flip rows.
-            var pixelBytes = outputFrame.GetPixelBytes();
-            int frameW = (int)outputFrame.SizeInPixels.Width;
-            int frameH = (int)outputFrame.SizeInPixels.Height;
-            int stride = frameW * 4;
-
-            // Reuse flip buffer across frames to avoid per-frame allocation (~22MB at 3K)
-            int requiredSize = stride * frameH;
-            if (_flipBuffer is null || _flipBuffer.Length != requiredSize)
-                _flipBuffer = new byte[requiredSize];
-
-            for (int y = 0; y < frameH; y++)
-            {
-                Buffer.BlockCopy(pixelBytes, y * stride, _flipBuffer, (frameH - 1 - y) * stride, stride);
-            }
-
-            var buffer = CryptographicBuffer.CreateFromByteArray(_flipBuffer);
+            // Give the D3D11 surface directly to the encoder — bypasses all
+            // pixel extraction and stride alignment issues entirely.
             var timestamp = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
-            var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
+            var sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
             sample.Duration = frameDuration;
 
+            // Dispose the GPU surface after the encoder has consumed it.
+            sample.Processed += (s, e) => outputSurface.Dispose();
+
             request.Sample = sample;
+
+            }
+            finally
+            {
+                _frameSemaphore.Release();
+            }
 
             // Report progress
             if (progress is not null)
@@ -573,9 +592,7 @@ public class VideoEncoder : IDisposable
     {
         if (!_disposed)
         {
-            _scaleTarget?.Dispose();
-            _scaleTarget = null;
-            _flipBuffer = null;
+            _frameSemaphore.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
         }

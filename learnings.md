@@ -454,6 +454,52 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
+## Video Export — Scrambled Frames & Trailing Cursor
+
+**Feature/area:** Export pipeline (VideoEncoder, ExportEngine)
+
+**Approaches tried:**
+
+1. **Fix concurrency (SemaphoreSlim serialization)** — Original code used fire-and-forget `_ = ProduceSampleAsync(...)` in `SampleRequested`, allowing overlapping callbacks to corrupt shared state (`compositor`, `_scaleTarget`). Fixed with `SemaphoreSlim(1,1)` and `Interlocked.Increment` for atomic frame reservation. Still broken (stride issue remained). ❌
+2. **Remove incorrect row flip** — Code had a bottom-up row flip with a wrong comment claiming "MediaStreamSource with Bgra8 expects bottom-up". Both Win2D and MF default to top-down for `CreateUncompressed(Bgra8)`. Removed the flip. Still broken. ❌
+3. **Set MF_MT_DEFAULT_STRIDE on VideoEncodingProperties** — Set aligned stride (256-byte aligned) on the media type properties. MediaTranscoder ignores this for `MediaStreamSource`-sourced data. Still broken. ❌
+4. **SoftwareBitmap.CopyToBuffer() for stride-aligned pixels** — `CopyToBuffer()` actually produces compact data (width*4 stride), not aligned. Setting `MF_MT_DEFAULT_STRIDE` to aligned stride caused worse drift. Still broken. ❌
+5. **MediaStreamSample.CreateFromDirect3D11Surface() + mod-16 dimensions + software encoding** — Bypasses all pixel extraction. Round output dimensions to mod-16 for H.264 macroblock alignment. Disable hardware acceleration to avoid hardware encoder surface interop quirks. ✅
+
+**What worked:**
+- **Root cause**: Non-mod-16 output dimensions (e.g. 2878×1540) caused the hardware H.264 encoder to misalign macroblock boundaries, producing horizontal banding. The preview pipeline doesn't use H.264 so was unaffected.
+- Round output dimensions to mod-16: `(compositorWidth / 16) * 16`
+- Use `MediaStreamSample.CreateFromDirect3D11Surface()` instead of extracting pixel bytes — avoids all stride alignment concerns
+- Set `MediaTranscoder.HardwareAccelerationEnabled = false` to use the software encoder, which handles D3D surface interop more reliably
+- Each frame gets its own `CanvasRenderTarget` disposed via `sample.Processed` event
+- Keep `SemaphoreSlim` serialization for thread-safe compositor access
+- Must uninstall Store version before `Add-AppxPackage -Register` for debug builds to take effect
+
+**What didn't work:**
+- `GetPixelBytes()` compact stride + no MF_MT_DEFAULT_STRIDE — encoder expects something other than compact stride (horizontal banding).
+- `SoftwareBitmap.CopyToBuffer()` — produces compact data despite SoftwareBitmap having aligned internal stride; misleading API.
+- Setting `MF_MT_DEFAULT_STRIDE` / `MF_MT_SAMPLE_SIZE` on `VideoEncodingProperties.Properties` — ignored by MediaTranscoder pipeline.
+- Row flipping — completely wrong for `CreateUncompressed(Bgra8)` which uses top-down row order.
+- Fire-and-forget async in `SampleRequested` — causes frame corruption due to concurrent access to shared state.
+
+---
+
+1. **SemaphoreSlim(1,1) to serialize frame compositing** — Partially helped. The `SampleRequested` handler used fire-and-forget (`_ = ProduceSampleAsync(...)`) allowing concurrent access to shared state (`FrameCompositor`, `_flipBuffer`, `_scaleTarget`). Added `SemaphoreSlim` serialization, `Interlocked.Increment` for atomic frame reservation, and pending-task draining before disposal. Fixed the concurrency issue but didn't fix the visual corruption. ✅
+2. **Removed incorrect bottom-up row flip** — Fixed the scrambled frames. The code had a comment claiming "MediaStreamSource with Bgra8 expects bottom-up" which is wrong. Both Win2D `GetPixelBytes()` and `VideoEncodingProperties.CreateUncompressed(Bgra8)` use top-down row order (positive stride). The row flip was converting correct top-down data to bottom-up, causing the H.264 encoder to produce corrupted output. Removed the flip and passed pixel bytes directly. ✅
+
+**What worked:** Both fixes combined — serialized compositing via SemaphoreSlim + removed the incorrect row flip.
+
+**What didn't work:** The row flip comment was misleading — BGRA8 in MediaStreamSource uses top-down (positive stride), not bottom-up like legacy GDI/BMP conventions.
+
+**Key findings:**
+- Biggest gaps: custom-drawn controls (TimelineControl, RegionSelectorOverlay, PreviewCanvas) have no AutomationPeers and are pointer-only.
+- All dynamic status areas (recording timer, export progress, playback time) lack live-region support.
+- Many icon-only buttons lack `AutomationProperties.Name`.
+- Hard-coded colors in timeline and controls won't adapt to High Contrast mode.
+- System tray is not keyboard-accessible.
+
+---
+
 ## Hard-Coded Colors — Theme Resource Migration
 
 **Feature/area:** Accessibility — High Contrast support (TimelineControl, PreviewCanvas, RegionSelectorOverlay, RecordingOverlayWindow, EditorPage)
