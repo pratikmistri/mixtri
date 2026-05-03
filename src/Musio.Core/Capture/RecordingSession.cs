@@ -482,7 +482,13 @@ public class RecordingSession : IDisposable
                         if (evenW < 2) evenW = 2;
                         if (evenH < 2) evenH = 2;
 
-                        _physicalCropRect = new Rect(x, y, evenW, evenH);
+                        // Round origin to integer pixels so the video crop and
+                        // cursor offset use the same pixel boundary (avoids
+                        // sub-pixel drift from fractional DPI-scaled coords).
+                        int roundedX = (int)Math.Round(x);
+                        int roundedY = (int)Math.Round(y);
+
+                        _physicalCropRect = new Rect(roundedX, roundedY, evenW, evenH);
                         _captureWidth = evenW;
                         _captureHeight = evenH;
                     }
