@@ -721,3 +721,25 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / known limitations:**
 - Window position is captured once at first frame. If the window moves during recording, cursor alignment drifts (acceptable for v1).
 - `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` may differ slightly from Graphics Capture bounds for some window types.
+
+---
+
+## Editor Background Style Settings
+
+**Feature/area:** Editor toolbar — background style editing for Window/Region captures
+
+**Approaches tried:**
+1. Considered adding a side panel for background settings — rejected as too heavy for MVP.
+2. Implemented a flyout from a "Style" button in the editor toolbar with preset picker + individual controls.
+
+**What worked:**
+- Flyout approach with `DispatcherTimer` debounce (200ms) for slider/toggle changes to avoid thrashing the PreviewRenderer.
+- Dedicated `RebuildPreviewRendererAsync` that recreates only the PreviewRenderer/FrameCompositor while preserving frame reader, audio, zoom keyframes, and playhead position. Full `InitializePreviewAsync` was too heavy (disposes everything, reloads waveform/cursor data, resets to TimeSpan.Zero).
+- `_suppressStyleEvents` flag to prevent feedback loops when programmatically updating controls (e.g., syncing controls to a preset selection).
+- Explicit `CaptureTargetType.Monitor` check (instead of `!= Window`) to gate which captures get background styling — allows both Window and Region to have backgrounds.
+- Building with VS MSBuild (`MSBuild.exe /p:Platform=x64`) works; `dotnet build` fails with MSB4062 due to missing WinAppSDK PRI task in dotnet CLI.
+
+**What didn't work / known limitations:**
+- `FrameCompositor` is immutable after init — no incremental background updates possible without full re-init. Long-term, an `UpdateBackgroundStyle()` API on FrameCompositor could avoid re-smoothing cursor data for non-padding changes.
+- Image background type not exposed in UI (kept to SolidColor/Gradient/Blur for simplicity).
+- Shadow/border detail controls (blur amount, opacity, width, color) not exposed — uses sensible defaults.
