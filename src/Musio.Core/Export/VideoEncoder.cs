@@ -290,6 +290,11 @@ public class VideoEncoder : IDisposable
         {
             frameReader?.Dispose();
 
+            // Release MediaComposition/MediaClip native resources to avoid
+            // holding video file handles and leaking memory.
+            sourceComp?.Clips.Clear();
+            webcamComp?.Clips.Clear();
+
             // Clean up temp video-only file
             if (hasAudio)
             {
@@ -512,6 +517,10 @@ public class VideoEncoder : IDisposable
                 tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Audio mux failed."));
         };
         await tcs.Task;
+
+        // Release MediaComposition native resources after mux completes
+        muxComp.Clips.Clear();
+        muxComp.BackgroundAudioTracks.Clear();
     }
 
     private MediaEncodingProfile CreateEncodingProfile(int width, int height)
@@ -579,6 +588,11 @@ public class VideoEncoder : IDisposable
 
         var thumbnail = await comp.GetThumbnailAsync(
             position, width, height, VideoFramePrecision.NearestFrame);
+
+        // Release MediaComposition/MediaClip native resources immediately —
+        // this method is called per-frame, so without cleanup each invocation
+        // leaks a composition + clip holding a file handle to the video.
+        comp.Clips.Clear();
 
         var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
         return await CanvasBitmap.LoadAsync(device, randomAccessStream);
