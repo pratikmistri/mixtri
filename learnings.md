@@ -743,3 +743,21 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `FrameCompositor` is immutable after init — no incremental background updates possible without full re-init. Long-term, an `UpdateBackgroundStyle()` API on FrameCompositor could avoid re-smoothing cursor data for non-padding changes.
 - Image background type not exposed in UI (kept to SolidColor/Gradient/Blur for simplicity).
 - Shadow/border detail controls (blur amount, opacity, width, color) not exposed — uses sensible defaults.
+
+---
+
+## Overlapping Zoom Segments Fix
+
+**Feature/area:** AutoZoomEngine — overlapping zoom transition handling
+
+**Approaches tried:**
+1. Investigated MergeSegments logic — it correctly merges auto segments but doesn't apply to manual keyframes.
+2. Fixed EvaluateManualKeyframes and EvaluateAutoSegments to use max-zoom-wins strategy.
+
+**What worked:**
+- Both `EvaluateManualKeyframes` and `EvaluateAutoSegments` now evaluate ALL active segments at a given time and return the one with the highest zoom level. This creates smooth crossovers: when keyframe B zooms in while A zooms out, B naturally takes over once its zoom exceeds A's decaying value.
+- Added regression test `GetZoomState_OverlappingManualKeyframes_NoJump` that samples the overlap zone and asserts no sudden zoom drops (>0.3 in 10ms).
+
+**What didn't work / known limitations:**
+- The original first-match strategy returned the earliest active segment, which meant A's zoom-out always won over B's zoom-in during overlaps, causing a snap when A ended.
+- Tests run with `dotnet test --no-build -c Debug /p:Platform=x64` after building with VS MSBuild.
