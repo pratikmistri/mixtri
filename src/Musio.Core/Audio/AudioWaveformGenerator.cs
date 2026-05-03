@@ -24,7 +24,9 @@ public static class AudioWaveformGenerator
         {
             long skipBytes = (long)(startSeconds * reader.WaveFormat.AverageBytesPerSecond);
             skipBytes -= skipBytes % reader.WaveFormat.BlockAlign;
-            if (skipBytes > 0 && skipBytes < reader.Length)
+            if (skipBytes >= reader.Length)
+                return new float[targetSampleCount];
+            if (skipBytes > 0)
                 reader.Position = skipBytes;
         }
 

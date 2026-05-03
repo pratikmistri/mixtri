@@ -12,6 +12,8 @@ public sealed class AudioPlaybackEngine : IDisposable
     private WaveOutEvent? _outputDevice;
     private MixingSampleProvider? _mixer;
     private readonly List<AudioFileReader> _readers = [];
+    private readonly object _transportLock = new();
+    private Timer? _scrubTimer;
     private bool _disposed;
 
     /// <summary>
@@ -60,7 +62,7 @@ public sealed class AudioPlaybackEngine : IDisposable
                 }
             }
 
-            _outputDevice = new WaveOutEvent();
+            _outputDevice = new WaveOutEvent { DesiredLatency = 100 };
             _outputDevice.Init(_mixer);
         }
         catch
@@ -74,20 +76,29 @@ public sealed class AudioPlaybackEngine : IDisposable
 
     public void Play()
     {
-        if (_outputDevice?.PlaybackState != PlaybackState.Playing)
-            _outputDevice?.Play();
+        lock (_transportLock)
+        {
+            if (_outputDevice?.PlaybackState != PlaybackState.Playing)
+                _outputDevice?.Play();
+        }
     }
 
     public void Pause()
     {
-        // Use Stop to clear internal audio buffers so that after
-        // seeking, Play() starts from the new position cleanly.
-        try { _outputDevice?.Stop(); } catch { }
+        lock (_transportLock)
+        {
+            // Use Stop to clear internal audio buffers so that after
+            // seeking, Play() starts from the new position cleanly.
+            try { _outputDevice?.Stop(); } catch { }
+        }
     }
 
     public void Stop()
     {
-        try { _outputDevice?.Stop(); } catch { }
+        lock (_transportLock)
+        {
+            try { _outputDevice?.Stop(); } catch { }
+        }
     }
 
     /// <summary>
@@ -109,6 +120,32 @@ public sealed class AudioPlaybackEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Plays a short burst of audio at the given position for scrub feedback.
+    /// Automatically stops after a brief silence gap (no new scrub events).
+    /// </summary>
+    public void ScrubTo(TimeSpan position)
+    {
+        if (_outputDevice is null) return;
+
+        lock (_transportLock)
+        {
+            try { _outputDevice.Stop(); } catch { }
+            Seek(position);
+            try { _outputDevice.Play(); } catch { }
+        }
+
+        // Auto-stop after 80ms of no new scrub events
+        _scrubTimer?.Dispose();
+        _scrubTimer = new Timer(_ =>
+        {
+            lock (_transportLock)
+            {
+                try { _outputDevice?.Stop(); } catch { }
+            }
+        }, null, 80, Timeout.Infinite);
+    }
+
     public bool IsLoaded => _outputDevice is not null;
     public bool IsPlaying => _outputDevice?.PlaybackState == PlaybackState.Playing;
 
@@ -116,6 +153,8 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _scrubTimer?.Dispose();
+        _scrubTimer = null;
         Stop();
         _outputDevice?.Dispose();
         _outputDevice = null;

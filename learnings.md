@@ -216,6 +216,21 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
+## Editor Audio Sync — Plan Review
+
+**Feature/area:** Editor audio/video sync and scrub-audio design review
+
+**Approaches tried:**
+
+1. **Reviewed existing editor mapping against recorded `Project.AudioToVideoOffsetSeconds` semantics** — Worked. Confirmed the current heuristic in `EditorPage.LoadAudioWaveformAsync()` conflicts with the persisted capture-time offset and inverts playback alignment. ✅
+2. **Reviewed scrub proposal against current `AudioPlaybackEngine` implementation** — Identified a risk: repeated `Stop()` calls can leave `WaveOutEvent` in a stopped state where `Play()` may not resume reliably without re-init or different pause semantics.
+
+**What worked:** Using the recorded positive pre-roll offset consistently for waveform trimming and `video -> audio` mapping matches the `Project` contract and the recording pipeline comments.
+
+**What didn't work:** Assuming `Stop -> Seek -> Play` on every scrub event is harmless. The existing engine already uses `Stop()` for pause/seek, so adding more stop/play churn may reinforce the current "plays once then stops working" failure mode instead of fixing it.
+
+---
+
 ## Recording — Minimize Before Capture Starts
 
 **Feature/area:** Recording startup sequence (RecordingPage)
@@ -378,6 +393,28 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **Approaches tried:**
 
 1. **Wired up existing AudioWaveformGenerator in EditorPage.InitializePreviewAsync()** — The generator, timeline model property, and rendering code all existed but were never connected. Added `LoadAudioWaveformAsync()` that reads WAV files from `Project.AudioFilePaths`, generates waveform peaks off-thread, merges multiple sources (system + mic) by max-peak, and assigns to `TimelineModel.AudioWaveformSamples`. ✅
+
+---
+
+## Audio-Video Sync — Precise Offset & Scrub Audio
+
+**Feature/area:** Audio playback sync + scrub (AudioPlaybackEngine, EditorPage, AudioWaveformGenerator)
+
+**Approaches tried:**
+
+1. **Duration-based heuristic offset** (`videoDuration - maxAudioDuration + 0.5`) — Didn't work. The 0.5s fudge factor was arbitrary. `Max(0, ...)` clipped negative results. When audio was longer than video (the common case since audio pre-roll starts before video), the offset was always just 0.5 regardless of actual timing. ✗
+2. **Used `Project.AudioToVideoOffsetSeconds` directly** — Worked. This is the precise offset measured during recording from `(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency`. Audio pre-roll is positive: at video time T, audio file position = T + offset. Waveform uses `startSeconds` + `maxDurationSeconds` params of `AudioWaveformGenerator.GenerateWaveform()` to skip pre-roll and cap to video duration. ✅
+3. **Added `ScrubTo()` for FCP-style scrub audio** — Worked. Stop→Seek→Play with 80ms debounce auto-stop. Serialized with a lock to prevent races between UI thread and timer callback. Reduced `WaveOutEvent.DesiredLatency` to 100ms for lower latency. ✅
+
+**What worked:**
+- `_audioOffsetSeconds = project.AudioToVideoOffsetSeconds` (positive) instead of `= -videoLead` (negative heuristic).
+- `AudioWaveformGenerator.GenerateWaveform(path, samples, startSeconds: offset, maxDurationSeconds: videoDuration)` — trims pre-roll and caps duration.
+- `AudioPlaybackEngine.ScrubTo()` with `_transportLock` serializing all Stop/Seek/Play calls.
+
+**What didn't work / pitfalls:**
+- Duration-based heuristic completely ignores `AudioToVideoOffsetSeconds` which is already recorded precisely.
+- `AudioWaveformGenerator` had a bug: when `startSeconds` exceeded file length, it silently fell back to position 0 instead of returning empty — fixed with `>= reader.Length` guard.
+- `WaveOutEvent` default `DesiredLatency` of 300ms is too high for scrub audio — 100ms is responsive enough.
 
 **What worked:** Placing the audio waveform load **before** the cursor-data early return ensures audio tracks appear even when no cursor data exists. Using `Task.Run` keeps the UI responsive during waveform generation.
 
