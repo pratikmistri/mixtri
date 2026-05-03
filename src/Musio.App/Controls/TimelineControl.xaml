@@ -25,8 +25,10 @@
             <!-- Cursor path track -->
             <RowDefinition Height="50" />
             <!-- Zoom segments track -->
-            <RowDefinition Height="50" />
-            <!-- Audio waveform track -->
+            <RowDefinition Height="40" />
+            <!-- System audio track -->
+            <RowDefinition Height="40" />
+            <!-- Mic audio track -->
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
@@ -41,7 +43,10 @@
             <TextBlock Text="Zoom" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
         <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Audio" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
+            <TextBlock Text="Audio" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+        </Border>
+        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
+            <TextBlock Text="Mic" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
         </Border>
 
         <!-- Canvases -->
@@ -85,11 +90,18 @@
             Draw="AudioTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
 
+        <canvas:CanvasControl
+            x:Name="MicTrackCanvas"
+            Grid.Row="5"
+            Grid.Column="1"
+            Draw="MicTrackCanvas_Draw"
+            PointerPressed="Track_PointerPressed" />
+
         <!-- Playhead overlay line -->
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="5"
+            Grid.RowSpan="6"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

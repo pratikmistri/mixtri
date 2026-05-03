@@ -76,6 +76,7 @@ public class RecordingSession : IDisposable
     private int _captureWidth;
     private int _captureHeight;
     private long _videoStartTicks;
+    private long _audioStartTicks;
     private Rect? _physicalCropRect;
     private float _recordingDpiScale;
 
@@ -206,6 +207,7 @@ public class RecordingSession : IDisposable
             // which is when StartCapture() was called (a few ms after mouse start).
             _videoStartTicks = Stopwatch.GetTimestamp();
 
+            _audioStartTicks = Stopwatch.GetTimestamp();
             _audioEngine?.StartRecording(_sessionFolder);
 
             if (_webcamEngine is not null)
@@ -299,6 +301,21 @@ public class RecordingSession : IDisposable
                     audioFilePaths.Add(micPath);
             }
 
+            // Compute audio→video offset from the first actual audio data callback
+            // to the first actual video frame. This is the precise pre-roll duration
+            // in the WAV files that must be skipped to align with video.
+            long videoOriginTicks = _firstVideoFrameTicks != 0
+                ? _firstVideoFrameTicks
+                : _videoStartTicks;
+            long audioOriginTicks = _audioEngine?.FirstDataTicks ?? _audioStartTicks;
+            if (audioOriginTicks == 0) audioOriginTicks = _audioStartTicks;
+            double audioToVideoOffset = Math.Max(0,
+                (double)(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency);
+
+            Debug.WriteLine(
+                $"[RecordingSession] Audio pre-roll: {audioToVideoOffset:F4}s " +
+                $"(audioFirstData→firstVideoFrame)");
+
             // Compute mouse→video time offset from the first ACTUAL frame,
             // not from when StartCapture() was called. Capture APIs often have
             // startup latency (frame pool creation, first vsync, etc.) that
@@ -307,14 +324,10 @@ public class RecordingSession : IDisposable
             if (_mouseRecorder is not null)
             {
                 var mouseData = _mouseRecorder.GetRecordedData();
-                long videoOriginTicks = _firstVideoFrameTicks != 0
-                    ? _firstVideoFrameTicks
-                    : _videoStartTicks; // fallback if no frames were captured
                 mouseToVideoOffset = (double)(videoOriginTicks - mouseData.StartTimestampTicks)
                     / Stopwatch.Frequency;
                 Debug.WriteLine(
-                    $"[RecordingSession] Mouse→video offset: {mouseToVideoOffset:F4}s " +
-                    $"(capture startup latency: {(_firstVideoFrameTicks - _videoStartTicks) / (double)Stopwatch.Frequency:F4}s)");
+                    $"[RecordingSession] Mouse→video offset: {mouseToVideoOffset:F4}s");
             }
 
             // Build project — use CFR duration and configured FPS for consistent timing.
@@ -335,6 +348,7 @@ public class RecordingSession : IDisposable
                 Height = _captureHeight,
                 Fps = _config.Fps,
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
+                AudioToVideoOffsetSeconds = audioToVideoOffset,
                 CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
                 CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
                 DpiScale = _recordingDpiScale,

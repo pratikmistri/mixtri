@@ -4,6 +4,7 @@ using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.Audio;
 using Musio.Core.Capture;
 using Musio.Core.Export;
 using Musio.Core.Models;
@@ -23,11 +24,13 @@ public sealed partial class EditorPage : Page
     private VideoFrameReader? _frameReader;
     private PreviewRenderer? _previewRenderer;
     private TimelineMapper? _timelineMapper;
+    private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
     private int _lastRenderedFrameIndex = -1;
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+    private double _audioOffsetSeconds;
 
     public EditorPage()
     {
@@ -40,7 +43,7 @@ public sealed partial class EditorPage : Page
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
 
-        // Sync playhead: when timeline scrubs, update preview
+        // Sync playhead: when timeline scrubs, update preview + audio
         Timeline.RegisterPropertyChangedCallback(
             Controls.TimelineControl.PlayheadPositionProperty,
             (_, _) =>
@@ -48,6 +51,9 @@ public sealed partial class EditorPage : Page
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
                 _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
+                // Only seek audio on manual scrub, not during playback ticks
+                if (!Preview.IsPlaying)
+                    _audioPlayer?.Seek(AudioPositionForVideo(Timeline.PlayheadPosition));
             });
 
         // Sync playhead: when preview plays, update timeline
@@ -56,6 +62,30 @@ public sealed partial class EditorPage : Page
             Timeline.PlayheadPosition = Preview.PlayheadPosition;
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
+        };
+
+        // Sync audio play/pause with preview
+        Preview.IsPlayingChanged += (_, isPlaying) =>
+        {
+            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            if (isPlaying)
+            {
+                _audioPlayer.Seek(AudioPositionForVideo(Preview.PlayheadPosition));
+                _audioPlayer.Play();
+            }
+            else
+            {
+                _audioPlayer.Pause();
+            }
+        };
+
+        // Re-seek audio when playback loops
+        Preview.PlaybackLooped += (_, _) =>
+        {
+            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            _audioPlayer.Seek(AudioPositionForVideo(TimeSpan.Zero));
+            if (!_audioPlayer.IsPlaying)
+                _audioPlayer.Play();
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -94,8 +124,10 @@ public sealed partial class EditorPage : Page
     {
         _frameReader?.Dispose();
         _previewRenderer?.Dispose();
+        _audioPlayer?.Dispose();
         _frameReader = null;
         _previewRenderer = null;
+        _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
 
@@ -111,6 +143,9 @@ public sealed partial class EditorPage : Page
         if (_frameReader is null)
             return;
 
+        // Load audio waveform data for timeline visualization
+        await LoadAudioWaveformAsync(project);
+
         // Load mouse data for cursor smoothing + click animations
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -122,6 +157,7 @@ public sealed partial class EditorPage : Page
         if (mouseData is null)
         {
             // No cursor data — just show raw frames
+            Timeline.Refresh();
             _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
             return;
         }
@@ -878,6 +914,110 @@ public sealed partial class EditorPage : Page
         }
         catch { }
         return 1.0f;
+    }
+
+    // --- Audio waveform loading ---
+
+    private async Task LoadAudioWaveformAsync(Project project)
+    {
+        if (project.AudioFilePaths is not { Count: > 0 })
+            return;
+
+        const int targetSamples = 2000;
+
+        try
+        {
+            var validPaths = project.AudioFilePaths.Where(File.Exists).ToList();
+            if (validPaths.Count == 0) return;
+
+            // Identify system vs mic files by naming convention
+            var systemPath = validPaths.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
+            var micPath = validPaths.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+
+            double videoDuration = project.Duration.TotalSeconds;
+
+            var (systemWaveform, micWaveform, audioDelay) = await Task.Run(() =>
+            {
+                float[]? sysWf = null;
+                float[]? micWf = null;
+
+                // Probe audio duration to compute video-audio timing relationship.
+                // Video typically starts before audio (WASAPI init takes time).
+                double maxAudioDuration = 0;
+                foreach (var path in new[] { systemPath, micPath })
+                {
+                    if (path is null) continue;
+                    try
+                    {
+                        using var probe = new NAudio.Wave.AudioFileReader(path);
+                        maxAudioDuration = Math.Max(maxAudioDuration, probe.TotalTime.TotalSeconds);
+                    }
+                    catch { }
+                }
+
+                // videoLeadTime: how much later audio starts relative to video.
+                // If video=14.5s and audio=13.5s, audio starts 1s after video.
+                // Add 0.5s to compensate for known post-roll (audio stops ~500ms
+                // after screen capture due to Task.Delay in stop sequence).
+                double videoLead = Math.Max(0, videoDuration - maxAudioDuration + 0.5);
+
+                // Pad waveform with leading zeros to represent silent period
+                // before audio data starts, then fill rest from audio file.
+                int leadSamples = (int)(targetSamples * videoLead / videoDuration);
+                int audioSamples = targetSamples - leadSamples;
+
+                if (systemPath is not null)
+                {
+                    try
+                    {
+                        var raw = AudioWaveformGenerator.GenerateWaveform(systemPath, audioSamples);
+                        sysWf = new float[targetSamples];
+                        Array.Copy(raw, 0, sysWf, leadSamples, Math.Min(raw.Length, audioSamples));
+                    }
+                    catch { /* skip */ }
+                }
+
+                if (micPath is not null)
+                {
+                    try
+                    {
+                        var raw = AudioWaveformGenerator.GenerateWaveform(micPath, audioSamples);
+                        micWf = new float[targetSamples];
+                        Array.Copy(raw, 0, micWf, leadSamples, Math.Min(raw.Length, audioSamples));
+                    }
+                    catch { /* skip */ }
+                }
+
+                return (sysWf, micWf, videoLead);
+            });
+
+            if (systemWaveform is { Length: > 0 })
+                ViewModel.Model.SystemAudioWaveformSamples = systemWaveform;
+            if (micWaveform is { Length: > 0 })
+                ViewModel.Model.MicAudioWaveformSamples = micWaveform;
+
+            // Audio playback: at video time T, seek to T - audioDelay in audio file
+            _audioOffsetSeconds = -audioDelay;
+            _audioPlayer?.Dispose();
+            _audioPlayer = new AudioPlaybackEngine();
+            _audioPlayer.Load(validPaths);
+        }
+        catch
+        {
+            // Audio waveform generation failed — editor still works without it
+        }
+    }
+
+    /// <summary>
+    /// Converts a video playhead position to the corresponding audio file position.
+    /// _audioOffsetSeconds is negative when video starts before audio.
+    /// </summary>
+    private TimeSpan AudioPositionForVideo(TimeSpan videoPosition)
+    {
+        var audioPos = videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+        return audioPos < TimeSpan.Zero ? TimeSpan.Zero : audioPos;
     }
 
     // --- Export flyout ---

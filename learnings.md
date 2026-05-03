@@ -369,12 +369,51 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What worked:** Systematic category-based audit covering WCAG 2.1 Level AA criteria (keyboard access, screen reader support, color contrast, live regions, semantic structure, focus management). Found 47 issues (7 Critical, 18 Major, 22 Minor).
 
-**Key findings:**
-- Biggest gaps: custom-drawn controls (TimelineControl, RegionSelectorOverlay, PreviewCanvas) have no AutomationPeers and are pointer-only.
-- All dynamic status areas (recording timer, export progress, playback time) lack live-region support.
-- Many icon-only buttons lack `AutomationProperties.Name`.
-- Hard-coded colors in timeline and controls won't adapt to High Contrast mode.
-- System tray is not keyboard-accessible.
+---
+
+## Audio Waveform — Missing Track in Editor
+
+**Feature/area:** Audio waveform visualization in timeline editor (EditorPage, AudioWaveformGenerator, TimelineModel)
+
+**Approaches tried:**
+
+1. **Wired up existing AudioWaveformGenerator in EditorPage.InitializePreviewAsync()** — The generator, timeline model property, and rendering code all existed but were never connected. Added `LoadAudioWaveformAsync()` that reads WAV files from `Project.AudioFilePaths`, generates waveform peaks off-thread, merges multiple sources (system + mic) by max-peak, and assigns to `TimelineModel.AudioWaveformSamples`. ✅
+
+**What worked:** Placing the audio waveform load **before** the cursor-data early return ensures audio tracks appear even when no cursor data exists. Using `Task.Run` keeps the UI responsive during waveform generation.
+
+**What didn't work (avoided):** Loading waveform after the `mouseData is null` early return — would have skipped audio loading for projects without cursor data.
+
+**Key insight:** The build must use VS MSBuild (`C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe`) with `/p:Platform=x64` or `/p:Platform=ARM64` — `dotnet build` fails with a missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the .NET 10 SDK.
+
+---
+
+## Timeline Clipping & Audio Settings Not Wired
+
+**Feature/area:** EditorPage timeline layout, SettingsPage audio toggles, RecordingViewModel defaults
+
+**Approaches tried:**
+
+1. **Increased timeline Height from 170 to 230** — The 5 track rows total 230px (30+60+40+50+50) but the container was only 170px, clipping zoom and audio tracks. ✅
+2. **Bound SettingsPage audio toggles to AppSettings** — The System Audio and Microphone toggles were static XAML with no bindings. Added `x:Name`, `Toggled` handlers, and `Loaded` handler to read/write `AppSettings.IsSystemAudioEnabled` and `AppSettings.IsMicEnabled`. ✅
+3. **RecordingViewModel reads from AppSettings** — Changed field initializers from hardcoded `true`/`false` to `AppSettings.Instance.IsSystemAudioEnabled`/`IsMicEnabled` so saved preferences are respected. ✅
+
+**What worked:** All three changes together — layout fix + settings binding + VM init from AppSettings.
+
+**Key insight:** SettingsPage controls were purely decorative — `AppSettings` had the properties but the XAML never bound to them. The RecordingViewModel also ignored AppSettings entirely.
+
+---
+
+## AudioCaptureEngine — Stop Deadlock
+
+**Feature/area:** Audio capture stop/dispose flow (AudioCaptureEngine)
+
+**Approaches tried:**
+
+1. **Moved capture stop/dispose outside the lock** — `StopRecording()` was holding `_lock` while calling `capture.Dispose()`, but WASAPI's `RecordingStopped` callback also tried to acquire `_lock`, causing a deadlock. Fix: grab references under lock, null out fields immediately (data handlers become no-ops via null checks), then stop/dispose outside the lock. ✅
+
+**What worked:** Lock-then-detach pattern — acquire lock only to swap fields to null, release lock, then do the blocking stop/dispose work lock-free.
+
+**What didn't work (root cause):** Holding `_lock` across `StopRecording()` → `Thread.Sleep(200)` → `Dispose()` while `RecordingStopped` and `DataAvailable` callbacks also contended for the same lock.
 
 ---
 

@@ -17,12 +17,19 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private bool _isPaused;
     private bool _disposed;
+    private long _firstDataTicks;
 
     public bool IsRecording { get; private set; }
     public bool IsSystemAudioEnabled { get; set; } = true;
     public bool IsMicEnabled { get; set; }
     public string? SystemAudioDeviceName { get; private set; }
     public string? MicDeviceName { get; private set; }
+
+    /// <summary>
+    /// Stopwatch timestamp of the first audio data callback.
+    /// This is when WAV file position 0 begins.
+    /// </summary>
+    public long FirstDataTicks => _firstDataTicks;
 
     // ── Device enumeration ──────────────────────────────────────────
 
@@ -142,6 +149,14 @@ public sealed class AudioCaptureEngine : IDisposable
 
     public void StopRecording()
     {
+        WasapiLoopbackCapture? sysCapture;
+        WasapiCapture? micCapture;
+        WaveFileWriter? sysWriter;
+        WaveFileWriter? micWriter;
+
+        // Grab references and null out fields under lock so data handlers
+        // become no-ops immediately. Then stop/dispose OUTSIDE the lock
+        // to avoid deadlocking with RecordingStopped callbacks.
         lock (_lock)
         {
             if (!IsRecording) return;
@@ -149,9 +164,14 @@ public sealed class AudioCaptureEngine : IDisposable
             IsRecording = false;
             _isPaused = false;
 
-            StopAndDisposeCapture(ref _systemCapture, ref _systemWriter);
-            StopAndDisposeCapture(ref _micCapture, ref _micWriter);
+            sysCapture = _systemCapture; _systemCapture = null;
+            micCapture = _micCapture;    _micCapture = null;
+            sysWriter = _systemWriter;   _systemWriter = null;
+            micWriter = _micWriter;      _micWriter = null;
         }
+
+        StopAndDisposeCapture(sysCapture, sysWriter);
+        StopAndDisposeCapture(micCapture, micWriter);
     }
 
     public void PauseRecording()
@@ -181,6 +201,8 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private void OnSystemDataAvailable(object? sender, WaveInEventArgs e)
     {
+        if (_firstDataTicks == 0)
+            Interlocked.CompareExchange(ref _firstDataTicks, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
         lock (_lock)
         {
             if (_isPaused || _systemWriter == null) return;
@@ -190,6 +212,8 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private void OnMicDataAvailable(object? sender, WaveInEventArgs e)
     {
+        if (_firstDataTicks == 0)
+            Interlocked.CompareExchange(ref _firstDataTicks, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
         lock (_lock)
         {
             if (_isPaused || _micWriter == null) return;
@@ -197,21 +221,10 @@ public sealed class AudioCaptureEngine : IDisposable
         }
     }
 
-    private void OnSystemRecordingStopped(object? sender, StoppedEventArgs e)
-    {
-        lock (_lock)
-        {
-            SafeDisposeWriter(ref _systemWriter);
-        }
-    }
-
-    private void OnMicRecordingStopped(object? sender, StoppedEventArgs e)
-    {
-        lock (_lock)
-        {
-            SafeDisposeWriter(ref _micWriter);
-        }
-    }
+    // RecordingStopped fires on the WASAPI thread during Dispose —
+    // no lock needed since writers are already detached in StopRecording.
+    private void OnSystemRecordingStopped(object? sender, StoppedEventArgs e) { }
+    private void OnMicRecordingStopped(object? sender, StoppedEventArgs e) { }
 
     // ── Helpers ──────────────────────────────────────────────────────
 
@@ -227,8 +240,7 @@ public sealed class AudioCaptureEngine : IDisposable
         }
     }
 
-    private static void StopAndDisposeCapture<T>(ref T? capture, ref WaveFileWriter? writer)
-        where T : class, IDisposable
+    private static void StopAndDisposeCapture(IDisposable? capture, WaveFileWriter? writer)
     {
         try
         {
@@ -239,43 +251,42 @@ public sealed class AudioCaptureEngine : IDisposable
         }
         catch { /* best-effort stop */ }
 
-        // Give the RecordingStopped event a moment to flush the writer
+        // Brief wait for final data callbacks to drain
         Thread.Sleep(200);
 
-        SafeDisposeWriter(ref writer);
-
-        capture?.Dispose();
-        capture = null;
+        SafeDisposeWriter(writer);
+        try { capture?.Dispose(); } catch { /* best-effort */ }
     }
 
-    private static void SafeDisposeWriter(ref WaveFileWriter? writer)
+    private static void SafeDisposeWriter(WaveFileWriter? writer)
     {
-        try
-        {
-            writer?.Dispose();
-        }
-        catch { /* best-effort dispose */ }
-        writer = null;
+        try { writer?.Dispose(); } catch { /* best-effort dispose */ }
     }
 
     // ── IDisposable ─────────────────────────────────────────────────
 
     public void Dispose()
     {
+        WasapiLoopbackCapture? sysCapture;
+        WasapiCapture? micCapture;
+        WaveFileWriter? sysWriter;
+        WaveFileWriter? micWriter;
+
         lock (_lock)
         {
             if (_disposed) return;
             _disposed = true;
 
-            if (IsRecording) StopRecording();
+            IsRecording = false;
+            _isPaused = false;
 
-            _systemCapture?.Dispose();
-            _systemCapture = null;
-            _micCapture?.Dispose();
-            _micCapture = null;
-
-            SafeDisposeWriter(ref _systemWriter);
-            SafeDisposeWriter(ref _micWriter);
+            sysCapture = _systemCapture; _systemCapture = null;
+            micCapture = _micCapture;    _micCapture = null;
+            sysWriter = _systemWriter;   _systemWriter = null;
+            micWriter = _micWriter;      _micWriter = null;
         }
+
+        StopAndDisposeCapture(sysCapture, sysWriter);
+        StopAndDisposeCapture(micCapture, micWriter);
     }
 }

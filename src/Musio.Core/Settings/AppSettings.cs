@@ -4,6 +4,7 @@ namespace Musio.Core.Settings;
 
 /// <summary>
 /// Singleton settings manager that persists user preferences via ApplicationData.LocalSettings.
+/// Falls back to an in-memory dictionary when running without package identity.
 /// </summary>
 public sealed class AppSettings
 {
@@ -11,6 +12,7 @@ public sealed class AppSettings
     public static AppSettings Instance => _instance.Value;
 
     private readonly ApplicationDataContainer? _settings;
+    private readonly Dictionary<string, object>? _memoryStore;
 
     private AppSettings()
     {
@@ -20,8 +22,9 @@ public sealed class AppSettings
         }
         catch
         {
-            // App may not have package identity — fall back to in-memory defaults
+            // App may not have package identity — use in-memory store
             _settings = null;
+            _memoryStore = new Dictionary<string, object>();
         }
     }
 
@@ -70,16 +73,28 @@ public sealed class AppSettings
 
     public T Get<T>(string key, T defaultValue)
     {
-        if (_settings is null) return defaultValue;
-        if (_settings.Values.TryGetValue(key, out var value) && value is T typed)
-            return typed;
+        if (_settings is not null)
+        {
+            if (_settings.Values.TryGetValue(key, out var value) && value is T typed)
+                return typed;
+            return defaultValue;
+        }
+
+        if (_memoryStore is not null && _memoryStore.TryGetValue(key, out var memValue) && memValue is T memTyped)
+            return memTyped;
 
         return defaultValue;
     }
 
     public void Set<T>(string key, T value)
     {
-        if (_settings is null) return;
-        _settings.Values[key] = value;
+        if (_settings is not null)
+        {
+            _settings.Values[key] = value;
+            return;
+        }
+
+        if (_memoryStore is not null && value is not null)
+            _memoryStore[key] = value;
     }
 }

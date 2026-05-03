@@ -41,10 +41,10 @@ public partial class RecordingViewModel : ObservableObject
     private CaptureMode _captureMode = CaptureMode.FullScreen;
 
     [ObservableProperty]
-    private bool _isSystemAudioEnabled = true;
+    private bool _isSystemAudioEnabled = AppSettings.Instance.IsSystemAudioEnabled;
 
     [ObservableProperty]
-    private bool _isMicEnabled;
+    private bool _isMicEnabled = AppSettings.Instance.IsMicEnabled;
 
     [ObservableProperty]
     private int _fps = 30;
