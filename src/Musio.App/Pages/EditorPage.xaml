@@ -219,6 +219,141 @@
                     Text="Drag on zoom track to add segment"
                     FontStyle="Italic" />
 
+                <!-- Background style controls (visible for Window/Region captures) -->
+                <AppBarSeparator x:Name="StyleSeparator" Visibility="Collapsed" />
+                <Button
+                    x:Name="StyleButton"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Background style settings">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE790;" />
+                        <TextBlock Text="Style" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="StyleFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="12" Padding="4">
+                                <TextBlock Text="Background Style" FontWeight="SemiBold" FontSize="14" />
+
+                                <!-- Preset picker -->
+                                <ComboBox
+                                    x:Name="PresetCombo"
+                                    Header="Preset"
+                                    HorizontalAlignment="Stretch"
+                                    DisplayMemberPath="Name"
+                                    SelectionChanged="PresetCombo_SelectionChanged" />
+
+                                <!-- Background type -->
+                                <ComboBox
+                                    x:Name="BgTypeCombo"
+                                    Header="Background"
+                                    HorizontalAlignment="Stretch"
+                                    SelectionChanged="BgTypeCombo_SelectionChanged">
+                                    <ComboBoxItem Content="Solid Color" Tag="SolidColor" />
+                                    <ComboBoxItem Content="Gradient" Tag="Gradient" />
+                                    <ComboBoxItem Content="Wallpaper" Tag="Image" />
+                                    <ComboBoxItem Content="Blur" Tag="Blur" />
+                                </ComboBox>
+
+                                <!-- Primary color -->
+                                <StackPanel x:Name="ColorPanel" Spacing="4">
+                                    <TextBlock Text="Color" FontSize="12" />
+                                    <DropDownButton x:Name="BgColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="BgColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="BgColorText" Text="#1a1a2e" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="BgColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="BgColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Gradient end color (only visible for Gradient type) -->
+                                <StackPanel x:Name="GradientPanel" Spacing="4" Visibility="Collapsed">
+                                    <TextBlock Text="Gradient End Color" FontSize="12" />
+                                    <DropDownButton x:Name="GradEndColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="GradEndColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="GradEndColorText" Text="#16213e" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="GradEndColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="GradEndColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+
+                                    <Slider
+                                        x:Name="GradAngleSlider"
+                                        Header="Gradient Angle"
+                                        Minimum="0" Maximum="360"
+                                        StepFrequency="5"
+                                        ValueChanged="StyleSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Wallpaper picker (only visible for Wallpaper/Image type) -->
+                                <StackPanel x:Name="WallpaperPanel" Spacing="4" Visibility="Collapsed">
+                                    <TextBlock Text="Wallpaper" FontSize="12" />
+                                    <GridView
+                                        x:Name="WallpaperGrid"
+                                        MaxHeight="180"
+                                        SelectionMode="Single"
+                                        SelectionChanged="WallpaperGrid_SelectionChanged" />
+                                </StackPanel>
+
+                                <!-- Padding -->
+                                <Slider
+                                    x:Name="PaddingSlider"
+                                    Header="Padding"
+                                    Minimum="0" Maximum="120"
+                                    StepFrequency="4"
+                                    ValueChanged="StyleSlider_ValueChanged" />
+
+                                <!-- Corner radius -->
+                                <Slider
+                                    x:Name="CornerRadiusSlider"
+                                    Header="Corner Radius"
+                                    Minimum="0" Maximum="32"
+                                    StepFrequency="2"
+                                    ValueChanged="StyleSlider_ValueChanged" />
+
+                                <!-- Shadow -->
+                                <ToggleSwitch
+                                    x:Name="ShadowToggle"
+                                    Header="Shadow"
+                                    Toggled="StyleToggle_Toggled" />
+
+                                <!-- Border -->
+                                <ToggleSwitch
+                                    x:Name="BorderToggle"
+                                    Header="Border"
+                                    Toggled="StyleToggle_Toggled" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
                 <AppBarSeparator />
 
                 <Button

@@ -290,4 +290,57 @@ public sealed class AutoZoomEngineTests
         Assert.AreEqual(target, current, 0.01f,
             $"SpringInterpolate should converge to target, got {current}");
     }
+
+    [TestMethod]
+    public void GetZoomState_OverlappingManualKeyframes_NoJump()
+    {
+        // Regression test: two overlapping manual keyframes should transition
+        // seamlessly — the higher zoom wins, preventing a snap/jump.
+        var config = new AutoZoomConfig();
+        var engine = new AutoZoomEngine(config);
+        var recording = BuildRecordingWithClicks(10.0, []);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency);
+
+        // Keyframe A at t=2.0, keyframe B at t=3.0
+        // With default durations (pre=345ms, hold=575ms, post=575ms):
+        //   A: active from 1.655 to 3.15 (zoom-out from 2.575 to 3.15)
+        //   B: active from 2.655 to 4.15 (zoom-in from 2.655 to 3.0)
+        // Overlap zone: 2.655 to 3.15
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.0),
+                ZoomLevel = 2.0,
+                CenterX = 0.3,
+                CenterY = 0.3,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(3.0),
+                ZoomLevel = 2.0,
+                CenterX = 0.7,
+                CenterY = 0.7,
+            },
+        ]);
+
+        // Sample through the overlap zone: zoom should never dip below 1.0
+        // and the transition should be monotonically smooth (no sudden jumps)
+        float prevZoom = 0;
+        bool hadJump = false;
+        for (double t = 2.5; t <= 3.5; t += 0.01)
+        {
+            var state = engine.GetZoomState(t);
+            Assert.IsTrue(state.ZoomLevel >= 1.0f,
+                $"Zoom at t={t:F2} should be >= 1.0, got {state.ZoomLevel}");
+
+            // A large sudden drop (> 0.3 in 10ms) indicates a visual jump
+            if (prevZoom > 0 && prevZoom - state.ZoomLevel > 0.3f)
+                hadJump = true;
+
+            prevZoom = state.ZoomLevel;
+        }
+
+        Assert.IsFalse(hadJump,
+            "Zoom should not have sudden drops during overlapping keyframe transition");
+    }
 }

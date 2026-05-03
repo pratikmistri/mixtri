@@ -721,3 +721,81 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / known limitations:**
 - Window position is captured once at first frame. If the window moves during recording, cursor alignment drifts (acceptable for v1).
 - `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` may differ slightly from Graphics Capture bounds for some window types.
+
+---
+
+## Editor Background Style Settings
+
+**Feature/area:** Editor toolbar — background style editing for Window/Region captures
+
+**Approaches tried:**
+1. Considered adding a side panel for background settings — rejected as too heavy for MVP.
+2. Implemented a flyout from a "Style" button in the editor toolbar with preset picker + individual controls.
+
+**What worked:**
+- Flyout approach with `DispatcherTimer` debounce (200ms) for slider/toggle changes to avoid thrashing the PreviewRenderer.
+- Dedicated `RebuildPreviewRendererAsync` that recreates only the PreviewRenderer/FrameCompositor while preserving frame reader, audio, zoom keyframes, and playhead position. Full `InitializePreviewAsync` was too heavy (disposes everything, reloads waveform/cursor data, resets to TimeSpan.Zero).
+- `_suppressStyleEvents` flag to prevent feedback loops when programmatically updating controls (e.g., syncing controls to a preset selection).
+- Explicit `CaptureTargetType.Monitor` check (instead of `!= Window`) to gate which captures get background styling — allows both Window and Region to have backgrounds.
+- Building with VS MSBuild (`MSBuild.exe /p:Platform=x64`) works; `dotnet build` fails with MSB4062 due to missing WinAppSDK PRI task in dotnet CLI.
+
+**What didn't work / known limitations:**
+- `FrameCompositor` is immutable after init — no incremental background updates possible without full re-init. Long-term, an `UpdateBackgroundStyle()` API on FrameCompositor could avoid re-smoothing cursor data for non-padding changes.
+- Image background type not exposed in UI (kept to SolidColor/Gradient/Blur for simplicity).
+- Shadow/border detail controls (blur amount, opacity, width, color) not exposed — uses sensible defaults.
+
+---
+
+## Overlapping Zoom Segments Fix
+
+**Feature/area:** AutoZoomEngine — overlapping zoom transition handling
+
+**Approaches tried:**
+1. Investigated MergeSegments logic — it correctly merges auto segments but doesn't apply to manual keyframes.
+2. Fixed EvaluateManualKeyframes and EvaluateAutoSegments to use max-zoom-wins strategy.
+
+**What worked:**
+- Both `EvaluateManualKeyframes` and `EvaluateAutoSegments` now evaluate ALL active segments at a given time and return the one with the highest zoom level. This creates smooth crossovers: when keyframe B zooms in while A zooms out, B naturally takes over once its zoom exceeds A's decaying value.
+- Added regression test `GetZoomState_OverlappingManualKeyframes_NoJump` that samples the overlap zone and asserts no sudden zoom drops (>0.3 in 10ms).
+
+**What didn't work / known limitations:**
+- The original first-match strategy returned the earliest active segment, which meant A's zoom-out always won over B's zoom-in during overlaps, causing a snap when A ended.
+- Tests run with `dotnet test --no-build -c Debug /p:Platform=x64` after building with VS MSBuild.
+
+---
+
+## Zoom + Padding — Post-Composite Zoom
+
+**Feature/area:** FrameCompositor zoom behavior when background padding is applied.
+
+**Approaches tried:**
+
+1. **Post-composite zoom (Approach A)** — Compose the frame at 1x (full source + background + cursor) into an intermediate buffer, then crop+scale the buffer according to the zoom state. This makes zoom operate on the entire framed output (content + padding), so padding scales proportionally. ✅
+2. **Pre-compute adjusted geometry (Approach B, not implemented)** — Would compute effective padding and source viewport mathematically for each zoom level. Better source quality but significantly more complex math, asymmetric padding, and harder to maintain.
+
+**What worked:**
+- When `padding > 0`, `ComposeFrame` now delegates to `ComposeFramePostCompositeZoom` which renders at 1x into a reusable `_compositeBuffer`, then applies the zoom as a final crop+scale. Zoom center is converted from source→composite space: `(centerX - viewport1x.X) * contentW / viewport1x.Width + padding`.
+- When `padding == 0`, the original `ComposeFrameDirect` path is used (no extra buffer overhead).
+- Always using post-composite path when padding > 0 (even at zoom=1) avoids a visual pop at the zoom threshold — at zoom=1, crop rect = full output, so it's effectively a no-op.
+- Webcam, keyboard, and subtitle overlays are rendered AFTER the zoom so they stay fixed on screen. Cursor is composited before zoom so it scales with content.
+
+**What didn't work / known limitations:**
+- Slight quality softness at high zoom levels (>3x) because the source is rasterized at 1x then upscaled. Acceptable for typical zoom ranges (1.5–3x).
+- Initially used post-composite path for ALL frames when padding > 0 (even zoom=1). This doubled render cost for every frame and made export extremely slow. Fixed by only activating post-composite path when `zoomLevel > 1.01`.
+
+---
+
+## Wallpaper Background — Per-Frame Image Load Fix
+
+**Feature/area:** BackgroundCompositor wallpaper/image background rendering.
+
+**Approaches tried:**
+
+1. **Cache the loaded `CanvasBitmap` in `BackgroundCompositor`** — `DrawImageBackground` was loading the wallpaper from disk via `CanvasBitmap.LoadAsync` on EVERY frame. Added `_cachedBackgroundImage` and `_cachedBackgroundPath` fields; only reload when the path changes. Made `BackgroundCompositor` implement `IDisposable` to clean up the cached bitmap. ✅
+
+**What worked:**
+- Instance-level caching of the wallpaper bitmap with path-change detection. Image loads from disk once, reused for all subsequent frames.
+- `BackgroundCompositor` now implements `IDisposable`; disposed by `FrameCompositor.Dispose()`.
+
+**What didn't work:**
+- The original code loaded the image synchronously from disk every frame (`CanvasBitmap.LoadAsync(...).GetAwaiter().GetResult()`), causing choppy preview playback and extremely slow export with wallpaper backgrounds.

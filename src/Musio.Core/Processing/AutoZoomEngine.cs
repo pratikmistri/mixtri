@@ -225,6 +225,10 @@ public class AutoZoomEngine
 
     private (float zoom, float cx, float cy)? EvaluateManualKeyframes(double timeSeconds)
     {
+        // When multiple keyframes overlap (e.g. A zooming out while B zooms in),
+        // pick the one producing the highest zoom level for a seamless crossover.
+        (float zoom, float cx, float cy)? best = null;
+
         foreach (var kf in _manualKeyframes)
         {
             double kfTime = kf.Timestamp.TotalSeconds;
@@ -257,14 +261,22 @@ public class AutoZoomEngine
 
             float cx = (float)(kf.CenterX * _sourceWidth);
             float cy = (float)(kf.CenterY * _sourceHeight);
-            return (zoom, cx, cy);
+
+            if (!best.HasValue || zoom > best.Value.zoom)
+                best = (zoom, cx, cy);
         }
 
-        return null;
+        return best;
     }
 
     private (float zoom, float cx, float cy) EvaluateAutoSegments(double timeSeconds)
     {
+        // When segments overlap (edge cases after merge), pick the highest zoom
+        // for a seamless transition — same strategy as manual keyframes.
+        float bestZoom = 1.0f;
+        float bestCx = _sourceWidth / 2f;
+        float bestCy = _sourceHeight / 2f;
+
         foreach (var seg in _autoSegments)
         {
             if (timeSeconds < seg.ZoomInStart || timeSeconds > seg.ZoomOutEnd)
@@ -288,13 +300,15 @@ public class AutoZoomEngine
                 zoom = CubicBezierEase(seg.TargetZoom, 1.0f, (float)progress);
             }
 
-            return (zoom, seg.CenterX, seg.CenterY);
+            if (zoom > bestZoom)
+            {
+                bestZoom = zoom;
+                bestCx = seg.CenterX;
+                bestCy = seg.CenterY;
+            }
         }
 
-        // No active zoom segment — return default (no zoom)
-        float defaultCx = _sourceWidth / 2f;
-        float defaultCy = _sourceHeight / 2f;
-        return (1.0f, defaultCx, defaultCy);
+        return (bestZoom, bestCx, bestCy);
     }
 
     /// <summary>
