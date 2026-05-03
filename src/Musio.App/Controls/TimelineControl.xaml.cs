@@ -163,8 +163,8 @@ public sealed partial class TimelineControl : UserControl
         AudioPlaceholderColor    = GetBrushColor("TimelineAudioPlaceholderBrush", Color.FromArgb(255, 80, 160, 80));
         AudioWaveformColor       = GetBrushColor("TimelineAudioWaveformBrush", Color.FromArgb(220, 80, 180, 80));
         AudioEnvelopeColor       = GetBrushColor("TimelineAudioEnvelopeBrush", Color.FromArgb(100, 120, 220, 120));
-        MicWaveformColor         = Color.FromArgb(220, 180, 120, 220);
-        MicEnvelopeColor         = Color.FromArgb(100, 200, 140, 255);
+        MicWaveformColor         = GetBrushColor("TimelineMicWaveformBrush", Color.FromArgb(220, 180, 120, 220));
+        MicEnvelopeColor         = GetBrushColor("TimelineMicEnvelopeBrush", Color.FromArgb(100, 200, 140, 255));
         PlayheadColor            = GetBrushColor("TimelinePlayheadBrush", Color.FromArgb(255, 255, 50, 50));
         CutLineColor             = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
         CursorTrackBackground    = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
