@@ -28,9 +28,12 @@ public class Project
     public double MouseToVideoOffsetSeconds { get; set; }
 
     /// <summary>
-    /// Offset of the crop region's top-left corner within the full monitor capture,
-    /// in physical pixels. Used to rebase mouse coordinates for region recordings.
-    /// Both are zero when the recording is not a region capture.
+    /// Screen-absolute physical pixel position of the captured frame's top-left
+    /// corner on the virtual desktop. Used to rebase mouse hook coordinates
+    /// (which are screen-absolute) into the captured frame's coordinate space.
+    /// For monitor captures this is the monitor origin, for window captures this
+    /// is the window position, and for region captures this is the monitor origin
+    /// plus the crop rect offset within the monitor.
     /// </summary>
     public int CropOffsetX { get; set; }
     public int CropOffsetY { get; set; }

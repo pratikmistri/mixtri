@@ -81,6 +81,13 @@ public class RecordingSession : IDisposable
     private float _recordingDpiScale;
     private volatile bool _captureGateOpen;
 
+    // Screen-absolute cursor offset: the physical pixel position of the
+    // captured frame's top-left corner on the virtual desktop. Used to
+    // rebase mouse hook coordinates (screen-absolute) into the captured
+    // frame's coordinate space.
+    private int _cursorOffsetX;
+    private int _cursorOffsetY;
+
     // Absolute Stopwatch timestamp when the first video frame was actually
     // emitted by the capture API. This is the true video time 0 — any
     // startup latency between StartCapture() and the first frame must not
@@ -368,8 +375,8 @@ public class RecordingSession : IDisposable
                 Fps = _config.Fps,
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
                 AudioToVideoOffsetSeconds = audioToVideoOffset,
-                CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
-                CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
+                CropOffsetX = _cursorOffsetX,
+                CropOffsetY = _cursorOffsetY,
                 DpiScale = _recordingDpiScale,
                 CaptureType = _config.Target.Type,
             };
@@ -475,7 +482,13 @@ public class RecordingSession : IDisposable
                         if (evenW < 2) evenW = 2;
                         if (evenH < 2) evenH = 2;
 
-                        _physicalCropRect = new Rect(x, y, evenW, evenH);
+                        // Round origin to integer pixels so the video crop and
+                        // cursor offset use the same pixel boundary (avoids
+                        // sub-pixel drift from fractional DPI-scaled coords).
+                        int roundedX = (int)Math.Round(x);
+                        int roundedY = (int)Math.Round(y);
+
+                        _physicalCropRect = new Rect(roundedX, roundedY, evenW, evenH);
                         _captureWidth = evenW;
                         _captureHeight = evenH;
                     }
@@ -494,11 +507,16 @@ public class RecordingSession : IDisposable
                 if (_captureWidth < 2) _captureWidth = 2;
                 if (_captureHeight < 2) _captureHeight = 2;
 
+                // Compute the screen-absolute cursor offset so the compositor
+                // can rebase mouse hook coordinates into the captured frame.
+                ComputeCursorOffset();
+
                 Debug.WriteLine(
                     $"[RecordingSession] Creating VideoWriter: " +
                     $"captureW={_captureWidth}, captureH={_captureHeight}, " +
                     $"frameW={e.Width}, frameH={e.Height}, " +
                     $"cropRect={_physicalCropRect}, " +
+                    $"cursorOffset=({_cursorOffsetX},{_cursorOffsetY}), " +
                     $"targetType={_config.Target.Type}, " +
                     $"logicalCrop={_config.Target.CropRect}");
 
@@ -635,8 +653,135 @@ public class RecordingSession : IDisposable
         return 1.0f;
     }
 
+    // ── Cursor offset computation ─────────────────────────────────────
+
+    /// <summary>
+    /// Computes the screen-absolute physical pixel position of the captured
+    /// frame's top-left corner. This is used to rebase mouse hook coordinates
+    /// (which are screen-absolute) into the captured frame's coordinate space.
+    /// </summary>
+    private void ComputeCursorOffset()
+    {
+        switch (_config.Target.Type)
+        {
+            case CaptureTargetType.Monitor:
+            {
+                // The captured frame covers the full monitor. The cursor
+                // offset is the monitor's screen-absolute origin.
+                var (mx, my) = GetMonitorOrigin(_config.Target.Handle);
+                _cursorOffsetX = mx;
+                _cursorOffsetY = my;
+                break;
+            }
+            case CaptureTargetType.Window:
+            {
+                // The captured frame covers the window's visible bounds.
+                // Use DwmGetWindowAttribute for the actual rendered frame
+                // bounds (excludes invisible shadow borders that GetWindowRect
+                // includes). Falls back to GetWindowRect if DWM call fails.
+                var (wx, wy) = GetWindowOrigin(_config.Target.Handle);
+                _cursorOffsetX = wx;
+                _cursorOffsetY = wy;
+                break;
+            }
+            case CaptureTargetType.Region:
+            {
+                // The captured frame is a cropped sub-region of the full
+                // monitor. The cursor offset is the monitor's screen origin
+                // plus the crop rect's position within the monitor frame.
+                var (mx, my) = GetMonitorOrigin(_config.Target.Handle);
+                int cropX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0;
+                int cropY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0;
+                _cursorOffsetX = mx + cropX;
+                _cursorOffsetY = my + cropY;
+                break;
+            }
+        }
+
+        Debug.WriteLine(
+            $"[RecordingSession] Cursor offset: ({_cursorOffsetX},{_cursorOffsetY}) " +
+            $"for {_config.Target.Type}");
+    }
+
+    /// <summary>
+    /// Returns the monitor's screen-absolute origin in physical pixels.
+    /// </summary>
+    private static (int X, int Y) GetMonitorOrigin(IntPtr hMonitor)
+    {
+        try
+        {
+            var info = new MONITORINFOEX();
+            info.cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>();
+            if (GetMonitorInfo(hMonitor, ref info))
+                return (info.rcMonitor.Left, info.rcMonitor.Top);
+        }
+        catch { }
+
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// Returns the window's screen-absolute origin in physical pixels.
+    /// Prefers DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS) which matches
+    /// the Graphics Capture API bounds; falls back to GetWindowRect.
+    /// </summary>
+    private static (int X, int Y) GetWindowOrigin(IntPtr hwnd)
+    {
+        try
+        {
+            // DWM extended frame bounds = actual rendered frame (no shadow)
+            int hr = DwmGetWindowAttribute(
+                hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                out RECT dwmRect, Marshal.SizeOf<RECT>());
+            if (hr == 0)
+                return (dwmRect.Left, dwmRect.Top);
+        }
+        catch { }
+
+        // Fallback to GetWindowRect (may include shadow padding)
+        try
+        {
+            if (GetWindowRect(hwnd, out RECT rect))
+                return (rect.Left, rect.Top);
+        }
+        catch { }
+
+        return (0, 0);
+    }
+
+    // ── P/Invoke ──────────────────────────────────────────────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MONITORINFOEX
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
+    }
+
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
+
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(
+        IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
     // ── IDisposable ─────────────────────────────────────────────────
 

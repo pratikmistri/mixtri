@@ -700,3 +700,24 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - The previous fix (storing `DpiScale` from `GetMonitorDpiScale`) correctly identified the DPI value but used it incorrectly — it assumed `WH_MOUSE_LL` coordinates were logical, when they're actually physical in PerMonitorV2.
 - The fallback `GetSystemDpiScale()` heuristic happened to return 1.0 (coincidentally correct) because `GetSystemMetrics(SM_CXSCREEN)` in PerMonitorV2 returns physical dimensions, making `capturedDim / logicalSize = 1.0`.
 - Bug was invisible at 100% DPI (scale=1.0, multiplication has no effect) but manifested at 125%/150%/200% DPI.
+
+---
+
+## Cursor Coordinates — Window & Multi-Monitor Offset Fix
+
+**Feature/area:** Recording pipeline (RecordingSession, Project, FrameCompositor)
+
+**Approaches tried:**
+
+1. **Compute screen-absolute cursor offset for all capture types** — Used. `Project.CropOffsetX/Y` must represent the screen-absolute physical pixel position of the captured frame's top-left corner (not just the crop-rect-within-monitor offset). Added `ComputeCursorOffset()` in `RecordingSession` that handles all three capture types. ✅
+
+**What worked:**
+- **Monitor capture**: Use `GetMonitorInfo(hMonitor).rcMonitor.Left/Top` as cursor offset. Fixes cursor on non-primary monitors.
+- **Window capture**: Use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` to get the window's actual rendered bounds (excludes DWM shadow). Falls back to `GetWindowRect`. Fixes cursor for all window captures.
+- **Region capture**: Monitor origin + physical crop rect position. Fixes cursor on non-primary monitor regions.
+- Separate `_cursorOffsetX/_cursorOffsetY` fields from `_physicalCropRect` (which is only for VideoWriter frame cropping).
+- No changes needed in FrameCompositor — it already applies `cursor.X - cropOffsetX` correctly.
+
+**What didn't work / known limitations:**
+- Window position is captured once at first frame. If the window moves during recording, cursor alignment drifts (acceptable for v1).
+- `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` may differ slightly from Graphics Capture bounds for some window types.
