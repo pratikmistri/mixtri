@@ -322,6 +322,7 @@ public class VideoEncoder : IDisposable
         Stopwatch stopwatch,
         CancellationToken ct)
     {
+        CanvasRenderTarget? outputSurface = null;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -329,9 +330,11 @@ public class VideoEncoder : IDisposable
             // Serialize frame production: shared compositor/frame-reader/webcam
             // composition state is not thread-safe and can corrupt frames if
             // accessed concurrently by overlapping SampleRequested callbacks.
-            await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
+            bool semaphoreAcquired = false;
             try
             {
+            await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
+            semaphoreAcquired = true;
 
             double timeSeconds = timelineMapper is not null
                 ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
@@ -370,7 +373,6 @@ public class VideoEncoder : IDisposable
             // target; otherwise the composed frame IS the output surface.
             // Each frame gets its own surface so the encoder can read it async
             // after we release the semaphore.
-            CanvasRenderTarget outputSurface;
             if (needsScaling)
             {
                 outputSurface = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
@@ -401,7 +403,8 @@ public class VideoEncoder : IDisposable
             }
             finally
             {
-                _frameSemaphore.Release();
+                if (semaphoreAcquired)
+                    _frameSemaphore.Release();
             }
 
             // Report progress
@@ -417,6 +420,8 @@ public class VideoEncoder : IDisposable
         catch (Exception ex)
         {
             Debug.WriteLine($"[VideoEncoder] Frame {frameIndex} error: {ex.Message}");
+            // Dispose GPU surface if it was created but never handed to the encoder
+            outputSurface?.Dispose();
             request.Sample = null;
         }
         finally
