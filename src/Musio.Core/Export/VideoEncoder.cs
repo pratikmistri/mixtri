@@ -326,8 +326,8 @@ public class VideoEncoder : IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            // Serialize compositing: shared state (compositor, _flipBuffer,
-            // _scaleTarget) is not thread-safe and will corrupt frames if
+            // Serialize frame production: shared compositor/frame-reader/webcam
+            // composition state is not thread-safe and can corrupt frames if
             // accessed concurrently by overlapping SampleRequested callbacks.
             await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
             try
