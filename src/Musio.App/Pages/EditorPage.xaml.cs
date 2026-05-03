@@ -14,6 +14,7 @@ using Musio.Core.Timeline;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
+using Windows.UI;
 
 namespace Musio_App.Pages;
 
@@ -31,6 +32,10 @@ public sealed partial class EditorPage : Page
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
     private double _audioOffsetSeconds;
+
+    // Background style editing state
+    private DispatcherTimer? _styleDebounceTimer;
+    private bool _suppressStyleEvents;
 
     public EditorPage()
     {
@@ -253,9 +258,9 @@ public sealed partial class EditorPage : Page
             Zoom = new AutoZoomConfig { Enabled = true },
         };
 
-        // Only apply background fill for window captures — region and
-        // full-screen recordings render without padding/shadow.
-        if (project.CaptureType != CaptureTargetType.Window)
+        // Only apply background fill for window and region captures —
+        // full-screen (monitor) recordings render without padding/shadow.
+        if (project.CaptureType is CaptureTargetType.Monitor)
         {
             config = config with
             {
@@ -292,6 +297,9 @@ public sealed partial class EditorPage : Page
             _previewRenderer?.Dispose();
             _previewRenderer = null;
         }
+
+        // Show style controls for Window and Region captures
+        InitializeStyleControls(project, config);
 
         _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
@@ -1211,4 +1219,279 @@ public sealed partial class EditorPage : Page
         ExportVM.PrepareForExport();
         ShowExportingState();
     }
+
+    // ─── Background Style Editing ───────────────────────────────────────
+
+    private void InitializeStyleControls(Project project, CompositionConfig config)
+    {
+        bool showStyle = project.CaptureType is CaptureTargetType.Window or CaptureTargetType.Region;
+        var vis = showStyle ? Visibility.Visible : Visibility.Collapsed;
+        StyleButton.Visibility = vis;
+        StyleSeparator.Visibility = vis;
+
+        if (!showStyle) return;
+
+        // Populate preset combo with built-in presets
+        PresetCombo.Items.Clear();
+        PresetCombo.Items.Add(new BrandPreset { Name = "(Custom)" });
+        foreach (var preset in DefaultBrandPresets.All)
+            PresetCombo.Items.Add(preset);
+
+        // Sync controls to current config, suppressing change events
+        SyncStyleControlsToConfig(config.Background);
+    }
+
+    private void SyncStyleControlsToConfig(BackgroundStyle bg)
+    {
+        _suppressStyleEvents = true;
+        try
+        {
+            // Background type combo
+            int typeIndex = bg.Type switch
+            {
+                BackgroundType.Gradient => 1,
+                BackgroundType.Blur => 2,
+                _ => 0, // SolidColor
+            };
+            BgTypeCombo.SelectedIndex = typeIndex;
+
+            // Primary color
+            var primaryColor = ParseHexColor(bg.Color);
+            BgColorPicker.Color = primaryColor;
+            BgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(primaryColor);
+            BgColorText.Text = bg.Color;
+
+            // Gradient controls
+            bool isGradient = bg.Type == BackgroundType.Gradient;
+            GradientPanel.Visibility = isGradient ? Visibility.Visible : Visibility.Collapsed;
+            ColorPanel.Visibility = bg.Type != BackgroundType.Blur ? Visibility.Visible : Visibility.Collapsed;
+
+            if (isGradient)
+            {
+                var endColor = ParseHexColor(bg.GradientEndColor);
+                GradEndColorPicker.Color = endColor;
+                GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
+                GradEndColorText.Text = bg.GradientEndColor;
+                GradAngleSlider.Value = bg.GradientAngle;
+            }
+
+            // Sliders
+            PaddingSlider.Value = bg.Padding;
+            CornerRadiusSlider.Value = bg.CornerRadius;
+
+            // Toggles
+            ShadowToggle.IsOn = bg.ShadowEnabled;
+            BorderToggle.IsOn = bg.BorderEnabled;
+
+            // Select matching preset or (Custom)
+            PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
+        }
+        finally
+        {
+            _suppressStyleEvents = false;
+        }
+    }
+
+    private int FindMatchingPresetIndex(BackgroundStyle bg)
+    {
+        var presets = DefaultBrandPresets.All;
+        for (int i = 0; i < presets.Count; i++)
+        {
+            var p = presets[i];
+            if (p.BackgroundType == bg.Type &&
+                string.Equals(p.BackgroundColor, bg.Color, StringComparison.OrdinalIgnoreCase) &&
+                p.Padding == bg.Padding &&
+                p.CornerRadius == bg.CornerRadius)
+            {
+                return i + 1; // +1 for the "(Custom)" entry at index 0
+            }
+        }
+        return 0; // Custom
+    }
+
+    private void PresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+        if (PresetCombo.SelectedItem is not BrandPreset preset) return;
+        if (preset.Name == "(Custom)") return;
+
+        var bg = BrandPresetConverter.ToBackgroundStyle(preset);
+        SyncStyleControlsToConfig(bg);
+        ApplyBackgroundStyle(bg);
+    }
+
+    private void BgTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+
+        var selectedType = BgTypeCombo.SelectedIndex switch
+        {
+            1 => BackgroundType.Gradient,
+            2 => BackgroundType.Blur,
+            _ => BackgroundType.SolidColor,
+        };
+
+        GradientPanel.Visibility = selectedType == BackgroundType.Gradient
+            ? Visibility.Visible : Visibility.Collapsed;
+        ColorPanel.Visibility = selectedType != BackgroundType.Blur
+            ? Visibility.Visible : Visibility.Collapsed;
+
+        ScheduleStyleUpdate();
+    }
+
+    private void BgColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressStyleEvents) return;
+        var hex = ColorToHex(args.NewColor);
+        BgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        BgColorText.Text = hex;
+        ScheduleStyleUpdate();
+    }
+
+    private void GradEndColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressStyleEvents) return;
+        var hex = ColorToHex(args.NewColor);
+        GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        GradEndColorText.Text = hex;
+        ScheduleStyleUpdate();
+    }
+
+    private void StyleSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+        ScheduleStyleUpdate();
+    }
+
+    private void StyleToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+        ScheduleStyleUpdate();
+    }
+
+    private void ScheduleStyleUpdate()
+    {
+        // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
+        if (_styleDebounceTimer is null)
+        {
+            _styleDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _styleDebounceTimer.Tick += (_, _) =>
+            {
+                _styleDebounceTimer.Stop();
+                var bg = BuildBackgroundStyleFromControls();
+                ApplyBackgroundStyle(bg);
+            };
+        }
+        _styleDebounceTimer.Stop();
+        _styleDebounceTimer.Start();
+    }
+
+    private BackgroundStyle BuildBackgroundStyleFromControls()
+    {
+        var bgType = BgTypeCombo.SelectedIndex switch
+        {
+            1 => BackgroundType.Gradient,
+            2 => BackgroundType.Blur,
+            _ => BackgroundType.SolidColor,
+        };
+
+        return new BackgroundStyle
+        {
+            Type = bgType,
+            Color = BgColorText.Text,
+            GradientEndColor = GradEndColorText.Text,
+            GradientAngle = GradAngleSlider.Value,
+            Padding = (int)PaddingSlider.Value,
+            CornerRadius = (int)CornerRadiusSlider.Value,
+            ShadowEnabled = ShadowToggle.IsOn,
+            ShadowBlur = 24,
+            ShadowOpacity = 0.5,
+            ShadowColor = "#000000",
+            BorderEnabled = BorderToggle.IsOn,
+            BorderWidth = 1,
+            BorderColor = "#333333",
+        };
+
+    }
+
+    private void ApplyBackgroundStyle(BackgroundStyle bg)
+    {
+        var config = ProjectService.Instance.CurrentComposition;
+        config = config with { Background = bg };
+        ProjectService.Instance.CurrentComposition = config;
+
+        // Mark preset as Custom if it no longer matches
+        _suppressStyleEvents = true;
+        PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
+        _suppressStyleEvents = false;
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    /// <summary>
+    /// Recreates only the PreviewRenderer with updated config, preserving
+    /// frame reader, audio, and playhead position.
+    /// </summary>
+    private async Task RebuildPreviewRendererAsync(CompositionConfig config)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        MouseRecordingData? mouseData = null;
+        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
+        {
+            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
+            catch { /* no cursor data */ }
+        }
+
+        mouseData ??= new MouseRecordingData();
+
+        _compositorReady = false;
+        _previewRenderer?.Dispose();
+
+        try
+        {
+            _previewRenderer = new PreviewRenderer();
+            await _previewRenderer.InitializeAsync(
+                mouseData, config,
+                project.Width > 0 ? project.Width : 1920,
+                project.Height > 0 ? project.Height : 1080,
+                project.Duration,
+                project.MouseToVideoOffsetSeconds,
+                project.CropOffsetX,
+                project.CropOffsetY,
+                project.DpiScale);
+
+            // Re-sync zoom keyframes from the model
+            if (ViewModel.Model.ZoomKeyframes.Count > 0)
+                _previewRenderer.UpdateZoomKeyframes(ViewModel.Model.ZoomKeyframes);
+
+            _compositorReady = true;
+        }
+        catch
+        {
+            _previewRenderer?.Dispose();
+            _previewRenderer = null;
+        }
+
+        // Re-render at current playhead position
+        _lastRenderedFrameIndex = -1;
+        var position = Timeline.PlayheadPosition;
+        await UpdatePreviewFrameAsync(position, force: true);
+    }
+
+    private static Color ParseHexColor(string hex)
+    {
+        hex = hex.TrimStart('#');
+        if (hex.Length == 6)
+        {
+            byte r = byte.Parse(hex[0..2], NumberStyles.HexNumber);
+            byte g = byte.Parse(hex[2..4], NumberStyles.HexNumber);
+            byte b = byte.Parse(hex[4..6], NumberStyles.HexNumber);
+            return Color.FromArgb(255, r, g, b);
+        }
+        return Color.FromArgb(255, 26, 26, 46); // fallback
+    }
+
+    private static string ColorToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 }
