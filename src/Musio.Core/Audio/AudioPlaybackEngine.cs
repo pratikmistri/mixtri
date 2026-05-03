@@ -109,17 +109,24 @@ public sealed class AudioPlaybackEngine : IDisposable
     /// </summary>
     public void Seek(TimeSpan position)
     {
-        foreach (var reader in _readers)
+        lock (_transportLock)
         {
-            try
+            // Stop output before repositioning to avoid racing the audio thread
+            // and to ensure subsequent playback starts from the new position.
+            try { _outputDevice?.Stop(); } catch { }
+
+            foreach (var reader in _readers)
             {
-                long targetBytes = (long)(position.TotalSeconds
-                    * reader.WaveFormat.AverageBytesPerSecond);
-                // Align to block boundary
-                targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
-                reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
+                try
+                {
+                    long targetBytes = (long)(position.TotalSeconds
+                        * reader.WaveFormat.AverageBytesPerSecond);
+                    // Align to block boundary
+                    targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
+                    reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
+                }
+                catch { /* best-effort seek */ }
             }
-            catch { /* best-effort seek */ }
         }
     }
 
