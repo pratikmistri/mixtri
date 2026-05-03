@@ -850,7 +850,27 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>Raised when the mic track mute state changes.</summary>
     public event EventHandler<bool>? MicAudioMuteChanged;
 
-    private static readonly Color MutedWaveformOverlay = Color.FromArgb(160, 30, 30, 30);
+    private static Color MutedWaveformOverlay => GetMutedWaveformOverlayColor();
+
+    private static Color GetMutedWaveformOverlayColor()
+    {
+        if (Application.Current?.Resources is ResourceDictionary resources)
+        {
+            if (resources.TryGetValue("TextFillColorDisabledBrush", out var disabledBrushObject) &&
+                disabledBrushObject is Microsoft.UI.Xaml.Media.SolidColorBrush disabledBrush)
+            {
+                return disabledBrush.Color;
+            }
+
+            if (resources.TryGetValue("SystemControlDisabledBaseMediumLowBrush", out var legacyBrushObject) &&
+                legacyBrushObject is Microsoft.UI.Xaml.Media.SolidColorBrush legacyBrush)
+            {
+                return legacyBrush.Color;
+            }
+        }
+
+        return Color.FromArgb(160, 30, 30, 30);
+    }
 
     private void AudioMuteButton_Click(object sender, RoutedEventArgs e)
     {
