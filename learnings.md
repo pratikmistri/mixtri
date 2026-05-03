@@ -479,6 +479,19 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `GetPixelBytes()` compact stride + no MF_MT_DEFAULT_STRIDE — encoder expects something other than compact stride (horizontal banding).
 - `SoftwareBitmap.CopyToBuffer()` — produces compact data despite SoftwareBitmap having aligned internal stride; misleading API.
 - Setting `MF_MT_DEFAULT_STRIDE` / `MF_MT_SAMPLE_SIZE` on `VideoEncodingProperties.Properties` — ignored by MediaTranscoder pipeline.
+
+---
+
+## Video Export — PR Review Fixes (Semaphore & Surface Leak)
+
+**Feature/area:** Export pipeline (VideoEncoder)
+
+**Issues found during code review of PR #1:**
+
+1. **Semaphore over-release on cancellation** — `_frameSemaphore.WaitAsync(ct)` can throw `OperationCanceledException` before acquiring, but the `finally` block unconditionally called `Release()`, corrupting the semaphore count. Fixed with a `bool semaphoreAcquired` flag.
+2. **GPU surface leak on exception** — `outputSurface` (CanvasRenderTarget) was only disposed via `sample.Processed` event. If an exception occurred after surface creation but before the handler was attached, the surface leaked. Fixed by moving declaration to outer scope and adding `outputSurface?.Dispose()` in the catch block.
+
+**What worked:** Both fixes are straightforward guard patterns (acquisition flag, catch-block cleanup).
 - Row flipping — completely wrong for `CreateUncompressed(Bgra8)` which uses top-down row order.
 - Fire-and-forget async in `SampleRequested` — causes frame corruption due to concurrent access to shared state.
 
