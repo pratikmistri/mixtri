@@ -24,6 +24,9 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         Stop();
         DisposeReaders();
+        _outputDevice?.Dispose();
+        _outputDevice = null;
+        _mixer = null;
 
         var validPaths = wavFilePaths.Where(File.Exists).ToList();
         if (validPaths.Count == 0) return;
