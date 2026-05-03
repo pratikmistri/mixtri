@@ -385,8 +385,11 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Original composition path: zoom crops the source frame directly,
-    /// padding is applied afterward at constant size. Used when padding = 0.
+    /// Direct composition fast path: zoom crops the source frame directly,
+    /// and any padding remains at a constant size. Used whenever
+    /// post-composite zoom is not needed, including when padding = 0 or
+    /// when padding &gt; 0 and zoom is inactive (for example,
+    /// <c>zoomState.ZoomLevel &lt;= 1.01f</c>).
     /// </summary>
     private CanvasRenderTarget ComposeFrameDirect(
         CanvasBitmap sourceFrame,
