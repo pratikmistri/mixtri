@@ -79,6 +79,7 @@ public class RecordingSession : IDisposable
     private long _audioStartTicks;
     private Rect? _physicalCropRect;
     private float _recordingDpiScale;
+    private volatile bool _captureGateOpen;
 
     // Absolute Stopwatch timestamp when the first video frame was actually
     // emitted by the capture API. This is the true video time 0 — any
@@ -97,6 +98,23 @@ public class RecordingSession : IDisposable
     public int Fps => _config.Fps;
     public bool SystemAudioEnabled => _config.SystemAudioEnabled;
     public bool MicEnabled => _config.MicEnabled;
+
+    /// <summary>
+    /// Opens the capture gate so frames and audio begin recording.
+    /// Call this after the recording overlay is visible to avoid
+    /// capturing startup frames (minimize animation, overlay creation).
+    /// </summary>
+    public void OpenCaptureGate()
+    {
+        _audioEngine?.OpenGate();
+        _captureGateOpen = true;
+
+        // Reset timing origins so offsets are measured from when
+        // actual recording content begins, not from engine start.
+        _videoStartTicks = Stopwatch.GetTimestamp();
+        _audioStartTicks = Stopwatch.GetTimestamp();
+        _elapsedWatch.Restart();
+    }
 
     public RecordingState State
     {
@@ -302,19 +320,20 @@ public class RecordingSession : IDisposable
             }
 
             // Compute audio→video offset from the first actual audio data callback
-            // to the first actual video frame. This is the precise pre-roll duration
-            // in the WAV files that must be skipped to align with video.
+            // to the first actual video frame. Positive = audio started before video
+            // (pre-roll to skip). Negative = audio started after video (leading
+            // silence on the timeline, e.g. mic permission dialog delay).
             long videoOriginTicks = _firstVideoFrameTicks != 0
                 ? _firstVideoFrameTicks
                 : _videoStartTicks;
             long audioOriginTicks = _audioEngine?.FirstDataTicks ?? _audioStartTicks;
             if (audioOriginTicks == 0) audioOriginTicks = _audioStartTicks;
-            double audioToVideoOffset = Math.Max(0,
-                (double)(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency);
+            double audioToVideoOffset =
+                (double)(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency;
 
             Debug.WriteLine(
-                $"[RecordingSession] Audio pre-roll: {audioToVideoOffset:F4}s " +
-                $"(audioFirstData→firstVideoFrame)");
+                $"[RecordingSession] Audio offset: {audioToVideoOffset:F4}s " +
+                $"(positive=pre-roll, negative=audio started late)");
 
             // Compute mouse→video time offset from the first ACTUAL frame,
             // not from when StartCapture() was called. Capture APIs often have
@@ -413,6 +432,13 @@ public class RecordingSession : IDisposable
 
     private void OnFrameCaptured(object? sender, CapturedFrameEventArgs e)
     {
+        // Discard frames until the recording overlay is visible.
+        // This eliminates the startup delta (minimize animation,
+        // overlay window creation) between capture start and
+        // the moment the user sees the recording widget.
+        if (!_captureGateOpen)
+            return;
+
         try
         {
             // Lazily create the video writer once we know capture dimensions

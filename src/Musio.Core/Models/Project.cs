@@ -44,8 +44,10 @@ public class Project
 
     /// <summary>
     /// Time offset in seconds between audio recording start and video frame 0.
-    /// Audio starts before the first video frame due to capture startup latency.
-    /// Add this offset when seeking audio to align with video playback.
+    /// Positive: audio started before video (pre-roll to skip in WAV file).
+    /// Negative: audio started after video (leading silence on timeline,
+    /// e.g. mic permission dialog delayed audio capture).
+    /// At video time T, the audio file position is T + this offset.
     /// </summary>
     public double AudioToVideoOffsetSeconds { get; set; }
     public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;

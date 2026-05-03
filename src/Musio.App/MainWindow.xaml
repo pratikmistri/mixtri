@@ -52,7 +52,7 @@
                     Tag="editor"
                     ToolTipService.ToolTip="Edit your recorded clips">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE90F;" />
+                        <FontIcon Glyph="&#xE78A;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>

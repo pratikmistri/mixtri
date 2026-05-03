@@ -23,6 +23,12 @@ public partial class RecordingViewModel : ObservableObject
     private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
 
     /// <summary>
+    /// Opens the capture gate so frames and audio begin recording.
+    /// Call after the recording overlay is visible.
+    /// </summary>
+    public void OpenCaptureGate() => _session?.OpenCaptureGate();
+
+    /// <summary>
     /// Must be called from the UI thread (e.g. in page constructor) to enable
     /// thread-safe property updates from background recording callbacks.
     /// </summary>

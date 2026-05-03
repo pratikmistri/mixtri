@@ -53,7 +53,11 @@ public sealed partial class EditorPage : Page
                 _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
                 // Play short audio burst at scrub position for editing feedback
                 if (!Preview.IsPlaying)
-                    _audioPlayer?.ScrubTo(AudioPositionForVideo(Timeline.PlayheadPosition));
+                {
+                    var audioPos = AudioPositionForVideo(Timeline.PlayheadPosition);
+                    if (audioPos >= TimeSpan.Zero)
+                        _audioPlayer?.ScrubTo(audioPos);
+                }
             });
 
         // Sync playhead: when preview plays, update timeline
@@ -62,6 +66,19 @@ public sealed partial class EditorPage : Page
             Timeline.PlayheadPosition = Preview.PlayheadPosition;
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
+
+            // Start audio when playhead reaches audio start point
+            // (handles negative offset where audio started after video)
+            if (_audioPlayer is not null && _audioPlayer.IsLoaded
+                && Preview.IsPlaying && !_audioPlayer.IsPlaying)
+            {
+                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
+                if (audioPos >= TimeSpan.Zero)
+                {
+                    _audioPlayer.Seek(audioPos);
+                    _audioPlayer.Play();
+                }
+            }
         };
 
         // Sync audio play/pause with preview
@@ -70,8 +87,13 @@ public sealed partial class EditorPage : Page
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
             if (isPlaying)
             {
-                _audioPlayer.Seek(AudioPositionForVideo(Preview.PlayheadPosition));
-                _audioPlayer.Play();
+                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
+                if (audioPos >= TimeSpan.Zero)
+                {
+                    _audioPlayer.Seek(audioPos);
+                    _audioPlayer.Play();
+                }
+                // else: audio hasn't started yet; PlaybackTick will start it
             }
             else
             {
@@ -83,9 +105,18 @@ public sealed partial class EditorPage : Page
         Preview.PlaybackLooped += (_, _) =>
         {
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
-            _audioPlayer.Seek(AudioPositionForVideo(TimeSpan.Zero));
-            if (!_audioPlayer.IsPlaying)
-                _audioPlayer.Play();
+            var audioPos = AudioPositionForVideo(TimeSpan.Zero);
+            if (audioPos >= TimeSpan.Zero)
+            {
+                _audioPlayer.Seek(audioPos);
+                if (!_audioPlayer.IsPlaying)
+                    _audioPlayer.Play();
+            }
+            else
+            {
+                // Audio starts later in the video — stop and let tick restart it
+                _audioPlayer.Pause();
+            }
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -938,8 +969,9 @@ public sealed partial class EditorPage : Page
 
             double videoDuration = project.Duration.TotalSeconds;
 
-            // Use the precise offset measured during recording: seconds of
-            // audio pre-roll captured before the first video frame arrived.
+            // Offset between audio and video start.
+            // Positive: audio pre-roll (WAV starts before video frame 0).
+            // Negative: audio started late (e.g. mic permission dialog delay).
             double audioOffset = project.AudioToVideoOffsetSeconds;
 
             var (systemWaveform, micWaveform) = await Task.Run(() =>
@@ -947,12 +979,6 @@ public sealed partial class EditorPage : Page
                 float[]? sysWf = null;
                 float[]? micWf = null;
 
-                // Probe each audio file's duration so we can compute the
-                // correct number of waveform peaks.  When the audio file
-                // is shorter than the video, we must generate fewer peaks
-                // (proportional to coverage) so each peak maps to the
-                // correct position on the video timeline.  The remainder
-                // is zero-filled (trailing silence).
                 double sysDuration = 0, micDuration = 0;
                 if (systemPath is not null)
                 {
@@ -965,39 +991,15 @@ public sealed partial class EditorPage : Page
                     catch { }
                 }
 
-                if (systemPath is not null && sysDuration > 0)
-                {
-                    try
-                    {
-                        double audioForVideo = Math.Max(0, sysDuration - audioOffset);
-                        int audioPeaks = (int)Math.Min(targetSamples,
-                            Math.Ceiling(targetSamples * audioForVideo / videoDuration));
-                        if (audioPeaks < 1) audioPeaks = 1;
+                // Waveform alignment:
+                // - skipSeconds: how much of the WAV to skip (pre-roll). 0 if offset <= 0.
+                // - leadTime: silence at the start of the timeline before audio begins.
+                //   Non-zero when audio started after video (negative offset).
+                double skipSeconds = Math.Max(0, audioOffset);
+                double leadTime = Math.Max(0, -audioOffset);
 
-                        var raw = AudioWaveformGenerator.GenerateWaveform(
-                            systemPath, audioPeaks, startSeconds: audioOffset);
-                        sysWf = new float[targetSamples];
-                        Array.Copy(raw, 0, sysWf, 0, Math.Min(raw.Length, targetSamples));
-                    }
-                    catch { /* skip */ }
-                }
-
-                if (micPath is not null && micDuration > 0)
-                {
-                    try
-                    {
-                        double audioForVideo = Math.Max(0, micDuration - audioOffset);
-                        int audioPeaks = (int)Math.Min(targetSamples,
-                            Math.Ceiling(targetSamples * audioForVideo / videoDuration));
-                        if (audioPeaks < 1) audioPeaks = 1;
-
-                        var raw = AudioWaveformGenerator.GenerateWaveform(
-                            micPath, audioPeaks, startSeconds: audioOffset);
-                        micWf = new float[targetSamples];
-                        Array.Copy(raw, 0, micWf, 0, Math.Min(raw.Length, targetSamples));
-                    }
-                    catch { /* skip */ }
-                }
+                sysWf = BuildAlignedWaveform(systemPath, sysDuration, skipSeconds, leadTime, videoDuration, targetSamples);
+                micWf = BuildAlignedWaveform(micPath, micDuration, skipSeconds, leadTime, videoDuration, targetSamples);
 
                 return (sysWf, micWf);
             });
@@ -1021,12 +1023,49 @@ public sealed partial class EditorPage : Page
 
     /// <summary>
     /// Converts a video playhead position to the corresponding audio file position.
-    /// _audioOffsetSeconds is positive: audio pre-roll before video frame 0.
+    /// Positive _audioOffsetSeconds = pre-roll (skip into WAV).
+    /// Negative _audioOffsetSeconds = audio started late (silence before audio).
+    /// Returns negative TimeSpan when video is before audio start — callers
+    /// must treat negative results as silence (no audio to play).
     /// </summary>
     private TimeSpan AudioPositionForVideo(TimeSpan videoPosition)
     {
-        var audioPos = videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
-        return audioPos < TimeSpan.Zero ? TimeSpan.Zero : audioPos;
+        return videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+    }
+
+    /// <summary>
+    /// Builds a waveform array aligned to the video timeline, handling both
+    /// pre-roll (positive offset → skip WAV start) and late audio (negative
+    /// offset → leading silence on the timeline).
+    /// </summary>
+    private static float[]? BuildAlignedWaveform(
+        string? path, double fileDuration,
+        double skipSeconds, double leadTime,
+        double videoDuration, int targetSamples)
+    {
+        if (path is null || fileDuration <= 0) return null;
+
+        try
+        {
+            // How much of the WAV maps to the video timeline
+            double audioForVideo = Math.Max(0, fileDuration - skipSeconds);
+            // How much of the video timeline this audio covers
+            double coverageDuration = Math.Min(audioForVideo, videoDuration - leadTime);
+            if (coverageDuration <= 0) return null;
+
+            int leadPeaks = (int)(targetSamples * leadTime / videoDuration);
+            int audioPeaks = (int)Math.Min(
+                targetSamples - leadPeaks,
+                Math.Ceiling(targetSamples * coverageDuration / videoDuration));
+            if (audioPeaks < 1) audioPeaks = 1;
+
+            var raw = AudioWaveformGenerator.GenerateWaveform(
+                path, audioPeaks, startSeconds: skipSeconds);
+            var wf = new float[targetSamples];
+            Array.Copy(raw, 0, wf, leadPeaks, Math.Min(raw.Length, audioPeaks));
+            return wf;
+        }
+        catch { return null; }
     }
 
     // --- Export flyout ---

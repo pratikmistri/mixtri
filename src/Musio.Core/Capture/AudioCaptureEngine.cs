@@ -18,6 +18,7 @@ public sealed class AudioCaptureEngine : IDisposable
     private bool _isPaused;
     private bool _disposed;
     private long _firstDataTicks;
+    private volatile bool _gateOpen;
 
     public bool IsRecording { get; private set; }
     public bool IsSystemAudioEnabled { get; set; } = true;
@@ -30,6 +31,12 @@ public sealed class AudioCaptureEngine : IDisposable
     /// This is when WAV file position 0 begins.
     /// </summary>
     public long FirstDataTicks => _firstDataTicks;
+
+    /// <summary>
+    /// Opens the capture gate so audio data is written to disk.
+    /// Call after the recording overlay is visible.
+    /// </summary>
+    public void OpenGate() => _gateOpen = true;
 
     // ── Device enumeration ──────────────────────────────────────────
 
@@ -201,6 +208,7 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private void OnSystemDataAvailable(object? sender, WaveInEventArgs e)
     {
+        if (!_gateOpen) return;
         if (_firstDataTicks == 0)
             Interlocked.CompareExchange(ref _firstDataTicks, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
         lock (_lock)
@@ -212,6 +220,7 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private void OnMicDataAvailable(object? sender, WaveInEventArgs e)
     {
+        if (!_gateOpen) return;
         if (_firstDataTicks == 0)
             Interlocked.CompareExchange(ref _firstDataTicks, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
         lock (_lock)
