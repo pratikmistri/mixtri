@@ -12,6 +12,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     private WaveOutEvent? _outputDevice;
     private MixingSampleProvider? _mixer;
     private readonly List<AudioFileReader> _readers = [];
+    private readonly List<MediaFoundationResampler> _resamplers = [];
     private readonly object _transportLock = new();
     private Timer? _scrubTimer;
     private bool _disposed;
@@ -57,6 +58,7 @@ public sealed class AudioPlaybackEngine : IDisposable
                     var resampled = new MediaFoundationResampler(reader,
                         WaveFormat.CreateIeeeFloatWaveFormat(
                             _mixer.WaveFormat.SampleRate, _mixer.WaveFormat.Channels));
+                    _resamplers.Add(resampled);
                     _mixer.AddMixerInput(resampled.ToSampleProvider());
                 }
                 else
@@ -174,6 +176,12 @@ public sealed class AudioPlaybackEngine : IDisposable
 
     private void DisposeReaders()
     {
+        foreach (var resampler in _resamplers)
+        {
+            try { resampler.Dispose(); } catch { }
+        }
+        _resamplers.Clear();
+
         foreach (var reader in _readers)
         {
             try { reader.Dispose(); } catch { }
