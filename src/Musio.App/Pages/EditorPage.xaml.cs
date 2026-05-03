@@ -165,6 +165,13 @@ public sealed partial class EditorPage : Page
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportVM.PropertyChanged += ExportVM_PropertyChanged;
+
+        // Clean up debounce timer when page is unloaded to prevent leaks
+        Unloaded += (_, _) =>
+        {
+            _styleDebounceTimer?.Stop();
+            _styleDebounceTimer = null;
+        };
     }
 
     private async Task InitializePreviewAsync()
@@ -172,6 +179,7 @@ public sealed partial class EditorPage : Page
         _frameReader?.Dispose();
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
+        _styleDebounceTimer?.Stop();
         _frameReader = null;
         _previewRenderer = null;
         _audioPlayer = null;
@@ -1238,28 +1246,33 @@ public sealed partial class EditorPage : Page
         foreach (var preset in DefaultBrandPresets.All)
             PresetCombo.Items.Add(preset);
 
-        // Load system wallpapers
-        LoadSystemWallpapers();
+        // Load system wallpapers (async to avoid blocking UI thread)
+        _ = LoadSystemWallpapersAsync();
 
         // Sync controls to current config, suppressing change events
         SyncStyleControlsToConfig(config.Background);
     }
 
-    private void LoadSystemWallpapers()
+    private async Task LoadSystemWallpapersAsync()
     {
         var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
-        _wallpaperPaths = [];
 
-        if (Directory.Exists(wallpaperDir))
+        // Enumerate and sort files on a background thread to avoid freezing the UI
+        var paths = await Task.Run(() =>
         {
-            _wallpaperPaths = Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
+            if (!Directory.Exists(wallpaperDir))
+                return new List<string>();
+
+            return Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
                 .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(f => new FileInfo(f).Length) // smaller files first for faster thumbnails
+                .OrderBy(f => new FileInfo(f).Length)
                 .ToList();
-        }
+        });
+
+        _wallpaperPaths = paths;
 
         WallpaperGrid.Items.Clear();
         foreach (var path in _wallpaperPaths)

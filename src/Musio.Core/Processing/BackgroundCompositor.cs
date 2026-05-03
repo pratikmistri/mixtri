@@ -151,9 +151,22 @@ public sealed class BackgroundCompositor : IDisposable
             || _cachedDevice != session.Device)
         {
             _cachedBackgroundImage?.Dispose();
-            _cachedBackgroundImage = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).GetAwaiter().GetResult();
-            _cachedBackgroundPath = style.BackgroundImagePath;
-            _cachedDevice = session.Device;
+            _cachedBackgroundImage = null;
+            _cachedBackgroundPath = null;
+            _cachedDevice = null;
+
+            try
+            {
+                _cachedBackgroundImage = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).GetAwaiter().GetResult();
+                _cachedBackgroundPath = style.BackgroundImagePath;
+                _cachedDevice = session.Device;
+            }
+            catch
+            {
+                // File missing/unreadable/corrupt — fall back to solid color
+                session.FillRectangle(0, 0, w, h, ColorHelper.ParseColor(style.Color));
+                return;
+            }
         }
 
         var srcSize = _cachedBackgroundImage.SizeInPixels;
