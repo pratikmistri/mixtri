@@ -36,6 +36,7 @@ public sealed partial class EditorPage : Page
     // Background style editing state
     private DispatcherTimer? _styleDebounceTimer;
     private bool _suppressStyleEvents;
+    private List<string>? _wallpaperPaths;
 
     public EditorPage()
     {
@@ -1237,8 +1238,49 @@ public sealed partial class EditorPage : Page
         foreach (var preset in DefaultBrandPresets.All)
             PresetCombo.Items.Add(preset);
 
+        // Load system wallpapers
+        LoadSystemWallpapers();
+
         // Sync controls to current config, suppressing change events
         SyncStyleControlsToConfig(config.Background);
+    }
+
+    private void LoadSystemWallpapers()
+    {
+        var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
+        _wallpaperPaths = [];
+
+        if (Directory.Exists(wallpaperDir))
+        {
+            _wallpaperPaths = Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
+                .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(f => new FileInfo(f).Length) // smaller files first for faster thumbnails
+                .ToList();
+        }
+
+        WallpaperGrid.Items.Clear();
+        foreach (var path in _wallpaperPaths)
+        {
+            var img = new Microsoft.UI.Xaml.Controls.Image
+            {
+                Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+                Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
+                {
+                    DecodePixelHeight = 96, // small thumbnails for perf
+                },
+            };
+            var border = new Border
+            {
+                Width = 72,
+                Height = 48,
+                CornerRadius = new CornerRadius(4),
+                Child = img,
+            };
+            WallpaperGrid.Items.Add(border);
+        }
     }
 
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
@@ -1250,7 +1292,8 @@ public sealed partial class EditorPage : Page
             int typeIndex = bg.Type switch
             {
                 BackgroundType.Gradient => 1,
-                BackgroundType.Blur => 2,
+                BackgroundType.Image => 2,
+                BackgroundType.Blur => 3,
                 _ => 0, // SolidColor
             };
             BgTypeCombo.SelectedIndex = typeIndex;
@@ -1261,10 +1304,13 @@ public sealed partial class EditorPage : Page
             BgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(primaryColor);
             BgColorText.Text = bg.Color;
 
-            // Gradient controls
+            // Panel visibility based on type
             bool isGradient = bg.Type == BackgroundType.Gradient;
+            bool isImage = bg.Type == BackgroundType.Image;
             GradientPanel.Visibility = isGradient ? Visibility.Visible : Visibility.Collapsed;
-            ColorPanel.Visibility = bg.Type != BackgroundType.Blur ? Visibility.Visible : Visibility.Collapsed;
+            WallpaperPanel.Visibility = isImage ? Visibility.Visible : Visibility.Collapsed;
+            ColorPanel.Visibility = bg.Type is not BackgroundType.Blur and not BackgroundType.Image
+                ? Visibility.Visible : Visibility.Collapsed;
 
             if (isGradient)
             {
@@ -1273,6 +1319,12 @@ public sealed partial class EditorPage : Page
                 GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
                 GradEndColorText.Text = bg.GradientEndColor;
                 GradAngleSlider.Value = bg.GradientAngle;
+            }
+
+            if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
+            {
+                int wpIdx = _wallpaperPaths.IndexOf(bg.BackgroundImagePath);
+                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx : -1;
             }
 
             // Sliders
@@ -1327,13 +1379,16 @@ public sealed partial class EditorPage : Page
         var selectedType = BgTypeCombo.SelectedIndex switch
         {
             1 => BackgroundType.Gradient,
-            2 => BackgroundType.Blur,
+            2 => BackgroundType.Image,
+            3 => BackgroundType.Blur,
             _ => BackgroundType.SolidColor,
         };
 
         GradientPanel.Visibility = selectedType == BackgroundType.Gradient
             ? Visibility.Visible : Visibility.Collapsed;
-        ColorPanel.Visibility = selectedType != BackgroundType.Blur
+        WallpaperPanel.Visibility = selectedType == BackgroundType.Image
+            ? Visibility.Visible : Visibility.Collapsed;
+        ColorPanel.Visibility = selectedType is not BackgroundType.Blur and not BackgroundType.Image
             ? Visibility.Visible : Visibility.Collapsed;
 
         ScheduleStyleUpdate();
@@ -1369,6 +1424,12 @@ public sealed partial class EditorPage : Page
         ScheduleStyleUpdate();
     }
 
+    private void WallpaperGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+        ScheduleStyleUpdate();
+    }
+
     private void ScheduleStyleUpdate()
     {
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
@@ -1391,9 +1452,18 @@ public sealed partial class EditorPage : Page
         var bgType = BgTypeCombo.SelectedIndex switch
         {
             1 => BackgroundType.Gradient,
-            2 => BackgroundType.Blur,
+            2 => BackgroundType.Image,
+            3 => BackgroundType.Blur,
             _ => BackgroundType.SolidColor,
         };
+
+        string? imagePath = null;
+        if (bgType == BackgroundType.Image && _wallpaperPaths is not null)
+        {
+            int idx = WallpaperGrid.SelectedIndex;
+            if (idx >= 0 && idx < _wallpaperPaths.Count)
+                imagePath = _wallpaperPaths[idx];
+        }
 
         return new BackgroundStyle
         {
@@ -1401,6 +1471,7 @@ public sealed partial class EditorPage : Page
             Color = BgColorText.Text,
             GradientEndColor = GradEndColorText.Text,
             GradientAngle = GradAngleSlider.Value,
+            BackgroundImagePath = imagePath,
             Padding = (int)PaddingSlider.Value,
             CornerRadius = (int)CornerRadiusSlider.Value,
             ShadowEnabled = ShadowToggle.IsOn,

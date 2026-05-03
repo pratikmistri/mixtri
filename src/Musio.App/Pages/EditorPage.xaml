@@ -251,6 +251,7 @@
                                     SelectionChanged="BgTypeCombo_SelectionChanged">
                                     <ComboBoxItem Content="Solid Color" Tag="SolidColor" />
                                     <ComboBoxItem Content="Gradient" Tag="Gradient" />
+                                    <ComboBoxItem Content="Wallpaper" Tag="Image" />
                                     <ComboBoxItem Content="Blur" Tag="Blur" />
                                 </ComboBox>
 
@@ -309,6 +310,16 @@
                                         Minimum="0" Maximum="360"
                                         StepFrequency="5"
                                         ValueChanged="StyleSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Wallpaper picker (only visible for Wallpaper/Image type) -->
+                                <StackPanel x:Name="WallpaperPanel" Spacing="4" Visibility="Collapsed">
+                                    <TextBlock Text="Wallpaper" FontSize="12" />
+                                    <GridView
+                                        x:Name="WallpaperGrid"
+                                        MaxHeight="180"
+                                        SelectionMode="Single"
+                                        SelectionChanged="WallpaperGrid_SelectionChanged" />
                                 </StackPanel>
 
                                 <!-- Padding -->
