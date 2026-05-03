@@ -21,6 +21,15 @@ public partial class WindowItem : ObservableObject
     [ObservableProperty]
     private BitmapImage? _icon;
 
+    /// <summary>Visibility for the fallback generic icon — collapsed when app icon is loaded.</summary>
+    public Microsoft.UI.Xaml.Visibility FallbackIconVisibility =>
+        Icon is not null ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    partial void OnIconChanged(BitmapImage? value)
+    {
+        OnPropertyChanged(nameof(FallbackIconVisibility));
+    }
+
     public WindowItem(WindowInfo info)
     {
         Info = info;

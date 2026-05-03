@@ -11,12 +11,38 @@ public static class AudioWaveformGenerator
     /// Generate waveform peak samples from a WAV file.
     /// Returns normalized peak values (0..1) suitable for rendering.
     /// </summary>
-    public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount)
+    /// <param name="startSeconds">Seconds to skip from the start (e.g. audio pre-roll before video).</param>
+    /// <param name="maxDurationSeconds">Max seconds of audio to process (0 = read to end).</param>
+    public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount,
+        double startSeconds = 0, double maxDurationSeconds = 0)
     {
         if (targetSampleCount <= 0) return [];
 
         using var reader = new AudioFileReader(wavFilePath);
-        long totalSamples = reader.Length / (reader.WaveFormat.BitsPerSample / 8);
+
+        if (startSeconds > 0)
+        {
+            long skipBytes = (long)(startSeconds * reader.WaveFormat.AverageBytesPerSecond);
+            skipBytes -= skipBytes % reader.WaveFormat.BlockAlign;
+            if (skipBytes >= reader.Length)
+                return new float[targetSampleCount];
+            if (skipBytes > 0)
+                reader.Position = skipBytes;
+        }
+
+        long remainingBytes = reader.Length - reader.Position;
+
+        // Cap to maxDurationSeconds to exclude post-roll
+        if (maxDurationSeconds > 0)
+        {
+            long maxBytes = (long)(maxDurationSeconds * reader.WaveFormat.AverageBytesPerSecond);
+            maxBytes -= maxBytes % reader.WaveFormat.BlockAlign;
+            if (maxBytes > 0 && maxBytes < remainingBytes)
+                remainingBytes = maxBytes;
+        }
+
+        int bytesPerSample = reader.WaveFormat.BitsPerSample / 8;
+        long totalSamples = remainingBytes / bytesPerSample;
         int channels = reader.WaveFormat.Channels;
         long monoSamples = totalSamples / channels;
 
@@ -25,10 +51,14 @@ public static class AudioWaveformGenerator
         int samplesPerBucket = Math.Max(1, (int)(monoSamples / targetSampleCount));
         var result = new List<float>(targetSampleCount);
         var buffer = new float[samplesPerBucket * channels];
+        long bytesRead = 0;
 
         int read;
         while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
         {
+            bytesRead += read * sizeof(float);
+            if (bytesRead > remainingBytes) break;
+
             float peak = 0f;
             for (int i = 0; i < read; i++)
                 peak = Math.Max(peak, Math.Abs(buffer[i]));

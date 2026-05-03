@@ -51,6 +51,7 @@
             FontWeight="SemiBold"
             HorizontalAlignment="Left"
             VerticalAlignment="Center"
+            Margin="4,0,0,0"
             Visibility="Collapsed" />
         <ProgressRing
             x:Name="StoppingSpinner"

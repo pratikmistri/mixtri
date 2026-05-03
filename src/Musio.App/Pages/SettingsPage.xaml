@@ -108,8 +108,10 @@
                 CornerRadius="8">
                 <StackPanel Spacing="16">
                     <ToggleSwitch
+                        x:Name="SystemAudioToggle"
                         Header="System Audio"
                         IsOn="True"
+                        Toggled="SystemAudioToggle_Toggled"
                         ToolTipService.ToolTip="Capture desktop audio output" />
                     <ComboBox
                         Header="System Audio Device"
@@ -117,7 +119,9 @@
                         PlaceholderText="Default output"
                         ToolTipService.ToolTip="Select audio output device" />
                     <ToggleSwitch
+                        x:Name="MicToggle"
                         Header="Microphone"
+                        Toggled="MicToggle_Toggled"
                         ToolTipService.ToolTip="Record microphone input" />
                     <ComboBox
                         Header="Microphone Device"

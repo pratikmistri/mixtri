@@ -12,6 +12,8 @@ public sealed partial class PreviewCanvas : UserControl
 {
     private CanvasRenderTarget? _previewFrame;
     private DispatcherTimer? _playbackTimer;
+    private System.Diagnostics.Stopwatch? _playbackClock;
+    private TimeSpan _playbackStartPosition;
     private bool _isPlaying;
     private Color _previewClearColor = Color.FromArgb(255, 20, 20, 20);
 
@@ -19,6 +21,11 @@ public sealed partial class PreviewCanvas : UserControl
     /// Raised each time the playback timer ticks so the host can supply a new composed frame.
     /// </summary>
     public event EventHandler? PlaybackTick;
+
+    /// <summary>
+    /// Raised when playback loops back to the beginning.
+    /// </summary>
+    public event EventHandler? PlaybackLooped;
 
     /// <summary>
     /// Raised when play/pause state changes.
@@ -107,6 +114,8 @@ public sealed partial class PreviewCanvas : UserControl
     {
         if (IsPlaying) return;
         EnsureTimer();
+        _playbackStartPosition = PlayheadPosition;
+        _playbackClock = System.Diagnostics.Stopwatch.StartNew();
         _playbackTimer!.Start();
         IsPlaying = true;
     }
@@ -115,6 +124,7 @@ public sealed partial class PreviewCanvas : UserControl
     public void Pause()
     {
         _playbackTimer?.Stop();
+        _playbackClock?.Stop();
         IsPlaying = false;
     }
 
@@ -139,13 +149,16 @@ public sealed partial class PreviewCanvas : UserControl
 
     private void OnPlaybackTick(object? sender, object e)
     {
-        if (Duration.TotalSeconds <= 0) return;
+        if (Duration.TotalSeconds <= 0 || _playbackClock is null) return;
 
-        // Advance playhead by one timer interval
-        var newPosition = PlayheadPosition + _playbackTimer!.Interval;
+        // Use wall-clock time for accurate sync with audio
+        var newPosition = _playbackStartPosition + _playbackClock.Elapsed;
         if (newPosition >= Duration)
         {
-            newPosition = TimeSpan.Zero; // loop
+            newPosition = TimeSpan.Zero;
+            _playbackStartPosition = TimeSpan.Zero;
+            _playbackClock.Restart();
+            PlaybackLooped?.Invoke(this, EventArgs.Empty);
         }
 
         PlayheadPosition = newPosition;

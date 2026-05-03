@@ -89,6 +89,11 @@ public sealed partial class RecordingPage : Page
         _overlayWindow = new RecordingOverlayWindow(ViewModel);
         _overlayWindow.StopRequested += OnOverlayStopRequested;
         _overlayWindow.Activate();
+
+        // Open the capture gate now that the overlay is visible.
+        // All frames and audio before this point are discarded,
+        // eliminating the startup delta.
+        ViewModel.OpenCaptureGate();
     }
 
     private void CloseRecordingOverlay()

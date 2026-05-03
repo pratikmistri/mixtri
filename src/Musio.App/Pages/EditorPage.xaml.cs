@@ -4,6 +4,7 @@ using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.Audio;
 using Musio.Core.Capture;
 using Musio.Core.Export;
 using Musio.Core.Models;
@@ -23,11 +24,13 @@ public sealed partial class EditorPage : Page
     private VideoFrameReader? _frameReader;
     private PreviewRenderer? _previewRenderer;
     private TimelineMapper? _timelineMapper;
+    private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
     private int _lastRenderedFrameIndex = -1;
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+    private double _audioOffsetSeconds;
 
     public EditorPage()
     {
@@ -40,7 +43,7 @@ public sealed partial class EditorPage : Page
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
 
-        // Sync playhead: when timeline scrubs, update preview
+        // Sync playhead: when timeline scrubs, update preview + audio
         Timeline.RegisterPropertyChangedCallback(
             Controls.TimelineControl.PlayheadPositionProperty,
             (_, _) =>
@@ -48,6 +51,13 @@ public sealed partial class EditorPage : Page
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
                 _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
+                // Play short audio burst at scrub position for editing feedback
+                if (!Preview.IsPlaying)
+                {
+                    var audioPos = AudioPositionForVideo(Timeline.PlayheadPosition);
+                    if (audioPos >= TimeSpan.Zero)
+                        _audioPlayer?.ScrubTo(audioPos);
+                }
             });
 
         // Sync playhead: when preview plays, update timeline
@@ -56,9 +66,70 @@ public sealed partial class EditorPage : Page
             Timeline.PlayheadPosition = Preview.PlayheadPosition;
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
+
+            // Start audio when playhead reaches audio start point
+            // (handles negative offset where audio started after video)
+            if (_audioPlayer is not null && _audioPlayer.IsLoaded
+                && Preview.IsPlaying && !_audioPlayer.IsPlaying)
+            {
+                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
+                if (audioPos >= TimeSpan.Zero)
+                {
+                    _audioPlayer.Seek(audioPos);
+                    _audioPlayer.Play();
+                }
+            }
+        };
+
+        // Sync audio play/pause with preview
+        Preview.IsPlayingChanged += (_, isPlaying) =>
+        {
+            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            if (isPlaying)
+            {
+                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
+                if (audioPos >= TimeSpan.Zero)
+                {
+                    _audioPlayer.Seek(audioPos);
+                    _audioPlayer.Play();
+                }
+                // else: audio hasn't started yet; PlaybackTick will start it
+            }
+            else
+            {
+                _audioPlayer.Pause();
+            }
+        };
+
+        // Re-seek audio when playback loops
+        Preview.PlaybackLooped += (_, _) =>
+        {
+            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            var audioPos = AudioPositionForVideo(TimeSpan.Zero);
+            if (audioPos >= TimeSpan.Zero)
+            {
+                _audioPlayer.Seek(audioPos);
+                if (!_audioPlayer.IsPlaying)
+                    _audioPlayer.Play();
+            }
+            else
+            {
+                // Audio starts later in the video — stop and let tick restart it
+                _audioPlayer.Pause();
+            }
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
+
+        // Audio mute: toggle playback and sync mute state for export
+        Timeline.SystemAudioMuteChanged += (_, isMuted) =>
+        {
+            ReloadAudioPlayer();
+        };
+        Timeline.MicAudioMuteChanged += (_, isMuted) =>
+        {
+            ReloadAudioPlayer();
+        };
 
         ViewModel.ModelReloaded += (_, _) =>
         {
@@ -94,8 +165,10 @@ public sealed partial class EditorPage : Page
     {
         _frameReader?.Dispose();
         _previewRenderer?.Dispose();
+        _audioPlayer?.Dispose();
         _frameReader = null;
         _previewRenderer = null;
+        _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
 
@@ -111,6 +184,9 @@ public sealed partial class EditorPage : Page
         if (_frameReader is null)
             return;
 
+        // Load audio waveform data for timeline visualization
+        await LoadAudioWaveformAsync(project);
+
         // Load mouse data for cursor smoothing + click animations
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -122,6 +198,7 @@ public sealed partial class EditorPage : Page
         if (mouseData is null)
         {
             // No cursor data — just show raw frames
+            Timeline.Refresh();
             _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
             return;
         }
@@ -878,6 +955,169 @@ public sealed partial class EditorPage : Page
         }
         catch { }
         return 1.0f;
+    }
+
+    // --- Audio waveform loading ---
+
+    private async Task LoadAudioWaveformAsync(Project project)
+    {
+        if (project.AudioFilePaths is not { Count: > 0 })
+            return;
+
+        const int targetSamples = 2000;
+
+        try
+        {
+            var validPaths = project.AudioFilePaths.Where(File.Exists).ToList();
+            if (validPaths.Count == 0) return;
+
+            // Identify system vs mic files by naming convention
+            var systemPath = validPaths.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
+            var micPath = validPaths.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+
+            double videoDuration = project.Duration.TotalSeconds;
+
+            // Offset between audio and video start.
+            // Positive: audio pre-roll (WAV starts before video frame 0).
+            // Negative: audio started late (e.g. mic permission dialog delay).
+            double audioOffset = project.AudioToVideoOffsetSeconds;
+
+            var (systemWaveform, micWaveform) = await Task.Run(() =>
+            {
+                float[]? sysWf = null;
+                float[]? micWf = null;
+
+                double sysDuration = 0, micDuration = 0;
+                if (systemPath is not null)
+                {
+                    try { using var p = new NAudio.Wave.AudioFileReader(systemPath); sysDuration = p.TotalTime.TotalSeconds; }
+                    catch { }
+                }
+                if (micPath is not null)
+                {
+                    try { using var p = new NAudio.Wave.AudioFileReader(micPath); micDuration = p.TotalTime.TotalSeconds; }
+                    catch { }
+                }
+
+                // Waveform alignment:
+                // - skipSeconds: how much of the WAV to skip (pre-roll). 0 if offset <= 0.
+                // - leadTime: silence at the start of the timeline before audio begins.
+                //   Non-zero when audio started after video (negative offset).
+                double skipSeconds = Math.Max(0, audioOffset);
+                double leadTime = Math.Max(0, -audioOffset);
+
+                sysWf = BuildAlignedWaveform(systemPath, sysDuration, skipSeconds, leadTime, videoDuration, targetSamples);
+                micWf = BuildAlignedWaveform(micPath, micDuration, skipSeconds, leadTime, videoDuration, targetSamples);
+
+                return (sysWf, micWf);
+            });
+
+            if (systemWaveform is { Length: > 0 })
+                ViewModel.Model.SystemAudioWaveformSamples = systemWaveform;
+            if (micWaveform is { Length: > 0 })
+                ViewModel.Model.MicAudioWaveformSamples = micWaveform;
+
+            // At video time T, the audio file position is T + audioOffset
+            _audioOffsetSeconds = audioOffset;
+            _audioPlayer?.Dispose();
+            _audioPlayer = new AudioPlaybackEngine();
+            _audioPlayer.Load(validPaths);
+        }
+        catch
+        {
+            // Audio waveform generation failed — editor still works without it
+        }
+    }
+
+    /// <summary>
+    /// Converts a video playhead position to the corresponding audio file position.
+    /// Positive _audioOffsetSeconds = pre-roll (skip into WAV).
+    /// Negative _audioOffsetSeconds = audio started late (silence before audio).
+    /// Returns negative TimeSpan when video is before audio start — callers
+    /// must treat negative results as silence (no audio to play).
+    /// </summary>
+    private TimeSpan AudioPositionForVideo(TimeSpan videoPosition)
+    {
+        return videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+    }
+
+    /// <summary>
+    /// Builds a waveform array aligned to the video timeline, handling both
+    /// pre-roll (positive offset → skip WAV start) and late audio (negative
+    /// offset → leading silence on the timeline).
+    /// </summary>
+    private static float[]? BuildAlignedWaveform(
+        string? path, double fileDuration,
+        double skipSeconds, double leadTime,
+        double videoDuration, int targetSamples)
+    {
+        if (path is null || fileDuration <= 0) return null;
+
+        try
+        {
+            // How much of the WAV maps to the video timeline
+            double audioForVideo = Math.Max(0, fileDuration - skipSeconds);
+            // How much of the video timeline this audio covers
+            double coverageDuration = Math.Min(audioForVideo, videoDuration - leadTime);
+            if (coverageDuration <= 0) return null;
+
+            int leadPeaks = (int)(targetSamples * leadTime / videoDuration);
+            int audioPeaks = (int)Math.Min(
+                targetSamples - leadPeaks,
+                Math.Ceiling(targetSamples * coverageDuration / videoDuration));
+            if (audioPeaks < 1) audioPeaks = 1;
+
+            var raw = AudioWaveformGenerator.GenerateWaveform(
+                path, audioPeaks, startSeconds: skipSeconds);
+            var wf = new float[targetSamples];
+            Array.Copy(raw, 0, wf, leadPeaks, Math.Min(raw.Length, audioPeaks));
+            return wf;
+        }
+        catch { return null; }
+    }
+
+    // --- Audio mute support ---
+
+    /// <summary>
+    /// Reloads the audio player with only the unmuted audio tracks.
+    /// </summary>
+    private void ReloadAudioPlayer()
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        _audioPlayer?.Dispose();
+        _audioPlayer = new AudioPlaybackEngine();
+
+        var paths = GetUnmutedAudioPaths(project);
+        if (paths.Count > 0)
+            _audioPlayer.Load(paths);
+    }
+
+    /// <summary>
+    /// Returns audio file paths filtered by current mute state.
+    /// </summary>
+    private List<string> GetUnmutedAudioPaths(Project project)
+    {
+        var model = ViewModel.Model;
+        var paths = new List<string>();
+        if (project.AudioFilePaths is null) return paths;
+
+        foreach (var path in project.AudioFilePaths)
+        {
+            if (!File.Exists(path)) continue;
+            var fileName = Path.GetFileName(path);
+            if (model.IsSystemAudioMuted
+                && fileName.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (model.IsMicAudioMuted
+                && fileName.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
+                continue;
+            paths.Add(path);
+        }
+        return paths;
     }
 
     // --- Export flyout ---

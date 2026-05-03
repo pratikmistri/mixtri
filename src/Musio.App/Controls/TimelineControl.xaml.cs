@@ -105,6 +105,8 @@ public sealed partial class TimelineControl : UserControl
     private Color AudioPlaceholderColor;
     private Color AudioWaveformColor;
     private Color AudioEnvelopeColor;
+    private Color MicWaveformColor;
+    private Color MicEnvelopeColor;
     private Color PlayheadColor;
     private Color CutLineColor;
     private Color CursorTrackBackground;
@@ -161,6 +163,8 @@ public sealed partial class TimelineControl : UserControl
         AudioPlaceholderColor    = GetBrushColor("TimelineAudioPlaceholderBrush", Color.FromArgb(255, 80, 160, 80));
         AudioWaveformColor       = GetBrushColor("TimelineAudioWaveformBrush", Color.FromArgb(220, 80, 180, 80));
         AudioEnvelopeColor       = GetBrushColor("TimelineAudioEnvelopeBrush", Color.FromArgb(100, 120, 220, 120));
+        MicWaveformColor         = GetBrushColor("TimelineMicWaveformBrush", Color.FromArgb(220, 180, 120, 220));
+        MicEnvelopeColor         = GetBrushColor("TimelineMicEnvelopeBrush", Color.FromArgb(100, 200, 140, 255));
         PlayheadColor            = GetBrushColor("TimelinePlayheadBrush", Color.FromArgb(255, 255, 50, 50));
         CutLineColor             = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
         CursorTrackBackground    = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
@@ -179,6 +183,7 @@ public sealed partial class TimelineControl : UserControl
         CursorTrackCanvas?.Invalidate();
         ZoomTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
+        MicTrackCanvas?.Invalidate();
     }
 
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
@@ -266,6 +271,7 @@ public sealed partial class TimelineControl : UserControl
         CursorTrackCanvas?.Invalidate();
         ZoomTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
+        MicTrackCanvas?.Invalidate();
         UpdatePlayheadVisual();
     }
 
@@ -838,9 +844,67 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Audio Track ---
 
-    // --- Audio Track (real waveform rendering) ---
+    /// <summary>Raised when the system audio track mute state changes.</summary>
+    public event EventHandler<bool>? SystemAudioMuteChanged;
+
+    /// <summary>Raised when the mic track mute state changes.</summary>
+    public event EventHandler<bool>? MicAudioMuteChanged;
+
+    private static Color MutedWaveformOverlay => GetMutedWaveformOverlayColor();
+
+    private static Color GetMutedWaveformOverlayColor()
+    {
+        if (Application.Current?.Resources is ResourceDictionary resources)
+        {
+            if (resources.TryGetValue("TextFillColorDisabledBrush", out var disabledBrushObject) &&
+                disabledBrushObject is Microsoft.UI.Xaml.Media.SolidColorBrush disabledBrush)
+            {
+                return disabledBrush.Color;
+            }
+
+            if (resources.TryGetValue("SystemControlDisabledBaseMediumLowBrush", out var legacyBrushObject) &&
+                legacyBrushObject is Microsoft.UI.Xaml.Media.SolidColorBrush legacyBrush)
+            {
+                return legacyBrush.Color;
+            }
+        }
+
+        return Color.FromArgb(160, 30, 30, 30);
+    }
+
+    private void AudioMuteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (Model is null) return;
+        Model.IsSystemAudioMuted = !Model.IsSystemAudioMuted;
+        // E767 = Volume3 (unmuted), E74F = Mute
+        AudioMuteIcon.Glyph = Model.IsSystemAudioMuted ? "\uE74F" : "\uE767";
+        AudioTrackCanvas?.Invalidate();
+        SystemAudioMuteChanged?.Invoke(this, Model.IsSystemAudioMuted);
+    }
+
+    private void MicMuteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (Model is null) return;
+        Model.IsMicAudioMuted = !Model.IsMicAudioMuted;
+        MicMuteIcon.Glyph = Model.IsMicAudioMuted ? "\uE74F" : "\uE767";
+        MicTrackCanvas?.Invalidate();
+        MicAudioMuteChanged?.Invoke(this, Model.IsMicAudioMuted);
+    }
 
     private void AudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        DrawWaveformTrack(sender, args, Model?.SystemAudioWaveformSamples, AudioWaveformColor, AudioEnvelopeColor,
+            Model?.IsSystemAudioMuted == true);
+    }
+
+    private void MicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        DrawWaveformTrack(sender, args, Model?.MicAudioWaveformSamples, MicWaveformColor, MicEnvelopeColor,
+            Model?.IsMicAudioMuted == true);
+    }
+
+    private void DrawWaveformTrack(CanvasControl sender, CanvasDrawEventArgs args,
+        float[]? waveform, Color waveformColor, Color envelopeColor, bool isMuted = false)
     {
         var ds = args.DrawingSession;
         var model = Model;
@@ -856,14 +920,12 @@ public sealed partial class TimelineControl : UserControl
         float x2 = (float)TimeToX(model.TrimEnd > TimeSpan.Zero ? model.TrimEnd : model.Duration);
         float centerY = h / 2f;
 
-        var waveform = model.AudioWaveformSamples;
         if (waveform is not null && waveform.Length > 0)
         {
             float trackWidth = x2 - x1;
             if (trackWidth <= 0) trackWidth = w;
             float barWidth = Math.Max(1f, trackWidth / waveform.Length);
 
-            // Draw filled waveform bars (mirrored around center)
             for (int i = 0; i < waveform.Length; i++)
             {
                 float bx = x1 + (i * trackWidth / waveform.Length);
@@ -872,10 +934,9 @@ public sealed partial class TimelineControl : UserControl
                 float amplitude = Math.Clamp(waveform[i], 0f, 1f);
                 float barHeight = amplitude * (h * 0.45f);
 
-                ds.FillRectangle(bx, centerY - barHeight, barWidth, barHeight * 2, AudioWaveformColor);
+                ds.FillRectangle(bx, centerY - barHeight, barWidth, barHeight * 2, waveformColor);
             }
 
-            // Volume envelope line
             if (waveform.Length > 1)
             {
                 var envBuilder = new CanvasPathBuilder(sender);
@@ -892,19 +953,20 @@ public sealed partial class TimelineControl : UserControl
 
                 envBuilder.EndFigure(CanvasFigureLoop.Open);
                 var envGeometry = CanvasGeometry.CreatePath(envBuilder);
-                ds.DrawGeometry(envGeometry, AudioEnvelopeColor, 1.5f);
+                ds.DrawGeometry(envGeometry, envelopeColor, 1.5f);
             }
         }
         else
         {
-            // Fallback: placeholder bar when no waveform data
             ds.FillRectangle(x1, h * 0.3f, x2 - x1, h * 0.4f, AudioPlaceholderColor);
         }
 
-        // Center line
         ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
 
-        // Playhead
+        // Dim the track if muted
+        if (isMuted)
+            ds.FillRectangle(0, 0, w, h, MutedWaveformOverlay);
+
         float px = (float)TimeToX(PlayheadPosition);
         ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }

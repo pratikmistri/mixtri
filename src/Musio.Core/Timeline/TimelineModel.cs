@@ -35,7 +35,12 @@ public class TimelineModel
     public double MouseToVideoOffsetSeconds { get; set; }
 
     // Audio waveform peak samples (normalized 0..1) for waveform rendering
-    public float[]? AudioWaveformSamples { get; set; }
+    public float[]? SystemAudioWaveformSamples { get; set; }
+    public float[]? MicAudioWaveformSamples { get; set; }
+
+    // Audio track mute state
+    public bool IsSystemAudioMuted { get; set; }
+    public bool IsMicAudioMuted { get; set; }
 
     // Get the effective (trimmed) duration
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;

@@ -178,7 +178,8 @@
                                     <DataTemplate x:DataType="vm:WindowItem">
                                         <StackPanel Orientation="Horizontal" Spacing="10" Padding="2">
                                             <Grid Width="20" Height="20" VerticalAlignment="Center">
-                                                <FontIcon Glyph="&#xE737;" FontSize="16" />
+                                                <FontIcon Glyph="&#xE737;" FontSize="16"
+                                                          Visibility="{x:Bind FallbackIconVisibility, Mode=OneWay}" />
                                                 <Image Source="{x:Bind Icon, Mode=OneWay}" Width="20" Height="20" />
                                             </Grid>
                                             <StackPanel Spacing="1" VerticalAlignment="Center">

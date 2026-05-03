@@ -43,8 +43,12 @@ public class Project
     public float DpiScale { get; set; }
 
     /// <summary>
-    /// How the recording was captured. Used to decide whether background
-    /// styling (padding, shadow, rounded corners) should be applied.
+    /// Time offset in seconds between audio recording start and video frame 0.
+    /// Positive: audio started before video (pre-roll to skip in WAV file).
+    /// Negative: audio started after video (leading silence on timeline,
+    /// e.g. mic permission dialog delayed audio capture).
+    /// At video time T, the audio file position is T + this offset.
     /// </summary>
+    public double AudioToVideoOffsetSeconds { get; set; }
     public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;
 }

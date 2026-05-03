@@ -76,8 +76,10 @@ public class RecordingSession : IDisposable
     private int _captureWidth;
     private int _captureHeight;
     private long _videoStartTicks;
+    private long _audioStartTicks;
     private Rect? _physicalCropRect;
     private float _recordingDpiScale;
+    private volatile bool _captureGateOpen;
 
     // Absolute Stopwatch timestamp when the first video frame was actually
     // emitted by the capture API. This is the true video time 0 — any
@@ -96,6 +98,23 @@ public class RecordingSession : IDisposable
     public int Fps => _config.Fps;
     public bool SystemAudioEnabled => _config.SystemAudioEnabled;
     public bool MicEnabled => _config.MicEnabled;
+
+    /// <summary>
+    /// Opens the capture gate so frames and audio begin recording.
+    /// Call this after the recording overlay is visible to avoid
+    /// capturing startup frames (minimize animation, overlay creation).
+    /// </summary>
+    public void OpenCaptureGate()
+    {
+        _audioEngine?.OpenGate();
+        _captureGateOpen = true;
+
+        // Reset timing origins so offsets are measured from when
+        // actual recording content begins, not from engine start.
+        _videoStartTicks = Stopwatch.GetTimestamp();
+        _audioStartTicks = Stopwatch.GetTimestamp();
+        _elapsedWatch.Restart();
+    }
 
     public RecordingState State
     {
@@ -206,6 +225,7 @@ public class RecordingSession : IDisposable
             // which is when StartCapture() was called (a few ms after mouse start).
             _videoStartTicks = Stopwatch.GetTimestamp();
 
+            _audioStartTicks = Stopwatch.GetTimestamp();
             _audioEngine?.StartRecording(_sessionFolder);
 
             if (_webcamEngine is not null)
@@ -299,6 +319,22 @@ public class RecordingSession : IDisposable
                     audioFilePaths.Add(micPath);
             }
 
+            // Compute audio→video offset from the first actual audio data callback
+            // to the first actual video frame. Positive = audio started before video
+            // (pre-roll to skip). Negative = audio started after video (leading
+            // silence on the timeline, e.g. mic permission dialog delay).
+            long videoOriginTicks = _firstVideoFrameTicks != 0
+                ? _firstVideoFrameTicks
+                : _videoStartTicks;
+            long audioOriginTicks = _audioEngine?.FirstDataTicks ?? _audioStartTicks;
+            if (audioOriginTicks == 0) audioOriginTicks = _audioStartTicks;
+            double audioToVideoOffset =
+                (double)(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency;
+
+            Debug.WriteLine(
+                $"[RecordingSession] Audio offset: {audioToVideoOffset:F4}s " +
+                $"(positive=pre-roll, negative=audio started late)");
+
             // Compute mouse→video time offset from the first ACTUAL frame,
             // not from when StartCapture() was called. Capture APIs often have
             // startup latency (frame pool creation, first vsync, etc.) that
@@ -307,14 +343,10 @@ public class RecordingSession : IDisposable
             if (_mouseRecorder is not null)
             {
                 var mouseData = _mouseRecorder.GetRecordedData();
-                long videoOriginTicks = _firstVideoFrameTicks != 0
-                    ? _firstVideoFrameTicks
-                    : _videoStartTicks; // fallback if no frames were captured
                 mouseToVideoOffset = (double)(videoOriginTicks - mouseData.StartTimestampTicks)
                     / Stopwatch.Frequency;
                 Debug.WriteLine(
-                    $"[RecordingSession] Mouse→video offset: {mouseToVideoOffset:F4}s " +
-                    $"(capture startup latency: {(_firstVideoFrameTicks - _videoStartTicks) / (double)Stopwatch.Frequency:F4}s)");
+                    $"[RecordingSession] Mouse→video offset: {mouseToVideoOffset:F4}s");
             }
 
             // Build project — use CFR duration and configured FPS for consistent timing.
@@ -335,6 +367,7 @@ public class RecordingSession : IDisposable
                 Height = _captureHeight,
                 Fps = _config.Fps,
                 MouseToVideoOffsetSeconds = mouseToVideoOffset,
+                AudioToVideoOffsetSeconds = audioToVideoOffset,
                 CropOffsetX = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.X : 0,
                 CropOffsetY = _physicalCropRect.HasValue ? (int)_physicalCropRect.Value.Y : 0,
                 DpiScale = _recordingDpiScale,
@@ -399,6 +432,13 @@ public class RecordingSession : IDisposable
 
     private void OnFrameCaptured(object? sender, CapturedFrameEventArgs e)
     {
+        // Discard frames until the recording overlay is visible.
+        // This eliminates the startup delta (minimize animation,
+        // overlay window creation) between capture start and
+        // the moment the user sees the recording widget.
+        if (!_captureGateOpen)
+            return;
+
         try
         {
             // Lazily create the video writer once we know capture dimensions
