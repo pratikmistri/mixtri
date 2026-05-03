@@ -32,8 +32,12 @@ public record BackgroundStyle
 /// Renders background, padding, corner radius, shadow, and border around a captured screen frame.
 /// Operates purely on a caller-provided <see cref="CanvasDrawingSession"/>.
 /// </summary>
-public sealed class BackgroundCompositor
+public sealed class BackgroundCompositor : IDisposable
 {
+    private CanvasBitmap? _cachedBackgroundImage;
+    private string? _cachedBackgroundPath;
+    private CanvasDevice? _cachedDevice;
+    private bool _disposed;
     /// <summary>
     /// Computes the total output dimensions including padding on all sides.
     /// </summary>
@@ -81,7 +85,7 @@ public sealed class BackgroundCompositor
         }
     }
 
-    private static void DrawBackground(
+    private void DrawBackground(
         CanvasDrawingSession session,
         CanvasBitmap screenFrame,
         float w, float h,
@@ -131,7 +135,7 @@ public sealed class BackgroundCompositor
         session.FillRectangle(0, 0, w, h, brush);
     }
 
-    private static void DrawImageBackground(
+    private void DrawImageBackground(
         CanvasDrawingSession session, float w, float h, BackgroundStyle style)
     {
         if (string.IsNullOrEmpty(style.BackgroundImagePath))
@@ -141,9 +145,18 @@ public sealed class BackgroundCompositor
             return;
         }
 
-        // Load image synchronously — callers should pre-validate the path
-        var image = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).GetAwaiter().GetResult();
-        var srcSize = image.SizeInPixels;
+        // Cache the wallpaper bitmap; reload if path or device changed (device-lost recovery)
+        if (_cachedBackgroundImage is null
+            || _cachedBackgroundPath != style.BackgroundImagePath
+            || _cachedDevice != session.Device)
+        {
+            _cachedBackgroundImage?.Dispose();
+            _cachedBackgroundImage = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).GetAwaiter().GetResult();
+            _cachedBackgroundPath = style.BackgroundImagePath;
+            _cachedDevice = session.Device;
+        }
+
+        var srcSize = _cachedBackgroundImage.SizeInPixels;
 
         // Scale-to-fill: compute scale so image covers entire output
         float scaleX = w / srcSize.Width;
@@ -154,7 +167,7 @@ public sealed class BackgroundCompositor
         float drawX = (w - drawW) / 2f;
         float drawY = (h - drawH) / 2f;
 
-        session.DrawImage(image, new Windows.Foundation.Rect(drawX, drawY, drawW, drawH));
+        session.DrawImage(_cachedBackgroundImage, new Windows.Foundation.Rect(drawX, drawY, drawW, drawH));
     }
 
     private static void DrawBlurBackground(
@@ -255,5 +268,17 @@ public sealed class BackgroundCompositor
             radius,
             borderColor,
             style.BorderWidth);
+    }
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            _cachedBackgroundImage?.Dispose();
+            _cachedBackgroundImage = null;
+            _cachedBackgroundPath = null;
+            _cachedDevice = null;
+            _disposed = true;
+        }
     }
 }

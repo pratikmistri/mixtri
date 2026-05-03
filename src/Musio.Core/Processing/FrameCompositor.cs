@@ -64,6 +64,9 @@ public class FrameCompositor : IDisposable
     // Reusable scratch buffer for CropSourceFrame to avoid per-frame GPU allocation
     private CanvasRenderTarget? _croppedBuffer;
 
+    // Reusable buffer for post-composite zoom (used when padding > 0)
+    private CanvasRenderTarget? _compositeBuffer;
+
     // Tick value corresponding to video time 0, for rebasing keyboard events.
     private long _videoStartTick;
 
@@ -367,6 +370,31 @@ public class FrameCompositor : IDisposable
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
         }
 
+        float padding = _config.Background.Padding;
+
+        // Use post-composite zoom only when padding AND zoom are both active.
+        // This avoids the extra buffer copy for the vast majority of frames
+        // where zoom is 1.0, keeping export performance unchanged.
+        if (padding > 0 && zoomState.ZoomLevel > 1.01f)
+            return ComposeFramePostCompositeZoom(
+                sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
+
+        // No padding or no zoom — direct composition (fast path)
+        return ComposeFrameDirect(
+            sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
+    }
+
+    /// <summary>
+    /// Original composition path: zoom crops the source frame directly,
+    /// padding is applied afterward at constant size. Used when padding = 0.
+    /// </summary>
+    private CanvasRenderTarget ComposeFrameDirect(
+        CanvasBitmap sourceFrame,
+        ZoomState zoomState,
+        SmoothedPosition cursorPos,
+        int cursorIndex,
+        double timeSeconds)
+    {
         // Adjust viewport for target aspect ratio (center-crop within viewport)
         var viewport = ComputeEffectiveViewport(zoomState);
 
@@ -403,6 +431,97 @@ public class FrameCompositor : IDisposable
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Post-composite zoom path: compose everything at 1x into a buffer, then
+    /// crop+scale the buffer according to the zoom state. This makes the zoom
+    /// operate on the entire framed output (content + padding), so the padding
+    /// scales proportionally and the device-frame illusion is maintained.
+    /// Webcam, keyboard, and subtitle overlays are rendered after the zoom so
+    /// they remain fixed on screen.
+    /// </summary>
+    private CanvasRenderTarget ComposeFramePostCompositeZoom(
+        CanvasBitmap sourceFrame,
+        ZoomState zoomState,
+        SmoothedPosition cursorPos,
+        int cursorIndex,
+        double timeSeconds)
+    {
+        float padding = _config.Background.Padding;
+
+        // 1. Compute 1x viewport (no zoom, aspect-ratio adjusted)
+        var noZoomState = _zoomEngine.ComputeViewportForCenter(
+            1.0f, _sourceWidth / 2f, _sourceHeight / 2f);
+        var viewport1x = ComputeEffectiveViewport(noZoomState);
+
+        // 2. Crop source at 1x
+        var croppedFrame = CropSourceFrame(sourceFrame, viewport1x);
+
+        // 3. Render 1x composite: background + content + cursor
+        EnsureCompositeBuffer();
+        using (var ds = _compositeBuffer!.CreateDrawingSession())
+        {
+            ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+            _bgCompositor.CompositeFrame(
+                ds, croppedFrame, OutputWidth, OutputHeight, _config.Background);
+            RenderCursorOverlay(ds, cursorPos, viewport1x, timeSeconds, cursorIndex);
+        }
+
+        // 4. Compute zoom viewport in composite space
+        float cx_comp = (float)((zoomState.CenterX - viewport1x.X)
+            * _contentWidth / viewport1x.Width + padding);
+        float cy_comp = (float)((zoomState.CenterY - viewport1x.Y)
+            * _contentHeight / viewport1x.Height + padding);
+        float cropW = OutputWidth / zoomState.ZoomLevel;
+        float cropH = OutputHeight / zoomState.ZoomLevel;
+        float cropX = Math.Clamp(
+            cx_comp - cropW / 2f, 0f, Math.Max(0f, OutputWidth - cropW));
+        float cropY = Math.Clamp(
+            cy_comp - cropH / 2f, 0f, Math.Max(0f, OutputHeight - cropH));
+
+        // 5. Draw zoomed composite + fixed overlays
+        var output = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+        using (var ds = output.CreateDrawingSession())
+        {
+            ds.DrawImage(_compositeBuffer,
+                new Rect(0, 0, OutputWidth, OutputHeight),
+                new Rect(cropX, cropY, cropW, cropH));
+
+            // Webcam overlay (fixed position, not zoomed)
+            if (_webcamCompositor is not null && _webcamFrame is not null)
+            {
+                _webcamCompositor.RenderWebcam(ds, _webcamFrame, OutputWidth, OutputHeight);
+            }
+
+            // Keyboard shortcut overlay (fixed position, not zoomed)
+            if (_keyboardRenderer is not null && _keyboardEvents is not null)
+            {
+                _keyboardRenderer.RenderKeyOverlay(
+                    ds, _keyboardEvents, timeSeconds, _tickFrequency,
+                    OutputWidth, OutputHeight, _videoStartTick);
+            }
+
+            // Subtitle overlay (fixed position, not zoomed)
+            _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
+        }
+
+        return output;
+    }
+
+    /// <summary>
+    /// Ensures the composite buffer for post-composite zoom is allocated
+    /// at the current output dimensions.
+    /// </summary>
+    private void EnsureCompositeBuffer()
+    {
+        if (_compositeBuffer is null
+            || _compositeBuffer.SizeInPixels.Width != (uint)OutputWidth
+            || _compositeBuffer.SizeInPixels.Height != (uint)OutputHeight)
+        {
+            _compositeBuffer?.Dispose();
+            _compositeBuffer = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+        }
     }
 
     #region Aspect Ratio
@@ -637,6 +756,9 @@ public class FrameCompositor : IDisposable
         {
             _croppedBuffer?.Dispose();
             _croppedBuffer = null;
+            _compositeBuffer?.Dispose();
+            _compositeBuffer = null;
+            _bgCompositor.Dispose();
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

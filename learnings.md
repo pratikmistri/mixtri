@@ -761,3 +761,41 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / known limitations:**
 - The original first-match strategy returned the earliest active segment, which meant A's zoom-out always won over B's zoom-in during overlaps, causing a snap when A ended.
 - Tests run with `dotnet test --no-build -c Debug /p:Platform=x64` after building with VS MSBuild.
+
+---
+
+## Zoom + Padding — Post-Composite Zoom
+
+**Feature/area:** FrameCompositor zoom behavior when background padding is applied.
+
+**Approaches tried:**
+
+1. **Post-composite zoom (Approach A)** — Compose the frame at 1x (full source + background + cursor) into an intermediate buffer, then crop+scale the buffer according to the zoom state. This makes zoom operate on the entire framed output (content + padding), so padding scales proportionally. ✅
+2. **Pre-compute adjusted geometry (Approach B, not implemented)** — Would compute effective padding and source viewport mathematically for each zoom level. Better source quality but significantly more complex math, asymmetric padding, and harder to maintain.
+
+**What worked:**
+- When `padding > 0`, `ComposeFrame` now delegates to `ComposeFramePostCompositeZoom` which renders at 1x into a reusable `_compositeBuffer`, then applies the zoom as a final crop+scale. Zoom center is converted from source→composite space: `(centerX - viewport1x.X) * contentW / viewport1x.Width + padding`.
+- When `padding == 0`, the original `ComposeFrameDirect` path is used (no extra buffer overhead).
+- Always using post-composite path when padding > 0 (even at zoom=1) avoids a visual pop at the zoom threshold — at zoom=1, crop rect = full output, so it's effectively a no-op.
+- Webcam, keyboard, and subtitle overlays are rendered AFTER the zoom so they stay fixed on screen. Cursor is composited before zoom so it scales with content.
+
+**What didn't work / known limitations:**
+- Slight quality softness at high zoom levels (>3x) because the source is rasterized at 1x then upscaled. Acceptable for typical zoom ranges (1.5–3x).
+- Initially used post-composite path for ALL frames when padding > 0 (even zoom=1). This doubled render cost for every frame and made export extremely slow. Fixed by only activating post-composite path when `zoomLevel > 1.01`.
+
+---
+
+## Wallpaper Background — Per-Frame Image Load Fix
+
+**Feature/area:** BackgroundCompositor wallpaper/image background rendering.
+
+**Approaches tried:**
+
+1. **Cache the loaded `CanvasBitmap` in `BackgroundCompositor`** — `DrawImageBackground` was loading the wallpaper from disk via `CanvasBitmap.LoadAsync` on EVERY frame. Added `_cachedBackgroundImage` and `_cachedBackgroundPath` fields; only reload when the path changes. Made `BackgroundCompositor` implement `IDisposable` to clean up the cached bitmap. ✅
+
+**What worked:**
+- Instance-level caching of the wallpaper bitmap with path-change detection. Image loads from disk once, reused for all subsequent frames.
+- `BackgroundCompositor` now implements `IDisposable`; disposed by `FrameCompositor.Dispose()`.
+
+**What didn't work:**
+- The original code loaded the image synchronously from disk every frame (`CanvasBitmap.LoadAsync(...).GetAwaiter().GetResult()`), causing choppy preview playback and extremely slow export with wallpaper backgrounds.
