@@ -412,6 +412,26 @@ public partial class ExportViewModel : ObservableObject
             ProgressStatus = $"{EstimatedTimeRemaining} remaining";
         });
 
+        // Apply audio mute state: temporarily filter muted tracks
+        var timeline = ProjectService.Instance.CurrentTimeline;
+        var originalAudioPaths = CurrentProject.AudioFilePaths;
+        if (timeline is not null)
+        {
+            CurrentProject.AudioFilePaths = originalAudioPaths
+                .Where(p =>
+                {
+                    var fn = Path.GetFileName(p);
+                    if (timeline.IsSystemAudioMuted
+                        && fn.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    if (timeline.IsMicAudioMuted
+                        && fn.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    return true;
+                })
+                .ToList();
+        }
+
         try
         {
             var settings = new ExportSettings
@@ -430,7 +450,7 @@ public partial class ExportViewModel : ObservableObject
                 settings,
                 CompositionConfig,
                 outputFolder,
-                timeline: ProjectService.Instance.CurrentTimeline,
+                timeline: timeline,
                 progress: exportProgress,
                 ct: _exportCts.Token);
 
@@ -463,6 +483,8 @@ public partial class ExportViewModel : ObservableObject
         }
         finally
         {
+            // Restore original audio paths
+            CurrentProject.AudioFilePaths = originalAudioPaths;
             IsExporting = false;
             _exportCts?.Dispose();
             _exportCts = null;

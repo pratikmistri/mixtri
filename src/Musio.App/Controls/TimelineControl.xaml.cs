@@ -844,18 +844,47 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Audio Track ---
 
+    /// <summary>Raised when the system audio track mute state changes.</summary>
+    public event EventHandler<bool>? SystemAudioMuteChanged;
+
+    /// <summary>Raised when the mic track mute state changes.</summary>
+    public event EventHandler<bool>? MicAudioMuteChanged;
+
+    private static readonly Color MutedWaveformOverlay = Color.FromArgb(160, 30, 30, 30);
+
+    private void AudioMuteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (Model is null) return;
+        Model.IsSystemAudioMuted = !Model.IsSystemAudioMuted;
+        // E767 = Volume3 (unmuted), E74F = Mute
+        AudioMuteIcon.Glyph = Model.IsSystemAudioMuted ? "\uE74F" : "\uE767";
+        AudioTrackCanvas?.Invalidate();
+        SystemAudioMuteChanged?.Invoke(this, Model.IsSystemAudioMuted);
+    }
+
+    private void MicMuteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (Model is null) return;
+        Model.IsMicAudioMuted = !Model.IsMicAudioMuted;
+        MicMuteIcon.Glyph = Model.IsMicAudioMuted ? "\uE74F" : "\uE767";
+        MicTrackCanvas?.Invalidate();
+        MicAudioMuteChanged?.Invoke(this, Model.IsMicAudioMuted);
+    }
+
     private void AudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
-        DrawWaveformTrack(sender, args, Model?.SystemAudioWaveformSamples, AudioWaveformColor, AudioEnvelopeColor);
+        DrawWaveformTrack(sender, args, Model?.SystemAudioWaveformSamples, AudioWaveformColor, AudioEnvelopeColor,
+            Model?.IsSystemAudioMuted == true);
     }
 
     private void MicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
-        DrawWaveformTrack(sender, args, Model?.MicAudioWaveformSamples, MicWaveformColor, MicEnvelopeColor);
+        DrawWaveformTrack(sender, args, Model?.MicAudioWaveformSamples, MicWaveformColor, MicEnvelopeColor,
+            Model?.IsMicAudioMuted == true);
     }
 
     private void DrawWaveformTrack(CanvasControl sender, CanvasDrawEventArgs args,
-        float[]? waveform, Color waveformColor, Color envelopeColor)
+        float[]? waveform, Color waveformColor, Color envelopeColor, bool isMuted = false)
     {
         var ds = args.DrawingSession;
         var model = Model;
@@ -913,6 +942,10 @@ public sealed partial class TimelineControl : UserControl
         }
 
         ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
+
+        // Dim the track if muted
+        if (isMuted)
+            ds.FillRectangle(0, 0, w, h, MutedWaveformOverlay);
 
         float px = (float)TimeToX(PlayheadPosition);
         ds.DrawLine(px, 0, px, h, PlayheadColor, 2);

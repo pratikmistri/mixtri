@@ -121,6 +121,16 @@ public sealed partial class EditorPage : Page
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
 
+        // Audio mute: toggle playback and sync mute state for export
+        Timeline.SystemAudioMuteChanged += (_, isMuted) =>
+        {
+            ReloadAudioPlayer();
+        };
+        Timeline.MicAudioMuteChanged += (_, isMuted) =>
+        {
+            ReloadAudioPlayer();
+        };
+
         ViewModel.ModelReloaded += (_, _) =>
         {
             DispatcherQueue.TryEnqueue(() =>
@@ -1066,6 +1076,48 @@ public sealed partial class EditorPage : Page
             return wf;
         }
         catch { return null; }
+    }
+
+    // --- Audio mute support ---
+
+    /// <summary>
+    /// Reloads the audio player with only the unmuted audio tracks.
+    /// </summary>
+    private void ReloadAudioPlayer()
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        _audioPlayer?.Dispose();
+        _audioPlayer = new AudioPlaybackEngine();
+
+        var paths = GetUnmutedAudioPaths(project);
+        if (paths.Count > 0)
+            _audioPlayer.Load(paths);
+    }
+
+    /// <summary>
+    /// Returns audio file paths filtered by current mute state.
+    /// </summary>
+    private List<string> GetUnmutedAudioPaths(Project project)
+    {
+        var model = ViewModel.Model;
+        var paths = new List<string>();
+        if (project.AudioFilePaths is null) return paths;
+
+        foreach (var path in project.AudioFilePaths)
+        {
+            if (!File.Exists(path)) continue;
+            var fileName = Path.GetFileName(path);
+            if (model.IsSystemAudioMuted
+                && fileName.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (model.IsMicAudioMuted
+                && fileName.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
+                continue;
+            paths.Add(path);
+        }
+        return paths;
     }
 
     // --- Export flyout ---

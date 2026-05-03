@@ -42,11 +42,31 @@
         <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
             <TextBlock Text="Zoom" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Audio" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+        <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="2,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                <Button x:Name="AudioMuteButton"
+                        Click="AudioMuteButton_Click"
+                        Padding="2" MinWidth="0" MinHeight="0"
+                        Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Mute/unmute system audio">
+                    <FontIcon x:Name="AudioMuteIcon" Glyph="&#xE767;" FontSize="12"
+                              Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" />
+                </Button>
+                <TextBlock Text="Audio" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+            </StackPanel>
         </Border>
-        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Mic" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="2,0">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                <Button x:Name="MicMuteButton"
+                        Click="MicMuteButton_Click"
+                        Padding="2" MinWidth="0" MinHeight="0"
+                        Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Mute/unmute microphone">
+                    <FontIcon x:Name="MicMuteIcon" Glyph="&#xE767;" FontSize="12"
+                              Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" />
+                </Button>
+                <TextBlock Text="Mic" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+            </StackPanel>
         </Border>
 
         <!-- Canvases -->

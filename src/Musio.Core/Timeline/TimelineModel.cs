@@ -38,6 +38,10 @@ public class TimelineModel
     public float[]? SystemAudioWaveformSamples { get; set; }
     public float[]? MicAudioWaveformSamples { get; set; }
 
+    // Audio track mute state
+    public bool IsSystemAudioMuted { get; set; }
+    public bool IsMicAudioMuted { get; set; }
+
     // Get the effective (trimmed) duration
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
 }
