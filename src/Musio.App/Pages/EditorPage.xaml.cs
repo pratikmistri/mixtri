@@ -1738,7 +1738,7 @@ public sealed partial class EditorPage : Page
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
-        SyncWebcamShapeUI(style.Shape);
+        SyncWebcamOverlayUI(style);
         UpdateWebcamOverlayPosition();
     }
 
@@ -1850,17 +1850,12 @@ public sealed partial class EditorPage : Page
         ProjectService.Instance.CurrentComposition = config;
     }
 
-    private void WebcamShape_Click(object sender, RoutedEventArgs e)
+    private void WebcamShapeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is not RadioButton rb || rb.Tag is not string tag) return;
+        if (_suppressWebcamEvents) return;
+        if (WebcamShapeCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
 
-        var shape = tag switch
-        {
-            "Circle" => WebcamShape.Circle,
-            "RoundedRect" => WebcamShape.RoundedRect,
-            "Rectangle" => WebcamShape.Rectangle,
-            _ => WebcamShape.Circle,
-        };
+        var shape = tag == "RoundedRect" ? WebcamShape.RoundedRect : WebcamShape.Circle;
 
         var config = ProjectService.Instance.CurrentComposition;
         if (config?.WebcamStyle is null) return;
@@ -1869,18 +1864,32 @@ public sealed partial class EditorPage : Page
         config = config with { WebcamStyle = newStyle };
         ProjectService.Instance.CurrentComposition = config;
 
-        SyncWebcamShapeUI(shape);
-
-        // Live-update compositor and re-render
         _previewRenderer?.UpdateWebcamStyle(newStyle);
         _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
     }
 
-    private void SyncWebcamShapeUI(WebcamShape shape)
+    private void WebcamBorderSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
-        ShapeCircle.IsChecked = shape == WebcamShape.Circle;
-        ShapeSquare.IsChecked = shape == WebcamShape.RoundedRect;
+        if (_suppressWebcamEvents) return;
 
-        WebcamShapeText.Text = shape == WebcamShape.RoundedRect ? "Square" : "Circle";
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { BorderWidth = (float)e.NewValue };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private bool _suppressWebcamEvents;
+
+    private void SyncWebcamOverlayUI(WebcamOverlayStyle style)
+    {
+        _suppressWebcamEvents = true;
+        WebcamShapeCombo.SelectedIndex = style.Shape == WebcamShape.RoundedRect ? 1 : 0;
+        WebcamBorderSlider.Value = style.BorderWidth;
+        _suppressWebcamEvents = false;
     }
 }
