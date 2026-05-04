@@ -13,7 +13,7 @@ public record WebcamOverlayStyle
 {
     public WebcamShape Shape { get; init; } = WebcamShape.Circle;
     public WebcamPosition Position { get; init; } = WebcamPosition.BottomRight;
-    public float Size { get; init; } = 150f;
+    public float Size { get; init; } = 300f;
     public float Margin { get; init; } = 20f;
     public float BorderWidth { get; init; } = 3f;
     public string BorderColor { get; init; } = "#FFFFFF";
