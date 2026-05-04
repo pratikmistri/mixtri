@@ -54,6 +54,7 @@ public sealed partial class EditorPage : Page
     private float _webcamDragStartNormX;
     private float _webcamDragStartNormY;
     private float _webcamDragStartNormSize;
+    private int _webcamResizeAnchor; // 0=TL, 1=TR, 2=BL, 3=BR
     private bool _hasWebcamOverlay;
 
     public EditorPage()
@@ -1750,6 +1751,26 @@ public sealed partial class EditorPage : Page
         Canvas.SetTop(WebcamOverlayRect, screenY);
         WebcamOverlayRect.Width = screenSize;
         WebcamOverlayRect.Height = screenSize;
+
+        // Position 4 corner resize handles
+        double hs = 16; // handle size
+        double hh = hs / 2;
+        PositionHandle(HandleTL, screenX - hh, screenY - hh);
+        PositionHandle(HandleTR, screenX + screenSize - hh, screenY - hh);
+        PositionHandle(HandleBL, screenX - hh, screenY + screenSize - hh);
+        PositionHandle(HandleBR, screenX + screenSize - hh, screenY + screenSize - hh);
+
+        var vis = WebcamOverlayRect.Visibility;
+        HandleTL.Visibility = vis;
+        HandleTR.Visibility = vis;
+        HandleBL.Visibility = vis;
+        HandleBR.Visibility = vis;
+    }
+
+    private static void PositionHandle(FrameworkElement handle, double x, double y)
+    {
+        Canvas.SetLeft(handle, x);
+        Canvas.SetTop(handle, y);
     }
 
     private void WebcamOverlay_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -1762,27 +1783,31 @@ public sealed partial class EditorPage : Page
     {
         if (!_hasWebcamOverlay) return;
 
-        var pos = e.GetCurrentPoint(WebcamOverlayRect).Position;
-        double w = WebcamOverlayRect.ActualWidth;
-        double h = WebcamOverlayRect.ActualHeight;
+        // Border click = drag
+        _webcamDragging = true;
+        _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        _webcamDragStartNormX = _webcamNormX;
+        _webcamDragStartNormY = _webcamNormY;
 
-        // Bottom-right 20px corner = resize; everywhere else = drag
-        double handleZone = 20;
-        if (pos.X >= w - handleZone && pos.Y >= h - handleZone)
-        {
-            _webcamResizing = true;
-            _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
-            _webcamDragStartNormSize = _webcamNormSize;
-        }
-        else
-        {
-            _webcamDragging = true;
-            _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
-            _webcamDragStartNormX = _webcamNormX;
-            _webcamDragStartNormY = _webcamNormY;
-        }
+        ((UIElement)sender).CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
 
-        WebcamOverlayRect.CapturePointer(e.Pointer);
+    private void WebcamHandle_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_hasWebcamOverlay) return;
+
+        // Handle click = resize
+        _webcamResizing = true;
+        _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        _webcamDragStartNormSize = _webcamNormSize;
+        _webcamDragStartNormX = _webcamNormX;
+        _webcamDragStartNormY = _webcamNormY;
+
+        // Remember which corner for anchor logic
+        _webcamResizeAnchor = sender == HandleTL ? 0 : sender == HandleTR ? 1 : sender == HandleBL ? 2 : 3;
+
+        ((UIElement)sender).CapturePointer(e.Pointer);
         e.Handled = true;
     }
 
@@ -1810,12 +1835,42 @@ public sealed partial class EditorPage : Page
         {
             double dx = pos.X - _webcamDragStart.X;
             double dy = pos.Y - _webcamDragStart.Y;
-            double delta = Math.Max(dx, dy);
+
+            // Determine delta based on which corner is being dragged
+            // TL(0): grow = drag up-left (negative dx/dy), BR(3): grow = drag down-right
+            double delta = _webcamResizeAnchor switch
+            {
+                0 => -Math.Max(dx, dy),    // TL: shrink when dragging right/down
+                1 => Math.Max(-dx, dy),    // TR: grow when dragging right or down
+                2 => Math.Max(dx, -dy),    // BL: grow when dragging left or down
+                _ => Math.Max(dx, dy),     // BR: grow when dragging right/down
+            };
 
             float minSize = 50f / (float)layout.Width;
             float maxSize = 0.5f;
-            _webcamNormSize = (float)Math.Clamp(
+            float newSize = (float)Math.Clamp(
                 _webcamDragStartNormSize + delta / layout.Width, minSize, maxSize);
+            float sizeDiff = newSize - _webcamDragStartNormSize;
+            float sizeDiffY = sizeDiff * (float)(layout.Width / layout.Height);
+
+            _webcamNormSize = newSize;
+
+            // Anchor the opposite corner by shifting position
+            switch (_webcamResizeAnchor)
+            {
+                case 0: // TL dragged → anchor BR
+                    _webcamNormX = _webcamDragStartNormX - sizeDiff;
+                    _webcamNormY = _webcamDragStartNormY - sizeDiffY;
+                    break;
+                case 1: // TR dragged → anchor BL
+                    _webcamNormY = _webcamDragStartNormY - sizeDiffY;
+                    break;
+                case 2: // BL dragged → anchor TR
+                    _webcamNormX = _webcamDragStartNormX - sizeDiff;
+                    break;
+                case 3: // BR dragged → anchor TL (position stays)
+                    break;
+            }
 
             UpdateWebcamOverlayPosition();
         }
@@ -1829,7 +1884,7 @@ public sealed partial class EditorPage : Page
         bool changed = _webcamDragging || _webcamResizing;
         _webcamDragging = false;
         _webcamResizing = false;
-        WebcamOverlayRect.ReleasePointerCapture(e.Pointer);
+        ((UIElement)sender).ReleasePointerCapture(e.Pointer);
         e.Handled = true;
 
         if (changed)

@@ -54,25 +54,25 @@
             <!-- Webcam position/resize overlay -->
             <Canvas x:Name="WebcamOverlayCanvas"
                     SizeChanged="WebcamOverlay_SizeChanged">
+                <!-- Drag area (full webcam rect, transparent fill for hit-test) -->
                 <Border x:Name="WebcamOverlayRect"
                         Background="Transparent"
-                        BorderBrush="#80FFFFFF"
-                        BorderThickness="2"
+                        BorderBrush="#CC00D4FF"
+                        BorderThickness="3"
                         CornerRadius="999"
                         Visibility="Collapsed"
                         PointerPressed="WebcamOverlay_PointerPressed"
                         PointerMoved="WebcamOverlay_PointerMoved"
-                        PointerReleased="WebcamOverlay_PointerReleased">
-                    <!-- Resize handle (bottom-right corner) -->
-                    <Border x:Name="WebcamResizeHandle"
-                            Width="14" Height="14"
-                            Background="White"
-                            CornerRadius="7"
-                            HorizontalAlignment="Right"
-                            VerticalAlignment="Bottom"
-                            Margin="0,0,-4,-4"
-                            IsHitTestVisible="False" />
-                </Border>
+                        PointerReleased="WebcamOverlay_PointerReleased" />
+                <!-- Resize handles (4 corners, positioned in code) -->
+                <Ellipse x:Name="HandleTL" Width="16" Height="16" Fill="#CC00D4FF" Stroke="White" StrokeThickness="2" Visibility="Collapsed"
+                         PointerPressed="WebcamHandle_PointerPressed" PointerMoved="WebcamOverlay_PointerMoved" PointerReleased="WebcamOverlay_PointerReleased" />
+                <Ellipse x:Name="HandleTR" Width="16" Height="16" Fill="#CC00D4FF" Stroke="White" StrokeThickness="2" Visibility="Collapsed"
+                         PointerPressed="WebcamHandle_PointerPressed" PointerMoved="WebcamOverlay_PointerMoved" PointerReleased="WebcamOverlay_PointerReleased" />
+                <Ellipse x:Name="HandleBL" Width="16" Height="16" Fill="#CC00D4FF" Stroke="White" StrokeThickness="2" Visibility="Collapsed"
+                         PointerPressed="WebcamHandle_PointerPressed" PointerMoved="WebcamOverlay_PointerMoved" PointerReleased="WebcamOverlay_PointerReleased" />
+                <Ellipse x:Name="HandleBR" Width="16" Height="16" Fill="#CC00D4FF" Stroke="White" StrokeThickness="2" Visibility="Collapsed"
+                         PointerPressed="WebcamHandle_PointerPressed" PointerMoved="WebcamOverlay_PointerMoved" PointerReleased="WebcamOverlay_PointerReleased" />
             </Canvas>
 
             <!-- Zoom region edit overlay -->
