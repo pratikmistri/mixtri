@@ -866,6 +866,8 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - WinRT `ImageStream` from `GetThumbnailAsync` throws `ObjectDisposedException` during `using var` cleanup (FlushAsync). Fixed by manually disposing intermediate streams with error suppression instead of `using var`.
 - Editor webcam drag/resize uses normalized (0–1) coordinates via `NormalizedX`/`NormalizedY` on `WebcamOverlayStyle`, mapped between screen and output space using `PreviewCanvas.FrameLayoutRect`.
 - Export `VideoEncoder.ProduceSampleAsync` had same `using var webcamFrame` bug — frame disposed before `ComposeFrame`. Also extracted webcam at compositor dimensions instead of webcam video dimensions. Fixed both + GIF export path.
+- `ExtractFrameFromCompositionAsync` in both VideoEncoder and ExportEngine had `using var` on WinRT ImageStream causing ObjectDisposedException. Fixed with manual dispose + error suppression.
+- Export webcam acceleration: pre-extract all webcam frames to temp JPEGs at overlay display size (300px) before the export loop, replacing per-frame `GetThumbnailAsync` MP4 decode with fast JPEG disk reads via `VideoFrameReader`.
 
 ## 2026-05-04 - Editor preview canvas exploration
 - **Feature/area**: Editor preview canvas, webcam overlay compositor, zoom-region editing.
