@@ -579,12 +579,19 @@ public class VideoEncoder : IDisposable
         if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
             clampedPosition = composition.Duration;
 
-        using var thumbnail = await composition.GetThumbnailAsync(
+        var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        using var stream = thumbnail.AsStream();
-        using var randomAccessStream = stream.AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+        var stream = thumbnail.AsStream();
+        var randomAccessStream = stream.AsRandomAccessStream();
+        var bitmap = await CanvasBitmap.LoadAsync(device, randomAccessStream);
+
+        // Dispose intermediate streams — ignore WinRT flush errors
+        try { randomAccessStream.Dispose(); } catch { }
+        try { stream.Dispose(); } catch { }
+        try { thumbnail.Dispose(); } catch { }
+
+        return bitmap;
     }
 
     private static async Task<CanvasBitmap> FallbackExtractFrameAsync(
