@@ -1787,6 +1787,10 @@ public sealed partial class EditorPage : Page
             _webcamDragStartNormY + dy / layout.Height, 0, 1 - _webcamNormSize * layout.Width / layout.Height);
 
         UpdateWebcamOverlayPosition();
+
+        // Live-update the compositor so the webcam video moves in real-time
+        UpdateWebcamStyleLive();
+
         e.Handled = true;
     }
 
@@ -1799,6 +1803,28 @@ public sealed partial class EditorPage : Page
         e.Handled = true;
 
         ApplyWebcamOverlayChange();
+    }
+
+    private void UpdateWebcamStyleLive()
+    {
+        if (_previewRenderer is null) return;
+
+        int outW = _previewRenderer.OutputWidth;
+        float pixelSize = _webcamNormSize * outW;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with
+        {
+            NormalizedX = _webcamNormX,
+            NormalizedY = _webcamNormY,
+            Size = pixelSize,
+        };
+
+        // Lightweight update — just change the style, re-render current frame
+        _previewRenderer.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
     }
 
     private void ApplyWebcamOverlayChange()
@@ -1817,7 +1843,5 @@ public sealed partial class EditorPage : Page
         };
         config = config with { WebcamStyle = newStyle };
         ProjectService.Instance.CurrentComposition = config;
-
-        _ = RebuildPreviewRendererAsync(config);
     }
 }

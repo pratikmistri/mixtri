@@ -38,9 +38,17 @@ public record WebcamOverlayStyle
 /// </summary>
 public class WebcamCompositor
 {
-    private readonly WebcamOverlayStyle _style;
+    private WebcamOverlayStyle _style;
 
     public WebcamCompositor(WebcamOverlayStyle style)
+    {
+        _style = style ?? throw new ArgumentNullException(nameof(style));
+    }
+
+    /// <summary>
+    /// Updates the overlay style (position, size) without recreating the compositor.
+    /// </summary>
+    public void UpdateStyle(WebcamOverlayStyle style)
     {
         _style = style ?? throw new ArgumentNullException(nameof(style));
     }

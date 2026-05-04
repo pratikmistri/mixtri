@@ -98,6 +98,14 @@ public class PreviewRenderer : IDisposable
         _compositor?.SetWebcamFrame(webcamFrame);
     }
 
+    /// <summary>
+    /// Updates the webcam overlay position/size without rebuilding the compositor.
+    /// </summary>
+    public void UpdateWebcamStyle(WebcamOverlayStyle style)
+    {
+        _compositor?.UpdateWebcamStyle(style);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

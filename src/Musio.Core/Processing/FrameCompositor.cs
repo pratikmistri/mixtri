@@ -308,6 +308,15 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Updates the webcam overlay style (position, size) without rebuilding the compositor.
+    /// </summary>
+    public void UpdateWebcamStyle(WebcamOverlayStyle style)
+    {
+        if (_webcamCompositor is not null)
+            _webcamCompositor.UpdateStyle(style);
+    }
+
+    /// <summary>
     /// Replaces the zoom engine's manual keyframes with the provided list.
     /// Call this when the user adds or removes zoom keyframes in the editor.
     /// </summary>

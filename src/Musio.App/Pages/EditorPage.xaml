@@ -56,9 +56,6 @@
                     SizeChanged="WebcamOverlay_SizeChanged">
                 <Border x:Name="WebcamOverlayRect"
                         Background="Transparent"
-                        BorderBrush="{ThemeResource SystemControlHighlightAccentBrush}"
-                        BorderThickness="3"
-                        CornerRadius="999"
                         Visibility="Collapsed"
                         PointerPressed="WebcamOverlay_PointerPressed"
                         PointerMoved="WebcamOverlay_PointerMoved"
