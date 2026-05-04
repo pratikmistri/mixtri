@@ -865,6 +865,7 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Editor preview initially used `using var webcamFrame` which disposed the `CanvasBitmap` before `RenderPreviewFrame` could read it. Fixed by keeping the frame alive as a field (`_lastWebcamFrame`), disposing only when replaced or on page unload.
 - WinRT `ImageStream` from `GetThumbnailAsync` throws `ObjectDisposedException` during `using var` cleanup (FlushAsync). Fixed by manually disposing intermediate streams with error suppression instead of `using var`.
 - Editor webcam drag/resize uses normalized (0–1) coordinates via `NormalizedX`/`NormalizedY` on `WebcamOverlayStyle`, mapped between screen and output space using `PreviewCanvas.FrameLayoutRect`.
+- Export `VideoEncoder.ProduceSampleAsync` had same `using var webcamFrame` bug — frame disposed before `ComposeFrame`. Also extracted webcam at compositor dimensions instead of webcam video dimensions. Fixed both + GIF export path.
 
 ## 2026-05-04 - Editor preview canvas exploration
 - **Feature/area**: Editor preview canvas, webcam overlay compositor, zoom-region editing.
