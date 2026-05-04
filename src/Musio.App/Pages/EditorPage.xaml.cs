@@ -1758,41 +1758,28 @@ public sealed partial class EditorPage : Page
     {
         if (!_hasWebcamOverlay) return;
 
-        var pos = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
-        var layout = Preview.FrameLayoutRect;
-        if (layout.Width <= 0) return;
+        var pos = e.GetCurrentPoint(WebcamOverlayRect).Position;
+        double w = WebcamOverlayRect.ActualWidth;
+        double h = WebcamOverlayRect.ActualHeight;
 
-        double screenX = layout.X + _webcamNormX * layout.Width;
-        double screenY = layout.Y + _webcamNormY * layout.Height;
-        double screenSize = _webcamNormSize * layout.Width;
-
-        // Check if pointer is on the resize handle (bottom-right corner)
-        double handleSize = 20;
-        double handleX = screenX + screenSize - handleSize;
-        double handleY = screenY + screenSize - handleSize;
-
-        if (pos.X >= handleX && pos.Y >= handleY &&
-            pos.X <= screenX + screenSize && pos.Y <= screenY + screenSize)
+        // Bottom-right 20px corner = resize; everywhere else = drag
+        double handleZone = 20;
+        if (pos.X >= w - handleZone && pos.Y >= h - handleZone)
         {
             _webcamResizing = true;
-            _webcamDragStart = pos;
+            _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
             _webcamDragStartNormSize = _webcamNormSize;
-            WebcamOverlayCanvas.CapturePointer(e.Pointer);
-            e.Handled = true;
-            return;
         }
-
-        // Check if pointer is inside the webcam overlay for dragging
-        if (pos.X >= screenX && pos.X <= screenX + screenSize &&
-            pos.Y >= screenY && pos.Y <= screenY + screenSize)
+        else
         {
             _webcamDragging = true;
-            _webcamDragStart = pos;
+            _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
             _webcamDragStartNormX = _webcamNormX;
             _webcamDragStartNormY = _webcamNormY;
-            WebcamOverlayCanvas.CapturePointer(e.Pointer);
-            e.Handled = true;
         }
+
+        WebcamOverlayRect.CapturePointer(e.Pointer);
+        e.Handled = true;
     }
 
     private void WebcamOverlay_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
@@ -1814,7 +1801,6 @@ public sealed partial class EditorPage : Page
                 _webcamDragStartNormY + dy / layout.Height, 0, 1 - _webcamNormSize * layout.Width / layout.Height);
 
             UpdateWebcamOverlayPosition();
-            e.Handled = true;
         }
         else if (_webcamResizing)
         {
@@ -1828,8 +1814,8 @@ public sealed partial class EditorPage : Page
                 _webcamDragStartNormSize + delta / layout.Width, minSize, maxSize);
 
             UpdateWebcamOverlayPosition();
-            e.Handled = true;
         }
+        e.Handled = true;
     }
 
     private void WebcamOverlay_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
@@ -1839,7 +1825,7 @@ public sealed partial class EditorPage : Page
         bool changed = _webcamDragging || _webcamResizing;
         _webcamDragging = false;
         _webcamResizing = false;
-        WebcamOverlayCanvas.ReleasePointerCapture(e.Pointer);
+        WebcamOverlayRect.ReleasePointerCapture(e.Pointer);
         e.Handled = true;
 
         if (changed)

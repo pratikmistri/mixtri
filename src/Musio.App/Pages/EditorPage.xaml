@@ -53,10 +53,7 @@
 
             <!-- Webcam position/resize overlay -->
             <Canvas x:Name="WebcamOverlayCanvas"
-                    Background="Transparent"
-                    PointerPressed="WebcamOverlay_PointerPressed"
-                    PointerMoved="WebcamOverlay_PointerMoved"
-                    PointerReleased="WebcamOverlay_PointerReleased"
+                    IsHitTestVisible="False"
                     SizeChanged="WebcamOverlay_SizeChanged">
                 <Border x:Name="WebcamOverlayRect"
                         Background="Transparent"
@@ -64,7 +61,10 @@
                         BorderThickness="2"
                         CornerRadius="999"
                         Visibility="Collapsed"
-                        IsHitTestVisible="False">
+                        IsHitTestVisible="True"
+                        PointerPressed="WebcamOverlay_PointerPressed"
+                        PointerMoved="WebcamOverlay_PointerMoved"
+                        PointerReleased="WebcamOverlay_PointerReleased">
                     <!-- Resize handle (bottom-right corner) -->
                     <Border x:Name="WebcamResizeHandle"
                             Width="14" Height="14"
