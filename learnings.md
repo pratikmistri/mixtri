@@ -863,6 +863,8 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Webcam-to-video timing offset is not tracked; webcam frames are sampled at raw video time 1:1 which may cause slight desync.
 - GIF export still has a potential use-after-dispose issue with webcam frames (pre-existing).
 - Editor preview initially used `using var webcamFrame` which disposed the `CanvasBitmap` before `RenderPreviewFrame` could read it. Fixed by keeping the frame alive as a field (`_lastWebcamFrame`), disposing only when replaced or on page unload.
+- WinRT `ImageStream` from `GetThumbnailAsync` throws `ObjectDisposedException` during `using var` cleanup (FlushAsync). Fixed by manually disposing intermediate streams with error suppression instead of `using var`.
+- Editor webcam drag/resize uses normalized (0–1) coordinates via `NormalizedX`/`NormalizedY` on `WebcamOverlayStyle`, mapped between screen and output space using `PreviewCanvas.FrameLayoutRect`.
 
 ## 2026-05-04 - Editor preview canvas exploration
 - **Feature/area**: Editor preview canvas, webcam overlay compositor, zoom-region editing.
