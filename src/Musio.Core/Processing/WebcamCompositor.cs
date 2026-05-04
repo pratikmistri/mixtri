@@ -40,10 +40,20 @@ public record WebcamOverlayStyle
 /// <summary>
 /// Composites a webcam frame onto the output canvas with configurable shape,
 /// position, border, and optional drop shadow.
+/// Caches clip geometry and shadow render target to avoid per-frame GPU allocations.
 /// </summary>
-public class WebcamCompositor
+public class WebcamCompositor : IDisposable
 {
+    private const float ShadowBlurAmount = 8f;
+    private const float ShadowOffsetY = 4f;
+
     private WebcamOverlayStyle _style;
+    private bool _disposed;
+
+    // Cached GPU resources — invalidated when style or canvas size changes
+    private CanvasGeometry? _cachedClipGeometry;
+    private CanvasRenderTarget? _cachedShadow;
+    private (float x, float y, float size, int canvasW, int canvasH) _cacheKey;
 
     public WebcamCompositor(WebcamOverlayStyle style)
     {
@@ -56,6 +66,7 @@ public class WebcamCompositor
     public void UpdateStyle(WebcamOverlayStyle style)
     {
         _style = style ?? throw new ArgumentNullException(nameof(style));
+        InvalidateCache();
     }
 
     /// <summary>
@@ -84,15 +95,22 @@ public class WebcamCompositor
             (srcH - cropSize) / 2f,
             cropSize, cropSize);
 
-        // Optional shadow behind the overlay
-        if (_style.ShadowEnabled)
+        // Ensure cached resources are valid for current layout
+        var key = (x, y, size, canvasWidth, canvasHeight);
+        if (_cachedClipGeometry is null || _cacheKey != key)
         {
-            RenderShadow(session, x, y, size);
+            RebuildCache(session.Device, x, y, size);
+            _cacheKey = key;
+        }
+
+        // Optional shadow behind the overlay (drawn from cache)
+        if (_style.ShadowEnabled && _cachedShadow is not null)
+        {
+            session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY));
         }
 
         // Clip webcam frame to the configured shape
-        using var clipGeometry = CreateClipGeometry(session.Device, x, y, size);
-        using (session.CreateLayer(1.0f, clipGeometry))
+        using (session.CreateLayer(1.0f, _cachedClipGeometry))
         {
             if (_style.Mirrored)
             {
@@ -138,6 +156,54 @@ public class WebcamCompositor
         };
     }
 
+    /// <summary>
+    /// Rebuilds cached clip geometry and shadow render target for the current layout.
+    /// </summary>
+    private void RebuildCache(CanvasDevice device, float x, float y, float size)
+    {
+        InvalidateCache();
+        _cachedClipGeometry = CreateClipGeometry(device, x, y, size);
+
+        if (_style.ShadowEnabled)
+        {
+            // Allocate a full-canvas-sized RT so the shadow offset doesn't clip.
+            // Use _cacheKey canvas dimensions if available, otherwise add generous padding.
+            float rtW = x + size + ShadowBlurAmount * 2 + 1;
+            float rtH = y + size + ShadowBlurAmount * 2 + ShadowOffsetY + 1;
+            _cachedShadow = new CanvasRenderTarget(device, rtW, rtH, 96);
+
+            using var clipGeometry = CreateClipGeometry(device, x, y, size);
+            using var commandList = new CanvasCommandList(device);
+            using (var maskSession = commandList.CreateDrawingSession())
+            {
+                var shadowColor = Windows.UI.Color.FromArgb(128, 0, 0, 0);
+                maskSession.FillGeometry(clipGeometry, shadowColor);
+            }
+
+            using var shadowEffect = new ShadowEffect
+            {
+                Source = commandList,
+                BlurAmount = ShadowBlurAmount,
+                ShadowColor = Windows.UI.Color.FromArgb(100, 0, 0, 0),
+            };
+
+            // Render the shadow without offset — offset is applied when drawing the cache
+            using (var ds = _cachedShadow.CreateDrawingSession())
+            {
+                ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+                ds.DrawImage(shadowEffect);
+            }
+        }
+    }
+
+    private void InvalidateCache()
+    {
+        _cachedClipGeometry?.Dispose();
+        _cachedClipGeometry = null;
+        _cachedShadow?.Dispose();
+        _cachedShadow = null;
+    }
+
     private CanvasGeometry CreateClipGeometry(CanvasDevice device, float x, float y, float size)
     {
         return _style.Shape switch
@@ -168,25 +234,13 @@ public class WebcamCompositor
         }
     }
 
-    private void RenderShadow(CanvasDrawingSession session, float x, float y, float size)
+    public void Dispose()
     {
-        var device = session.Device;
-        using var clipGeometry = CreateClipGeometry(device, x, y, size);
-
-        using var commandList = new CanvasCommandList(device);
-        using (var maskSession = commandList.CreateDrawingSession())
+        if (!_disposed)
         {
-            var shadowColor = Windows.UI.Color.FromArgb(128, 0, 0, 0);
-            maskSession.FillGeometry(clipGeometry, shadowColor);
+            InvalidateCache();
+            _disposed = true;
+            GC.SuppressFinalize(this);
         }
-
-        using var shadowEffect = new ShadowEffect
-        {
-            Source = commandList,
-            BlurAmount = 8f,
-            ShadowColor = Windows.UI.Color.FromArgb(100, 0, 0, 0),
-        };
-
-        session.DrawImage(shadowEffect, new Vector2(0, 4));
     }
 }

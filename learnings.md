@@ -872,3 +872,17 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - **Approaches tried**: Inspected PreviewCanvas, EditorPage preview host, FrameCompositor/WebcamCompositor, and RegionSelectorOverlay/TimelineControl for interaction patterns.
 - **What worked**: PreviewCanvas uses a CanvasControl (`PreviewSurface`) and `SetFrame(CanvasRenderTarget?)` swaps the cached render target; zoom-region editing already uses a Canvas overlay with pointer press/move/release and resize handles.
 - **What didn't work**: No existing pointer interaction was found on the preview canvas itself for drag/resize overlays; webcam placement in compositor is enum-based only.
+
+---
+
+## 2026-05-04 - Webcam export performance optimization
+
+- **Feature/area**: Export pipeline (VideoEncoder, ExportEngine, WebcamCompositor, FrameCompositor)
+- **Approaches tried**:
+  1. **Reduced webcam extraction resolution** — GetThumbnailAsync was decoding at full webcam resolution (e.g., 1920×1080) even though the overlay displays at ~300px. Now extracts at 1.5× the overlay size, reducing decode work by ~80%. ✅
+  2. **Eliminated double stream wrapping** — ExtractFrameFromCompositionAsync was converting ImageStream→.NET Stream→RandomAccessStream→CanvasBitmap. ImageStream already implements IRandomAccessStream, so pass it directly. ✅
+  3. **Cached shadow and clip geometry in WebcamCompositor** — Shadow (CanvasCommandList + ShadowEffect) and clip geometry were recreated every frame despite being constant (only depend on position/shape). Now cached and invalidated on UpdateStyle(). Made WebcamCompositor IDisposable. ✅
+  4. **Fixed GIF export webcam frame leak** — ExportEngine's GIF path set webcam frame on compositor but never disposed it after composition consumed it, leaking one CanvasBitmap per frame during long GIF exports. ✅
+  5. **Wired WebcamCompositor disposal into FrameCompositor.Dispose()** — Prevents GPU resource leaks from cached shadow/geometry. ✅
+- **What worked**: All five optimizations combined. Build and all 93 tests pass.
+- **What didn't work**: N/A — all approaches succeeded without regression.

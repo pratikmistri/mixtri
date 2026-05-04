@@ -190,17 +190,35 @@ public class ExportEngine
 
         // Webcam source for overlay (opened once, reused per frame)
         MediaComposition? webcamComp = null;
-        int webcamWidth = 0, webcamHeight = 0;
+        int webcamExtractW = 0, webcamExtractH = 0;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
         {
             var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
             var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
             var webcamProps = webcamClip.GetVideoEncodingProperties();
-            webcamWidth = (int)webcamProps.Width;
-            webcamHeight = (int)webcamProps.Height;
+            int webcamNativeW = (int)webcamProps.Width;
+            int webcamNativeH = (int)webcamProps.Height;
             webcamComp = new MediaComposition();
             webcamComp.Clips.Add(webcamClip);
+
+            // Extract at ~1.5x the overlay display size instead of full resolution
+            float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
+            float minDim = Math.Min(webcamNativeW, webcamNativeH);
+            if (minDim > displaySize)
+            {
+                float scale = displaySize / minDim;
+                webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
+                webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
+            }
+            else
+            {
+                webcamExtractW = webcamNativeW;
+                webcamExtractH = webcamNativeH;
+            }
         }
+
+        // Track the previous webcam frame so it can be disposed after composition consumes it
+        CanvasBitmap? previousWebcamFrame = null;
 
         try
         {
@@ -214,15 +232,19 @@ public class ExportEngine
                         : (double)frameIndex / fps;
                     var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
+                    // Dispose the previous iteration's webcam frame (composition has consumed it)
+                    previousWebcamFrame?.Dispose();
+                    previousWebcamFrame = null;
+
                     // Extract webcam frame and set on compositor
-                    CanvasBitmap? webcamFrame = null;
                     if (webcamComp is not null)
                     {
                         try
                         {
-                            webcamFrame = await ExtractFrameFromCompositionAsync(
-                                device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                            var webcamFrame = await ExtractFrameFromCompositionAsync(
+                                device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
                             compositor.SetWebcamFrame(webcamFrame);
+                            previousWebcamFrame = webcamFrame;
                         }
                         catch
                         {
@@ -243,9 +265,6 @@ public class ExportEngine
                             device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
                     }
 
-                    // Clear webcam frame from compositor after this callback;
-                    // the GIF encoder will call ComposeFrame next.
-                    // Keep webcamFrame alive — GifEncoder.ComposeFrame reads it.
                     return result;
                 },
                 frameIndex => timelineMapper is not null
@@ -259,6 +278,10 @@ public class ExportEngine
         }
         finally
         {
+            // Dispose the last webcam frame
+            compositor.SetWebcamFrame(null);
+            previousWebcamFrame?.Dispose();
+
             frameReader?.Dispose();
             sourceComp?.Clips.Clear();
             webcamComp?.Clips.Clear();
@@ -277,18 +300,11 @@ public class ExportEngine
         if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
             clampedPosition = composition.Duration;
 
-        var thumbnail = await composition.GetThumbnailAsync(
+        using var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        var stream = thumbnail.AsStream();
-        var randomAccessStream = stream.AsRandomAccessStream();
-        var bitmap = await CanvasBitmap.LoadAsync(device, randomAccessStream);
-
-        try { randomAccessStream.Dispose(); } catch { }
-        try { stream.Dispose(); } catch { }
-        try { thumbnail.Dispose(); } catch { }
-
-        return bitmap;
+        // ImageStream already implements IRandomAccessStream — pass directly
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     /// <summary>
@@ -308,9 +324,7 @@ public class ExportEngine
 
         comp.Clips.Clear();
 
-        using var stream = thumbnail.AsStream();
-        using var randomAccessStream = stream.AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     /// <summary>

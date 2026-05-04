@@ -772,6 +772,7 @@ public class FrameCompositor : IDisposable
             _compositeBuffer = null;
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
+            _webcamCompositor?.Dispose();
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

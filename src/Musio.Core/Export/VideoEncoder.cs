@@ -168,7 +168,7 @@ public class VideoEncoder : IDisposable
 
         // Prepare webcam source (opened once, reused per frame)
         MediaComposition? webcamComp = null;
-        int webcamWidth = 0, webcamHeight = 0;
+        int webcamExtractW = 0, webcamExtractH = 0;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
         {
             try
@@ -176,10 +176,26 @@ public class VideoEncoder : IDisposable
                 var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
                 var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
                 var webcamProps = webcamClip.GetVideoEncodingProperties();
-                webcamWidth = (int)webcamProps.Width;
-                webcamHeight = (int)webcamProps.Height;
+                int webcamNativeW = (int)webcamProps.Width;
+                int webcamNativeH = (int)webcamProps.Height;
                 webcamComp = new MediaComposition();
                 webcamComp.Clips.Add(webcamClip);
+
+                // Extract at ~1.5x the overlay display size instead of full resolution.
+                // The webcam overlay is typically 300px but the source may be 1080p+.
+                float displaySize = (compositionConfig.WebcamStyle?.Size ?? 300f) * 1.5f;
+                float minDim = Math.Min(webcamNativeW, webcamNativeH);
+                if (minDim > displaySize)
+                {
+                    float scale = displaySize / minDim;
+                    webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
+                    webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
+                }
+                else
+                {
+                    webcamExtractW = webcamNativeW;
+                    webcamExtractH = webcamNativeH;
+                }
             }
             catch (Exception ex)
             {
@@ -239,7 +255,7 @@ public class VideoEncoder : IDisposable
                     compositor, frameReader, sourceComp, webcamComp,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
                     compositorWidth, compositorHeight,
-                    webcamWidth, webcamHeight,
+                    webcamExtractW, webcamExtractH,
                     targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
 
@@ -324,7 +340,7 @@ public class VideoEncoder : IDisposable
         string sourceVideoPath,
         int sourceWidth, int sourceHeight,
         int compositorWidth, int compositorHeight,
-        int webcamWidth, int webcamHeight,
+        int webcamExtractW, int webcamExtractH,
         int targetWidth, int targetHeight,
         bool needsScaling,
         TimelineMapper? timelineMapper,
@@ -359,7 +375,7 @@ public class VideoEncoder : IDisposable
                 try
                 {
                     webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                        device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
                     compositor.SetWebcamFrame(webcamFrame);
                 }
                 catch
@@ -579,19 +595,11 @@ public class VideoEncoder : IDisposable
         if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
             clampedPosition = composition.Duration;
 
-        var thumbnail = await composition.GetThumbnailAsync(
+        using var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        var stream = thumbnail.AsStream();
-        var randomAccessStream = stream.AsRandomAccessStream();
-        var bitmap = await CanvasBitmap.LoadAsync(device, randomAccessStream);
-
-        // Dispose intermediate streams — ignore WinRT flush errors
-        try { randomAccessStream.Dispose(); } catch { }
-        try { stream.Dispose(); } catch { }
-        try { thumbnail.Dispose(); } catch { }
-
-        return bitmap;
+        // ImageStream already implements IRandomAccessStream — pass directly
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     private static async Task<CanvasBitmap> FallbackExtractFrameAsync(
@@ -610,9 +618,7 @@ public class VideoEncoder : IDisposable
         // leaks a composition + clip holding a file handle to the video.
         comp.Clips.Clear();
 
-        using var stream = thumbnail.AsStream();
-        using var randomAccessStream = stream.AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     private static async Task<StorageFile> CreateOutputFileAsync(string outputPath)
