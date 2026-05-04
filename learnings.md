@@ -862,3 +862,4 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / known limitations:**
 - Webcam-to-video timing offset is not tracked; webcam frames are sampled at raw video time 1:1 which may cause slight desync.
 - GIF export still has a potential use-after-dispose issue with webcam frames (pre-existing).
+- Editor preview initially used `using var webcamFrame` which disposed the `CanvasBitmap` before `RenderPreviewFrame` could read it. Fixed by keeping the frame alive as a field (`_lastWebcamFrame`), disposing only when replaced or on page unload.
