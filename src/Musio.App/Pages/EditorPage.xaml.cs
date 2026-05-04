@@ -65,6 +65,13 @@ public sealed partial class EditorPage : Page
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
 
+        // Keep webcam overlay in sync with preview frame layout
+        Preview.FrameLayoutChanged += (_, _) =>
+        {
+            if (_hasWebcamOverlay)
+                UpdateWebcamOverlayPosition();
+        };
+
         // Sync playhead: when timeline scrubs, update preview + audio
         Timeline.RegisterPropertyChangedCallback(
             Controls.TimelineControl.PlayheadPositionProperty,
@@ -435,11 +442,6 @@ public sealed partial class EditorPage : Page
                 {
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
-
-                    // Update webcam overlay position after frame layout is known
-                    if (_hasWebcamOverlay)
-                        UpdateWebcamOverlayPosition();
-
                     return;
                 }
             }
@@ -1752,8 +1754,7 @@ public sealed partial class EditorPage : Page
 
     private void WebcamOverlay_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (_hasWebcamOverlay)
-            UpdateWebcamOverlayPosition();
+        // Layout updates are handled by Preview.FrameLayoutChanged
     }
 
     private void WebcamOverlay_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)

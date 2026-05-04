@@ -25,6 +25,11 @@ public sealed partial class PreviewCanvas : UserControl
     public Rect FrameLayoutRect { get; private set; }
 
     /// <summary>
+    /// Raised after each draw when <see cref="FrameLayoutRect"/> has been updated.
+    /// </summary>
+    public event EventHandler? FrameLayoutChanged;
+
+    /// <summary>
     /// Raised each time the playback timer ticks so the host can supply a new composed frame.
     /// </summary>
     public event EventHandler? PlaybackTick;
@@ -198,6 +203,8 @@ public sealed partial class PreviewCanvas : UserControl
         ds.DrawImage(_previewFrame,
             new Rect(destX, destY, destW, destH),
             new Rect(0, 0, frameW, frameH));
+
+        FrameLayoutChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private static void OnPlayheadPositionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
