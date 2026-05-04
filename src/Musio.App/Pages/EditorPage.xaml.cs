@@ -32,6 +32,7 @@ public sealed partial class EditorPage : Page
     private Windows.Media.Editing.MediaComposition? _webcamComposition;
     private int _webcamWidth;
     private int _webcamHeight;
+    private CanvasBitmap? _lastWebcamFrame;
     private int _lastRenderedFrameIndex = -1;
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
@@ -189,6 +190,8 @@ public sealed partial class EditorPage : Page
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
             _webcamComposition = null;
+            _lastWebcamFrame?.Dispose();
+            _lastWebcamFrame = null;
             _compositorReady = false;
 
             // Unsubscribe VMs from singleton event sources
@@ -481,8 +484,12 @@ public sealed partial class EditorPage : Page
             var device = CanvasDevice.GetSharedDevice();
             using var stream = thumbnail.AsStream();
             using var ras = stream.AsRandomAccessStream();
-            using var webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
-            _previewRenderer.SetWebcamFrame(webcamFrame);
+            var webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
+
+            // Dispose previous frame, keep new one alive through rendering
+            _lastWebcamFrame?.Dispose();
+            _lastWebcamFrame = webcamFrame;
+            _previewRenderer.SetWebcamFrame(_lastWebcamFrame);
         }
         catch
         {
