@@ -56,6 +56,7 @@ public class RecordingSession : IDisposable
     private KeyboardHookRecorder? _keyboardRecorder;
     private AudioCaptureEngine? _audioEngine;
     private WebcamCaptureEngine? _webcamEngine;
+    private string? _resolvedWebcamDeviceId;
     private VideoWriter? _videoWriter;
 
     // Timing
@@ -199,9 +200,25 @@ public class RecordingSession : IDisposable
             _keyboardRecorder = new KeyboardHookRecorder();
 
             // Initialize webcam capture engine (if enabled)
-            if (_config.IsWebcamEnabled && !string.IsNullOrWhiteSpace(_config.WebcamDeviceId))
+            if (_config.IsWebcamEnabled)
             {
-                _webcamEngine = new WebcamCaptureEngine();
+                var webcamDeviceId = _config.WebcamDeviceId;
+                if (string.IsNullOrWhiteSpace(webcamDeviceId))
+                {
+                    // Auto-select first available webcam
+                    var devices = await WebcamCaptureEngine.GetDevicesAsync();
+                    webcamDeviceId = devices.FirstOrDefault()?.Id;
+                }
+
+                if (!string.IsNullOrWhiteSpace(webcamDeviceId))
+                {
+                    _webcamEngine = new WebcamCaptureEngine();
+                    _resolvedWebcamDeviceId = webcamDeviceId;
+                }
+                else
+                {
+                    Error?.Invoke(this, "Webcam enabled but no camera device found");
+                }
             }
 
             // Initialize audio capture engine (if any audio enabled)
@@ -236,7 +253,7 @@ public class RecordingSession : IDisposable
             _audioEngine?.StartRecording(_sessionFolder);
 
             if (_webcamEngine is not null)
-                await _webcamEngine.StartAsync(_config.WebcamDeviceId!, _sessionFolder);
+                await _webcamEngine.StartAsync(_resolvedWebcamDeviceId!, _sessionFolder);
 
             // Start elapsed timer
             _elapsedWatch.Restart();

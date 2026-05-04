@@ -397,6 +397,15 @@ public class ExportEngine
     {
         var keyboardEvents = composition.KeyboardEvents;
         var subtitles = composition.Subtitles;
+        var webcamStyle = composition.WebcamStyle;
+
+        // Auto-enable webcam overlay if the project has a webcam recording
+        if (webcamStyle is null &&
+            !string.IsNullOrWhiteSpace(project.WebcamFilePath) &&
+            File.Exists(project.WebcamFilePath))
+        {
+            webcamStyle = new WebcamOverlayStyle();
+        }
 
         // Load keyboard data if the project has it and the config expects keyboard overlay
         if (composition.KeyboardStyle is not null &&
@@ -416,12 +425,15 @@ public class ExportEngine
         }
 
         // Return enriched config if anything changed
-        if (keyboardEvents != composition.KeyboardEvents || subtitles != composition.Subtitles)
+        if (keyboardEvents != composition.KeyboardEvents ||
+            subtitles != composition.Subtitles ||
+            webcamStyle != composition.WebcamStyle)
         {
             return composition with
             {
                 KeyboardEvents = keyboardEvents,
                 Subtitles = subtitles,
+                WebcamStyle = webcamStyle,
             };
         }
 

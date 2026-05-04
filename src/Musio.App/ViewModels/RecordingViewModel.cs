@@ -56,7 +56,7 @@ public partial class RecordingViewModel : ObservableObject
     private int _fps = 30;
 
     [ObservableProperty]
-    private bool _isWebcamEnabled;
+    private bool _isWebcamEnabled = AppSettings.Instance.IsWebcamEnabled;
 
     [ObservableProperty]
     private string _recordingStatus = "Ready to record";
@@ -197,6 +197,7 @@ public partial class RecordingViewModel : ObservableObject
                 SystemAudioEnabled = IsSystemAudioEnabled,
                 MicEnabled = IsMicEnabled,
                 IsWebcamEnabled = IsWebcamEnabled,
+                WebcamDeviceId = GetWebcamDeviceId(),
                 OutputFolder = outputFolder,
             };
 
@@ -382,4 +383,10 @@ public partial class RecordingViewModel : ObservableObject
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    private static string? GetWebcamDeviceId()
+    {
+        var savedId = AppSettings.Instance.WebcamDeviceId;
+        return string.IsNullOrWhiteSpace(savedId) ? null : savedId;
+    }
 }

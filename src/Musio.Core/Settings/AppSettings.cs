@@ -71,6 +71,12 @@ public sealed class AppSettings
         set => Set(nameof(IsWebcamEnabled), value);
     }
 
+    public string WebcamDeviceId
+    {
+        get => Get(nameof(WebcamDeviceId), "");
+        set => Set(nameof(WebcamDeviceId), value);
+    }
+
     public T Get<T>(string key, T defaultValue)
     {
         if (_settings is not null)

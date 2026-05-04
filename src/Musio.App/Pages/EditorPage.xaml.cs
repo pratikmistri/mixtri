@@ -27,6 +27,11 @@ public sealed partial class EditorPage : Page
     private TimelineMapper? _timelineMapper;
     private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
+
+    // Webcam overlay for editor preview
+    private Windows.Media.Editing.MediaComposition? _webcamComposition;
+    private int _webcamWidth;
+    private int _webcamHeight;
     private int _lastRenderedFrameIndex = -1;
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
@@ -182,6 +187,8 @@ public sealed partial class EditorPage : Page
             _previewRenderer = null;
             _audioPlayer?.Dispose();
             _audioPlayer = null;
+            _webcamComposition?.Clips.Clear();
+            _webcamComposition = null;
             _compositorReady = false;
 
             // Unsubscribe VMs from singleton event sources
@@ -299,6 +306,13 @@ public sealed partial class EditorPage : Page
             };
         }
 
+        // Auto-enable webcam overlay if the project has a webcam recording
+        if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) &&
+            File.Exists(project.WebcamFilePath))
+        {
+            config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
+        }
+
         // Persist so the export pipeline uses the same config
         ProjectService.Instance.CurrentComposition = config;
 
@@ -322,6 +336,9 @@ public sealed partial class EditorPage : Page
             _previewRenderer?.Dispose();
             _previewRenderer = null;
         }
+
+        // Load webcam composition for preview overlay
+        await LoadWebcamCompositionAsync(project);
 
         // Show style controls for Window and Region captures
         InitializeStyleControls(project, config);
@@ -391,6 +408,9 @@ public sealed partial class EditorPage : Page
         {
             if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
             {
+                // Extract webcam frame for overlay
+                await SetWebcamFrameForPreviewAsync(sourcePosition);
+
                 var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
                 bitmap.Dispose();
 
@@ -419,6 +439,54 @@ public sealed partial class EditorPage : Page
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Preview frame error at {position}: {ex.Message}");
             bitmap.Dispose();
+        }
+    }
+
+    private async Task LoadWebcamCompositionAsync(Project project)
+    {
+        if (string.IsNullOrWhiteSpace(project.WebcamFilePath) || !File.Exists(project.WebcamFilePath))
+            return;
+
+        try
+        {
+            var webcamFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+            var webcamClip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(webcamFile);
+            var props = webcamClip.GetVideoEncodingProperties();
+            _webcamWidth = (int)props.Width;
+            _webcamHeight = (int)props.Height;
+            _webcamComposition = new Windows.Media.Editing.MediaComposition();
+            _webcamComposition.Clips.Add(webcamClip);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Failed to load webcam video: {ex.Message}");
+        }
+    }
+
+    private async Task SetWebcamFrameForPreviewAsync(TimeSpan position)
+    {
+        if (_webcamComposition is null || _previewRenderer is null) return;
+
+        try
+        {
+            var clamped = position;
+            if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
+                clamped = _webcamComposition.Duration;
+
+            using var thumbnail = await _webcamComposition.GetThumbnailAsync(
+                clamped, _webcamWidth, _webcamHeight,
+                Windows.Media.Editing.VideoFramePrecision.NearestFrame);
+
+            var device = CanvasDevice.GetSharedDevice();
+            using var stream = thumbnail.AsStream();
+            using var ras = stream.AsRandomAccessStream();
+            using var webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
+            _previewRenderer.SetWebcamFrame(webcamFrame);
+        }
+        catch
+        {
+            _previewRenderer.SetWebcamFrame(null);
         }
     }
 

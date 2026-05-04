@@ -84,6 +84,14 @@ public class PreviewRenderer : IDisposable
         _compositor?.SyncSuppressedClickTicks(suppressedTicks);
     }
 
+    /// <summary>
+    /// Sets the current webcam frame for overlay compositing.
+    /// </summary>
+    public void SetWebcamFrame(CanvasBitmap? webcamFrame)
+    {
+        _compositor?.SetWebcamFrame(webcamFrame);
+    }
+
     public void Dispose()
     {
         if (!_disposed)
