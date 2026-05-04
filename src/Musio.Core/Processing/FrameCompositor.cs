@@ -762,6 +762,7 @@ public class FrameCompositor : IDisposable
             _compositeBuffer?.Dispose();
             _compositeBuffer = null;
             _bgCompositor.Dispose();
+            _cursorRenderer.Dispose();
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

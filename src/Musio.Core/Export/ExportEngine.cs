@@ -244,6 +244,8 @@ public class ExportEngine
         finally
         {
             frameReader?.Dispose();
+            sourceComp?.Clips.Clear();
+            webcamComp?.Clips.Clear();
         }
     }
 
@@ -259,10 +261,11 @@ public class ExportEngine
         if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
             clampedPosition = composition.Duration;
 
-        var thumbnail = await composition.GetThumbnailAsync(
+        using var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        using var stream = thumbnail.AsStream();
+        using var randomAccessStream = stream.AsRandomAccessStream();
         return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 
@@ -278,10 +281,13 @@ public class ExportEngine
         var comp = new MediaComposition();
         comp.Clips.Add(clip);
 
-        var thumbnail = await comp.GetThumbnailAsync(
+        using var thumbnail = await comp.GetThumbnailAsync(
             position, width, height, VideoFramePrecision.NearestFrame);
 
-        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        comp.Clips.Clear();
+
+        using var stream = thumbnail.AsStream();
+        using var randomAccessStream = stream.AsRandomAccessStream();
         return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 

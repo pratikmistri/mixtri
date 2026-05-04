@@ -26,11 +26,12 @@ public record CursorStyle
 /// Renders a custom cursor onto video frames using Win2D, with click animations,
 /// ripple highlights, motion blur, and auto-hide support.
 /// </summary>
-public class CursorRenderer
+public class CursorRenderer : IDisposable
 {
     private CursorStyle _style;
     private CanvasBitmap? _cursorBitmap;
     private CanvasGeometry? _defaultCursorGeometry;
+    private bool _disposed;
 
     /// <summary>Recording start timestamp in ticks (from MouseRecordingData.StartTimestampTicks).</summary>
     public long StartTimestampTicks { get; set; }
@@ -284,4 +285,15 @@ public class CursorRenderer
     }
 
     #endregion
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        _cursorBitmap?.Dispose();
+        _cursorBitmap = null;
+        _defaultCursorGeometry?.Dispose();
+        _defaultCursorGeometry = null;
+    }
 }

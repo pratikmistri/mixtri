@@ -528,6 +528,34 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - In HighContrast theme dictionaries, `Color="{StaticResource SystemColorXxxColor}"` correctly references system HC colors.
 - `AcrylicBrush` in Default / `SolidColorBrush` in HighContrast for the same key works because both derive from `Brush`.
 - `ActualThemeChanged` fires for both Light↔Dark and High Contrast toggles; `InvalidateAllCanvases()` redraws Win2D surfaces with new colors.
+
+---
+
+## Memory Leak & Management Stability Pass
+
+**Feature/area:** Cross-cutting memory/resource management across capture, export, processing, and UI layers.
+
+**Approaches tried:**
+1. Full-codebase rubber-duck review focused on memory leaks, resource management, and disposal patterns.
+2. Applied fixes to 12 Critical + High severity issues, then ran a verification rubber-duck pass to catch gaps.
+
+**What worked:**
+- `composition.Clips.Clear()` in `try/finally` releases MediaClip COM objects in VideoWriter.FinalizeAsync — prevents linear OOM growth proportional to frame count.
+- `Cleanup()` methods on EditorViewModel/ExportViewModel that unsubscribe from `ProjectService.Instance.ProjectChanged` — severs the singleton root that prevented GC of old VMs after page navigation.
+- Expanded EditorPage.Unloaded to dispose `_frameReader`, `_previewRenderer`, `_audioPlayer` and call VM Cleanup.
+- `using var` on `CanvasGeometry` and `CanvasPathBuilder` in TimelineControl draw callbacks — prevents Win2D native resource accumulation during 30fps redraws.
+- `using var` on thumbnail streams in VideoEncoder/ExportEngine `ExtractFrameFromCompositionAsync` — prevents per-frame stream handle leaks during export.
+- `CursorRenderer : IDisposable` with `_cursorBitmap`/`_defaultCursorGeometry` disposal, called from `FrameCompositor.Dispose()`.
+- `MouseHookRecorder.SaveToFile()` clears + trims in-memory lists after persisting to disk.
+- `try/finally` around GDI handle cleanup + `using var` for `SoftwareBitmap` in RegionSelectorOverlay.
+- `RemoveAll(t => t.IsCompleted)` on VideoEncoder `pendingSamples` to prevent unbounded task graph growth.
+- Disposing old `_recognizer` before creating new one in SpeechToText, plus `try/finally` for stream.
+- ExportEngine GIF `finally` block clears `sourceComp?.Clips` and `webcamComp?.Clips`.
+
+**What didn't work / known limitations:**
+- EditorPage constructor uses many anonymous lambda event handlers (Preview.PlaybackTick, etc.) which can't be individually unsubscribed. Since they form intra-page references, fixing the singleton VM subscription root is sufficient for GC.
+- `MouseHookRecorder.SaveToFile()` now invalidates in-memory data after saving. Callers needing data post-save must use `GetRecordedData()` first or `LoadFromFile()` after.
+- GIF export webcam frame lifetime issue (using var disposes before ComposeFrame reads it) was identified but not fixed — user confirmed GIF+webcam is not a supported path currently.
 - Merged dictionary via `<ResourceDictionary Source="Themes/AppColors.xaml" />` in App.xaml keeps the main file clean.
 
 **What didn't work / pitfalls:**
@@ -799,3 +827,21 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What didn't work:**
 - The original code loaded the image synchronously from disk every frame (`CanvasBitmap.LoadAsync(...).GetAwaiter().GetResult()`), causing choppy preview playback and extremely slow export with wallpaper backgrounds.
+
+---
+
+## Memory Leak Review
+
+**Feature/area:** Resource-lifetime review for recording/export/editor cleanup paths.
+
+**Approaches tried:**
+1. Reviewed diffs and current implementations for `VideoWriter`, `EditorPage`, `MouseHookRecorder`, `EditorViewModel`, `ExportViewModel`, `VideoEncoder`, `ExportEngine`, `CursorRenderer`, `FrameCompositor`, `SpeechToText`, `TimelineControl`, and `RegionSelectorOverlay`.
+2. Built the solution with VS MSBuild (`Musio.sln /restore /t:Build /p:Configuration=Debug /p:Platform=x64`) to verify the reviewed changes compile cleanly.
+
+**What worked:**
+- The new deterministic cleanup patterns compile cleanly and most of the targeted fixes are sound: disposing thumbnail/stream objects, clearing `MediaComposition.Clips` after render, disposing cursor resources, and releasing GDI handles in `finally`.
+
+**What didn't work / known limitations:**
+- `ExportEngine.ExportGifAsync` still passes a `using var` webcam bitmap into `FrameCompositor.SetWebcamFrame()`, but `GifEncoder` composes after the callback returns, so the compositor can read a disposed bitmap.
+- `TimelineControl` still allocates `CanvasPathBuilder` objects without disposing them.
+- `SpeechToText` keeps the last recognizer alive after `TranscribeAsync`, so its event handlers retain captured transcription state until the next call or `Dispose()`.
