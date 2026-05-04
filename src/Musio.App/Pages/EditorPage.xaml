@@ -365,6 +365,31 @@
                     </Button.Flyout>
                 </Button>
 
+                <!-- Webcam shape selector (visible when webcam overlay is active) -->
+                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
+                <Button
+                    x:Name="WebcamShapeButton"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Webcam overlay shape">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon x:Name="WebcamShapeIcon" FontSize="14" Glyph="&#xEA3B;" />
+                        <TextBlock x:Name="WebcamShapeText" Text="Circle" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout Placement="Top">
+                            <StackPanel Width="160" Spacing="4">
+                                <RadioButton x:Name="ShapeCircle" Content="Circle" GroupName="WebcamShape"
+                                             IsChecked="True" Click="WebcamShape_Click" Tag="Circle" />
+                                <RadioButton x:Name="ShapeSquare" Content="Square" GroupName="WebcamShape"
+                                             Click="WebcamShape_Click" Tag="RoundedRect" />
+                                <RadioButton x:Name="ShapeRectangle" Content="Rectangle" GroupName="WebcamShape"
+                                             Click="WebcamShape_Click" Tag="Rectangle" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
                 <AppBarSeparator />
 
                 <Button

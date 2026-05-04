@@ -1704,6 +1704,8 @@ public sealed partial class EditorPage : Page
         if (!_hasWebcamOverlay)
         {
             WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
             return;
         }
 
@@ -1734,6 +1736,9 @@ public sealed partial class EditorPage : Page
         }
 
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        SyncWebcamShapeUI(style.Shape);
         UpdateWebcamOverlayPosition();
     }
 
@@ -1843,5 +1848,46 @@ public sealed partial class EditorPage : Page
         };
         config = config with { WebcamStyle = newStyle };
         ProjectService.Instance.CurrentComposition = config;
+    }
+
+    private void WebcamShape_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not RadioButton rb || rb.Tag is not string tag) return;
+
+        var shape = tag switch
+        {
+            "Circle" => WebcamShape.Circle,
+            "RoundedRect" => WebcamShape.RoundedRect,
+            "Rectangle" => WebcamShape.Rectangle,
+            _ => WebcamShape.Circle,
+        };
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { Shape = shape };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        SyncWebcamShapeUI(shape);
+
+        // Live-update compositor and re-render
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void SyncWebcamShapeUI(WebcamShape shape)
+    {
+        ShapeCircle.IsChecked = shape == WebcamShape.Circle;
+        ShapeSquare.IsChecked = shape == WebcamShape.RoundedRect;
+        ShapeRectangle.IsChecked = shape == WebcamShape.Rectangle;
+
+        WebcamShapeText.Text = shape switch
+        {
+            WebcamShape.Circle => "Circle",
+            WebcamShape.RoundedRect => "Square",
+            WebcamShape.Rectangle => "Rectangle",
+            _ => "Circle",
+        };
     }
 }
