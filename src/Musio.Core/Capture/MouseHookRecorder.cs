@@ -337,10 +337,10 @@ public sealed class MouseHookRecorder : IDisposable
     ///         [startTicks:i64][endTicks:i64][tickFreq:f64]
     ///         [MouseSample * sampleCount][ClickEvent * clickCount]
     /// </summary>
-    /// <summary>
-    /// Writes all recorded data to a binary file, then frees in-memory samples.
-    /// After this call, use <see cref="LoadFromFile"/> to read the data back.
-    /// </summary>
+    /// <remarks>
+    /// After saving, this method frees in-memory samples.
+    /// Use <see cref="LoadFromFile"/> to read the data back after this call.
+    /// </remarks>
     public void SaveToFile(string filePath)
     {
         var data = GetRecordedData();
