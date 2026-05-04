@@ -238,7 +238,9 @@ public class VideoEncoder : IDisposable
                     args.Request, deferral, frame, totalFrames,
                     compositor, frameReader, sourceComp, webcamComp,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
-                    compositorWidth, compositorHeight, targetWidth, targetHeight,
+                    compositorWidth, compositorHeight,
+                    webcamWidth, webcamHeight,
+                    targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
 
                 lock (pendingSamplesLock)
@@ -322,6 +324,7 @@ public class VideoEncoder : IDisposable
         string sourceVideoPath,
         int sourceWidth, int sourceHeight,
         int compositorWidth, int compositorHeight,
+        int webcamWidth, int webcamHeight,
         int targetWidth, int targetHeight,
         bool needsScaling,
         TimelineMapper? timelineMapper,
@@ -350,14 +353,13 @@ public class VideoEncoder : IDisposable
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
             // Webcam overlay
+            CanvasBitmap? webcamFrame = null;
             if (webcamComp is not null)
             {
                 try
                 {
-                    using var webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan,
-                        compositorWidth > 0 ? compositorWidth : sourceWidth,
-                        compositorHeight > 0 ? compositorHeight : sourceHeight);
+                    webcamFrame = await ExtractFrameFromCompositionAsync(
+                        device, webcamComp, timeSpan, webcamWidth, webcamHeight);
                     compositor.SetWebcamFrame(webcamFrame);
                 }
                 catch
@@ -375,6 +377,10 @@ public class VideoEncoder : IDisposable
             // Composite using the exact source time so cursor, click, and zoom
             // effects are precisely synchronized with the visual frame content.
             var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
+
+            // Dispose webcam frame after composition has consumed it
+            compositor.SetWebcamFrame(null);
+            webcamFrame?.Dispose();
 
             // Build the output surface. For scaling we need a separate render
             // target; otherwise the composed frame IS the output surface.

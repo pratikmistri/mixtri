@@ -215,22 +215,38 @@ public class ExportEngine
                     var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
                     // Extract webcam frame and set on compositor
+                    CanvasBitmap? webcamFrame = null;
                     if (webcamComp is not null)
                     {
-                        using var webcamFrame = await ExtractFrameFromCompositionAsync(
-                            device, webcamComp, timeSpan, webcamWidth, webcamHeight);
-                        compositor.SetWebcamFrame(webcamFrame);
+                        try
+                        {
+                            webcamFrame = await ExtractFrameFromCompositionAsync(
+                                device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                            compositor.SetWebcamFrame(webcamFrame);
+                        }
+                        catch
+                        {
+                            compositor.SetWebcamFrame(null);
+                        }
                     }
 
                     // Fast path: JPEG frames; slow path: reusable composition
+                    CanvasBitmap result;
                     if (frameReader is not null)
                     {
-                        return await frameReader.LoadFrameAtTimeAsync(timeSpan)
+                        result = await frameReader.LoadFrameAtTimeAsync(timeSpan)
                             ?? await FallbackExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
                     }
+                    else
+                    {
+                        result = await ExtractFrameFromCompositionAsync(
+                            device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+                    }
 
-                    return await ExtractFrameFromCompositionAsync(
-                        device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+                    // Clear webcam frame from compositor after this callback;
+                    // the GIF encoder will call ComposeFrame next.
+                    // Keep webcamFrame alive — GifEncoder.ComposeFrame reads it.
+                    return result;
                 },
                 frameIndex => timelineMapper is not null
                     ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
