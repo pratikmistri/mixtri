@@ -18,6 +18,18 @@ public record WebcamOverlayStyle
     public float BorderWidth { get; init; } = 3f;
     public string BorderColor { get; init; } = "#FFFFFF";
     public bool ShadowEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Custom X position as a fraction (0–1) of the output canvas width.
+    /// When non-null, overrides the <see cref="Position"/> enum.
+    /// </summary>
+    public float? NormalizedX { get; init; }
+
+    /// <summary>
+    /// Custom Y position as a fraction (0–1) of the output canvas height.
+    /// When non-null, overrides the <see cref="Position"/> enum.
+    /// </summary>
+    public float? NormalizedY { get; init; }
 }
 
 /// <summary>
@@ -73,6 +85,17 @@ public class WebcamCompositor
 
     private (float x, float y) CalculatePosition(int canvasWidth, int canvasHeight, float size, float margin)
     {
+        // Custom normalized position overrides the enum preset
+        if (_style.NormalizedX.HasValue && _style.NormalizedY.HasValue)
+        {
+            float x = _style.NormalizedX.Value * canvasWidth;
+            float y = _style.NormalizedY.Value * canvasHeight;
+            // Clamp to keep overlay within canvas
+            x = Math.Clamp(x, 0, Math.Max(0, canvasWidth - size));
+            y = Math.Clamp(y, 0, Math.Max(0, canvasHeight - size));
+            return (x, y);
+        }
+
         return _style.Position switch
         {
             WebcamPosition.TopLeft => (margin, margin),

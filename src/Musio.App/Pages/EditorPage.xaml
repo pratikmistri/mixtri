@@ -51,6 +51,32 @@
             <controls:PreviewCanvas
                 x:Name="Preview" />
 
+            <!-- Webcam position/resize overlay -->
+            <Canvas x:Name="WebcamOverlayCanvas"
+                    Background="Transparent"
+                    PointerPressed="WebcamOverlay_PointerPressed"
+                    PointerMoved="WebcamOverlay_PointerMoved"
+                    PointerReleased="WebcamOverlay_PointerReleased"
+                    SizeChanged="WebcamOverlay_SizeChanged">
+                <Border x:Name="WebcamOverlayRect"
+                        Background="Transparent"
+                        BorderBrush="#80FFFFFF"
+                        BorderThickness="2"
+                        CornerRadius="999"
+                        Visibility="Collapsed"
+                        IsHitTestVisible="False">
+                    <!-- Resize handle (bottom-right corner) -->
+                    <Border x:Name="WebcamResizeHandle"
+                            Width="14" Height="14"
+                            Background="White"
+                            CornerRadius="7"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Bottom"
+                            Margin="0,0,-4,-4"
+                            IsHitTestVisible="False" />
+                </Border>
+            </Canvas>
+
             <!-- Zoom region edit overlay -->
             <Grid x:Name="ZoomRegionOverlay" Visibility="Collapsed">
                 <Canvas x:Name="ZoomRegionCanvas"

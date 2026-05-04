@@ -44,6 +44,18 @@ public sealed partial class EditorPage : Page
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
 
+    // Webcam overlay drag/resize state
+    private bool _webcamDragging;
+    private bool _webcamResizing;
+    private Windows.Foundation.Point _webcamDragStart;
+    private float _webcamNormX;
+    private float _webcamNormY;
+    private float _webcamNormSize;
+    private float _webcamDragStartNormX;
+    private float _webcamDragStartNormY;
+    private float _webcamDragStartNormSize;
+    private bool _hasWebcamOverlay;
+
     public EditorPage()
     {
         ViewModel = new EditorViewModel();
@@ -343,6 +355,9 @@ public sealed partial class EditorPage : Page
 
         // Load webcam composition for preview overlay
         await LoadWebcamCompositionAsync(project);
+
+        // Initialize webcam overlay editing
+        InitializeWebcamOverlay(config);
 
         // Show style controls for Window and Region captures
         InitializeStyleControls(project, config);
@@ -1675,4 +1690,182 @@ public sealed partial class EditorPage : Page
     }
 
     private static string ColorToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
+
+    private void InitializeWebcamOverlay(CompositionConfig config)
+    {
+        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
+        if (!_hasWebcamOverlay)
+        {
+            WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            return;
+        }
+
+        var style = config.WebcamStyle!;
+        var project = ProjectService.Instance.CurrentProject;
+        int outW = project?.Width > 0 ? project.Width : 1920;
+        int outH = project?.Height > 0 ? project.Height : 1080;
+
+        // Determine initial normalized position from style
+        _webcamNormSize = style.Size / outW;
+        if (style.NormalizedX.HasValue && style.NormalizedY.HasValue)
+        {
+            _webcamNormX = style.NormalizedX.Value;
+            _webcamNormY = style.NormalizedY.Value;
+        }
+        else
+        {
+            float margin = style.Margin;
+            float size = style.Size;
+            (float px, float py) = style.Position switch
+            {
+                WebcamPosition.TopLeft => (margin, margin),
+                WebcamPosition.TopRight => (outW - size - margin, margin),
+                WebcamPosition.BottomLeft => (margin, outH - size - margin),
+                _ => (outW - size - margin, outH - size - margin),
+            };
+            _webcamNormX = px / outW;
+            _webcamNormY = py / outH;
+        }
+
+        WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        UpdateWebcamOverlayPosition();
+    }
+
+    private void UpdateWebcamOverlayPosition()
+    {
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || layout.Height <= 0) return;
+
+        double screenX = layout.X + _webcamNormX * layout.Width;
+        double screenY = layout.Y + _webcamNormY * layout.Height;
+        double screenSize = _webcamNormSize * layout.Width;
+
+        Canvas.SetLeft(WebcamOverlayRect, screenX);
+        Canvas.SetTop(WebcamOverlayRect, screenY);
+        WebcamOverlayRect.Width = screenSize;
+        WebcamOverlayRect.Height = screenSize;
+    }
+
+    private void WebcamOverlay_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_hasWebcamOverlay)
+            UpdateWebcamOverlayPosition();
+    }
+
+    private void WebcamOverlay_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_hasWebcamOverlay) return;
+
+        var pos = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0) return;
+
+        double screenX = layout.X + _webcamNormX * layout.Width;
+        double screenY = layout.Y + _webcamNormY * layout.Height;
+        double screenSize = _webcamNormSize * layout.Width;
+
+        // Check if pointer is on the resize handle (bottom-right corner)
+        double handleSize = 20;
+        double handleX = screenX + screenSize - handleSize;
+        double handleY = screenY + screenSize - handleSize;
+
+        if (pos.X >= handleX && pos.Y >= handleY &&
+            pos.X <= screenX + screenSize && pos.Y <= screenY + screenSize)
+        {
+            _webcamResizing = true;
+            _webcamDragStart = pos;
+            _webcamDragStartNormSize = _webcamNormSize;
+            WebcamOverlayCanvas.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+
+        // Check if pointer is inside the webcam overlay for dragging
+        if (pos.X >= screenX && pos.X <= screenX + screenSize &&
+            pos.Y >= screenY && pos.Y <= screenY + screenSize)
+        {
+            _webcamDragging = true;
+            _webcamDragStart = pos;
+            _webcamDragStartNormX = _webcamNormX;
+            _webcamDragStartNormY = _webcamNormY;
+            WebcamOverlayCanvas.CapturePointer(e.Pointer);
+            e.Handled = true;
+        }
+    }
+
+    private void WebcamOverlay_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging && !_webcamResizing) return;
+
+        var pos = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0) return;
+
+        if (_webcamDragging)
+        {
+            double dx = pos.X - _webcamDragStart.X;
+            double dy = pos.Y - _webcamDragStart.Y;
+
+            _webcamNormX = (float)Math.Clamp(
+                _webcamDragStartNormX + dx / layout.Width, 0, 1 - _webcamNormSize);
+            _webcamNormY = (float)Math.Clamp(
+                _webcamDragStartNormY + dy / layout.Height, 0, 1 - _webcamNormSize * layout.Width / layout.Height);
+
+            UpdateWebcamOverlayPosition();
+            e.Handled = true;
+        }
+        else if (_webcamResizing)
+        {
+            double dx = pos.X - _webcamDragStart.X;
+            double dy = pos.Y - _webcamDragStart.Y;
+            double delta = Math.Max(dx, dy);
+
+            float minSize = 50f / (float)layout.Width;
+            float maxSize = 0.5f;
+            _webcamNormSize = (float)Math.Clamp(
+                _webcamDragStartNormSize + delta / layout.Width, minSize, maxSize);
+
+            UpdateWebcamOverlayPosition();
+            e.Handled = true;
+        }
+    }
+
+    private void WebcamOverlay_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging && !_webcamResizing) return;
+
+        bool changed = _webcamDragging || _webcamResizing;
+        _webcamDragging = false;
+        _webcamResizing = false;
+        WebcamOverlayCanvas.ReleasePointerCapture(e.Pointer);
+        e.Handled = true;
+
+        if (changed)
+            ApplyWebcamOverlayChange();
+    }
+
+    private void ApplyWebcamOverlayChange()
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        int outW = project.Width > 0 ? project.Width : 1920;
+        float pixelSize = _webcamNormSize * outW;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with
+        {
+            NormalizedX = _webcamNormX,
+            NormalizedY = _webcamNormY,
+            Size = pixelSize,
+        };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
 }
