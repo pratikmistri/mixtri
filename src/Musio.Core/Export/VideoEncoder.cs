@@ -243,6 +243,8 @@ public class VideoEncoder : IDisposable
 
                 lock (pendingSamplesLock)
                 {
+                    // Remove completed tasks to prevent unbounded list growth
+                    pendingSamples.RemoveAll(t => t.IsCompleted);
                     pendingSamples.Add(task);
                 }
             };
@@ -571,10 +573,11 @@ public class VideoEncoder : IDisposable
         if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
             clampedPosition = composition.Duration;
 
-        var thumbnail = await composition.GetThumbnailAsync(
+        using var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        using var stream = thumbnail.AsStream();
+        using var randomAccessStream = stream.AsRandomAccessStream();
         return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 
@@ -586,7 +589,7 @@ public class VideoEncoder : IDisposable
         var comp = new MediaComposition();
         comp.Clips.Add(clip);
 
-        var thumbnail = await comp.GetThumbnailAsync(
+        using var thumbnail = await comp.GetThumbnailAsync(
             position, width, height, VideoFramePrecision.NearestFrame);
 
         // Release MediaComposition/MediaClip native resources immediately —
@@ -594,7 +597,8 @@ public class VideoEncoder : IDisposable
         // leaks a composition + clip holding a file handle to the video.
         comp.Clips.Clear();
 
-        var randomAccessStream = thumbnail.AsStream().AsRandomAccessStream();
+        using var stream = thumbnail.AsStream();
+        using var randomAccessStream = stream.AsRandomAccessStream();
         return await CanvasBitmap.LoadAsync(device, randomAccessStream);
     }
 

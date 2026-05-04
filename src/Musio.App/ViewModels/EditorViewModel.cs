@@ -145,6 +145,16 @@ public partial class EditorViewModel : ObservableObject
         ModelReloaded?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>
+    /// Unsubscribes from singleton and long-lived event sources to prevent
+    /// this VM from being kept alive after the page is unloaded.
+    /// </summary>
+    public void Cleanup()
+    {
+        ProjectService.Instance.ProjectChanged -= OnProjectChanged;
+        _undoRedoManager.StateChanged -= OnUndoRedoStateChanged;
+    }
+
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
         CanUndo = _undoRedoManager.CanUndo;

@@ -130,6 +130,11 @@ public sealed partial class RegionSelectorOverlay : UserControl
     /// </summary>
     private static async Task<SoftwareBitmapSource?> CaptureDesktopScreenshotAsync()
     {
+        IntPtr hdcScreen = IntPtr.Zero;
+        IntPtr hdcMem = IntPtr.Zero;
+        IntPtr hBitmap = IntPtr.Zero;
+        IntPtr oldObj = IntPtr.Zero;
+
         try
         {
             int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -140,14 +145,15 @@ public sealed partial class RegionSelectorOverlay : UserControl
             if (width <= 0 || height <= 0)
                 return null;
 
-            var hdcScreen = GetDC(IntPtr.Zero);
-            var hdcMem = CreateCompatibleDC(hdcScreen);
-            var hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
-            var oldObj = SelectObject(hdcMem, hBitmap);
+            hdcScreen = GetDC(IntPtr.Zero);
+            hdcMem = CreateCompatibleDC(hdcScreen);
+            hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            oldObj = SelectObject(hdcMem, hBitmap);
 
             BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY);
 
             SelectObject(hdcMem, oldObj);
+            oldObj = IntPtr.Zero;
 
             // Read pixel data from the HBITMAP
             var bmi = new BITMAPINFO
@@ -163,13 +169,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
             var pixelData = new byte[width * height * 4];
             GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
 
-            // Clean up GDI resources
-            DeleteObject(hBitmap);
-            DeleteDC(hdcMem);
-            ReleaseDC(IntPtr.Zero, hdcScreen);
-
             // Convert BGRA pixel data to SoftwareBitmap
-            var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
+            using var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
             softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
 
             var source = new SoftwareBitmapSource();
@@ -180,6 +181,18 @@ public sealed partial class RegionSelectorOverlay : UserControl
         catch
         {
             return null;
+        }
+        finally
+        {
+            // Ensure GDI resources are always released
+            if (oldObj != IntPtr.Zero)
+                SelectObject(hdcMem, oldObj);
+            if (hBitmap != IntPtr.Zero)
+                DeleteObject(hBitmap);
+            if (hdcMem != IntPtr.Zero)
+                DeleteDC(hdcMem);
+            if (hdcScreen != IntPtr.Zero)
+                ReleaseDC(IntPtr.Zero, hdcScreen);
         }
     }
 

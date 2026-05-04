@@ -233,74 +233,83 @@ public sealed class VideoWriter : IDisposable
         // so constant duration matches real wall-clock time.
         var constantDuration = TimeSpan.FromSeconds(1.0 / _fps);
 
-        for (long i = 0; i < totalFrames; i++)
-        {
-            string framePath = Path.Combine(_framesDir, $"frame_{i:D8}.jpg");
-            if (!File.Exists(framePath))
-                continue;
-
-            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
-            var clip = await MediaClip.CreateFromImageFileAsync(file, constantDuration);
-            composition.Clips.Add(clip);
-        }
-
-        if (composition.Clips.Count == 0)
-            return;
-
-        // H.264 requires even dimensions
-        uint profileWidth = (uint)(_width & ~1);
-        uint profileHeight = (uint)(_height & ~1);
-        if (profileWidth < 2) profileWidth = 2;
-        if (profileHeight < 2) profileHeight = 2;
-
-        // Encode to MP4 — use Auto quality so the profile dimensions aren't
-        // constrained to a preset resolution, then set them explicitly.
-        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
-        profile.Video ??= new VideoEncodingProperties();
-        profile.Video.Subtype = "H264";
-        profile.Video.Width = profileWidth;
-        profile.Video.Height = profileHeight;
-        profile.Video.FrameRate.Numerator = (uint)_fps;
-        profile.Video.FrameRate.Denominator = 1;
-        profile.Video.Bitrate = 20_000_000;
-
         try
         {
-            File.AppendAllText(logPath,
-                $"Profile: {profileWidth}x{profileHeight}, Clips={composition.Clips.Count}\n");
+            for (long i = 0; i < totalFrames; i++)
+            {
+                string framePath = Path.Combine(_framesDir, $"frame_{i:D8}.jpg");
+                if (!File.Exists(framePath))
+                    continue;
+
+                var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
+                var clip = await MediaClip.CreateFromImageFileAsync(file, constantDuration);
+                composition.Clips.Add(clip);
+            }
+
+            if (composition.Clips.Count == 0)
+                return;
+
+            // H.264 requires even dimensions
+            uint profileWidth = (uint)(_width & ~1);
+            uint profileHeight = (uint)(_height & ~1);
+            if (profileWidth < 2) profileWidth = 2;
+            if (profileHeight < 2) profileHeight = 2;
+
+            // Encode to MP4 — use Auto quality so the profile dimensions aren't
+            // constrained to a preset resolution, then set them explicitly.
+            var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
+            profile.Video ??= new VideoEncodingProperties();
+            profile.Video.Subtype = "H264";
+            profile.Video.Width = profileWidth;
+            profile.Video.Height = profileHeight;
+            profile.Video.FrameRate.Numerator = (uint)_fps;
+            profile.Video.FrameRate.Denominator = 1;
+            profile.Video.Bitrate = 20_000_000;
+
+            try
+            {
+                File.AppendAllText(logPath,
+                    $"Profile: {profileWidth}x{profileHeight}, Clips={composition.Clips.Count}\n");
+            }
+            catch { }
+
+            string dir = Path.GetDirectoryName(_outputPath)!;
+            var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
+            var outputFile = await folder.CreateFileAsync(
+                Path.GetFileName(_outputPath), CreationCollisionOption.ReplaceExisting);
+
+            var renderOp = composition.RenderToFileAsync(
+                outputFile, MediaTrimmingPreference.Precise, profile);
+
+            var tcs = new TaskCompletionSource<object?>();
+            renderOp.Completed = (info, status) =>
+            {
+                if (status == Windows.Foundation.AsyncStatus.Completed)
+                {
+                    tcs.TrySetResult(null);
+                }
+                else if (status == Windows.Foundation.AsyncStatus.Canceled)
+                {
+                    tcs.TrySetCanceled();
+                }
+                else
+                {
+                    var err = info.ErrorCode;
+                    try { File.AppendAllText(logPath, $"RenderToFile FAILED: {err}\n"); }
+                    catch { }
+                    tcs.TrySetException(
+                        err ?? new InvalidOperationException("MP4 render failed."));
+                }
+            };
+
+            await tcs.Task;
         }
-        catch { }
-
-        string dir = Path.GetDirectoryName(_outputPath)!;
-        var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
-        var outputFile = await folder.CreateFileAsync(
-            Path.GetFileName(_outputPath), CreationCollisionOption.ReplaceExisting);
-
-        var renderOp = composition.RenderToFileAsync(
-            outputFile, MediaTrimmingPreference.Precise, profile);
-
-        var tcs = new TaskCompletionSource<object?>();
-        renderOp.Completed = (info, status) =>
+        finally
         {
-            if (status == Windows.Foundation.AsyncStatus.Completed)
-            {
-                tcs.TrySetResult(null);
-            }
-            else if (status == Windows.Foundation.AsyncStatus.Canceled)
-            {
-                tcs.TrySetCanceled();
-            }
-            else
-            {
-                var err = info.ErrorCode;
-                try { File.AppendAllText(logPath, $"RenderToFile FAILED: {err}\n"); }
-                catch { }
-                tcs.TrySetException(
-                    err ?? new InvalidOperationException("MP4 render failed."));
-            }
-        };
-
-        await tcs.Task;
+            // Release all MediaClip COM objects to avoid linear memory/handle
+            // growth proportional to frame count.
+            composition.Clips.Clear();
+        }
 
         // Keep frame images for editor preview — they'll be cleaned up
         // when the project is explicitly deleted or on next recording.

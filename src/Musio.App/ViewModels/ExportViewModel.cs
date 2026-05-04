@@ -36,6 +36,15 @@ public partial class ExportViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Unsubscribes from singleton event sources to prevent this VM from
+    /// being kept alive after the page is unloaded.
+    /// </summary>
+    public void Cleanup()
+    {
+        ProjectService.Instance.ProjectChanged -= OnProjectChanged;
+    }
+
+    /// <summary>
     /// Resets export state and generates a fresh output path for a new export.
     /// Called when starting a new export or when the project changes.
     /// </summary>

@@ -52,6 +52,8 @@ public class SpeechToText : IDisposable
         var segments = new List<SubtitleSegment>();
         var lang = new Windows.Globalization.Language(language);
 
+        // Dispose previous recognizer if TranscribeAsync is called multiple times
+        _recognizer?.Dispose();
         _recognizer = new Windows.Media.SpeechRecognition.SpeechRecognizer(lang);
 
         // Use dictation mode for natural speech with pauses
@@ -102,24 +104,29 @@ public class SpeechToText : IDisposable
         var storageFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(audioFilePath);
         var stream = await storageFile.OpenAsync(Windows.Storage.FileAccessMode.Read);
 
-        await _recognizer.ContinuousRecognitionSession.StartAsync();
-
-        progress?.Report(0.5);
-
-        // Wait for recognition to complete or cancellation
-        using var registration = ct.Register(() => tcs.TrySetCanceled(ct));
-        await tcs.Task;
-
         try
         {
-            await _recognizer.ContinuousRecognitionSession.StopAsync();
-        }
-        catch (Exception)
-        {
-            // Session may already be stopped
-        }
+            await _recognizer.ContinuousRecognitionSession.StartAsync();
 
-        stream.Dispose();
+            progress?.Report(0.5);
+
+            // Wait for recognition to complete or cancellation
+            using var registration = ct.Register(() => tcs.TrySetCanceled(ct));
+            await tcs.Task;
+
+            try
+            {
+                await _recognizer.ContinuousRecognitionSession.StopAsync();
+            }
+            catch (Exception)
+            {
+                // Session may already be stopped
+            }
+        }
+        finally
+        {
+            stream.Dispose();
+        }
 
         progress?.Report(1.0);
 

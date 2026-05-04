@@ -166,11 +166,27 @@ public sealed partial class EditorPage : Page
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportVM.PropertyChanged += ExportVM_PropertyChanged;
 
-        // Clean up debounce timer when page is unloaded to prevent leaks
+        // Clean up when page is unloaded to prevent leaks
         Unloaded += (_, _) =>
         {
             _styleDebounceTimer?.Stop();
             _styleDebounceTimer = null;
+
+            // Stop playback to halt timer ticks
+            Preview.Pause();
+
+            // Dispose owned resources
+            _frameReader?.Dispose();
+            _frameReader = null;
+            _previewRenderer?.Dispose();
+            _previewRenderer = null;
+            _audioPlayer?.Dispose();
+            _audioPlayer = null;
+            _compositorReady = false;
+
+            // Unsubscribe VMs from singleton event sources
+            ViewModel.Cleanup();
+            ExportVM.Cleanup();
         };
     }
 

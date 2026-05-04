@@ -487,7 +487,7 @@ public sealed partial class TimelineControl : UserControl
                 : isEditable ? ZoomSegmentFill
                 : ZoomSegmentAutoFill;
 
-            var roundedRect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
+            using var roundedRect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(roundedRect, fillColor);
 
             // Border
@@ -531,7 +531,7 @@ public sealed partial class TimelineControl : UserControl
             float cy = ZoomSegmentVerticalPadding;
             float ch = h - ZoomSegmentVerticalPadding * 2;
 
-            var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
+            using var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
             ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
                 new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
@@ -939,7 +939,7 @@ public sealed partial class TimelineControl : UserControl
 
             if (waveform.Length > 1)
             {
-                var envBuilder = new CanvasPathBuilder(sender);
+                using var envBuilder = new CanvasPathBuilder(sender);
                 float startX = x1;
                 float startY = centerY - waveform[0] * (h * 0.45f);
                 envBuilder.BeginFigure(startX, startY);
@@ -952,7 +952,7 @@ public sealed partial class TimelineControl : UserControl
                 }
 
                 envBuilder.EndFigure(CanvasFigureLoop.Open);
-                var envGeometry = CanvasGeometry.CreatePath(envBuilder);
+                using var envGeometry = CanvasGeometry.CreatePath(envBuilder);
                 ds.DrawGeometry(envGeometry, envelopeColor, 1.5f);
             }
         }
@@ -1021,8 +1021,8 @@ public sealed partial class TimelineControl : UserControl
         // Draw X-position path (blue) and Y-position path (orange)
         if (cursorData.Samples.Count > 1)
         {
-            var xPathBuilder = new CanvasPathBuilder(sender);
-            var yPathBuilder = new CanvasPathBuilder(sender);
+            using var xPathBuilder = new CanvasPathBuilder(sender);
+            using var yPathBuilder = new CanvasPathBuilder(sender);
             bool xStarted = false, yStarted = false;
 
             foreach (var sample in cursorData.Samples)
@@ -1046,12 +1046,14 @@ public sealed partial class TimelineControl : UserControl
             if (xStarted)
             {
                 xPathBuilder.EndFigure(CanvasFigureLoop.Open);
-                ds.DrawGeometry(CanvasGeometry.CreatePath(xPathBuilder), CursorPathXColor, 1.2f);
+                using var xGeometry = CanvasGeometry.CreatePath(xPathBuilder);
+                ds.DrawGeometry(xGeometry, CursorPathXColor, 1.2f);
             }
             if (yStarted)
             {
                 yPathBuilder.EndFigure(CanvasFigureLoop.Open);
-                ds.DrawGeometry(CanvasGeometry.CreatePath(yPathBuilder), CursorPathYColor, 1.2f);
+                using var yGeometry = CanvasGeometry.CreatePath(yPathBuilder);
+                ds.DrawGeometry(yGeometry, CursorPathYColor, 1.2f);
             }
         }
 
