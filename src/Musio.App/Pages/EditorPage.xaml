@@ -383,8 +383,6 @@
                                              IsChecked="True" Click="WebcamShape_Click" Tag="Circle" />
                                 <RadioButton x:Name="ShapeSquare" Content="Square" GroupName="WebcamShape"
                                              Click="WebcamShape_Click" Tag="RoundedRect" />
-                                <RadioButton x:Name="ShapeRectangle" Content="Rectangle" GroupName="WebcamShape"
-                                             Click="WebcamShape_Click" Tag="Rectangle" />
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>

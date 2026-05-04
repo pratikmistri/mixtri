@@ -1880,14 +1880,7 @@ public sealed partial class EditorPage : Page
     {
         ShapeCircle.IsChecked = shape == WebcamShape.Circle;
         ShapeSquare.IsChecked = shape == WebcamShape.RoundedRect;
-        ShapeRectangle.IsChecked = shape == WebcamShape.Rectangle;
 
-        WebcamShapeText.Text = shape switch
-        {
-            WebcamShape.Circle => "Circle",
-            WebcamShape.RoundedRect => "Square",
-            WebcamShape.Rectangle => "Rectangle",
-            _ => "Circle",
-        };
+        WebcamShapeText.Text = shape == WebcamShape.RoundedRect ? "Square" : "Circle";
     }
 }
