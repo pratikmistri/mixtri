@@ -30,6 +30,11 @@ public record WebcamOverlayStyle
     /// When non-null, overrides the <see cref="Position"/> enum.
     /// </summary>
     public float? NormalizedY { get; init; }
+
+    /// <summary>
+    /// When true, the webcam frame is horizontally flipped (mirror mode).
+    /// </summary>
+    public bool Mirrored { get; init; } = false;
 }
 
 /// <summary>
@@ -70,6 +75,15 @@ public class WebcamCompositor
 
         var destRect = new Rect(x, y, size, size);
 
+        // Center-crop source frame to square (avoid stretching 16:9 into a square)
+        float srcW = (float)webcamFrame.SizeInPixels.Width;
+        float srcH = (float)webcamFrame.SizeInPixels.Height;
+        float cropSize = Math.Min(srcW, srcH);
+        var sourceRect = new Rect(
+            (srcW - cropSize) / 2f,
+            (srcH - cropSize) / 2f,
+            cropSize, cropSize);
+
         // Optional shadow behind the overlay
         if (_style.ShadowEnabled)
         {
@@ -80,7 +94,17 @@ public class WebcamCompositor
         using var clipGeometry = CreateClipGeometry(session.Device, x, y, size);
         using (session.CreateLayer(1.0f, clipGeometry))
         {
-            session.DrawImage(webcamFrame, destRect);
+            if (_style.Mirrored)
+            {
+                var transform = session.Transform;
+                session.Transform = Matrix3x2.CreateScale(-1, 1, new Vector2(x + size / 2f, y + size / 2f));
+                session.DrawImage(webcamFrame, destRect, sourceRect);
+                session.Transform = transform;
+            }
+            else
+            {
+                session.DrawImage(webcamFrame, destRect, sourceRect);
+            }
         }
 
         // Border stroke

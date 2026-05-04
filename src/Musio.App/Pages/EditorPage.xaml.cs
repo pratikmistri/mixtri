@@ -1890,6 +1890,22 @@ public sealed partial class EditorPage : Page
         _suppressWebcamEvents = true;
         WebcamShapeCombo.SelectedIndex = style.Shape == WebcamShape.RoundedRect ? 1 : 0;
         WebcamBorderSlider.Value = style.BorderWidth;
+        WebcamMirrorToggle.IsOn = style.Mirrored;
         _suppressWebcamEvents = false;
+    }
+
+    private void WebcamMirrorToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { Mirrored = WebcamMirrorToggle.IsOn };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
     }
 }

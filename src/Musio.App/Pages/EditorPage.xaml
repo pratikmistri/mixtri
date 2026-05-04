@@ -374,12 +374,12 @@
                     ToolTipService.ToolTip="Webcam overlay settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE714;" />
-                        <TextBlock Text="Webcam" />
+                        <TextBlock Text="Camera" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout Placement="Top">
                             <StackPanel Width="260" Spacing="12" Padding="4">
-                                <TextBlock Text="Webcam Overlay" FontWeight="SemiBold" FontSize="14" />
+                                <TextBlock Text="Camera Overlay" FontWeight="SemiBold" FontSize="14" />
 
                                 <!-- Shape -->
                                 <ComboBox
@@ -402,6 +402,12 @@
                                         Value="8"
                                         ValueChanged="WebcamBorderSlider_ValueChanged" />
                                 </StackPanel>
+
+                                <!-- Mirror -->
+                                <ToggleSwitch
+                                    x:Name="WebcamMirrorToggle"
+                                    Header="Mirror"
+                                    Toggled="WebcamMirrorToggle_Toggled" />
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>
