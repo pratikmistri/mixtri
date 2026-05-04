@@ -333,8 +333,9 @@ public sealed partial class EditorPage : Page
                 project.DpiScale);
             _compositorReady = true;
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] PreviewRenderer init failed: {ex.Message}");
             // Compositor init failed — fall back to raw frames
             _previewRenderer?.Dispose();
             _previewRenderer = null;
@@ -471,29 +472,34 @@ public sealed partial class EditorPage : Page
     {
         if (_webcamComposition is null || _previewRenderer is null) return;
 
+        CanvasBitmap? webcamFrame = null;
         try
         {
             var clamped = position;
             if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
                 clamped = _webcamComposition.Duration;
 
-            using var thumbnail = await _webcamComposition.GetThumbnailAsync(
+            var thumbnail = await _webcamComposition.GetThumbnailAsync(
                 clamped, _webcamWidth, _webcamHeight,
                 Windows.Media.Editing.VideoFramePrecision.NearestFrame);
 
             var device = CanvasDevice.GetSharedDevice();
-            using var stream = thumbnail.AsStream();
-            using var ras = stream.AsRandomAccessStream();
-            var webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
+            var stream = thumbnail.AsStream();
+            var ras = stream.AsRandomAccessStream();
+            webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
 
-            // Dispose previous frame, keep new one alive through rendering
+            // Dispose intermediate streams — ignore errors from WinRT stream flush
+            try { ras.Dispose(); } catch { }
+            try { stream.Dispose(); } catch { }
+            try { thumbnail.Dispose(); } catch { }
+        }
+        catch { /* frame extraction failed — keep previous frame */ }
+
+        if (webcamFrame is not null)
+        {
             _lastWebcamFrame?.Dispose();
             _lastWebcamFrame = webcamFrame;
             _previewRenderer.SetWebcamFrame(_lastWebcamFrame);
-        }
-        catch
-        {
-            _previewRenderer.SetWebcamFrame(null);
         }
     }
 
