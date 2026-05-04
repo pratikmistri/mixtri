@@ -397,9 +397,9 @@
                                     <Slider
                                         x:Name="WebcamBorderSlider"
                                         Minimum="0"
-                                        Maximum="10"
+                                        Maximum="20"
                                         StepFrequency="1"
-                                        Value="3"
+                                        Value="8"
                                         ValueChanged="WebcamBorderSlider_ValueChanged" />
                                 </StackPanel>
                             </StackPanel>

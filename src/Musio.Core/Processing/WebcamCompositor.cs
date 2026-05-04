@@ -15,7 +15,7 @@ public record WebcamOverlayStyle
     public WebcamPosition Position { get; init; } = WebcamPosition.BottomRight;
     public float Size { get; init; } = 300f;
     public float Margin { get; init; } = 20f;
-    public float BorderWidth { get; init; } = 3f;
+    public float BorderWidth { get; init; } = 8f;
     public string BorderColor { get; init; } = "#FFFFFF";
     public bool ShadowEnabled { get; init; } = true;
 
