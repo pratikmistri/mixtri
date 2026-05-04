@@ -166,24 +166,47 @@ public class VideoEncoder : IDisposable
             throw new InvalidOperationException(
                 "Cannot export: no JPEG frames or valid source video found.");
 
-        // Prepare webcam source (opened once, reused per frame)
-        MediaComposition? webcamComp = null;
-        int webcamWidth = 0, webcamHeight = 0;
+        // Prepare webcam frames — pre-extract to temp JPEGs for fast per-frame loading
+        VideoFrameReader? webcamFrameReader = null;
+        string? webcamTempDir = null;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
         {
             try
             {
+                int displaySize = (int)(compositionConfig.WebcamStyle?.Size ?? 300);
+                displaySize = Math.Max(displaySize, 200);
+
+                webcamTempDir = Path.Combine(Path.GetTempPath(), $"musio_webcam_{Guid.NewGuid():N}");
+                Directory.CreateDirectory(webcamTempDir);
+
                 var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
                 var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
-                var webcamProps = webcamClip.GetVideoEncodingProperties();
-                webcamWidth = (int)webcamProps.Width;
-                webcamHeight = (int)webcamProps.Height;
-                webcamComp = new MediaComposition();
+                var webcamComp = new MediaComposition();
                 webcamComp.Clips.Add(webcamClip);
+
+                Debug.WriteLine($"[VideoEncoder] Pre-extracting webcam at {displaySize}x{displaySize}...");
+                int count = (int)Math.Ceiling(webcamComp.Duration.TotalSeconds * _settings.Fps);
+                for (int i = 0; i < count; i++)
+                {
+                    var ts = TimeSpan.FromSeconds((double)i / _settings.Fps);
+                    var thumbnail = await webcamComp.GetThumbnailAsync(
+                        ts, displaySize, displaySize, VideoFramePrecision.NearestFrame);
+
+                    var path = Path.Combine(webcamTempDir, $"frame_{i:D8}.jpg");
+                    using (var src = thumbnail.AsStream())
+                    using (var dst = File.Create(path))
+                        await src.CopyToAsync(dst);
+
+                    try { thumbnail.Dispose(); } catch { }
+                }
+                webcamComp.Clips.Clear();
+
+                webcamFrameReader = VideoFrameReader.OpenSession(webcamTempDir, _settings.Fps);
+                Debug.WriteLine($"[VideoEncoder] Webcam pre-extracted: {webcamFrameReader?.FrameCount ?? 0} frames");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[VideoEncoder] Failed to load webcam video: {ex.Message}");
+                Debug.WriteLine($"[VideoEncoder] Webcam pre-extract failed: {ex.Message}");
             }
         }
 
@@ -236,10 +259,9 @@ public class VideoEncoder : IDisposable
                 var deferral = args.Request.GetDeferral();
                 var task = ProduceSampleAsync(
                     args.Request, deferral, frame, totalFrames,
-                    compositor, frameReader, sourceComp, webcamComp,
+                    compositor, frameReader, sourceComp, webcamFrameReader,
                     device, project.VideoFilePath, sourceWidth, sourceHeight,
                     compositorWidth, compositorHeight,
-                    webcamWidth, webcamHeight,
                     targetWidth, targetHeight,
                     needsScaling, timelineMapper, progress, stopwatch, ct);
 
@@ -293,11 +315,18 @@ public class VideoEncoder : IDisposable
         finally
         {
             frameReader?.Dispose();
+            webcamFrameReader?.Dispose();
 
             // Release MediaComposition/MediaClip native resources to avoid
             // holding video file handles and leaking memory.
             sourceComp?.Clips.Clear();
-            webcamComp?.Clips.Clear();
+
+            // Clean up temp webcam frames
+            if (webcamTempDir is not null)
+            {
+                try { Directory.Delete(webcamTempDir, recursive: true); }
+                catch { /* best-effort */ }
+            }
 
             // Clean up temp video-only file
             if (hasAudio)
@@ -319,12 +348,11 @@ public class VideoEncoder : IDisposable
         FrameCompositor compositor,
         VideoFrameReader? frameReader,
         MediaComposition? sourceComp,
-        MediaComposition? webcamComp,
+        VideoFrameReader? webcamFrameReader,
         CanvasDevice device,
         string sourceVideoPath,
         int sourceWidth, int sourceHeight,
         int compositorWidth, int compositorHeight,
-        int webcamWidth, int webcamHeight,
         int targetWidth, int targetHeight,
         bool needsScaling,
         TimelineMapper? timelineMapper,
@@ -352,14 +380,13 @@ public class VideoEncoder : IDisposable
             var timeSpan = TimeSpan.FromSeconds(timeSeconds);
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
-            // Webcam overlay
+            // Webcam overlay — load pre-extracted JPEG frame (fast disk read)
             CanvasBitmap? webcamFrame = null;
-            if (webcamComp is not null)
+            if (webcamFrameReader is not null)
             {
                 try
                 {
-                    webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan, webcamWidth, webcamHeight);
+                    webcamFrame = await webcamFrameReader.LoadFrameAtTimeAsync(timeSpan);
                     compositor.SetWebcamFrame(webcamFrame);
                 }
                 catch
