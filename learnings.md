@@ -845,3 +845,20 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `ExportEngine.ExportGifAsync` still passes a `using var` webcam bitmap into `FrameCompositor.SetWebcamFrame()`, but `GifEncoder` composes after the callback returns, so the compositor can read a disposed bitmap.
 - `TimelineControl` still allocates `CanvasPathBuilder` objects without disposing them.
 - `SpeechToText` keeps the last recognizer alive after `TranscribeAsync`, so its event handlers retain captured transcription state until the next call or `Dispose()`.
+
+---
+
+## Webcam Overlay — End-to-End Pipeline Fix
+
+**Feature/area:** Webcam overlay (AppSettings, SettingsPage, RecordingViewModel, RecordingSession, ExportEngine, PreviewRenderer, EditorPage)
+
+**Approaches tried:**
+
+1. **Traced why webcam never activated despite toggle** — Root cause: `RecordingViewModel.StartRecordingAsync` set `IsWebcamEnabled` in config but never set `WebcamDeviceId`. `RecordingSession` required both to be set (`IsWebcamEnabled && !string.IsNullOrWhiteSpace(WebcamDeviceId)`), so the webcam engine was never created. ✅
+2. **Wired full pipeline** — Added `WebcamDeviceId` to `AppSettings`, wired `SettingsPage` toggle/combo with device enumeration, initialized VM from settings, passed device ID through config, added auto-select fallback in `RecordingSession`, auto-set `WebcamOverlayStyle` in export enrichment, and added webcam frame extraction to editor preview. ✅
+
+**What worked:** Fixing all 6 layers of the pipeline (settings persistence → UI wiring → VM init → session auto-select → export style enrichment → editor preview plumbing).
+
+**What didn't work / known limitations:**
+- Webcam-to-video timing offset is not tracked; webcam frames are sampled at raw video time 1:1 which may cause slight desync.
+- GIF export still has a potential use-after-dispose issue with webcam frames (pre-existing).
