@@ -20,6 +20,12 @@ public class PreviewRenderer : IDisposable
     /// <summary>Preview output height (half of full export resolution).</summary>
     public int PreviewHeight { get; private set; }
 
+    /// <summary>Compositor output width (includes padding).</summary>
+    public int OutputWidth => _compositor?.OutputWidth ?? PreviewWidth;
+
+    /// <summary>Compositor output height (includes padding).</summary>
+    public int OutputHeight => _compositor?.OutputHeight ?? PreviewHeight;
+
     /// <summary>Total number of frames available after initialization.</summary>
     public int TotalFrames => _compositor?.TotalFrames ?? 0;
 

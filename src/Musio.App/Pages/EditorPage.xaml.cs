@@ -437,6 +437,11 @@ public sealed partial class EditorPage : Page
                 {
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
+
+                    // Update webcam overlay position after frame layout is known
+                    if (_hasWebcamOverlay)
+                        UpdateWebcamOverlayPosition();
+
                     return;
                 }
             }
@@ -1703,9 +1708,8 @@ public sealed partial class EditorPage : Page
         }
 
         var style = config.WebcamStyle!;
-        var project = ProjectService.Instance.CurrentProject;
-        int outW = project?.Width > 0 ? project.Width : 1920;
-        int outH = project?.Height > 0 ? project.Height : 1080;
+        int outW = _previewRenderer?.OutputWidth ?? 1920;
+        int outH = _previewRenderer?.OutputHeight ?? 1080;
 
         // Determine initial normalized position from style
         _webcamNormSize = style.Size / outW;
@@ -1834,10 +1838,7 @@ public sealed partial class EditorPage : Page
 
     private void ApplyWebcamOverlayChange()
     {
-        var project = ProjectService.Instance.CurrentProject;
-        if (project is null) return;
-
-        int outW = project.Width > 0 ? project.Width : 1920;
+        int outW = _previewRenderer?.OutputWidth ?? 1920;
         float pixelSize = _webcamNormSize * outW;
 
         var config = ProjectService.Instance.CurrentComposition;
