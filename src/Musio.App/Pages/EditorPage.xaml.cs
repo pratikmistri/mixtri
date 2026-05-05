@@ -2097,9 +2097,25 @@ public sealed partial class EditorPage : Page
         }
         catch (Exception ex)
         {
-            EditorInfoBar.Message = $"Subtitle generation failed: {ex.Message}";
-            EditorInfoBar.Severity = InfoBarSeverity.Error;
-            EditorInfoBar.IsOpen = true;
+            // Speech privacy policy not accepted — guide user to Settings
+            if ((uint)ex.HResult == 0x80045509 || (uint)ex.HResult == 0x803c010f
+                || ex.Message.Contains("privacy policy", StringComparison.OrdinalIgnoreCase))
+            {
+                EditorInfoBar.Message = "Speech recognition requires permission. Opening Settings…";
+                EditorInfoBar.Severity = InfoBarSeverity.Warning;
+                EditorInfoBar.IsOpen = true;
+                try
+                {
+                    await Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:privacy-speech"));
+                }
+                catch { /* Settings launch failed — user can navigate manually */ }
+            }
+            else
+            {
+                EditorInfoBar.Message = $"Subtitle generation failed: {ex.Message}";
+                EditorInfoBar.Severity = InfoBarSeverity.Error;
+                EditorInfoBar.IsOpen = true;
+            }
         }
         finally
         {
