@@ -34,7 +34,10 @@ public sealed partial class SettingsPage : Page
             if (match >= 0)
                 WebcamDeviceCombo.SelectedIndex = match;
             else if (_webcamDevices.Count > 0)
+            {
                 WebcamDeviceCombo.SelectedIndex = 0;
+                AppSettings.Instance.WebcamDeviceId = _webcamDevices[0].Id;
+            }
         }
         catch { /* no webcam devices available */ }
         finally
