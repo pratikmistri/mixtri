@@ -51,6 +51,17 @@
             <controls:PreviewCanvas
                 x:Name="Preview" />
 
+            <!-- Webcam position overlay (drag to move) -->
+            <Canvas x:Name="WebcamOverlayCanvas"
+                    SizeChanged="WebcamOverlay_SizeChanged">
+                <Border x:Name="WebcamOverlayRect"
+                        Background="Transparent"
+                        Visibility="Collapsed"
+                        PointerPressed="WebcamOverlay_PointerPressed"
+                        PointerMoved="WebcamOverlay_PointerMoved"
+                        PointerReleased="WebcamOverlay_PointerReleased" />
+            </Canvas>
+
             <!-- Zoom region edit overlay -->
             <Grid x:Name="ZoomRegionOverlay" Visibility="Collapsed">
                 <Canvas x:Name="ZoomRegionCanvas"
@@ -349,6 +360,54 @@
                                     x:Name="BorderToggle"
                                     Header="Border"
                                     Toggled="StyleToggle_Toggled" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
+                <!-- Webcam overlay settings (visible when webcam overlay is active) -->
+                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
+                <Button
+                    x:Name="WebcamShapeButton"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Webcam overlay settings">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE714;" />
+                        <TextBlock Text="Camera" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout Placement="Top">
+                            <StackPanel Width="260" Spacing="12" Padding="4">
+                                <TextBlock Text="Camera Overlay" FontWeight="SemiBold" FontSize="14" />
+
+                                <!-- Shape -->
+                                <ComboBox
+                                    x:Name="WebcamShapeCombo"
+                                    Header="Shape"
+                                    HorizontalAlignment="Stretch"
+                                    SelectionChanged="WebcamShapeCombo_SelectionChanged">
+                                    <ComboBoxItem Content="Circle" Tag="Circle" />
+                                    <ComboBoxItem Content="Square" Tag="RoundedRect" />
+                                </ComboBox>
+
+                                <!-- Border width -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Border Thickness" />
+                                    <Slider
+                                        x:Name="WebcamBorderSlider"
+                                        Minimum="0"
+                                        Maximum="20"
+                                        StepFrequency="1"
+                                        Value="8"
+                                        ValueChanged="WebcamBorderSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Mirror -->
+                                <ToggleSwitch
+                                    x:Name="WebcamMirrorToggle"
+                                    Header="Mirror"
+                                    Toggled="WebcamMirrorToggle_Toggled" />
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>

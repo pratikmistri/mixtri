@@ -146,12 +146,17 @@
                 CornerRadius="8">
                 <StackPanel Spacing="16">
                     <ToggleSwitch
+                        x:Name="WebcamToggle"
                         Header="Enable Webcam"
+                        Toggled="WebcamToggle_Toggled"
                         ToolTipService.ToolTip="Show webcam overlay in recording" />
                     <ComboBox
+                        x:Name="WebcamDeviceCombo"
                         Header="Webcam Device"
                         HorizontalAlignment="Stretch"
                         PlaceholderText="Default camera"
+                        DisplayMemberPath="Name"
+                        SelectionChanged="WebcamDeviceCombo_SelectionChanged"
                         ToolTipService.ToolTip="Select webcam device" />
                 </StackPanel>
             </Border>

@@ -20,6 +20,12 @@ public class PreviewRenderer : IDisposable
     /// <summary>Preview output height (half of full export resolution).</summary>
     public int PreviewHeight { get; private set; }
 
+    /// <summary>Compositor output width (includes padding).</summary>
+    public int OutputWidth => _compositor?.OutputWidth ?? PreviewWidth;
+
+    /// <summary>Compositor output height (includes padding).</summary>
+    public int OutputHeight => _compositor?.OutputHeight ?? PreviewHeight;
+
     /// <summary>Total number of frames available after initialization.</summary>
     public int TotalFrames => _compositor?.TotalFrames ?? 0;
 
@@ -82,6 +88,22 @@ public class PreviewRenderer : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _compositor?.SyncSuppressedClickTicks(suppressedTicks);
+    }
+
+    /// <summary>
+    /// Sets the current webcam frame for overlay compositing.
+    /// </summary>
+    public void SetWebcamFrame(CanvasBitmap? webcamFrame)
+    {
+        _compositor?.SetWebcamFrame(webcamFrame);
+    }
+
+    /// <summary>
+    /// Updates the webcam overlay position/size without rebuilding the compositor.
+    /// </summary>
+    public void UpdateWebcamStyle(WebcamOverlayStyle style)
+    {
+        _compositor?.UpdateWebcamStyle(style);
     }
 
     public void Dispose()

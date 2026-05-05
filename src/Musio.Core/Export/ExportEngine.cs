@@ -190,17 +190,44 @@ public class ExportEngine
 
         // Webcam source for overlay (opened once, reused per frame)
         MediaComposition? webcamComp = null;
-        int webcamWidth = 0, webcamHeight = 0;
+        int webcamExtractW = 0, webcamExtractH = 0;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
         {
-            var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
-            var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
-            var webcamProps = webcamClip.GetVideoEncodingProperties();
-            webcamWidth = (int)webcamProps.Width;
-            webcamHeight = (int)webcamProps.Height;
-            webcamComp = new MediaComposition();
-            webcamComp.Clips.Add(webcamClip);
+            try
+            {
+                var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+                var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
+                var webcamProps = webcamClip.GetVideoEncodingProperties();
+                int webcamNativeW = (int)webcamProps.Width;
+                int webcamNativeH = (int)webcamProps.Height;
+                webcamComp = new MediaComposition();
+                webcamComp.Clips.Add(webcamClip);
+
+                // Extract at ~1.5x the overlay display size instead of full resolution
+                float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
+                float minDim = Math.Min(webcamNativeW, webcamNativeH);
+                if (minDim > displaySize)
+                {
+                    float scale = displaySize / minDim;
+                    webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
+                    webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
+                }
+                else
+                {
+                    webcamExtractW = webcamNativeW;
+                    webcamExtractH = webcamNativeH;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ExportEngine] Failed to load webcam for GIF overlay: {ex.Message}");
+                // Continue GIF export without webcam overlay
+            }
         }
+
+        // Track the previous webcam frame so it can be disposed after composition consumes it
+        CanvasBitmap? previousWebcamFrame = null;
 
         try
         {
@@ -214,23 +241,40 @@ public class ExportEngine
                         : (double)frameIndex / fps;
                     var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
+                    // Dispose the previous iteration's webcam frame (composition has consumed it)
+                    previousWebcamFrame?.Dispose();
+                    previousWebcamFrame = null;
+
                     // Extract webcam frame and set on compositor
                     if (webcamComp is not null)
                     {
-                        using var webcamFrame = await ExtractFrameFromCompositionAsync(
-                            device, webcamComp, timeSpan, webcamWidth, webcamHeight);
-                        compositor.SetWebcamFrame(webcamFrame);
+                        try
+                        {
+                            var webcamFrame = await ExtractFrameFromCompositionAsync(
+                                device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
+                            compositor.SetWebcamFrame(webcamFrame);
+                            previousWebcamFrame = webcamFrame;
+                        }
+                        catch
+                        {
+                            compositor.SetWebcamFrame(null);
+                        }
                     }
 
                     // Fast path: JPEG frames; slow path: reusable composition
+                    CanvasBitmap result;
                     if (frameReader is not null)
                     {
-                        return await frameReader.LoadFrameAtTimeAsync(timeSpan)
+                        result = await frameReader.LoadFrameAtTimeAsync(timeSpan)
                             ?? await FallbackExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
                     }
+                    else
+                    {
+                        result = await ExtractFrameFromCompositionAsync(
+                            device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+                    }
 
-                    return await ExtractFrameFromCompositionAsync(
-                        device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+                    return result;
                 },
                 frameIndex => timelineMapper is not null
                     ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
@@ -243,6 +287,10 @@ public class ExportEngine
         }
         finally
         {
+            // Dispose the last webcam frame
+            compositor.SetWebcamFrame(null);
+            previousWebcamFrame?.Dispose();
+
             frameReader?.Dispose();
             sourceComp?.Clips.Clear();
             webcamComp?.Clips.Clear();
@@ -264,9 +312,8 @@ public class ExportEngine
         using var thumbnail = await composition.GetThumbnailAsync(
             clampedPosition, width, height, VideoFramePrecision.NearestFrame);
 
-        using var stream = thumbnail.AsStream();
-        using var randomAccessStream = stream.AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+        // ImageStream already implements IRandomAccessStream — pass directly
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     /// <summary>
@@ -286,9 +333,7 @@ public class ExportEngine
 
         comp.Clips.Clear();
 
-        using var stream = thumbnail.AsStream();
-        using var randomAccessStream = stream.AsRandomAccessStream();
-        return await CanvasBitmap.LoadAsync(device, randomAccessStream);
+        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     /// <summary>
@@ -397,6 +442,15 @@ public class ExportEngine
     {
         var keyboardEvents = composition.KeyboardEvents;
         var subtitles = composition.Subtitles;
+        var webcamStyle = composition.WebcamStyle;
+
+        // Auto-enable webcam overlay if the project has a webcam recording
+        if (webcamStyle is null &&
+            !string.IsNullOrWhiteSpace(project.WebcamFilePath) &&
+            File.Exists(project.WebcamFilePath))
+        {
+            webcamStyle = new WebcamOverlayStyle();
+        }
 
         // Load keyboard data if the project has it and the config expects keyboard overlay
         if (composition.KeyboardStyle is not null &&
@@ -416,12 +470,15 @@ public class ExportEngine
         }
 
         // Return enriched config if anything changed
-        if (keyboardEvents != composition.KeyboardEvents || subtitles != composition.Subtitles)
+        if (keyboardEvents != composition.KeyboardEvents ||
+            subtitles != composition.Subtitles ||
+            webcamStyle != composition.WebcamStyle)
         {
             return composition with
             {
                 KeyboardEvents = keyboardEvents,
                 Subtitles = subtitles,
+                WebcamStyle = webcamStyle,
             };
         }
 

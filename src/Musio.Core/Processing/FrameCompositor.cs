@@ -308,6 +308,15 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Updates the webcam overlay style (position, size) without rebuilding the compositor.
+    /// </summary>
+    public void UpdateWebcamStyle(WebcamOverlayStyle style)
+    {
+        if (_webcamCompositor is not null)
+            _webcamCompositor.UpdateStyle(style);
+    }
+
+    /// <summary>
     /// Replaces the zoom engine's manual keyframes with the provided list.
     /// Call this when the user adds or removes zoom keyframes in the editor.
     /// </summary>
@@ -763,6 +772,7 @@ public class FrameCompositor : IDisposable
             _compositeBuffer = null;
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
+            _webcamCompositor?.Dispose();
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

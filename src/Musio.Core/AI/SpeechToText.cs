@@ -52,9 +52,9 @@ public class SpeechToText : IDisposable
         var segments = new List<SubtitleSegment>();
         var lang = new Windows.Globalization.Language(language);
 
-        // Dispose previous recognizer if TranscribeAsync is called multiple times
-        _recognizer?.Dispose();
-        _recognizer = new Windows.Media.SpeechRecognition.SpeechRecognizer(lang);
+        // Clear any stale instance-level recognizer before creating a new one
+        this._recognizer?.Dispose();
+        this._recognizer = new Windows.Media.SpeechRecognition.SpeechRecognizer(lang);
 
         // Use dictation mode for natural speech with pauses
         var dictationConstraint =

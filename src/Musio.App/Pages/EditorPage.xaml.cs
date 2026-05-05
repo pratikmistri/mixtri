@@ -27,6 +27,12 @@ public sealed partial class EditorPage : Page
     private TimelineMapper? _timelineMapper;
     private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
+
+    // Webcam overlay for editor preview
+    private Windows.Media.Editing.MediaComposition? _webcamComposition;
+    private int _webcamWidth;
+    private int _webcamHeight;
+    private CanvasBitmap? _lastWebcamFrame;
     private int _lastRenderedFrameIndex = -1;
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
@@ -38,6 +44,16 @@ public sealed partial class EditorPage : Page
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
 
+    // Webcam overlay drag state
+    private bool _webcamDragging;
+    private Windows.Foundation.Point _webcamDragStart;
+    private float _webcamNormX;
+    private float _webcamNormY;
+    private float _webcamNormSize;
+    private float _webcamDragStartNormX;
+    private float _webcamDragStartNormY;
+    private bool _hasWebcamOverlay;
+
     public EditorPage()
     {
         ViewModel = new EditorViewModel();
@@ -48,6 +64,13 @@ public sealed partial class EditorPage : Page
 
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
+
+        // Keep webcam overlay in sync with preview frame layout
+        Preview.FrameLayoutChanged += (_, _) =>
+        {
+            if (_hasWebcamOverlay)
+                UpdateWebcamOverlayPosition();
+        };
 
         // Sync playhead: when timeline scrubs, update preview + audio
         Timeline.RegisterPropertyChangedCallback(
@@ -182,6 +205,10 @@ public sealed partial class EditorPage : Page
             _previewRenderer = null;
             _audioPlayer?.Dispose();
             _audioPlayer = null;
+            _webcamComposition?.Clips.Clear();
+            _webcamComposition = null;
+            _lastWebcamFrame?.Dispose();
+            _lastWebcamFrame = null;
             _compositorReady = false;
 
             // Unsubscribe VMs from singleton event sources
@@ -299,6 +326,13 @@ public sealed partial class EditorPage : Page
             };
         }
 
+        // Auto-enable webcam overlay if the project has a webcam recording
+        if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) &&
+            File.Exists(project.WebcamFilePath))
+        {
+            config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
+        }
+
         // Persist so the export pipeline uses the same config
         ProjectService.Instance.CurrentComposition = config;
 
@@ -316,12 +350,19 @@ public sealed partial class EditorPage : Page
                 project.DpiScale);
             _compositorReady = true;
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] PreviewRenderer init failed: {ex.Message}");
             // Compositor init failed — fall back to raw frames
             _previewRenderer?.Dispose();
             _previewRenderer = null;
         }
+
+        // Load webcam composition for preview overlay
+        await LoadWebcamCompositionAsync(project);
+
+        // Initialize webcam overlay editing
+        InitializeWebcamOverlay(config);
 
         // Show style controls for Window and Region captures
         InitializeStyleControls(project, config);
@@ -391,6 +432,9 @@ public sealed partial class EditorPage : Page
         {
             if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
             {
+                // Extract webcam frame for overlay
+                await SetWebcamFrameForPreviewAsync(sourcePosition);
+
                 var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
                 bitmap.Dispose();
 
@@ -419,6 +463,83 @@ public sealed partial class EditorPage : Page
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Preview frame error at {position}: {ex.Message}");
             bitmap.Dispose();
+        }
+    }
+
+    private async Task LoadWebcamCompositionAsync(Project project)
+    {
+        // Clear previous webcam state so stale resources don't persist
+        // when loading a new project or one without a webcam file.
+        _webcamComposition?.Clips.Clear();
+        _webcamComposition = null;
+        _lastWebcamFrame?.Dispose();
+        _lastWebcamFrame = null;
+
+        if (string.IsNullOrWhiteSpace(project.WebcamFilePath) || !File.Exists(project.WebcamFilePath))
+            return;
+
+        try
+        {
+            var webcamFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+            var webcamClip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(webcamFile);
+            var props = webcamClip.GetVideoEncodingProperties();
+            _webcamWidth = (int)props.Width;
+            _webcamHeight = (int)props.Height;
+            _webcamComposition = new Windows.Media.Editing.MediaComposition();
+            _webcamComposition.Clips.Add(webcamClip);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Failed to load webcam video: {ex.Message}");
+        }
+    }
+
+    private async Task SetWebcamFrameForPreviewAsync(TimeSpan position)
+    {
+        if (_webcamComposition is null || _previewRenderer is null) return;
+
+        CanvasBitmap? webcamFrame = null;
+        try
+        {
+            var clamped = position;
+            if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
+                clamped = _webcamComposition.Duration;
+
+            // Cap extraction size for preview — full native resolution is
+            // unnecessarily heavy for a ~300px overlay during editor scrubbing.
+            float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
+            int extractW = _webcamWidth;
+            int extractH = _webcamHeight;
+            float minDim = Math.Min(_webcamWidth, _webcamHeight);
+            if (minDim > previewCap)
+            {
+                float scale = previewCap / minDim;
+                extractW = Math.Max((int)Math.Ceiling(_webcamWidth * scale), 1);
+                extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
+            }
+
+            var thumbnail = await _webcamComposition.GetThumbnailAsync(
+                clamped, extractW, extractH,
+                Windows.Media.Editing.VideoFramePrecision.NearestFrame);
+
+            var device = CanvasDevice.GetSharedDevice();
+            var stream = thumbnail.AsStream();
+            var ras = stream.AsRandomAccessStream();
+            webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
+
+            // Dispose intermediate streams — ignore errors from WinRT stream flush
+            try { ras.Dispose(); } catch { }
+            try { stream.Dispose(); } catch { }
+            try { thumbnail.Dispose(); } catch { }
+        }
+        catch { /* frame extraction failed — keep previous frame */ }
+
+        if (webcamFrame is not null)
+        {
+            _lastWebcamFrame?.Dispose();
+            _lastWebcamFrame = webcamFrame;
+            _previewRenderer.SetWebcamFrame(_lastWebcamFrame);
         }
     }
 
@@ -1594,4 +1715,217 @@ public sealed partial class EditorPage : Page
     }
 
     private static string ColorToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
+
+    private void InitializeWebcamOverlay(CompositionConfig config)
+    {
+        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
+        if (!_hasWebcamOverlay)
+        {
+            WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            return;
+        }
+
+        var style = config.WebcamStyle!;
+        int outW = _previewRenderer?.OutputWidth ?? 1920;
+        int outH = _previewRenderer?.OutputHeight ?? 1080;
+
+        // Determine initial normalized position from style
+        _webcamNormSize = style.Size / outW;
+        if (style.NormalizedX.HasValue && style.NormalizedY.HasValue)
+        {
+            _webcamNormX = style.NormalizedX.Value;
+            _webcamNormY = style.NormalizedY.Value;
+        }
+        else
+        {
+            float margin = style.Margin;
+            float size = style.Size;
+            (float px, float py) = style.Position switch
+            {
+                WebcamPosition.TopLeft => (margin, margin),
+                WebcamPosition.TopRight => (outW - size - margin, margin),
+                WebcamPosition.BottomLeft => (margin, outH - size - margin),
+                _ => (outW - size - margin, outH - size - margin),
+            };
+            _webcamNormX = px / outW;
+            _webcamNormY = py / outH;
+        }
+
+        WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        SyncWebcamOverlayUI(style);
+        UpdateWebcamOverlayPosition();
+    }
+
+    private void UpdateWebcamOverlayPosition()
+    {
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || layout.Height <= 0) return;
+
+        double screenX = layout.X + _webcamNormX * layout.Width;
+        double screenY = layout.Y + _webcamNormY * layout.Height;
+        double screenSize = _webcamNormSize * layout.Width;
+
+        Canvas.SetLeft(WebcamOverlayRect, screenX);
+        Canvas.SetTop(WebcamOverlayRect, screenY);
+        WebcamOverlayRect.Width = screenSize;
+        WebcamOverlayRect.Height = screenSize;
+    }
+
+    private void WebcamOverlay_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // Layout updates are handled by Preview.FrameLayoutChanged
+    }
+
+    private void WebcamOverlay_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_hasWebcamOverlay) return;
+
+        _webcamDragging = true;
+        _webcamDragStart = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        _webcamDragStartNormX = _webcamNormX;
+        _webcamDragStartNormY = _webcamNormY;
+
+        ((UIElement)sender).CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void WebcamOverlay_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging) return;
+
+        var pos = e.GetCurrentPoint(WebcamOverlayCanvas).Position;
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0) return;
+
+        double dx = pos.X - _webcamDragStart.X;
+        double dy = pos.Y - _webcamDragStart.Y;
+
+        _webcamNormX = (float)Math.Clamp(
+            _webcamDragStartNormX + dx / layout.Width, 0, 1 - _webcamNormSize);
+        _webcamNormY = (float)Math.Clamp(
+            _webcamDragStartNormY + dy / layout.Height, 0, 1 - _webcamNormSize * layout.Width / layout.Height);
+
+        UpdateWebcamOverlayPosition();
+
+        // Live-update the compositor so the webcam video moves in real-time
+        UpdateWebcamStyleLive();
+
+        e.Handled = true;
+    }
+
+    private void WebcamOverlay_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging) return;
+
+        _webcamDragging = false;
+        ((UIElement)sender).ReleasePointerCapture(e.Pointer);
+        e.Handled = true;
+
+        ApplyWebcamOverlayChange();
+    }
+
+    private void UpdateWebcamStyleLive()
+    {
+        if (_previewRenderer is null) return;
+
+        int outW = _previewRenderer.OutputWidth;
+        float pixelSize = _webcamNormSize * outW;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with
+        {
+            NormalizedX = _webcamNormX,
+            NormalizedY = _webcamNormY,
+            Size = pixelSize,
+        };
+
+        // Lightweight update — just change the style, re-render current frame
+        _previewRenderer.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void ApplyWebcamOverlayChange()
+    {
+        int outW = _previewRenderer?.OutputWidth ?? 1920;
+        float pixelSize = _webcamNormSize * outW;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with
+        {
+            NormalizedX = _webcamNormX,
+            NormalizedY = _webcamNormY,
+            Size = pixelSize,
+        };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+    }
+
+    private void WebcamShapeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+        if (WebcamShapeCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        var shape = tag == "RoundedRect" ? WebcamShape.RoundedRect : WebcamShape.Circle;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { Shape = shape };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void WebcamBorderSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { BorderWidth = (float)e.NewValue };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private bool _suppressWebcamEvents;
+
+    private void SyncWebcamOverlayUI(WebcamOverlayStyle style)
+    {
+        _suppressWebcamEvents = true;
+        WebcamShapeCombo.SelectedIndex = style.Shape == WebcamShape.RoundedRect ? 1 : 0;
+        WebcamBorderSlider.Value = style.BorderWidth;
+        WebcamMirrorToggle.IsOn = style.Mirrored;
+        _suppressWebcamEvents = false;
+    }
+
+    private void WebcamMirrorToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.WebcamStyle is null) return;
+
+        var newStyle = config.WebcamStyle with { Mirrored = WebcamMirrorToggle.IsOn };
+        config = config with { WebcamStyle = newStyle };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _previewRenderer?.UpdateWebcamStyle(newStyle);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
 }

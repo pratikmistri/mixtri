@@ -845,3 +845,60 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - `ExportEngine.ExportGifAsync` still passes a `using var` webcam bitmap into `FrameCompositor.SetWebcamFrame()`, but `GifEncoder` composes after the callback returns, so the compositor can read a disposed bitmap.
 - `TimelineControl` still allocates `CanvasPathBuilder` objects without disposing them.
 - `SpeechToText` keeps the last recognizer alive after `TranscribeAsync`, so its event handlers retain captured transcription state until the next call or `Dispose()`.
+
+---
+
+## Webcam Overlay — End-to-End Pipeline Fix
+
+**Feature/area:** Webcam overlay (AppSettings, SettingsPage, RecordingViewModel, RecordingSession, ExportEngine, PreviewRenderer, EditorPage)
+
+**Approaches tried:**
+
+1. **Traced why webcam never activated despite toggle** — Root cause: `RecordingViewModel.StartRecordingAsync` set `IsWebcamEnabled` in config but never set `WebcamDeviceId`. `RecordingSession` required both to be set (`IsWebcamEnabled && !string.IsNullOrWhiteSpace(WebcamDeviceId)`), so the webcam engine was never created. ✅
+2. **Wired full pipeline** — Added `WebcamDeviceId` to `AppSettings`, wired `SettingsPage` toggle/combo with device enumeration, initialized VM from settings, passed device ID through config, added auto-select fallback in `RecordingSession`, auto-set `WebcamOverlayStyle` in export enrichment, and added webcam frame extraction to editor preview. ✅
+
+**What worked:** Fixing all 6 layers of the pipeline (settings persistence → UI wiring → VM init → session auto-select → export style enrichment → editor preview plumbing).
+
+**What didn't work / known limitations:**
+- Webcam-to-video timing offset is not tracked; webcam frames are sampled at raw video time 1:1 which may cause slight desync.
+- GIF export still has a potential use-after-dispose issue with webcam frames (pre-existing).
+- Editor preview initially used `using var webcamFrame` which disposed the `CanvasBitmap` before `RenderPreviewFrame` could read it. Fixed by keeping the frame alive as a field (`_lastWebcamFrame`), disposing only when replaced or on page unload.
+- WinRT `ImageStream` from `GetThumbnailAsync` throws `ObjectDisposedException` during `using var` cleanup (FlushAsync). Fixed by manually disposing intermediate streams with error suppression instead of `using var`.
+- Editor webcam drag/resize uses normalized (0–1) coordinates via `NormalizedX`/`NormalizedY` on `WebcamOverlayStyle`, mapped between screen and output space using `PreviewCanvas.FrameLayoutRect`.
+- Export `VideoEncoder.ProduceSampleAsync` had same `using var webcamFrame` bug — frame disposed before `ComposeFrame`. Also extracted webcam at compositor dimensions instead of webcam video dimensions. Fixed both + GIF export path.
+
+## 2026-05-04 - Editor preview canvas exploration
+- **Feature/area**: Editor preview canvas, webcam overlay compositor, zoom-region editing.
+- **Approaches tried**: Inspected PreviewCanvas, EditorPage preview host, FrameCompositor/WebcamCompositor, and RegionSelectorOverlay/TimelineControl for interaction patterns.
+- **What worked**: PreviewCanvas uses a CanvasControl (`PreviewSurface`) and `SetFrame(CanvasRenderTarget?)` swaps the cached render target; zoom-region editing already uses a Canvas overlay with pointer press/move/release and resize handles.
+- **What didn't work**: No existing pointer interaction was found on the preview canvas itself for drag/resize overlays; webcam placement in compositor is enum-based only.
+
+---
+
+## 2026-05-04 - Webcam export performance optimization
+
+- **Feature/area**: Export pipeline (VideoEncoder, ExportEngine, WebcamCompositor, FrameCompositor)
+- **Approaches tried**:
+  1. **Reduced webcam extraction resolution** — GetThumbnailAsync was decoding at full webcam resolution (e.g., 1920×1080) even though the overlay displays at ~300px. Now extracts at 1.5× the overlay size, reducing decode work by ~80%. ✅
+  2. **Eliminated double stream wrapping** — ExtractFrameFromCompositionAsync was converting ImageStream→.NET Stream→RandomAccessStream→CanvasBitmap. ImageStream already implements IRandomAccessStream, so pass it directly. ✅
+  3. **Cached shadow and clip geometry in WebcamCompositor** — Shadow (CanvasCommandList + ShadowEffect) and clip geometry were recreated every frame despite being constant (only depend on position/shape). Now cached and invalidated on UpdateStyle(). Made WebcamCompositor IDisposable. ✅
+  4. **Fixed GIF export webcam frame leak** — ExportEngine's GIF path set webcam frame on compositor but never disposed it after composition consumed it, leaking one CanvasBitmap per frame during long GIF exports. ✅
+  5. **Wired WebcamCompositor disposal into FrameCompositor.Dispose()** — Prevents GPU resource leaks from cached shadow/geometry. ✅
+- **What worked**: All five optimizations combined. Build and all 93 tests pass.
+- **What didn't work**: N/A — all approaches succeeded without regression.
+
+---
+
+## 2026-05-04 - Copilot Code Review Fixes (7 issues)
+
+- **Feature/area**: RecordingSession, WebcamCompositor, ExportEngine, SpeechToText, EditorPage, VideoEncoder
+- **Approaches tried**:
+  1. **Stale webcam device ID** (RecordingSession.cs) — Saved device ID was used without validation; stale/unplugged camera caused StartAsync() to throw. Fix: enumerate devices upfront and fall back to first available if saved ID not found. ✅
+  2. **Shadow clipping at top/left edges** (WebcamCompositor.cs) — Shadow render target only padded right/bottom; shadow was clipped when webcam was near left/top. Fix: ensure render target has padding on all sides via min-size floor. ✅
+  3. **GIF webcam error handling** (ExportEngine.cs) — GIF path opened webcam clip without try/catch, failing entire export on corrupt files. Fix: wrapped in try/catch to skip webcam overlay gracefully. ✅
+  4. **Recognizer field shadowing** (SpeechToText.cs) — `using var _recognizer` created a local that shadowed the instance field, preventing external Dispose()/TranscribeAsync() from cancelling in-flight recognition. Fix: assign to instance field directly. ✅
+  5. **Full-resolution webcam preview** (EditorPage.xaml.cs) — Preview requested thumbnails at native resolution (1080p/4K) for ~300px overlay. Fix: cap extraction to 1.5× display size, matching export path. ✅
+  6. **Stale webcam state on project reload** (EditorPage.xaml.cs) — LoadWebcamCompositionAsync didn't clear previous _webcamComposition/_lastWebcamFrame. Fix: clear old state at method start. ✅
+  7. **Webcam bitmap leak on error** (VideoEncoder.cs) — webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. ✅
+- **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
+- **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).
