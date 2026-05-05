@@ -413,6 +413,82 @@
                     </Button.Flyout>
                 </Button>
 
+                <!-- Subtitle controls (visible when audio is available or subtitles exist) -->
+                <AppBarSeparator x:Name="SubtitleSeparator" Visibility="Collapsed" />
+                <Button
+                    x:Name="SubtitleButton"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Subtitle settings">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE8BD;" />
+                        <TextBlock Text="Subtitles" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="SubtitleFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="12" Padding="4">
+                                <TextBlock Text="Subtitles" FontWeight="SemiBold" FontSize="14" />
+
+                                <!-- Generate button (visible when no subtitles yet) -->
+                                <Button
+                                    x:Name="GenerateSubtitlesBtn"
+                                    HorizontalAlignment="Stretch"
+                                    Click="GenerateSubtitles_Click">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon FontSize="14" Glyph="&#xE8BD;" />
+                                        <TextBlock Text="Generate Subtitles" />
+                                    </StackPanel>
+                                </Button>
+
+                                <!-- Progress (visible during generation) -->
+                                <StackPanel x:Name="SubtitleProgressPanel" Spacing="4" Visibility="Collapsed">
+                                    <TextBlock x:Name="SubtitleProgressText" Text="Transcribing audio…" FontSize="12" />
+                                    <ProgressBar
+                                        x:Name="SubtitleProgressBar"
+                                        Minimum="0" Maximum="100"
+                                        IsIndeterminate="False" />
+                                </StackPanel>
+
+                                <!-- Settings (visible after subtitles are generated) -->
+                                <StackPanel x:Name="SubtitleSettingsPanel" Spacing="12" Visibility="Collapsed">
+                                    <!-- Enable/disable toggle -->
+                                    <ToggleSwitch
+                                        x:Name="SubtitleToggle"
+                                        Header="Show Subtitles"
+                                        IsOn="True"
+                                        Toggled="SubtitleToggle_Toggled" />
+
+                                    <!-- Position -->
+                                    <ComboBox
+                                        x:Name="SubtitlePositionCombo"
+                                        Header="Position"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SubtitlePositionCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Top" Tag="Top" />
+                                        <ComboBoxItem Content="Center" Tag="Center" />
+                                        <ComboBoxItem Content="Bottom" Tag="Bottom" IsSelected="True" />
+                                    </ComboBox>
+
+                                    <!-- Font size -->
+                                    <Slider
+                                        x:Name="SubtitleFontSizeSlider"
+                                        Header="Font Size"
+                                        Minimum="14" Maximum="48"
+                                        StepFrequency="2"
+                                        Value="24"
+                                        ValueChanged="SubtitleFontSize_ValueChanged" />
+
+                                    <!-- Regenerate -->
+                                    <HyperlinkButton
+                                        x:Name="RegenerateSubtitlesLink"
+                                        Content="Regenerate subtitles"
+                                        Click="GenerateSubtitles_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
                 <AppBarSeparator />
 
                 <Button

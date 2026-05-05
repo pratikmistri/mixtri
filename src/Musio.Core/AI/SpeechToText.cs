@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Musio.Core.AI;
 
@@ -141,6 +143,48 @@ public class SpeechToText : IDisposable
         var wordCount = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
         var seconds = wordCount / 2.5; // ~150 wpm ≈ 2.5 words/s
         return TimeSpan.FromSeconds(Math.Max(seconds, 1.0));
+    }
+
+    // ── Subtitle segment persistence ──────────────────────────────────
+
+    private record SubtitleSegmentDto(double StartSeconds, double EndSeconds, string Text);
+
+    private static readonly JsonSerializerOptions _jsonOpts = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    /// <summary>
+    /// Saves subtitle segments to a JSON file.
+    /// </summary>
+    public static async Task SaveSegmentsAsync(string path, List<SubtitleSegment> segments)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(segments);
+
+        var dtos = segments.Select(s => new SubtitleSegmentDto(
+            s.Start.TotalSeconds, s.End.TotalSeconds, s.Text)).ToList();
+
+        var json = JsonSerializer.Serialize(dtos, _jsonOpts);
+        await File.WriteAllTextAsync(path, json, System.Text.Encoding.UTF8);
+    }
+
+    /// <summary>
+    /// Loads subtitle segments from a JSON file (synchronous for export pipeline).
+    /// </summary>
+    public static List<SubtitleSegment> LoadSegments(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var json = File.ReadAllText(path, System.Text.Encoding.UTF8);
+        var dtos = JsonSerializer.Deserialize<List<SubtitleSegmentDto>>(json, _jsonOpts);
+        if (dtos is null) return [];
+
+        return dtos.Select(d => new SubtitleSegment(
+            TimeSpan.FromSeconds(d.StartSeconds),
+            TimeSpan.FromSeconds(d.EndSeconds),
+            d.Text)).ToList();
     }
 
     public void Dispose()

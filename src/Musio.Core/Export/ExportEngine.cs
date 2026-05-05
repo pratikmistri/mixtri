@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
+using Musio.Core.AI;
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
@@ -466,6 +467,24 @@ public class ExportEngine
             catch (Exception ex)
             {
                 Debug.WriteLine($"[ExportEngine] Failed to load keyboard data: {ex.Message}");
+            }
+        }
+
+        // Load subtitle data if the config expects subtitles and segments aren't populated
+        if (composition.SubtitleStyle is not null &&
+            subtitles is null or { Count: 0 } &&
+            !string.IsNullOrWhiteSpace(project.SubtitleDataFilePath) &&
+            File.Exists(project.SubtitleDataFilePath))
+        {
+            try
+            {
+                var loadedSegments = SpeechToText.LoadSegments(project.SubtitleDataFilePath);
+                if (loadedSegments.Count > 0)
+                    subtitles = loadedSegments;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ExportEngine] Failed to load subtitle data: {ex.Message}");
             }
         }
 

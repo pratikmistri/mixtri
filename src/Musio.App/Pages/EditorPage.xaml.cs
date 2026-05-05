@@ -4,6 +4,7 @@ using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.AI;
 using Musio.Core.Audio;
 using Musio.Core.Capture;
 using Musio.Core.Export;
@@ -43,6 +44,10 @@ public sealed partial class EditorPage : Page
     private DispatcherTimer? _styleDebounceTimer;
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
+
+    // Subtitle state
+    private bool _suppressSubtitleEvents;
+    private List<SubtitleSegment>? _loadedSubtitleSegments;
 
     // Webcam overlay drag state
     private bool _webcamDragging;
@@ -333,6 +338,28 @@ public sealed partial class EditorPage : Page
             config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
         }
 
+        // Auto-load subtitles if a transcription file exists
+        if (!string.IsNullOrWhiteSpace(project.SubtitleDataFilePath) &&
+            File.Exists(project.SubtitleDataFilePath))
+        {
+            try
+            {
+                _loadedSubtitleSegments = SpeechToText.LoadSegments(project.SubtitleDataFilePath);
+                if (_loadedSubtitleSegments.Count > 0)
+                {
+                    config = config with
+                    {
+                        SubtitleStyle = config.SubtitleStyle ?? new SubtitleStyle(),
+                        Subtitles = _loadedSubtitleSegments,
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EditorPage] Failed to load subtitles: {ex.Message}");
+            }
+        }
+
         // Persist so the export pipeline uses the same config
         ProjectService.Instance.CurrentComposition = config;
 
@@ -366,6 +393,9 @@ public sealed partial class EditorPage : Page
 
         // Show style controls for Window and Region captures
         InitializeStyleControls(project, config);
+
+        // Show subtitle controls if audio or existing subtitles are available
+        InitializeSubtitleControls(project, config);
 
         _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
@@ -1927,5 +1957,219 @@ public sealed partial class EditorPage : Page
 
         _previewRenderer?.UpdateWebcamStyle(newStyle);
         _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    // ─── Subtitle Controls ─────────────────────────────────────────────
+
+    private void InitializeSubtitleControls(Project project, CompositionConfig config)
+    {
+        bool hasAudio = project.AudioFilePaths.Count > 0;
+        bool hasSubtitles = _loadedSubtitleSegments is { Count: > 0 };
+
+        if (!hasAudio && !hasSubtitles)
+        {
+            SubtitleButton.Visibility = Visibility.Collapsed;
+            SubtitleSeparator.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        SubtitleButton.Visibility = Visibility.Visible;
+        SubtitleSeparator.Visibility = Visibility.Visible;
+
+        _suppressSubtitleEvents = true;
+
+        if (hasSubtitles)
+        {
+            GenerateSubtitlesBtn.Visibility = Visibility.Collapsed;
+            SubtitleSettingsPanel.Visibility = Visibility.Visible;
+
+            var style = config.SubtitleStyle ?? new SubtitleStyle();
+            SubtitleToggle.IsOn = config.SubtitleStyle is not null;
+            SubtitleFontSizeSlider.Value = style.FontSize;
+            SubtitlePositionCombo.SelectedIndex = style.Position switch
+            {
+                SubtitlePosition.Top => 0,
+                SubtitlePosition.Center => 1,
+                _ => 2,
+            };
+        }
+        else
+        {
+            GenerateSubtitlesBtn.Visibility = Visibility.Visible;
+            SubtitleSettingsPanel.Visibility = Visibility.Collapsed;
+        }
+
+        _suppressSubtitleEvents = false;
+    }
+
+    private async void GenerateSubtitles_Click(object sender, RoutedEventArgs e)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        // Find the mic audio file (prefer mic_*.wav over system_*.wav)
+        var audioPath = project.AudioFilePaths
+            .FirstOrDefault(p => Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
+            ?? project.AudioFilePaths.FirstOrDefault();
+
+        if (string.IsNullOrEmpty(audioPath) || !File.Exists(audioPath))
+        {
+            EditorInfoBar.Message = "No audio file found for transcription.";
+            EditorInfoBar.Severity = InfoBarSeverity.Warning;
+            EditorInfoBar.IsOpen = true;
+            return;
+        }
+
+        // Show progress, hide generate button
+        GenerateSubtitlesBtn.IsEnabled = false;
+        RegenerateSubtitlesLink.IsEnabled = false;
+        SubtitleProgressPanel.Visibility = Visibility.Visible;
+        SubtitleProgressBar.Value = 0;
+
+        try
+        {
+            var progress = new Progress<double>(p =>
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    SubtitleProgressBar.Value = p * 100;
+                });
+            });
+
+            using var stt = new SpeechToText();
+            var result = await stt.TranscribeAsync(audioPath, "en-US", progress);
+
+            if (result.Segments.Count == 0)
+            {
+                EditorInfoBar.Message = "No speech detected in the audio.";
+                EditorInfoBar.Severity = InfoBarSeverity.Warning;
+                EditorInfoBar.IsOpen = true;
+                SubtitleProgressPanel.Visibility = Visibility.Collapsed;
+                GenerateSubtitlesBtn.IsEnabled = true;
+                return;
+            }
+
+            // Rebase subtitle timestamps from audio time to video time
+            var offset = project.AudioToVideoOffsetSeconds;
+            var rebased = new List<SubtitleSegment>();
+            foreach (var seg in result.Segments)
+            {
+                var start = seg.Start - TimeSpan.FromSeconds(offset);
+                var end = seg.End - TimeSpan.FromSeconds(offset);
+                if (end <= TimeSpan.Zero) continue;
+                if (start < TimeSpan.Zero) start = TimeSpan.Zero;
+                rebased.Add(new SubtitleSegment(start, end, seg.Text));
+            }
+
+            // Save to JSON next to the video file
+            var dir = Path.GetDirectoryName(project.VideoFilePath) ?? ".";
+            var subtitlePath = Path.Combine(dir, "subtitles.json");
+            await SpeechToText.SaveSegmentsAsync(subtitlePath, rebased);
+
+            project.SubtitleDataFilePath = subtitlePath;
+            _loadedSubtitleSegments = rebased;
+
+            // Update composition config with subtitle data
+            var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+            config = config with
+            {
+                SubtitleStyle = new SubtitleStyle(),
+                Subtitles = rebased,
+            };
+            ProjectService.Instance.CurrentComposition = config;
+
+            // Show settings panel
+            SubtitleProgressPanel.Visibility = Visibility.Collapsed;
+            GenerateSubtitlesBtn.Visibility = Visibility.Collapsed;
+            SubtitleSettingsPanel.Visibility = Visibility.Visible;
+            _suppressSubtitleEvents = true;
+            SubtitleToggle.IsOn = true;
+            SubtitlePositionCombo.SelectedIndex = 2; // Bottom
+            SubtitleFontSizeSlider.Value = 24;
+            _suppressSubtitleEvents = false;
+
+            // Rebuild preview to show subtitles
+            _ = RebuildPreviewRendererAsync(config);
+
+            EditorInfoBar.Message = $"Generated {rebased.Count} subtitle segment(s).";
+            EditorInfoBar.Severity = InfoBarSeverity.Success;
+            EditorInfoBar.IsOpen = true;
+        }
+        catch (Exception ex)
+        {
+            EditorInfoBar.Message = $"Subtitle generation failed: {ex.Message}";
+            EditorInfoBar.Severity = InfoBarSeverity.Error;
+            EditorInfoBar.IsOpen = true;
+        }
+        finally
+        {
+            SubtitleProgressPanel.Visibility = Visibility.Collapsed;
+            GenerateSubtitlesBtn.IsEnabled = true;
+            RegenerateSubtitlesLink.IsEnabled = true;
+        }
+    }
+
+    private void SubtitleToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSubtitleEvents) return;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is null) return;
+
+        if (SubtitleToggle.IsOn && _loadedSubtitleSegments is { Count: > 0 })
+        {
+            config = config with
+            {
+                SubtitleStyle = BuildSubtitleStyle(),
+                Subtitles = _loadedSubtitleSegments,
+            };
+        }
+        else
+        {
+            config = config with { SubtitleStyle = null, Subtitles = null };
+        }
+
+        ProjectService.Instance.CurrentComposition = config;
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    private void SubtitlePositionCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSubtitleEvents) return;
+        ApplySubtitleStyle();
+    }
+
+    private void SubtitleFontSize_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressSubtitleEvents) return;
+        ApplySubtitleStyle();
+    }
+
+    private void ApplySubtitleStyle()
+    {
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config?.SubtitleStyle is null) return;
+
+        config = config with { SubtitleStyle = BuildSubtitleStyle() };
+        ProjectService.Instance.CurrentComposition = config;
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    private SubtitleStyle BuildSubtitleStyle()
+    {
+        var position = SubtitlePositionCombo.SelectedItem is ComboBoxItem item
+            ? (string)item.Tag switch
+            {
+                "Top" => SubtitlePosition.Top,
+                "Center" => SubtitlePosition.Center,
+                _ => SubtitlePosition.Bottom,
+            }
+            : SubtitlePosition.Bottom;
+
+        return new SubtitleStyle
+        {
+            FontSize = (float)SubtitleFontSizeSlider.Value,
+            Position = position,
+        };
     }
 }

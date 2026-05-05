@@ -54,4 +54,10 @@ public class Project
     /// </summary>
     public double AudioToVideoOffsetSeconds { get; set; }
     public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;
+
+    /// <summary>
+    /// Path to the JSON file containing transcribed subtitle segments.
+    /// Null when no transcription has been generated.
+    /// </summary>
+    public string? SubtitleDataFilePath { get; set; }
 }

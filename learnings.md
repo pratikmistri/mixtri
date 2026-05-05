@@ -902,3 +902,24 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   7. **Webcam bitmap leak on error** (VideoEncoder.cs) — webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. ✅
 - **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
 - **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).
+
+---
+
+## Subtitle UI Integration — Wiring Backend to Editor
+
+**Feature/area:** EditorPage subtitle controls, ExportEngine subtitle enrichment, Project model
+
+**Approaches tried:**
+
+1. **Added SubtitleDataFilePath to Project model + JSON persistence in SpeechToText** — Worked. Follows the existing KeyboardDataFilePath pattern. Sync load for export, async save from UI. ✅
+2. **Added subtitle button with flyout to EditorPage toolbar** — Follows Camera/Style button pattern with generate button, toggle, position combo, font size slider. ✅
+3. **Used RebuildPreviewRendererAsync for subtitle config changes** — Works correctly since FrameCompositor constructs SubtitleBurner once in constructor. ✅
+4. **Rebased subtitle timestamps from audio time to video time** — Used AudioToVideoOffsetSeconds offset to align subtitles with video timeline. ✅
+5. **Updated ExportEngine.EnrichCompositionWithOverlays** — Auto-loads subtitle segments from file when SubtitleStyle is set (mirrors keyboard event loading pattern). ✅
+
+**What worked:** Following the existing overlay pattern (webcam/keyboard): data file path on Project, auto-load in export enrichment, toolbar button with flyout in editor, RebuildPreviewRendererAsync for live preview.
+
+**What didn't work / key gotchas:**
+- Mic audio file must be selected over system audio (system_*.wav vs mic_*.wav) since system audio contains no speech.
+- SpeechRecognizer ContinuousRecognitionSession may not actually transcribe from file (the stream is opened but not passed to the recognizer). This is a pre-existing backend issue.
+- Event suppression flag (_suppressSubtitleEvents) is required to prevent XAML events from firing during control initialization.
