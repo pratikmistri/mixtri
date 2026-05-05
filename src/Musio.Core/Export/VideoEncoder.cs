@@ -384,19 +384,26 @@ public class VideoEncoder : IDisposable
                 }
             }
 
-            // Load source frame (same as editor preview)
-            using var sourceFrame = frameReader is not null
-                ? await frameReader.LoadFrameAtTimeAsync(timeSpan)
-                    ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
-                : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+            CanvasRenderTarget composedFrame;
+            try
+            {
+                // Load source frame (same as editor preview)
+                using var sourceFrame = frameReader is not null
+                    ? await frameReader.LoadFrameAtTimeAsync(timeSpan)
+                        ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
+                    : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
 
-            // Composite using the exact source time so cursor, click, and zoom
-            // effects are precisely synchronized with the visual frame content.
-            var composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
-
-            // Dispose webcam frame after composition has consumed it
-            compositor.SetWebcamFrame(null);
-            webcamFrame?.Dispose();
+                // Composite using the exact source time so cursor, click, and zoom
+                // effects are precisely synchronized with the visual frame content.
+                composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
+            }
+            finally
+            {
+                // Always dispose webcam frame after composition — prevents GPU memory
+                // leaks if source loading or ComposeFrame throws.
+                compositor.SetWebcamFrame(null);
+                webcamFrame?.Dispose();
+            }
 
             // Build the output surface. For scaling we need a separate render
             // target; otherwise the composed frame IS the output surface.

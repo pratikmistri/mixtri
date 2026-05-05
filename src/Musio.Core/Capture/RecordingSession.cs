@@ -203,10 +203,16 @@ public class RecordingSession : IDisposable
             if (_config.IsWebcamEnabled)
             {
                 var webcamDeviceId = _config.WebcamDeviceId;
+                var devices = await WebcamCaptureEngine.GetDevicesAsync();
+
                 if (string.IsNullOrWhiteSpace(webcamDeviceId))
                 {
                     // Auto-select first available webcam
-                    var devices = await WebcamCaptureEngine.GetDevicesAsync();
+                    webcamDeviceId = devices.FirstOrDefault()?.Id;
+                }
+                else if (!devices.Any(d => d.Id == webcamDeviceId))
+                {
+                    // Saved device is stale/unplugged — fall back to first available
                     webcamDeviceId = devices.FirstOrDefault()?.Id;
                 }
 

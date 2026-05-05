@@ -52,10 +52,9 @@ public class SpeechToText : IDisposable
         var segments = new List<SubtitleSegment>();
         var lang = new Windows.Globalization.Language(language);
 
-        // Clear any stale instance-level recognizer and scope this recognizer to the call
+        // Clear any stale instance-level recognizer before creating a new one
         this._recognizer?.Dispose();
-        this._recognizer = null;
-        using var _recognizer = new Windows.Media.SpeechRecognition.SpeechRecognizer(lang);
+        this._recognizer = new Windows.Media.SpeechRecognition.SpeechRecognizer(lang);
 
         // Use dictation mode for natural speech with pauses
         var dictationConstraint =

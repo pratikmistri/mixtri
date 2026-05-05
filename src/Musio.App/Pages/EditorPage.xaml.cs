@@ -468,6 +468,13 @@ public sealed partial class EditorPage : Page
 
     private async Task LoadWebcamCompositionAsync(Project project)
     {
+        // Clear previous webcam state so stale resources don't persist
+        // when loading a new project or one without a webcam file.
+        _webcamComposition?.Clips.Clear();
+        _webcamComposition = null;
+        _lastWebcamFrame?.Dispose();
+        _lastWebcamFrame = null;
+
         if (string.IsNullOrWhiteSpace(project.WebcamFilePath) || !File.Exists(project.WebcamFilePath))
             return;
 
@@ -499,8 +506,21 @@ public sealed partial class EditorPage : Page
             if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
                 clamped = _webcamComposition.Duration;
 
+            // Cap extraction size for preview — full native resolution is
+            // unnecessarily heavy for a ~300px overlay during editor scrubbing.
+            float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
+            int extractW = _webcamWidth;
+            int extractH = _webcamHeight;
+            float minDim = Math.Min(_webcamWidth, _webcamHeight);
+            if (minDim > previewCap)
+            {
+                float scale = previewCap / minDim;
+                extractW = Math.Max((int)Math.Ceiling(_webcamWidth * scale), 1);
+                extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
+            }
+
             var thumbnail = await _webcamComposition.GetThumbnailAsync(
-                clamped, _webcamWidth, _webcamHeight,
+                clamped, extractW, extractH,
                 Windows.Media.Editing.VideoFramePrecision.NearestFrame);
 
             var device = CanvasDevice.GetSharedDevice();

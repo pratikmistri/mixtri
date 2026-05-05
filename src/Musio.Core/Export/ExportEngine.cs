@@ -193,27 +193,36 @@ public class ExportEngine
         int webcamExtractW = 0, webcamExtractH = 0;
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
         {
-            var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
-            var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
-            var webcamProps = webcamClip.GetVideoEncodingProperties();
-            int webcamNativeW = (int)webcamProps.Width;
-            int webcamNativeH = (int)webcamProps.Height;
-            webcamComp = new MediaComposition();
-            webcamComp.Clips.Add(webcamClip);
+            try
+            {
+                var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+                var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
+                var webcamProps = webcamClip.GetVideoEncodingProperties();
+                int webcamNativeW = (int)webcamProps.Width;
+                int webcamNativeH = (int)webcamProps.Height;
+                webcamComp = new MediaComposition();
+                webcamComp.Clips.Add(webcamClip);
 
-            // Extract at ~1.5x the overlay display size instead of full resolution
-            float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
-            float minDim = Math.Min(webcamNativeW, webcamNativeH);
-            if (minDim > displaySize)
-            {
-                float scale = displaySize / minDim;
-                webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
-                webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
+                // Extract at ~1.5x the overlay display size instead of full resolution
+                float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
+                float minDim = Math.Min(webcamNativeW, webcamNativeH);
+                if (minDim > displaySize)
+                {
+                    float scale = displaySize / minDim;
+                    webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
+                    webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
+                }
+                else
+                {
+                    webcamExtractW = webcamNativeW;
+                    webcamExtractH = webcamNativeH;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                webcamExtractW = webcamNativeW;
-                webcamExtractH = webcamNativeH;
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ExportEngine] Failed to load webcam for GIF overlay: {ex.Message}");
+                // Continue GIF export without webcam overlay
             }
         }
 

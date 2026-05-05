@@ -886,3 +886,19 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   5. **Wired WebcamCompositor disposal into FrameCompositor.Dispose()** — Prevents GPU resource leaks from cached shadow/geometry. ✅
 - **What worked**: All five optimizations combined. Build and all 93 tests pass.
 - **What didn't work**: N/A — all approaches succeeded without regression.
+
+---
+
+## 2026-05-04 - Copilot Code Review Fixes (7 issues)
+
+- **Feature/area**: RecordingSession, WebcamCompositor, ExportEngine, SpeechToText, EditorPage, VideoEncoder
+- **Approaches tried**:
+  1. **Stale webcam device ID** (RecordingSession.cs) — Saved device ID was used without validation; stale/unplugged camera caused StartAsync() to throw. Fix: enumerate devices upfront and fall back to first available if saved ID not found. ✅
+  2. **Shadow clipping at top/left edges** (WebcamCompositor.cs) — Shadow render target only padded right/bottom; shadow was clipped when webcam was near left/top. Fix: ensure render target has padding on all sides via min-size floor. ✅
+  3. **GIF webcam error handling** (ExportEngine.cs) — GIF path opened webcam clip without try/catch, failing entire export on corrupt files. Fix: wrapped in try/catch to skip webcam overlay gracefully. ✅
+  4. **Recognizer field shadowing** (SpeechToText.cs) — `using var _recognizer` created a local that shadowed the instance field, preventing external Dispose()/TranscribeAsync() from cancelling in-flight recognition. Fix: assign to instance field directly. ✅
+  5. **Full-resolution webcam preview** (EditorPage.xaml.cs) — Preview requested thumbnails at native resolution (1080p/4K) for ~300px overlay. Fix: cap extraction to 1.5× display size, matching export path. ✅
+  6. **Stale webcam state on project reload** (EditorPage.xaml.cs) — LoadWebcamCompositionAsync didn't clear previous _webcamComposition/_lastWebcamFrame. Fix: clear old state at method start. ✅
+  7. **Webcam bitmap leak on error** (VideoEncoder.cs) — webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. ✅
+- **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
+- **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).

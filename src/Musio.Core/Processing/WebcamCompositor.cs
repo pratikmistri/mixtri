@@ -166,10 +166,15 @@ public class WebcamCompositor : IDisposable
 
         if (_style.ShadowEnabled)
         {
-            // Allocate a full-canvas-sized RT so the shadow offset doesn't clip.
-            // Use _cacheKey canvas dimensions if available, otherwise add generous padding.
-            float rtW = x + size + ShadowBlurAmount * 2 + 1;
-            float rtH = y + size + ShadowBlurAmount * 2 + ShadowOffsetY + 1;
+            // Pad all edges so the shadow blur is never clipped when the
+            // overlay is near any canvas edge (left, top, right, or bottom).
+            float pad = ShadowBlurAmount + 1;
+            float rtW = x + size + pad + Math.Max(pad, ShadowBlurAmount * 2);
+            float rtH = y + size + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
+            // Ensure the render target is at least large enough for the shape + padding on the
+            // left/top side (when x or y are smaller than the blur radius).
+            rtW = Math.Max(rtW, size + pad * 2);
+            rtH = Math.Max(rtH, size + pad * 2 + ShadowOffsetY);
             _cachedShadow = new CanvasRenderTarget(device, rtW, rtH, 96);
 
             using var clipGeometry = CreateClipGeometry(device, x, y, size);
