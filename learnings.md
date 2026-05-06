@@ -593,6 +593,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:**
 - Drain-loop pattern (not recursive fire-and-forget) for render coalescing — ensures at most one render is in-flight, the latest position is always rendered next, and no renders pile up.
 - `_croppedBuffer` field-level reuse with dimension check — safe because `CropSourceFrame` is only called within `ComposeFrame` scope.
+
+---
+
+## Timeline System Brushes & Video Filmstrip
+
+**Feature/area:** Timeline track colors (TimelineControl, AppColors.xaml, EditorPage)
+
+**Approaches tried:**
+
+1. **Replaced custom hard-coded hex color brushes in AppColors.xaml with WinUI 3 standard system brush resolution** — Worked. Removed ~30 custom timeline brushes from Default and HighContrast theme dictionaries. ResolveThemeColors() now resolves from `Application.Current.Resources` using standard keys like `AccentFillColorDefaultBrush`, `CardBackgroundFillColorDefaultBrush`, `TextFillColorSecondaryBrush`, etc. Kept semantic status colors (playhead red, cut line yellow, speed overlays, cursor click) in AppColors.xaml. ✅
+2. **XAML border backgrounds switched from custom brushes to {ThemeResource} system brushes** — Worked. Track label borders use `CardBackgroundFillColorDefaultBrush`, `CardBackgroundFillColorSecondaryBrush`, `SolidBackgroundFillColorBaseBrush`, `TextFillColorSecondaryBrush` directly. ✅
+3. **FCP-style filmstrip thumbnails in video track** — Worked. Pre-scaled thumbnails generated from VideoFrameReader at ~0.5-2s intervals, cached as CanvasBitmap[] on TimelineControl. DrawFilmstrip tiles them across clip bounds with source-time mapping (respects SpeedFactor/EffectiveSourceStart). Backplate uses CardBackgroundFillColorSecondary, stroke uses ControlStrokeColorDefault. Falls back to accent-colored rectangle when no thumbnails available. ✅
+4. **Thumbnail generation versioning** — Worked. `_thumbnailGenerationId` counter in EditorPage prevents stale thumbnail results from overwriting current project's thumbnails when projects change rapidly. ✅
+
+**What worked:** Resolving system colors via `Application.Current.Resources` (not control-local Resources) for WinUI system brushes; keeping a `GetBrushColor` fallback for semantic brushes still defined in AppColors.xaml; TimelineControl owning thumbnail lifecycle via SetThumbnails/ClearThumbnails.
+
+**What didn't work / watch out for:**
+- Cannot use `{ThemeResource}` inside own theme dictionaries to reference system resources directly — must resolve at runtime in C#.
+- Win2D needs Color values, not Brushes — always extract `.Color` from resolved SolidColorBrush.
+- Thumbnail generation should pre-scale to track height (~52px) at load time, never during Draw handler.
 - Sorting clicks once at init time guarantees binary search correctness without relying on recorder ordering.
 
 **What didn't work / considerations:**
