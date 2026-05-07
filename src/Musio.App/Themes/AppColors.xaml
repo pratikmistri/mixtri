@@ -44,6 +44,43 @@
         </ResourceDictionary>
 
         <!-- ═══════════════════════════════════════════════════════════════
+             LIGHT — overrides for light theme contrast
+             ═══════════════════════════════════════════════════════════════ -->
+        <ResourceDictionary x:Key="Light">
+
+            <!-- ── Shared overlay colors ── -->
+            <SolidColorBrush x:Key="OverlayDimBrush"          Color="#80000000" />
+            <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
+            <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="#FF000000" />
+
+            <!-- ── Timeline — orange playhead for contrast on light backgrounds ── -->
+            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFE87C06" />
+            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFE87C06" />
+            <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
+            <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
+            <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />
+            <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="#DCFFA064" />
+            <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="#FFFF5050" />
+
+            <!-- ── Preview canvas ── -->
+            <SolidColorBrush x:Key="PreviewSurfaceClearBrush"  Color="#FFF0F0F0" />
+
+            <!-- ── Region selector ── -->
+            <SolidColorBrush x:Key="RegionMaskBrush"             Color="#4D000000" />
+            <SolidColorBrush x:Key="RegionSelectionStrokeBrush"  Color="#FF0078D4" />
+            <SolidColorBrush x:Key="RegionHandleFillBrush"       Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="RegionLabelBackgroundBrush"  Color="#CC000000" />
+
+            <!-- ── Recording overlay ── -->
+            <AcrylicBrush x:Key="RecordingOverlayBackgroundBrush"
+                          TintColor="#F0F0F0" TintOpacity="0.8"
+                          FallbackColor="#E0F0F0F0" />
+            <SolidColorBrush x:Key="RecordingIndicatorBrush"       Color="#FFFF3B30" />
+            <SolidColorBrush x:Key="RecordingStopBackgroundBrush"  Color="#40FF3B30" />
+            <SolidColorBrush x:Key="RecordingStopBorderBrush"      Color="#60FF3B30" />
+        </ResourceDictionary>
+
+        <!-- ═══════════════════════════════════════════════════════════════
              HIGH CONTRAST — maps to system colors for accessibility
              ═══════════════════════════════════════════════════════════════ -->
         <ResourceDictionary x:Key="HighContrast">
