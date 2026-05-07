@@ -53,6 +53,18 @@
                         x:Name="CaptureModeSelector"
                         Height="36"
                         SelectionChanged="CaptureModeSelector_SelectionChanged">
+                        <ctk:Segmented.Resources>
+                            <ResourceDictionary>
+                                <ResourceDictionary.ThemeDictionaries>
+                                    <ResourceDictionary x:Key="Default">
+                                        <SolidColorBrush x:Key="SegmentedItemBackgroundSelected" Color="Transparent" />
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="HighContrast">
+                                        <SolidColorBrush x:Key="SegmentedItemBackgroundSelected" Color="{StaticResource SystemColorHighlightColor}" />
+                                    </ResourceDictionary>
+                                </ResourceDictionary.ThemeDictionaries>
+                            </ResourceDictionary>
+                        </ctk:Segmented.Resources>
                         <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
                             <ctk:SegmentedItem.Icon>
                                 <FontIcon Glyph="&#xE740;" />
