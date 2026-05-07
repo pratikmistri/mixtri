@@ -21,6 +21,8 @@ public sealed partial class RecordingPage : Page
     private RecordingOverlayWindow? _overlayWindow;
     private RegionBorderHighlight? _regionBorder;
     private bool _recordingMinimizedWindow;
+    private bool _isPageLoading = true;
+    private bool _isPickerOpen;
 
     public RecordingPage()
     {
@@ -138,6 +140,10 @@ public sealed partial class RecordingPage : Page
     public Visibility BoolToVisibility(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
 
+    // x:Bind helper: inverted bool → Visibility
+    public Visibility InvertBoolToVisibility(bool value) =>
+        value ? Visibility.Collapsed : Visibility.Visible;
+
     // x:Bind helper: dim options grid while recording
     public double RecordingOpacity(bool isRecording) =>
         isRecording ? 0.4 : 1.0;
@@ -146,6 +152,7 @@ public sealed partial class RecordingPage : Page
     {
         CaptureModeSelector.SelectedIndex = (int)ViewModel.CaptureMode;
         UpdateRegionPanelVisibility();
+        _isPageLoading = false;
     }
 
     private void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -154,6 +161,15 @@ public sealed partial class RecordingPage : Page
         {
             ViewModel.CaptureMode = Enum.Parse<CaptureMode>(tag);
             UpdateRegionPanelVisibility();
+
+            // Auto-launch the appropriate picker when the user selects a mode
+            if (!_isPageLoading && !_isPickerOpen)
+            {
+                if (ViewModel.CaptureMode == CaptureMode.Window)
+                    _ = LaunchWindowPickerAsync();
+                else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
+                    _ = LaunchRegionPickerAsync();
+            }
         }
     }
 
@@ -176,7 +192,7 @@ public sealed partial class RecordingPage : Page
                 : Visibility.Collapsed;
 
             if (ViewModel.CaptureMode == CaptureMode.Window)
-                _ = RefreshWindowListAsync();
+                UpdateWindowInfoDisplay();
         }
     }
 
@@ -206,38 +222,71 @@ public sealed partial class RecordingPage : Page
 
     private async void SelectRegionButton_Click(object sender, RoutedEventArgs e)
     {
-        var overlay = new RegionSelectorOverlay();
-        var region = await overlay.ShowAsync();
+        await LaunchRegionPickerAsync();
+    }
 
-        if (region is not null)
+    private async void SelectWindowButton_Click(object sender, RoutedEventArgs e)
+    {
+        await LaunchWindowPickerAsync();
+    }
+
+    private async Task LaunchWindowPickerAsync()
+    {
+        if (_isPickerOpen) return;
+        _isPickerOpen = true;
+
+        try
         {
-            ViewModel.SelectedRegion = region;
-            ViewModel.HasSelectedRegion = true;
-            UpdateRegionInfoDisplay();
+            var overlay = new WindowSelectorOverlay();
+            var window = await overlay.ShowAsync();
+
+            if (window is not null)
+            {
+                ViewModel.SelectedWindow = window;
+                UpdateWindowInfoDisplay();
+            }
+        }
+        finally
+        {
+            _isPickerOpen = false;
         }
     }
 
-    private void WindowComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async Task LaunchRegionPickerAsync()
     {
-        if (WindowComboBox?.SelectedItem is WindowItem item)
-            ViewModel.SelectedWindow = item.Info;
-    }
+        if (_isPickerOpen) return;
+        _isPickerOpen = true;
 
-    private async void RefreshWindows_Click(object sender, RoutedEventArgs e)
-    {
-        await RefreshWindowListAsync();
-    }
-
-    private async Task RefreshWindowListAsync()
-    {
-        await ViewModel.RefreshAvailableWindowsAsync();
-
-        // Restore ComboBox selection if the ViewModel still has a selected window
-        if (ViewModel.SelectedWindow is not null && WindowComboBox is not null)
+        try
         {
-            var match = ViewModel.AvailableWindows
-                .FirstOrDefault(w => w.Info.Handle == ViewModel.SelectedWindow.Handle);
-            WindowComboBox.SelectedItem = match;
+            var overlay = new RegionSelectorOverlay();
+            var region = await overlay.ShowAsync();
+
+            if (region is not null)
+            {
+                ViewModel.SelectedRegion = region;
+                ViewModel.HasSelectedRegion = true;
+                UpdateRegionInfoDisplay();
+            }
+        }
+        finally
+        {
+            _isPickerOpen = false;
+        }
+    }
+
+    private void UpdateWindowInfoDisplay()
+    {
+        if (WindowInfoText is null) return;
+
+        if (ViewModel.SelectedWindow is not null)
+        {
+            WindowInfoText.Text = $"{ViewModel.SelectedWindow.Title} ({ViewModel.SelectedWindow.ProcessName})";
+            WindowInfoText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            WindowInfoText.Visibility = Visibility.Collapsed;
         }
     }
 

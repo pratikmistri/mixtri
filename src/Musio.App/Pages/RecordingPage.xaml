@@ -7,33 +7,9 @@
     xmlns:local="using:Musio_App.Pages"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
-    xmlns:vm="using:Musio_App.ViewModels"
     mc:Ignorable="d">
 
     <Grid>
-        <VisualStateManager.VisualStateGroups>
-            <VisualStateGroup>
-                <VisualState x:Name="Wide">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="640" />
-                    </VisualState.StateTriggers>
-                    <VisualState.Setters>
-                        <Setter Target="StartRecordText.Visibility" Value="Visible" />
-                        <Setter Target="StopRecordText.Visibility" Value="Visible" />
-                    </VisualState.Setters>
-                </VisualState>
-                <VisualState x:Name="Narrow">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="0" />
-                    </VisualState.StateTriggers>
-                    <VisualState.Setters>
-                        <Setter Target="StartRecordText.Visibility" Value="Collapsed" />
-                        <Setter Target="StopRecordText.Visibility" Value="Collapsed" />
-                    </VisualState.Setters>
-                </VisualState>
-            </VisualStateGroup>
-        </VisualStateManager.VisualStateGroups>
-
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -48,84 +24,34 @@
             IsClosable="True"
             Severity="Informational" />
 
-        <ScrollViewer Grid.Row="1" Padding="16" HorizontalScrollBarVisibility="Disabled"
-                      VerticalScrollBarVisibility="Auto">
-            <StackPanel HorizontalAlignment="Stretch" VerticalAlignment="Center" Spacing="24">
-                <StackPanel.ChildrenTransitions>
-                    <EntranceThemeTransition FromVerticalOffset="40" />
-                </StackPanel.ChildrenTransitions>
+        <!-- Centered Toolbar -->
+        <Border
+            Grid.Row="1"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="12"
+            Padding="6">
+            <Border.Transitions>
+                <TransitionCollection>
+                    <EntranceThemeTransition FromVerticalOffset="30" />
+                </TransitionCollection>
+            </Border.Transitions>
 
-                <!-- Hero: Start / Stop Recording -->
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="16">
-                    <Button
-                        x:Name="StartRecordButton"
-                        Height="64"
-                        MinWidth="64"
-                        Padding="24,0"
-                        Click="StartRecordButton_Click"
-                        CornerRadius="32"
-                        IsEnabled="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
-                        Style="{StaticResource AccentButtonStyle}"
-                        ToolTipService.ToolTip="Start a new screen recording (Ctrl+Shift+R)">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <FontIcon FontSize="22" Glyph="&#xE7C8;" />
-                            <TextBlock
-                                x:Name="StartRecordText"
-                                VerticalAlignment="Center"
-                                FontSize="16"
-                                FontWeight="SemiBold"
-                                Text="Start Recording" />
-                        </StackPanel>
-                    </Button>
-
-                    <Button
-                        x:Name="StopRecordButton"
-                        Height="64"
-                        MinWidth="64"
-                        Padding="24,0"
-                        Command="{x:Bind ViewModel.StopRecordingCommand}"
-                        CornerRadius="32"
-                        Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
-                        ToolTipService.ToolTip="Stop the current recording">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <FontIcon FontSize="22" Foreground="Red" Glyph="&#xE71A;" />
-                            <TextBlock
-                                x:Name="StopRecordText"
-                                VerticalAlignment="Center"
-                                FontSize="16"
-                                FontWeight="SemiBold"
-                                Text="Stop Recording" />
-                        </StackPanel>
-                    </Button>
-
-                    <!-- Elapsed timer shown during recording -->
-                    <TextBlock
-                        VerticalAlignment="Center"
-                        FontSize="20"
-                        FontWeight="SemiBold"
-                        Foreground="Red"
-                        Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}"
-                        Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
-                </StackPanel>
-
-                <!-- TeachingTip for first-run -->
-                <TeachingTip
-                    x:Name="QuickRecordTip"
-                    Title="Quick Record"
-                    Subtitle="Press Ctrl+Shift+R to start recording instantly from anywhere."
-                    IsLightDismissEnabled="True"
-                    PreferredPlacement="Bottom" />
-
-                <!-- Capture Mode (disabled during recording) -->
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <!-- Options section (disabled during recording) -->
                 <StackPanel
-                    HorizontalAlignment="Center"
-                    MaxWidth="480"
-                    Spacing="12"
+                    Orientation="Horizontal"
+                    Spacing="6"
                     IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
                     Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
+
+                    <!-- Capture Mode -->
                     <ctk:Segmented
                         x:Name="CaptureModeSelector"
-                        HorizontalAlignment="Stretch"
+                        Height="36"
                         SelectionChanged="CaptureModeSelector_SelectionChanged">
                         <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
                             <ctk:SegmentedItem.Icon>
@@ -144,68 +70,116 @@
                         </ctk:SegmentedItem>
                     </ctk:Segmented>
 
-                    <!-- Region selection (visible when Custom Region is selected) -->
-                    <StackPanel x:Name="RegionPanel" Spacing="8" Visibility="Collapsed">
+                    <!-- Inline: Window picker (expands when Window mode selected) -->
+                    <StackPanel x:Name="WindowPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
+                        <AppBarSeparator />
+                        <Button
+                            x:Name="SelectWindowButton"
+                            VerticalAlignment="Center"
+                            Click="SelectWindowButton_Click"
+                            Content="Select Window"
+                            ToolTipService.ToolTip="Click to visually select a window" />
+                        <TextBlock
+                            x:Name="WindowInfoText"
+                            VerticalAlignment="Center"
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Visibility="Collapsed" />
+                    </StackPanel>
+
+                    <!-- Inline: Region selector (expands when Region mode selected) -->
+                    <StackPanel x:Name="RegionPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
+                        <AppBarSeparator />
                         <Button
                             x:Name="SelectRegionButton"
-                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Center"
                             Click="SelectRegionButton_Click"
                             Content="Select Region"
                             ToolTipService.ToolTip="Click to select a custom screen region" />
                         <TextBlock
                             x:Name="RegionInfoText"
+                            VerticalAlignment="Center"
                             FontSize="12"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            TextWrapping="Wrap"
                             Visibility="Collapsed" />
                     </StackPanel>
 
-                    <!-- Window selection (visible when Window is selected) -->
-                    <StackPanel x:Name="WindowPanel" Spacing="8" Visibility="Collapsed">
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <ComboBox
-                                x:Name="WindowComboBox"
-                                Grid.Column="0"
-                                HorizontalAlignment="Stretch"
-                                PlaceholderText="Select a window…"
-                                ItemsSource="{x:Bind ViewModel.AvailableWindows}"
-                                SelectionChanged="WindowComboBox_SelectionChanged">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:WindowItem">
-                                        <StackPanel Orientation="Horizontal" Spacing="10" Padding="2">
-                                            <Grid Width="20" Height="20" VerticalAlignment="Center">
-                                                <FontIcon Glyph="&#xE737;" FontSize="16"
-                                                          Visibility="{x:Bind FallbackIconVisibility, Mode=OneWay}" />
-                                                <Image Source="{x:Bind Icon, Mode=OneWay}" Width="20" Height="20" />
-                                            </Grid>
-                                            <StackPanel Spacing="1" VerticalAlignment="Center">
-                                                <TextBlock Text="{x:Bind Title}"
-                                                           TextTrimming="CharacterEllipsis"
-                                                           MaxWidth="280" />
-                                                <TextBlock Text="{x:Bind ProcessName}"
-                                                           FontSize="11"
-                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            </StackPanel>
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-                            <Button
-                                Grid.Column="1"
-                                VerticalAlignment="Stretch"
-                                Click="RefreshWindows_Click"
-                                ToolTipService.ToolTip="Refresh window list">
-                                <FontIcon Glyph="&#xE72C;" FontSize="14" />
-                            </Button>
-                        </Grid>
-                    </StackPanel>
+                    <AppBarSeparator />
+
+                    <!-- Audio & Camera toggles -->
+                    <ToggleButton
+                        IsChecked="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
+                        ToolTipService.ToolTip="Microphone"
+                        VerticalAlignment="Center"
+                        Width="36" Height="36" Padding="0">
+                        <FontIcon Glyph="&#xE720;" FontSize="14" />
+                    </ToggleButton>
+                    <ToggleButton
+                        IsChecked="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
+                        ToolTipService.ToolTip="System Audio"
+                        VerticalAlignment="Center"
+                        Width="36" Height="36" Padding="0">
+                        <FontIcon Glyph="&#xE767;" FontSize="14" />
+                    </ToggleButton>
+                    <ToggleButton
+                        IsChecked="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
+                        ToolTipService.ToolTip="Camera"
+                        VerticalAlignment="Center"
+                        Width="36" Height="36" Padding="0">
+                        <FontIcon Glyph="&#xE714;" FontSize="14" />
+                    </ToggleButton>
                 </StackPanel>
+
+                <AppBarSeparator />
+
+                <!-- Record button (visible when not recording) -->
+                <Button
+                    x:Name="StartRecordButton"
+                    VerticalAlignment="Center"
+                    Height="36"
+                    Padding="12,0"
+                    Click="StartRecordButton_Click"
+                    CornerRadius="18"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
+                    ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="14" Glyph="&#xE7C8;" />
+                        <TextBlock Text="Record" VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Stop button + timer (visible during recording) -->
+                <Button
+                    x:Name="StopRecordButton"
+                    VerticalAlignment="Center"
+                    Height="36"
+                    Width="36"
+                    Padding="0"
+                    CornerRadius="18"
+                    Command="{x:Bind ViewModel.StopRecordingCommand}"
+                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
+                    ToolTipService.ToolTip="Stop recording">
+                    <FontIcon FontSize="16" Foreground="Red" Glyph="&#xE71A;" />
+                </Button>
+                <TextBlock
+                    VerticalAlignment="Center"
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="Red"
+                    Margin="4,0,2,0"
+                    Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}"
+                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
             </StackPanel>
-        </ScrollViewer>
+        </Border>
+
+        <!-- TeachingTip for first-run -->
+        <TeachingTip
+            x:Name="QuickRecordTip"
+            Title="Quick Record"
+            Subtitle="Press Ctrl+Shift+R to start recording instantly from anywhere."
+            IsLightDismissEnabled="True"
+            PreferredPlacement="Bottom" />
 
         <!-- Status Bar -->
         <Border

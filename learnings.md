@@ -624,6 +624,29 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ## Region Border Highlight — DPI Scaling Mismatch
 
+---
+
+## Window Picker Overlay & Auto-Trigger Selection Modes
+
+**Feature/area:** RecordingPage, WindowSelectorOverlay, RegionSelectorOverlay
+
+**Approaches tried:**
+
+1. **Created `WindowSelectorOverlay` control modeled after `RegionSelectorOverlay`** — Worked. Full-screen overlay with desktop screenshot background, 4 dim mask rectangles, and highlight border. Uses `EnumWindows` for Z-order-aware window enumeration, filters out cloaked/minimized/tool/same-process windows. Coordinate mapping from canvas DIPs to screen physical pixels via virtual desktop bounds ratio. ✅
+2. **Auto-trigger pickers on capture mode selection** — Worked. `CaptureModeSelector_SelectionChanged` launches `WindowSelectorOverlay` or `RegionSelectorOverlay` automatically. `_isPageLoading` flag prevents trigger during page initialization; `_isPickerOpen` reentrancy guard prevents concurrent overlays. ✅
+3. **Replaced Window ComboBox with visual picker button + info text** — Worked. Consistent with Region panel pattern (button + label). Visual picker provides better UX than dropdown list. ✅
+
+**What worked:**
+- `WindowSelectorOverlay.ShowAsync()`: minimize Musio → enumerate windows → capture screenshot → show maximized borderless overlay → return WindowInfo on click or null on Escape → restore Musio (in try/finally for exception safety).
+- Z-order-aware hit testing: `EnumWindows` returns windows in Z-order (topmost first), so first rect containing the cursor point = correct window.
+- Window validation on click: `IsWindow()` + `IsWindowVisible()` confirm the window still exists before returning.
+- Coordinate mapping: `canvasX * (vdWidth / canvasWidth) + vdLeft` for canvas→screen, reverse for screen→canvas.
+
+**What didn't work / known limitations:**
+- Same multi-monitor limitation as `RegionSelectorOverlay`: screenshot covers full virtual desktop but overlay is maximized on one monitor, so coordinates on secondary monitors may be slightly off due to Stretch="Fill" scaling.
+- `GetWindowRect` includes invisible DWM extended frame borders; highlight may extend slightly beyond visible window edges. Could use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for more precise visual highlights.
+
+
 **Feature/area:** Region recording border overlay (RecordingPage, RegionBorderHighlight)
 
 **Approaches tried:**
@@ -922,3 +945,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   7. **Webcam bitmap leak on error** (VideoEncoder.cs) — webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. ✅
 - **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
 - **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).
+
+---
+
+## Recording Page — Mic / System Audio / Camera Toggle Buttons
+
+- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingViewModel.cs)
+- **Approaches tried**:
+  1. **ToggleButton with FontIcon** — Added 3 `ToggleButton` controls (Mic &#xE720;, Speaker &#xE767;, Camera &#xE714;) bound two-way to existing ViewModel properties (`IsMicEnabled`, `IsSystemAudioEnabled`, `IsWebcamEnabled`). Placed between hero buttons and capture mode selector. ✅
+  2. **Persisting toggle state** — Added `partial void On*Changed` methods in ViewModel to write back to `AppSettings.Instance` on each toggle. ✅
+- **What worked**: ToggleButtons with two-way `x:Bind` to existing `[ObservableProperty]` fields + partial change handlers for persistence. Controls disabled during recording via shared `IsHitTestVisible`/`Opacity` binding pattern already used by capture mode section.
+- **What didn't work**: N/A — straightforward addition.
+
+---
+
+## Recording Page — Single Toolbar Layout with Inline Expansion
+
+- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingPage.xaml.cs)
+- **Approaches tried**:
+  1. **Single horizontal toolbar** — Replaced the vertical 3-layer layout (hero button → toggles → capture mode) with a single centered toolbar: `[Capture Mode] | [inline sub-options] | [🎤 🔊 📷] | [⏺]`. Used a `Border` with card styling (CornerRadius="12") and `AppBarSeparator` dividers between sections. ✅
+  2. **Inline expansion for sub-options** — Window picker (ComboBox + refresh button) and Region selector (button + info text) expand inline in the toolbar when their mode is selected, separated by an AppBarSeparator. ✅
+  3. **Split options vs action sections** — Options (capture mode, toggles) wrapped in a StackPanel with `IsHitTestVisible`/`Opacity` bindings for recording-disabled state, while record/stop button stays outside so it remains interactive. Added `InvertBoolToVisibility` helper for showing/hiding start vs stop button. ✅
+- **What worked**: Single toolbar with inline expansion, split disabled/interactive sections, removed VisualStateManager (no longer needed without text labels on buttons).
+- **What didn't work**: N/A.
