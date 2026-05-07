@@ -281,12 +281,13 @@ public sealed partial class RecordingPage : Page
 
         if (ViewModel.SelectedWindow is not null)
         {
-            WindowInfoText.Text = $"{ViewModel.SelectedWindow.Title} ({ViewModel.SelectedWindow.ProcessName})";
-            WindowInfoText.Visibility = Visibility.Visible;
+            WindowInfoText.Text = ViewModel.SelectedWindow.Title;
+            ToolTipService.SetToolTip(SelectWindowButton,
+                $"{ViewModel.SelectedWindow.Title} ({ViewModel.SelectedWindow.ProcessName}) — click to change");
         }
         else
         {
-            WindowInfoText.Visibility = Visibility.Collapsed;
+            WindowInfoText.Text = "Select Window";
         }
     }
 

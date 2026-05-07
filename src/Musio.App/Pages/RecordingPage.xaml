@@ -76,15 +76,18 @@
                         <Button
                             x:Name="SelectWindowButton"
                             VerticalAlignment="Center"
+                            MaxWidth="260"
                             Click="SelectWindowButton_Click"
-                            Content="Select Window"
-                            ToolTipService.ToolTip="Click to visually select a window" />
-                        <TextBlock
-                            x:Name="WindowInfoText"
-                            VerticalAlignment="Center"
-                            FontSize="12"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Visibility="Collapsed" />
+                            ToolTipService.ToolTip="Click to visually select a window">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE737;" FontSize="14" />
+                                <TextBlock
+                                    x:Name="WindowInfoText"
+                                    Text="Select Window"
+                                    TextTrimming="CharacterEllipsis"
+                                    VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
                     </StackPanel>
 
                     <!-- Inline: Region selector (expands when Region mode selected) -->
