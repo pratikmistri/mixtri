@@ -178,9 +178,9 @@ public sealed partial class TimelineControl : UserControl
         RulerTickColor = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(255, 135, 135, 135));
         RulerTextColor = GetSystemBrushColor("TextFillColorSecondaryBrush", Color.FromArgb(255, 197, 197, 197));
 
-        // ── Video track — system accent ──
-        VideoClipColor        = GetSystemBrushColor("AccentFillColorDefaultBrush", Color.FromArgb(255, 60, 120, 200));
-        VideoClipSelectedColor = GetSystemBrushColor("AccentFillColorSecondaryBrush", Color.FromArgb(255, 90, 155, 235));
+        // ── Video track — #0C2EE8 electric blue ──
+        VideoClipColor        = isDark ? Color.FromArgb(255, 12, 46, 232) : Color.FromArgb(255, 10, 38, 195);
+        VideoClipSelectedColor = isDark ? Color.FromArgb(255, 50, 80, 255) : Color.FromArgb(255, 40, 65, 220);
         VideoClipSelectedBorder = GetSystemBrushColor("FocusStrokeColorOuterBrush", Color.FromArgb(255, 255, 255, 255));
         FilmstripBackplateColor = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
         FilmstripStrokeColor  = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(30, 255, 255, 255));
@@ -193,38 +193,38 @@ public sealed partial class TimelineControl : UserControl
         TrimHandleColor       = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
         TrimHandleBorderColor = GetSystemBrushColor("SurfaceStrokeColorDefaultBrush", Color.FromArgb(255, 117, 117, 117));
 
-        // ── Zoom segments — pastel yellow (dark) / muted gold (light) ──
-        var zoomBase          = isDark ? Color.FromArgb(255, 220, 200, 100) : Color.FromArgb(255, 170, 140, 40);
-        var zoomLight         = isDark ? Color.FromArgb(255, 235, 215, 120) : Color.FromArgb(255, 190, 160, 55);
-        ZoomSegmentFill       = WithAlpha(zoomBase, 160);
-        ZoomSegmentAutoFill   = WithAlpha(zoomBase, 80);
-        ZoomSegmentSelectedFill = WithAlpha(zoomLight, 210);
-        ZoomSegmentBorder     = WithAlpha(zoomBase, 180);
-        ZoomSegmentSelectedBorder = isDark ? Color.FromArgb(255, 245, 230, 160) : Color.FromArgb(255, 140, 110, 30);
-        ZoomSegmentHandleColor = isDark ? Color.FromArgb(255, 255, 245, 200) : Color.FromArgb(255, 120, 95, 20);
-        ZoomSegmentCreatePreview = WithAlpha(zoomBase, 80);
-        // Dark text on the bright yellow fill for readability
-        ZoomSegmentTextColor  = isDark ? Color.FromArgb(255, 50, 40, 10) : Color.FromArgb(255, 60, 45, 5);
+        // ── Zoom segments — #DDFF00 neon yellow ──
+        var zoomBase          = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
+        var zoomLight         = isDark ? Color.FromArgb(255, 235, 255, 60) : Color.FromArgb(255, 200, 230, 40);
+        ZoomSegmentFill       = WithAlpha(zoomBase, 200);
+        ZoomSegmentAutoFill   = WithAlpha(zoomBase, 120);
+        ZoomSegmentSelectedFill = WithAlpha(zoomLight, 230);
+        ZoomSegmentBorder     = WithAlpha(zoomBase, 220);
+        ZoomSegmentSelectedBorder = isDark ? Color.FromArgb(255, 240, 255, 100) : Color.FromArgb(255, 160, 190, 0);
+        ZoomSegmentHandleColor = isDark ? Color.FromArgb(255, 245, 255, 150) : Color.FromArgb(255, 140, 170, 0);
+        ZoomSegmentCreatePreview = WithAlpha(zoomBase, 120);
+        // Dark text on bright neon yellow for readability
+        ZoomSegmentTextColor  = isDark ? Color.FromArgb(255, 30, 40, 0) : Color.FromArgb(255, 40, 50, 0);
 
-        // ── Audio — pastel teal (dark) / muted teal (light) ──
-        var audioBase         = isDark ? Color.FromArgb(255, 80, 190, 170) : Color.FromArgb(255, 30, 140, 120);
-        AudioWaveformColor    = WithAlpha(audioBase, 200);
-        AudioEnvelopeColor    = WithAlpha(audioBase, 80);
-        AudioPlaceholderColor = WithAlpha(audioBase, 100);
+        // ── Audio — #0DFF89 neon green ──
+        var audioBase         = isDark ? Color.FromArgb(255, 13, 255, 137) : Color.FromArgb(255, 10, 210, 110);
+        AudioWaveformColor    = WithAlpha(audioBase, 240);
+        AudioEnvelopeColor    = WithAlpha(audioBase, 120);
+        AudioPlaceholderColor = WithAlpha(audioBase, 150);
 
-        // ── Mic — pastel lavender (dark) / muted purple (light) ──
-        var micBase           = isDark ? Color.FromArgb(255, 170, 130, 210) : Color.FromArgb(255, 120, 80, 160);
-        MicWaveformColor      = WithAlpha(micBase, 200);
-        MicEnvelopeColor      = WithAlpha(micBase, 80);
+        // ── Mic — #FF00AA hot pink ──
+        var micBase           = isDark ? Color.FromArgb(255, 255, 0, 170) : Color.FromArgb(255, 210, 0, 140);
+        MicWaveformColor      = WithAlpha(micBase, 240);
+        MicEnvelopeColor      = WithAlpha(micBase, 120);
 
-        // ── Cursor paths — same hue, different opacity ──
-        var cursorBase        = isDark ? Color.FromArgb(255, 110, 160, 230) : Color.FromArgb(255, 50, 110, 190);
-        CursorPathXColor      = WithAlpha(cursorBase, 220);
-        CursorPathYColor      = WithAlpha(cursorBase, 110);
+        // ── Cursor paths — #E87C06 orange ──
+        var cursorBase        = isDark ? Color.FromArgb(255, 232, 124, 6) : Color.FromArgb(255, 210, 110, 5);
+        CursorPathXColor      = WithAlpha(cursorBase, 255);
+        CursorPathYColor      = WithAlpha(cursorBase, 150);
         CursorClickColor      = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
 
         // ── Playhead & cut lines — semantic ──
-        PlayheadColor         = GetBrushColor("TimelinePlayheadBrush", Color.FromArgb(255, 255, 50, 50));
+        PlayheadColor         = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
         CutLineColor          = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
 
         // ── Text & lines — system ──
@@ -449,7 +449,7 @@ public sealed partial class TimelineControl : UserControl
             return;
 
         bool hasThumbnails = _thumbnails is not null && _thumbnails.Length > 0 && _thumbnailIntervalSeconds > 0;
-        const float pad = 4f;
+        const float pad = 14f;
 
         // Draw clips
         for (int idx = 0; idx < model.Clips.Count; idx++)
@@ -562,10 +562,6 @@ public sealed partial class TimelineControl : UserControl
             float x = (float)TimeToX(model.Clips[i].Start);
             ds.DrawLine(x, 0, x, h, CutLineColor, 1.5f);
         }
-
-        // Playhead on this track
-        float px = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
     private void DrawTrimHandle(CanvasDrawingSession ds, TimeSpan time, float trackHeight)
@@ -745,10 +741,6 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
                 new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
         }
-
-        // Playhead
-        float px = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
     /// <summary>
@@ -1133,8 +1125,6 @@ public sealed partial class TimelineControl : UserControl
         {
             // Muted: show only a faint dashed center line
             ds.DrawLine(x1, centerY, x2, centerY, TrackEmptyLineColor, 0.5f);
-            float px = (float)TimeToX(PlayheadPosition);
-            ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
             return;
         }
 
@@ -1181,9 +1171,6 @@ public sealed partial class TimelineControl : UserControl
         }
 
         ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
-
-        float ppx = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
     }
 
     // --- Cursor Path Track ---
@@ -1200,8 +1187,6 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || model.Duration.TotalSeconds <= 0)
         {
             ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
-            float ppx = (float)TimeToX(PlayheadPosition);
-            ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
         }
 
@@ -1209,8 +1194,6 @@ public sealed partial class TimelineControl : UserControl
         if (cursorData is null || cursorData.Samples.Count == 0)
         {
             ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
-            float ppx = (float)TimeToX(PlayheadPosition);
-            ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
         }
 
@@ -1286,10 +1269,6 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawCircle(cx, cy, 3.5f, GetSystemBrushColor("ControlStrokeColorDefaultBrush",
                 Color.FromArgb(255, 120, 120, 120)), 1f);
         }
-
-        // Playhead
-        float playX = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(playX, 0, playX, h, PlayheadColor, 2);
     }
 
     // --- Interaction ---

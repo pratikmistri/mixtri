@@ -498,7 +498,8 @@ public class FrameCompositor : IDisposable
         {
             ds.DrawImage(_compositeBuffer,
                 new Rect(0, 0, OutputWidth, OutputHeight),
-                new Rect(cropX, cropY, cropW, cropH));
+                new Rect(cropX, cropY, cropW, cropH),
+                1f, CanvasImageInterpolation.HighQualityCubic);
 
             // Webcam overlay (fixed position, not zoomed)
             if (_webcamCompositor is not null && _webcamFrame is not null)
@@ -637,7 +638,8 @@ public class FrameCompositor : IDisposable
 
         using var ds = _croppedBuffer.CreateDrawingSession();
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
-        ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport);
+        ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport,
+            1f, CanvasImageInterpolation.HighQualityCubic);
         return _croppedBuffer;
     }
 

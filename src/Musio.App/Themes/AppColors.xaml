@@ -17,8 +17,8 @@
 
             <!-- ── Timeline — semantic status colors (all other timeline colors
                  are resolved from standard WinUI system brushes at runtime) ── -->
-            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFFF0000" />
-            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFFF3232" />
+            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFDDFF00" />
+            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFDDFF00" />
             <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
             <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
             <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />

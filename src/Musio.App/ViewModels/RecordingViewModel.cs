@@ -165,6 +165,15 @@ public partial class RecordingViewModel : ObservableObject
 
     public bool IsCustomRegionMode => CaptureMode == CaptureMode.CustomRegion;
 
+    partial void OnIsMicEnabledChanged(bool value)
+        => AppSettings.Instance.IsMicEnabled = value;
+
+    partial void OnIsSystemAudioEnabledChanged(bool value)
+        => AppSettings.Instance.IsSystemAudioEnabled = value;
+
+    partial void OnIsWebcamEnabledChanged(bool value)
+        => AppSettings.Instance.IsWebcamEnabled = value;
+
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsCustomRegionMode));

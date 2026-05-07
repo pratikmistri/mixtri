@@ -19,7 +19,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="30" />
             <!-- Time ruler -->
-            <RowDefinition Height="60" />
+            <RowDefinition Height="80" />
             <!-- Video track -->
             <RowDefinition Height="40" />
             <!-- Cursor path track -->
@@ -121,7 +121,7 @@
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="6"
+            Grid.RowSpan="7"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

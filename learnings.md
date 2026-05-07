@@ -968,3 +968,44 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   3. **Split options vs action sections** — Options (capture mode, toggles) wrapped in a StackPanel with `IsHitTestVisible`/`Opacity` bindings for recording-disabled state, while record/stop button stays outside so it remains interactive. Added `InvertBoolToVisibility` helper for showing/hiding start vs stop button. ✅
 - **What worked**: Single toolbar with inline expansion, split disabled/interactive sections, removed VisualStateManager (no longer needed without text labels on buttons).
 - **What didn't work**: N/A.
+
+---
+
+## Timeline Track Colors — Light Theme Bright Palette
+
+- **Feature/area**: TimelineControl light-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Replaced dark/muted "rich" light-theme colors with bright vivid ones** — Previous light-theme colors were low-brightness muted tones (e.g., zoom `180,145,30`, audio `20,160,130`, mic `135,75,180`, cursor `40,120,210`). Changed to high-saturation bright colors with a slight white lift: zoom `255,200,50`, audio `40,215,180`, mic `170,95,245`, cursor `60,150,255`. Updated zoom selected border/handle colors to match. ✅
+- **What worked**: Bright vivid colors with high hue saturation and a touch of white — visible and distinct on light backgrounds without being neon.
+- **What didn't work**: N/A.
+
+---
+
+## Timeline Track Colors — Dark Theme High Saturation
+
+- **Feature/area**: TimelineControl dark-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Boosted dark-theme colors to high saturation** — Previous dark-theme colors were already fairly vivid but not max saturation (zoom `230,200,60`, audio `50,210,180`, mic `180,120,230`, cursor `100,170,250`). Pushed to higher saturation with a touch of white: zoom `255,210,50`, audio `40,230,190`, mic `190,100,255`, cursor `80,170,255`. ✅
+- **What worked**: Near-max saturation colors pop well on dark backgrounds while the slight white tint prevents them from looking harsh/neon.
+- **What didn't work**: Just boosting brightness of the same hues (gold, teal, lavender) didn't feel inspiring — needed completely different neon hue choices.
+
+---
+
+## Timeline Track Colors — Neon Hue Overhaul
+
+- **Feature/area**: TimelineControl track colors for both themes (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Complete hue shift to neon palette** — Replaced all track hues: zoom gold→neon green (`50,255,100`), audio teal→neon cyan (`0,240,220`), mic lavender→neon magenta (`255,50,200`), cursor pale blue→electric blue (`60,140,255`). Light theme uses slightly deeper versions for contrast on lighter backgrounds. ✅
+- **What worked**: Completely changing hues to neon-style colors rather than boosting brightness of existing hues. The neon green/cyan/magenta/blue palette feels modern and inspiring.
+- **What didn't work**: Boosting brightness/saturation of the same gold/teal/lavender hues — still felt muted and uninspiring.
+
+---
+
+## Timeline Track Colors — User-Chosen Neon Palette + 4px Filmstrip Stroke
+
+- **Feature/area**: TimelineControl track colors and filmstrip stroke (`TimelineControl.xaml.cs`)
+- **Approaches tried**:
+  1. **Applied exact user palette (#0DFF89, #0C2EE8, #FF00AA, #DDFF00, #E87C06)** — Mapped: orange `#E87C06` → video clip + filmstrip stroke, neon yellow `#DDFF00` → zoom, neon green `#0DFF89` → audio, hot pink `#FF00AA` → mic, electric blue `#0C2EE8` → cursor. Light theme uses slightly deeper variants. ✅
+  2. **4px filmstrip stroke** — Changed filmstrip stroke from 1px (unselected) / 2px (selected) to 4px in all states. Stroke color changed from translucent white to orange `#E87C06`. ✅
+- **What worked**: Using the exact user-provided palette with appropriate dark/light theme adjustments. Orange filmstrip stroke at 4px gives the video track a bold, distinct frame.
+- **What didn't work**: Previous neon palette (green/cyan/magenta/blue chosen by AI) didn't match user's vision — always ask for or use user-provided color references.
