@@ -26,19 +26,14 @@
         <!-- Visual overlay layer -->
         <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
             <!-- Four dark mask rectangles forming the dim overlay around the highlighted window -->
-            <Rectangle x:Name="TopMask" Fill="{ThemeResource RegionMaskBrush}" />
-            <Rectangle x:Name="BottomMask" Fill="{ThemeResource RegionMaskBrush}" />
-            <Rectangle x:Name="LeftMask" Fill="{ThemeResource RegionMaskBrush}" />
-            <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="TopMask" Fill="#99000000" />
+            <Rectangle x:Name="BottomMask" Fill="#99000000" />
+            <Rectangle x:Name="LeftMask" Fill="#99000000" />
+            <Rectangle x:Name="RightMask" Fill="#99000000" />
 
             <!-- Highlight border around hovered window -->
             <Rectangle
                 x:Name="HighlightRect"
-                Fill="Transparent"
-                Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="1"
-                RadiusX="8"
-                RadiusY="8"
                 Visibility="Collapsed" />
 
             <!-- Window info label -->
