@@ -133,49 +133,55 @@
                         <FontIcon Glyph="&#xE714;" FontSize="14" />
                     </ToggleButton>
                 </StackPanel>
-
-                <AppBarSeparator />
-
-                <!-- Record button (visible when not recording) -->
-                <Button
-                    x:Name="StartRecordButton"
-                    VerticalAlignment="Center"
-                    Height="36"
-                    Padding="12,0"
-                    Click="StartRecordButton_Click"
-                    CornerRadius="18"
-                    Style="{StaticResource AccentButtonStyle}"
-                    Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
-                    ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
-                    <StackPanel Orientation="Horizontal" Spacing="6">
-                        <FontIcon FontSize="14" Glyph="&#xE7C8;" />
-                        <TextBlock Text="Record" VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Button>
-
-                <!-- Stop button + timer (visible during recording) -->
-                <Button
-                    x:Name="StopRecordButton"
-                    VerticalAlignment="Center"
-                    Height="36"
-                    Width="36"
-                    Padding="0"
-                    CornerRadius="18"
-                    Command="{x:Bind ViewModel.StopRecordingCommand}"
-                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
-                    ToolTipService.ToolTip="Stop recording">
-                    <FontIcon FontSize="16" Foreground="Red" Glyph="&#xE71A;" />
-                </Button>
-                <TextBlock
-                    VerticalAlignment="Center"
-                    FontSize="14"
-                    FontWeight="SemiBold"
-                    Foreground="Red"
-                    Margin="4,0,2,0"
-                    Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}"
-                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
             </StackPanel>
         </Border>
+
+        <!-- Record button — hero style below toolbar (visible when not recording) -->
+        <Button
+            x:Name="StartRecordButton"
+            Grid.Row="1"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Margin="0,100,0,0"
+            Height="48"
+            Padding="32,0"
+            Click="StartRecordButton_Click"
+            CornerRadius="24"
+            Style="{StaticResource AccentButtonStyle}"
+            Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
+            ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <FontIcon FontSize="16" Glyph="&#xE7C8;" />
+                <TextBlock Text="Record" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold" />
+            </StackPanel>
+        </Button>
+
+        <!-- Stop button + timer — hero style below toolbar (visible during recording) -->
+        <StackPanel
+            Grid.Row="1"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Margin="0,100,0,0"
+            Orientation="Horizontal"
+            Spacing="12"
+            Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}">
+            <Button
+                x:Name="StopRecordButton"
+                Height="48"
+                Width="48"
+                Padding="0"
+                CornerRadius="24"
+                Command="{x:Bind ViewModel.StopRecordingCommand}"
+                ToolTipService.ToolTip="Stop recording">
+                <FontIcon FontSize="18" Foreground="Red" Glyph="&#xE71A;" />
+            </Button>
+            <TextBlock
+                VerticalAlignment="Center"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Foreground="Red"
+                Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}" />
+        </StackPanel>
 
         <!-- Selection metadata text below toolbar -->
         <TextBlock
@@ -183,7 +189,7 @@
             Grid.Row="1"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
-            Margin="0,80,0,0"
+            Margin="0,160,0,0"
             MaxWidth="400"
             FontSize="12"
             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
