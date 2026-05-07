@@ -57,10 +57,14 @@
                             <ResourceDictionary>
                                 <ResourceDictionary.ThemeDictionaries>
                                     <ResourceDictionary x:Key="Default">
-                                        <SolidColorBrush x:Key="SegmentedItemBackgroundSelected" Color="Transparent" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackground" Color="Transparent" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="Transparent" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="Transparent" />
                                     </ResourceDictionary>
                                     <ResourceDictionary x:Key="HighContrast">
-                                        <SolidColorBrush x:Key="SegmentedItemBackgroundSelected" Color="{StaticResource SystemColorHighlightColor}" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackground" Color="{StaticResource SystemColorHighlightColor}" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="{StaticResource SystemColorHighlightColor}" />
+                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="{StaticResource SystemColorHighlightColor}" />
                                     </ResourceDictionary>
                                 </ResourceDictionary.ThemeDictionaries>
                             </ResourceDictionary>
