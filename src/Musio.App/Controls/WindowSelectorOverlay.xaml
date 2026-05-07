@@ -36,7 +36,9 @@
                 x:Name="HighlightRect"
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="3"
+                StrokeThickness="1"
+                RadiusX="8"
+                RadiusY="8"
                 Visibility="Collapsed" />
 
             <!-- Window info label -->
