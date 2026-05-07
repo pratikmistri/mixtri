@@ -194,6 +194,10 @@ public sealed partial class RecordingPage : Page
             if (ViewModel.CaptureMode == CaptureMode.Window)
                 UpdateWindowInfoDisplay();
         }
+
+        // Hide metadata when in FullScreen mode (no selection to show)
+        if (ViewModel.CaptureMode == CaptureMode.FullScreen)
+            HideSelectionMetadata();
     }
 
     private void UpdateRegionInfoDisplay()
@@ -201,8 +205,7 @@ public sealed partial class RecordingPage : Page
         if (ViewModel.HasSelectedRegion && ViewModel.SelectedRegion is not null)
         {
             var r = ViewModel.SelectedRegion;
-            RegionInfoText.Text = $"Last: {r.Width}\u00d7{r.Height} at {r.X},{r.Y}";
-            RegionInfoText.Visibility = Visibility.Visible;
+            ShowSelectionMetadata($"Region: {r.Width}\u00d7{r.Height} at ({r.X}, {r.Y})");
             return;
         }
 
@@ -211,12 +214,11 @@ public sealed partial class RecordingPage : Page
         {
             ViewModel.SelectedRegion = saved;
             ViewModel.HasSelectedRegion = true;
-            RegionInfoText.Text = $"Last: {saved.Width}\u00d7{saved.Height} at {saved.X},{saved.Y}";
-            RegionInfoText.Visibility = Visibility.Visible;
+            ShowSelectionMetadata($"Region: {saved.Width}\u00d7{saved.Height} at ({saved.X}, {saved.Y})");
         }
         else
         {
-            RegionInfoText.Visibility = Visibility.Collapsed;
+            HideSelectionMetadata();
         }
     }
 
@@ -277,18 +279,27 @@ public sealed partial class RecordingPage : Page
 
     private void UpdateWindowInfoDisplay()
     {
-        if (WindowInfoText is null) return;
-
         if (ViewModel.SelectedWindow is not null)
         {
-            WindowInfoText.Text = ViewModel.SelectedWindow.Title;
-            ToolTipService.SetToolTip(SelectWindowButton,
-                $"{ViewModel.SelectedWindow.Title} ({ViewModel.SelectedWindow.ProcessName}) — click to change");
+            ShowSelectionMetadata($"{ViewModel.SelectedWindow.Title} — {ViewModel.SelectedWindow.ProcessName}");
         }
         else
         {
-            WindowInfoText.Text = "Select Window";
+            HideSelectionMetadata();
         }
+    }
+
+    private void ShowSelectionMetadata(string text)
+    {
+        if (SelectionMetadataText is null) return;
+        SelectionMetadataText.Text = text;
+        SelectionMetadataText.Visibility = Visibility.Visible;
+    }
+
+    private void HideSelectionMetadata()
+    {
+        if (SelectionMetadataText is null) return;
+        SelectionMetadataText.Visibility = Visibility.Collapsed;
     }
 
     private const int SW_MINIMIZE = 6;

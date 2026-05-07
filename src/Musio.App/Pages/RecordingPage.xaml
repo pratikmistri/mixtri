@@ -73,38 +73,41 @@
                     <!-- Inline: Window picker (expands when Window mode selected) -->
                     <StackPanel x:Name="WindowPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
                         <AppBarSeparator />
-                        <Button
+                        <DropDownButton
                             x:Name="SelectWindowButton"
                             VerticalAlignment="Center"
-                            MaxWidth="260"
-                            Click="SelectWindowButton_Click"
+                            Content="Select Window"
                             ToolTipService.ToolTip="Click to visually select a window">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE737;" FontSize="14" />
-                                <TextBlock
-                                    x:Name="WindowInfoText"
-                                    Text="Select Window"
-                                    TextTrimming="CharacterEllipsis"
-                                    VerticalAlignment="Center" />
-                            </StackPanel>
-                        </Button>
+                            <DropDownButton.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="Pick from screen" Click="SelectWindowButton_Click">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE737;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </DropDownButton.Flyout>
+                        </DropDownButton>
                     </StackPanel>
 
                     <!-- Inline: Region selector (expands when Region mode selected) -->
                     <StackPanel x:Name="RegionPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
                         <AppBarSeparator />
-                        <Button
+                        <DropDownButton
                             x:Name="SelectRegionButton"
                             VerticalAlignment="Center"
-                            Click="SelectRegionButton_Click"
                             Content="Select Region"
-                            ToolTipService.ToolTip="Click to select a custom screen region" />
-                        <TextBlock
-                            x:Name="RegionInfoText"
-                            VerticalAlignment="Center"
-                            FontSize="12"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Visibility="Collapsed" />
+                            ToolTipService.ToolTip="Click to select a custom screen region">
+                            <DropDownButton.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="Draw region on screen" Click="SelectRegionButton_Click">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE7A8;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </DropDownButton.Flyout>
+                        </DropDownButton>
                     </StackPanel>
 
                     <AppBarSeparator />
@@ -175,6 +178,20 @@
                     Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
             </StackPanel>
         </Border>
+
+        <!-- Selection metadata text below toolbar -->
+        <TextBlock
+            x:Name="SelectionMetadataText"
+            Grid.Row="1"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Margin="0,80,0,0"
+            MaxWidth="400"
+            FontSize="12"
+            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+            TextTrimming="CharacterEllipsis"
+            TextAlignment="Center"
+            Visibility="Collapsed" />
 
         <!-- TeachingTip for first-run -->
         <TeachingTip
