@@ -222,6 +222,12 @@ public sealed partial class EditorPage : Page
         };
     }
 
+    /// <summary>
+    /// Pauses preview playback and audio. Called by App when the window
+    /// becomes hidden (minimize-to-tray / system suspension).
+    /// </summary>
+    public void PausePlayback() => Preview.Pause();
+
     private async Task InitializePreviewAsync()
     {
         _frameReader?.Dispose();

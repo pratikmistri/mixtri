@@ -195,6 +195,12 @@ public partial class RecordingViewModel : ObservableObject
                 return;
             }
 
+            // Bring the selected window to the front so it's fully visible for capture
+            if (CaptureMode == CaptureMode.Window && SelectedWindow is not null)
+            {
+                SetForegroundWindow(SelectedWindow.Handle);
+            }
+
             var outputFolder = AppSettings.Instance.DefaultSavePath;
             if (string.IsNullOrWhiteSpace(outputFolder))
                 outputFolder = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
@@ -389,6 +395,9 @@ public partial class RecordingViewModel : ObservableObject
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hwnd);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);

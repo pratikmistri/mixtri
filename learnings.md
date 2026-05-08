@@ -1009,3 +1009,23 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   2. **4px filmstrip stroke** — Changed filmstrip stroke from 1px (unselected) / 2px (selected) to 4px in all states. Stroke color changed from translucent white to orange `#E87C06`. ✅
 - **What worked**: Using the exact user-provided palette with appropriate dark/light theme adjustments. Orange filmstrip stroke at 4px gives the video track a bold, distinct frame.
 - **What didn't work**: Previous neon palette (green/cyan/magenta/blue chosen by AI) didn't match user's vision — always ask for or use user-provided color references.
+
+---
+
+## Window Capture — Bring Window to Front on Record
+
+- **Feature/area**: RecordingViewModel — Window capture mode (`RecordingViewModel.cs`)
+- **Approaches tried**:
+  1. **Added `SetForegroundWindow` P/Invoke call in `StartRecordingAsync`** — After `BuildCaptureTarget()` succeeds and before creating the `RecordingSession`, call `SetForegroundWindow(SelectedWindow.Handle)` when in `CaptureMode.Window`. ✅
+- **What worked**: Simple `SetForegroundWindow` call right after target validation brings the selected window to the top of the z-order before capture begins.
+
+---
+
+## PLM Suspension Hang Fix (HANG_QUIESCE)
+
+- **Feature/area**: App lifecycle — PLM suspension handling (`App.xaml.cs`, `MainWindow.xaml.cs`, `EditorPage.xaml.cs`)
+- **Approaches tried**:
+  1. **WM_ENDSESSION handling in MainWindow WndProc** — Detects system shutdown/logoff and sets `_isExiting = true` via `App.HandleSystemShutdown()` so `OnWindowClosing` doesn't cancel the close. ✅
+  2. **ExtendedExecutionSession when hiding to tray** — Requests `ExtendedExecutionReason.Unspecified` when the window becomes hidden to prevent PLM from suspending the app while it runs in the tray. Released when the window is shown again. ✅
+  3. **Pause editor playback on window hide** — `Window.VisibilityChanged` event pauses `EditorPage.Preview` (and audio via its `IsPlayingChanged` handler) when the window becomes invisible. ✅
+- **What worked**: Three-pronged approach — WM_ENDSESSION for system shutdown, ExtendedExecutionSession for PLM prevention, and VisibilityChanged for playback pause.

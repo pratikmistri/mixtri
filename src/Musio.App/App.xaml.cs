@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using Musio_App.Pages;
 using Musio_App.Services;
 using Musio.Core.Services;
 using Musio.Core.Settings;
+using Windows.ApplicationModel.ExtendedExecution;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -18,6 +20,7 @@ public partial class App : Application
     private Window? _window;
     private SystemTrayService? _trayService;
     private GlobalHotkeyService? _hotkeyService;
+    private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
@@ -59,6 +62,7 @@ public partial class App : Application
     {
         _window = new MainWindow();
         _window.Closed += OnWindowClosed;
+        _window.VisibilityChanged += OnWindowVisibilityChanged;
         _window.Activate();
 
         // Clean up .frames/ from previously-exported sessions in the background
@@ -111,6 +115,75 @@ public partial class App : Application
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         ShowWindow(hwnd, SW_SHOW);
         _window.Activate();
+        ReleaseExtendedExecution();
+    }
+
+    /// <summary>
+    /// Called by MainWindow when WM_ENDSESSION is received — allows the
+    /// app to exit cleanly during system shutdown instead of cancelling the
+    /// close and triggering a HANG_QUIESCE timeout.
+    /// </summary>
+    public void HandleSystemShutdown()
+    {
+        _isExiting = true;
+        ReleaseExtendedExecution();
+        _hotkeyService?.Dispose();
+        _trayService?.Dispose();
+    }
+
+    private void OnWindowVisibilityChanged(object sender, WindowVisibilityChangedEventArgs args)
+    {
+        if (!args.Visible)
+        {
+            PauseEditorPlayback();
+            _ = RequestExtendedExecutionAsync();
+        }
+    }
+
+    private void PauseEditorPlayback()
+    {
+        if (_window is MainWindow mainWindow
+            && mainWindow.ContentFrame.Content is EditorPage editor)
+        {
+            editor.PausePlayback();
+        }
+    }
+
+    private async System.Threading.Tasks.Task RequestExtendedExecutionAsync()
+    {
+        if (_extendedSession is not null) return;
+
+        try
+        {
+            var session = new ExtendedExecutionSession
+            {
+                Reason = ExtendedExecutionReason.Unspecified,
+                Description = "Musio background tray operation",
+            };
+            session.Revoked += OnExtendedExecutionRevoked;
+
+            var result = await session.RequestExtensionAsync();
+            if (result == ExtendedExecutionResult.Allowed)
+                _extendedSession = session;
+            else
+                session.Dispose();
+        }
+        catch
+        {
+            // ExtendedExecution not available on this platform — continue without it
+        }
+    }
+
+    private void OnExtendedExecutionRevoked(object? sender, ExtendedExecutionRevokedEventArgs args)
+    {
+        _extendedSession?.Dispose();
+        _extendedSession = null;
+    }
+
+    private void ReleaseExtendedExecution()
+    {
+        _extendedSession?.Dispose();
+        _extendedSession = null;
     }
 
     private void OnHotkeyPressed(object? sender, HotkeyPressedEventArgs e)
