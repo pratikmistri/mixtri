@@ -38,7 +38,8 @@
                 x:Name="SelectionRect"
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="2"
+                StrokeThickness="1"
+                StrokeDashArray="4,4"
                 Visibility="Collapsed" />
 
             <!-- Resize handles (corners + edges) -->

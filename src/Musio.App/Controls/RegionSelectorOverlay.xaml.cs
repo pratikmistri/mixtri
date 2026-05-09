@@ -31,9 +31,20 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private double _selX, _selY, _selW, _selH;
     private bool _hasSelection;
 
+    // Screenshot pixel data for edge-snap contrast analysis
+    private byte[]? _screenshotPixels;
+    private int _screenshotWidth;
+    private int _screenshotHeight;
+
+    // Cached cursors to avoid allocating on every pointer-move
+    private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
+    private static readonly Dictionary<InputSystemCursorShape, InputSystemCursor> _cursorCache = new();
+
     private const double HandleSize = 8;
     private const double HandleHitArea = 16;
     private const double MinSelectionSize = 10;
+    private const int SnapRadius = 15;
+    private const float SnapMinContrast = 12.0f;
 
     public event EventHandler<CaptureRegion>? RegionSelected;
     public event EventHandler? SelectionCancelled;
@@ -87,7 +98,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
         }
 
         // Capture the virtual desktop screenshot
-        var screenshotSource = await CaptureDesktopScreenshotAsync();
+        var (screenshotSource, pixels, ssW, ssH) = await CaptureDesktopScreenshotAsync();
+        _screenshotPixels = pixels;
+        _screenshotWidth = ssW;
+        _screenshotHeight = ssH;
 
         _hostWindow = new Window();
         _hostWindow.Content = this;
@@ -127,8 +141,9 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     /// <summary>
     /// Captures the full virtual desktop as a SoftwareBitmapSource via GDI BitBlt.
+    /// Also returns the raw BGRA pixel data for contrast analysis.
     /// </summary>
-    private static async Task<SoftwareBitmapSource?> CaptureDesktopScreenshotAsync()
+    private static async Task<(SoftwareBitmapSource? Source, byte[]? Pixels, int Width, int Height)> CaptureDesktopScreenshotAsync()
     {
         IntPtr hdcScreen = IntPtr.Zero;
         IntPtr hdcMem = IntPtr.Zero;
@@ -143,7 +158,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
             int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
             if (width <= 0 || height <= 0)
-                return null;
+                return (null, null, 0, 0);
 
             hdcScreen = GetDC(IntPtr.Zero);
             hdcMem = CreateCompatibleDC(hdcScreen);
@@ -176,11 +191,11 @@ public sealed partial class RegionSelectorOverlay : UserControl
             var source = new SoftwareBitmapSource();
             await source.SetBitmapAsync(softwareBitmap);
 
-            return source;
+            return (source, pixelData, width, height);
         }
         catch
         {
-            return null;
+            return (null, null, 0, 0);
         }
         finally
         {
@@ -365,10 +380,42 @@ public sealed partial class RegionSelectorOverlay : UserControl
             UpdateOverlay();
             e.Handled = true;
         }
+        else if (_hasSelection)
+        {
+            string handle = HitTestHandle(pos.X, pos.Y);
+            SetCursorShape(GetCursorForHandle(handle));
+        }
+        else
+        {
+            SetCursorShape(InputSystemCursorShape.Cross);
+        }
     }
+
+    private void SetCursorShape(InputSystemCursorShape shape)
+    {
+        if (shape == _currentCursorShape) return;
+        _currentCursorShape = shape;
+        if (!_cursorCache.TryGetValue(shape, out var cursor))
+        {
+            cursor = InputSystemCursor.Create(shape);
+            _cursorCache[shape] = cursor;
+        }
+        ProtectedCursor = cursor;
+    }
+
+    private static InputSystemCursorShape GetCursorForHandle(string handle) => handle switch
+    {
+        "TL" or "BR" => InputSystemCursorShape.SizeNorthwestSoutheast,
+        "TR" or "BL" => InputSystemCursorShape.SizeNortheastSouthwest,
+        "T" or "B"   => InputSystemCursorShape.SizeNorthSouth,
+        "L" or "R"   => InputSystemCursorShape.SizeWestEast,
+        _            => InputSystemCursorShape.Cross,
+    };
 
     private void Grid_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        bool shiftHeld = IsShiftHeld();
+
         if (_isDragging)
         {
             _isDragging = false;
@@ -376,6 +423,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
             if (_selW > MinSelectionSize && _selH > MinSelectionSize)
             {
+                if (!shiftHeld)
+                    SnapSelectionEdges(snapLeft: true, snapTop: true, snapRight: true, snapBottom: true);
                 ButtonPanel.Visibility = Visibility.Visible;
             }
             else
@@ -391,8 +440,34 @@ public sealed partial class RegionSelectorOverlay : UserControl
         {
             _isResizing = false;
             RootGrid.ReleasePointerCapture(e.Pointer);
+
+            if (!shiftHeld)
+            {
+                // Only snap the edges that were being resized
+                var (sl, st, sr, sb) = _resizeHandle switch
+                {
+                    "TL" => (true, true, false, false),
+                    "T"  => (false, true, false, false),
+                    "TR" => (false, true, true, false),
+                    "L"  => (true, false, false, false),
+                    "R"  => (false, false, true, false),
+                    "BL" => (true, false, false, true),
+                    "B"  => (false, false, false, true),
+                    "BR" => (false, false, true, true),
+                    _    => (false, false, false, false),
+                };
+                SnapSelectionEdges(sl, st, sr, sb);
+                UpdateOverlay();
+            }
+
             e.Handled = true;
         }
+    }
+
+    private static bool IsShiftHeld()
+    {
+        var state = InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift);
+        return state.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
     }
 
     private string HitTestHandle(double px, double py)
@@ -432,6 +507,135 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
         if (_selW < MinSelectionSize) _selW = MinSelectionSize;
         if (_selH < MinSelectionSize) _selH = MinSelectionSize;
+    }
+
+    #endregion
+
+    #region Edge-snap contrast analysis
+
+    private int OverlayToPixelX(double x) =>
+        ActualWidth > 0 ? (int)Math.Round(x * _screenshotWidth / ActualWidth) : 0;
+    private int OverlayToPixelY(double y) =>
+        ActualHeight > 0 ? (int)Math.Round(y * _screenshotHeight / ActualHeight) : 0;
+    private double PixelToOverlayX(int px) =>
+        _screenshotWidth > 0 ? px * ActualWidth / _screenshotWidth : 0;
+    private double PixelToOverlayY(int py) =>
+        _screenshotHeight > 0 ? py * ActualHeight / _screenshotHeight : 0;
+
+    private int GetLuminance(int px, int py)
+    {
+        if (px < 0 || px >= _screenshotWidth || py < 0 || py >= _screenshotHeight)
+            return 0;
+        int idx = (py * _screenshotWidth + px) * 4;
+        // (B + 2G + R) / 4 — fast approximate brightness
+        return (_screenshotPixels![idx] + 2 * _screenshotPixels[idx + 1] + _screenshotPixels[idx + 2]) >> 2;
+    }
+
+    /// <summary>
+    /// Contrast at row boundary y (between row y-1 and y), scored over columns [x0..x1].
+    /// </summary>
+    private float ComputeHorizontalContrast(int y, int x0, int x1)
+    {
+        if (y <= 0 || y >= _screenshotHeight) return 0;
+        x0 = Math.Clamp(x0, 0, _screenshotWidth - 1);
+        x1 = Math.Clamp(x1, 0, _screenshotWidth - 1);
+        if (x0 >= x1) return 0;
+
+        long sum = 0;
+        for (int x = x0; x <= x1; x++)
+            sum += Math.Abs(GetLuminance(x, y) - GetLuminance(x, y - 1));
+        return (float)sum / (x1 - x0 + 1);
+    }
+
+    /// <summary>
+    /// Contrast at column boundary x (between col x-1 and x), scored over rows [y0..y1].
+    /// </summary>
+    private float ComputeVerticalContrast(int x, int y0, int y1)
+    {
+        if (x <= 0 || x >= _screenshotWidth) return 0;
+        y0 = Math.Clamp(y0, 0, _screenshotHeight - 1);
+        y1 = Math.Clamp(y1, 0, _screenshotHeight - 1);
+        if (y0 >= y1) return 0;
+
+        long sum = 0;
+        for (int y = y0; y <= y1; y++)
+            sum += Math.Abs(GetLuminance(x, y) - GetLuminance(x - 1, y));
+        return (float)sum / (y1 - y0 + 1);
+    }
+
+    /// <summary>
+    /// Searches ±SnapRadius around <paramref name="pos"/> for the strongest contrast edge.
+    /// Only snaps if the best candidate has local prominence (1.5× average) and meets min threshold.
+    /// </summary>
+    private int FindBestSnap(int pos, int spanStart, int spanEnd, bool isHorizontal)
+    {
+        int limit = isHorizontal ? _screenshotHeight - 1 : _screenshotWidth - 1;
+        pos = Math.Clamp(pos, 1, limit);
+        int searchMin = Math.Max(1, pos - SnapRadius);
+        int searchMax = Math.Min(limit, pos + SnapRadius);
+
+        int best = pos;
+        float bestScore = 0;
+        float totalScore = 0;
+        int count = 0;
+
+        for (int candidate = searchMin; candidate <= searchMax; candidate++)
+        {
+            float score = isHorizontal
+                ? ComputeHorizontalContrast(candidate, spanStart, spanEnd)
+                : ComputeVerticalContrast(candidate, spanStart, spanEnd);
+            totalScore += score;
+            count++;
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+
+        float avgScore = count > 0 ? totalScore / count : 0;
+        if (bestScore < SnapMinContrast || bestScore < avgScore * 1.5f)
+            return pos;
+
+        return best;
+    }
+
+    private void SnapSelectionEdges(bool snapLeft, bool snapTop, bool snapRight, bool snapBottom)
+    {
+        if (_screenshotPixels == null || _screenshotWidth <= 0 || _screenshotHeight <= 0
+            || ActualWidth <= 0 || ActualHeight <= 0)
+            return;
+
+        int pxLeft = OverlayToPixelX(_selX);
+        int pxTop = OverlayToPixelY(_selY);
+        int pxRight = OverlayToPixelX(_selX + _selW);
+        int pxBottom = OverlayToPixelY(_selY + _selH);
+
+        int origLeft = pxLeft, origTop = pxTop, origRight = pxRight, origBottom = pxBottom;
+
+        // Snap horizontal edges (top/bottom) using the current left..right span
+        if (snapTop)
+            pxTop = FindBestSnap(pxTop, pxLeft, pxRight, isHorizontal: true);
+        if (snapBottom)
+            pxBottom = FindBestSnap(pxBottom, pxLeft, pxRight, isHorizontal: true);
+
+        // Snap vertical edges (left/right) using the (possibly snapped) top..bottom span
+        if (snapLeft)
+            pxLeft = FindBestSnap(pxLeft, pxTop, pxBottom, isHorizontal: false);
+        if (snapRight)
+            pxRight = FindBestSnap(pxRight, pxTop, pxBottom, isHorizontal: false);
+
+        // Enforce minimum size with separate X/Y scales
+        int minPxX = Math.Max(1, (int)(MinSelectionSize * _screenshotWidth / ActualWidth));
+        int minPxY = Math.Max(1, (int)(MinSelectionSize * _screenshotHeight / ActualHeight));
+        if (pxRight - pxLeft < minPxX) { pxLeft = origLeft; pxRight = origRight; }
+        if (pxBottom - pxTop < minPxY) { pxTop = origTop; pxBottom = origBottom; }
+
+        _selX = PixelToOverlayX(pxLeft);
+        _selY = PixelToOverlayY(pxTop);
+        _selW = PixelToOverlayX(pxRight) - _selX;
+        _selH = PixelToOverlayY(pxBottom) - _selY;
     }
 
     #endregion
