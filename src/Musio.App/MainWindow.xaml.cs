@@ -9,6 +9,9 @@ namespace Musio_App;
 
 public sealed partial class MainWindow : Window
 {
+    /// <summary>Exposes the navigation frame so App can reach the current page.</summary>
+    public Frame ContentFrame => NavFrame;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -50,6 +53,8 @@ public sealed partial class MainWindow : Window
     private IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         const uint WM_GETMINMAXINFO = 0x0024;
+        const uint WM_ENDSESSION = 0x0026;
+
         if (msg == WM_GETMINMAXINFO)
         {
             var info = System.Runtime.InteropServices.Marshal.PtrToStructure<MINMAXINFO>(lParam);
@@ -58,6 +63,14 @@ public sealed partial class MainWindow : Window
             System.Runtime.InteropServices.Marshal.StructureToPtr(info, lParam, false);
             return IntPtr.Zero;
         }
+
+        // System shutdown / logoff — let the app exit cleanly instead of
+        // hiding to tray and causing a HANG_QUIESCE timeout.
+        if (msg == WM_ENDSESSION && wParam != IntPtr.Zero)
+        {
+            App.Current.HandleSystemShutdown();
+        }
+
         return CallWindowProc(_originalWndProc, hwnd, msg, wParam, lParam);
     }
 

@@ -165,6 +165,15 @@ public partial class RecordingViewModel : ObservableObject
 
     public bool IsCustomRegionMode => CaptureMode == CaptureMode.CustomRegion;
 
+    partial void OnIsMicEnabledChanged(bool value)
+        => AppSettings.Instance.IsMicEnabled = value;
+
+    partial void OnIsSystemAudioEnabledChanged(bool value)
+        => AppSettings.Instance.IsSystemAudioEnabled = value;
+
+    partial void OnIsWebcamEnabledChanged(bool value)
+        => AppSettings.Instance.IsWebcamEnabled = value;
+
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsCustomRegionMode));
@@ -184,6 +193,12 @@ public partial class RecordingViewModel : ObservableObject
             {
                 RecordingStatus = "Could not determine capture target";
                 return;
+            }
+
+            // Bring the selected window to the front so it's fully visible for capture
+            if (CaptureMode == CaptureMode.Window && SelectedWindow is not null)
+            {
+                SetForegroundWindow(SelectedWindow.Handle);
             }
 
             var outputFolder = AppSettings.Instance.DefaultSavePath;
@@ -380,6 +395,9 @@ public partial class RecordingViewModel : ObservableObject
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hwnd);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);

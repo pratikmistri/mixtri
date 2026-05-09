@@ -80,7 +80,7 @@ public sealed partial class TimelineControl : UserControl
     private bool _zoomCreateActive;
     private const double ZoomCreateDragThreshold = 5.0; // pixels before creating
 
-    // Colors — resolved from theme resources (see Themes/AppColors.xaml)
+    // Colors — resolved from WinUI system theme resources (see ResolveThemeColors)
     private Color RulerBackground;
     private Color RulerTickColor;
     private Color RulerTextColor;
@@ -88,6 +88,8 @@ public sealed partial class TimelineControl : UserControl
     private Color VideoClipColor;
     private Color VideoClipSelectedColor;
     private Color VideoClipSelectedBorder;
+    private Color FilmstripBackplateColor;
+    private Color FilmstripStrokeColor;
     private Color SpeedUpOverlayColor;
     private Color SlowDownOverlayColor;
     private Color TrimHandleColor;
@@ -116,7 +118,12 @@ public sealed partial class TimelineControl : UserControl
     private Color SpeedLabelTextColor;
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
+    private Color ClickStrokeColor;
 
+    // Filmstrip thumbnail cache
+    private CanvasBitmap[]? _thumbnails;
+    private double _thumbnailIntervalSeconds;
+    private double _videoAspectRatio = 16.0 / 9.0;
     private const double TrimHandleWidth = 8;
 
     public TimelineControl()
@@ -130,50 +137,107 @@ public sealed partial class TimelineControl : UserControl
     {
         try
         {
+            // Check control-local resources first
             if (Resources.TryGetValue(key, out var val) && val is Microsoft.UI.Xaml.Media.SolidColorBrush brush)
                 return brush.Color;
+
+            // Fall back to Application.Resources (where AppColors.xaml is merged)
+            if (Application.Current?.Resources?.TryGetValue(key, out var appVal) == true
+                && appVal is Microsoft.UI.Xaml.Media.SolidColorBrush appBrush)
+                return appBrush.Color;
         }
         catch { /* resource not found — use fallback */ }
         return fallback;
     }
 
+    /// <summary>Resolves a WinUI system theme resource brush/color from Application.Current.Resources.</summary>
+    private static Color GetSystemBrushColor(string key, Color fallback)
+    {
+        try
+        {
+            if (Application.Current?.Resources?.TryGetValue(key, out var val) == true)
+            {
+                if (val is Microsoft.UI.Xaml.Media.SolidColorBrush b)
+                    return b.Color;
+                if (val is Color c)
+                    return c;
+            }
+        }
+        catch { }
+        return fallback;
+    }
+
+    private static Color WithAlpha(Color c, byte alpha) => Color.FromArgb(alpha, c.R, c.G, c.B);
+
     private void ResolveThemeColors()
     {
-        RulerBackground          = GetBrushColor("TimelineRulerBackgroundBrush", Color.FromArgb(255, 40, 40, 40));
-        RulerTickColor           = GetBrushColor("TimelineRulerTickBrush", Color.FromArgb(255, 160, 160, 160));
-        RulerTextColor           = GetBrushColor("TimelineTrackLabelForegroundBrush", Color.FromArgb(255, 200, 200, 200));
-        VideoTrackBackground     = GetBrushColor("TimelineTrackPrimaryBackgroundBrush", Color.FromArgb(255, 30, 30, 30));
-        VideoClipColor           = GetBrushColor("TimelineVideoClipBrush", Color.FromArgb(255, 60, 120, 200));
-        VideoClipSelectedColor   = GetBrushColor("TimelineVideoClipSelectedBrush", Color.FromArgb(255, 90, 155, 235));
-        VideoClipSelectedBorder  = GetBrushColor("TimelineVideoClipSelectedBorderBrush", Color.FromArgb(255, 180, 210, 255));
-        SpeedUpOverlayColor      = GetBrushColor("TimelineSpeedUpOverlayBrush", Color.FromArgb(200, 230, 160, 50));
-        SlowDownOverlayColor     = GetBrushColor("TimelineSlowDownOverlayBrush", Color.FromArgb(200, 60, 130, 230));
-        TrimHandleColor          = GetBrushColor("TimelineTrimHandleBrush", Color.FromArgb(255, 255, 255, 255));
-        TrimHandleBorderColor    = GetBrushColor("TimelineTrimHandleBorderBrush", Color.FromArgb(255, 100, 100, 100));
-        ZoomTrackBackground      = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
-        ZoomSegmentFill          = GetBrushColor("TimelineZoomSegmentBrush", Color.FromArgb(200, 60, 160, 80));
-        ZoomSegmentAutoFill      = GetBrushColor("TimelineZoomSegmentAutoBrush", Color.FromArgb(120, 60, 140, 70));
-        ZoomSegmentSelectedFill  = GetBrushColor("TimelineZoomSegmentSelectedBrush", Color.FromArgb(230, 80, 200, 100));
-        ZoomSegmentBorder        = GetBrushColor("TimelineZoomSegmentBorderBrush", Color.FromArgb(255, 100, 200, 100));
-        ZoomSegmentSelectedBorder = GetBrushColor("TimelineZoomSegmentSelectedBorderBrush", Color.FromArgb(255, 180, 255, 180));
-        ZoomSegmentHandleColor   = GetBrushColor("TimelineZoomSegmentHandleBrush", Color.FromArgb(255, 220, 255, 220));
-        ZoomSegmentCreatePreview = GetBrushColor("TimelineZoomSegmentCreatePreviewBrush", Color.FromArgb(100, 100, 200, 100));
-        ZoomSegmentTextColor     = GetBrushColor("TimelineZoomSegmentTextBrush", Color.FromArgb(255, 240, 255, 240));
-        AudioTrackBackground     = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
-        AudioPlaceholderColor    = GetBrushColor("TimelineAudioPlaceholderBrush", Color.FromArgb(255, 80, 160, 80));
-        AudioWaveformColor       = GetBrushColor("TimelineAudioWaveformBrush", Color.FromArgb(220, 80, 180, 80));
-        AudioEnvelopeColor       = GetBrushColor("TimelineAudioEnvelopeBrush", Color.FromArgb(100, 120, 220, 120));
-        MicWaveformColor         = GetBrushColor("TimelineMicWaveformBrush", Color.FromArgb(220, 180, 120, 220));
-        MicEnvelopeColor         = GetBrushColor("TimelineMicEnvelopeBrush", Color.FromArgb(100, 200, 140, 255));
-        PlayheadColor            = GetBrushColor("TimelinePlayheadBrush", Color.FromArgb(255, 255, 50, 50));
-        CutLineColor             = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
-        CursorTrackBackground    = GetBrushColor("TimelineTrackSecondaryBackgroundBrush", Color.FromArgb(255, 35, 35, 35));
-        CursorPathXColor         = GetBrushColor("TimelineCursorPathXBrush", Color.FromArgb(220, 100, 180, 255));
-        CursorPathYColor         = GetBrushColor("TimelineCursorPathYBrush", Color.FromArgb(220, 255, 160, 100));
-        CursorClickColor         = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
-        SpeedLabelTextColor      = GetBrushColor("TimelineSpeedLabelTextBrush", Color.FromArgb(255, 255, 255, 255));
-        TrackCenterLineColor     = GetBrushColor("TimelineTrackCenterLineBrush", Color.FromArgb(100, 255, 255, 255));
-        TrackEmptyLineColor      = GetBrushColor("TimelineTrackEmptyLineBrush", Color.FromArgb(60, 255, 255, 255));
+        bool isDark = ActualTheme != ElementTheme.Light;
+
+        // ── Backgrounds — WinUI system surface colors ──
+        RulerBackground      = GetSystemBrushColor("SolidBackgroundFillColorBaseBrush", Color.FromArgb(255, 32, 32, 32));
+        VideoTrackBackground = GetSystemBrushColor("CardBackgroundFillColorDefaultBrush", Color.FromArgb(255, 45, 45, 45));
+        ZoomTrackBackground  = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
+        AudioTrackBackground = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
+        CursorTrackBackground = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
+
+        // ── Ruler — system text colors ──
+        RulerTickColor = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(255, 135, 135, 135));
+        RulerTextColor = GetSystemBrushColor("TextFillColorSecondaryBrush", Color.FromArgb(255, 197, 197, 197));
+
+        // ── Video track — #0C2EE8 electric blue ──
+        VideoClipColor        = isDark ? Color.FromArgb(255, 12, 46, 232) : Color.FromArgb(255, 10, 38, 195);
+        VideoClipSelectedColor = isDark ? Color.FromArgb(255, 50, 80, 255) : Color.FromArgb(255, 40, 65, 220);
+        VideoClipSelectedBorder = GetSystemBrushColor("FocusStrokeColorOuterBrush", Color.FromArgb(255, 255, 255, 255));
+        FilmstripBackplateColor = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
+        FilmstripStrokeColor  = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(30, 255, 255, 255));
+
+        // ── Speed overlays — semantic status colors ──
+        SpeedUpOverlayColor   = GetBrushColor("TimelineSpeedUpOverlayBrush", Color.FromArgb(200, 230, 160, 50));
+        SlowDownOverlayColor  = GetBrushColor("TimelineSlowDownOverlayBrush", Color.FromArgb(200, 60, 130, 230));
+
+        // ── Trim handles — system text/stroke ──
+        TrimHandleColor       = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
+        TrimHandleBorderColor = GetSystemBrushColor("SurfaceStrokeColorDefaultBrush", Color.FromArgb(255, 117, 117, 117));
+
+        // ── Zoom segments — #DDFF00 neon yellow ──
+        var zoomBase          = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
+        var zoomLight         = isDark ? Color.FromArgb(255, 235, 255, 60) : Color.FromArgb(255, 200, 230, 40);
+        ZoomSegmentFill       = WithAlpha(zoomBase, 200);
+        ZoomSegmentAutoFill   = WithAlpha(zoomBase, 120);
+        ZoomSegmentSelectedFill = WithAlpha(zoomLight, 230);
+        ZoomSegmentBorder     = WithAlpha(zoomBase, 220);
+        ZoomSegmentSelectedBorder = isDark ? Color.FromArgb(255, 240, 255, 100) : Color.FromArgb(255, 160, 190, 0);
+        ZoomSegmentHandleColor = isDark ? Color.FromArgb(255, 245, 255, 150) : Color.FromArgb(255, 140, 170, 0);
+        ZoomSegmentCreatePreview = WithAlpha(zoomBase, 120);
+        // Dark text on bright neon yellow for readability
+        ZoomSegmentTextColor  = isDark ? Color.FromArgb(255, 30, 40, 0) : Color.FromArgb(255, 40, 50, 0);
+
+        // ── Audio — #0DFF89 neon green ──
+        var audioBase         = isDark ? Color.FromArgb(255, 13, 255, 137) : Color.FromArgb(255, 10, 210, 110);
+        AudioWaveformColor    = WithAlpha(audioBase, 240);
+        AudioEnvelopeColor    = WithAlpha(audioBase, 120);
+        AudioPlaceholderColor = WithAlpha(audioBase, 150);
+
+        // ── Mic — #FF00AA hot pink ──
+        var micBase           = isDark ? Color.FromArgb(255, 255, 0, 170) : Color.FromArgb(255, 210, 0, 140);
+        MicWaveformColor      = WithAlpha(micBase, 240);
+        MicEnvelopeColor      = WithAlpha(micBase, 120);
+
+        // ── Cursor paths — #E87C06 orange ──
+        var cursorBase        = isDark ? Color.FromArgb(255, 232, 124, 6) : Color.FromArgb(255, 210, 110, 5);
+        CursorPathXColor      = WithAlpha(cursorBase, 255);
+        CursorPathYColor      = WithAlpha(cursorBase, 150);
+        CursorClickColor      = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
+        ClickStrokeColor      = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(255, 120, 120, 120));
+
+        // ── Playhead & cut lines — semantic ──
+        PlayheadColor         = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
+        CutLineColor          = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
+
+        // ── Text & lines — system ──
+        SpeedLabelTextColor   = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
+        TrackCenterLineColor  = GetSystemBrushColor("DividerStrokeColorDefaultBrush", Color.FromArgb(100, 255, 255, 255));
+        TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
     }
 
     private void InvalidateAllCanvases()
@@ -185,6 +249,29 @@ public sealed partial class TimelineControl : UserControl
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
     }
+
+    // --- Filmstrip Thumbnail Management ---
+
+    /// <summary>
+    /// Sets pre-scaled thumbnails for the video filmstrip.
+    /// TimelineControl takes ownership and disposes previous thumbnails.
+    /// </summary>
+    public void SetThumbnails(CanvasBitmap[]? thumbnails, double intervalSeconds, double aspectRatio)
+    {
+        if (_thumbnails is not null)
+        {
+            foreach (var t in _thumbnails)
+                t?.Dispose();
+        }
+
+        _thumbnails = thumbnails;
+        _thumbnailIntervalSeconds = intervalSeconds;
+        _videoAspectRatio = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0;
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>Clears and disposes all cached thumbnails.</summary>
+    public void ClearThumbnails() => SetThumbnails(null, 0, 16.0 / 9.0);
 
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
     public event EventHandler<string?>? ZoomSegmentSelected;
@@ -234,17 +321,20 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Coordinate helpers ---
 
+    /// <summary>Horizontal inset so rounded clip edges aren't clipped at the canvas boundary.</summary>
+    private const double TrackContentInset = 4;
+
     private double TimeToX(TimeSpan time)
     {
         var model = Model;
         if (model is null || model.Duration.TotalSeconds <= 0)
-            return 0;
+            return TrackContentInset;
 
         double totalSeconds = model.Duration.TotalSeconds;
         double canvasWidth = TimeRulerCanvas.ActualWidth;
         if (canvasWidth <= 0) canvasWidth = ActualWidth;
-        double pixelsPerSecond = (canvasWidth / totalSeconds) * model.ZoomLevel;
-        return (time.TotalSeconds - model.ScrollOffset) * pixelsPerSecond;
+        double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
+        return TrackContentInset + (time.TotalSeconds - model.ScrollOffset) * pixelsPerSecond;
     }
 
     private TimeSpan XToTime(double x)
@@ -256,10 +346,10 @@ public sealed partial class TimelineControl : UserControl
         double totalSeconds = model.Duration.TotalSeconds;
         double canvasWidth = TimeRulerCanvas.ActualWidth;
         if (canvasWidth <= 0) canvasWidth = ActualWidth;
-        double pixelsPerSecond = (canvasWidth / totalSeconds) * model.ZoomLevel;
+        double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
         if (pixelsPerSecond <= 0) return TimeSpan.Zero;
 
-        double seconds = (x / pixelsPerSecond) + model.ScrollOffset;
+        double seconds = ((x - TrackContentInset) / pixelsPerSecond) + model.ScrollOffset;
         seconds = Math.Clamp(seconds, 0, totalSeconds);
         return TimeSpan.FromSeconds(seconds);
     }
@@ -297,7 +387,7 @@ public sealed partial class TimelineControl : UserControl
             return;
 
         double totalSeconds = model.Duration.TotalSeconds;
-        double pixelsPerSecond = (w / totalSeconds) * model.ZoomLevel;
+        double pixelsPerSecond = ((w - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
 
         // Choose tick interval based on zoom
         double tickInterval = ChooseTickInterval(pixelsPerSecond);
@@ -309,7 +399,7 @@ public sealed partial class TimelineControl : UserControl
         // Minor ticks
         for (double t = Math.Floor(startSec / minorInterval) * minorInterval; t <= endSec; t += minorInterval)
         {
-            float x = (float)((t - model.ScrollOffset) * pixelsPerSecond);
+            float x = (float)(TrackContentInset + (t - model.ScrollOffset) * pixelsPerSecond);
             if (x < 0 || x > w) continue;
             ds.DrawLine(x, h * 0.7f, x, h, RulerTickColor);
         }
@@ -317,7 +407,7 @@ public sealed partial class TimelineControl : UserControl
         // Major ticks + labels
         for (double t = Math.Floor(startSec / tickInterval) * tickInterval; t <= endSec; t += tickInterval)
         {
-            float x = (float)((t - model.ScrollOffset) * pixelsPerSecond);
+            float x = (float)(TrackContentInset + (t - model.ScrollOffset) * pixelsPerSecond);
             if (x < -50 || x > w + 50) continue;
             ds.DrawLine(x, h * 0.4f, x, h, RulerTickColor);
 
@@ -351,6 +441,8 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Video Track ---
 
+    private const float VideoClipCornerRadius = 6;
+
     private void VideoTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
         var ds = args.DrawingSession;
@@ -363,6 +455,9 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || model.Duration.TotalSeconds <= 0)
             return;
 
+        bool hasThumbnails = _thumbnails is not null && _thumbnails.Length > 0 && _thumbnailIntervalSeconds > 0;
+        const float pad = 14f;
+
         // Draw clips
         for (int idx = 0; idx < model.Clips.Count; idx++)
         {
@@ -372,17 +467,39 @@ public sealed partial class TimelineControl : UserControl
             if (x2 < 0 || x1 > w) continue;
 
             bool isSelected = idx == _selectedClipIndex;
-            var clipColor = isSelected ? VideoClipSelectedColor : VideoClipColor;
-            ds.FillRectangle(x1, 4, x2 - x1, h - 8, clipColor);
+            float clipW = Math.Max(1, x2 - x1);
+            float clipH = h - pad * 2;
 
-            if (isSelected)
-                ds.DrawRectangle(x1, 4, x2 - x1, h - 8, VideoClipSelectedBorder, 2f);
+            using var clipGeom = CanvasGeometry.CreateRoundedRectangle(ds, x1, pad, clipW, clipH, VideoClipCornerRadius, VideoClipCornerRadius);
+
+            if (hasThumbnails)
+            {
+                // FCP-style filmstrip: clip to rounded rect, draw backplate → thumbnails → stroke
+                using (ds.CreateLayer(1f, clipGeom))
+                {
+                    ds.FillGeometry(clipGeom, FilmstripBackplateColor);
+                    DrawFilmstrip(ds, x1, x2, pad, clipH, clip, w);
+                }
+                var strokeColor = isSelected ? VideoClipSelectedBorder : FilmstripStrokeColor;
+                float strokeWidth = isSelected ? 2f : 1f;
+                ds.DrawGeometry(clipGeom, strokeColor, strokeWidth);
+            }
+            else
+            {
+                var clipColor = isSelected ? VideoClipSelectedColor : VideoClipColor;
+                ds.FillGeometry(clipGeom, clipColor);
+                if (isSelected)
+                    ds.DrawGeometry(clipGeom, VideoClipSelectedBorder, 2f);
+            }
 
             // Speed indicator for clips with non-default SpeedFactor
             if (Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
             {
                 var segColor = clip.SpeedFactor > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
-                ds.FillRectangle(x1, 4, x2 - x1, h - 8, segColor);
+                using (ds.CreateLayer(1f, clipGeom))
+                {
+                    ds.FillGeometry(clipGeom, segColor);
+                }
 
                 string speedLabel = $"{clip.SpeedFactor:0.##}x";
                 ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
@@ -400,7 +517,24 @@ public sealed partial class TimelineControl : UserControl
         {
             float x1 = (float)TimeToX(model.TrimStart);
             float x2 = (float)TimeToX(model.TrimEnd > TimeSpan.Zero ? model.TrimEnd : model.Duration);
-            ds.FillRectangle(x1, 4, x2 - x1, h - 8, VideoClipColor);
+            float clipW = Math.Max(1, x2 - x1);
+            float clipH = h - pad * 2;
+
+            using var clipGeom = CanvasGeometry.CreateRoundedRectangle(ds, x1, pad, clipW, clipH, VideoClipCornerRadius, VideoClipCornerRadius);
+
+            if (hasThumbnails)
+            {
+                using (ds.CreateLayer(1f, clipGeom))
+                {
+                    ds.FillGeometry(clipGeom, FilmstripBackplateColor);
+                    DrawFilmstrip(ds, x1, x2, pad, clipH, null, w);
+                }
+                ds.DrawGeometry(clipGeom, FilmstripStrokeColor, 1f);
+            }
+            else
+            {
+                ds.FillGeometry(clipGeom, VideoClipColor);
+            }
         }
 
         // Speed segments overlay (orange = sped up, blue = slowed down)
@@ -411,7 +545,9 @@ public sealed partial class TimelineControl : UserControl
             if (x2 < 0 || x1 > w) continue;
 
             var segColor = seg.Speed > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
-            ds.FillRectangle(x1, 4, x2 - x1, h - 8, segColor);
+            float segW = Math.Max(1, x2 - x1);
+            using var segGeom = CanvasGeometry.CreateRoundedRectangle(ds, x1, 4, segW, h - 8, VideoClipCornerRadius, VideoClipCornerRadius);
+            ds.FillGeometry(segGeom, segColor);
 
             string speedLabel = $"{seg.Speed:0.##}x";
             ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
@@ -433,18 +569,94 @@ public sealed partial class TimelineControl : UserControl
             float x = (float)TimeToX(model.Clips[i].Start);
             ds.DrawLine(x, 0, x, h, CutLineColor, 1.5f);
         }
-
-        // Playhead on this track
-        float px = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
     private void DrawTrimHandle(CanvasDrawingSession ds, TimeSpan time, float trackHeight)
     {
         float x = (float)TimeToX(time);
-        ds.FillRectangle(x - (float)TrimHandleWidth / 2, 0, (float)TrimHandleWidth, trackHeight, TrimHandleColor);
-        ds.DrawRectangle(x - (float)TrimHandleWidth / 2, 0, (float)TrimHandleWidth, trackHeight,
-            TrimHandleBorderColor, 1);
+        const float pad = 4f;
+        float handleW = 6f;
+        float pillW = 3f;
+        float pillH = trackHeight * 0.35f;
+        float pillY = (trackHeight - pillH) / 2f;
+        float pillRadius = pillW / 2f;
+
+        // Subtle rounded handle background at clip edge
+        ds.FillRoundedRectangle(x - handleW / 2, pad, handleW, trackHeight - pad * 2,
+            VideoClipCornerRadius, VideoClipCornerRadius, TrimHandleBorderColor);
+
+        // Pill grip indicator centered in handle
+        ds.FillRoundedRectangle(x - pillW / 2, pillY, pillW, pillH,
+            pillRadius, pillRadius, TrimHandleColor);
+    }
+
+    /// <summary>
+    /// Draws a filmstrip of pre-scaled thumbnails tiled across a clip region.
+    /// </summary>
+    private void DrawFilmstrip(CanvasDrawingSession ds, float clipX1, float clipX2,
+        float y, float trackH, TimelineClip? clip, float canvasWidth)
+    {
+        if (_thumbnails is null || _thumbnails.Length == 0 || _thumbnailIntervalSeconds <= 0)
+            return;
+
+        float thumbH = trackH;
+        float thumbW = thumbH * (float)_videoAspectRatio;
+        if (thumbW < 2) return;
+
+        // Determine visible range
+        float visibleX1 = Math.Max(0, clipX1);
+        float visibleX2 = Math.Min(canvasWidth, clipX2);
+        if (visibleX1 >= visibleX2) return;
+
+        // Align tile grid to clip start, skip off-screen tiles
+        float firstTileX = clipX1;
+        if (firstTileX < visibleX1 - thumbW)
+        {
+            int skipTiles = (int)((visibleX1 - firstTileX) / thumbW);
+            firstTileX += skipTiles * thumbW;
+        }
+
+        for (float tileX = firstTileX; tileX < visibleX2; tileX += thumbW)
+        {
+            // Source time for the center of this tile
+            float tileCenterX = Math.Clamp(tileX + thumbW / 2, clipX1, clipX2);
+            var timelineTime = XToTime(tileCenterX);
+
+            // Map timeline time → source time (respects speed changes and clip offsets)
+            TimeSpan sourceTime;
+            if (clip is not null)
+            {
+                var offset = timelineTime - clip.Start;
+                if (offset < TimeSpan.Zero) offset = TimeSpan.Zero;
+                sourceTime = clip.EffectiveSourceStart +
+                    TimeSpan.FromTicks((long)(offset.Ticks * clip.SpeedFactor));
+            }
+            else
+            {
+                sourceTime = timelineTime;
+            }
+
+            // Find nearest cached thumbnail
+            int thumbIndex = (int)(sourceTime.TotalSeconds / _thumbnailIntervalSeconds);
+            thumbIndex = Math.Clamp(thumbIndex, 0, _thumbnails.Length - 1);
+
+            var thumb = _thumbnails[thumbIndex];
+            if (thumb is null) continue;
+
+            // Clip draw rect to clip bounds
+            float drawX = Math.Max(tileX, clipX1);
+            float drawEndX = Math.Min(tileX + thumbW, clipX2);
+            float drawW = drawEndX - drawX;
+            if (drawW <= 0) continue;
+
+            // Source rect within the thumbnail bitmap
+            float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
+            float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
+
+            ds.DrawImage(thumb,
+                new Rect(drawX, y, drawW, thumbH),
+                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+        }
     }
 
     // --- Zoom Track ---
@@ -536,10 +748,6 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
                 new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
         }
-
-        // Playhead
-        float px = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
     /// <summary>
@@ -920,6 +1128,13 @@ public sealed partial class TimelineControl : UserControl
         float x2 = (float)TimeToX(model.TrimEnd > TimeSpan.Zero ? model.TrimEnd : model.Duration);
         float centerY = h / 2f;
 
+        if (isMuted)
+        {
+            // Muted: show only a faint dashed center line
+            ds.DrawLine(x1, centerY, x2, centerY, TrackEmptyLineColor, 0.5f);
+            return;
+        }
+
         if (waveform is not null && waveform.Length > 0)
         {
             float trackWidth = x2 - x1;
@@ -958,17 +1173,11 @@ public sealed partial class TimelineControl : UserControl
         }
         else
         {
-            ds.FillRectangle(x1, h * 0.3f, x2 - x1, h * 0.4f, AudioPlaceholderColor);
+            // No waveform data — show a subtle placeholder line instead of a filled bar
+            ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
         }
 
         ds.DrawLine(x1, centerY, x2, centerY, TrackCenterLineColor, 0.5f);
-
-        // Dim the track if muted
-        if (isMuted)
-            ds.FillRectangle(0, 0, w, h, MutedWaveformOverlay);
-
-        float px = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(px, 0, px, h, PlayheadColor, 2);
     }
 
     // --- Cursor Path Track ---
@@ -985,8 +1194,6 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || model.Duration.TotalSeconds <= 0)
         {
             ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
-            float ppx = (float)TimeToX(PlayheadPosition);
-            ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
         }
 
@@ -994,8 +1201,6 @@ public sealed partial class TimelineControl : UserControl
         if (cursorData is null || cursorData.Samples.Count == 0)
         {
             ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
-            float ppx = (float)TimeToX(PlayheadPosition);
-            ds.DrawLine(ppx, 0, ppx, h, PlayheadColor, 2);
             return;
         }
 
@@ -1067,13 +1272,9 @@ public sealed partial class TimelineControl : UserControl
 
             float normY = (float)(click.Y - minY) / rangeY;
             float cy = margin + normY * drawHeight;
-            ds.FillCircle(cx, cy, 3f, CursorClickColor);
-            ds.DrawCircle(cx, cy, 3f, SpeedLabelTextColor, 0.8f);
+            ds.FillCircle(cx, cy, 3.5f, CursorClickColor);
+            ds.DrawCircle(cx, cy, 3.5f, ClickStrokeColor, 1f);
         }
-
-        // Playhead
-        float playX = (float)TimeToX(PlayheadPosition);
-        ds.DrawLine(playX, 0, playX, h, PlayheadColor, 2);
     }
 
     // --- Interaction ---

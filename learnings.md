@@ -593,6 +593,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:**
 - Drain-loop pattern (not recursive fire-and-forget) for render coalescing — ensures at most one render is in-flight, the latest position is always rendered next, and no renders pile up.
 - `_croppedBuffer` field-level reuse with dimension check — safe because `CropSourceFrame` is only called within `ComposeFrame` scope.
+
+---
+
+## Timeline System Brushes & Video Filmstrip
+
+**Feature/area:** Timeline track colors (TimelineControl, AppColors.xaml, EditorPage)
+
+**Approaches tried:**
+
+1. **Replaced custom hard-coded hex color brushes in AppColors.xaml with WinUI 3 standard system brush resolution** — Worked. Removed ~30 custom timeline brushes from Default and HighContrast theme dictionaries. ResolveThemeColors() now resolves from `Application.Current.Resources` using standard keys like `AccentFillColorDefaultBrush`, `CardBackgroundFillColorDefaultBrush`, `TextFillColorSecondaryBrush`, etc. Kept semantic status colors (playhead `#FFDDFF00` in Default and `#FFE87C06` in Light, cut line yellow, speed overlays, cursor click) in AppColors.xaml. ✅
+2. **XAML border backgrounds switched from custom brushes to {ThemeResource} system brushes** — Worked. Track label borders use `CardBackgroundFillColorDefaultBrush`, `CardBackgroundFillColorSecondaryBrush`, `SolidBackgroundFillColorBaseBrush`, `TextFillColorSecondaryBrush` directly. ✅
+3. **FCP-style filmstrip thumbnails in video track** — Worked. Pre-scaled thumbnails generated from VideoFrameReader at ~0.5-2s intervals, cached as CanvasBitmap[] on TimelineControl. DrawFilmstrip tiles them across clip bounds with source-time mapping (respects SpeedFactor/EffectiveSourceStart). Backplate uses CardBackgroundFillColorSecondary, stroke uses ControlStrokeColorDefault. Falls back to accent-colored rectangle when no thumbnails available. ✅
+4. **Thumbnail generation versioning** — Worked. `_thumbnailGenerationId` counter in EditorPage prevents stale thumbnail results from overwriting current project's thumbnails when projects change rapidly. ✅
+
+**What worked:** Resolving system colors via `Application.Current.Resources` (not control-local Resources) for WinUI system brushes; keeping a `GetBrushColor` fallback for semantic brushes still defined in AppColors.xaml; TimelineControl owning thumbnail lifecycle via SetThumbnails/ClearThumbnails.
+
+**What didn't work / watch out for:**
+- Cannot use `{ThemeResource}` inside own theme dictionaries to reference system resources directly — must resolve at runtime in C#.
+- Win2D needs Color values, not Brushes — always extract `.Color` from resolved SolidColorBrush.
+- Thumbnail generation should pre-scale to track height (~52px) at load time, never during Draw handler.
 - Sorting clicks once at init time guarantees binary search correctness without relying on recorder ordering.
 
 **What didn't work / considerations:**
@@ -603,6 +623,29 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 ---
 
 ## Region Border Highlight — DPI Scaling Mismatch
+
+---
+
+## Window Picker Overlay & Auto-Trigger Selection Modes
+
+**Feature/area:** RecordingPage, WindowSelectorOverlay, RegionSelectorOverlay
+
+**Approaches tried:**
+
+1. **Created `WindowSelectorOverlay` control modeled after `RegionSelectorOverlay`** — Worked. Full-screen overlay with desktop screenshot background, 4 dim mask rectangles, and highlight border. Uses `EnumWindows` for Z-order-aware window enumeration, filters out cloaked/minimized/tool/same-process windows. Coordinate mapping from canvas DIPs to screen physical pixels via virtual desktop bounds ratio. ✅
+2. **Auto-trigger pickers on capture mode selection** — Worked. `CaptureModeSelector_SelectionChanged` launches `WindowSelectorOverlay` or `RegionSelectorOverlay` automatically. `_isPageLoading` flag prevents trigger during page initialization; `_isPickerOpen` reentrancy guard prevents concurrent overlays. ✅
+3. **Replaced Window ComboBox with visual picker button + info text** — Worked. Consistent with Region panel pattern (button + label). Visual picker provides better UX than dropdown list. ✅
+
+**What worked:**
+- `WindowSelectorOverlay.ShowAsync()`: minimize Musio → enumerate windows → capture screenshot → show maximized borderless overlay → return WindowInfo on click or null on Escape → restore Musio (in try/finally for exception safety).
+- Z-order-aware hit testing: `EnumWindows` returns windows in Z-order (topmost first), so first rect containing the cursor point = correct window.
+- Window validation on click: `IsWindow()` + `IsWindowVisible()` confirm the window still exists before returning.
+- Coordinate mapping: `canvasX * (vdWidth / canvasWidth) + vdLeft` for canvas→screen, reverse for screen→canvas.
+
+**What didn't work / known limitations:**
+- Same multi-monitor limitation as `RegionSelectorOverlay`: screenshot covers full virtual desktop but overlay is maximized on one monitor, so coordinates on secondary monitors may be slightly off due to Stretch="Fill" scaling.
+- `GetWindowRect` includes invisible DWM extended frame borders; highlight may extend slightly beyond visible window edges. Could use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for more precise visual highlights.
+
 
 **Feature/area:** Region recording border overlay (RecordingPage, RegionBorderHighlight)
 
@@ -902,3 +945,100 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   7. **Webcam bitmap leak on error** (VideoEncoder.cs) — webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. ✅
 - **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
 - **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).
+
+---
+
+## Recording Page — Mic / System Audio / Camera Toggle Buttons
+
+- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingViewModel.cs)
+- **Approaches tried**:
+  1. **ToggleButton with FontIcon** — Added 3 `ToggleButton` controls (Mic &#xE720;, Speaker &#xE767;, Camera &#xE714;) bound two-way to existing ViewModel properties (`IsMicEnabled`, `IsSystemAudioEnabled`, `IsWebcamEnabled`). Placed between hero buttons and capture mode selector. ✅
+  2. **Persisting toggle state** — Added `partial void On*Changed` methods in ViewModel to write back to `AppSettings.Instance` on each toggle. ✅
+- **What worked**: ToggleButtons with two-way `x:Bind` to existing `[ObservableProperty]` fields + partial change handlers for persistence. Controls disabled during recording via shared `IsHitTestVisible`/`Opacity` binding pattern already used by capture mode section.
+- **What didn't work**: N/A — straightforward addition.
+
+---
+
+## Recording Page — Single Toolbar Layout with Inline Expansion
+
+- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingPage.xaml.cs)
+- **Approaches tried**:
+  1. **Single horizontal toolbar** — Replaced the vertical 3-layer layout (hero button → toggles → capture mode) with a single centered toolbar: `[Capture Mode] | [inline sub-options] | [🎤 🔊 📷] | [⏺]`. Used a `Border` with card styling (CornerRadius="12") and `AppBarSeparator` dividers between sections. ✅
+  2. **Inline expansion for sub-options** — Window picker (ComboBox + refresh button) and Region selector (button + info text) expand inline in the toolbar when their mode is selected, separated by an AppBarSeparator. ✅
+  3. **Split options vs action sections** — Options (capture mode, toggles) wrapped in a StackPanel with `IsHitTestVisible`/`Opacity` bindings for recording-disabled state, while record/stop button stays outside so it remains interactive. Added `InvertBoolToVisibility` helper for showing/hiding start vs stop button. ✅
+- **What worked**: Single toolbar with inline expansion, split disabled/interactive sections, removed VisualStateManager (no longer needed without text labels on buttons).
+- **What didn't work**: N/A.
+
+---
+
+## Timeline Track Colors — Light Theme Bright Palette
+
+- **Feature/area**: TimelineControl light-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Replaced dark/muted "rich" light-theme colors with bright vivid ones** — Previous light-theme colors were low-brightness muted tones (e.g., zoom `180,145,30`, audio `20,160,130`, mic `135,75,180`, cursor `40,120,210`). Changed to high-saturation bright colors with a slight white lift: zoom `255,200,50`, audio `40,215,180`, mic `170,95,245`, cursor `60,150,255`. Updated zoom selected border/handle colors to match. ✅
+- **What worked**: Bright vivid colors with high hue saturation and a touch of white — visible and distinct on light backgrounds without being neon.
+- **What didn't work**: N/A.
+
+---
+
+## Timeline Track Colors — Dark Theme High Saturation
+
+- **Feature/area**: TimelineControl dark-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Boosted dark-theme colors to high saturation** — Previous dark-theme colors were already fairly vivid but not max saturation (zoom `230,200,60`, audio `50,210,180`, mic `180,120,230`, cursor `100,170,250`). Pushed to higher saturation with a touch of white: zoom `255,210,50`, audio `40,230,190`, mic `190,100,255`, cursor `80,170,255`. ✅
+- **What worked**: Near-max saturation colors pop well on dark backgrounds while the slight white tint prevents them from looking harsh/neon.
+- **What didn't work**: Just boosting brightness of the same hues (gold, teal, lavender) didn't feel inspiring — needed completely different neon hue choices.
+
+---
+
+## Timeline Track Colors — Neon Hue Overhaul
+
+- **Feature/area**: TimelineControl track colors for both themes (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Approaches tried**:
+  1. **Complete hue shift to neon palette** — Replaced all track hues: zoom gold→neon green (`50,255,100`), audio teal→neon cyan (`0,240,220`), mic lavender→neon magenta (`255,50,200`), cursor pale blue→electric blue (`60,140,255`). Light theme uses slightly deeper versions for contrast on lighter backgrounds. ✅
+- **What worked**: Completely changing hues to neon-style colors rather than boosting brightness of existing hues. The neon green/cyan/magenta/blue palette feels modern and inspiring.
+- **What didn't work**: Boosting brightness/saturation of the same gold/teal/lavender hues — still felt muted and uninspiring.
+
+---
+
+## Timeline Track Colors — User-Chosen Neon Palette + 4px Filmstrip Stroke
+
+- **Feature/area**: TimelineControl track colors and filmstrip stroke (`TimelineControl.xaml.cs`)
+- **Approaches tried**:
+  1. **Applied exact user palette (#0DFF89, #0C2EE8, #FF00AA, #DDFF00, #E87C06)** — Mapped: orange `#E87C06` → video clip + filmstrip stroke, neon yellow `#DDFF00` → zoom, neon green `#0DFF89` → audio, hot pink `#FF00AA` → mic, electric blue `#0C2EE8` → cursor. Light theme uses slightly deeper variants. ✅
+  2. **4px filmstrip stroke** — Changed filmstrip stroke from 1px (unselected) / 2px (selected) to 4px in all states. Stroke color changed from translucent white to orange `#E87C06`. ✅
+- **What worked**: Using the exact user-provided palette with appropriate dark/light theme adjustments. Orange filmstrip stroke at 4px gives the video track a bold, distinct frame.
+- **What didn't work**: Previous neon palette (green/cyan/magenta/blue chosen by AI) didn't match user's vision — always ask for or use user-provided color references.
+
+---
+
+## Window Capture — Bring Window to Front on Record
+
+- **Feature/area**: RecordingViewModel — Window capture mode (`RecordingViewModel.cs`)
+- **Approaches tried**:
+  1. **Added `SetForegroundWindow` P/Invoke call in `StartRecordingAsync`** — After `BuildCaptureTarget()` succeeds and before creating the `RecordingSession`, call `SetForegroundWindow(SelectedWindow.Handle)` when in `CaptureMode.Window`. ✅
+- **What worked**: Simple `SetForegroundWindow` call right after target validation brings the selected window to the top of the z-order before capture begins.
+
+---
+
+## PLM Suspension Hang Fix (HANG_QUIESCE)
+
+- **Feature/area**: App lifecycle — PLM suspension handling (`App.xaml.cs`, `MainWindow.xaml.cs`, `EditorPage.xaml.cs`)
+- **Approaches tried**:
+  1. **WM_ENDSESSION handling in MainWindow WndProc** — Detects system shutdown/logoff and sets `_isExiting = true` via `App.HandleSystemShutdown()` so `OnWindowClosing` doesn't cancel the close. ✅
+  2. **ExtendedExecutionSession when hiding to tray** — Requests `ExtendedExecutionReason.Unspecified` when the window becomes hidden to prevent PLM from suspending the app while it runs in the tray. Released when the window is shown again. ✅
+  3. **Pause editor playback on window hide** — `Window.VisibilityChanged` event pauses `EditorPage.Preview` (and audio via its `IsPlayingChanged` handler) when the window becomes invisible. ✅
+- **What worked**: Three-pronged approach — WM_ENDSESSION for system shutdown, ExtendedExecutionSession for PLM prevention, and VisibilityChanged for playback pause.
+
+---
+
+## Comprehensive Automated Test Suite & CI Pipeline
+
+- **Feature/area**: Test infrastructure — Musio.Tests project, GitHub Actions CI workflow
+- **Approaches tried**:
+  1. **`dotnet build` for test project** — Failed with MSB4062 because Musio.Core references WinAppSDK which requires the PRI task DLL only available in VS MSBuild.
+  2. **VS MSBuild.exe for build + `dotnet test --no-build` for execution** — Worked. MSBuild builds the Core and Tests projects successfully, then `dotnet test --no-build` runs all tests. ✅
+  3. **GitHub Actions workflow with `microsoft/setup-msbuild@v2`** — Uses `setup-msbuild` action to get MSBuild on CI runner, then `dotnet test --no-build` to execute. ✅
+- **What worked**: Build with VS MSBuild (`msbuild /p:Configuration=Release /p:Platform=AnyCPU`), test with `dotnet test --no-build`. CI uses `microsoft/setup-msbuild@v2` action.
+- **What didn't work**: `dotnet build` fails for any project that transitively references WinAppSDK due to missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the dotnet SDK.
+- **Test files created**: AspectRatioHelperTests, CubicBezierEasingTests, TimelineMapperTests, PerformanceMonitorTests, SubtitleGeneratorTests, AudioWaveformGeneratorTests, ProjectModelTests, EditOperationsExtendedTests, SessionCleanupServiceTests, KeyboardRecorderTests, ExportResolutionTests, ZoomKeyframeExtendedTests (254 total tests, all passing).

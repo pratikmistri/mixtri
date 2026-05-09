@@ -28,6 +28,9 @@ public sealed partial class EditorPage : Page
     private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
 
+    // Thumbnail generation versioning — prevents stale results
+    private int _thumbnailGenerationId;
+
     // Webcam overlay for editor preview
     private Windows.Media.Editing.MediaComposition? _webcamComposition;
     private int _webcamWidth;
@@ -210,12 +213,20 @@ public sealed partial class EditorPage : Page
             _lastWebcamFrame?.Dispose();
             _lastWebcamFrame = null;
             _compositorReady = false;
+            _thumbnailGenerationId++; // cancel any in-flight thumbnail generation
+            Timeline.ClearThumbnails();
 
             // Unsubscribe VMs from singleton event sources
             ViewModel.Cleanup();
             ExportVM.Cleanup();
         };
     }
+
+    /// <summary>
+    /// Pauses preview playback and audio. Called by App when the window
+    /// becomes hidden (minimize-to-tray / system suspension).
+    /// </summary>
+    public void PausePlayback() => Preview.Pause();
 
     private async Task InitializePreviewAsync()
     {
@@ -228,6 +239,8 @@ public sealed partial class EditorPage : Page
         _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
+        _thumbnailGenerationId++; // cancel any in-flight generation
+        Timeline.ClearThumbnails();
 
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
@@ -240,6 +253,9 @@ public sealed partial class EditorPage : Page
         _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
         if (_frameReader is null)
             return;
+
+        // Generate filmstrip thumbnails for timeline video track
+        _ = GenerateTimelineThumbnailsAsync(_frameReader);
 
         // Load audio waveform data for timeline visualization
         await LoadAudioWaveformAsync(project);
@@ -556,6 +572,94 @@ public sealed partial class EditorPage : Page
         int outputFrame = (int)(outputPosition.TotalSeconds * fps);
         double sourceSeconds = mapper.GetSourceTimeForOutputFrame(outputFrame);
         return TimeSpan.FromSeconds(sourceSeconds);
+    }
+
+    /// <summary>
+    /// Generates pre-scaled thumbnails for the timeline video track filmstrip.
+    /// Uses versioning to cancel stale generation when the project changes.
+    /// </summary>
+    private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader)
+    {
+        var generationId = ++_thumbnailGenerationId;
+
+        // Load first frame to determine aspect ratio
+        var firstFrame = await reader.LoadFrameAsync(0);
+        if (firstFrame is null || generationId != _thumbnailGenerationId)
+        {
+            firstFrame?.Dispose();
+            return;
+        }
+
+        double aspectRatio = (double)firstFrame.SizeInPixels.Width / firstFrame.SizeInPixels.Height;
+        double totalSeconds = reader.Duration.TotalSeconds;
+        if (totalSeconds <= 0)
+        {
+            firstFrame.Dispose();
+            return;
+        }
+
+        // Thumbnail size: match video track height (60px row minus padding)
+        const int thumbH = 52;
+        int thumbW = Math.Max(1, (int)(thumbH * aspectRatio));
+
+        // Determine interval: aim for a reasonable density, cap total count
+        double interval = Math.Max(0.5, totalSeconds / 200);
+        int count = Math.Min(300, (int)(totalSeconds / interval) + 1);
+
+        var device = CanvasDevice.GetSharedDevice();
+        var thumbnails = new CanvasBitmap[count];
+
+        for (int i = 0; i < count; i++)
+        {
+            if (generationId != _thumbnailGenerationId)
+            {
+                // Generation cancelled — clean up
+                foreach (var t in thumbnails) t?.Dispose();
+                firstFrame.Dispose();
+                return;
+            }
+
+            CanvasBitmap? frame;
+            if (i == 0)
+            {
+                frame = firstFrame;
+            }
+            else
+            {
+                double time = i * interval;
+                frame = await reader.LoadFrameAtTimeAsync(TimeSpan.FromSeconds(time));
+            }
+
+            if (frame is null) continue;
+
+            try
+            {
+                // Scale down to thumbnail size
+                var renderTarget = new CanvasRenderTarget(device, thumbW, thumbH, 96);
+                using (var session = renderTarget.CreateDrawingSession())
+                {
+                    session.DrawImage(frame,
+                        new Rect(0, 0, thumbW, thumbH),
+                        new Rect(0, 0, frame.SizeInPixels.Width, frame.SizeInPixels.Height));
+                }
+                thumbnails[i] = renderTarget;
+            }
+            finally
+            {
+                if (i > 0) frame.Dispose();
+            }
+        }
+
+        firstFrame.Dispose();
+
+        if (generationId != _thumbnailGenerationId)
+        {
+            foreach (var t in thumbnails) t?.Dispose();
+            return;
+        }
+
+        // TimelineControl takes ownership of the bitmaps
+        Timeline.SetThumbnails(thumbnails, interval, aspectRatio);
     }
 
     private TimelineMapper? EnsureTimelineMapper()

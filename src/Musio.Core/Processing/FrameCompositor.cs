@@ -496,9 +496,14 @@ public class FrameCompositor : IDisposable
         var output = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
         using (var ds = output.CreateDrawingSession())
         {
+            // Use high-quality interpolation only when zoomed; linear is cheaper at 1:1
+            var interpolation = (cropW < OutputWidth * 0.95f || cropH < OutputHeight * 0.95f)
+                ? CanvasImageInterpolation.HighQualityCubic
+                : CanvasImageInterpolation.Linear;
             ds.DrawImage(_compositeBuffer,
                 new Rect(0, 0, OutputWidth, OutputHeight),
-                new Rect(cropX, cropY, cropW, cropH));
+                new Rect(cropX, cropY, cropW, cropH),
+                1f, interpolation);
 
             // Webcam overlay (fixed position, not zoomed)
             if (_webcamCompositor is not null && _webcamFrame is not null)
@@ -637,7 +642,8 @@ public class FrameCompositor : IDisposable
 
         using var ds = _croppedBuffer.CreateDrawingSession();
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
-        ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport);
+        ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport,
+            1f, CanvasImageInterpolation.HighQualityCubic);
         return _croppedBuffer;
     }
 

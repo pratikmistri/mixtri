@@ -19,7 +19,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="30" />
             <!-- Time ruler -->
-            <RowDefinition Height="60" />
+            <RowDefinition Height="80" />
             <!-- Video track -->
             <RowDefinition Height="40" />
             <!-- Cursor path track -->
@@ -32,17 +32,17 @@
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
-        <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource TimelineRulerBackgroundBrush}" />
-        <Border Grid.Row="1" Grid.Column="0" Background="{ThemeResource TimelineTrackPrimaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Video" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
+        <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+        <Border Grid.Row="1" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="4,0">
+            <TextBlock Text="Video" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="2" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Cursor" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
+        <Border Grid.Row="2" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+            <TextBlock Text="Cursor" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="4,0">
-            <TextBlock Text="Zoom" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="11" VerticalAlignment="Center" />
+        <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+            <TextBlock Text="Zoom" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="2,0">
+        <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="AudioMuteButton"
                         Click="AudioMuteButton_Click"
@@ -50,12 +50,12 @@
                         Background="Transparent" BorderThickness="0"
                         ToolTipService.ToolTip="Mute/unmute system audio">
                     <FontIcon x:Name="AudioMuteIcon" Glyph="&#xE767;" FontSize="12"
-                              Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" />
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Button>
-                <TextBlock Text="Audio" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+                <TextBlock Text="Audio" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
-        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource TimelineTrackSecondaryBackgroundBrush}" Padding="2,0">
+        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="MicMuteButton"
                         Click="MicMuteButton_Click"
@@ -63,9 +63,9 @@
                         Background="Transparent" BorderThickness="0"
                         ToolTipService.ToolTip="Mute/unmute microphone">
                     <FontIcon x:Name="MicMuteIcon" Glyph="&#xE767;" FontSize="12"
-                              Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" />
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Button>
-                <TextBlock Text="Mic" Foreground="{ThemeResource TimelineTrackLabelForegroundBrush}" FontSize="10" VerticalAlignment="Center" />
+                <TextBlock Text="Mic" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
 
@@ -121,7 +121,7 @@
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="6"
+            Grid.RowSpan="7"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

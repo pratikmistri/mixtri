@@ -15,41 +15,15 @@
             <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
             <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="#FFFFFFFF" />
 
-            <!-- ── Timeline backgrounds ── -->
-            <SolidColorBrush x:Key="TimelineRulerBackgroundBrush"          Color="#FF282828" />
-            <SolidColorBrush x:Key="TimelineTrackPrimaryBackgroundBrush"   Color="#FF1E1E1E" />
-            <SolidColorBrush x:Key="TimelineTrackSecondaryBackgroundBrush" Color="#FF232323" />
-            <SolidColorBrush x:Key="TimelineTrackLabelForegroundBrush"     Color="#FFC8C8C8" />
-            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFFF0000" />
-
-            <!-- ── Timeline Win2D drawing ── -->
-            <SolidColorBrush x:Key="TimelineRulerTickBrush"               Color="#FFA0A0A0" />
-            <SolidColorBrush x:Key="TimelineVideoClipBrush"               Color="#FF3C78C8" />
-            <SolidColorBrush x:Key="TimelineVideoClipSelectedBrush"       Color="#FF5A9BEB" />
-            <SolidColorBrush x:Key="TimelineVideoClipSelectedBorderBrush" Color="#FFB4D2FF" />
+            <!-- ── Timeline — semantic status colors (all other timeline colors
+                 are resolved from standard WinUI system brushes at runtime) ── -->
+            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFDDFF00" />
+            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFDDFF00" />
+            <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
             <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
             <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />
-            <SolidColorBrush x:Key="TimelineTrimHandleBrush"              Color="#FFFFFFFF" />
-            <SolidColorBrush x:Key="TimelineTrimHandleBorderBrush"        Color="#FF646464" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentBrush"             Color="#C83CA050" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentAutoBrush"         Color="#783C8C46" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentSelectedBrush"     Color="#E650C864" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentBorderBrush"       Color="#FF64C864" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentSelectedBorderBrush" Color="#FFB4FFB4" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentHandleBrush"       Color="#FFDCFFDC" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentCreatePreviewBrush" Color="#6464C864" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentTextBrush"         Color="#FFF0FFF0" />
-            <SolidColorBrush x:Key="TimelineAudioPlaceholderBrush"        Color="#FF50A050" />
-            <SolidColorBrush x:Key="TimelineAudioWaveformBrush"           Color="#DC50B450" />
-            <SolidColorBrush x:Key="TimelineAudioEnvelopeBrush"           Color="#6478DC78" />
-            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFFF3232" />
-            <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
-            <SolidColorBrush x:Key="TimelineCursorPathXBrush"             Color="#DC64B4FF" />
             <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="#DCFFA064" />
             <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="#FFFF5050" />
-            <SolidColorBrush x:Key="TimelineSpeedLabelTextBrush"          Color="#FFFFFFFF" />
-            <SolidColorBrush x:Key="TimelineTrackCenterLineBrush"         Color="#64FFFFFF" />
-            <SolidColorBrush x:Key="TimelineTrackEmptyLineBrush"          Color="#3CFFFFFF" />
 
             <!-- ── Preview canvas ── -->
             <SolidColorBrush x:Key="PreviewSurfaceClearBrush"  Color="#FF141414" />
@@ -70,6 +44,43 @@
         </ResourceDictionary>
 
         <!-- ═══════════════════════════════════════════════════════════════
+             LIGHT — overrides for light theme contrast
+             ═══════════════════════════════════════════════════════════════ -->
+        <ResourceDictionary x:Key="Light">
+
+            <!-- ── Shared overlay colors ── -->
+            <SolidColorBrush x:Key="OverlayDimBrush"          Color="#80000000" />
+            <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
+            <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="#FFFFFFFF" />
+
+            <!-- ── Timeline — orange playhead for contrast on light backgrounds ── -->
+            <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFE87C06" />
+            <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="#FFE87C06" />
+            <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
+            <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
+            <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />
+            <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="#DCFFA064" />
+            <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="#FFFF5050" />
+
+            <!-- ── Preview canvas ── -->
+            <SolidColorBrush x:Key="PreviewSurfaceClearBrush"  Color="#FFF0F0F0" />
+
+            <!-- ── Region selector ── -->
+            <SolidColorBrush x:Key="RegionMaskBrush"             Color="#4D000000" />
+            <SolidColorBrush x:Key="RegionSelectionStrokeBrush"  Color="#FF0078D4" />
+            <SolidColorBrush x:Key="RegionHandleFillBrush"       Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="RegionLabelBackgroundBrush"  Color="#CC000000" />
+
+            <!-- ── Recording overlay ── -->
+            <AcrylicBrush x:Key="RecordingOverlayBackgroundBrush"
+                          TintColor="#F0F0F0" TintOpacity="0.8"
+                          FallbackColor="#E0F0F0F0" />
+            <SolidColorBrush x:Key="RecordingIndicatorBrush"       Color="#FFFF3B30" />
+            <SolidColorBrush x:Key="RecordingStopBackgroundBrush"  Color="#40FF3B30" />
+            <SolidColorBrush x:Key="RecordingStopBorderBrush"      Color="#60FF3B30" />
+        </ResourceDictionary>
+
+        <!-- ═══════════════════════════════════════════════════════════════
              HIGH CONTRAST — maps to system colors for accessibility
              ═══════════════════════════════════════════════════════════════ -->
         <ResourceDictionary x:Key="HighContrast">
@@ -79,41 +90,14 @@
             <SolidColorBrush x:Key="OverlayDenseBrush"        Color="{StaticResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="{StaticResource SystemColorWindowTextColor}" />
 
-            <!-- ── Timeline backgrounds ── -->
-            <SolidColorBrush x:Key="TimelineRulerBackgroundBrush"          Color="{StaticResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="TimelineTrackPrimaryBackgroundBrush"   Color="{StaticResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="TimelineTrackSecondaryBackgroundBrush" Color="{StaticResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="TimelineTrackLabelForegroundBrush"     Color="{StaticResource SystemColorWindowTextColor}" />
+            <!-- ── Timeline — semantic status colors (HC overrides) ── -->
             <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="{StaticResource SystemColorHotlightColor}" />
-
-            <!-- ── Timeline Win2D drawing ── -->
-            <SolidColorBrush x:Key="TimelineRulerTickBrush"               Color="{StaticResource SystemColorWindowTextColor}" />
-            <SolidColorBrush x:Key="TimelineVideoClipBrush"               Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineVideoClipSelectedBrush"       Color="{StaticResource SystemColorHotlightColor}" />
-            <SolidColorBrush x:Key="TimelineVideoClipSelectedBorderBrush" Color="{StaticResource SystemColorHighlightTextColor}" />
-            <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineTrimHandleBrush"              Color="{StaticResource SystemColorButtonTextColor}" />
-            <SolidColorBrush x:Key="TimelineTrimHandleBorderBrush"        Color="{StaticResource SystemColorWindowTextColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentBrush"             Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentAutoBrush"         Color="{StaticResource SystemColorGrayTextColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentSelectedBrush"     Color="{StaticResource SystemColorHotlightColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentBorderBrush"       Color="{StaticResource SystemColorWindowTextColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentSelectedBorderBrush" Color="{StaticResource SystemColorHighlightTextColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentHandleBrush"       Color="{StaticResource SystemColorButtonTextColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentCreatePreviewBrush" Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineZoomSegmentTextBrush"         Color="{StaticResource SystemColorHighlightTextColor}" />
-            <SolidColorBrush x:Key="TimelineAudioPlaceholderBrush"        Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineAudioWaveformBrush"           Color="{StaticResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TimelineAudioEnvelopeBrush"           Color="{StaticResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TimelinePlayheadBrush"                Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="{StaticResource SystemColorHotlightColor}" />
-            <SolidColorBrush x:Key="TimelineCursorPathXBrush"             Color="{StaticResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="{StaticResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="{StaticResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="{StaticResource SystemColorHotlightColor}" />
-            <SolidColorBrush x:Key="TimelineSpeedLabelTextBrush"          Color="{StaticResource SystemColorHighlightTextColor}" />
-            <SolidColorBrush x:Key="TimelineTrackCenterLineBrush"         Color="{StaticResource SystemColorGrayTextColor}" />
-            <SolidColorBrush x:Key="TimelineTrackEmptyLineBrush"          Color="{StaticResource SystemColorGrayTextColor}" />
 
             <!-- ── Preview canvas ── -->
             <SolidColorBrush x:Key="PreviewSurfaceClearBrush"  Color="{StaticResource SystemColorWindowColor}" />
