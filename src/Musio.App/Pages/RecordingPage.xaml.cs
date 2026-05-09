@@ -155,7 +155,7 @@ public sealed partial class RecordingPage : Page
         _isPageLoading = false;
     }
 
-    private void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (CaptureModeSelector?.SelectedItem is FrameworkElement item && item.Tag is string tag)
         {
@@ -165,10 +165,17 @@ public sealed partial class RecordingPage : Page
             // Auto-launch the appropriate picker when the user selects a mode
             if (!_isPageLoading && !_isPickerOpen)
             {
-                if (ViewModel.CaptureMode == CaptureMode.Window)
-                    _ = LaunchWindowPickerAsync();
-                else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                    _ = LaunchRegionPickerAsync();
+                try
+                {
+                    if (ViewModel.CaptureMode == CaptureMode.Window)
+                        await LaunchWindowPickerAsync();
+                    else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
+                        await LaunchRegionPickerAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RecordingPage] Picker launch failed: {ex.Message}");
+                }
             }
         }
     }

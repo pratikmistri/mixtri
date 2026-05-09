@@ -387,7 +387,7 @@ public sealed partial class TimelineControl : UserControl
             return;
 
         double totalSeconds = model.Duration.TotalSeconds;
-        double pixelsPerSecond = (w / totalSeconds) * model.ZoomLevel;
+        double pixelsPerSecond = ((w - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
 
         // Choose tick interval based on zoom
         double tickInterval = ChooseTickInterval(pixelsPerSecond);
@@ -399,7 +399,7 @@ public sealed partial class TimelineControl : UserControl
         // Minor ticks
         for (double t = Math.Floor(startSec / minorInterval) * minorInterval; t <= endSec; t += minorInterval)
         {
-            float x = (float)((t - model.ScrollOffset) * pixelsPerSecond);
+            float x = (float)(TrackContentInset + (t - model.ScrollOffset) * pixelsPerSecond);
             if (x < 0 || x > w) continue;
             ds.DrawLine(x, h * 0.7f, x, h, RulerTickColor);
         }
@@ -407,7 +407,7 @@ public sealed partial class TimelineControl : UserControl
         // Major ticks + labels
         for (double t = Math.Floor(startSec / tickInterval) * tickInterval; t <= endSec; t += tickInterval)
         {
-            float x = (float)((t - model.ScrollOffset) * pixelsPerSecond);
+            float x = (float)(TrackContentInset + (t - model.ScrollOffset) * pixelsPerSecond);
             if (x < -50 || x > w + 50) continue;
             ds.DrawLine(x, h * 0.4f, x, h, RulerTickColor);
 
