@@ -51,7 +51,7 @@
             <!-- ── Shared overlay colors ── -->
             <SolidColorBrush x:Key="OverlayDimBrush"          Color="#80000000" />
             <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
-            <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="#FF000000" />
+            <SolidColorBrush x:Key="OverlayForegroundBrush"   Color="#FFFFFFFF" />
 
             <!-- ── Timeline — orange playhead for contrast on light backgrounds ── -->
             <SolidColorBrush x:Key="TimelinePlayheadOverlayBrush"         Color="#FFE87C06" />

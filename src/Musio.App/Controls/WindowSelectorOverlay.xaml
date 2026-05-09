@@ -34,6 +34,9 @@
             <!-- Highlight border around hovered window -->
             <Rectangle
                 x:Name="HighlightRect"
+                Fill="Transparent"
+                Stroke="{ThemeResource OverlayForegroundBrush}"
+                StrokeThickness="2"
                 Visibility="Collapsed" />
 
             <!-- Window info label -->

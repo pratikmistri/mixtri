@@ -118,6 +118,7 @@ public sealed partial class TimelineControl : UserControl
     private Color SpeedLabelTextColor;
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
+    private Color ClickStrokeColor;
 
     // Filmstrip thumbnail cache
     private CanvasBitmap[]? _thumbnails;
@@ -136,9 +137,14 @@ public sealed partial class TimelineControl : UserControl
     {
         try
         {
-            // Check control-local resources first (for semantic overrides in AppColors.xaml)
+            // Check control-local resources first
             if (Resources.TryGetValue(key, out var val) && val is Microsoft.UI.Xaml.Media.SolidColorBrush brush)
                 return brush.Color;
+
+            // Fall back to Application.Resources (where AppColors.xaml is merged)
+            if (Application.Current?.Resources?.TryGetValue(key, out var appVal) == true
+                && appVal is Microsoft.UI.Xaml.Media.SolidColorBrush appBrush)
+                return appBrush.Color;
         }
         catch { /* resource not found — use fallback */ }
         return fallback;
@@ -222,6 +228,7 @@ public sealed partial class TimelineControl : UserControl
         CursorPathXColor      = WithAlpha(cursorBase, 255);
         CursorPathYColor      = WithAlpha(cursorBase, 150);
         CursorClickColor      = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
+        ClickStrokeColor      = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(255, 120, 120, 120));
 
         // ── Playhead & cut lines — semantic ──
         PlayheadColor         = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
@@ -1265,9 +1272,8 @@ public sealed partial class TimelineControl : UserControl
 
             float normY = (float)(click.Y - minY) / rangeY;
             float cy = margin + normY * drawHeight;
-            ds.FillCircle(cx, cy, 3.5f, CursorPathXColor);
-            ds.DrawCircle(cx, cy, 3.5f, GetSystemBrushColor("ControlStrokeColorDefaultBrush",
-                Color.FromArgb(255, 120, 120, 120)), 1f);
+            ds.FillCircle(cx, cy, 3.5f, CursorClickColor);
+            ds.DrawCircle(cx, cy, 3.5f, ClickStrokeColor, 1f);
         }
     }
 

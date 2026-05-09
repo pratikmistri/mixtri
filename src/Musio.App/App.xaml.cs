@@ -138,6 +138,10 @@ public partial class App : Application
             PauseEditorPlayback();
             _ = RequestExtendedExecutionAsync();
         }
+        else
+        {
+            ReleaseExtendedExecution();
+        }
     }
 
     private void PauseEditorPlayback()
