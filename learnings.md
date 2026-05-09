@@ -1029,3 +1029,16 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   2. **ExtendedExecutionSession when hiding to tray** — Requests `ExtendedExecutionReason.Unspecified` when the window becomes hidden to prevent PLM from suspending the app while it runs in the tray. Released when the window is shown again. ✅
   3. **Pause editor playback on window hide** — `Window.VisibilityChanged` event pauses `EditorPage.Preview` (and audio via its `IsPlayingChanged` handler) when the window becomes invisible. ✅
 - **What worked**: Three-pronged approach — WM_ENDSESSION for system shutdown, ExtendedExecutionSession for PLM prevention, and VisibilityChanged for playback pause.
+
+---
+
+## Comprehensive Automated Test Suite & CI Pipeline
+
+- **Feature/area**: Test infrastructure — Musio.Tests project, GitHub Actions CI workflow
+- **Approaches tried**:
+  1. **`dotnet build` for test project** — Failed with MSB4062 because Musio.Core references WinAppSDK which requires the PRI task DLL only available in VS MSBuild.
+  2. **VS MSBuild.exe for build + `dotnet test --no-build` for execution** — Worked. MSBuild builds the Core and Tests projects successfully, then `dotnet test --no-build` runs all tests. ✅
+  3. **GitHub Actions workflow with `microsoft/setup-msbuild@v2`** — Uses `setup-msbuild` action to get MSBuild on CI runner, then `dotnet test --no-build` to execute. ✅
+- **What worked**: Build with VS MSBuild (`msbuild /p:Configuration=Release /p:Platform=AnyCPU`), test with `dotnet test --no-build`. CI uses `microsoft/setup-msbuild@v2` action.
+- **What didn't work**: `dotnet build` fails for any project that transitively references WinAppSDK due to missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the dotnet SDK.
+- **Test files created**: AspectRatioHelperTests, CubicBezierEasingTests, TimelineMapperTests, PerformanceMonitorTests, SubtitleGeneratorTests, AudioWaveformGeneratorTests, ProjectModelTests, EditOperationsExtendedTests, SessionCleanupServiceTests, KeyboardRecorderTests, ExportResolutionTests, ZoomKeyframeExtendedTests (254 total tests, all passing).

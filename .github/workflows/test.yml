@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore dependencies
+        run: dotnet restore src/Musio.Tests/Musio.Tests.csproj
+
+      - name: Build tests
+        run: msbuild src/Musio.Tests/Musio.Tests.csproj /p:Configuration=Release /p:Platform=AnyCPU /t:Build /v:minimal
+
+      - name: Run tests
+        run: dotnet test src/Musio.Tests/Musio.Tests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: src/Musio.Tests/TestResults/*.trx
