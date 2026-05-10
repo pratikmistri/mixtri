@@ -407,6 +407,12 @@
                                     StepFrequency="0.25"
                                     ValueChanged="CursorSizeSlider_ValueChanged" />
 
+                                <!-- Tilt toggle (mouse cursor only) -->
+                                <ToggleSwitch
+                                    x:Name="CursorTiltToggle"
+                                    Header="Tilt"
+                                    Toggled="CursorTiltToggle_Toggled" />
+
                                 <!-- Color presets -->
                                 <StackPanel Spacing="4">
                                     <TextBlock Text="Color" FontSize="12" />

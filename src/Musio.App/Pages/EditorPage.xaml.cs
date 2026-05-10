@@ -1505,6 +1505,11 @@ public sealed partial class EditorPage : Page
             // Size
             CursorSizeSlider.Value = cursor.Scale;
 
+            // Tilt
+            CursorTiltToggle.IsOn = cursor.TiltEnabled;
+            CursorTiltToggle.Visibility = cursor.Type != CursorType.Touch
+                ? Visibility.Visible : Visibility.Collapsed;
+
             // Color — find matching radio button by Tag
             string cursorColor = (cursor.Color ?? "#FFFFFF").ToUpperInvariant();
             bool found = false;
@@ -1529,6 +1534,9 @@ public sealed partial class EditorPage : Page
     private void CursorType_Checked(object sender, RoutedEventArgs e)
     {
         if (_suppressCursorEvents) return;
+        // Show/hide tilt toggle based on cursor type
+        bool isMouse = CursorTypeMouse.IsChecked == true;
+        CursorTiltToggle.Visibility = isMouse ? Visibility.Visible : Visibility.Collapsed;
         ApplyCursorStyleFromControls();
     }
 
@@ -1536,6 +1544,12 @@ public sealed partial class EditorPage : Page
     {
         if (_suppressCursorEvents) return;
         ScheduleCursorUpdate();
+    }
+
+    private void CursorTiltToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressCursorEvents) return;
+        ApplyCursorStyleFromControls();
     }
 
     private void CursorColor_Checked(object sender, RoutedEventArgs e)
@@ -1581,6 +1595,7 @@ public sealed partial class EditorPage : Page
             Type = cursorType,
             Scale = (float)CursorSizeSlider.Value,
             Color = color,
+            TiltEnabled = CursorTiltToggle.IsOn,
         };
 
         config = config with { Cursor = newCursor };

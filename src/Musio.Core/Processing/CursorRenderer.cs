@@ -16,6 +16,7 @@ public record CursorStyle
     public string? CustomImagePath { get; init; }
     public float Scale { get; init; } = 3.0f;         // 1.0 - 6.0
     public string Color { get; init; } = "#FFFFFF";
+    public bool TiltEnabled { get; init; } = true;
     public bool MotionBlurEnabled { get; init; } = false;
     public float MotionBlurStrength { get; init; } = 0.5f;
     public bool AutoHideEnabled { get; init; } = true;
@@ -104,7 +105,7 @@ public class CursorRenderer : IDisposable
         }
 
         // Compute velocity-based tilt for cinematic feel
-        float tiltAngle = ComputeTiltAngle(position);
+        float tiltAngle = _style.TiltEnabled ? ComputeTiltAngle(position) : 0f;
 
         // Main cursor
         RenderCursor(session, x, y, finalScale, autoHideOpacity, tiltAngle);
