@@ -743,6 +743,30 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 1. **Store DPI scale in Project + subtract CropOffsetX/Y from all mouse coordinate transforms** — Worked. Two root causes: (a) `GetSystemDpiScale()` compared cropped region size to full monitor logical size, always returning 1.0 for region captures; (b) `CropOffsetX/Y` (physical pixel origin of the crop region) were stored but never subtracted from mouse coordinates. ✅
 
+---
+
+## Core Models/Timeline/Settings/AI/Audio/Services — Crash/Hang/Vulnerability Fixes
+
+**Feature/area:** Musio.Core layer — CursorData, TimelineModel, RegionMemory, PresetManager, SubtitleBurner, AudioWaveformGenerator, SpeechToText, GlobalHotkeyService, FrameRateLimiter, AppSettings.
+
+**Approaches tried:**
+
+1. **Surgical safeguards across 10 files** — Applied minimal guards without refactoring surrounding code. ✅
+
+**What worked:**
+- **CursorData**: Zero-check on `TickFrequency` before division in `Duration` property.
+- **TimelineModel**: NaN/Infinity/overflow clamp on `SourceDuration` computed property.
+- **RegionMemory**: try/catch around composite value casts in `LoadRegion`.
+- **PresetManager**: Per-file try/catch in `LoadPresets` + path traversal/reserved name sanitization in `GetPresetPath`.
+- **SubtitleBurner**: try/catch around `Convert.ToByte` hex parsing in `ParseColor`.
+- **AudioWaveformGenerator**: Added `bitsPerSample <= 0 || bitsPerSample % 8 != 0` guard.
+- **SpeechToText**: 10-minute timeout via `Task.WhenAny` + `Task.Delay` to prevent infinite hang.
+- **GlobalHotkeyService**: try/catch in `Initialize` and `HotkeyWndProc` event invocation.
+- **FrameRateLimiter**: `Thread.SpinWait(10)` instead of `SpinWait(1)` to reduce CPU pressure.
+- **AppSettings**: try/catch in `Set<T>` around `_settings.Values[key] = value`.
+
+**What didn't work:** N/A — all fixes applied cleanly. Pre-existing build error in `ExportEngine.cs` (unrelated `MediaClip.Dispose()`) remains.
+
 **What worked:**
 - Added `Project.DpiScale` (float) — set from `GetMonitorDpiScale(hMonitor)` during recording. Zero = auto-detect fallback for backward compatibility with old projects.
 - `FrameCompositor.InitializeAsync` accepts `cropOffsetX`, `cropOffsetY`, `dpiScale` parameters. When `dpiScale > 0`, uses it directly instead of the broken `GetSystemDpiScale()` heuristic.
@@ -1140,3 +1164,21 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   4. Wrapped GetStringAttribute/GetGuidAttribute COM vtable access in try/catch returning E_FAIL.
 - **What worked**: All four fixes applied cleanly. MediaClip doesn't implement IDisposable, so used null-out instead of Dispose.
 - **What didn't work**: Tried sourceClip?.Dispose() but MediaClip (WinRT) has no Dispose method — switched to nulling the reference after Clips.Clear().
+
+---
+
+## Capture Layer - Crash/Hang/Vulnerability Fixes
+
+**Feature/area:** AudioCaptureEngine, MouseHookRecorder, KeyboardHookRecorder, ScreenCaptureEngine, VideoWriter, WebcamCaptureEngine
+
+**Approaches tried:**
+
+1. Surgical try/catch guards on callback threads - Wrapped audio Write calls and hook Marshal.PtrToStructure in try/catch. Worked.
+2. Timeout on ManualResetEventSlim.Wait() - 5s timeout with InvalidOperationException. Worked.
+3. Resource cleanup on partial init failure - cleanup already-started resources on throw. Worked.
+4. Input validation - fps > 0 and null-check on GetDirectoryName. Worked.
+5. Dispose deadlock prevention - Task.Wait(3s) instead of GetAwaiter().GetResult(). Worked.
+
+**What worked:** All five - minimal surgical fixes.
+
+**What didn't work:** dotnet CLI build fails due to missing WinAppSDK PriGen task in .NET 10 SDK; must use VS MSBuild to build.
