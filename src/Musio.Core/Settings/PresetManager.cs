@@ -86,10 +86,17 @@ public class PresetManager
 
         foreach (var file in Directory.GetFiles(folder, "*.json"))
         {
-            var json = File.ReadAllText(file);
-            var preset = JsonSerializer.Deserialize<T>(json, JsonOptions);
-            if (preset is not null)
-                presets.Add(preset);
+            try
+            {
+                var json = File.ReadAllText(file);
+                var preset = JsonSerializer.Deserialize<T>(json, JsonOptions);
+                if (preset is not null)
+                    presets.Add(preset);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PresetManager] Failed to load preset '{file}': {ex.Message}");
+            }
         }
 
         return presets;
@@ -102,9 +109,23 @@ public class PresetManager
             File.Delete(filePath);
     }
 
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
     private static string GetPresetPath(string folder, string name)
     {
         var safeName = string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
+        // Prevent path traversal
+        safeName = safeName.Replace("..", "_");
+        // Truncate excessively long names
+        if (safeName.Length > 100)
+            safeName = safeName[..100];
+        if (ReservedDeviceNames.Contains(safeName))
+            safeName = "_" + safeName;
         return Path.Combine(folder, $"{safeName}.json");
     }
 }

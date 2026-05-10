@@ -119,19 +119,26 @@ public class SubtitleBurner
     {
         hex = hex.TrimStart('#');
 
-        return hex.Length switch
+        try
         {
-            6 => Color.FromArgb(
-                0xFF,
-                Convert.ToByte(hex[..2], 16),
-                Convert.ToByte(hex[2..4], 16),
-                Convert.ToByte(hex[4..6], 16)),
-            8 => Color.FromArgb(
-                Convert.ToByte(hex[..2], 16),
-                Convert.ToByte(hex[2..4], 16),
-                Convert.ToByte(hex[4..6], 16),
-                Convert.ToByte(hex[6..8], 16)),
-            _ => Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
-        };
+            return hex.Length switch
+            {
+                6 => Color.FromArgb(
+                    0xFF,
+                    Convert.ToByte(hex[..2], 16),
+                    Convert.ToByte(hex[2..4], 16),
+                    Convert.ToByte(hex[4..6], 16)),
+                8 => Color.FromArgb(
+                    Convert.ToByte(hex[..2], 16),
+                    Convert.ToByte(hex[2..4], 16),
+                    Convert.ToByte(hex[4..6], 16),
+                    Convert.ToByte(hex[6..8], 16)),
+                _ => Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+            };
+        }
+        catch
+        {
+            return Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+        }
     }
 }

@@ -432,7 +432,10 @@ public class VideoEncoder : IDisposable
             sample.Duration = frameDuration;
 
             // Dispose the GPU surface after the encoder has consumed it.
-            sample.Processed += (s, e) => outputSurface.Dispose();
+            // Capture in a local to avoid double-dispose if the catch block also disposes.
+            var surfaceToDispose = outputSurface;
+            outputSurface = null; // prevent catch block from disposing
+            sample.Processed += (s, e) => surfaceToDispose.Dispose();
 
             request.Sample = sample;
 
@@ -547,7 +550,14 @@ public class VideoEncoder : IDisposable
             else
                 tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Audio mux failed."));
         };
-        await tcs.Task;
+        var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5));
+        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+        {
+            ct.ThrowIfCancellationRequested();
+            renderOp.Cancel();
+            throw new TimeoutException("Audio mux operation timed out after 5 minutes.");
+        }
+        await tcs.Task; // propagate any exception
 
         // Release MediaComposition native resources after mux completes
         muxComp.Clips.Clear();

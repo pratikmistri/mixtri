@@ -12,7 +12,7 @@ public sealed class AppSettings
     public static AppSettings Instance => _instance.Value;
 
     private readonly ApplicationDataContainer? _settings;
-    private readonly Dictionary<string, object>? _memoryStore;
+    private readonly Dictionary<string, object> _memoryStore = new();
 
     private AppSettings()
     {
@@ -22,9 +22,8 @@ public sealed class AppSettings
         }
         catch
         {
-            // App may not have package identity — use in-memory store
+            // App may not have package identity — use in-memory store only
             _settings = null;
-            _memoryStore = new Dictionary<string, object>();
         }
     }
 
@@ -83,10 +82,15 @@ public sealed class AppSettings
         {
             if (_settings.Values.TryGetValue(key, out var value) && value is T typed)
                 return typed;
+
+            // Check in-memory fallback (populated when persistence failed)
+            if (_memoryStore.TryGetValue(key, out var fallback) && fallback is T fbTyped)
+                return fbTyped;
+
             return defaultValue;
         }
 
-        if (_memoryStore is not null && _memoryStore.TryGetValue(key, out var memValue) && memValue is T memTyped)
+        if (_memoryStore.TryGetValue(key, out var memValue) && memValue is T memTyped)
             return memTyped;
 
         return defaultValue;
@@ -96,11 +100,21 @@ public sealed class AppSettings
     {
         if (_settings is not null)
         {
-            _settings.Values[key] = value;
+            try
+            {
+                _settings.Values[key] = value;
+            }
+            catch (Exception ex)
+            {
+                // Persist failed — fall back to in-memory so the value is
+                // at least available for the current session.
+                System.Diagnostics.Debug.WriteLine($"[AppSettings] Failed to persist '{key}': {ex.Message}");
+                if (value is not null) _memoryStore[key] = value;
+            }
             return;
         }
 
-        if (_memoryStore is not null && value is not null)
+        if (value is not null)
             _memoryStore[key] = value;
     }
 }

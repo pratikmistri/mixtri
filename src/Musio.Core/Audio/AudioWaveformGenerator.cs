@@ -79,7 +79,7 @@ public static class AudioWaveformGenerator
     /// </summary>
     public static float[] GenerateWaveform(byte[] audioData, int channels, int bitsPerSample, int targetSampleCount)
     {
-        if (targetSampleCount <= 0 || audioData.Length == 0 || channels <= 0) return [];
+        if (targetSampleCount <= 0 || audioData.Length == 0 || channels <= 0 || bitsPerSample <= 0 || bitsPerSample % 8 != 0) return [];
 
         int bytesPerSample = bitsPerSample / 8;
         int totalSamples = audioData.Length / bytesPerSample;

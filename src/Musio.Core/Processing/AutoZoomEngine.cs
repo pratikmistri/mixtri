@@ -102,9 +102,11 @@ public class AutoZoomEngine
     /// </summary>
     public void SetSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
     {
-        _suppressedClickTicks = suppressedTicks is HashSet<long> hs
-            ? new HashSet<long>(hs)
-            : [.. suppressedTicks];
+        _suppressedClickTicks = suppressedTicks is null
+            ? []
+            : suppressedTicks is HashSet<long> hs
+                ? new HashSet<long>(hs)
+                : [.. suppressedTicks];
         if (_lastMouseData is not null)
             RebuildAutoSegments();
     }

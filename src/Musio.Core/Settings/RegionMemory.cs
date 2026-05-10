@@ -50,16 +50,23 @@ public sealed class RegionMemory
     {
         if (_settings is null) return null;
 
-        if (_settings.Values.TryGetValue(CompositeKey, out var value)
-            && value is ApplicationDataCompositeValue composite)
+        try
         {
-            return new CaptureRegion(
-                (int)composite["X"],
-                (int)composite["Y"],
-                (int)composite["Width"],
-                (int)composite["Height"],
-                (string)composite["MonitorId"]
-            );
+            if (_settings.Values.TryGetValue(CompositeKey, out var value)
+                && value is ApplicationDataCompositeValue composite)
+            {
+                return new CaptureRegion(
+                    (int)composite["X"],
+                    (int)composite["Y"],
+                    (int)composite["Width"],
+                    (int)composite["Height"],
+                    (string)composite["MonitorId"]
+                );
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RegionMemory] Failed to load region: {ex.Message}");
         }
 
         return null;

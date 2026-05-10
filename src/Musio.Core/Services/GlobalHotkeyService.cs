@@ -43,13 +43,24 @@ public sealed class GlobalHotkeyService : IDisposable
     public void Initialize(IntPtr hwnd)
     {
         if (_hwnd != IntPtr.Zero) return;
-        _hwnd = hwnd;
 
+        _hwnd = hwnd;
         _wndProcDelegate = HotkeyWndProc;
+
+        // SetWindowLongPtr returns 0 on failure (and sets last error), not an exception.
         _originalWndProc = SetWindowLongPtr(
             _hwnd,
             GWLP_WNDPROC,
             Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+
+        if (_originalWndProc == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            System.Diagnostics.Debug.WriteLine(
+                $"[GlobalHotkeyService] SetWindowLongPtr failed, Win32 error {err}");
+            _hwnd = IntPtr.Zero;
+            _wndProcDelegate = null;
+        }
     }
 
     public bool RegisterHotkey(int id, ModifierKeys modifiers, int virtualKeyCode)
@@ -83,7 +94,14 @@ public sealed class GlobalHotkeyService : IDisposable
             int hotkeyId = wParam.ToInt32();
             if (_registeredIds.Contains(hotkeyId))
             {
-                HotkeyPressed?.Invoke(this, new HotkeyPressedEventArgs(hotkeyId));
+                try
+                {
+                    HotkeyPressed?.Invoke(this, new HotkeyPressedEventArgs(hotkeyId));
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[GlobalHotkeyService] HotkeyPressed handler failed: {ex.Message}");
+                }
                 return IntPtr.Zero;
             }
         }
@@ -115,7 +133,7 @@ public sealed class GlobalHotkeyService : IDisposable
     [DllImport("user32.dll")]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int nIndex, IntPtr dwNewLong);
 
     [DllImport("user32.dll")]

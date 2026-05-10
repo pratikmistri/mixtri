@@ -58,8 +58,16 @@ public sealed class ScreenCaptureEngine : IDisposable
     public static ScreenCaptureEngine CreateForMonitor(IntPtr hMonitor, int fps = 30)
     {
         var device = Direct3DDeviceHelper.CreateDevice();
-        var item = CreateCaptureItemForMonitor(hMonitor);
-        return new ScreenCaptureEngine(device, item, fps);
+        try
+        {
+            var item = CreateCaptureItemForMonitor(hMonitor);
+            return new ScreenCaptureEngine(device, item, fps);
+        }
+        catch
+        {
+            device.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -68,8 +76,16 @@ public sealed class ScreenCaptureEngine : IDisposable
     public static ScreenCaptureEngine CreateForWindow(IntPtr hwnd, int fps = 30)
     {
         var device = Direct3DDeviceHelper.CreateDevice();
-        var item = CreateCaptureItemForWindow(hwnd);
-        return new ScreenCaptureEngine(device, item, fps);
+        try
+        {
+            var item = CreateCaptureItemForWindow(hwnd);
+            return new ScreenCaptureEngine(device, item, fps);
+        }
+        catch
+        {
+            device.Dispose();
+            throw;
+        }
     }
 
     public void StartCapture()

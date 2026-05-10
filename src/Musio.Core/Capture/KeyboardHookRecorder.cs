@@ -156,7 +156,8 @@ public sealed class KeyboardHookRecorder : IDisposable
         };
         _hookThread.Start();
 
-        _hookReady.Wait();
+        if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+            throw new InvalidOperationException("Keyboard hook thread failed to start within 5 seconds.");
 
         if (_hookId == nint.Zero)
             throw new InvalidOperationException(
@@ -213,33 +214,40 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     private nint HookCallback(int nCode, nint wParam, nint lParam)
     {
-        if (nCode >= 0)
+        try
         {
-            var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-            int msg = (int)wParam;
-            int vk = (int)hookData.vkCode;
-
-            bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-
-            UpdateModifierState(vk, isDown);
-
-            long ticks = Stopwatch.GetTimestamp();
-            string keyName = MapVirtualKeyToName(vk);
-
-            var evt = new KeyPressEvent(
-                TimestampTicks: ticks,
-                VirtualKeyCode: vk,
-                KeyName: keyName,
-                IsDown: isDown,
-                IsCtrl: _ctrlDown,
-                IsAlt: _altDown,
-                IsShift: _shiftDown,
-                IsWin: _winDown);
-
-            lock (_lock)
+            if (nCode >= 0)
             {
-                _events.Add(evt);
+                var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
+                int msg = (int)wParam;
+                int vk = (int)hookData.vkCode;
+
+                bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+
+                UpdateModifierState(vk, isDown);
+
+                long ticks = Stopwatch.GetTimestamp();
+                string keyName = MapVirtualKeyToName(vk);
+
+                var evt = new KeyPressEvent(
+                    TimestampTicks: ticks,
+                    VirtualKeyCode: vk,
+                    KeyName: keyName,
+                    IsDown: isDown,
+                    IsCtrl: _ctrlDown,
+                    IsAlt: _altDown,
+                    IsShift: _shiftDown,
+                    IsWin: _winDown);
+
+                lock (_lock)
+                {
+                    _events.Add(evt);
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[KeyboardHookRecorder] HookCallback error: {ex.Message}");
         }
 
         return CallNextHookEx(_hookId, nCode, wParam, lParam);

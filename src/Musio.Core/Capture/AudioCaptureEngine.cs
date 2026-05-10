@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
@@ -147,6 +148,14 @@ public sealed class AudioCaptureEngine : IDisposable
                 {
                     // Mic device unavailable — continue without it
                 }
+                catch (Exception)
+                {
+                    // Unexpected mic failure — clean up already-started system capture
+                    StopAndDisposeCapture(_systemCapture, _systemWriter);
+                    _systemCapture = null;
+                    _systemWriter = null;
+                    throw;
+                }
             }
 
             _isPaused = false;
@@ -214,7 +223,14 @@ public sealed class AudioCaptureEngine : IDisposable
         lock (_lock)
         {
             if (_isPaused || _systemWriter == null) return;
-            _systemWriter.Write(e.Buffer, 0, e.BytesRecorded);
+            try
+            {
+                _systemWriter.Write(e.Buffer, 0, e.BytesRecorded);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[AudioCaptureEngine] System audio write failed: {ex.Message}");
+            }
         }
     }
 
@@ -226,7 +242,14 @@ public sealed class AudioCaptureEngine : IDisposable
         lock (_lock)
         {
             if (_isPaused || _micWriter == null) return;
-            _micWriter.Write(e.Buffer, 0, e.BytesRecorded);
+            try
+            {
+                _micWriter.Write(e.Buffer, 0, e.BytesRecorded);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[AudioCaptureEngine] Mic audio write failed: {ex.Message}");
+            }
         }
     }
 

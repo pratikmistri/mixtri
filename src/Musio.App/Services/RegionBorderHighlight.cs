@@ -23,6 +23,9 @@ public sealed class RegionBorderHighlight : IDisposable
     {
         if (_disposed) return;
 
+        // Clean up any existing border windows and brush
+        Hide();
+
         EnsureClassRegistered();
 
         _hBrush = CreateSolidBrush(BorderColor);

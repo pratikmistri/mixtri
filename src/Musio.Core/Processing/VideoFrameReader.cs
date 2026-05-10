@@ -31,17 +31,25 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public static VideoFrameReader? OpenSession(string sessionFolder, int fps)
     {
-        var framesDir = Path.Combine(sessionFolder, ".frames");
-        if (!Directory.Exists(framesDir))
+        try
+        {
+            var framesDir = Path.Combine(sessionFolder, ".frames");
+            if (!Directory.Exists(framesDir))
+                return null;
+
+            var frames = Directory.GetFiles(framesDir, "frame_*.jpg");
+            Array.Sort(frames);
+
+            if (frames.Length == 0)
+                return null;
+
+            return new VideoFrameReader(frames, fps, CanvasDevice.GetSharedDevice());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            System.Diagnostics.Debug.WriteLine($"[VideoFrameReader] Failed to open session: {ex.Message}");
             return null;
-
-        var frames = Directory.GetFiles(framesDir, "frame_*.jpg");
-        Array.Sort(frames);
-
-        if (frames.Length == 0)
-            return null;
-
-        return new VideoFrameReader(frames, fps, CanvasDevice.GetSharedDevice());
+        }
     }
 
     /// <summary>
