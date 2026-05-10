@@ -1060,3 +1060,24 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - **What worked**: Build with VS MSBuild (`msbuild /p:Configuration=Release /p:Platform=AnyCPU`), test with `dotnet test --no-build`. CI uses `microsoft/setup-msbuild@v2` action.
 - **What didn't work**: `dotnet build` fails for any project that transitively references WinAppSDK due to missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the dotnet SDK.
 - **Test files created**: AspectRatioHelperTests, CubicBezierEasingTests, TimelineMapperTests, PerformanceMonitorTests, SubtitleGeneratorTests, AudioWaveformGeneratorTests, ProjectModelTests, EditOperationsExtendedTests, SessionCleanupServiceTests, KeyboardRecorderTests, ExportResolutionTests, ZoomKeyframeExtendedTests (254 total tests, all passing).
+
+---
+
+## Touch Cursor Dedup — Overlapping Click Animations
+
+**Feature/area:** Compositor pipeline (CursorRenderer, FrameCompositor)
+
+**Approaches tried:**
+
+1. **Chain-based dedup in RenderTouchClicks** — Worked. Consecutive click-down events whose gap < TouchTotalDuration (1.41s) are grouped into "chains." Each chain renders a single touch cursor that floats in → taps at each click position → slides between click positions → fades out after the last tap. ✅
+
+**What worked:**
+- `CursorRenderer.RenderTouchClicks` groups overlapping click-downs into chains and delegates to `RenderTouchChain`.
+- `RenderTouchChain` walks the chain timeline: pre-roll float-in for first click, tap-down/tap-up at each click, EaseInOut slide between consecutive clicks, fade-out after last tap.
+- `FrameCompositor.GetActiveClicks` window widened from ±1.0s to ±1.5s to ensure upcoming chained clicks are visible during transitions.
+- Every click's tap animation is preserved (no taps are suppressed).
+- Isolated clicks (gap ≥ 1.41s) behave identically to the original code.
+
+**What didn't work / design rejected:**
+- "Latest pre-roll wins" approach (only render the click with the most recently started animation) — rejected because it suppresses earlier click taps when a later click's 1s pre-roll begins before the earlier click actually taps.
+- Expanding the window was necessary: a ±1s window can miss the next chained click during the transition phase (max future distance = 1.25s).

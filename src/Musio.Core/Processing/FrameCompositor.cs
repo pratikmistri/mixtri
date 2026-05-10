@@ -379,8 +379,6 @@ public class FrameCompositor : IDisposable
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
         }
 
-        float padding = _config.Background.Padding;
-
         // Use post-composite zoom when zoom is active — this pre-composes the
         // cursor onto the frame before zooming, so the cursor scales with zoom.
         if (zoomState.ZoomLevel > 1.01f)
@@ -682,9 +680,11 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Returns click events within ±1 second of the current time, with positions
+    /// Returns click events within ±1.5 seconds of the current time, with positions
     /// transformed from source coordinates to output coordinates.
     /// Uses binary search for efficient lookup (clicks are sorted by TimestampTicks).
+    /// The wider window (vs ±1s) ensures touch cursor chains can see upcoming clicks
+    /// needed for smooth transitions between consecutive taps.
     /// </summary>
     private List<ClickEvent> GetActiveClicks(
         double timeSeconds, Rect viewport,
@@ -692,7 +692,7 @@ public class FrameCompositor : IDisposable
     {
         if (_mouseData is null) return [];
 
-        const double windowSeconds = 1.0;
+        const double windowSeconds = 1.5;
         var result = new List<ClickEvent>();
         var clicks = _mouseData.Clicks;
         if (clicks.Count == 0) return result;

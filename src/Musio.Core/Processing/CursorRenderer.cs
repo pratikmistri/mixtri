@@ -121,9 +121,10 @@ public class CursorRenderer : IDisposable
     private const float TouchTapScale = 0.6f;            // scale down to 60% on tap
 
     /// <summary>
-    /// Renders touch indicators at click-down positions. Each tap starts
-    /// 1s before the click: floats up 40px into the click position,
-    /// taps (scale down + up) at click time, then fades out.
+    /// Renders touch indicators at click-down positions. Consecutive clicks whose
+    /// animations would overlap are merged into a single "chain" so that only one
+    /// touch cursor is ever visible: it floats in, taps at each click position
+    /// (sliding between them), then fades out after the last tap.
     /// </summary>
     private void RenderTouchClicks(
         CanvasDrawingSession session,
@@ -135,61 +136,143 @@ public class CursorRenderer : IDisposable
 
         float baseScale = Math.Clamp(_style.Scale, 1.0f, 6.0f);
 
+        // Collect click-down events with computed click times (already sorted by timestamp)
+        var downClicks = new List<(ClickEvent Click, double ClickTime)>();
         foreach (var click in activeClicks)
         {
             if (!click.IsDown) continue;
-
             double clickTime = (click.TimestampTicks - StartTimestampTicks) / TickFrequency;
-            double animStart = clickTime - TouchPreRoll;
-            double elapsed = currentTimeSeconds - animStart;
-
-            if (elapsed < 0 || elapsed > TouchTotalDuration) continue;
-
-            float x = click.X;
-            float y = click.Y;
-            float opacity;
-            float yOffset;
-            float scale;
-
-            if (elapsed < TouchPreRoll)
-            {
-                // Phase 1: float up into click position (pre-roll)
-                float t = (float)(elapsed / TouchPreRoll);
-                float eased = CubicBezierEasing.EaseOut(t);
-                yOffset = TouchFloatDistance * baseScale * (1f - eased);
-                opacity = eased;
-                scale = baseScale * (0.7f + 0.3f * eased);
-            }
-            else if (elapsed < TouchPreRoll + TouchTapDownDuration)
-            {
-                // Phase 2: tap down — quick scale down
-                float t = (float)((elapsed - TouchPreRoll) / TouchTapDownDuration);
-                float eased = CubicBezierEasing.EaseInOut(t);
-                yOffset = 0;
-                opacity = 1f;
-                scale = baseScale * (1f - (1f - TouchTapScale) * eased);
-            }
-            else if (elapsed < TouchPreRoll + TouchTapDownDuration + TouchTapUpDuration)
-            {
-                // Phase 3: tap up — spring back to full scale
-                float t = (float)((elapsed - TouchPreRoll - TouchTapDownDuration) / TouchTapUpDuration);
-                float eased = CubicBezierEasing.SpringOut(t);
-                yOffset = 0;
-                opacity = 1f;
-                scale = baseScale * (TouchTapScale + (1f - TouchTapScale) * eased);
-            }
-            else
-            {
-                // Phase 4: fade out
-                float t = (float)((elapsed - TouchPreRoll - TouchTapDownDuration - TouchTapUpDuration) / TouchFadeOutDuration);
-                float eased = CubicBezierEasing.EaseIn(t);
-                yOffset = 0;
-                opacity = 1f - eased;
-                scale = baseScale * (1f + 0.1f * eased);
-            }
-
-            DrawTouchCursor(session, x, y + yOffset, scale, opacity);
+            downClicks.Add((click, clickTime));
         }
+
+        if (downClicks.Count == 0) return;
+
+        // Build chains of temporally overlapping clicks and render each chain.
+        // Two consecutive clicks chain when their gap < TouchTotalDuration,
+        // meaning the second click's independent animation would overlap the first's.
+        int chainStart = 0;
+        for (int i = 1; i <= downClicks.Count; i++)
+        {
+            bool endChain = i == downClicks.Count ||
+                downClicks[i].ClickTime - downClicks[i - 1].ClickTime >= TouchTotalDuration;
+
+            if (endChain)
+            {
+                RenderTouchChain(session, downClicks, chainStart, i, currentTimeSeconds, baseScale);
+                chainStart = i;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Renders a single chained touch animation spanning clicks[startIdx..endIdx).
+    /// Timeline: float-in → [tap → slide]* → tap → fade-out.
+    /// </summary>
+    private void RenderTouchChain(
+        CanvasDrawingSession session,
+        List<(ClickEvent Click, double ClickTime)> clicks,
+        int startIdx, int endIdx,
+        double currentTimeSeconds,
+        float baseScale)
+    {
+        const double tapDuration = TouchTapDownDuration + TouchTapUpDuration;
+
+        var first = clicks[startIdx];
+        var last = clicks[endIdx - 1];
+
+        double chainAnimStart = first.ClickTime - TouchPreRoll;
+        double chainAnimEnd = last.ClickTime + tapDuration + TouchFadeOutDuration;
+
+        if (currentTimeSeconds < chainAnimStart || currentTimeSeconds > chainAnimEnd)
+            return;
+
+        float x, y, opacity, scale;
+        float yOffset = 0;
+
+        if (currentTimeSeconds < first.ClickTime)
+        {
+            // Pre-roll: float up into first click position
+            double elapsed = currentTimeSeconds - chainAnimStart;
+            float t = (float)(elapsed / TouchPreRoll);
+            float eased = CubicBezierEasing.EaseOut(t);
+
+            x = first.Click.X;
+            y = first.Click.Y;
+            yOffset = TouchFloatDistance * baseScale * (1f - eased);
+            opacity = eased;
+            scale = baseScale * (0.7f + 0.3f * eased);
+        }
+        else if (currentTimeSeconds >= last.ClickTime + tapDuration)
+        {
+            // Fade out after last tap
+            double fadeElapsed = currentTimeSeconds - (last.ClickTime + tapDuration);
+            float t = (float)(fadeElapsed / TouchFadeOutDuration);
+            float eased = CubicBezierEasing.EaseIn(t);
+
+            x = last.Click.X;
+            y = last.Click.Y;
+            opacity = 1f - eased;
+            scale = baseScale * (1f + 0.1f * eased);
+        }
+        else
+        {
+            // Tap / transition region — walk the chain to find the active segment
+            x = first.Click.X;
+            y = first.Click.Y;
+            opacity = 1f;
+            scale = baseScale;
+
+            for (int i = startIdx; i < endIdx; i++)
+            {
+                var (click, clickTime) = clicks[i];
+                double tapDownEnd = clickTime + TouchTapDownDuration;
+                double tapEnd = clickTime + tapDuration;
+
+                if (currentTimeSeconds < tapDownEnd)
+                {
+                    // Tap down
+                    float t = (float)((currentTimeSeconds - clickTime) / TouchTapDownDuration);
+                    float eased = CubicBezierEasing.EaseInOut(t);
+
+                    x = click.X;
+                    y = click.Y;
+                    scale = baseScale * (1f - (1f - TouchTapScale) * eased);
+                    break;
+                }
+
+                if (currentTimeSeconds < tapEnd)
+                {
+                    // Tap up — spring back
+                    float t = (float)((currentTimeSeconds - tapDownEnd) / TouchTapUpDuration);
+                    float eased = CubicBezierEasing.SpringOut(t);
+
+                    x = click.X;
+                    y = click.Y;
+                    scale = baseScale * (TouchTapScale + (1f - TouchTapScale) * eased);
+                    break;
+                }
+
+                if (i + 1 < endIdx)
+                {
+                    var nextClick = clicks[i + 1];
+                    if (currentTimeSeconds < nextClick.ClickTime)
+                    {
+                        // Slide from this click to the next
+                        double slideDuration = nextClick.ClickTime - tapEnd;
+                        float t = slideDuration > 0
+                            ? Math.Clamp((float)((currentTimeSeconds - tapEnd) / slideDuration), 0f, 1f)
+                            : 1f;
+                        float eased = CubicBezierEasing.EaseInOut(t);
+
+                        x = click.X + (nextClick.Click.X - click.X) * eased;
+                        y = click.Y + (nextClick.Click.Y - click.Y) * eased;
+                        break;
+                    }
+                }
+            }
+        }
+
+        DrawTouchCursor(session, x, y + yOffset, scale, opacity);
     }
 
     /// <summary>
