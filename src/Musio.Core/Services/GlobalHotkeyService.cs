@@ -44,19 +44,22 @@ public sealed class GlobalHotkeyService : IDisposable
     {
         if (_hwnd != IntPtr.Zero) return;
 
-        try
+        _hwnd = hwnd;
+        _wndProcDelegate = HotkeyWndProc;
+
+        // SetWindowLongPtr returns 0 on failure (and sets last error), not an exception.
+        _originalWndProc = SetWindowLongPtr(
+            _hwnd,
+            GWLP_WNDPROC,
+            Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+
+        if (_originalWndProc == IntPtr.Zero)
         {
-            _hwnd = hwnd;
-            _wndProcDelegate = HotkeyWndProc;
-            _originalWndProc = SetWindowLongPtr(
-                _hwnd,
-                GWLP_WNDPROC,
-                Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[GlobalHotkeyService] Initialize failed: {ex.Message}");
+            int err = Marshal.GetLastWin32Error();
+            System.Diagnostics.Debug.WriteLine(
+                $"[GlobalHotkeyService] SetWindowLongPtr failed, Win32 error {err}");
             _hwnd = IntPtr.Zero;
+            _wndProcDelegate = null;
         }
     }
 
@@ -130,7 +133,7 @@ public sealed class GlobalHotkeyService : IDisposable
     [DllImport("user32.dll")]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int nIndex, IntPtr dwNewLong);
 
     [DllImport("user32.dll")]

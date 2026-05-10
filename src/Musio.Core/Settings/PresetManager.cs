@@ -109,6 +109,13 @@ public class PresetManager
             File.Delete(filePath);
     }
 
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
     private static string GetPresetPath(string folder, string name)
     {
         var safeName = string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
@@ -117,14 +124,7 @@ public class PresetManager
         // Truncate excessively long names
         if (safeName.Length > 100)
             safeName = safeName[..100];
-        // Guard against Windows reserved device names
-        var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
-        };
-        if (reserved.Contains(safeName))
+        if (ReservedDeviceNames.Contains(safeName))
             safeName = "_" + safeName;
         return Path.Combine(folder, $"{safeName}.json");
     }

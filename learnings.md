@@ -765,7 +765,7 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - **FrameRateLimiter**: `Thread.SpinWait(10)` instead of `SpinWait(1)` to reduce CPU pressure.
 - **AppSettings**: try/catch in `Set<T>` around `_settings.Values[key] = value`.
 
-**What didn't work:** N/A — all fixes applied cleanly. Pre-existing build error in `ExportEngine.cs` (unrelated `MediaClip.Dispose()`) remains.
+**What didn't work:** N/A — all fixes applied cleanly.
 
 **What worked:**
 - Added `Project.DpiScale` (float) — set from `GetMonitorDpiScale(hMonitor)` during recording. Zero = auto-detect fallback for backward compatibility with old projects.

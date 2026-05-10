@@ -550,8 +550,13 @@ public class VideoEncoder : IDisposable
             else
                 tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Audio mux failed."));
         };
-        if (await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromMinutes(5), ct)) != tcs.Task)
+        var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5));
+        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+        {
+            ct.ThrowIfCancellationRequested();
+            renderOp.Cancel();
             throw new TimeoutException("Audio mux operation timed out after 5 minutes.");
+        }
         await tcs.Task; // propagate any exception
 
         // Release MediaComposition native resources after mux completes
