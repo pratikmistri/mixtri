@@ -1091,3 +1091,52 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / design rejected:**
 - "Latest pre-roll wins" approach (only render the click with the most recently started animation) — rejected because it suppresses earlier click taps when a later click's 1s pre-roll begins before the earlier click actually taps.
 - Expanding the window was necessary: a ±1s window can miss the next chained click during the transition phase (max future distance = 1.25s).
+
+---
+
+## Processing Layer — Crash/Hang/Vulnerability Fixes
+
+**Feature/area**: `CursorRenderer`, `BackgroundCompositor`, `AutoZoomEngine`, `VideoFrameReader` in `Musio.Core.Processing`.
+
+**Approaches tried:**
+
+1. Surgical safeguards added to four files without refactoring surrounding code.
+
+**What worked:**
+
+- **CursorRenderer**: Wrapped `CanvasBitmap.LoadAsync` in try/catch so corrupt/missing custom cursor images don't crash init. Added disposal of previous `_cursorBitmap`/`_defaultCursorGeometry` before reloading to prevent GPU resource leaks. ✅
+- **BackgroundCompositor**: Changed sync-over-async `.GetAwaiter().GetResult()` to `.AsTask().ConfigureAwait(false).GetAwaiter().GetResult()` to prevent SynchronizationContext deadlocks. ✅
+- **AutoZoomEngine**: Added null check on `suppressedTicks` parameter in `SetSuppressedClickTicks` to prevent NRE. ✅
+- **VideoFrameReader**: Wrapped `OpenSession` body in try/catch for `IOException`/`UnauthorizedAccessException`/`ArgumentException` to handle inaccessible session folders gracefully. ✅
+
+**What didn't work:** N/A — all fixes were straightforward safeguards.
+
+**Note:** Build has a pre-existing error in `ExportEngine.cs(297)` unrelated to these changes.
+
+---
+
+## App Layer — Crash/Hang/Vulnerability Safeguards
+
+**Feature/area**: Musio.App — MainWindow, RecordingPage, PreviewCanvas, RecordingOverlayWindow, RegionBorderHighlight
+
+**Approaches tried:**
+- Direct surgical fixes: replace throw with debug log, add try/catch to async void handlers, clamp FPS to ≥1, stop existing timer before creating new one, call Hide() before Show() to prevent GDI resource leak.
+
+**What worked:**
+- All five fixes applied as minimal safeguards without refactoring surrounding code. No new dependencies added. Build succeeds for Musio.App (pre-existing Musio.Core error is unrelated).
+
+**What didn't work:**
+- N/A — first approach succeeded for all five issues.
+
+---
+
+### Export Layer – Crash/Hang/Vulnerability Fixes (Round 2)
+
+- **Feature/area**: VideoEncoder.cs, ExportEngine.cs, HardwareEncoderDetector.cs in Musio.Core/Export.
+- **Approaches tried**:
+  1. Added 5-minute timeout to MuxAudioAsync TCS await to prevent infinite hang.
+  2. Captured outputSurface in a local variable before nulling to prevent double-dispose race in sample.Processed callback.
+  3. Added sourceClip = null cleanup in ExportGifAsync finally block (MediaClip is not IDisposable).
+  4. Wrapped GetStringAttribute/GetGuidAttribute COM vtable access in try/catch returning E_FAIL.
+- **What worked**: All four fixes applied cleanly. MediaClip doesn't implement IDisposable, so used null-out instead of Dispose.
+- **What didn't work**: Tried sourceClip?.Dispose() but MediaClip (WinRT) has no Dispose method — switched to nulling the reference after Clips.Clear().

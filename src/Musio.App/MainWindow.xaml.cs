@@ -124,7 +124,8 @@ public sealed partial class MainWindow : Window
                     NavFrame.Navigate(typeof(EditorPage));
                     break;
                 default:
-                    throw new InvalidOperationException($"Unknown navigation item tag: {item.Tag}");
+                    System.Diagnostics.Debug.WriteLine($"[MainWindow] Unknown navigation item tag: {item.Tag}");
+                    break;
             }
         }
     }

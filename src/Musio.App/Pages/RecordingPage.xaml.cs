@@ -53,19 +53,26 @@ public sealed partial class RecordingPage : Page
 
     private async void StartRecordButton_Click(object sender, RoutedEventArgs e)
     {
-        // Minimize the main window before recording starts so the
-        // minimize animation is never captured in the recording.
-        var mainWindow = App.Current.MainAppWindow;
-        if (mainWindow is not null)
+        try
         {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-            ShowWindow(hwnd, SW_MINIMIZE);
-            _recordingMinimizedWindow = true;
-            // Wait for the minimize animation to finish
-            await Task.Delay(600);
-        }
+            // Minimize the main window before recording starts so the
+            // minimize animation is never captured in the recording.
+            var mainWindow = App.Current.MainAppWindow;
+            if (mainWindow is not null)
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+                ShowWindow(hwnd, SW_MINIMIZE);
+                _recordingMinimizedWindow = true;
+                // Wait for the minimize animation to finish
+                await Task.Delay(600);
+            }
 
-        ViewModel.StartRecordingCommand.Execute(null);
+            ViewModel.StartRecordingCommand.Execute(null);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RecordingPage] StartRecordButton_Click failed: {ex.Message}");
+        }
     }
 
     private void ShowRecordingOverlay()

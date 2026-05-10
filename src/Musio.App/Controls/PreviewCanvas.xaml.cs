@@ -83,7 +83,7 @@ public sealed partial class PreviewCanvas : UserControl
         get => _previewFps;
         set
         {
-            _previewFps = value;
+            _previewFps = Math.Max(1, value);
             if (_playbackTimer is not null)
                 _playbackTimer.Interval = TimeSpan.FromMilliseconds(1000.0 / _previewFps);
         }

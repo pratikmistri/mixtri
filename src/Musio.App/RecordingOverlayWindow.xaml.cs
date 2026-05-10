@@ -130,13 +130,20 @@ public sealed partial class RecordingOverlayWindow : Window
 
     private async void Stop_Click(object sender, RoutedEventArgs e)
     {
-        StopButton.IsEnabled = false;
-        ShowStoppingState();
+        try
+        {
+            StopButton.IsEnabled = false;
+            ShowStoppingState();
 
-        // Yield to let the UI render the stopping state before the heavy stop work begins
-        await Task.Delay(50);
+            // Yield to let the UI render the stopping state before the heavy stop work begins
+            await Task.Delay(50);
 
-        StopRequested?.Invoke(this, EventArgs.Empty);
+            StopRequested?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RecordingOverlay] Stop_Click failed: {ex.Message}");
+        }
     }
 
     private void ShowStoppingState()
@@ -146,6 +153,8 @@ public sealed partial class RecordingOverlayWindow : Window
         StopButton.Visibility = Visibility.Collapsed;
         StoppingText.Visibility = Visibility.Visible;
         StoppingSpinner.Visibility = Visibility.Visible;
+
+        _phraseTimer?.Stop();
 
         // Cycle through phrases
         _phraseIndex = 0;
@@ -161,12 +170,19 @@ public sealed partial class RecordingOverlayWindow : Window
 
     private async void OnOverlayClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (!_isClosingProgrammatically)
+        try
         {
-            args.Cancel = true;
-            ShowStoppingState();
-            await Task.Delay(50);
-            StopRequested?.Invoke(this, EventArgs.Empty);
+            if (!_isClosingProgrammatically)
+            {
+                args.Cancel = true;
+                ShowStoppingState();
+                await Task.Delay(50);
+                StopRequested?.Invoke(this, EventArgs.Empty);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RecordingOverlay] OnOverlayClosing failed: {ex.Message}");
         }
     }
 
