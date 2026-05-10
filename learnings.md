@@ -709,6 +709,16 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** Following the existing Style flyout pattern (suppress events, debounce, `RebuildPreviewRendererAsync`) and extending `CursorStyle`/`CursorRenderer` minimally.
 
 **What didn't work:** Setting XAML default values (`IsChecked="True"`, `Value="2"`) on cursor flyout controls — these fire event handlers during `InitializeComponent()` before `_suppressCursorEvents` is set, causing `ApplyCursorStyleFromControls` → `RebuildPreviewRendererAsync` to race with `InitializePreviewAsync`, hanging the app after recording. Fix: remove all XAML defaults from flyout controls and set them only in `SyncCursorControlsToConfig()` under the suppress flag, matching the Style flyout pattern.
+
+---
+
+## Export — H.264 Corruption on AMD GPUs at High Resolutions
+
+**Feature/area:** Export pipeline (VideoEncoder)
+
+**Approaches tried:**
+
+1. **Switched `VideoEncodingQuality` from `HD1080p` to `Auto`** — Partially worked for recording pipeline but NOT for export (see below).
 2. **Scaled bitrate proportionally to pixel count** — The fixed 20 Mbps bitrate was tight for ~3K output. New `ComputeBitrate(width, height)` scales the base bitrate by `actualPixels / (1920×1080)`, so high-res exports get adequate bitrate. ✅
 3. **Reused flip buffer and scale render target across frames** — Per-frame allocation of `byte[~22MB]` and `CanvasRenderTarget` at ~3K caused excessive GC pressure and memory throughput on integrated GPUs with shared memory. Added `_flipBuffer` and `_scaleTarget` fields, allocated once and reused. ✅
 

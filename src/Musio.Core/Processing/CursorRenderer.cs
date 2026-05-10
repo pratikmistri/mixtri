@@ -408,11 +408,10 @@ public class CursorRenderer : IDisposable
             (speed - TiltVelocityThreshold) / (TiltVelocitySaturation - TiltVelocityThreshold),
             0f, 1f);
 
-        // Direction: tilt toward movement using atan2 of velocity,
-        // but scale down to a subtle lean rather than full rotation
-        float angle = MathF.Atan2(vx, -vy); // angle relative to "up" direction
-        // Dampen: only use a fraction of the angle, capped at max tilt
-        return Math.Clamp(angle * tiltFactor * 0.3f, -MaxTiltRadians, MaxTiltRadians);
+        // Use only the horizontal component so purely vertical motion produces ~0 tilt
+        float horizontalRatio = vx / speed;
+        float angle = horizontalRatio * MaxTiltRadians;
+        return angle * tiltFactor;
     }
 
     #endregion
@@ -426,10 +425,6 @@ public class CursorRenderer : IDisposable
         if (_cursorBitmap != null && _style.Type == CursorType.Custom)
         {
             DrawBitmapCursor(session, x, y, scale, opacity);
-        }
-        else if (_style.Type == CursorType.Touch)
-        {
-            DrawTouchCursor(session, x, y, scale, opacity);
         }
         else
         {
@@ -451,7 +446,6 @@ public class CursorRenderer : IDisposable
     }
 
     /// <summary>
-    /// Draws a translucent glass-like circle centered on the cursor position.
     /// Draws a translucent glass-like circle centered on the cursor position.
     /// Radial gradient is offset downward to create a crescent highlight,
     /// with a thin reversed gradient stroke (dark top, bright bottom).

@@ -417,7 +417,7 @@
                                 <StackPanel Spacing="4">
                                     <TextBlock Text="Color" FontSize="12" />
                                     <StackPanel x:Name="CursorColorPanel" Orientation="Horizontal" Spacing="8">
-                                        <RadioButton GroupName="CursorColor" Tag="#FFFFFF" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#FFFFFF" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="White">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>
@@ -437,7 +437,7 @@
                                                 </ControlTemplate>
                                             </RadioButton.Template>
                                         </RadioButton>
-                                        <RadioButton GroupName="CursorColor" Tag="#000000" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#000000" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="Black">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>
@@ -457,7 +457,7 @@
                                                 </ControlTemplate>
                                             </RadioButton.Template>
                                         </RadioButton>
-                                        <RadioButton GroupName="CursorColor" Tag="#FFD600" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#FFD600" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="Yellow">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>
@@ -477,7 +477,7 @@
                                                 </ControlTemplate>
                                             </RadioButton.Template>
                                         </RadioButton>
-                                        <RadioButton GroupName="CursorColor" Tag="#FF3B30" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#FF3B30" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="Red">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>
@@ -497,7 +497,7 @@
                                                 </ControlTemplate>
                                             </RadioButton.Template>
                                         </RadioButton>
-                                        <RadioButton GroupName="CursorColor" Tag="#007AFF" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#007AFF" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="Blue">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>
@@ -517,7 +517,7 @@
                                                 </ControlTemplate>
                                             </RadioButton.Template>
                                         </RadioButton>
-                                        <RadioButton GroupName="CursorColor" Tag="#34C759" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0">
+                                        <RadioButton GroupName="CursorColor" Tag="#34C759" Checked="CursorColor_Checked" MinWidth="0" MinHeight="0" Padding="0" AutomationProperties.Name="Green">
                                             <RadioButton.Template>
                                                 <ControlTemplate TargetType="RadioButton">
                                                     <Grid>

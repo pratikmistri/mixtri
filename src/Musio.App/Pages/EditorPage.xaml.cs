@@ -201,6 +201,8 @@ public sealed partial class EditorPage : Page
         {
             _styleDebounceTimer?.Stop();
             _styleDebounceTimer = null;
+            _cursorDebounceTimer?.Stop();
+            _cursorDebounceTimer = null;
 
             // Stop playback to halt timer ticks
             Preview.Pause();
