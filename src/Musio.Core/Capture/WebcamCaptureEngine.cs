@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Windows.Devices.Enumeration;
 using Windows.Media.Capture;
 using Windows.Media.MediaProperties;
@@ -50,23 +51,31 @@ public sealed class WebcamCaptureEngine : IDisposable
 
         _mediaCapture = new MediaCapture();
 
-        var settings = new MediaCaptureInitializationSettings
+        try
         {
-            VideoDeviceId = deviceId,
-            StreamingCaptureMode = StreamingCaptureMode.Video,
-        };
+            var settings = new MediaCaptureInitializationSettings
+            {
+                VideoDeviceId = deviceId,
+                StreamingCaptureMode = StreamingCaptureMode.Video,
+            };
 
-        await _mediaCapture.InitializeAsync(settings);
+            await _mediaCapture.InitializeAsync(settings);
 
-        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        var fileName = $"webcam_{timestamp}.mp4";
-        var folder = await StorageFolder.GetFolderFromPathAsync(outputFolder);
-        var file = await folder.CreateFileAsync(fileName, CreationCollisionOption.GenerateUniqueName);
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var fileName = $"webcam_{timestamp}.mp4";
+            var folder = await StorageFolder.GetFolderFromPathAsync(outputFolder);
+            var file = await folder.CreateFileAsync(fileName, CreationCollisionOption.GenerateUniqueName);
 
-        OutputFilePath = file.Path;
+            OutputFilePath = file.Path;
 
-        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD720p);
-        await _mediaCapture.StartRecordToStorageFileAsync(profile, file);
+            var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD720p);
+            await _mediaCapture.StartRecordToStorageFileAsync(profile, file);
+        }
+        catch
+        {
+            DisposeMediaCapture();
+            throw;
+        }
 
         IsRecording = true;
     }
@@ -91,8 +100,12 @@ public sealed class WebcamCaptureEngine : IDisposable
 
         if (IsRecording && _mediaCapture is not null)
         {
-            // Best-effort synchronous stop; callers should await StopAsync first.
-            try { _mediaCapture.StopRecordAsync().AsTask().GetAwaiter().GetResult(); }
+            try
+            {
+                var stopTask = _mediaCapture.StopRecordAsync().AsTask();
+                if (!stopTask.Wait(TimeSpan.FromSeconds(3)))
+                    Debug.WriteLine("[WebcamCaptureEngine] StopRecordAsync timed out in Dispose.");
+            }
             catch { /* best-effort */ }
             IsRecording = false;
         }

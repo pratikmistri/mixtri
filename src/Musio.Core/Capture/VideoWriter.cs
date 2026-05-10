@@ -80,6 +80,8 @@ public sealed class VideoWriter : IDisposable
     public VideoWriter(string outputPath, int width, int height, int fps,
         IDirect3DDevice? captureDevice = null, Rect? cropRect = null)
     {
+        if (fps <= 0) throw new ArgumentOutOfRangeException(nameof(fps), "FPS must be positive.");
+
         _outputPath = outputPath;
         _width = width;
         _height = height;
@@ -92,7 +94,9 @@ public sealed class VideoWriter : IDisposable
         else
             _device = CanvasDevice.GetSharedDevice();
 
-        _framesDir = Path.Combine(Path.GetDirectoryName(outputPath)!, ".frames");
+        var dir = Path.GetDirectoryName(outputPath)
+            ?? throw new ArgumentException("Output path must include a directory.", nameof(outputPath));
+        _framesDir = Path.Combine(dir, ".frames");
         Directory.CreateDirectory(_framesDir);
     }
 

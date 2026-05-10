@@ -145,7 +145,8 @@ public sealed class MouseHookRecorder : IDisposable
         _hookThread.Start();
 
         // Wait for the hook to be installed before returning.
-        _hookReady.Wait();
+        if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+            throw new InvalidOperationException("Mouse hook thread failed to start within 5 seconds.");
 
         if (_hookId == nint.Zero)
             throw new InvalidOperationException(
@@ -232,34 +233,41 @@ public sealed class MouseHookRecorder : IDisposable
 
     private nint HookCallback(int nCode, nint wParam, nint lParam)
     {
-        if (nCode >= 0 && !_paused)
+        try
         {
-            var hookData = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-            long ticks   = Stopwatch.GetTimestamp();
-            int msg      = (int)wParam;
-
-            ClassifyEvent(msg, hookData, ticks, out MouseEventKind kind, out MouseButton button,
-                          out short scrollDelta, out bool isClick, out bool isDown);
-
-            var sample = new MouseSample
+            if (nCode >= 0 && !_paused)
             {
-                TimestampTicks = ticks,
-                X              = hookData.pt.X,
-                Y              = hookData.pt.Y,
-                EventKind      = kind,
-                Button         = button,
-                ScrollDelta    = scrollDelta,
-            };
+                var hookData = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                long ticks   = Stopwatch.GetTimestamp();
+                int msg      = (int)wParam;
 
-            lock (_lock)
-            {
-                _samples.Add(sample);
+                ClassifyEvent(msg, hookData, ticks, out MouseEventKind kind, out MouseButton button,
+                              out short scrollDelta, out bool isClick, out bool isDown);
 
-                if (isClick)
+                var sample = new MouseSample
                 {
-                    _clicks.Add(new ClickEvent(ticks, hookData.pt.X, hookData.pt.Y, button, isDown));
+                    TimestampTicks = ticks,
+                    X              = hookData.pt.X,
+                    Y              = hookData.pt.Y,
+                    EventKind      = kind,
+                    Button         = button,
+                    ScrollDelta    = scrollDelta,
+                };
+
+                lock (_lock)
+                {
+                    _samples.Add(sample);
+
+                    if (isClick)
+                    {
+                        _clicks.Add(new ClickEvent(ticks, hookData.pt.X, hookData.pt.Y, button, isDown));
+                    }
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MouseHookRecorder] HookCallback error: {ex.Message}");
         }
 
         return CallNextHookEx(_hookId, nCode, wParam, lParam);
