@@ -163,33 +163,43 @@ public static class HardwareEncoderDetector
     private static int GetStringAttribute(IntPtr obj, ref Guid key, out string? value)
     {
         value = null;
-
-        // IMFAttributes is the first interface on activate objects; use vtable.
-        // GetString is at vtable index 30 for IMFAttributes.
-        // Simpler: use GetAllocatedString (index 33).
-        IntPtr vtable = Marshal.ReadIntPtr(obj);
-        // GetAllocatedString = slot 33
-        IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 33 * IntPtr.Size);
-        var getStr = Marshal.GetDelegateForFunctionPointer<GetAllocatedStringDelegate>(fnPtr);
-
-        int hr = getStr(obj, ref key, out IntPtr strPtr, out uint length);
-        if (hr >= 0 && strPtr != IntPtr.Zero)
+        try
         {
-            value = Marshal.PtrToStringUni(strPtr, (int)length);
-            Marshal.FreeCoTaskMem(strPtr);
-        }
+            IntPtr vtable = Marshal.ReadIntPtr(obj);
+            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 33 * IntPtr.Size);
+            var getStr = Marshal.GetDelegateForFunctionPointer<GetAllocatedStringDelegate>(fnPtr);
 
-        return hr;
+            int hr = getStr(obj, ref key, out IntPtr strPtr, out uint length);
+            if (hr >= 0 && strPtr != IntPtr.Zero)
+            {
+                value = Marshal.PtrToStringUni(strPtr, (int)length);
+                Marshal.FreeCoTaskMem(strPtr);
+            }
+
+            return hr;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[HardwareEncoderDetector] GetStringAttribute failed: {ex.Message}");
+            return unchecked((int)0x80004005); // E_FAIL
+        }
     }
 
     private static int GetGuidAttribute(IntPtr obj, ref Guid key, out Guid value)
     {
         value = Guid.Empty;
-        IntPtr vtable = Marshal.ReadIntPtr(obj);
-        // GetGUID = slot 20
-        IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 20 * IntPtr.Size);
-        var getGuid = Marshal.GetDelegateForFunctionPointer<GetGUIDDelegate>(fnPtr);
-        return getGuid(obj, ref key, out value);
+        try
+        {
+            IntPtr vtable = Marshal.ReadIntPtr(obj);
+            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 20 * IntPtr.Size);
+            var getGuid = Marshal.GetDelegateForFunctionPointer<GetGUIDDelegate>(fnPtr);
+            return getGuid(obj, ref key, out value);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[HardwareEncoderDetector] GetGuidAttribute failed: {ex.Message}");
+            return unchecked((int)0x80004005); // E_FAIL
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]

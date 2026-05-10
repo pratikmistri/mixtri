@@ -96,7 +96,14 @@ public sealed class AppSettings
     {
         if (_settings is not null)
         {
-            _settings.Values[key] = value;
+            try
+            {
+                _settings.Values[key] = value;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AppSettings] Failed to persist '{key}': {ex.Message}");
+            }
             return;
         }
 

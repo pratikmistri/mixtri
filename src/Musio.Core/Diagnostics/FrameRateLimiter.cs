@@ -59,7 +59,7 @@ public class FrameRateLimiter
                 // Spin-wait for sub-millisecond precision
                 while (_stopwatch.ElapsedTicks < targetTick)
                 {
-                    Thread.SpinWait(1);
+                    Thread.SpinWait(10);
                 }
                 break;
             }

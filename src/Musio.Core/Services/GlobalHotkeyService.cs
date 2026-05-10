@@ -43,13 +43,21 @@ public sealed class GlobalHotkeyService : IDisposable
     public void Initialize(IntPtr hwnd)
     {
         if (_hwnd != IntPtr.Zero) return;
-        _hwnd = hwnd;
 
-        _wndProcDelegate = HotkeyWndProc;
-        _originalWndProc = SetWindowLongPtr(
-            _hwnd,
-            GWLP_WNDPROC,
-            Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+        try
+        {
+            _hwnd = hwnd;
+            _wndProcDelegate = HotkeyWndProc;
+            _originalWndProc = SetWindowLongPtr(
+                _hwnd,
+                GWLP_WNDPROC,
+                Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[GlobalHotkeyService] Initialize failed: {ex.Message}");
+            _hwnd = IntPtr.Zero;
+        }
     }
 
     public bool RegisterHotkey(int id, ModifierKeys modifiers, int virtualKeyCode)
@@ -83,7 +91,14 @@ public sealed class GlobalHotkeyService : IDisposable
             int hotkeyId = wParam.ToInt32();
             if (_registeredIds.Contains(hotkeyId))
             {
-                HotkeyPressed?.Invoke(this, new HotkeyPressedEventArgs(hotkeyId));
+                try
+                {
+                    HotkeyPressed?.Invoke(this, new HotkeyPressedEventArgs(hotkeyId));
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[GlobalHotkeyService] HotkeyPressed handler failed: {ex.Message}");
+                }
                 return IntPtr.Zero;
             }
         }

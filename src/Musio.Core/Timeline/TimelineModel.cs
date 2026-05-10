@@ -62,7 +62,17 @@ public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)
     public TimeSpan EffectiveSourceStart => SourceStart ?? Start;
 
     /// <summary>Source duration (how much source content this clip represents).</summary>
-    public TimeSpan SourceDuration => TimeSpan.FromTicks((long)((End - Start).Ticks * SpeedFactor));
+    public TimeSpan SourceDuration
+    {
+        get
+        {
+            double ticks = (End - Start).Ticks * SpeedFactor;
+            if (double.IsNaN(ticks) || double.IsInfinity(ticks))
+                return End - Start;
+            ticks = Math.Clamp(ticks, long.MinValue, long.MaxValue);
+            return TimeSpan.FromTicks((long)ticks);
+        }
+    }
 }
 
 public record ZoomKeyframe

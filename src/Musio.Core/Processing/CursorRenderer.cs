@@ -60,9 +60,23 @@ public class CursorRenderer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(device);
 
+        // Dispose previous resources to prevent GPU leaks on reinit
+        _cursorBitmap?.Dispose();
+        _cursorBitmap = null;
+        _defaultCursorGeometry?.Dispose();
+        _defaultCursorGeometry = null;
+
         if (_style.Type == CursorType.Custom && !string.IsNullOrEmpty(_style.CustomImagePath))
         {
-            _cursorBitmap = await CanvasBitmap.LoadAsync(device, _style.CustomImagePath);
+            try
+            {
+                _cursorBitmap = await CanvasBitmap.LoadAsync(device, _style.CustomImagePath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[CursorRenderer] Failed to load custom cursor image: {ex.Message}");
+            }
         }
 
         // Always create the default geometry as fallback

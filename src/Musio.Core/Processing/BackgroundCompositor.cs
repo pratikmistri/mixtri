@@ -157,7 +157,7 @@ public sealed class BackgroundCompositor : IDisposable
 
             try
             {
-                _cachedBackgroundImage = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).GetAwaiter().GetResult();
+                _cachedBackgroundImage = CanvasBitmap.LoadAsync(session.Device, style.BackgroundImagePath).AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
                 _cachedBackgroundPath = style.BackgroundImagePath;
                 _cachedDevice = session.Device;
             }

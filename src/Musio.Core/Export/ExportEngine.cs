@@ -294,6 +294,7 @@ public class ExportEngine
             frameReader?.Dispose();
             sourceComp?.Clips.Clear();
             webcamComp?.Clips.Clear();
+            sourceClip = null;
         }
     }
 

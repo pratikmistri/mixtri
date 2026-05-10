@@ -39,6 +39,8 @@ public class MouseRecordingData
     public long EndTimestampTicks { get; init; }
     public double TickFrequency { get; init; }
 
-    public TimeSpan Duration => TimeSpan.FromTicks(
-        (long)((EndTimestampTicks - StartTimestampTicks) / TickFrequency * TimeSpan.TicksPerSecond));
+    public TimeSpan Duration => TickFrequency > 0
+        ? TimeSpan.FromTicks(
+            (long)((EndTimestampTicks - StartTimestampTicks) / TickFrequency * TimeSpan.TicksPerSecond))
+        : TimeSpan.Zero;
 }

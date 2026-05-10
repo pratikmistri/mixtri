@@ -110,9 +110,15 @@ public class SpeechToText : IDisposable
 
             progress?.Report(0.5);
 
-            // Wait for recognition to complete or cancellation
+            // Wait for recognition to complete, cancellation, or timeout
             using var registration = ct.Register(() => tcs.TrySetCanceled(ct));
-            await tcs.Task;
+            var timeoutTask = Task.Delay(TimeSpan.FromMinutes(10), ct);
+            if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+            {
+                tcs.TrySetCanceled();
+                throw new TimeoutException("Speech recognition timed out after 10 minutes.");
+            }
+            await tcs.Task; // propagate any exception
 
             try
             {
