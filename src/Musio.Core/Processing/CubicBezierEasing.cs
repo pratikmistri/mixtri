@@ -69,6 +69,9 @@ public static class CubicBezierEasing
     /// <summary>Ease-out: cubic-bezier(0, 0, 0.2, 1)</summary>
     public static float EaseOut(float t) => Evaluate(t, 0f, 0f, 0.2f, 1f);
 
+    /// <summary>Ease-in: cubic-bezier(0.4, 0, 1, 1)</summary>
+    public static float EaseIn(float t) => Evaluate(t, 0.4f, 0f, 1f, 1f);
+
     /// <summary>Ease-in-out: cubic-bezier(0.4, 0, 0.2, 1)</summary>
     public static float EaseInOut(float t) => Evaluate(t, 0.4f, 0f, 0.2f, 1f);
 

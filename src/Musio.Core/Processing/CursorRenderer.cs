@@ -1,4 +1,5 @@
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Geometry;
 using Musio.Core.Models;
 using System.Numerics;
@@ -7,13 +8,15 @@ using Windows.UI;
 
 namespace Musio.Core.Processing;
 
-public enum CursorType { Default, System, Custom }
+public enum CursorType { Default, System, Custom, Touch }
 
 public record CursorStyle
 {
     public CursorType Type { get; init; } = CursorType.Default;
     public string? CustomImagePath { get; init; }
-    public float Scale { get; init; } = 1.0f;         // 0.5 - 3.0
+    public float Scale { get; init; } = 3.0f;         // 1.0 - 6.0
+    public string Color { get; init; } = "#FFFFFF";
+    public bool TiltEnabled { get; init; } = true;
     public bool MotionBlurEnabled { get; init; } = false;
     public float MotionBlurStrength { get; init; } = 0.5f;
     public bool AutoHideEnabled { get; init; } = true;
@@ -76,6 +79,13 @@ public class CursorRenderer : IDisposable
         double currentTimeSeconds,
         double lastMoveTimeSeconds)
     {
+        // Touch cursor: render at click positions only (float up, tap, fade out)
+        if (_style.Type == CursorType.Touch)
+        {
+            RenderTouchClicks(session, activeClicks, currentTimeSeconds);
+            return;
+        }
+
         float autoHideOpacity = GetAutoHideOpacity(currentTimeSeconds, lastMoveTimeSeconds);
         if (autoHideOpacity <= 0f) return;
 
@@ -86,7 +96,7 @@ public class CursorRenderer : IDisposable
             ? GetClickScale(currentTimeSeconds, activeClicks, TickFrequency)
             : 1.0f;
 
-        float finalScale = Math.Clamp(_style.Scale, 0.5f, 8.0f) * clickScale;
+        float finalScale = Math.Clamp(_style.Scale, 1.0f, 6.0f) * clickScale;
 
         // Motion blur ghosts (drawn behind cursor)
         if (_style.MotionBlurEnabled)
@@ -94,8 +104,175 @@ public class CursorRenderer : IDisposable
             RenderMotionBlur(session, position, finalScale, autoHideOpacity);
         }
 
+        // Compute velocity-based tilt for cinematic feel
+        float tiltAngle = _style.TiltEnabled ? ComputeTiltAngle(position) : 0f;
+
         // Main cursor
-        RenderCursor(session, x, y, finalScale, autoHideOpacity);
+        RenderCursor(session, x, y, finalScale, autoHideOpacity, tiltAngle);
+    }
+
+    // Touch animation durations
+    private const float TouchPreRoll = 1.0f;             // start animating 1s before click
+    private const float TouchTapDownDuration = 0.06f;    // scale down (tap press)
+    private const float TouchTapUpDuration = 0.10f;      // scale back up (tap release)
+    private const float TouchFadeOutDuration = 0.25f;    // fade away after tap
+    private const float TouchTotalDuration = TouchPreRoll + TouchTapDownDuration + TouchTapUpDuration + TouchFadeOutDuration;
+    private const float TouchFloatDistance = 40f;         // pixels to float up
+    private const float TouchTapScale = 0.6f;            // scale down to 60% on tap
+
+    /// <summary>
+    /// Renders touch indicators at click-down positions. Consecutive clicks whose
+    /// animations would overlap are merged into a single "chain" so that only one
+    /// touch cursor is ever visible: it floats in, taps at each click position
+    /// (sliding between them), then fades out after the last tap.
+    /// </summary>
+    private void RenderTouchClicks(
+        CanvasDrawingSession session,
+        List<ClickEvent> activeClicks,
+        double currentTimeSeconds)
+    {
+        if (activeClicks is null || activeClicks.Count == 0 || TickFrequency <= 0)
+            return;
+
+        float baseScale = Math.Clamp(_style.Scale, 1.0f, 6.0f);
+
+        // Collect click-down events with computed click times (already sorted by timestamp)
+        var downClicks = new List<(ClickEvent Click, double ClickTime)>();
+        foreach (var click in activeClicks)
+        {
+            if (!click.IsDown) continue;
+            double clickTime = (click.TimestampTicks - StartTimestampTicks) / TickFrequency;
+            downClicks.Add((click, clickTime));
+        }
+
+        if (downClicks.Count == 0) return;
+
+        // Build chains of temporally overlapping clicks and render each chain.
+        // Two consecutive clicks chain when their gap < TouchTotalDuration,
+        // meaning the second click's independent animation would overlap the first's.
+        int chainStart = 0;
+        for (int i = 1; i <= downClicks.Count; i++)
+        {
+            bool endChain = i == downClicks.Count ||
+                downClicks[i].ClickTime - downClicks[i - 1].ClickTime >= TouchTotalDuration;
+
+            if (endChain)
+            {
+                RenderTouchChain(session, downClicks, chainStart, i, currentTimeSeconds, baseScale);
+                chainStart = i;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Renders a single chained touch animation spanning clicks[startIdx..endIdx).
+    /// Timeline: float-in → [tap → slide]* → tap → fade-out.
+    /// </summary>
+    private void RenderTouchChain(
+        CanvasDrawingSession session,
+        List<(ClickEvent Click, double ClickTime)> clicks,
+        int startIdx, int endIdx,
+        double currentTimeSeconds,
+        float baseScale)
+    {
+        const double tapDuration = TouchTapDownDuration + TouchTapUpDuration;
+
+        var first = clicks[startIdx];
+        var last = clicks[endIdx - 1];
+
+        double chainAnimStart = first.ClickTime - TouchPreRoll;
+        double chainAnimEnd = last.ClickTime + tapDuration + TouchFadeOutDuration;
+
+        if (currentTimeSeconds < chainAnimStart || currentTimeSeconds > chainAnimEnd)
+            return;
+
+        float x, y, opacity, scale;
+        float yOffset = 0;
+
+        if (currentTimeSeconds < first.ClickTime)
+        {
+            // Pre-roll: float up into first click position
+            double elapsed = currentTimeSeconds - chainAnimStart;
+            float t = (float)(elapsed / TouchPreRoll);
+            float eased = CubicBezierEasing.EaseOut(t);
+
+            x = first.Click.X;
+            y = first.Click.Y;
+            yOffset = TouchFloatDistance * baseScale * (1f - eased);
+            opacity = eased;
+            scale = baseScale * (0.7f + 0.3f * eased);
+        }
+        else if (currentTimeSeconds >= last.ClickTime + tapDuration)
+        {
+            // Fade out after last tap
+            double fadeElapsed = currentTimeSeconds - (last.ClickTime + tapDuration);
+            float t = (float)(fadeElapsed / TouchFadeOutDuration);
+            float eased = CubicBezierEasing.EaseIn(t);
+
+            x = last.Click.X;
+            y = last.Click.Y;
+            opacity = 1f - eased;
+            scale = baseScale * (1f + 0.1f * eased);
+        }
+        else
+        {
+            // Tap / transition region — walk the chain to find the active segment
+            x = first.Click.X;
+            y = first.Click.Y;
+            opacity = 1f;
+            scale = baseScale;
+
+            for (int i = startIdx; i < endIdx; i++)
+            {
+                var (click, clickTime) = clicks[i];
+                double tapDownEnd = clickTime + TouchTapDownDuration;
+                double tapEnd = clickTime + tapDuration;
+
+                if (currentTimeSeconds < tapDownEnd)
+                {
+                    // Tap down
+                    float t = (float)((currentTimeSeconds - clickTime) / TouchTapDownDuration);
+                    float eased = CubicBezierEasing.EaseInOut(t);
+
+                    x = click.X;
+                    y = click.Y;
+                    scale = baseScale * (1f - (1f - TouchTapScale) * eased);
+                    break;
+                }
+
+                if (currentTimeSeconds < tapEnd)
+                {
+                    // Tap up — spring back
+                    float t = (float)((currentTimeSeconds - tapDownEnd) / TouchTapUpDuration);
+                    float eased = CubicBezierEasing.SpringOut(t);
+
+                    x = click.X;
+                    y = click.Y;
+                    scale = baseScale * (TouchTapScale + (1f - TouchTapScale) * eased);
+                    break;
+                }
+
+                if (i + 1 < endIdx)
+                {
+                    var nextClick = clicks[i + 1];
+                    if (currentTimeSeconds < nextClick.ClickTime)
+                    {
+                        // Slide from this click to the next
+                        double slideDuration = nextClick.ClickTime - tapEnd;
+                        float t = slideDuration > 0
+                            ? Math.Clamp((float)((currentTimeSeconds - tapEnd) / slideDuration), 0f, 1f)
+                            : 1f;
+                        float eased = CubicBezierEasing.EaseInOut(t);
+
+                        x = click.X + (nextClick.Click.X - click.X) * eased;
+                        y = click.Y + (nextClick.Click.Y - click.Y) * eased;
+                        break;
+                    }
+                }
+            }
+        }
+
+        DrawTouchCursor(session, x, y + yOffset, scale, opacity);
     }
 
     /// <summary>
@@ -208,9 +385,40 @@ public class CursorRenderer : IDisposable
 
     #endregion
 
+    #region Velocity Tilt
+
+    private const float MaxTiltRadians = 0.25f;          // ~14° max tilt
+    private const float TiltVelocityThreshold = 50f;     // px/s before tilt starts
+    private const float TiltVelocitySaturation = 800f;   // px/s at max tilt
+
+    /// <summary>
+    /// Computes a slight rotation angle based on horizontal velocity,
+    /// tilting the cursor toward the direction of movement.
+    /// </summary>
+    private static float ComputeTiltAngle(SmoothedPosition position)
+    {
+        float vx = (float)position.VelocityX;
+        float vy = (float)position.VelocityY;
+        float speed = MathF.Sqrt(vx * vx + vy * vy);
+
+        if (speed < TiltVelocityThreshold) return 0f;
+
+        // Tilt based on horizontal velocity component (left/right lean)
+        float tiltFactor = Math.Clamp(
+            (speed - TiltVelocityThreshold) / (TiltVelocitySaturation - TiltVelocityThreshold),
+            0f, 1f);
+
+        // Use only the horizontal component so purely vertical motion produces ~0 tilt
+        float horizontalRatio = vx / speed;
+        float angle = horizontalRatio * MaxTiltRadians;
+        return angle * tiltFactor;
+    }
+
+    #endregion
+
     #region Cursor Drawing
 
-    private void RenderCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity)
+    private void RenderCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f)
     {
         if (opacity <= 0f) return;
 
@@ -220,7 +428,7 @@ public class CursorRenderer : IDisposable
         }
         else
         {
-            DrawDefaultCursor(session, x, y, scale, opacity);
+            DrawDefaultCursor(session, x, y, scale, opacity, tiltAngle);
         }
     }
 
@@ -238,10 +446,55 @@ public class CursorRenderer : IDisposable
     }
 
     /// <summary>
-    /// Draws a built-in default cursor as a white arrow with black outline (~32x32 logical pixels).
-    /// Uses <see cref="CanvasPathBuilder"/> to create the classic pointer arrow shape.
+    /// Draws a translucent glass-like circle centered on the cursor position.
+    /// Radial gradient is offset downward to create a crescent highlight,
+    /// with a thin reversed gradient stroke (dark top, bright bottom).
     /// </summary>
-    public void DrawDefaultCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity)
+    private void DrawTouchCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity)
+    {
+        if (opacity <= 0f) return;
+
+        float radius = 12f * scale;
+        var baseColor = ParseCursorColor(1f);
+
+        // Radial gradient fill offset downward — bright spot below center creates a crescent
+        float offsetY = radius * 0.45f;
+        var fillStops = new CanvasGradientStop[]
+        {
+            new() { Position = 0.0f, Color = Color.FromArgb((byte)(opacity * 160), baseColor.R, baseColor.G, baseColor.B) },
+            new() { Position = 0.5f, Color = Color.FromArgb((byte)(opacity * 90), baseColor.R, baseColor.G, baseColor.B) },
+            new() { Position = 1.0f, Color = Color.FromArgb((byte)(opacity * 20), baseColor.R, baseColor.G, baseColor.B) },
+        };
+        using var fillBrush = new CanvasRadialGradientBrush(session, fillStops)
+        {
+            Center = new Vector2(x, y + offsetY),
+            RadiusX = radius,
+            RadiusY = radius,
+        };
+        session.FillCircle(x, y, radius, fillBrush);
+
+        // Thin reversed gradient stroke: subtle dark top → bright highlight bottom
+        byte darkA = (byte)(opacity * 50);
+        byte brightA = (byte)(opacity * 180);
+        var strokeStops = new CanvasGradientStop[]
+        {
+            new() { Position = 0.0f, Color = Color.FromArgb(darkA, baseColor.R, baseColor.G, baseColor.B) },
+            new() { Position = 0.6f, Color = Color.FromArgb((byte)(opacity * 100), 255, 255, 255) },
+            new() { Position = 1.0f, Color = Color.FromArgb(brightA, 255, 255, 255) },
+        };
+        using var strokeBrush = new CanvasLinearGradientBrush(session, strokeStops)
+        {
+            StartPoint = new Vector2(x, y - radius),
+            EndPoint = new Vector2(x, y + radius),
+        };
+        session.DrawCircle(x, y, radius, strokeBrush, 1.0f * scale);
+    }
+
+    /// <summary>
+    /// Draws a built-in default cursor as a colored arrow with contrasting outline (~32x32 logical pixels).
+    /// Applies velocity-based tilt rotation for a cinematic feel.
+    /// </summary>
+    public void DrawDefaultCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f)
     {
         if (opacity <= 0f) return;
 
@@ -251,16 +504,43 @@ public class CursorRenderer : IDisposable
         var savedTransform = session.Transform;
         session.Transform =
             Matrix3x2.CreateScale(scale)
+            * Matrix3x2.CreateRotation(tiltAngle)
             * Matrix3x2.CreateTranslation(x, y)
             * savedTransform;
 
-        var fillColor = Color.FromArgb((byte)(opacity * 255), 255, 255, 255);
-        var strokeColor = Color.FromArgb((byte)(opacity * 255), 30, 30, 30);
+        var fillColor = ParseCursorColor(opacity);
+        var strokeColor = GetContrastOutlineColor(fillColor, opacity);
 
         session.FillGeometry(_defaultCursorGeometry, fillColor);
         session.DrawGeometry(_defaultCursorGeometry, strokeColor, 1.5f / scale);
 
         session.Transform = savedTransform;
+    }
+
+    /// <summary>Parses <see cref="CursorStyle.Color"/> hex string into a <see cref="Color"/> with the given opacity.</summary>
+    private Color ParseCursorColor(float opacity)
+    {
+        byte a = (byte)(opacity * 255);
+        string hex = (_style.Color ?? "#FFFFFF").TrimStart('#');
+        if (hex.Length == 6 &&
+            byte.TryParse(hex.AsSpan(0, 2), System.Globalization.NumberStyles.HexNumber, null, out byte r) &&
+            byte.TryParse(hex.AsSpan(2, 2), System.Globalization.NumberStyles.HexNumber, null, out byte g) &&
+            byte.TryParse(hex.AsSpan(4, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b))
+        {
+            return Color.FromArgb(a, r, g, b);
+        }
+        return Color.FromArgb(a, 255, 255, 255); // fallback white
+    }
+
+    /// <summary>Returns a contrasting outline: black for light fills, white for dark fills.</summary>
+    private static Color GetContrastOutlineColor(Color fill, float opacity)
+    {
+        // Perceived luminance (ITU-R BT.601)
+        double lum = 0.299 * fill.R + 0.587 * fill.G + 0.114 * fill.B;
+        byte a = (byte)(opacity * 255);
+        return lum > 140
+            ? Color.FromArgb(a, 30, 30, 30)     // dark outline for light fills
+            : Color.FromArgb(a, 220, 220, 220);  // light outline for dark fills
     }
 
     /// <summary>
