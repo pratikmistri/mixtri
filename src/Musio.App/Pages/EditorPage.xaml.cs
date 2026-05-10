@@ -47,6 +47,10 @@ public sealed partial class EditorPage : Page
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
 
+    // Cursor style editing state
+    private DispatcherTimer? _cursorDebounceTimer;
+    private bool _suppressCursorEvents;
+
     // Webcam overlay drag state
     private bool _webcamDragging;
     private Windows.Foundation.Point _webcamDragStart;
@@ -318,7 +322,7 @@ public sealed partial class EditorPage : Page
             SmoothingStrength = SmoothingStrength.Smooth,
             Cursor = new CursorStyle
             {
-                Scale = 2.0f,
+                Scale = 3.0f,
                 ClickAnimationEnabled = true,
                 AutoHideEnabled = true,
                 AutoHideDelaySeconds = 3.0f,
@@ -382,6 +386,9 @@ public sealed partial class EditorPage : Page
 
         // Show style controls for Window and Region captures
         InitializeStyleControls(project, config);
+
+        // Show cursor controls when cursor data is available
+        InitializeCursorControls(project, config);
 
         _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
@@ -1471,6 +1478,118 @@ public sealed partial class EditorPage : Page
     }
 
     // ─── Background Style Editing ───────────────────────────────────────
+
+    // ─── Cursor Style Editing ───────────────────────────────────────────
+
+    private void InitializeCursorControls(Project project, CompositionConfig config)
+    {
+        bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
+        var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
+        CursorButton.Visibility = vis;
+        CursorSeparator.Visibility = vis;
+
+        if (!hasCursor) return;
+
+        SyncCursorControlsToConfig(config.Cursor);
+    }
+
+    private void SyncCursorControlsToConfig(CursorStyle cursor)
+    {
+        _suppressCursorEvents = true;
+        try
+        {
+            // Cursor type
+            CursorTypeMouse.IsChecked = cursor.Type != CursorType.Touch;
+            CursorTypeTouch.IsChecked = cursor.Type == CursorType.Touch;
+
+            // Size
+            CursorSizeSlider.Value = cursor.Scale;
+
+            // Color — find matching radio button by Tag
+            string cursorColor = (cursor.Color ?? "#FFFFFF").ToUpperInvariant();
+            bool found = false;
+            foreach (var child in CursorColorPanel.Children)
+            {
+                if (child is RadioButton rb && rb.Tag is string tag)
+                {
+                    bool match = string.Equals(tag, cursorColor, StringComparison.OrdinalIgnoreCase);
+                    rb.IsChecked = match;
+                    if (match) found = true;
+                }
+            }
+            if (!found && CursorColorPanel.Children.FirstOrDefault() is RadioButton first)
+                first.IsChecked = true;
+        }
+        finally
+        {
+            _suppressCursorEvents = false;
+        }
+    }
+
+    private void CursorType_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressCursorEvents) return;
+        ApplyCursorStyleFromControls();
+    }
+
+    private void CursorSizeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressCursorEvents) return;
+        ScheduleCursorUpdate();
+    }
+
+    private void CursorColor_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressCursorEvents) return;
+        ApplyCursorStyleFromControls();
+    }
+
+    private void ScheduleCursorUpdate()
+    {
+        if (_cursorDebounceTimer is null)
+        {
+            _cursorDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _cursorDebounceTimer.Tick += (_, _) =>
+            {
+                _cursorDebounceTimer.Stop();
+                ApplyCursorStyleFromControls();
+            };
+        }
+        _cursorDebounceTimer.Stop();
+        _cursorDebounceTimer.Start();
+    }
+
+    private void ApplyCursorStyleFromControls()
+    {
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is null) return;
+
+        var cursorType = CursorTypeTouch.IsChecked == true ? CursorType.Touch : CursorType.Default;
+
+        string color = "#FFFFFF";
+        foreach (var child in CursorColorPanel.Children)
+        {
+            if (child is RadioButton rb && rb.IsChecked == true && rb.Tag is string tag)
+            {
+                color = tag;
+                break;
+            }
+        }
+
+        var newCursor = config.Cursor with
+        {
+            Type = cursorType,
+            Scale = (float)CursorSizeSlider.Value,
+            Color = color,
+        };
+
+        config = config with { Cursor = newCursor };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    // ─── Background Style Editing (continued) ───────────────────────────
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {

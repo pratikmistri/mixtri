@@ -691,6 +691,24 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **Approaches tried:**
 
 1. **Replaced `MediaEncodingProfile.CreateMp4(GetProfileQuality())` with `VideoEncodingQuality.Auto`** — Worked. The previous code used quality presets (`HD1080p`, `HD720p`, etc.) that constrain H.264 Level/DPB to the preset resolution. On high-DPI displays (2.8K → ~2976×1896 compositor output), the Level 4.0 macroblock limit (8,192) was exceeded by 2.7× (22,134 actual), causing the AMD AMF encoder to produce corrupted reference frames → ghosting/trailing artifacts. Using `Auto` lets the encoder auto-determine the correct Level (5.1+). ✅
+
+---
+
+## Cursor Options Flyout
+
+**Feature/area:** Cursor customization (CursorRenderer, CursorStyle, EditorPage)
+
+**Approaches tried:**
+
+1. **Added `Touch` to `CursorType` enum and `Color` property to `CursorStyle` record** — Worked. Extended the existing record without renaming/removing existing enum values to preserve backward compatibility. ✅
+2. **Added `DrawTouchCursor()` method to `CursorRenderer`** — Worked. Draws a filled circle centered on the cursor position using `FillCircle`/`DrawCircle`. Centering on `(x, y)` aligns the touch indicator with the actual pointer hotspot. ✅
+3. **Used contrast-aware outline color** — Worked. `GetContrastOutlineColor()` uses ITU-R BT.601 perceived luminance to choose black outline for light fills and white outline for dark fills, ensuring cursor visibility on any background. ✅
+4. **Added Cursor flyout to EditorPage toolbar (same pattern as Style flyout)** — Worked. RadioButtons for Mouse/Touch type, Slider for size, 6 preset color circles as templated RadioButtons with selection ring. Debounce timer for slider, immediate apply for discrete choices. ✅
+5. **Color preset circles as templated RadioButtons** — Worked. Each color circle is a `RadioButton` with a custom `ControlTemplate` containing an `Ellipse` for the color fill and a `SelectionRing` ellipse toggled via `VisualState`. Accessible and keyboard-navigable. ✅
+
+**What worked:** Following the existing Style flyout pattern (suppress events, debounce, `RebuildPreviewRendererAsync`) and extending `CursorStyle`/`CursorRenderer` minimally.
+
+**What didn't work:** Setting XAML default values (`IsChecked="True"`, `Value="2"`) on cursor flyout controls — these fire event handlers during `InitializeComponent()` before `_suppressCursorEvents` is set, causing `ApplyCursorStyleFromControls` → `RebuildPreviewRendererAsync` to race with `InitializePreviewAsync`, hanging the app after recording. Fix: remove all XAML defaults from flyout controls and set them only in `SyncCursorControlsToConfig()` under the suppress flag, matching the Style flyout pattern.
 2. **Scaled bitrate proportionally to pixel count** — The fixed 20 Mbps bitrate was tight for ~3K output. New `ComputeBitrate(width, height)` scales the base bitrate by `actualPixels / (1920×1080)`, so high-res exports get adequate bitrate. ✅
 3. **Reused flip buffer and scale render target across frames** — Per-frame allocation of `byte[~22MB]` and `CanvasRenderTarget` at ~3K caused excessive GC pressure and memory throughput on integrated GPUs with shared memory. Added `_flipBuffer` and `_scaleTarget` fields, allocated once and reused. ✅
 

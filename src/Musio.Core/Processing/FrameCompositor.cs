@@ -381,10 +381,9 @@ public class FrameCompositor : IDisposable
 
         float padding = _config.Background.Padding;
 
-        // Use post-composite zoom only when padding AND zoom are both active.
-        // This avoids the extra buffer copy for the vast majority of frames
-        // where zoom is 1.0, keeping export performance unchanged.
-        if (padding > 0 && zoomState.ZoomLevel > 1.01f)
+        // Use post-composite zoom when zoom is active — this pre-composes the
+        // cursor onto the frame before zooming, so the cursor scales with zoom.
+        if (zoomState.ZoomLevel > 1.01f)
             return ComposeFramePostCompositeZoom(
                 sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
 
