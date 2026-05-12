@@ -1182,3 +1182,18 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** All five - minimal surgical fixes.
 
 **What didn't work:** dotnet CLI build fails due to missing WinAppSDK PriGen task in .NET 10 SDK; must use VS MSBuild to build.
+
+---
+
+## Window/Region Selector — Escape Key Not Working
+
+**Feature/area:** WindowSelectorOverlay + RegionSelectorOverlay (Escape to cancel selection)
+
+**Approaches tried:**
+
+1. **`Activated` event handler + `KeyDown` fallback** — Did not fix the issue. XAML `Focus(FocusState.Programmatic)` and `KeyboardAccelerator`/`KeyDown` all depend on XAML keyboard focus, which is not reliably established on a borderless maximized overlay window before the user clicks. ❌
+2. **Win32 low-level keyboard hook (`WH_KEYBOARD_LL`)** — Worked. Installs a `SetWindowsHookEx` hook in `ShowAsync` that intercepts `VK_ESCAPE` at the OS level, completely bypassing XAML focus. Hook is cleaned up in the `finally` block. Applied to both overlays. ✅
+
+**What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
+
+**What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) — XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.

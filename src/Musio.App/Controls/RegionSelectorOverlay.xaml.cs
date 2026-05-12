@@ -36,6 +36,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private int _screenshotWidth;
     private int _screenshotHeight;
 
+    // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
+    private IntPtr _keyboardHook;
+    private LowLevelKeyboardProc? _hookProc;
+
     // Cached cursors to avoid allocating on every pointer-move
     private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
     private static readonly Dictionary<InputSystemCursorShape, InputSystemCursor> _cursorCache = new();
@@ -121,9 +125,21 @@ public sealed partial class RegionSelectorOverlay : UserControl
             ScreenshotImage.Source = screenshotSource;
 
         _hostWindow.Closed += (_, _) => _tcs.TrySetResult(null);
+
+        // Install low-level keyboard hook so Escape works even without XAML focus
+        _hookProc = EscapeHookCallback;
+        _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+
         _hostWindow.Activate();
 
         var result = await _tcs.Task;
+
+        if (_keyboardHook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_keyboardHook);
+            _keyboardHook = IntPtr.Zero;
+        }
+        _hookProc = null;
 
         try { _hostWindow.Close(); }
         catch { /* already closed */ }
@@ -659,6 +675,20 @@ public sealed partial class RegionSelectorOverlay : UserControl
         args.Handled = true;
     }
 
+    private IntPtr EscapeHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && wParam == WM_KEYDOWN)
+        {
+            int vkCode = Marshal.ReadInt32(lParam);
+            if (vkCode == VK_ESCAPE)
+            {
+                DispatcherQueue.TryEnqueue(CancelSelection);
+                return (IntPtr)1;
+            }
+        }
+        return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+    }
+
     private void OnEnterPressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (_hasSelection)
@@ -718,6 +748,12 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private const int SM_CYVIRTUALSCREEN = 79;
     private const uint SRCCOPY = 0x00CC0020;
 
+    private const int WH_KEYBOARD_LL = 13;
+    private static readonly IntPtr WM_KEYDOWN = 0x0100;
+    private const int VK_ESCAPE = 0x1B;
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct BITMAPINFO
     {
@@ -768,6 +804,15 @@ public sealed partial class RegionSelectorOverlay : UserControl
     [DllImport("gdi32.dll")]
     private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint lines,
         [Out] byte[] bits, ref BITMAPINFO bmi, uint usage);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     #endregion
 }

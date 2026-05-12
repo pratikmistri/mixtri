@@ -26,11 +26,16 @@ public sealed partial class WindowSelectorOverlay : UserControl
     // Virtual desktop bounds (physical pixels)
     private int _vdLeft, _vdTop, _vdWidth, _vdHeight;
 
+    // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
+    private IntPtr _keyboardHook;
+    private LowLevelKeyboardProc? _hookProc;
+
     public WindowSelectorOverlay()
     {
         InitializeComponent();
         Loaded += OnLoaded;
         SizeChanged += OnSizeChanged;
+        KeyDown += OnKeyDown;
         ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.Hand);
     }
 
@@ -93,12 +98,29 @@ public sealed partial class WindowSelectorOverlay : UserControl
                 ScreenshotImage.Source = screenshotSource;
 
             _hostWindow.Closed += (_, _) => _tcs.TrySetResult(null);
+            _hostWindow.Activated += (_, args) =>
+            {
+                if (args.WindowActivationState != WindowActivationState.Deactivated)
+                    DispatcherQueue.TryEnqueue(() => Focus(FocusState.Programmatic));
+            };
+
+            // Install low-level keyboard hook so Escape works even without XAML focus
+            _hookProc = EscapeHookCallback;
+            _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+
             _hostWindow.Activate();
 
             return await _tcs.Task;
         }
         finally
         {
+            if (_keyboardHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_keyboardHook);
+                _keyboardHook = IntPtr.Zero;
+            }
+            _hookProc = null;
+
             try { _hostWindow?.Close(); }
             catch { /* already closed */ }
             _hostWindow = null;
@@ -338,6 +360,29 @@ public sealed partial class WindowSelectorOverlay : UserControl
         args.Handled = true;
     }
 
+    private void OnKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            _tcs?.TrySetResult(null);
+            e.Handled = true;
+        }
+    }
+
+    private IntPtr EscapeHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && wParam == WM_KEYDOWN)
+        {
+            int vkCode = Marshal.ReadInt32(lParam);
+            if (vkCode == VK_ESCAPE)
+            {
+                DispatcherQueue.TryEnqueue(() => _tcs?.TrySetResult(null));
+                return (IntPtr)1;
+            }
+        }
+        return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+    }
+
     #region Desktop Screenshot
 
     /// <summary>
@@ -423,7 +468,12 @@ public sealed partial class WindowSelectorOverlay : UserControl
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int DWMWA_CLOAKED = 14;
 
+    private const int WH_KEYBOARD_LL = 13;
+    private static readonly IntPtr WM_KEYDOWN = 0x0100;
+    private const int VK_ESCAPE = 0x1B;
+
     private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -508,6 +558,15 @@ public sealed partial class WindowSelectorOverlay : UserControl
     [DllImport("gdi32.dll")]
     private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint lines,
         [Out] byte[] bits, ref BITMAPINFO bmi, uint usage);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     #endregion
 }
