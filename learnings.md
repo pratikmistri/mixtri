@@ -1197,3 +1197,18 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
 
 **What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) — XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.
+
+
+---
+
+## Perf — FrameCompositor.CropSourceFrame Interpolation
+
+**Approaches tried:**
+
+1. **Adaptive interpolation: Linear when source→content scale is within ±5% of 1:1, otherwise HighQualityCubic** — Avoids running a 4-tap bicubic filter for every pixel on every frame in the common case (AspectRatio.Auto with no zoom, where viewport == content size, scale = exactly 1.0). Mirrors the same adaptive choice already present in ComposeFramePostCompositeZoom. ✅
+
+**What worked:** A small Math.Abs(scale - 1.0) < 0.05 guard around the interpolation choice. Hits every frame in both preview and export pipelines, and is visually equivalent to cubic at 1:1.
+
+**What didn't work:** N/A (single-pass change).
+
+---
