@@ -1197,3 +1197,20 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
 
 **What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) â€” XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.
+
+
+---
+
+## Stop-Trigger Click Removal from Recording Data
+
+**Feature/area:** MouseHookRecorder, RecordingOverlayWindow, recording stop flow
+
+**Approaches tried:**
+
+1. **Timestamp-based trim with `NotifyStopRequested()`** — Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
+
+**What worked:** Signaling the mouse recorder from the overlay's `Stop_Click` and `OnOverlayClosing` handlers (earliest possible point in the stop flow), then trimming the stop-trigger click in `GetRecordedData()`. The 200ms threshold is generous enough for UI dispatch delay (~3-10ms typical) while avoiding false positives.
+
+**What didn't work:** N/A — first approach worked.
+
+**Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
