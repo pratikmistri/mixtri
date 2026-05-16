@@ -132,6 +132,7 @@ public sealed partial class RecordingOverlayWindow : Window
     {
         try
         {
+            _viewModel.NotifyStopRequested();
             StopButton.IsEnabled = false;
             ShowStoppingState();
 
@@ -174,6 +175,7 @@ public sealed partial class RecordingOverlayWindow : Window
         {
             if (!_isClosingProgrammatically)
             {
+                _viewModel.NotifyStopRequested();
                 args.Cancel = true;
                 ShowStoppingState();
                 await Task.Delay(50);

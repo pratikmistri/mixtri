@@ -106,6 +106,7 @@ public sealed class MouseHookRecorder : IDisposable
 
     private long _startTicks;
     private long _endTicks;
+    private long _stopRequestedTicks;
     private bool _paused;
     private bool _disposed;
 
@@ -159,13 +160,24 @@ public sealed class MouseHookRecorder : IDisposable
     {
         if (!IsRecording) return;
 
-        _endTicks = Stopwatch.GetTimestamp();
+        _endTicks = _stopRequestedTicks > 0 ? _stopRequestedTicks : Stopwatch.GetTimestamp();
         IsRecording = false;
 
         // Tell the hook thread's message loop to exit.
         PostThreadMessage(_hookThreadId, WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
+    }
+
+    /// <summary>
+    /// Signals that the user has initiated a stop (e.g. clicked the Stop button).
+    /// Records the current timestamp and stops collecting new events. The click
+    /// that triggered the stop will be excluded from recorded data.
+    /// </summary>
+    public void NotifyStopRequested()
+    {
+        _stopRequestedTicks = Stopwatch.GetTimestamp();
+        _paused = true;
     }
 
     public void PauseRecording()
@@ -186,7 +198,7 @@ public sealed class MouseHookRecorder : IDisposable
     {
         lock (_lock)
         {
-            return new MouseRecordingData
+            var data = new MouseRecordingData
             {
                 Samples = new List<MouseSample>(_samples),
                 Clicks  = new List<ClickEvent>(_clicks),
@@ -194,6 +206,11 @@ public sealed class MouseHookRecorder : IDisposable
                 EndTimestampTicks   = _endTicks != 0 ? _endTicks : Stopwatch.GetTimestamp(),
                 TickFrequency       = Stopwatch.Frequency,
             };
+
+            if (_stopRequestedTicks > 0)
+                data = MouseRecordingData.TrimStopClick(data, _stopRequestedTicks);
+
+            return data;
         }
     }
 
