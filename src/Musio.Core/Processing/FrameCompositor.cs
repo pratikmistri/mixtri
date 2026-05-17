@@ -641,14 +641,16 @@ public class FrameCompositor : IDisposable
         // significantly more expensive than Linear. It only meaningfully improves
         // quality when actually resampling (zoom in/out or aspect-ratio crop with
         // non-unit scale). At ~1:1 the bicubic filter produces output essentially
-        // identical to Linear, so use the cheaper path. This mirrors the choice
-        // already made in ComposeFramePostCompositeZoom for the zoom blit.
+        // identical to Linear, so use the cheaper path. Use the same explicit
+        // near-unit threshold form as ComposeFramePostCompositeZoom so the two
+        // paths stay aligned over time.
         double scaleX = _contentWidth / viewport.Width;
         double scaleY = _contentHeight / viewport.Height;
-        const double unitScaleTolerance = 0.05; // within ±5% of 1:1 → Linear
+        const double nearUnitScaleMinimum = 0.95;
+        const double nearUnitScaleMaximum = 1.05;
         bool nearUnitScale =
-            Math.Abs(scaleX - 1.0) < unitScaleTolerance &&
-            Math.Abs(scaleY - 1.0) < unitScaleTolerance;
+            scaleX >= nearUnitScaleMinimum && scaleX <= nearUnitScaleMaximum &&
+            scaleY >= nearUnitScaleMinimum && scaleY <= nearUnitScaleMaximum;
         var interpolation = nearUnitScale
             ? CanvasImageInterpolation.Linear
             : CanvasImageInterpolation.HighQualityCubic;
