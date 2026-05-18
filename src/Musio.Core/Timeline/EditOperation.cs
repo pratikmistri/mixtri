@@ -569,17 +569,22 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly double? _newZoomLevel;
     private readonly double? _newCenterX;
     private readonly double? _newCenterY;
+    private readonly float? _newRotationY;
+    private readonly float? _newRotationX;
     private ZoomKeyframe? _previousKeyframe;
 
     public string Description => "Update Zoom Properties";
 
     public UpdateZoomSegmentPropertiesOperation(string keyframeId,
-        double? zoomLevel = null, double? centerX = null, double? centerY = null)
+        double? zoomLevel = null, double? centerX = null, double? centerY = null,
+        float? rotationY = null, float? rotationX = null)
     {
         _keyframeId = keyframeId;
         _newZoomLevel = zoomLevel;
         _newCenterX = centerX;
         _newCenterY = centerY;
+        _newRotationY = rotationY;
+        _newRotationX = rotationX;
     }
 
     public void Execute(TimelineModel model)
@@ -599,6 +604,8 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             ZoomLevel = _newZoomLevel ?? kf.ZoomLevel,
             CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
             CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
+            RotationY = _newRotationY ?? kf.RotationY,
+            RotationX = _newRotationX ?? kf.RotationX,
             IsManual = true,
         };
     }

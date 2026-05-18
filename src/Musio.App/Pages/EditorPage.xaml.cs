@@ -869,6 +869,10 @@ public sealed partial class EditorPage : Page
                     }
                 }
 
+                // Sync 3D rotation controls
+                RotationYBox.Value = kf.RotationY;
+                RotationXBox.Value = kf.RotationX;
+
                 _suppressZoomPropertyUpdate = false;
             }
         }
@@ -972,6 +976,28 @@ public sealed partial class EditorPage : Page
         }
 
         var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
+        ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    private void RotationYBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+        if (double.IsNaN(args.NewValue)) return;
+
+        float rotY = (float)Math.Clamp(args.NewValue, -30, 30);
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, rotationY: rotY);
+        ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    private void RotationXBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+        if (double.IsNaN(args.NewValue)) return;
+
+        float rotX = (float)Math.Clamp(args.NewValue, -30, 30);
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, rotationX: rotX);
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
