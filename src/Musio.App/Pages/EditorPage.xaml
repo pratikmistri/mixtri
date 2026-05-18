@@ -215,31 +215,16 @@
                         </StackPanel>
                     </Button>
                     <AppBarSeparator />
-                    <TextBlock VerticalAlignment="Center" Text="3D:" FontWeight="SemiBold" />
-                    <NumberBox
-                        x:Name="RotationYBox"
-                        Width="100"
-                        Header="Y°"
-                        Minimum="-30"
-                        Maximum="30"
-                        SmallChange="1"
-                        LargeChange="5"
-                        SpinButtonPlacementMode="Compact"
-                        Value="0"
-                        ValueChanged="RotationYBox_ValueChanged"
-                        ToolTipService.ToolTip="3D rotation around vertical axis (degrees)" />
-                    <NumberBox
-                        x:Name="RotationXBox"
-                        Width="100"
-                        Header="X°"
-                        Minimum="-30"
-                        Maximum="30"
-                        SmallChange="1"
-                        LargeChange="5"
-                        SpinButtonPlacementMode="Compact"
-                        Value="0"
-                        ValueChanged="RotationXBox_ValueChanged"
-                        ToolTipService.ToolTip="3D rotation around horizontal axis (degrees)" />
+                    <ComboBox
+                        x:Name="Pan3DCombo"
+                        Width="130"
+                        SelectedIndex="0"
+                        SelectionChanged="Pan3DCombo_SelectionChanged"
+                        ToolTipService.ToolTip="3D cinematic camera pan direction">
+                        <ComboBoxItem Content="No 3D" Tag="none" />
+                        <ComboBoxItem Content="&#xE76B;  Pan Left" Tag="left" />
+                        <ComboBoxItem Content="&#xE76C;  Pan Right" Tag="right" />
+                    </ComboBox>
                     <Button
                         Padding="8,6"
                         Click="RemoveZoomSegment_Click"

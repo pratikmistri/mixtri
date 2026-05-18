@@ -24,7 +24,7 @@ public sealed class PerspectiveTransformTests
         Assert.AreEqual(1f, matrix.M33, 0.001f);
         Assert.AreEqual(0f, matrix.M12, 0.001f);
         Assert.AreEqual(0f, matrix.M21, 0.001f);
-        Assert.AreEqual(-1f / 2000f, matrix.M34, 0.0001f, "Perspective term should be -1/d");
+        Assert.AreEqual(1f / 2000f, matrix.M34, 0.0001f, "Perspective term should be 1/d");
     }
 
     [TestMethod]

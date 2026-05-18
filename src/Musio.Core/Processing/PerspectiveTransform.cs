@@ -1,7 +1,6 @@
 using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Effects;
-using Musio.Core.Models;
 
 namespace Musio.Core.Processing;
 
@@ -34,22 +33,15 @@ public sealed class PerspectiveTransform
         int width = (int)source.SizeInPixels.Width;
         int height = (int)source.SizeInPixels.Height;
 
-        // Default camera distance: proportional to the larger dimension for a
-        // natural perspective. Closer camera = more dramatic foreshortening.
         if (cameraDistance <= 0)
-            cameraDistance = Math.Max(width, height) * 1.5f;
+            cameraDistance = Math.Max(width, height) * 1.2f;
 
-        // Clamp rotation to prevent extreme distortion or behind-camera artifacts
         rotationYDegrees = Math.Clamp(rotationYDegrees, -MaxRotationDegrees, MaxRotationDegrees);
         rotationXDegrees = Math.Clamp(rotationXDegrees, -MaxRotationDegrees, MaxRotationDegrees);
 
         float radY = rotationYDegrees * MathF.PI / 180f;
         float radX = rotationXDegrees * MathF.PI / 180f;
 
-        // Build the 4x4 transform:
-        // 1. Translate to center the image at origin
-        // 2. Rotate around Y axis, then X axis
-        // 3. Apply perspective (camera at -cameraDistance looking at origin)
         var transform = BuildPerspectiveMatrix(width, height, radY, radX, cameraDistance);
 
         var device = source.Device;
@@ -57,7 +49,6 @@ public sealed class PerspectiveTransform
 
         using (var ds = output.CreateDrawingSession())
         {
-            // Clear with transparent — the caller's background is already in the source
             ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
 
             using var effect = new Transform3DEffect
@@ -67,7 +58,11 @@ public sealed class PerspectiveTransform
                 InterpolationMode = CanvasImageInterpolation.HighQualityCubic,
             };
 
-            ds.DrawImage(effect);
+            // Draw centered — the effect output may shift due to perspective
+            var bounds = effect.GetBounds(ds);
+            float offsetX = (float)((width - bounds.Width) / 2 - bounds.X);
+            float offsetY = (float)((height - bounds.Height) / 2 - bounds.Y);
+            ds.DrawImage(effect, offsetX, offsetY);
         }
 
         return output;
@@ -84,24 +79,14 @@ public sealed class PerspectiveTransform
         float radiansY, float radiansX,
         float cameraDistance)
     {
-        // Rotation around Y axis (left-right tilt)
         var rotY = Matrix4x4.CreateRotationY(radiansY);
-
-        // Rotation around X axis (top-bottom tilt)
         var rotX = Matrix4x4.CreateRotationX(radiansX);
-
-        // Combined rotation: Y first, then X
         var rotation = rotY * rotX;
 
-        // Perspective projection: the D2D 3DTransform effect operates on
-        // coordinates centered at the image middle. After rotation, some
-        // pixels have z != 0. We add a perspective term so that z > 0
-        // (further from camera) appears smaller and z < 0 (closer) appears larger.
-        //
-        // The perspective matrix maps w = 1 + z/d, so after division:
-        //   x' = x / (1 + z/d),  y' = y / (1 + z/d)
+        // Perspective: w' = 1 + z/d. Far pixels (z > 0) get w' > 1 → appear
+        // smaller after division. Near pixels (z < 0) get w' < 1 → appear larger.
         var perspective = Matrix4x4.Identity;
-        perspective.M34 = -1f / cameraDistance;
+        perspective.M34 = 1f / cameraDistance;
 
         return rotation * perspective;
     }

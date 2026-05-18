@@ -869,9 +869,14 @@ public sealed partial class EditorPage : Page
                     }
                 }
 
-                // Sync 3D rotation controls
-                RotationYBox.Value = kf.RotationY;
-                RotationXBox.Value = kf.RotationX;
+                // Sync 3D pan combo
+                int panIndex = kf.RotationY switch
+                {
+                    < -0.5f => 1,  // Pan Left
+                    > 0.5f => 2,   // Pan Right
+                    _ => 0,        // No 3D
+                };
+                Pan3DCombo.SelectedIndex = panIndex;
 
                 _suppressZoomPropertyUpdate = false;
             }
@@ -979,25 +984,22 @@ public sealed partial class EditorPage : Page
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
-    private void RotationYBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    private void Pan3DCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
         if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
-        if (double.IsNaN(args.NewValue)) return;
+        if (Pan3DCombo.SelectedItem is not ComboBoxItem item) return;
 
-        float rotY = (float)Math.Clamp(args.NewValue, -30, 30);
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, rotationY: rotY);
-        ViewModel.UndoRedoManager.Execute(operation);
-    }
+        string tag = item.Tag?.ToString() ?? "none";
+        float rotY = tag switch
+        {
+            "left" => -8f,
+            "right" => 8f,
+            _ => 0f,
+        };
 
-    private void RotationXBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-    {
-        if (_suppressZoomPropertyUpdate) return;
-        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
-        if (double.IsNaN(args.NewValue)) return;
-
-        float rotX = (float)Math.Clamp(args.NewValue, -30, 30);
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, rotationX: rotX);
+        var operation = new UpdateZoomSegmentPropertiesOperation(
+            selectedId, rotationY: rotY, rotationX: 0f);
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
