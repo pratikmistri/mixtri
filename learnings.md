@@ -1197,3 +1197,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
 
 **What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) â€” XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.
+
+---
+
+## 3D Cinematic Perspective Transform — Post-Compose Camera Effect
+
+**Feature/area:** Compositor pipeline (PerspectiveTransform, FrameCompositor, AutoZoomEngine, ZoomKeyframe, ZoomState)
+
+**Approaches tried:**
+
+1. **Win2D `Transform3DEffect` with `Matrix4x4` as post-compose step** — Worked. Created `PerspectiveTransform` class that applies true 3D perspective projection to the fully composed frame using D2D's 3D transform effect. The composed frame (with background, cursor, etc.) is treated as a flat card in 3D space. Camera rotation (Y-axis, X-axis) and perspective depth are controlled via `Matrix4x4.CreateRotationY/X` combined with a perspective term (`M34 = -1/cameraDistance`). GPU-accelerated, zero cost when rotation is zero. $([char]0x2705)
+
+**What worked:**
+- Adding `RotationY`/`RotationX` fields to `ZoomKeyframe` (model) and `ZoomState` (runtime struct).
+- Interpolating rotation alongside zoom level in `AutoZoomEngine.EvaluateManualKeyframes` using the same `CubicBezierEase`.
+- Applying the 3D transform as a post-process in `FrameCompositor.ComposeFrame` after either `ComposeFrameDirect` or `ComposeFramePostCompositeZoom`.
+- Exception-safe dispose pattern for the intermediate render target swap.
+
+**Key design decisions:**
+- Rotation is tied to zoom keyframes (not a separate track) — the 3D effect activates with zoom segments.
+- Auto-zoom segments have 0 rotation (only manual keyframes can specify rotation).
+- Camera distance defaults to 1.5x the larger frame dimension for natural perspective.
+- Rotation clamped to +/-30 degrees to prevent extreme distortion.
+- `Transform3DEffect` is available in `Microsoft.Graphics.Win2D 1.3.0` for WinUI 3.

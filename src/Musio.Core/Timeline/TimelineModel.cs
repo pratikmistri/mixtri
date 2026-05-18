@@ -91,6 +91,12 @@ public record ZoomKeyframe
     public TimeSpan HoldDuration { get; init; } = TimeSpan.FromMilliseconds(575);  // 500ms + 15%
     public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(575);  // 500ms + 15%
 
+    /// <summary>3D rotation around the vertical (Y) axis in degrees. Positive tilts right side toward viewer.</summary>
+    public float RotationY { get; init; }
+
+    /// <summary>3D rotation around the horizontal (X) axis in degrees. Positive tilts top away from viewer.</summary>
+    public float RotationX { get; init; }
+
     /// <summary>
     /// True for keyframes added by the user via the editor UI.
     /// False for keyframes auto-generated from click events (visualization only).

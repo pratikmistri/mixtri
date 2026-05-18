@@ -27,6 +27,10 @@ public struct ZoomState
     public float ViewportHeight;
     /// <summary>True when the zoom center comes from a manual keyframe and should not be overridden.</summary>
     public bool IsManualOverride;
+    /// <summary>3D rotation around the vertical (Y) axis in degrees.</summary>
+    public float RotationY;
+    /// <summary>3D rotation around the horizontal (X) axis in degrees.</summary>
+    public float RotationX;
 }
 
 public class AutoZoomEngine
@@ -225,11 +229,11 @@ public class AutoZoomEngine
         return ComputeViewport(autoResult);
     }
 
-    private (float zoom, float cx, float cy)? EvaluateManualKeyframes(double timeSeconds)
+    private (float zoom, float cx, float cy, float rotY, float rotX)? EvaluateManualKeyframes(double timeSeconds)
     {
         // When multiple keyframes overlap (e.g. A zooming out while B zooms in),
         // pick the one producing the highest zoom level for a seamless crossover.
-        (float zoom, float cx, float cy)? best = null;
+        (float zoom, float cx, float cy, float rotY, float rotX)? best = null;
 
         foreach (var kf in _manualKeyframes)
         {
@@ -242,36 +246,45 @@ public class AutoZoomEngine
                 continue;
 
             float zoom;
+            float rotY, rotX;
             if (timeSeconds < kfTime)
             {
                 double progress = (kfTime - preStart) > 0
                     ? (timeSeconds - preStart) / (kfTime - preStart)
                     : 1.0;
-                zoom = CubicBezierEase(1.0f, (float)kf.ZoomLevel, (float)progress);
+                float p = (float)progress;
+                zoom = CubicBezierEase(1.0f, (float)kf.ZoomLevel, p);
+                rotY = CubicBezierEase(0f, kf.RotationY, p);
+                rotX = CubicBezierEase(0f, kf.RotationX, p);
             }
             else if (timeSeconds <= holdEnd)
             {
                 zoom = (float)kf.ZoomLevel;
+                rotY = kf.RotationY;
+                rotX = kf.RotationX;
             }
             else
             {
                 double progress = (postEnd - holdEnd) > 0
                     ? (timeSeconds - holdEnd) / (postEnd - holdEnd)
                     : 1.0;
-                zoom = CubicBezierEase((float)kf.ZoomLevel, 1.0f, (float)progress);
+                float p = (float)progress;
+                zoom = CubicBezierEase((float)kf.ZoomLevel, 1.0f, p);
+                rotY = CubicBezierEase(kf.RotationY, 0f, p);
+                rotX = CubicBezierEase(kf.RotationX, 0f, p);
             }
 
             float cx = (float)(kf.CenterX * _sourceWidth);
             float cy = (float)(kf.CenterY * _sourceHeight);
 
             if (!best.HasValue || zoom > best.Value.zoom)
-                best = (zoom, cx, cy);
+                best = (zoom, cx, cy, rotY, rotX);
         }
 
         return best;
     }
 
-    private (float zoom, float cx, float cy) EvaluateAutoSegments(double timeSeconds)
+    private (float zoom, float cx, float cy, float rotY, float rotX) EvaluateAutoSegments(double timeSeconds)
     {
         // When segments overlap (edge cases after merge), pick the highest zoom
         // for a seamless transition — same strategy as manual keyframes.
@@ -310,7 +323,7 @@ public class AutoZoomEngine
             }
         }
 
-        return (bestZoom, bestCx, bestCy);
+        return (bestZoom, bestCx, bestCy, 0f, 0f);
     }
 
     /// <summary>
@@ -439,8 +452,13 @@ public class AutoZoomEngine
     /// <summary>
     /// Compute the visible viewport rectangle from zoom level and center, clamped to source bounds.
     /// </summary>
-    private ZoomState ComputeViewport((float zoom, float cx, float cy) state)
-        => ComputeViewportForCenter(state.zoom, state.cx, state.cy);
+    private ZoomState ComputeViewport((float zoom, float cx, float cy, float rotY, float rotX) state)
+    {
+        var result = ComputeViewportForCenter(state.zoom, state.cx, state.cy);
+        result.RotationY = state.rotY;
+        result.RotationX = state.rotX;
+        return result;
+    }
 
     /// <summary>
     /// Public API: compute viewport for a given zoom level and center point.

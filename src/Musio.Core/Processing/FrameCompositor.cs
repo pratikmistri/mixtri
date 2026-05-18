@@ -67,6 +67,9 @@ public class FrameCompositor : IDisposable
     // Reusable buffer for post-composite zoom (used when padding > 0)
     private CanvasRenderTarget? _compositeBuffer;
 
+    // 3D perspective transform for cinematic camera effects
+    private readonly PerspectiveTransform _perspectiveTransform = new();
+
     // Tick value corresponding to video time 0, for rebasing keyboard events.
     private long _videoStartTick;
 
@@ -375,19 +378,42 @@ public class FrameCompositor : IDisposable
         {
             // Override zoom center with actual cursor position for auto segments.
             // Manual segments keep their user-defined center.
-            zoomState = _zoomEngine.ComputeViewportForCenter(
+            var overridden = _zoomEngine.ComputeViewportForCenter(
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
+            // Preserve rotation from the original zoom state (auto segments have 0 rotation)
+            overridden.RotationY = zoomState.RotationY;
+            overridden.RotationX = zoomState.RotationX;
+            zoomState = overridden;
         }
 
-        // Use post-composite zoom when zoom is active — this pre-composes the
-        // cursor onto the frame before zooming, so the cursor scales with zoom.
+        // Compose the frame using the appropriate path
+        CanvasRenderTarget result;
         if (zoomState.ZoomLevel > 1.01f)
-            return ComposeFramePostCompositeZoom(
+            result = ComposeFramePostCompositeZoom(
+                sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
+        else
+            result = ComposeFrameDirect(
                 sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
 
-        // No padding or no zoom — direct composition (fast path)
-        return ComposeFrameDirect(
-            sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
+        // Apply 3D perspective transform when rotation is active
+        if (MathF.Abs(zoomState.RotationY) > 0.01f || MathF.Abs(zoomState.RotationX) > 0.01f)
+        {
+            CanvasRenderTarget? transformed = null;
+            try
+            {
+                transformed = _perspectiveTransform.Apply(
+                    result, zoomState.RotationY, zoomState.RotationX);
+                result.Dispose();
+                result = transformed;
+                transformed = null; // ownership transferred
+            }
+            finally
+            {
+                transformed?.Dispose();
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
