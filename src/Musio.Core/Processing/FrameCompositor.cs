@@ -364,23 +364,17 @@ public class FrameCompositor : IDisposable
 
         double timeSeconds = sourceTimeSeconds;
 
-        // Compute cursor index from source time directly, avoiding integer
-        // frame-index truncation. Mouse frame = (videoTime + offset) * fps.
         int cursorIndex = Math.Clamp(
             (int)Math.Round((sourceTimeSeconds + _mouseTimeOffset) * _config.OutputFps),
             0, _smoothedPositions.Count - 1);
         var cursorPos = _smoothedPositions[cursorIndex];
 
-        // Get zoom state — use smoothed cursor position as center hint
-        // so the viewport always keeps the cursor in view
         var zoomState = _zoomEngine.GetZoomState(timeSeconds);
+
         if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
         {
-            // Override zoom center with actual cursor position for auto segments.
-            // Manual segments keep their user-defined center.
             var overridden = _zoomEngine.ComputeViewportForCenter(
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
-            // Preserve rotation from the original zoom state (auto segments have 0 rotation)
             overridden.RotationY = zoomState.RotationY;
             overridden.RotationX = zoomState.RotationX;
             zoomState = overridden;
@@ -405,7 +399,7 @@ public class FrameCompositor : IDisposable
                     result, zoomState.RotationY, zoomState.RotationX);
                 result.Dispose();
                 result = transformed;
-                transformed = null; // ownership transferred
+                transformed = null;
             }
             finally
             {
