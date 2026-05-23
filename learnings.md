@@ -1378,3 +1378,18 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What didn't work:**
 - Returning the max-zoom segment's center as-is — produces a discontinuous jump at the crossover when overlapping segments have different centers.
+
+---
+
+## Style Menu For Full-Screen Capture
+
+**Feature/area:** EditorPage style flyout, ProjectService composition defaults.
+
+**Approaches tried:**
+
+1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** — Worked. Previously gated on Window/Region only; now exposed for Monitor too. âœ…
+2. **Gate the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) behind a new `ProjectService.CompositionDefaultsApplied` flag reset in `SetProject`** — Worked. Defaults apply once per project load; user edits via the now-visible style menu survive editor re-navigation since `InitializePreviewAsync` runs on every page construction. âœ…
+
+**What worked:** Combination — unconditional style-menu visibility + one-shot defaults flag in `ProjectService` reset on `SetProject`.
+
+**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` — would clobber user edits every time the EditorPage was re-constructed.

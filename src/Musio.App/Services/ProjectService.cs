@@ -1,3 +1,4 @@
+using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Timeline;
@@ -28,6 +29,27 @@ public class ProjectService
             TrimEnd = project.Duration,
             Fps = project.Fps
         };
+
+        // Apply capture-type-specific style defaults at project load time
+        // so they're guaranteed to be in place before the editor reads
+        // composition state, regardless of which initialization path runs.
+        // Full-screen (Monitor) captures default to zeroed padding/shadow/
+        // corner radius/border; users can still override via the Style menu
+        // and their edits persist for the lifetime of this project.
+        if (project.CaptureType is CaptureTargetType.Monitor)
+        {
+            CurrentComposition = CurrentComposition with
+            {
+                Background = CurrentComposition.Background with
+                {
+                    Padding = 0,
+                    ShadowEnabled = false,
+                    CornerRadius = 0,
+                    BorderEnabled = false,
+                },
+            };
+        }
+
         ProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 }
