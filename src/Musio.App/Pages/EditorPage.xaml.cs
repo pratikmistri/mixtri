@@ -333,21 +333,10 @@ public sealed partial class EditorPage : Page
             Zoom = new AutoZoomConfig { Enabled = true },
         };
 
-        // Only apply background fill for window and region captures —
-        // full-screen (monitor) recordings render without padding/shadow.
-        if (project.CaptureType is CaptureTargetType.Monitor)
-        {
-            config = config with
-            {
-                Background = config.Background with
-                {
-                    Padding = 0,
-                    ShadowEnabled = false,
-                    CornerRadius = 0,
-                    BorderEnabled = false,
-                },
-            };
-        }
+        // Capture-type-specific style defaults (e.g. zeroed padding/shadow
+        // for full-screen Monitor captures) are applied once at project load
+        // time in ProjectService.SetProject. User edits via the Style menu
+        // are preserved across editor re-navigation.
 
         // Auto-enable webcam overlay if the project has a webcam recording
         if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) &&
@@ -1888,12 +1877,11 @@ public sealed partial class EditorPage : Page
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
-        bool showStyle = project.CaptureType is CaptureTargetType.Window or CaptureTargetType.Region;
-        var vis = showStyle ? Visibility.Visible : Visibility.Collapsed;
-        StyleButton.Visibility = vis;
-        StyleSeparator.Visibility = vis;
-
-        if (!showStyle) return;
+        // Style menu is available for all capture types. Monitor (full-screen)
+        // captures start with zeroed defaults (see ProjectService.SetProject) but
+        // users can still customize padding, corner radius, shadow, border, etc.
+        StyleButton.Visibility = Visibility.Visible;
+        StyleSeparator.Visibility = Visibility.Visible;
 
         // Populate preset combo with built-in presets
         PresetCombo.Items.Clear();
