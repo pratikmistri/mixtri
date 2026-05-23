@@ -1345,3 +1345,17 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What worked:** All three above.
 
+
+---
+
+## Editor — Spacebar Play/Pause Shortcut
+
+**Feature/area:** EditorPage keyboard accelerators / Preview playback.
+
+**Approaches tried:**
+
+1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** — Worked. ?
+2. **Skip handler when a text input has focus** — Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
+
+**What worked:** XAML accelerator + focus-check guard in the handler.
+

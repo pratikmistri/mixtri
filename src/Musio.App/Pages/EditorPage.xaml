@@ -28,6 +28,9 @@
             Key="X"
             Invoked="CutAccelerator_Invoked"
             Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="Space"
+            Invoked="PlayPauseAccelerator_Invoked" />
     </Page.KeyboardAccelerators>
 
     <Grid>
