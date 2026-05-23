@@ -721,12 +721,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (!_hasSelection)
             return;
 
-        // The captured screenshot spans the entire virtual desktop in
-        // physical pixels, and the host window covers the same physical
-        // bounds. So converting overlay DIPs → screenshot pixels gives us
-        // virtual-desktop physical pixel coordinates (with the virtual
-        // desktop origin as zero). Add the virtual desktop origin to obtain
-        // absolute screen coordinates.
+        // Overlay DIPs → virtual desktop physical pixels (screen-absolute).
         double scaleX = ActualWidth > 0 ? _screenshotWidth / ActualWidth : 1.0;
         double scaleY = ActualHeight > 0 ? _screenshotHeight / ActualHeight : 1.0;
         int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -737,27 +732,32 @@ public sealed partial class RegionSelectorOverlay : UserControl
         int physW = (int)Math.Round(_selW * scaleX);
         int physH = (int)Math.Round(_selH * scaleY);
 
-        // Determine which monitor contains the selection centre (using
-        // screen-absolute physical pixel coordinates).
+        // Pick the monitor with the largest intersection with the selection.
+        // This handles cross-monitor drags and gaps between displays better
+        // than a simple "center is inside" test.
         var monitors = _regionSelector.GetMonitors();
-        int centerX = physX + physW / 2;
-        int centerY = physY + physH / 2;
-
-        var hostMonitor = monitors.FirstOrDefault(m =>
-                centerX >= m.X && centerX < m.X + m.Width &&
-                centerY >= m.Y && centerY < m.Y + m.Height)
-            ?? monitors.FirstOrDefault(m => m.IsPrimary)
-            ?? monitors.FirstOrDefault();
-
-        if (hostMonitor is null)
+        MonitorInfo? hostMonitor = null;
+        long bestArea = 0;
+        foreach (var m in monitors)
         {
+            long iw = Math.Max(0L, Math.Min(physX + physW, m.X + m.Width) - Math.Max(physX, m.X));
+            long ih = Math.Max(0L, Math.Min(physY + physH, m.Y + m.Height) - Math.Max(physY, m.Y));
+            long area = iw * ih;
+            if (area > bestArea)
+            {
+                bestArea = area;
+                hostMonitor = m;
+            }
+        }
+
+        if (hostMonitor is null || bestArea <= 0)
+        {
+            // Selection lies entirely in a gap between monitors — invalid.
             CancelSelection();
             return;
         }
 
-        // Clamp the physical rect to the host monitor so the crop never
-        // spills onto an adjacent display (which would be invalid for the
-        // monitor-relative crop rect used by RecordingSession).
+        // Clamp to host monitor (now guaranteed to have non-empty intersection).
         int monLeft = hostMonitor.X;
         int monTop = hostMonitor.Y;
         int monRight = hostMonitor.X + hostMonitor.Width;
@@ -766,14 +766,14 @@ public sealed partial class RegionSelectorOverlay : UserControl
         int clampedTop = Math.Max(physY, monTop);
         int clampedRight = Math.Min(physX + physW, monRight);
         int clampedBottom = Math.Min(physY + physH, monBottom);
-        int clampedW = Math.Max(1, clampedRight - clampedLeft);
-        int clampedH = Math.Max(1, clampedBottom - clampedTop);
+        int clampedW = clampedRight - clampedLeft;
+        int clampedH = clampedBottom - clampedTop;
 
         // Convert physical pixels → monitor-local DIPs using THIS monitor's
-        // DPI scale (mixed-DPI multi-monitor support). RecordingSession
-        // multiplies the stored crop rect by the same per-monitor DPI scale
-        // to recover the physical crop, so we must store DIPs here.
-        float dpiScale = GetDpiScaleForPoint(centerX, centerY);
+        // effective DPI (handles mixed-DPI multi-monitor). Use the host
+        // monitor's HMONITOR directly so we never disagree with the chosen
+        // monitor (e.g., gaps near boundaries with MonitorFromPoint).
+        float dpiScale = GetMonitorDpiScale(hostMonitor.Handle);
         if (dpiScale <= 0) dpiScale = 1.0f;
 
         int dipX = (int)Math.Round((clampedLeft - monLeft) / dpiScale);
@@ -786,11 +786,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
         CompleteWithRegion(region);
     }
 
-    private static float GetDpiScaleForPoint(int x, int y)
+    private static float GetMonitorDpiScale(IntPtr hMonitor)
     {
         try
         {
-            IntPtr hMonitor = MonitorFromPoint(new POINT { X = x, Y = y }, MONITOR_DEFAULTTONEAREST);
             if (hMonitor == IntPtr.Zero) return 1.0f;
             int hr = GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
             if (hr == 0 && dpiX > 0)
@@ -889,14 +888,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     [DllImport("user32.dll")]
     private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT { public int X; public int Y; }
-
-    private const uint MONITOR_DEFAULTTONEAREST = 2;
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);

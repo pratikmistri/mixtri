@@ -320,12 +320,26 @@ public partial class RecordingViewModel : ObservableObject
                     return null;
                 }
 
-                // Resolve the monitor that owns this region by MonitorId
+                // Resolve the monitor that owns this region by MonitorId.
+                // Exact match against device name — `Contains` is unsafe
+                // (e.g. "\\.\DISPLAY1" would match "\\.\DISPLAY10").
                 var allMonitors = MonitorEnumerator.GetAllMonitors();
-                var monitor = allMonitors.FirstOrDefault(m => m.DisplayName.Contains(SelectedRegion.MonitorId))
-                    ?? allMonitors.FirstOrDefault();
+                var monitor = allMonitors.FirstOrDefault(m =>
+                        m.DisplayName == SelectedRegion.MonitorId
+                        || m.DisplayName.StartsWith(SelectedRegion.MonitorId + " "));
                 if (monitor is null)
+                {
+                    // The monitor that owned this region is no longer connected
+                    // (e.g. external display unplugged since the region was saved).
+                    // Don't silently fall back to the primary monitor — the region's
+                    // monitor-local coords would land on the wrong display, producing
+                    // a clamped/off-screen capture. Clear the stale region and ask
+                    // the user to reselect.
+                    SelectedRegion = null;
+                    HasSelectedRegion = false;
+                    RecordingStatus = "Saved region's monitor is no longer connected — please select a new region";
                     return null;
+                }
 
                 var crop = new Windows.Foundation.Rect(
                     SelectedRegion.X, SelectedRegion.Y,

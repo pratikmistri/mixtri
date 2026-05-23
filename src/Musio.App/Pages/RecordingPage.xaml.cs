@@ -87,10 +87,19 @@ public sealed partial class RecordingPage : Page
         {
             _regionBorder = new RegionBorderHighlight();
             float dpiScale = GetRegionMonitorDpiScale(region);
-            int px = (int)(region.X * dpiScale);
-            int py = (int)(region.Y * dpiScale);
-            int pw = (int)(region.Width * dpiScale);
-            int ph = (int)(region.Height * dpiScale);
+            var (monLeft, monTop) = GetRegionMonitorOrigin(region);
+            // region.X/Y are monitor-local DIPs. Convert to monitor-local
+            // physical pixels and offset by the monitor's screen-absolute
+            // physical origin so the Win32 border windows land on the
+            // correct monitor. Use Math.Round + even-dimension flooring to
+            // match the crop rect computed by RecordingSession (which rounds
+            // origin to int and floors W/H to multiples of 2 for H.264).
+            int px = monLeft + (int)Math.Round(region.X * dpiScale);
+            int py = monTop + (int)Math.Round(region.Y * dpiScale);
+            int pw = ((int)(region.Width * dpiScale)) & ~1;
+            int ph = ((int)(region.Height * dpiScale)) & ~1;
+            if (pw < 2) pw = 2;
+            if (ph < 2) ph = 2;
             _regionBorder.Show(px, py, pw, ph);
         }
 
@@ -322,15 +331,25 @@ public sealed partial class RecordingPage : Page
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 
+    private static CaptureTarget? FindMonitorForRegion(CaptureRegion region)
+    {
+        var monitors = MonitorEnumerator.GetAllMonitors();
+        // Exact match against the raw device name. DisplayName is either
+        // "\\.\DISPLAY1" or "\\.\DISPLAY1 (Primary)". Using Contains would
+        // make "\\.\DISPLAY1" wrongly match "\\.\DISPLAY10".
+        return monitors.FirstOrDefault(m =>
+                m.DisplayName == region.MonitorId
+                || m.DisplayName.StartsWith(region.MonitorId + " "))
+            ?? monitors.FirstOrDefault();
+    }
+
     /// <summary>
     /// Resolves the DPI scale for the monitor that owns the given region.
     /// Uses the same monitor-matching logic as <see cref="RecordingViewModel.BuildCaptureTarget"/>.
     /// </summary>
     private static float GetRegionMonitorDpiScale(CaptureRegion region)
     {
-        var monitors = MonitorEnumerator.GetAllMonitors();
-        var monitor = monitors.FirstOrDefault(m => m.DisplayName.Contains(region.MonitorId))
-            ?? monitors.FirstOrDefault();
+        var monitor = FindMonitorForRegion(region);
 
         if (monitor is not null && monitor.Handle != IntPtr.Zero)
         {
@@ -341,6 +360,35 @@ public sealed partial class RecordingPage : Page
 
         return 1.0f;
     }
+
+    private static (int Left, int Top) GetRegionMonitorOrigin(CaptureRegion region)
+    {
+        var monitor = FindMonitorForRegion(region);
+
+        if (monitor is not null && monitor.Handle != IntPtr.Zero)
+        {
+            var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+            if (GetMonitorInfo(monitor.Handle, ref info))
+                return (info.rcMonitor.Left, info.rcMonitor.Top);
+        }
+
+        return (0, 0);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
     [DllImport("shcore.dll")]
     private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);

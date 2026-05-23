@@ -1221,3 +1221,35 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Per-window DPI Unaware context: would require coordinate juggling between unaware logical pixels and the PMv2-captured physical-pixel screenshot. Rejected as more complex and fragile.
 - Keeping `Stretch="Fill"` after Maximize fix: irrelevant once window equals virtual desktop size — Fill becomes 1:1.
 
+
+---
+
+## Region Border Highlight — Wrong Position on Non-Primary Monitor
+
+**Feature/area:** `RegionBorderHighlight` placement in `RecordingPage.ShowRecordingOverlay`.
+
+**Symptom:** After the region selection fix stored `CaptureRegion` in monitor-local DIPs, the red border indicator drawn around the recording region during capture was always placed on the wrong monitor / at the wrong location.
+
+**Root cause:** `ShowRecordingOverlay` multiplied `region.X/Y` (monitor-local DIPs) by the monitor's DPI scale, producing monitor-local **physical** pixels. The Win32 `CreateWindowEx` used by `RegionBorderHighlight` requires **screen-absolute** physical pixel coordinates (PMv2 process), so without the monitor's screen origin the border was anchored at (0,0) of the virtual desktop instead of the correct monitor.
+
+**What worked:** Added `GetRegionMonitorOrigin` (`GetMonitorInfo` on the resolved monitor handle) and offset the computed px/py by `info.rcMonitor.Left/Top` before calling `RegionBorderHighlight.Show`. Border now lands exactly on the captured region across all monitors and DPI scales.
+
+
+## Multi-Monitor Region Selection — Rubber-Duck Adoptions
+
+- **Feature/area**: Region selection overlay + recording border highlight (multi-monitor).
+- **What worked**:
+  - Pick host monitor for the selected rect by **largest intersection area** in virtual-desktop physical pixels (replaces `MonitorFromPoint` on a single corner, which can disagree across monitor boundaries).
+  - Cancel selection when the rect has zero intersection with any monitor (instead of clamping to a phantom 1x1 region via `Math.Max(1, …)`).
+  - Add `IntPtr Handle` to `MonitorInfo` so DPI lookups (`GetDpiForMonitor`) and origin lookups (`GetMonitorInfo`) use the same hMonitor used for selection, eliminating point-lookup drift.
+  - Match monitor by exact `DisplayName == MonitorId` (or `StartsWith(MonitorId + ' ')` to cover `"\\.\DISPLAY1 (Primary)"`). `Contains` matched `\\.\DISPLAY1` against `\\.\DISPLAY10`.
+  - Round border px/py with `Math.Round` and floor pw/ph to even numbers (`& ~1`) to match the H.264 crop math in `RecordingSession` (avoids 1-2 px drift between highlight and actual captured frame).
+- **What didn't work**:
+  - `presenter.Maximize()` to cover the virtual desktop — only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
+  - `DisplayName.Contains(MonitorId)` for monitor lookup — unsafe substring match across DISPLAY1/DISPLAY10.
+
+## Stale Saved Region — Disconnected Monitor
+
+- **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
+- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected — please select a new region'), and return null. This forces the user to reselect on the current display topology.
+- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` — the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.

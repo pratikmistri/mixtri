@@ -4,7 +4,7 @@ using Musio.Core.Settings;
 
 namespace Musio.Core.Capture;
 
-public record MonitorInfo(string Id, string Name, int X, int Y, int Width, int Height, bool IsPrimary);
+public record MonitorInfo(IntPtr Handle, string Id, string Name, int X, int Y, int Width, int Height, bool IsPrimary);
 
 public record WindowInfo(IntPtr Handle, string Title, string ProcessName, int X, int Y, int Width, int Height, string? ExecutablePath = null);
 
@@ -50,6 +50,7 @@ public class RegionSelector
                     bool isPrimary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
                     monitors.Add(new MonitorInfo(
+                        hMonitor,
                         deviceName,
                         isPrimary ? $"{deviceName} (Primary)" : deviceName,
                         info.rcMonitor.Left,
