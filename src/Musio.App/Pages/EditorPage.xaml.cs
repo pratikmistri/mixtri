@@ -14,6 +14,7 @@ using Musio.Core.Timeline;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
+using Windows.System;
 using Windows.UI;
 
 namespace Musio_App.Pages;
@@ -857,7 +858,7 @@ public sealed partial class EditorPage : Page
             {
                 _suppressZoomPropertyUpdate = true;
 
-                // Update zoom level combo to match selected segment
+                bool matched = false;
                 for (int i = 0; i < ZoomLevelCombo.Items.Count; i++)
                 {
                     if (ZoomLevelCombo.Items[i] is ComboBoxItem item &&
@@ -865,8 +866,14 @@ public sealed partial class EditorPage : Page
                         Math.Abs(z - kf.ZoomLevel) < 0.01)
                     {
                         ZoomLevelCombo.SelectedIndex = i;
+                        matched = true;
                         break;
                     }
+                }
+                if (!matched)
+                {
+                    ZoomLevelCombo.SelectedIndex = -1;
+                    ZoomLevelCombo.Text = kf.ZoomLevel.ToString("0.##", CultureInfo.InvariantCulture) + "x";
                 }
 
                 _suppressZoomPropertyUpdate = false;
@@ -975,6 +982,50 @@ public sealed partial class EditorPage : Page
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
+    private void ZoomLevelCombo_TextSubmitted(ComboBox sender, ComboBoxTextSubmittedEventArgs args)
+    {
+        if (Timeline is null || Timeline.SelectedZoomKeyframeId is not { } selectedId)
+        {
+            args.Handled = true;
+            return;
+        }
+
+        string text = (args.Text ?? string.Empty).Trim().TrimEnd('x', 'X');
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+        {
+            // Restore display from current zoom level
+            SyncZoomLevelComboToFreeform(_zoomRegionEditMode ? _zoomRegionZoomLevel : GetSelectedKeyframeZoom() ?? 2.0);
+            args.Handled = true;
+            return;
+        }
+
+        zoom = Math.Clamp(zoom, MinZoomLevel, MaxZoomLevel);
+
+        if (_zoomRegionEditMode)
+        {
+            _zoomRegionZoomLevel = zoom;
+            // Re-clamp center for new zoom
+            (double halfW, double halfH) = GetNormalizedHalfExtents(zoom);
+            _zoomRegionCenterX = Math.Clamp(_zoomRegionCenterX, halfW, 1.0 - halfW);
+            _zoomRegionCenterY = Math.Clamp(_zoomRegionCenterY, halfH, 1.0 - halfH);
+            UpdateZoomRegionRect();
+        }
+        else
+        {
+            var op = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoom);
+            ViewModel.UndoRedoManager.Execute(op);
+        }
+
+        SyncZoomLevelComboToFreeform(zoom);
+        args.Handled = true;
+    }
+
+    private double? GetSelectedKeyframeZoom()
+    {
+        if (Timeline?.SelectedZoomKeyframeId is not { } id) return null;
+        return ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == id)?.ZoomLevel;
+    }
+
     // --- Zoom Region Edit Mode ---
 
     private bool _zoomRegionEditMode;
@@ -986,6 +1037,17 @@ public sealed partial class EditorPage : Page
     private bool _isDraggingZoomRegion;
     private Point _dragStartPoint;
     private double _dragStartCenterX, _dragStartCenterY;
+
+    private enum ZoomDragMode { None, Move, ResizeTL, ResizeTR, ResizeBL, ResizeBR }
+    private ZoomDragMode _zoomDragMode = ZoomDragMode.None;
+    private const double HandleHitRadius = 10.0;
+    private const double HandleSize = 10.0;
+    private const double MinZoomLevel = 1.0;
+    private const double MaxZoomLevel = 4.0;
+    private const double CenterSnapThreshold = 0.02; // normalized (~2% of frame)
+    private double _dragAnchorDispX, _dragAnchorDispY;
+    private double _dragStartRectW, _dragStartRectH;
+    private double _dragStartZoomLevel;
 
     private void EditZoomRegion_Click(object sender, RoutedEventArgs e)
     {
@@ -1026,8 +1088,10 @@ public sealed partial class EditorPage : Page
     {
         _zoomRegionEditMode = false;
         _isDraggingZoomRegion = false;
+        _zoomDragMode = ZoomDragMode.None;
         _zoomRegionKeyframeId = null;
         ZoomRegionOverlay.Visibility = Visibility.Collapsed;
+        UpdateSnapGuides(false, false);
 
         // Re-render with compositor
         _lastRenderedFrameIndex = -1;
@@ -1086,6 +1150,12 @@ public sealed partial class EditorPage : Page
         ZoomRegionRect.Width = rectW;
         ZoomRegionRect.Height = rectH;
 
+        // Position corner handles centered on each corner
+        PositionHandle(HandleTL, rectX, rectY);
+        PositionHandle(HandleTR, rectX + rectW, rectY);
+        PositionHandle(HandleBL, rectX, rectY + rectH);
+        PositionHandle(HandleBR, rectX + rectW, rectY + rectH);
+
         // Dim overlays constrained to frame display area
         double fX = _frameDisplayX, fY = _frameDisplayY;
         double fW = _frameDisplayW, fH = _frameDisplayH;
@@ -1121,6 +1191,48 @@ public sealed partial class EditorPage : Page
         _ => -1.0,
     };
 
+    private (double halfW, double halfH) GetNormalizedHalfExtents(double zoom)
+    {
+        double vpW = _zoomRegionSourceW / zoom;
+        double vpH = _zoomRegionSourceH / zoom;
+
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is not null && config.AspectRatio != AspectRatio.Auto)
+        {
+            double contentRatio = GetAspectRatioValue(config.AspectRatio);
+            if (contentRatio > 0)
+            {
+                double vpRatio = vpW / vpH;
+                if (vpRatio > contentRatio) vpW = vpH * contentRatio;
+                else vpH = vpW / contentRatio;
+            }
+        }
+        return (vpW / _zoomRegionSourceW / 2.0, vpH / _zoomRegionSourceH / 2.0);
+    }
+
+    private static void PositionHandle(Microsoft.UI.Xaml.Shapes.Rectangle handle, double cornerX, double cornerY)
+    {
+        Canvas.SetLeft(handle, cornerX - HandleSize / 2);
+        Canvas.SetTop(handle, cornerY - HandleSize / 2);
+    }
+
+    private ZoomDragMode HitTestCorners(Point p)
+    {
+        double rectX = Canvas.GetLeft(ZoomRegionRect);
+        double rectY = Canvas.GetTop(ZoomRegionRect);
+        double rectR = rectX + ZoomRegionRect.Width;
+        double rectB = rectY + ZoomRegionRect.Height;
+
+        if (IsNear(p, rectX, rectY)) return ZoomDragMode.ResizeTL;
+        if (IsNear(p, rectR, rectY)) return ZoomDragMode.ResizeTR;
+        if (IsNear(p, rectX, rectB)) return ZoomDragMode.ResizeBL;
+        if (IsNear(p, rectR, rectB)) return ZoomDragMode.ResizeBR;
+        return ZoomDragMode.None;
+
+        static bool IsNear(Point pt, double cx, double cy)
+            => System.Math.Abs(pt.X - cx) <= HandleHitRadius && System.Math.Abs(pt.Y - cy) <= HandleHitRadius;
+    }
+
     private void ZoomRegionCanvas_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (!_zoomRegionEditMode) return;
@@ -1128,10 +1240,32 @@ public sealed partial class EditorPage : Page
         var point = e.GetCurrentPoint(ZoomRegionCanvas);
         double rectX = Canvas.GetLeft(ZoomRegionRect);
         double rectY = Canvas.GetTop(ZoomRegionRect);
+        double rectR = rectX + ZoomRegionRect.Width;
+        double rectB = rectY + ZoomRegionRect.Height;
 
-        if (point.Position.X >= rectX && point.Position.X <= rectX + ZoomRegionRect.Width &&
-            point.Position.Y >= rectY && point.Position.Y <= rectY + ZoomRegionRect.Height)
+        var corner = HitTestCorners(point.Position);
+        if (corner != ZoomDragMode.None)
         {
+            _zoomDragMode = corner;
+            _isDraggingZoomRegion = true;
+            _dragStartPoint = point.Position;
+            _dragStartCenterX = _zoomRegionCenterX;
+            _dragStartCenterY = _zoomRegionCenterY;
+            _dragStartRectW = ZoomRegionRect.Width;
+            _dragStartRectH = ZoomRegionRect.Height;
+            _dragStartZoomLevel = _zoomRegionZoomLevel;
+            // Anchor is the opposite corner in display coords
+            _dragAnchorDispX = corner is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeBL ? rectR : rectX;
+            _dragAnchorDispY = corner is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeTR ? rectB : rectY;
+            ZoomRegionCanvas.CapturePointer(e.Pointer);
+            e.Handled = true;
+            return;
+        }
+
+        if (point.Position.X >= rectX && point.Position.X <= rectR &&
+            point.Position.Y >= rectY && point.Position.Y <= rectB)
+        {
+            _zoomDragMode = ZoomDragMode.Move;
             _isDraggingZoomRegion = true;
             _dragStartPoint = point.Position;
             _dragStartCenterX = _zoomRegionCenterX;
@@ -1144,23 +1278,85 @@ public sealed partial class EditorPage : Page
     private void ZoomRegionCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
         if (!_isDraggingZoomRegion) return;
+        if (_frameDisplayW <= 0 || _frameDisplayH <= 0) return;
 
         var point = e.GetCurrentPoint(ZoomRegionCanvas);
-        double deltaX = point.Position.X - _dragStartPoint.X;
-        double deltaY = point.Position.Y - _dragStartPoint.Y;
+        bool shift = (e.KeyModifiers & VirtualKeyModifiers.Shift) == VirtualKeyModifiers.Shift;
 
-        if (_frameDisplayW > 0 && _frameDisplayH > 0)
+        if (_zoomDragMode == ZoomDragMode.Move)
         {
+            double deltaX = point.Position.X - _dragStartPoint.X;
+            double deltaY = point.Position.Y - _dragStartPoint.Y;
+
             double deltaNormX = deltaX / _frameDisplayW;
             double deltaNormY = deltaY / _frameDisplayH;
 
-            // Clamp center so the viewport stays within source bounds
-            double halfW = 1.0 / (_zoomRegionZoomLevel * 2.0);
-            double halfH = 1.0 / (_zoomRegionZoomLevel * 2.0);
-            _zoomRegionCenterX = Math.Clamp(_dragStartCenterX + deltaNormX, halfW, 1.0 - halfW);
-            _zoomRegionCenterY = Math.Clamp(_dragStartCenterY + deltaNormY, halfH, 1.0 - halfH);
+            (double halfW, double halfH) = GetNormalizedHalfExtents(_zoomRegionZoomLevel);
 
+            double newCx = System.Math.Clamp(_dragStartCenterX + deltaNormX, halfW, 1.0 - halfW);
+            double newCy = System.Math.Clamp(_dragStartCenterY + deltaNormY, halfH, 1.0 - halfH);
+
+            bool snappedX = false, snappedY = false;
+            if (!shift)
+            {
+                if (System.Math.Abs(newCx - 0.5) < CenterSnapThreshold) { newCx = 0.5; snappedX = true; }
+                if (System.Math.Abs(newCy - 0.5) < CenterSnapThreshold) { newCy = 0.5; snappedY = true; }
+            }
+
+            _zoomRegionCenterX = newCx;
+            _zoomRegionCenterY = newCy;
             UpdateZoomRegionRect();
+            UpdateSnapGuides(snappedX, snappedY);
+        }
+        else if (_zoomDragMode is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeTR or ZoomDragMode.ResizeBL or ZoomDragMode.ResizeBR)
+        {
+            double dispDx = point.Position.X - _dragAnchorDispX;
+            double dispDy = point.Position.Y - _dragAnchorDispY;
+
+            int signX = _zoomDragMode is ZoomDragMode.ResizeTR or ZoomDragMode.ResizeBR ? 1 : -1;
+            int signY = _zoomDragMode is ZoomDragMode.ResizeBL or ZoomDragMode.ResizeBR ? 1 : -1;
+
+            // Project pointer-from-anchor onto the rect's diagonal direction
+            // (signX*W0, signY*H0). This makes resize feel natural in both
+            // outward and inward directions while preserving aspect.
+            double diagX = signX * _dragStartRectW;
+            double diagY = signY * _dragStartRectH;
+            double diagLenSq = diagX * diagX + diagY * diagY;
+            if (diagLenSq <= 0) { e.Handled = true; return; }
+            double projLen = (dispDx * diagX + dispDy * diagY) / System.Math.Sqrt(diagLenSq);
+            double diagLen = System.Math.Sqrt(diagLenSq);
+            double scale = projLen / diagLen;
+            if (scale < 0.0001) scale = 0.0001;
+
+            double newZoom = System.Math.Clamp(_dragStartZoomLevel / scale, MinZoomLevel, MaxZoomLevel);
+            double effectiveScale = _dragStartZoomLevel / newZoom;
+
+            double newRectW = _dragStartRectW * effectiveScale;
+            double newRectH = _dragStartRectH * effectiveScale;
+
+            double centerDispX = _dragAnchorDispX + signX * newRectW / 2.0;
+            double centerDispY = _dragAnchorDispY + signY * newRectH / 2.0;
+
+            double newCx = (centerDispX - _frameDisplayX) / _frameDisplayW;
+            double newCy = (centerDispY - _frameDisplayY) / _frameDisplayH;
+
+            (double rHalfW, double rHalfH) = GetNormalizedHalfExtents(newZoom);
+            newCx = System.Math.Clamp(newCx, rHalfW, 1.0 - rHalfW);
+            newCy = System.Math.Clamp(newCy, rHalfH, 1.0 - rHalfH);
+
+            bool snappedX = false, snappedY = false;
+            if (!shift)
+            {
+                if (System.Math.Abs(newCx - 0.5) < CenterSnapThreshold) { newCx = 0.5; snappedX = true; }
+                if (System.Math.Abs(newCy - 0.5) < CenterSnapThreshold) { newCy = 0.5; snappedY = true; }
+            }
+
+            _zoomRegionZoomLevel = newZoom;
+            _zoomRegionCenterX = newCx;
+            _zoomRegionCenterY = newCy;
+            UpdateZoomRegionRect();
+            SyncZoomLevelComboToFreeform(newZoom);
+            UpdateSnapGuides(snappedX, snappedY);
         }
 
         e.Handled = true;
@@ -1171,8 +1367,46 @@ public sealed partial class EditorPage : Page
         if (_isDraggingZoomRegion)
         {
             _isDraggingZoomRegion = false;
+            _zoomDragMode = ZoomDragMode.None;
             ZoomRegionCanvas.ReleasePointerCapture(e.Pointer);
+            UpdateSnapGuides(false, false);
             e.Handled = true;
+        }
+    }
+
+    private void SyncZoomLevelComboToFreeform(double zoom)
+    {
+        string text = zoom.ToString("0.##", CultureInfo.InvariantCulture) + "x";
+        if (ZoomLevelCombo.Text == text) return;
+        _suppressZoomPropertyUpdate = true;
+        try { ZoomLevelCombo.Text = text; }
+        finally { _suppressZoomPropertyUpdate = false; }
+    }
+
+    private void UpdateSnapGuides(bool snappedX, bool snappedY)
+    {
+        if (snappedX)
+        {
+            double cx = _frameDisplayX + _frameDisplayW / 2.0;
+            SnapGuideV.X1 = cx; SnapGuideV.X2 = cx;
+            SnapGuideV.Y1 = _frameDisplayY; SnapGuideV.Y2 = _frameDisplayY + _frameDisplayH;
+            SnapGuideV.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            SnapGuideV.Visibility = Visibility.Collapsed;
+        }
+
+        if (snappedY)
+        {
+            double cy = _frameDisplayY + _frameDisplayH / 2.0;
+            SnapGuideH.Y1 = cy; SnapGuideH.Y2 = cy;
+            SnapGuideH.X1 = _frameDisplayX; SnapGuideH.X2 = _frameDisplayX + _frameDisplayW;
+            SnapGuideH.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            SnapGuideH.Visibility = Visibility.Collapsed;
         }
     }
 
