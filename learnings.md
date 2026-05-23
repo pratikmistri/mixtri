@@ -1332,3 +1332,16 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** Reading `PointerRoutedEventArgs.KeyModifiers` directly (no separate keyboard hook). Computing the anchor corner in display coords at `PointerPressed` and re-projecting the new center display position back to normalized coords keeps the opposite corner fixed across resize. Clamping zoom first, then deriving effective scale, avoids the rect drifting outside `[1.5, 4.0]`.
 
 **What didn't work / rejected:** Letting the corner handle `Rectangle` elements be hit-test-visible ? would steal pointer capture from the `Canvas` and break the existing drag handlers. Solution: keep handles purely cosmetic and do manual hit testing.
+
+---
+
+## Region Selector Overlay & Recording Page — PR Review Fixes
+
+**Approaches tried:**
+
+1. **TryApplyPresetRegion coordinate space bug** — Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
+2. **UpdateOverlay degenerate-selection state leak** — When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
+3. **RecordingPage._infoBarTimer navigation leak** — Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
+
+**What worked:** All three above.
+

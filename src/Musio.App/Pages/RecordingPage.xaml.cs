@@ -72,6 +72,18 @@ public sealed partial class RecordingPage : Page
             ViewModel.PropertyChanged -= _viewModelHandler;
             _viewModelHandler = null;
         }
+
+        // Detach the InfoBar timer so it can't fire (and keep this page alive)
+        // after navigation. The timer is created on this page's DispatcherQueue
+        // and retains OnInfoBarTimerTick.
+        if (_infoBarTimer is not null)
+        {
+            _infoBarTimer.Stop();
+            _infoBarTimer.Tick -= OnInfoBarTimerTick;
+        }
+        if (RecordingInfoBar is not null)
+            RecordingInfoBar.IsOpen = false;
+
         base.OnNavigatedFrom(e);
     }
 

@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Input;
@@ -106,26 +107,57 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (preset is null || preset.Width <= 0 || preset.Height <= 0)
             return;
 
-        // If layout isn't ready yet, OnSizeChanged will call UpdateOverlay
-        // once ActualWidth/Height become valid; trust the preset for now.
+        // CaptureRegion is stored as monitor-local DIPs (see ConfirmSelection),
+        // but the overlay's selection coordinates are virtual-desktop overlay
+        // DIPs. Convert monitor-local DIPs → physical pixels (using the saved
+        // monitor's origin + effective DPI) → overlay DIPs before seeding the
+        // selection so multi-monitor / mixed-DPI presets render correctly.
+        var monitor = _regionSelector.GetMonitors().FirstOrDefault(m => m.Id == preset.MonitorId);
+        if (monitor is null)
+            return;
+
+        float dpiScale = GetMonitorDpiScale(monitor.Handle);
+        if (dpiScale <= 0) dpiScale = 1.0f;
+
+        // Monitor-local DIPs → screen-absolute physical pixels.
+        double physX = monitor.X + preset.X * dpiScale;
+        double physY = monitor.Y + preset.Y * dpiScale;
+        double physW = preset.Width * dpiScale;
+        double physH = preset.Height * dpiScale;
+
+        // Physical pixels → overlay DIPs. The overlay canvas spans the entire
+        // virtual desktop; _screenshotWidth/Height are the virtual desktop in
+        // physical pixels, ActualWidth/Height are the same in overlay DIPs.
         double canvasW = ActualWidth;
         double canvasH = ActualHeight;
-        if (canvasW > 0 && canvasH > 0)
-        {
-            // Reject regions that don't intersect the current virtual desktop
-            // (e.g. saved on a now-disconnected monitor).
-            bool intersects = preset.X < canvasW
-                && preset.Y < canvasH
-                && preset.X + preset.Width > 0
-                && preset.Y + preset.Height > 0;
-            if (!intersects)
-                return;
-        }
+        if (canvasW <= 0 || canvasH <= 0 || _screenshotWidth <= 0 || _screenshotHeight <= 0)
+            return;
 
-        _selX = preset.X;
-        _selY = preset.Y;
-        _selW = preset.Width;
-        _selH = preset.Height;
+        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        double scaleX = _screenshotWidth / canvasW; // phys-per-overlay-DIP
+        double scaleY = _screenshotHeight / canvasH;
+        if (scaleX <= 0 || scaleY <= 0)
+            return;
+
+        double overlayX = (physX - vdLeft) / scaleX;
+        double overlayY = (physY - vdTop) / scaleY;
+        double overlayW = physW / scaleX;
+        double overlayH = physH / scaleY;
+
+        // Reject regions that don't intersect the current virtual desktop
+        // (e.g. saved on a now-disconnected monitor).
+        bool intersects = overlayX < canvasW
+            && overlayY < canvasH
+            && overlayX + overlayW > 0
+            && overlayY + overlayH > 0;
+        if (!intersects)
+            return;
+
+        _selX = overlayX;
+        _selY = overlayY;
+        _selW = overlayW;
+        _selH = overlayH;
         _hasSelection = true;
 
         // Pre-rendered selections need the Confirm/Cancel buttons immediately —
@@ -361,8 +393,15 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
         if (sw <= 0 || sh <= 0)
         {
-            // Degenerate selection (entirely off-screen) — show the blank
-            // overlay so the user can drag a new one.
+            // Degenerate selection (entirely off-screen) — clear selection
+            // state so Confirm/Cancel buttons hide and the next pointer-down
+            // starts a fresh drag rather than resizing the invisible region.
+            _hasSelection = false;
+            _selX = _selY = _selW = _selH = 0;
+            if (ButtonPanel is not null)
+                ButtonPanel.Visibility = Visibility.Collapsed;
+
+            // Show the blank overlay so the user can drag a new one.
             Canvas.SetLeft(TopMask, 0);
             Canvas.SetTop(TopMask, 0);
             TopMask.Width = canvasW;
