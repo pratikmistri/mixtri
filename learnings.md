@@ -1259,11 +1259,45 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   - Match monitor by exact `DisplayName == MonitorId` (or `StartsWith(MonitorId + ' ')` to cover `"\\.\DISPLAY1 (Primary)"`). `Contains` matched `\\.\DISPLAY1` against `\\.\DISPLAY10`.
   - Round border px/py with `Math.Round` and floor pw/ph to even numbers (`& ~1`) to match the H.264 crop math in `RecordingSession` (avoids 1-2 px drift between highlight and actual captured frame).
 - **What didn't work**:
-  - `presenter.Maximize()` to cover the virtual desktop — only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
-  - `DisplayName.Contains(MonitorId)` for monitor lookup — unsafe substring match across DISPLAY1/DISPLAY10.
+  - `presenter.Maximize()` to cover the virtual desktop � only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
+  - `DisplayName.Contains(MonitorId)` for monitor lookup � unsafe substring match across DISPLAY1/DISPLAY10.
 
-## Stale Saved Region — Disconnected Monitor
+## Stale Saved Region � Disconnected Monitor
 
 - **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected — please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` — the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected � please select a new region'), and return null. This forces the user to reselect on the current display topology.
+- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` � the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+
+---
+
+---
+
+## Stop-Trigger Click Removal from Recording Data
+
+**Feature/area:** MouseHookRecorder, RecordingOverlayWindow, recording stop flow
+
+**Approaches tried:**
+
+1. **Timestamp-based trim with `NotifyStopRequested()`** � Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
+
+**What worked:** Signaling the mouse recorder from the overlay's `Stop_Click` and `OnOverlayClosing` handlers (earliest possible point in the stop flow), then trimming the stop-trigger click in `GetRecordedData()`. The 200ms threshold is generous enough for UI dispatch delay (~3-10ms typical) while avoiding false positives.
+
+**What didn't work:** N/A � first approach worked.
+
+**Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
+
+
+---
+
+## Zoom Region Editor Styling, Resize & Center Snapping
+
+**Feature/area:** `EditorPage` zoom region edit overlay (`ZoomRegionRect` + handlers in `EditorPage.xaml.cs`).
+
+**Approaches tried:**
+1. **1px dashed stroke** ? reduced `StrokeThickness` from 2 to 1 on `ZoomRegionRect`.
+2. **Corner-handle resize, aspect-preserving** ? Added 4 corner `Rectangle` handles in XAML (visual only, `IsHitTestVisible=False`); hit-testing performed in code against the rect corners with a 10px radius. On drag, the opposite corner is anchored, scale = `max(|dx|/W0, |dy|/H0)`, `newZoom = startZoom / scale` clamped to `[1.5, 4.0]` (the UI's exposed range). vp width/height are derived from zoom (and output aspect override is uniform in zoom), so the rect aspect is preserved automatically.
+3. **Center snapping with Shift override** ? On translation, snap normalized center to `0.5` when within `CenterSnapThreshold` (0.02) per axis, unless `e.KeyModifiers` includes `VirtualKeyModifiers.Shift`. Blue dashed guide lines visualize active snap.
+
+**What worked:** Reading `PointerRoutedEventArgs.KeyModifiers` directly (no separate keyboard hook). Computing the anchor corner in display coords at `PointerPressed` and re-projecting the new center display position back to normalized coords keeps the opposite corner fixed across resize. Clamping zoom first, then deriving effective scale, avoids the rect drifting outside `[1.5, 4.0]`.
+
+**What didn't work / rejected:** Letting the corner handle `Rectangle` elements be hit-test-visible ? would steal pointer capture from the `Canvas` and break the existing drag handlers. Solution: keep handles purely cosmetic and do manual hit testing.
