@@ -637,10 +637,28 @@ public class FrameCompositor : IDisposable
             _croppedBuffer = new CanvasRenderTarget(_device, _contentWidth, _contentHeight, 96);
         }
 
+        // Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
+        // significantly more expensive than Linear. It only meaningfully improves
+        // quality when actually resampling (zoom in/out or aspect-ratio crop with
+        // non-unit scale). At ~1:1 the bicubic filter produces output essentially
+        // identical to Linear, so use the cheaper path. Use the same explicit
+        // near-unit threshold form as ComposeFramePostCompositeZoom so the two
+        // paths stay aligned over time.
+        double scaleX = _contentWidth / viewport.Width;
+        double scaleY = _contentHeight / viewport.Height;
+        const double nearUnitScaleMinimum = 0.95;
+        const double nearUnitScaleMaximum = 1.05;
+        bool nearUnitScale =
+            scaleX >= nearUnitScaleMinimum && scaleX <= nearUnitScaleMaximum &&
+            scaleY >= nearUnitScaleMinimum && scaleY <= nearUnitScaleMaximum;
+        var interpolation = nearUnitScale
+            ? CanvasImageInterpolation.Linear
+            : CanvasImageInterpolation.HighQualityCubic;
+
         using var ds = _croppedBuffer.CreateDrawingSession();
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
         ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport,
-            1f, CanvasImageInterpolation.HighQualityCubic);
+            1f, interpolation);
         return _croppedBuffer;
     }
 
