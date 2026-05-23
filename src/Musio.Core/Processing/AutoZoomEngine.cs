@@ -228,8 +228,21 @@ public class AutoZoomEngine
     private (float zoom, float cx, float cy)? EvaluateManualKeyframes(double timeSeconds)
     {
         // When multiple keyframes overlap (e.g. A zooming out while B zooms in),
-        // pick the one producing the highest zoom level for a seamless crossover.
-        (float zoom, float cx, float cy)? best = null;
+        // use max-zoom for the zoom level but blend centers by each keyframe's
+        // "activation weight" (zoom - 1) so the focal point glides smoothly
+        // from A's center to B's center across the overlap, instead of snapping
+        // at the instant B's zoom first exceeds A's.
+        bool anyActive = false;
+        float bestZoom = float.NegativeInfinity;
+        double weightSum = 0.0;
+        double cxSum = 0.0;
+        double cySum = 0.0;
+        // Fallback center (in case all weights are ~0 within the overlap region):
+        // track the center of the keyframe currently contributing the max zoom.
+        // Initialized to source center but always overridden as soon as any
+        // segment is active (since bestZoom starts at -inf).
+        float fallbackCx = _sourceWidth / 2f;
+        float fallbackCy = _sourceHeight / 2f;
 
         foreach (var kf in _manualKeyframes)
         {
@@ -264,20 +277,49 @@ public class AutoZoomEngine
             float cx = (float)(kf.CenterX * _sourceWidth);
             float cy = (float)(kf.CenterY * _sourceHeight);
 
-            if (!best.HasValue || zoom > best.Value.zoom)
-                best = (zoom, cx, cy);
+            anyActive = true;
+            double w = Math.Max(0.0, zoom - 1.0);
+            weightSum += w;
+            cxSum += w * cx;
+            cySum += w * cy;
+
+            if (zoom > bestZoom)
+            {
+                bestZoom = zoom;
+                fallbackCx = cx;
+                fallbackCy = cy;
+            }
         }
 
-        return best;
+        if (!anyActive)
+            return null;
+
+        float outCx, outCy;
+        if (weightSum > 1e-6)
+        {
+            outCx = (float)(cxSum / weightSum);
+            outCy = (float)(cySum / weightSum);
+        }
+        else
+        {
+            outCx = fallbackCx;
+            outCy = fallbackCy;
+        }
+
+        return (bestZoom, outCx, outCy);
     }
 
     private (float zoom, float cx, float cy) EvaluateAutoSegments(double timeSeconds)
     {
-        // When segments overlap (edge cases after merge), pick the highest zoom
-        // for a seamless transition — same strategy as manual keyframes.
+        // Same strategy as manual keyframes: max zoom for level, weighted
+        // average for center to avoid focal-point snaps across overlapping
+        // segments.
         float bestZoom = 1.0f;
-        float bestCx = _sourceWidth / 2f;
-        float bestCy = _sourceHeight / 2f;
+        float fallbackCx = _sourceWidth / 2f;
+        float fallbackCy = _sourceHeight / 2f;
+        double weightSum = 0.0;
+        double cxSum = 0.0;
+        double cySum = 0.0;
 
         foreach (var seg in _autoSegments)
         {
@@ -302,15 +344,32 @@ public class AutoZoomEngine
                 zoom = CubicBezierEase(seg.TargetZoom, 1.0f, (float)progress);
             }
 
+            double w = Math.Max(0.0, zoom - 1.0);
+            weightSum += w;
+            cxSum += w * seg.CenterX;
+            cySum += w * seg.CenterY;
+
             if (zoom > bestZoom)
             {
                 bestZoom = zoom;
-                bestCx = seg.CenterX;
-                bestCy = seg.CenterY;
+                fallbackCx = seg.CenterX;
+                fallbackCy = seg.CenterY;
             }
         }
 
-        return (bestZoom, bestCx, bestCy);
+        float outCx, outCy;
+        if (weightSum > 1e-6)
+        {
+            outCx = (float)(cxSum / weightSum);
+            outCy = (float)(cySum / weightSum);
+        }
+        else
+        {
+            outCx = fallbackCx;
+            outCy = fallbackCy;
+        }
+
+        return (bestZoom, outCx, outCy);
     }
 
     /// <summary>

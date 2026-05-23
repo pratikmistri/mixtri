@@ -343,4 +343,84 @@ public sealed class AutoZoomEngineTests
         Assert.IsFalse(hadJump,
             "Zoom should not have sudden drops during overlapping keyframe transition");
     }
+
+    [TestMethod]
+    public void GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap()
+    {
+        // Regression: when two overlapping keyframes have different centers,
+        // the focal point should glide smoothly from A to B rather than
+        // snapping at the moment B's zoom first exceeds A's.
+        const int W = 1920;
+        const int H = 1080;
+        var config = new AutoZoomConfig();
+        var engine = new AutoZoomEngine(config);
+        var recording = BuildRecordingWithClicks(10.0, []);
+        engine.BuildZoomTimeline(recording, W, H, TickFrequency);
+
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.0),
+                ZoomLevel = 2.0,
+                CenterX = 0.3,
+                CenterY = 0.3,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(3.0),
+                ZoomLevel = 2.0,
+                CenterX = 0.7,
+                CenterY = 0.7,
+            },
+        ]);
+
+        // Step through and assert per-step center movement is bounded.
+        // With smoothed blending across a ~500ms overlap, peak rate is roughly
+        // (W * 0.4) / 0.5s ≈ 1.5 px/ms ≈ 8 px per 5ms linear, ~16 px with
+        // cubic-bezier ease. Pick 60 px as a generous-but-meaningful threshold
+        // — well below the old ~768 px hard-switch snap (B's center minus A's
+        // center across the crossover), while still catching any future
+        // regression that re-introduces a jump.
+        const double step = 0.005;
+        const float maxStepPixels = 60f;
+        float prevCx = -1, prevCy = -1;
+        for (double t = 2.0; t <= 3.6; t += step)
+        {
+            var state = engine.GetZoomState(t);
+            float cx = state.CenterX;
+            float cy = state.CenterY;
+            if (prevCx >= 0)
+            {
+                Assert.IsTrue(Math.Abs(cx - prevCx) < maxStepPixels,
+                    $"Center X jumped {Math.Abs(cx - prevCx):F1}px at t={t:F3}");
+                Assert.IsTrue(Math.Abs(cy - prevCy) < maxStepPixels,
+                    $"Center Y jumped {Math.Abs(cy - prevCy):F1}px at t={t:F3}");
+            }
+            prevCx = cx;
+            prevCy = cy;
+        }
+
+        // Endpoint assertions: outside the overlap, each keyframe should own
+        // the focal point — verifies the blend doesn't bias the result.
+        // At t = 2.0 (kf A's timestamp, hold phase, kf B not yet active),
+        // center must equal A's center.
+        var stateA = engine.GetZoomState(2.0);
+        Assert.AreEqual(0.3f * W, stateA.CenterX, 1f, "Center at A's timestamp should be A's center");
+        Assert.AreEqual(0.3f * H, stateA.CenterY, 1f, "Center at A's timestamp should be A's center");
+
+        // At t = 3.0 (kf B's timestamp, hold phase, kf A's post-ease finished
+        // at 2.0 + hold(0.575) + post(0.575) = 3.15 — A is still tailing off
+        // here, but B's weight at hold-peak dominates by ~3x). Use a looser
+        // tolerance reflecting the still-active tail.
+        var stateB = engine.GetZoomState(3.0);
+        Assert.IsTrue(stateB.CenterX > 0.55f * W,
+            $"Center at B's timestamp should be near B's center (0.7*W=1344), got {stateB.CenterX}");
+
+        // After both segments end (B's post-ease finishes at 3.0 + 0.575 + 0.575
+        // = 4.15), no manual override → falls through to auto (empty), so
+        // zoom returns to 1.0.
+        var stateAfter = engine.GetZoomState(4.5);
+        Assert.AreEqual(1.0f, stateAfter.ZoomLevel, 0.01f,
+            "Zoom should return to 1.0 after all segments end");
+    }
 }

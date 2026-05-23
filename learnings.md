@@ -1359,3 +1359,22 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What worked:** XAML accelerator + focus-check guard in the handler.
 
+
+
+---
+
+## Overlapping Zoom Segments — Center Snap Fix
+
+**Feature/area:** AutoZoomEngine — focal-point continuity across overlapping zoom segments
+
+**Approaches tried:**
+1. Earlier fix used max-zoom-wins for both zoom level and center (cx/cy). Zoom level stayed continuous, but the *center* snapped at the instant B's zoom first exceeded A's, since the winning keyframe's center was used wholesale. Editing a segment moved where this snap occurred, making the visual jump obvious.
+2. Blend centers by per-keyframe "activation weight" (max(0, zoom - 1)) while still using max-zoom for the zoom level. ?
+
+**What worked:**
+- In `EvaluateManualKeyframes` and `EvaluateAutoSegments`: compute `w = max(0, zoom - 1)` per active segment, accumulate `weighted sum of cx/cy`, return `weightSum > eps ? sum/weight : maxZoomSegmentCenter`.
+- This guarantees: at A-only the center = cA; at the crossover it's a smooth weighted blend; at B-only the center = cB. No focal-point snap regardless of how segments are edited.
+- Regression test `GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` steps through the overlap and asserts per-step center delta stays well under the would-be snap magnitude.
+
+**What didn't work:**
+- Returning the max-zoom segment's center as-is — produces a discontinuous jump at the crossover when overlapping segments have different centers.
