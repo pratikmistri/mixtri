@@ -1271,3 +1271,19 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work:** N/A � first approach worked.
 
 **Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
+
+
+---
+
+## Zoom Region Editor Styling, Resize & Center Snapping
+
+**Feature/area:** `EditorPage` zoom region edit overlay (`ZoomRegionRect` + handlers in `EditorPage.xaml.cs`).
+
+**Approaches tried:**
+1. **1px dashed stroke** ? reduced `StrokeThickness` from 2 to 1 on `ZoomRegionRect`.
+2. **Corner-handle resize, aspect-preserving** ? Added 4 corner `Rectangle` handles in XAML (visual only, `IsHitTestVisible=False`); hit-testing performed in code against the rect corners with a 10px radius. On drag, the opposite corner is anchored, scale = `max(|dx|/W0, |dy|/H0)`, `newZoom = startZoom / scale` clamped to `[1.5, 4.0]` (the UI's exposed range). vp width/height are derived from zoom (and output aspect override is uniform in zoom), so the rect aspect is preserved automatically.
+3. **Center snapping with Shift override** ? On translation, snap normalized center to `0.5` when within `CenterSnapThreshold` (0.02) per axis, unless `e.KeyModifiers` includes `VirtualKeyModifiers.Shift`. Blue dashed guide lines visualize active snap.
+
+**What worked:** Reading `PointerRoutedEventArgs.KeyModifiers` directly (no separate keyboard hook). Computing the anchor corner in display coords at `PointerPressed` and re-projecting the new center display position back to normalized coords keeps the opposite corner fixed across resize. Clamping zoom first, then deriving effective scale, avoids the rect drifting outside `[1.5, 4.0]`.
+
+**What didn't work / rejected:** Letting the corner handle `Rectangle` elements be hit-test-visible ? would steal pointer capture from the `Canvas` and break the existing drag handlers. Solution: keep handles purely cosmetic and do manual hit testing.

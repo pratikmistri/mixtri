@@ -75,9 +75,26 @@
                     <Rectangle x:Name="DimLeft" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
                     <Rectangle x:Name="DimRight" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
                     <Rectangle x:Name="ZoomRegionRect"
-                               Stroke="{ThemeResource OverlayForegroundBrush}" StrokeThickness="2"
+                               Stroke="{ThemeResource OverlayForegroundBrush}" StrokeThickness="1"
                                StrokeDashArray="6,3"
-                               Fill="Transparent" />
+                               Fill="Transparent"
+                               IsHitTestVisible="False" />
+                    <Line x:Name="SnapGuideV" Stroke="{ThemeResource AccentFillColorDefaultBrush}" StrokeThickness="1" StrokeDashArray="3,3"
+                          Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Line x:Name="SnapGuideH" Stroke="{ThemeResource AccentFillColorDefaultBrush}" StrokeThickness="1" StrokeDashArray="3,3"
+                          Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleTL" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleTR" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleBL" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleBR" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
                 </Canvas>
 
                 <StackPanel
@@ -196,9 +213,12 @@
                     <ComboBox
                         x:Name="ZoomLevelCombo"
                         Width="80"
-                        SelectedIndex="1"
+                        IsEditable="True"
+                        SelectedIndex="2"
                         SelectionChanged="ZoomLevelCombo_SelectionChanged"
+                        TextSubmitted="ZoomLevelCombo_TextSubmitted"
                         ToolTipService.ToolTip="Zoom level for selected segment">
+                        <ComboBoxItem Content="1x" Tag="1" />
                         <ComboBoxItem Content="1.5x" Tag="1.5" />
                         <ComboBoxItem Content="2x" Tag="2" />
                         <ComboBoxItem Content="2.5x" Tag="2.5" />
