@@ -112,12 +112,30 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _hostWindow.ExtendsContentIntoTitleBar = true;
         _hostWindow.Title = "Select Region";
 
-        // Hide title bar chrome and maximize
+        // Hide title bar chrome; do NOT maximize — Maximize() only covers a
+        // single monitor. We size the window manually to the full virtual
+        // desktop so the overlay covers every display.
         if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(false, false);
             presenter.IsAlwaysOnTop = true;
-            presenter.Maximize();
+            presenter.IsResizable = false;
+            presenter.IsMaximizable = false;
+            presenter.IsMinimizable = false;
+        }
+
+        // Position and size the window to span the entire virtual desktop
+        // (all monitors) in physical pixels. This matches the dimensions of
+        // the screenshot we captured above so the image displays 1:1 with
+        // each monitor's physical pixels, even across mixed-DPI setups.
+        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vdWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vdHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vdWidth > 0 && vdHeight > 0)
+        {
+            _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                vdLeft, vdTop, vdWidth, vdHeight));
         }
 
         // Set the screenshot as background
@@ -703,25 +721,82 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (!_hasSelection)
             return;
 
-        // Determine which monitor contains the selection centre
-        var monitors = _regionSelector.GetMonitors();
-        string monitorId = monitors.FirstOrDefault()?.Id ?? "unknown";
-        int centerX = (int)(_selX + _selW / 2);
-        int centerY = (int)(_selY + _selH / 2);
+        // Overlay DIPs → virtual desktop physical pixels (screen-absolute).
+        double scaleX = ActualWidth > 0 ? _screenshotWidth / ActualWidth : 1.0;
+        double scaleY = ActualHeight > 0 ? _screenshotHeight / ActualHeight : 1.0;
+        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
-        foreach (var mon in monitors)
+        int physX = vdLeft + (int)Math.Round(_selX * scaleX);
+        int physY = vdTop + (int)Math.Round(_selY * scaleY);
+        int physW = (int)Math.Round(_selW * scaleX);
+        int physH = (int)Math.Round(_selH * scaleY);
+
+        // Pick the monitor with the largest intersection with the selection.
+        // This handles cross-monitor drags and gaps between displays better
+        // than a simple "center is inside" test.
+        var monitors = _regionSelector.GetMonitors();
+        MonitorInfo? hostMonitor = null;
+        long bestArea = 0;
+        foreach (var m in monitors)
         {
-            if (centerX >= mon.X && centerX < mon.X + mon.Width &&
-                centerY >= mon.Y && centerY < mon.Y + mon.Height)
+            long iw = Math.Max(0L, Math.Min(physX + physW, m.X + m.Width) - Math.Max(physX, m.X));
+            long ih = Math.Max(0L, Math.Min(physY + physH, m.Y + m.Height) - Math.Max(physY, m.Y));
+            long area = iw * ih;
+            if (area > bestArea)
             {
-                monitorId = mon.Id;
-                break;
+                bestArea = area;
+                hostMonitor = m;
             }
         }
 
-        var region = new CaptureRegion((int)_selX, (int)_selY, (int)_selW, (int)_selH, monitorId);
+        if (hostMonitor is null || bestArea <= 0)
+        {
+            // Selection lies entirely in a gap between monitors — invalid.
+            CancelSelection();
+            return;
+        }
+
+        // Clamp to host monitor (now guaranteed to have non-empty intersection).
+        int monLeft = hostMonitor.X;
+        int monTop = hostMonitor.Y;
+        int monRight = hostMonitor.X + hostMonitor.Width;
+        int monBottom = hostMonitor.Y + hostMonitor.Height;
+        int clampedLeft = Math.Max(physX, monLeft);
+        int clampedTop = Math.Max(physY, monTop);
+        int clampedRight = Math.Min(physX + physW, monRight);
+        int clampedBottom = Math.Min(physY + physH, monBottom);
+        int clampedW = clampedRight - clampedLeft;
+        int clampedH = clampedBottom - clampedTop;
+
+        // Convert physical pixels → monitor-local DIPs using THIS monitor's
+        // effective DPI (handles mixed-DPI multi-monitor). Use the host
+        // monitor's HMONITOR directly so we never disagree with the chosen
+        // monitor (e.g., gaps near boundaries with MonitorFromPoint).
+        float dpiScale = GetMonitorDpiScale(hostMonitor.Handle);
+        if (dpiScale <= 0) dpiScale = 1.0f;
+
+        int dipX = (int)Math.Round((clampedLeft - monLeft) / dpiScale);
+        int dipY = (int)Math.Round((clampedTop - monTop) / dpiScale);
+        int dipW = Math.Max(1, (int)Math.Round(clampedW / dpiScale));
+        int dipH = Math.Max(1, (int)Math.Round(clampedH / dpiScale));
+
+        var region = new CaptureRegion(dipX, dipY, dipW, dipH, hostMonitor.Id);
         _regionSelector.SaveRegion(region);
         CompleteWithRegion(region);
+    }
+
+    private static float GetMonitorDpiScale(IntPtr hMonitor)
+    {
+        try
+        {
+            if (hMonitor == IntPtr.Zero) return 1.0f;
+            int hr = GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            if (hr == 0 && dpiX > 0)
+                return dpiX / 96.0f;
+        }
+        catch { }
+        return 1.0f;
     }
 
     private void CompleteWithRegion(CaptureRegion region)
@@ -813,6 +888,9 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     [DllImport("user32.dll")]
     private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     #endregion
 }
