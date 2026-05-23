@@ -139,6 +139,15 @@ public class RecordingSession : IDisposable
     public long FramesCaptured => _screenEngine?.FramesCaptured ?? 0;
     public long DroppedFrames => _screenEngine?.DroppedFrames ?? 0;
 
+    /// <summary>
+    /// Signals that the user has initiated a stop. Call as early as possible
+    /// in the stop flow so the mouse recorder can exclude the stop-trigger click.
+    /// </summary>
+    public void NotifyStopRequested()
+    {
+        _mouseRecorder?.NotifyStopRequested();
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     public event EventHandler<RecordingState>? StateChanged;

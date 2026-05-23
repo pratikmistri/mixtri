@@ -43,4 +43,57 @@ public class MouseRecordingData
         ? TimeSpan.FromTicks(
             (long)((EndTimestampTicks - StartTimestampTicks) / TickFrequency * TimeSpan.TicksPerSecond))
         : TimeSpan.Zero;
+
+    /// <summary>
+    /// Returns a copy of <paramref name="data"/> with the stop-trigger click removed.
+    /// The stop-trigger click is the last left-button-down event that occurred
+    /// within 200 ms before <paramref name="stopRequestedTicks"/>. Its matching
+    /// button-up event and corresponding button samples are also removed.
+    /// Move and scroll samples are preserved.
+    /// </summary>
+    public static MouseRecordingData TrimStopClick(MouseRecordingData data, long stopRequestedTicks)
+    {
+        var samples = new List<MouseSample>(data.Samples);
+        var clicks = new List<ClickEvent>(data.Clicks);
+        long endTicks = stopRequestedTicks;
+
+        // Find the last left-button-down click (the one that triggered stop).
+        int lastDownIdx = -1;
+        for (int i = clicks.Count - 1; i >= 0; i--)
+        {
+            if (clicks[i].IsDown && clicks[i].Button == MouseButton.Left)
+            {
+                lastDownIdx = i;
+                break;
+            }
+        }
+
+        if (lastDownIdx >= 0)
+        {
+            var stopClick = clicks[lastDownIdx];
+            long threshold = (long)(data.TickFrequency * 0.2); // 200 ms
+
+            if (stopClick.TimestampTicks >= stopRequestedTicks - threshold)
+            {
+                long cutoffTicks = stopClick.TimestampTicks;
+
+                // Remove all click events at or after the stop click
+                clicks.RemoveAll(c => c.TimestampTicks >= cutoffTicks);
+
+                // Remove button-down / button-up samples at or after the stop click
+                samples.RemoveAll(s => s.TimestampTicks >= cutoffTicks
+                    && (s.EventKind == MouseEventKind.ButtonDown
+                        || s.EventKind == MouseEventKind.ButtonUp));
+            }
+        }
+
+        return new MouseRecordingData
+        {
+            Samples = samples,
+            Clicks = clicks,
+            StartTimestampTicks = data.StartTimestampTicks,
+            EndTimestampTicks = endTicks,
+            TickFrequency = data.TickFrequency,
+        };
+    }
 }

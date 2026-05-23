@@ -239,6 +239,12 @@ public partial class RecordingViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Signals that the user has initiated a stop. Call as early as possible
+    /// (e.g. in the Stop button handler) so the stop-trigger click is excluded.
+    /// </summary>
+    public void NotifyStopRequested() => _session?.NotifyStopRequested();
+
     [RelayCommand]
     private async Task StopRecordingAsync()
     {

@@ -267,4 +267,191 @@ public sealed class MouseHookRecorderTests
     }
 
     #endregion
+
+    #region TrimStopClick
+
+    [TestMethod]
+    public void TrimStopClick_RemovesLastLeftClickPair()
+    {
+        long freq = 10_000_000;
+        long start = 0;
+        long stopClickDown = (long)(9.998 * freq); // 9.998s — stop click down
+        long stopClickUp   = (long)(9.999 * freq); // 9.999s — stop click up
+        long stopRequested = (long)(10.0 * freq);   // 10.0s  — handler fires
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>
+            {
+                new() { TimestampTicks = (long)(1.0 * freq), X = 100, Y = 100, EventKind = MouseEventKind.Move },
+                new() { TimestampTicks = (long)(2.0 * freq), X = 200, Y = 200, EventKind = MouseEventKind.ButtonDown, Button = MouseButton.Left },
+                new() { TimestampTicks = (long)(2.1 * freq), X = 200, Y = 200, EventKind = MouseEventKind.ButtonUp, Button = MouseButton.Left },
+                new() { TimestampTicks = (long)(9.5 * freq), X = 500, Y = 500, EventKind = MouseEventKind.Move },
+                new() { TimestampTicks = stopClickDown, X = 600, Y = 600, EventKind = MouseEventKind.ButtonDown, Button = MouseButton.Left },
+                new() { TimestampTicks = stopClickUp, X = 600, Y = 600, EventKind = MouseEventKind.ButtonUp, Button = MouseButton.Left },
+            },
+            Clicks = new List<ClickEvent>
+            {
+                new((long)(2.0 * freq), 200, 200, MouseButton.Left, true),
+                new((long)(2.1 * freq), 200, 200, MouseButton.Left, false),
+                new(stopClickDown, 600, 600, MouseButton.Left, true),
+                new(stopClickUp, 600, 600, MouseButton.Left, false),
+            },
+            StartTimestampTicks = start,
+            EndTimestampTicks = (long)(10.5 * freq),
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        // Stop click pair should be removed, legitimate click pair preserved
+        Assert.AreEqual(2, trimmed.Clicks.Count);
+        Assert.IsTrue(trimmed.Clicks[0].IsDown);
+        Assert.AreEqual(200, trimmed.Clicks[0].X);
+        Assert.IsFalse(trimmed.Clicks[1].IsDown);
+
+        // Button samples for stop click removed; move + legitimate button samples kept
+        Assert.AreEqual(4, trimmed.Samples.Count); // move + down + up + move (legitimate)
+        Assert.IsTrue(trimmed.Samples.All(s =>
+            s.EventKind == MouseEventKind.Move
+            || s.TimestampTicks < stopClickDown));
+
+        // EndTimestampTicks should be set to stopRequested
+        Assert.AreEqual(stopRequested, trimmed.EndTimestampTicks);
+    }
+
+    [TestMethod]
+    public void TrimStopClick_DoesNotRemoveClicksOutsideThreshold()
+    {
+        long freq = 10_000_000;
+        long clickDown = (long)(1.0 * freq); // 1s — well before stop
+        long stopRequested = (long)(10.0 * freq); // 10s
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>(),
+            Clicks = new List<ClickEvent>
+            {
+                new(clickDown, 100, 100, MouseButton.Left, true),
+                new(clickDown + 100_000, 100, 100, MouseButton.Left, false),
+            },
+            StartTimestampTicks = 0,
+            EndTimestampTicks = (long)(10.5 * freq),
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        // Click is 9 seconds before stop — well outside 200ms threshold, should be preserved
+        Assert.AreEqual(2, trimmed.Clicks.Count);
+    }
+
+    [TestMethod]
+    public void TrimStopClick_PreservesMoveSamples()
+    {
+        long freq = 10_000_000;
+        long stopClickDown = (long)(9.998 * freq);
+        long stopRequested = (long)(10.0 * freq);
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>
+            {
+                new() { TimestampTicks = stopClickDown, X = 600, Y = 600, EventKind = MouseEventKind.Move },
+                new() { TimestampTicks = stopClickDown, X = 600, Y = 600, EventKind = MouseEventKind.ButtonDown, Button = MouseButton.Left },
+                new() { TimestampTicks = stopClickDown + 10_000, X = 600, Y = 600, EventKind = MouseEventKind.Scroll, ScrollDelta = 120 },
+            },
+            Clicks = new List<ClickEvent>
+            {
+                new(stopClickDown, 600, 600, MouseButton.Left, true),
+            },
+            StartTimestampTicks = 0,
+            EndTimestampTicks = (long)(10.5 * freq),
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        // Click removed
+        Assert.AreEqual(0, trimmed.Clicks.Count);
+        // ButtonDown sample removed, Move and Scroll preserved
+        Assert.AreEqual(2, trimmed.Samples.Count);
+        Assert.IsTrue(trimmed.Samples.Any(s => s.EventKind == MouseEventKind.Move));
+        Assert.IsTrue(trimmed.Samples.Any(s => s.EventKind == MouseEventKind.Scroll));
+    }
+
+    [TestMethod]
+    public void TrimStopClick_NoClicks_ReturnsUnchanged()
+    {
+        long freq = 10_000_000;
+        long stopRequested = (long)(10.0 * freq);
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>
+            {
+                new() { TimestampTicks = (long)(5.0 * freq), X = 100, Y = 100, EventKind = MouseEventKind.Move },
+            },
+            Clicks = new List<ClickEvent>(),
+            StartTimestampTicks = 0,
+            EndTimestampTicks = (long)(10.5 * freq),
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        Assert.AreEqual(0, trimmed.Clicks.Count);
+        Assert.AreEqual(1, trimmed.Samples.Count);
+        Assert.AreEqual(stopRequested, trimmed.EndTimestampTicks);
+    }
+
+    [TestMethod]
+    public void TrimStopClick_OnlyRightClicks_PreservesAll()
+    {
+        long freq = 10_000_000;
+        long clickDown = (long)(9.998 * freq);
+        long stopRequested = (long)(10.0 * freq);
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>(),
+            Clicks = new List<ClickEvent>
+            {
+                new(clickDown, 500, 500, MouseButton.Right, true),
+                new(clickDown + 10_000, 500, 500, MouseButton.Right, false),
+            },
+            StartTimestampTicks = 0,
+            EndTimestampTicks = (long)(10.5 * freq),
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        // Right clicks don't trigger the Stop button — should be preserved
+        Assert.AreEqual(2, trimmed.Clicks.Count);
+    }
+
+    [TestMethod]
+    public void TrimStopClick_SetsEndTimestampToStopRequested()
+    {
+        long freq = 10_000_000;
+        long stopRequested = (long)(10.0 * freq);
+        long originalEnd = (long)(10.5 * freq);
+
+        var data = new MouseRecordingData
+        {
+            Samples = new List<MouseSample>(),
+            Clicks = new List<ClickEvent>(),
+            StartTimestampTicks = 0,
+            EndTimestampTicks = originalEnd,
+            TickFrequency = freq,
+        };
+
+        var trimmed = MouseRecordingData.TrimStopClick(data, stopRequested);
+
+        Assert.AreEqual(stopRequested, trimmed.EndTimestampTicks);
+        Assert.AreNotEqual(originalEnd, trimmed.EndTimestampTicks);
+    }
+
+    #endregion
 }

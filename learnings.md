@@ -1200,7 +1200,7 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
-## Multi-Monitor Region Selection — Compression & Wrong Coords
+## Multi-Monitor Region Selection ï¿½ Compression & Wrong Coords
 
 **Feature/area:** `RegionSelectorOverlay` (region capture flow).
 
@@ -1219,12 +1219,12 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What didn't work / rejected approaches:**
 - Per-window DPI Unaware context: would require coordinate juggling between unaware logical pixels and the PMv2-captured physical-pixel screenshot. Rejected as more complex and fragile.
-- Keeping `Stretch="Fill"` after Maximize fix: irrelevant once window equals virtual desktop size — Fill becomes 1:1.
+- Keeping `Stretch="Fill"` after Maximize fix: irrelevant once window equals virtual desktop size ï¿½ Fill becomes 1:1.
 
 
 ---
 
-## Region Border Highlight — Wrong Position on Non-Primary Monitor
+## Region Border Highlight ï¿½ Wrong Position on Non-Primary Monitor
 
 **Feature/area:** `RegionBorderHighlight` placement in `RecordingPage.ShowRecordingOverlay`.
 
@@ -1235,21 +1235,39 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** Added `GetRegionMonitorOrigin` (`GetMonitorInfo` on the resolved monitor handle) and offset the computed px/py by `info.rcMonitor.Left/Top` before calling `RegionBorderHighlight.Show`. Border now lands exactly on the captured region across all monitors and DPI scales.
 
 
-## Multi-Monitor Region Selection — Rubber-Duck Adoptions
+## Multi-Monitor Region Selection ï¿½ Rubber-Duck Adoptions
 
 - **Feature/area**: Region selection overlay + recording border highlight (multi-monitor).
 - **What worked**:
   - Pick host monitor for the selected rect by **largest intersection area** in virtual-desktop physical pixels (replaces `MonitorFromPoint` on a single corner, which can disagree across monitor boundaries).
-  - Cancel selection when the rect has zero intersection with any monitor (instead of clamping to a phantom 1x1 region via `Math.Max(1, …)`).
+  - Cancel selection when the rect has zero intersection with any monitor (instead of clamping to a phantom 1x1 region via `Math.Max(1, ï¿½)`).
   - Add `IntPtr Handle` to `MonitorInfo` so DPI lookups (`GetDpiForMonitor`) and origin lookups (`GetMonitorInfo`) use the same hMonitor used for selection, eliminating point-lookup drift.
   - Match monitor by exact `DisplayName == MonitorId` (or `StartsWith(MonitorId + ' ')` to cover `"\\.\DISPLAY1 (Primary)"`). `Contains` matched `\\.\DISPLAY1` against `\\.\DISPLAY10`.
   - Round border px/py with `Math.Round` and floor pw/ph to even numbers (`& ~1`) to match the H.264 crop math in `RecordingSession` (avoids 1-2 px drift between highlight and actual captured frame).
 - **What didn't work**:
-  - `presenter.Maximize()` to cover the virtual desktop — only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
-  - `DisplayName.Contains(MonitorId)` for monitor lookup — unsafe substring match across DISPLAY1/DISPLAY10.
+  - `presenter.Maximize()` to cover the virtual desktop ï¿½ only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
+  - `DisplayName.Contains(MonitorId)` for monitor lookup ï¿½ unsafe substring match across DISPLAY1/DISPLAY10.
 
-## Stale Saved Region — Disconnected Monitor
+## Stale Saved Region ï¿½ Disconnected Monitor
 
 - **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected — please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` — the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected ï¿½ please select a new region'), and return null. This forces the user to reselect on the current display topology.
+- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` ï¿½ the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+
+---
+
+---
+
+## Stop-Trigger Click Removal from Recording Data
+
+**Feature/area:** MouseHookRecorder, RecordingOverlayWindow, recording stop flow
+
+**Approaches tried:**
+
+1. **Timestamp-based trim with `NotifyStopRequested()`** ï¿½ Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
+
+**What worked:** Signaling the mouse recorder from the overlay's `Stop_Click` and `OnOverlayClosing` handlers (earliest possible point in the stop flow), then trimming the stop-trigger click in `GetRecordedData()`. The 200ms threshold is generous enough for UI dispatch delay (~3-10ms typical) while avoiding false positives.
+
+**What didn't work:** N/A ï¿½ first approach worked.
+
+**Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
