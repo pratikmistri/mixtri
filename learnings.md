@@ -1197,3 +1197,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
 
 **What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) â€” XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.
+
+---
+
+## Multi-Monitor Region Selection — Compression & Wrong Coords
+
+**Feature/area:** `RegionSelectorOverlay` (region capture flow).
+
+**Symptom:** On multi-monitor setups, choosing "Region" displayed both monitors' contents squashed into a single display, and the resulting selection rectangle landed in the wrong place.
+
+**Root cause:**
+1. `CaptureDesktopScreenshotAsync` captured the entire virtual desktop (`SM_X/CXVIRTUALSCREEN`) in physical pixels.
+2. The host `Window` was sized via `OverlappedPresenter.Maximize()`, which only covers a single monitor. The second monitor was never under the overlay.
+3. `ScreenshotImage` used `Stretch="Fill"` so the multi-monitor screenshot was compressed into the single-monitor window.
+4. `ConfirmSelection` stored raw overlay DIPs as `CaptureRegion.X/Y/W/H`, but `RecordingSession` expects monitor-local DIPs (it multiplies by the monitor's DPI scale to recover physical pixels).
+
+**What worked:**
+- Replaced `presenter.Maximize()` with `AppWindow.MoveAndResize` to the full virtual desktop rect (`SM_X/Y/CX/CYVIRTUALSCREEN`). The window now spans every monitor in physical pixels, matching the screenshot 1:1.
+- Set `IsResizable/IsMaximizable/IsMinimizable=false` on the presenter.
+- `ConfirmSelection` now: overlay DIPs -> virtual-desktop physical pixels (`_screenshotWidth/ActualWidth` ratio + virtual screen origin) -> monitor-local physical pixels (clamped to host monitor) -> monitor-local DIPs via `GetDpiForMonitor` (`MonitorFromPoint` at selection center). This handles mixed-DPI multi-monitor correctly because each monitor's DPI is queried independently.
+
+**What didn't work / rejected approaches:**
+- Per-window DPI Unaware context: would require coordinate juggling between unaware logical pixels and the PMv2-captured physical-pixel screenshot. Rejected as more complex and fragile.
+- Keeping `Stretch="Fill"` after Maximize fix: irrelevant once window equals virtual desktop size — Fill becomes 1:1.
+
