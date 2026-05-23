@@ -840,6 +840,50 @@ public sealed partial class EditorPage : Page
         args.Handled = true;
     }
 
+    private void PlayPauseAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl())
+        {
+            return;
+        }
+
+        if (Preview.IsPlaying)
+        {
+            Preview.Pause();
+        }
+        else
+        {
+            Preview.Play();
+        }
+        args.Handled = true;
+    }
+
+    private bool IsFocusOnInteractiveControl()
+    {
+        DependencyObject? node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        while (node is not null)
+        {
+            switch (node)
+            {
+                case TextBox:
+                case PasswordBox:
+                case RichEditBox:
+                case AutoSuggestBox:
+                case ComboBox:
+                case NumberBox:
+                case Microsoft.UI.Xaml.Controls.Primitives.ButtonBase:
+                case ToggleSwitch:
+                case Slider:
+                case ColorPicker:
+                case FlyoutPresenter:
+                case MenuFlyoutPresenter:
+                    return true;
+            }
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
     // --- Zoom Segment Handlers ---
 
     private bool _suppressZoomPropertyUpdate;
