@@ -22,7 +22,29 @@ public enum AspectRatio
     Portrait9x16,
     Square1x1,
     Classic4x3,
-    Tall3x4
+    Tall3x4,
+    Cinematic21x9,
+    Instagram4x5
+}
+
+public enum FitMode
+{
+    /// <summary>Fill the canvas; crop overflow according to <see cref="Project.CropAnchorX"/>/<see cref="Project.CropAnchorY"/>.</summary>
+    Cover,
+    /// <summary>Show entire source frame; gap filled with the project's background style (letterbox/pillarbox).</summary>
+    Contain
+}
+
+/// <summary>
+/// Controls what the zoom region operates on when zoom is active and the source
+/// frame is smaller than the output canvas (Contain mode and/or non-zero padding).
+/// </summary>
+public enum ZoomScope
+{
+    /// <summary>Zoom region spans the entire composed canvas (background + source + letterbox/padding zoom together as one unit).</summary>
+    Frame,
+    /// <summary>Zoom region is constrained to the source frame; letterbox bars and padding remain at a fixed size.</summary>
+    Source
 }
 
 public enum VideoQuality

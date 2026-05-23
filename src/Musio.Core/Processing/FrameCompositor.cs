@@ -17,6 +17,10 @@ public record CompositionConfig
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.UltraSmooth;
     public int OutputFps { get; init; } = 30;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
+    public FitMode FitMode { get; init; } = FitMode.Cover;
+    public double CropAnchorX { get; init; } = 0.5;
+    public double CropAnchorY { get; init; } = 0.5;
+    public ZoomScope ZoomScope { get; init; } = ZoomScope.Frame;
     public WebcamOverlayStyle? WebcamStyle { get; init; }
     public KeyboardOverlayStyle? KeyboardStyle { get; init; }
     public SubtitleStyle? SubtitleStyle { get; init; }
@@ -51,8 +55,17 @@ public class FrameCompositor : IDisposable
     private CanvasBitmap? _webcamFrame;
     private int _sourceWidth;
     private int _sourceHeight;
+    // Output canvas dims (target aspect ratio, padding-independent).
     private int _contentWidth;
     private int _contentHeight;
+    // The actual source frame rect inside the output canvas. The offsets equal
+    // user-padding plus any letterbox/pillarbox gap when the source aspect ratio
+    // doesn't match the canvas (Contain mode). Everything outside this rect is
+    // background — there is no separate "inner content" container.
+    private int _sourceAreaWidth;
+    private int _sourceAreaHeight;
+    private int _sourceAreaOffsetX;
+    private int _sourceAreaOffsetY;
     private bool _initialized;
     private bool _disposed;
     private float _coordScaleX = 1.0f;
@@ -379,9 +392,10 @@ public class FrameCompositor : IDisposable
                 zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
         }
 
-        // Use post-composite zoom when zoom is active — this pre-composes the
-        // cursor onto the frame before zooming, so the cursor scales with zoom.
-        if (zoomState.ZoomLevel > 1.01f)
+        // Choose zoom path based on user-selected ZoomScope. Frame zoom (default)
+        // operates on the entire composed canvas; Source zoom keeps the
+        // background/letterbox/padding constant while zooming only the source.
+        if (zoomState.ZoomLevel > 1.01f && _config.ZoomScope == ZoomScope.Frame)
             return ComposeFramePostCompositeZoom(
                 sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
 
@@ -416,7 +430,9 @@ public class FrameCompositor : IDisposable
         {
             // Background + shadow + content + border
             _bgCompositor.CompositeFrame(
-                ds, croppedFrame, OutputWidth, OutputHeight, _config.Background);
+                ds, croppedFrame, OutputWidth, OutputHeight,
+                _sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight,
+                _config.Background);
 
             // Cursor overlay with position transformed to output space
             RenderCursorOverlay(ds, cursorPos, viewport, timeSeconds, cursorIndex);
@@ -457,8 +473,6 @@ public class FrameCompositor : IDisposable
         int cursorIndex,
         double timeSeconds)
     {
-        float padding = _config.Background.Padding;
-
         // 1. Compute 1x viewport (no zoom, aspect-ratio adjusted)
         var noZoomState = _zoomEngine.ComputeViewportForCenter(
             1.0f, _sourceWidth / 2f, _sourceHeight / 2f);
@@ -473,15 +487,18 @@ public class FrameCompositor : IDisposable
         {
             ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
             _bgCompositor.CompositeFrame(
-                ds, croppedFrame, OutputWidth, OutputHeight, _config.Background);
+                ds, croppedFrame, OutputWidth, OutputHeight,
+                _sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight,
+                _config.Background);
             RenderCursorOverlay(ds, cursorPos, viewport1x, timeSeconds, cursorIndex);
         }
 
-        // 4. Compute zoom viewport in composite space
+        // 4. Compute zoom viewport in composite space. _sourceAreaOffsetX/Y already
+        //    includes user-padding plus any AR-fit gap, so no separate +padding.
         float cx_comp = (float)((zoomState.CenterX - viewport1x.X)
-            * _contentWidth / viewport1x.Width + padding);
+            * _sourceAreaWidth / viewport1x.Width + _sourceAreaOffsetX);
         float cy_comp = (float)((zoomState.CenterY - viewport1x.Y)
-            * _contentHeight / viewport1x.Height + padding);
+            * _sourceAreaHeight / viewport1x.Height + _sourceAreaOffsetY);
         float cropW = OutputWidth / zoomState.ZoomLevel;
         float cropH = OutputHeight / zoomState.ZoomLevel;
         float cropX = Math.Clamp(
@@ -544,28 +561,67 @@ public class FrameCompositor : IDisposable
     {
         float targetRatio = GetAspectRatioValue(_config.AspectRatio);
 
+        // Step 1: compute the output canvas at the target aspect ratio, sized to fit
+        // within the source bounds. Independent of padding.
         if (targetRatio <= 0f)
         {
-            // Auto — content matches source
             _contentWidth = _sourceWidth;
             _contentHeight = _sourceHeight;
-            return;
-        }
-
-        float sourceRatio = (float)_sourceWidth / _sourceHeight;
-
-        if (sourceRatio > targetRatio)
-        {
-            // Source is wider than target — crop width
-            _contentHeight = _sourceHeight;
-            _contentWidth = (int)Math.Round(_sourceHeight * (double)targetRatio);
         }
         else
         {
-            // Source is taller than target — crop height
-            _contentWidth = _sourceWidth;
-            _contentHeight = (int)Math.Round(_sourceWidth / (double)targetRatio);
+            float sourceRatio = (float)_sourceWidth / _sourceHeight;
+            if (sourceRatio > targetRatio)
+            {
+                _contentHeight = _sourceHeight;
+                _contentWidth = (int)Math.Round(_sourceHeight * (double)targetRatio);
+            }
+            else
+            {
+                _contentWidth = _sourceWidth;
+                _contentHeight = (int)Math.Round(_sourceWidth / (double)targetRatio);
+            }
         }
+
+        // Step 2: the user-padding setting reserves at least that many pixels of
+        // background on each side. The remaining "max content box" is where the
+        // source frame may live.
+        int padding = Math.Max(0, _config.Background.Padding);
+        int maxContentW = Math.Max(1, _contentWidth - 2 * padding);
+        int maxContentH = Math.Max(1, _contentHeight - 2 * padding);
+
+        // Step 3: size the actual source frame within the max content box per FitMode.
+        // Any leftover gap on opposing sides simply becomes more background — there is
+        // no separate letterbox/pillarbox container.
+        if (targetRatio <= 0f || _config.FitMode == FitMode.Cover)
+        {
+            // Auto / Cover: source fills the max content box. (For Cover the viewport
+            // upstream was already cropped to the target AR so the source matches the
+            // box AR — any slight drift from padding is absorbed by viewport scaling.)
+            _sourceAreaWidth = maxContentW;
+            _sourceAreaHeight = maxContentH;
+        }
+        else
+        {
+            // Contain: source preserves its native AR fitting inside the max content box.
+            float srcAr = (float)_sourceWidth / _sourceHeight;
+            float boxAr = (float)maxContentW / maxContentH;
+            if (srcAr > boxAr)
+            {
+                _sourceAreaWidth = maxContentW;
+                _sourceAreaHeight = (int)Math.Round(maxContentW / (double)srcAr);
+            }
+            else
+            {
+                _sourceAreaHeight = maxContentH;
+                _sourceAreaWidth = (int)Math.Round(maxContentH * (double)srcAr);
+            }
+        }
+
+        // Step 4: center the source frame within the canvas. The offset is the total
+        // background gap on the left/top — user-padding plus any AR-fit gap.
+        _sourceAreaOffsetX = (_contentWidth - _sourceAreaWidth) / 2;
+        _sourceAreaOffsetY = (_contentHeight - _sourceAreaHeight) / 2;
     }
 
     private static float GetAspectRatioValue(AspectRatio ratio) => ratio switch
@@ -575,12 +631,17 @@ public class FrameCompositor : IDisposable
         AspectRatio.Square1x1 => 1f,
         AspectRatio.Classic4x3 => 4f / 3f,
         AspectRatio.Tall3x4 => 3f / 4f,
+        AspectRatio.Cinematic21x9 => 21f / 9f,
+        AspectRatio.Instagram4x5 => 4f / 5f,
         _ => -1f, // Auto — no constraint
     };
 
     /// <summary>
-    /// Adjusts the zoom viewport to match the content aspect ratio by center-cropping
-    /// within the viewport rectangle, then clamps to source bounds.
+    /// Adjusts the zoom viewport to match the target aspect ratio.
+    /// For <see cref="FitMode.Cover"/> the viewport is narrowed to the target ratio
+    /// using <see cref="CompositionConfig.CropAnchorX"/>/<see cref="CompositionConfig.CropAnchorY"/>.
+    /// For <see cref="FitMode.Contain"/> the viewport keeps the source aspect ratio
+    /// (it represents the source region drawn into the letterboxed sub-rect).
     /// </summary>
     private Rect ComputeEffectiveViewport(ZoomState zoomState)
     {
@@ -589,28 +650,32 @@ public class FrameCompositor : IDisposable
         float vpW = zoomState.ViewportWidth;
         float vpH = zoomState.ViewportHeight;
 
-        if (_config.AspectRatio == AspectRatio.Auto)
+        if (_config.AspectRatio == AspectRatio.Auto || _config.FitMode == FitMode.Contain)
             return new Rect(vpX, vpY, vpW, vpH);
 
-        float contentRatio = (float)_contentWidth / _contentHeight;
+        // Cover: narrow the zoom viewport to the target ratio using the configured anchor.
+        float targetRatio = GetAspectRatioValue(_config.AspectRatio);
         float vpRatio = vpW / vpH;
 
         float newW, newH;
-        if (vpRatio > contentRatio)
+        if (vpRatio > targetRatio)
         {
             // Viewport wider than target — narrow horizontally
             newH = vpH;
-            newW = vpH * contentRatio;
+            newW = vpH * targetRatio;
         }
         else
         {
             // Viewport taller than target — shorten vertically
             newW = vpW;
-            newH = vpW / contentRatio;
+            newH = vpW / targetRatio;
         }
 
-        float newX = vpX + (vpW - newW) / 2f;
-        float newY = vpY + (vpH - newH) / 2f;
+        float anchorX = (float)Math.Clamp(_config.CropAnchorX, 0.0, 1.0);
+        float anchorY = (float)Math.Clamp(_config.CropAnchorY, 0.0, 1.0);
+
+        float newX = vpX + (vpW - newW) * anchorX;
+        float newY = vpY + (vpH - newH) * anchorY;
 
         // Clamp to source bounds
         newX = Math.Clamp(newX, 0f, Math.Max(0f, _sourceWidth - newW));
@@ -624,17 +689,20 @@ public class FrameCompositor : IDisposable
     #region Source Cropping
 
     /// <summary>
-    /// Draws the viewport region of the source frame into a reusable content-sized render target.
+    /// Draws the viewport region of the source frame into a reusable buffer sized
+    /// exactly to the source-area rect. The buffer contains only the visible source
+    /// pixels — no letterbox/padding container — and is drawn at the source-area
+    /// position by the background compositor.
     /// The returned target is owned by the compositor — callers must NOT dispose it.
     /// </summary>
     private CanvasRenderTarget CropSourceFrame(CanvasBitmap source, Rect viewport)
     {
         if (_croppedBuffer is null
-            || _croppedBuffer.SizeInPixels.Width != (uint)_contentWidth
-            || _croppedBuffer.SizeInPixels.Height != (uint)_contentHeight)
+            || _croppedBuffer.SizeInPixels.Width != (uint)_sourceAreaWidth
+            || _croppedBuffer.SizeInPixels.Height != (uint)_sourceAreaHeight)
         {
             _croppedBuffer?.Dispose();
-            _croppedBuffer = new CanvasRenderTarget(_device, _contentWidth, _contentHeight, 96);
+            _croppedBuffer = new CanvasRenderTarget(_device, _sourceAreaWidth, _sourceAreaHeight, 96);
         }
 
         // Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
@@ -644,8 +712,8 @@ public class FrameCompositor : IDisposable
         // identical to Linear, so use the cheaper path. Use the same explicit
         // near-unit threshold form as ComposeFramePostCompositeZoom so the two
         // paths stay aligned over time.
-        double scaleX = _contentWidth / viewport.Width;
-        double scaleY = _contentHeight / viewport.Height;
+        double scaleX = _sourceAreaWidth / viewport.Width;
+        double scaleY = _sourceAreaHeight / viewport.Height;
         const double nearUnitScaleMinimum = 0.95;
         const double nearUnitScaleMaximum = 1.05;
         bool nearUnitScale =
@@ -657,7 +725,10 @@ public class FrameCompositor : IDisposable
 
         using var ds = _croppedBuffer.CreateDrawingSession();
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
-        ds.DrawImage(source, new Rect(0, 0, _contentWidth, _contentHeight), viewport,
+
+        ds.DrawImage(source,
+            new Rect(0, 0, _sourceAreaWidth, _sourceAreaHeight),
+            viewport,
             1f, interpolation);
         return _croppedBuffer;
     }
@@ -673,24 +744,24 @@ public class FrameCompositor : IDisposable
         double timeSeconds,
         int frameIndex)
     {
-        float padding = _config.Background.Padding;
-
-        // Scale factors from source-viewport space → content space
-        float scaleX = (float)(_contentWidth / viewport.Width);
-        float scaleY = (float)(_contentHeight / viewport.Height);
+        // Scale factors from source-viewport space → output (canvas) space.
+        // Source area is positioned at (_sourceAreaOffsetX, _sourceAreaOffsetY) in the
+        // canvas — that offset already includes user-padding plus any AR-fit gap.
+        float scaleX = (float)(_sourceAreaWidth / viewport.Width);
+        float scaleY = (float)(_sourceAreaHeight / viewport.Height);
 
         // Transform cursor from source coords to output coords
         var transformedPos = new SmoothedPosition
         {
-            X = (cursorPos.X - viewport.X) * scaleX + padding,
-            Y = (cursorPos.Y - viewport.Y) * scaleY + padding,
+            X = (cursorPos.X - viewport.X) * scaleX + _sourceAreaOffsetX,
+            Y = (cursorPos.Y - viewport.Y) * scaleY + _sourceAreaOffsetY,
             TimestampSeconds = cursorPos.TimestampSeconds,
             VelocityX = cursorPos.VelocityX * scaleX,
             VelocityY = cursorPos.VelocityY * scaleY,
         };
 
         // Collect temporally-relevant clicks with transformed positions
-        var activeClicks = GetActiveClicks(timeSeconds, viewport, scaleX, scaleY, padding);
+        var activeClicks = GetActiveClicks(timeSeconds, viewport, scaleX, scaleY);
 
         double lastMoveTime = _lastMoveTimes[frameIndex];
 
@@ -706,7 +777,7 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private List<ClickEvent> GetActiveClicks(
         double timeSeconds, Rect viewport,
-        float scaleX, float scaleY, float padding)
+        float scaleX, float scaleY)
     {
         if (_mouseData is null) return [];
 
@@ -742,9 +813,10 @@ public class FrameCompositor : IDisposable
             if (click.TimestampTicks > windowEndTicks)
                 break;
 
-            // Transform click position from logical to physical, subtract crop offset, then to output space
-            int cx = (int)((click.X * _coordScaleX - _cropOffsetX - viewport.X) * scaleX + padding);
-            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY - viewport.Y) * scaleY + padding);
+            // Transform click position from logical to physical, subtract crop offset, then to output space.
+            // _sourceAreaOffsetX/Y already includes user-padding plus any AR-fit gap.
+            int cx = (int)((click.X * _coordScaleX - _cropOffsetX - viewport.X) * scaleX + _sourceAreaOffsetX);
+            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY - viewport.Y) * scaleY + _sourceAreaOffsetY);
 
             // Create adjusted click event with shifted timestamp for the renderer
             long adjustedTicks = click.TimestampTicks

@@ -64,7 +64,11 @@ public class ExportEngine
         var exportComposition = enrichedComposition with
         {
             OutputFps = exportFps,
-            AspectRatio = settings.AspectRatio,
+            AspectRatio = project.AspectRatio,
+            FitMode = project.FitMode,
+            CropAnchorX = project.CropAnchorX,
+            CropAnchorY = project.CropAnchorY,
+            ZoomScope = project.ZoomScope,
             Cursor = enrichedComposition.Cursor with
             {
                 Scale = Math.Max(enrichedComposition.Cursor.Scale, 2.0f),

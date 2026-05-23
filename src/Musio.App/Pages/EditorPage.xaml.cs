@@ -382,6 +382,9 @@ public sealed partial class EditorPage : Page
         // Show cursor controls when cursor data is available
         InitializeCursorControls(project, config);
 
+        // Aspect ratio + fit + crop anchor controls (always visible)
+        InitializeAspectRatioControls();
+
         _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
 
@@ -1676,6 +1679,13 @@ public sealed partial class EditorPage : Page
             return;
         }
 
+        // Pause preview playback before export. The export pipeline composites
+        // frames on the shared Win2D device; running it concurrently with the
+        // preview's per-frame composition can corrupt output frames and crash
+        // the encoder when both pull from the same source files at once.
+        Preview.Pause();
+        try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
+
         // Start new export
         ExportVM.PrepareForExport();
         if (!ExportVM.ExportCommand.CanExecute(null))
@@ -2433,5 +2443,181 @@ public sealed partial class EditorPage : Page
 
         _previewRenderer?.UpdateWebcamStyle(newStyle);
         _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    // ─── Aspect Ratio / Fit / Crop Anchor ──────────────────────────────
+
+    private bool _suppressAspectRatioEvents;
+
+    /// <summary>
+    /// Initializes the aspect ratio flyout from the current project + composition state.
+    /// Safe to call multiple times; uses a suppression flag so event handlers don't
+    /// re-write state during initialization.
+    /// </summary>
+    private void InitializeAspectRatioControls()
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var config = ProjectService.Instance.CurrentComposition;
+        if (project is null || config is null) return;
+
+        _suppressAspectRatioEvents = true;
+        try
+        {
+            SelectRatioRadio(project.AspectRatio);
+            SelectFitModeRadio(project.FitMode);
+            SelectZoomScopeRadio(project.ZoomScope);
+            SelectCropAnchorRadio(project.CropAnchorX, project.CropAnchorY);
+            UpdateFitAndAnchorVisibility(project.AspectRatio);
+        }
+        finally
+        {
+            _suppressAspectRatioEvents = false;
+        }
+    }
+
+    private void SelectRatioRadio(AspectRatio ratio)
+    {
+        var target = ratio switch
+        {
+            AspectRatio.Landscape16x9 => Ratio16x9,
+            AspectRatio.Portrait9x16 => Ratio9x16,
+            AspectRatio.Square1x1 => Ratio1x1,
+            AspectRatio.Instagram4x5 => Ratio4x5,
+            AspectRatio.Classic4x3 => Ratio4x3,
+            AspectRatio.Tall3x4 => Ratio3x4,
+            AspectRatio.Cinematic21x9 => Ratio21x9,
+            _ => RatioAuto,
+        };
+        target.IsChecked = true;
+    }
+
+    private void SelectFitModeRadio(FitMode fit)
+    {
+        FitModeSegmented.SelectedIndex = fit == FitMode.Contain ? 1 : 0;
+    }
+
+    private void SelectZoomScopeRadio(ZoomScope scope)
+    {
+        ZoomScopeSegmented.SelectedIndex = scope == ZoomScope.Source ? 1 : 0;
+    }
+
+    private void SelectCropAnchorRadio(double anchorX, double anchorY)
+    {
+        // Snap to nearest 0 / 0.5 / 1 on each axis to find the matching radio.
+        static double NearestSnap(double v) => v < 0.25 ? 0.0 : v > 0.75 ? 1.0 : 0.5;
+        double sx = NearestSnap(anchorX);
+        double sy = NearestSnap(anchorY);
+        string tag = $"{sx.ToString(CultureInfo.InvariantCulture)},{sy.ToString(CultureInfo.InvariantCulture)}";
+        foreach (var child in CropAnchorGrid.Children)
+        {
+            if (child is RadioButton rb && rb.Tag is string t && t == tag)
+            {
+                rb.IsChecked = true;
+                return;
+            }
+        }
+        CropAnchorCenter.IsChecked = true;
+    }
+
+    private void UpdateFitAndAnchorVisibility(AspectRatio ratio)
+    {
+        bool ratioActive = ratio != AspectRatio.Auto;
+        FitModePanel.Visibility = ratioActive ? Visibility.Visible : Visibility.Collapsed;
+        bool coverActive = ratioActive && FitModeSegmented.SelectedIndex == 0;
+        CropAnchorPanel.Visibility = coverActive ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void AspectRatioOption_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAspectRatioEvents) return;
+        if (sender is not RadioButton rb || rb.Tag is not string tag) return;
+        if (!Enum.TryParse<AspectRatio>(tag, out var ratio)) return;
+        ApplyAspectRatio(ratio);
+    }
+
+    private void FitModeSegmented_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressAspectRatioEvents) return;
+        if (FitModeSegmented.SelectedItem is not CommunityToolkit.WinUI.Controls.SegmentedItem item) return;
+        if (item.Tag is not string tag) return;
+        if (!Enum.TryParse<FitMode>(tag, out var fit)) return;
+        ApplyFitMode(fit);
+    }
+
+    private void ZoomScopeSegmented_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressAspectRatioEvents) return;
+        if (ZoomScopeSegmented.SelectedItem is not CommunityToolkit.WinUI.Controls.SegmentedItem item) return;
+        if (item.Tag is not string tag) return;
+        if (!Enum.TryParse<ZoomScope>(tag, out var scope)) return;
+        ApplyZoomScope(scope);
+    }
+
+    private void CropAnchor_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAspectRatioEvents) return;
+        if (sender is not RadioButton rb || rb.Tag is not string tag) return;
+        var parts = tag.Split(',');
+        if (parts.Length != 2) return;
+        if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var ax)) return;
+        if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var ay)) return;
+        ApplyCropAnchor(ax, ay);
+    }
+
+    private void ApplyAspectRatio(AspectRatio ratio)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var config = ProjectService.Instance.CurrentComposition;
+        if (project is null || config is null) return;
+
+        project.AspectRatio = ratio;
+        config = config with { AspectRatio = ratio };
+        ProjectService.Instance.CurrentComposition = config;
+
+        UpdateFitAndAnchorVisibility(ratio);
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    private void ApplyFitMode(FitMode fit)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var config = ProjectService.Instance.CurrentComposition;
+        if (project is null || config is null) return;
+
+        project.FitMode = fit;
+        config = config with { FitMode = fit };
+        ProjectService.Instance.CurrentComposition = config;
+
+        UpdateFitAndAnchorVisibility(project.AspectRatio);
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    private void ApplyCropAnchor(double anchorX, double anchorY)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var config = ProjectService.Instance.CurrentComposition;
+        if (project is null || config is null) return;
+
+        project.CropAnchorX = anchorX;
+        project.CropAnchorY = anchorY;
+        config = config with { CropAnchorX = anchorX, CropAnchorY = anchorY };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _ = RebuildPreviewRendererAsync(config);
+    }
+
+    private void ApplyZoomScope(ZoomScope scope)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var config = ProjectService.Instance.CurrentComposition;
+        if (project is null || config is null) return;
+
+        project.ZoomScope = scope;
+        config = config with { ZoomScope = scope };
+        ProjectService.Instance.CurrentComposition = config;
+
+        _ = RebuildPreviewRendererAsync(config);
     }
 }
