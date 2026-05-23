@@ -1878,7 +1878,7 @@ public sealed partial class EditorPage : Page
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
         // Style menu is available for all capture types. Monitor (full-screen)
-        // captures start with zeroed defaults (see InitializePreviewAsync) but
+        // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
         StyleButton.Visibility = Visibility.Visible;
         StyleSeparator.Visibility = Visibility.Visible;

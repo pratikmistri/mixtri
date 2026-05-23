@@ -1335,27 +1335,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
-## Region Selector Overlay & Recording Page — PR Review Fixes
+## Region Selector Overlay & Recording Page ï¿½ PR Review Fixes
 
 **Approaches tried:**
 
-1. **TryApplyPresetRegion coordinate space bug** — Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
-2. **UpdateOverlay degenerate-selection state leak** — When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
-3. **RecordingPage._infoBarTimer navigation leak** — Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
+1. **TryApplyPresetRegion coordinate space bug** ï¿½ Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
+2. **UpdateOverlay degenerate-selection state leak** ï¿½ When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
+3. **RecordingPage._infoBarTimer navigation leak** ï¿½ Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
 
 **What worked:** All three above.
 
 
 ---
 
-## Editor — Spacebar Play/Pause Shortcut
+## Editor ï¿½ Spacebar Play/Pause Shortcut
 
 **Feature/area:** EditorPage keyboard accelerators / Preview playback.
 
 **Approaches tried:**
 
-1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** — Worked. ?
-2. **Skip handler when a text input has focus** — Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
+1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** ï¿½ Worked. ?
+2. **Skip handler when a text input has focus** ï¿½ Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
 
 **What worked:** XAML accelerator + focus-check guard in the handler.
 
@@ -1363,9 +1363,9 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
-## Overlapping Zoom Segments — Center Snap Fix
+## Overlapping Zoom Segments ï¿½ Center Snap Fix
 
-**Feature/area:** AutoZoomEngine — focal-point continuity across overlapping zoom segments
+**Feature/area:** AutoZoomEngine ï¿½ focal-point continuity across overlapping zoom segments
 
 **Approaches tried:**
 1. Earlier fix used max-zoom-wins for both zoom level and center (cx/cy). Zoom level stayed continuous, but the *center* snapped at the instant B's zoom first exceeded A's, since the winning keyframe's center was used wholesale. Editing a segment moved where this snap occurred, making the visual jump obvious.
@@ -1377,7 +1377,7 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Regression test `GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` steps through the overlap and asserts per-step center delta stays well under the would-be snap magnitude.
 
 **What didn't work:**
-- Returning the max-zoom segment's center as-is — produces a discontinuous jump at the crossover when overlapping segments have different centers.
+- Returning the max-zoom segment's center as-is ï¿½ produces a discontinuous jump at the crossover when overlapping segments have different centers.
 
 ---
 
@@ -1387,9 +1387,9 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **Approaches tried:**
 
-1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** — Worked. Previously gated on Window/Region only; now exposed for Monitor too. âœ…
-2. **Gate the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) behind a new `ProjectService.CompositionDefaultsApplied` flag reset in `SetProject`** — Worked. Defaults apply once per project load; user edits via the now-visible style menu survive editor re-navigation since `InitializePreviewAsync` runs on every page construction. âœ…
+1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** ï¿½ Worked. Previously gated on Window/Region only; now exposed for Monitor too. âœ…
+2. **Move the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) from `EditorPage.InitializePreviewAsync` into `ProjectService.SetProject`** ï¿½ Worked. Defaults apply at project-load time so user edits via the now-visible style menu survive editor re-navigation. âœ…
 
-**What worked:** Combination — unconditional style-menu visibility + one-shot defaults flag in `ProjectService` reset on `SetProject`.
+**What worked:** Combination ï¿½ unconditional style-menu visibility + applying Monitor defaults in `ProjectService.SetProject` (instead of every `InitializePreviewAsync`).
 
-**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` — would clobber user edits every time the EditorPage was re-constructed.
+**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` ï¿½ would clobber user edits every time the EditorPage was re-constructed.
