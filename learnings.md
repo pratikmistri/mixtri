@@ -1253,3 +1253,32 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
 - **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected — please select a new region'), and return null. This forces the user to reselect on the current display topology.
 - **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` — the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+## Region Picker — "blank on open / silent on cancel" confusion
+
+**Approaches tried:**
+
+1. **Pre-render initial region in `RegionSelectorOverlay.OnLoaded`** — Worked. Added `ShowAsync(CaptureRegion? initialRegion)` overload; `OnLoaded` now seeds `_selX/_selY/_selW/_selH` and `_hasSelection = true` from the caller-supplied region (or persisted last region as fallback), then calls `UpdateOverlay()`. User now opens onto their existing rectangle with handles instead of a blank dark canvas. ?
+2. **Track cancel vs confirm via `WasCancelled` property on the overlay** — Worked. `CancelSelection` sets `WasCancelled = true` before resolving the TCS with null. `RecordingPage.LaunchRegionPickerAsync` reads it after `ShowAsync` returns null to distinguish "user pressed Escape ? no-op" from "first-time open with no prior selection". On Escape with an existing selection, page shows an InfoBar: *"Region selection cancelled — kept previous region."* — eliminates the pixel-identical confusion. ?
+
+**What worked:** Both fixes together. Pre-render eliminates the blank-screen surprise; InfoBar makes Escape's no-op explicit.
+
+**What didn't work / not chosen:**
+
+- Returning a richer result type (e.g. `RegionPickerResult { Region, WasCancelled }`) — would be cleaner but required more surface area changes; `WasCancelled` as a property on the overlay (already a stateful UserControl) was the smaller diff.
+
+---
+
+## Recording state lost on page navigation
+
+**Approaches tried:**
+
+1. **Per-page `RecordingViewModel` (original)** — Didn't work. `RecordingPage` declared `public RecordingViewModel ViewModel { get; } = new();` so every navigation back to the page constructed a fresh VM, losing `CaptureMode`, `SelectedWindow`, `SelectedRegion`, `HasSelectedRegion`, and audio toggles. Region survived only because it was persisted to `ApplicationData.LocalSettings` via `RegionMemory`.
+2. **Shared singleton `RecordingViewModel.Shared`** — Worked. Page now uses `ViewModel { get; } = RecordingViewModel.Shared;` so all selection state survives Editor ? Record navigation. ?
+3. **Per-navigation event subscription** — Required companion fix. Constructor-based `ViewModel.PropertyChanged += …` on a shared VM would leak page references (the VM holds the lambda which captures `this`). Moved subscription to `OnNavigatedTo` and added matching tear-down in `OnNavigatedFrom` so prior page instances can be GC'd. ?
+
+**What worked:** Shared VM + navigation-scoped event lifecycle.
+
+**What didn't work / not chosen:**
+
+- Re-hydrating only `SelectedRegion` from `LoadLastRegion()` in `UpdateRegionInfoDisplay` (already existed) — insufficient because `CaptureMode` and `SelectedWindow` were not persisted, and on fresh-install `LocalSettings` is empty.
+- `NavigationCacheMode=Required` on the page — would also work but caches the entire visual tree; singleton VM is a smaller, more explicit contract.

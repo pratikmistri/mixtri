@@ -15,7 +15,7 @@ namespace Musio_App.Pages;
 
 public sealed partial class RecordingPage : Page
 {
-    public RecordingViewModel ViewModel { get; } = new();
+    public RecordingViewModel ViewModel { get; } = RecordingViewModel.Shared;
 
     private readonly RegionSelector _regionSelector = new();
     private RecordingOverlayWindow? _overlayWindow;
@@ -24,15 +24,28 @@ public sealed partial class RecordingPage : Page
     private bool _isPageLoading = true;
     private bool _isPickerOpen;
 
+    private System.ComponentModel.PropertyChangedEventHandler? _viewModelHandler;
+
     public RecordingPage()
     {
         InitializeComponent();
-        ViewModel.SetDispatcher(DispatcherQueue);
         Loaded += OnLoaded;
+    }
 
-        ViewModel.PropertyChanged += (_, e) =>
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+
+        // Re-point the shared VM's dispatcher at this page's UI thread (cheap;
+        // safe to call repeatedly).
+        ViewModel.SetDispatcher(DispatcherQueue);
+
+        // Wire up IsRecording observation per-navigation; tear down in
+        // OnNavigatedFrom so the VM doesn't accumulate handlers from prior page
+        // instances.
+        _viewModelHandler = (_, args) =>
         {
-            if (e.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
+            if (args.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
 
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -49,6 +62,17 @@ public sealed partial class RecordingPage : Page
                 }
             });
         };
+        ViewModel.PropertyChanged += _viewModelHandler;
+    }
+
+    protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        if (_viewModelHandler is not null)
+        {
+            ViewModel.PropertyChanged -= _viewModelHandler;
+            _viewModelHandler = null;
+        }
+        base.OnNavigatedFrom(e);
     }
 
     private async void StartRecordButton_Click(object sender, RoutedEventArgs e)
@@ -285,7 +309,7 @@ public sealed partial class RecordingPage : Page
         try
         {
             var overlay = new RegionSelectorOverlay();
-            var region = await overlay.ShowAsync();
+            var region = await overlay.ShowAsync(ViewModel.SelectedRegion);
 
             if (region is not null)
             {
@@ -293,11 +317,44 @@ public sealed partial class RecordingPage : Page
                 ViewModel.HasSelectedRegion = true;
                 UpdateRegionInfoDisplay();
             }
+            else if (overlay.WasCancelled && ViewModel.HasSelectedRegion)
+            {
+                // Pixel-identical dimensions before/after cancel make the no-op
+                // invisible — surface an explicit "kept previous region" hint.
+                ShowTransientInfo("Region selection cancelled — kept previous region.");
+            }
         }
         finally
         {
             _isPickerOpen = false;
         }
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _infoBarTimer;
+
+    private void ShowTransientInfo(string message)
+    {
+        if (RecordingInfoBar is null) return;
+        RecordingInfoBar.Severity = InfoBarSeverity.Informational;
+        RecordingInfoBar.Title = string.Empty;
+        RecordingInfoBar.Message = message;
+        RecordingInfoBar.IsOpen = true;
+
+        // Auto-dismiss after a few seconds so the bar doesn't linger forever.
+        _infoBarTimer?.Stop();
+        _infoBarTimer ??= DispatcherQueue.CreateTimer();
+        _infoBarTimer.Interval = TimeSpan.FromSeconds(4);
+        _infoBarTimer.IsRepeating = false;
+        _infoBarTimer.Tick -= OnInfoBarTimerTick;
+        _infoBarTimer.Tick += OnInfoBarTimerTick;
+        _infoBarTimer.Start();
+    }
+
+    private void OnInfoBarTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        if (RecordingInfoBar is not null)
+            RecordingInfoBar.IsOpen = false;
+        sender.Stop();
     }
 
     private void UpdateWindowInfoDisplay()

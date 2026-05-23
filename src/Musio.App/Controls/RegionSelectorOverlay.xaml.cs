@@ -44,6 +44,19 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
     private static readonly Dictionary<InputSystemCursorShape, InputSystemCursor> _cursorCache = new();
 
+    // Region passed by the caller to be pre-rendered on open. Set by ShowAsync
+    // before the overlay window is activated so OnLoaded can apply it.
+    private CaptureRegion? _initialRegion;
+
+    /// <summary>
+    /// True when the most recent <see cref="ShowAsync"/> call ended because the
+    /// user pressed Escape / Cancel rather than confirming a selection.
+    /// Read by callers to distinguish "cancelled — keep prior selection" from
+    /// "confirmed identical selection" (both return the same region value via
+    /// the persisted last-region, but only the former should suppress UI churn).
+    /// </summary>
+    public bool WasCancelled { get; private set; }
+
     private const double HandleSize = 8;
     private const double HandleHitArea = 16;
     private const double MinSelectionSize = 10;
@@ -72,8 +85,53 @@ public sealed partial class RegionSelectorOverlay : UserControl
             UseLastButton.Visibility = Visibility.Visible;
         }
 
+        // Pre-render the caller-supplied region (or fall back to the persisted
+        // last region) so the user opens to their existing selection rather
+        // than a blank dark screen.
+        TryApplyPresetRegion(_initialRegion ?? lastRegion);
+
         UpdateOverlay();
         Focus(FocusState.Programmatic);
+    }
+
+    /// <summary>
+    /// Validates <paramref name="preset"/> against the current overlay canvas
+    /// and, if it intersects, seeds the selection state and shows the Confirm
+    /// button panel. Rejects degenerate / off-screen regions silently so a
+    /// stale persisted region from a disconnected monitor or older layout
+    /// does not produce negative-size rendering in <see cref="UpdateOverlay"/>.
+    /// </summary>
+    private void TryApplyPresetRegion(CaptureRegion? preset)
+    {
+        if (preset is null || preset.Width <= 0 || preset.Height <= 0)
+            return;
+
+        // If layout isn't ready yet, OnSizeChanged will call UpdateOverlay
+        // once ActualWidth/Height become valid; trust the preset for now.
+        double canvasW = ActualWidth;
+        double canvasH = ActualHeight;
+        if (canvasW > 0 && canvasH > 0)
+        {
+            // Reject regions that don't intersect the current virtual desktop
+            // (e.g. saved on a now-disconnected monitor).
+            bool intersects = preset.X < canvasW
+                && preset.Y < canvasH
+                && preset.X + preset.Width > 0
+                && preset.Y + preset.Height > 0;
+            if (!intersects)
+                return;
+        }
+
+        _selX = preset.X;
+        _selY = preset.Y;
+        _selW = preset.Width;
+        _selH = preset.Height;
+        _hasSelection = true;
+
+        // Pre-rendered selections need the Confirm/Cancel buttons immediately —
+        // they're normally only shown on pointer-up of a fresh drag.
+        if (ButtonPanel is not null)
+            ButtonPanel.Visibility = Visibility.Visible;
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -85,8 +143,17 @@ public sealed partial class RegionSelectorOverlay : UserControl
     /// Opens a borderless maximized window with this overlay and waits for the user to
     /// confirm a selection or cancel.
     /// </summary>
-    public async Task<CaptureRegion?> ShowAsync()
+    public Task<CaptureRegion?> ShowAsync() => ShowAsync(null);
+
+    /// <summary>
+    /// Opens the overlay pre-populated with <paramref name="initialRegion"/>
+    /// (if non-null) so the user can refine an existing selection instead of
+    /// starting from a blank canvas.
+    /// </summary>
+    public async Task<CaptureRegion?> ShowAsync(CaptureRegion? initialRegion)
     {
+        _initialRegion = initialRegion;
+        WasCancelled = false;
         _tcs = new TaskCompletionSource<CaptureRegion?>();
 
         // Minimize Musio so it doesn't appear in the screenshot
@@ -142,7 +209,15 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (screenshotSource is not null)
             ScreenshotImage.Source = screenshotSource;
 
-        _hostWindow.Closed += (_, _) => _tcs.TrySetResult(null);
+        _hostWindow.Closed += (_, _) =>
+        {
+            // System-close (Alt+F4, taskbar close, etc.) skips the explicit
+            // CancelSelection path, so flag it as a cancel so callers still
+            // get the "kept previous region" hint.
+            if (!_tcs.Task.IsCompleted)
+                WasCancelled = true;
+            _tcs.TrySetResult(null);
+        };
 
         // Install low-level keyboard hook so Escape works even without XAML focus
         _hookProc = EscapeHookCallback;
@@ -275,11 +350,31 @@ public sealed partial class RegionSelectorOverlay : UserControl
             return;
         }
 
-        // Clamp selection to canvas
+        // Clamp selection to canvas. canvasW - sx can be negative when a stale
+        // preset region lies off the current virtual desktop, so guard the
+        // width/height against negative values rather than letting them flow
+        // into Rectangle.Width (which throws / renders incorrectly).
         double sx = Math.Max(0, _selX);
         double sy = Math.Max(0, _selY);
-        double sw = Math.Min(Math.Max(0, _selW), canvasW - sx);
-        double sh = Math.Min(Math.Max(0, _selH), canvasH - sy);
+        double sw = Math.Max(0, Math.Min(Math.Max(0, _selW), canvasW - sx));
+        double sh = Math.Max(0, Math.Min(Math.Max(0, _selH), canvasH - sy));
+
+        if (sw <= 0 || sh <= 0)
+        {
+            // Degenerate selection (entirely off-screen) — show the blank
+            // overlay so the user can drag a new one.
+            Canvas.SetLeft(TopMask, 0);
+            Canvas.SetTop(TopMask, 0);
+            TopMask.Width = canvasW;
+            TopMask.Height = canvasH;
+            BottomMask.Width = 0; BottomMask.Height = 0;
+            LeftMask.Width = 0; LeftMask.Height = 0;
+            RightMask.Width = 0; RightMask.Height = 0;
+            SelectionRect.Visibility = Visibility.Collapsed;
+            DimensionLabel.Visibility = Visibility.Collapsed;
+            HideHandles();
+            return;
+        }
 
         // Top mask
         Canvas.SetLeft(TopMask, 0);
@@ -807,6 +902,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     private void CancelSelection()
     {
+        WasCancelled = true;
         SelectionCancelled?.Invoke(this, EventArgs.Empty);
         _tcs?.TrySetResult(null);
     }
