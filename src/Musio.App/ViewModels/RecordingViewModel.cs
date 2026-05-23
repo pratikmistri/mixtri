@@ -18,6 +18,15 @@ public enum CaptureMode
 
 public partial class RecordingViewModel : ObservableObject
 {
+    /// <summary>
+    /// Process-wide singleton so capture mode, selected region/window, and audio
+    /// toggles survive page navigation (e.g. Editor → Record). The
+    /// <see cref="RecordingPage"/> wires up to this instance via
+    /// <c>OnNavigatedTo</c>/<c>OnNavigatedFrom</c> rather than constructor
+    /// subscriptions to avoid handler leaks.
+    /// </summary>
+    public static RecordingViewModel Shared { get; } = new();
+
     private RecordingSession? _session;
     private System.Threading.Timer? _elapsedTimer;
     private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
