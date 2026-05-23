@@ -195,6 +195,7 @@ public sealed partial class EditorPage : Page
 
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
+        ExportFlyout.Closed += ExportFlyout_Closed;
         ExportVM.PropertyChanged += ExportVM_PropertyChanged;
 
         // Clean up when page is unloaded to prevent leaks
@@ -1699,6 +1700,19 @@ public sealed partial class EditorPage : Page
 
         ShowExportingState();
         await ExportVM.ExportCommand.ExecuteAsync(null);
+    }
+
+    private void ExportFlyout_Closed(object? sender, object e)
+    {
+        // Reset terminal state (Exported / Failed) so the next open starts a fresh
+        // export. Without this, dismissing the flyout via click-outside leaves
+        // ExportSucceeded=true; reopening the flyout would then short-circuit and
+        // show the prior result instead of running a new export — which makes
+        // subsequent style/edit changes appear to never apply to the output file.
+        if (ExportVM.IsExporting) return;
+        if (!ExportVM.ExportSucceeded && !ExportVM.ExportFailed) return;
+        ExportVM.PrepareForExport();
+        ShowExportingState();
     }
 
     private void ExportVM_PropertyChanged(object? sender, PropertyChangedEventArgs e)

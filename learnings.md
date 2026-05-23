@@ -1538,3 +1538,34 @@ Users can choose whether zoom treats the entire visible frame as one unit (Frame
 
 **What didn't work / not tried:**
 - Giving the encoder its own `CanvasDevice` (instead of the shared one) would also help but was not needed once the preview is paused before export. Worth revisiting if the corruption recurs.
+
+
+---
+
+## Round 13: Style changes silently dropped on re-export
+
+### Feature/area
+Export flyout state lifecycle (`src/Musio.App/Pages/EditorPage.xaml.cs`).
+
+### Symptom
+User exports ? applies shadow/rounded-corner ? exports again ? 2nd MP4 still
+has no shadow/corner even though the preview shows them correctly.
+
+### Root cause
+`ExportFlyout_Opened` short-circuits if `ExportVM.ExportSucceeded` is true.
+The flag is only reset by the explicit "Close" button (`CloseFlyout_Click`).
+Dismissing the flyout by clicking outside leaves the flag set, so the next
+"open" just re-shows the cached `ExportedFilePath` from the previous run —
+no fresh `PrepareForExport` is called and no new export runs. The user
+believes they triggered a 2nd export and inspects the 1st (pre-style) file.
+
+### Fix
+Hook `ExportFlyout.Closed` to call `PrepareForExport` whenever the flyout
+dismisses in a terminal state (Succeeded/Failed) and is not actively exporting.
+This guarantees the next `Opened` falls through to the export path and reads
+the latest `ProjectService.Instance.CurrentComposition`.
+
+### What didn't work
+Initially considered moving the reset into `ExportFlyout_Opened` itself, but
+that would re-export even when the user re-opens the flyout just to re-read
+the success message. Resetting on close is cleaner and matches user intent.
