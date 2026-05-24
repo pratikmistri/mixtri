@@ -1911,11 +1911,12 @@ public sealed partial class EditorPage : Page
         StyleButton.Visibility = Visibility.Visible;
         StyleSeparator.Visibility = Visibility.Visible;
 
-        // Populate preset combo with built-in presets
+        // Populate preset combo with built-in presets — each item is a small
+        // swatch + label so users can identify gradients at a glance.
         PresetCombo.Items.Clear();
-        PresetCombo.Items.Add(new BrandPreset { Name = "(Custom)" });
+        PresetCombo.Items.Add(BuildPresetItem(new BrandPreset { Name = "(Custom)" }, isCustom: true));
         foreach (var preset in DefaultBrandPresets.All)
-            PresetCombo.Items.Add(preset);
+            PresetCombo.Items.Add(BuildPresetItem(preset, isCustom: false));
 
         // Load system wallpapers (async to avoid blocking UI thread)
         _ = LoadSystemWallpapersAsync();
@@ -2059,6 +2060,95 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    private static ComboBoxItem BuildPresetItem(BrandPreset preset, bool isCustom)
+    {
+        var swatch = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            Width = 32,
+            Height = 18,
+            RadiusX = 4,
+            RadiusY = 4,
+            Stroke = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+            StrokeThickness = 1,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        if (isCustom)
+        {
+            swatch.Fill = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlFillColorDefaultBrush"];
+        }
+        else
+        {
+            swatch.Fill = BuildPresetSwatchBrush(preset);
+        }
+
+        var label = new TextBlock
+        {
+            Text = preset.Name,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+        };
+        panel.Children.Add(swatch);
+        panel.Children.Add(label);
+
+        return new ComboBoxItem
+        {
+            Content = panel,
+            Tag = preset,
+        };
+    }
+
+    private static Microsoft.UI.Xaml.Media.Brush BuildPresetSwatchBrush(BrandPreset preset)
+    {
+        var start = ParseHexColor(preset.BackgroundColor);
+
+        if (preset.BackgroundType != BackgroundType.Gradient
+            || string.IsNullOrEmpty(preset.GradientEndColor))
+        {
+            return new Microsoft.UI.Xaml.Media.SolidColorBrush(start);
+        }
+
+        var end = ParseHexColor(preset.GradientEndColor);
+
+        // Convert angle (degrees, 0° = →, 90° = ↓) to start/end points on the
+        // unit square so the swatch preview matches the rendered background.
+        var (sp, ep) = AngleToGradientEndpoints(preset.GradientAngle);
+
+        var brush = new Microsoft.UI.Xaml.Media.LinearGradientBrush
+        {
+            StartPoint = sp,
+            EndPoint = ep,
+        };
+        brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop { Color = start, Offset = 0 });
+        brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop { Color = end, Offset = 1 });
+        return brush;
+    }
+
+    private static (Point Start, Point End) AngleToGradientEndpoints(double angleDegrees)
+    {
+        // Normalize to [0, 360).
+        double a = angleDegrees % 360.0;
+        if (a < 0) a += 360.0;
+        double rad = a * Math.PI / 180.0;
+
+        // Direction vector for the gradient line.
+        double dx = Math.Cos(rad);
+        double dy = Math.Sin(rad);
+
+        // Project from center (0.5, 0.5) to the box edge along ±direction.
+        // Scale so the longer axis fills the unit square diagonally.
+        double scale = 0.5 / Math.Max(Math.Abs(dx), Math.Abs(dy));
+        double hx = dx * scale;
+        double hy = dy * scale;
+
+        return (new Point(0.5 - hx, 0.5 - hy), new Point(0.5 + hx, 0.5 + hy));
+    }
+
     private int FindMatchingPresetIndex(BackgroundStyle bg)
     {
         var presets = DefaultBrandPresets.All;
@@ -2079,7 +2169,8 @@ public sealed partial class EditorPage : Page
     private void PresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressStyleEvents) return;
-        if (PresetCombo.SelectedItem is not BrandPreset preset) return;
+        if (PresetCombo.SelectedItem is not ComboBoxItem item) return;
+        if (item.Tag is not BrandPreset preset) return;
         if (preset.Name == "(Custom)") return;
 
         var bg = BrandPresetConverter.ToBackgroundStyle(preset);

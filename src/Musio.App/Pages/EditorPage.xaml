@@ -691,7 +691,6 @@
                                     x:Name="PresetCombo"
                                     Header="Preset"
                                     HorizontalAlignment="Stretch"
-                                    DisplayMemberPath="Name"
                                     SelectionChanged="PresetCombo_SelectionChanged" />
 
                                 <!-- Background type -->
