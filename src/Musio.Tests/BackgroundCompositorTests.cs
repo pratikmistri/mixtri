@@ -9,15 +9,16 @@ public sealed class BackgroundCompositorTests
     #region CalculateOutputSize
 
     [TestMethod]
-    public void CalculateOutputSize_WithDefaultPadding_AddsCorrectPadding()
+    public void CalculateOutputSize_WithDefaultPadding_ReturnsCanvasUnchanged()
     {
         var compositor = new BackgroundCompositor();
         var style = new BackgroundStyle(); // Padding defaults to 48
 
         var (width, height) = compositor.CalculateOutputSize(1920, 1080, style);
 
-        Assert.AreEqual(1920 + 48 * 2, width);
-        Assert.AreEqual(1080 + 48 * 2, height);
+        // Padding now insets the content within the canvas; canvas size is unchanged.
+        Assert.AreEqual(1920, width);
+        Assert.AreEqual(1080, height);
     }
 
     [TestMethod]
@@ -33,15 +34,15 @@ public sealed class BackgroundCompositorTests
     }
 
     [TestMethod]
-    public void CalculateOutputSize_WithLargePadding_ScalesCorrectly()
+    public void CalculateOutputSize_WithLargePadding_ReturnsCanvasUnchanged()
     {
         var compositor = new BackgroundCompositor();
         var style = new BackgroundStyle { Padding = 200 };
 
         var (width, height) = compositor.CalculateOutputSize(800, 600, style);
 
-        Assert.AreEqual(800 + 400, width);
-        Assert.AreEqual(600 + 400, height);
+        Assert.AreEqual(800, width);
+        Assert.AreEqual(600, height);
     }
 
     [TestMethod]
@@ -52,8 +53,8 @@ public sealed class BackgroundCompositorTests
 
         var (width, height) = compositor.CalculateOutputSize(1, 1, style);
 
-        Assert.AreEqual(21, width);
-        Assert.AreEqual(21, height);
+        Assert.AreEqual(1, width);
+        Assert.AreEqual(1, height);
     }
 
     #endregion

@@ -1,4 +1,5 @@
 using Musio.Core.Capture;
+using Musio.Core.Settings;
 
 namespace Musio.Core.Models;
 
@@ -54,4 +55,36 @@ public class Project
     /// </summary>
     public double AudioToVideoOffsetSeconds { get; set; }
     public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;
+
+    /// <summary>
+    /// Canvas aspect ratio for preview and export. <see cref="AspectRatio.Auto"/>
+    /// matches the captured source. Drives both editor preview and exported video dimensions.
+    /// </summary>
+    public AspectRatio AspectRatio { get; set; } = AspectRatio.Auto;
+
+    /// <summary>
+    /// How the captured source frame fits into the canvas when <see cref="AspectRatio"/>
+    /// differs from the source aspect ratio. Ignored when <see cref="AspectRatio"/> is Auto.
+    /// </summary>
+    public FitMode FitMode { get; set; } = FitMode.Cover;
+
+    /// <summary>
+    /// Horizontal crop anchor in 0..1 when <see cref="FitMode"/> is Cover. 0 = left edge,
+    /// 0.5 = center, 1 = right edge. Selects which portion of the source frame is visible
+    /// when the source is wider than the canvas.
+    /// </summary>
+    public double CropAnchorX { get; set; } = 0.5;
+
+    /// <summary>
+    /// Vertical crop anchor in 0..1 when <see cref="FitMode"/> is Cover. 0 = top edge,
+    /// 0.5 = center, 1 = bottom edge.
+    /// </summary>
+    public double CropAnchorY { get; set; } = 0.5;
+
+    /// <summary>
+    /// Whether zoom operates on the entire composed canvas (Frame) or only the
+    /// captured source frame within it (Source). Only matters when the source
+    /// area is smaller than the canvas (Contain mode or non-zero padding).
+    /// </summary>
+    public ZoomScope ZoomScope { get; set; } = ZoomScope.Frame;
 }

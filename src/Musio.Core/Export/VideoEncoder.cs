@@ -217,6 +217,13 @@ public class VideoEncoder : IDisposable
             int currentFrame = 0;
             var pendingSamples = new List<Task>();
             var pendingSamplesLock = new object();
+            // Captures the first exception thrown inside ProduceSampleAsync so the
+            // export can fail loudly with a real error instead of silently producing
+            // a truncated video (the MediaStreamSource treats Sample=null as EOS,
+            // which previously caused failed exports to appear as ~1-second videos).
+            Exception? firstFrameError = null;
+            int firstFrameErrorIndex = -1;
+            var frameErrorLock = new object();
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
             // Create uncompressed video stream for the MediaStreamSource
@@ -256,7 +263,18 @@ public class VideoEncoder : IDisposable
                     compositorWidth, compositorHeight,
                     webcamExtractW, webcamExtractH,
                     targetWidth, targetHeight,
-                    needsScaling, timelineMapper, progress, stopwatch, ct);
+                    needsScaling, timelineMapper, progress, stopwatch, ct,
+                    onError: (ex, frameIdx) =>
+                    {
+                        lock (frameErrorLock)
+                        {
+                            if (firstFrameError is null)
+                            {
+                                firstFrameError = ex;
+                                firstFrameErrorIndex = frameIdx;
+                            }
+                        }
+                    });
 
                 lock (pendingSamplesLock)
                 {
@@ -295,6 +313,27 @@ public class VideoEncoder : IDisposable
                 snapshot = pendingSamples.ToArray();
             }
             await Task.WhenAll(snapshot).ConfigureAwait(false);
+
+            // If any frame failed during compositing, fail the export loudly.
+            // Without this, MediaStreamSource silently treats Sample=null as EOS,
+            // producing a truncated (often ~1 second) video on the first error.
+            // Read under the same lock used by the producer tasks so the read is
+            // explicitly synchronized (Task.WhenAll already establishes happens-
+            // before, but reading under the lock makes the intent obvious).
+            Exception? capturedError;
+            int capturedIndex;
+            lock (frameErrorLock)
+            {
+                capturedError = firstFrameError;
+                capturedIndex = firstFrameErrorIndex;
+            }
+            if (capturedError is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Export failed while compositing frame {capturedIndex}: " +
+                    $"{capturedError.Message}",
+                    capturedError);
+            }
 
             // ── Pass 2: Mux audio (fast — no frame re-compositing) ──
             if (hasAudio)
@@ -345,7 +384,8 @@ public class VideoEncoder : IDisposable
         TimelineMapper? timelineMapper,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<Exception, int>? onError = null)
     {
         CanvasRenderTarget? outputSurface = null;
         try
@@ -457,7 +497,9 @@ public class VideoEncoder : IDisposable
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[VideoEncoder] Frame {frameIndex} error: {ex.Message}");
+            Debug.WriteLine($"[VideoEncoder] Frame {frameIndex} error: {ex}");
+            // Notify caller so the export can fail loudly rather than truncating.
+            onError?.Invoke(ex, frameIndex);
             // Dispose GPU surface if it was created but never handed to the encoder
             outputSurface?.Dispose();
             request.Sample = null;
