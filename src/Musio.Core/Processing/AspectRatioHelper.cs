@@ -19,6 +19,8 @@ public static class AspectRatioHelper
         AspectRatio.Square1x1 => (1, 1),
         AspectRatio.Classic4x3 => (4, 3),
         AspectRatio.Tall3x4 => (3, 4),
+        AspectRatio.Cinematic21x9 => (21, 9),
+        AspectRatio.Instagram4x5 => (4, 5),
         _ => (0, 0),
     };
 
@@ -60,17 +62,22 @@ public static class AspectRatioHelper
     }
 
     /// <summary>
-    /// Calculates a center-crop rectangle to convert the source dimensions to the
-    /// target aspect ratio. Returns (X, Y, Width, Height) in source pixel coordinates.
-    /// For <see cref="AspectRatio.Auto"/>, the crop covers the full source.
+    /// Calculates an anchored crop rectangle to convert the source dimensions to the
+    /// target aspect ratio. <paramref name="anchorX"/>/<paramref name="anchorY"/> are
+    /// in 0..1 and place the crop window within the source: (0,0)=top-left, (0.5,0.5)=center,
+    /// (1,1)=bottom-right. For <see cref="AspectRatio.Auto"/>, the crop covers the full source.
     /// </summary>
     public static (int X, int Y, int Width, int Height) CalculateCropRect(
-        int sourceWidth, int sourceHeight, AspectRatio targetRatio)
+        int sourceWidth, int sourceHeight, AspectRatio targetRatio,
+        double anchorX = 0.5, double anchorY = 0.5)
     {
         var (ratioW, ratioH) = GetRatio(targetRatio);
 
         if (ratioW == 0 || ratioH == 0)
             return (0, 0, sourceWidth, sourceHeight);
+
+        anchorX = Math.Clamp(anchorX, 0.0, 1.0);
+        anchorY = Math.Clamp(anchorY, 0.0, 1.0);
 
         double targetAr = (double)ratioW / ratioH;
         double sourceAr = (double)sourceWidth / sourceHeight;
@@ -83,7 +90,7 @@ public static class AspectRatioHelper
             cropH = sourceHeight;
             cropW = (int)Math.Round(sourceHeight * targetAr);
             cropW = Math.Min(cropW, sourceWidth);
-            offsetX = (sourceWidth - cropW) / 2;
+            offsetX = (int)Math.Round((sourceWidth - cropW) * anchorX);
             offsetY = 0;
         }
         else
@@ -93,7 +100,7 @@ public static class AspectRatioHelper
             cropH = (int)Math.Round(sourceWidth / targetAr);
             cropH = Math.Min(cropH, sourceHeight);
             offsetX = 0;
-            offsetY = (sourceHeight - cropH) / 2;
+            offsetY = (int)Math.Round((sourceHeight - cropH) * anchorY);
         }
 
         return (offsetX, offsetY, cropW, cropH);
@@ -110,6 +117,22 @@ public static class AspectRatioHelper
         AspectRatio.Square1x1 => "1:1 Square",
         AspectRatio.Classic4x3 => "4:3 Classic",
         AspectRatio.Tall3x4 => "3:4 Tall",
+        AspectRatio.Cinematic21x9 => "21:9 Cinematic",
+        AspectRatio.Instagram4x5 => "4:5 Portrait",
+        _ => ratio.ToString(),
+    };
+
+    /// <summary>Short label suitable for buttons/chips (e.g. "16:9", "Auto").</summary>
+    public static string GetShortLabel(AspectRatio ratio) => ratio switch
+    {
+        AspectRatio.Auto => "Auto",
+        AspectRatio.Landscape16x9 => "16:9",
+        AspectRatio.Portrait9x16 => "9:16",
+        AspectRatio.Square1x1 => "1:1",
+        AspectRatio.Classic4x3 => "4:3",
+        AspectRatio.Tall3x4 => "3:4",
+        AspectRatio.Cinematic21x9 => "21:9",
+        AspectRatio.Instagram4x5 => "4:5",
         _ => ratio.ToString(),
     };
 

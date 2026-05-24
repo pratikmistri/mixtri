@@ -72,9 +72,11 @@ public sealed class SettingsTests
     public void AspectRatio_AllValues_AreDefined()
     {
         var values = Enum.GetValues<AspectRatio>();
-        Assert.AreEqual(6, values.Length);
+        Assert.AreEqual(8, values.Length);
         CollectionAssert.Contains(values, AspectRatio.Auto);
         CollectionAssert.Contains(values, AspectRatio.Square1x1);
+        CollectionAssert.Contains(values, AspectRatio.Cinematic21x9);
+        CollectionAssert.Contains(values, AspectRatio.Instagram4x5);
     }
 
     [TestMethod]

@@ -14,6 +14,8 @@ public sealed class AspectRatioHelperTests
     [DataRow(AspectRatio.Square1x1, 1, 1)]
     [DataRow(AspectRatio.Classic4x3, 4, 3)]
     [DataRow(AspectRatio.Tall3x4, 3, 4)]
+    [DataRow(AspectRatio.Cinematic21x9, 21, 9)]
+    [DataRow(AspectRatio.Instagram4x5, 4, 5)]
     [DataRow(AspectRatio.Auto, 0, 0)]
     public void GetRatio_ReturnsExpectedValues(AspectRatio ratio, int expectedW, int expectedH)
     {
@@ -157,6 +159,62 @@ public sealed class AspectRatioHelperTests
             Assert.IsTrue(y + h <= 1080, $"{ratio}: crop must fit in source height");
             Assert.IsTrue(w > 0 && h > 0, $"{ratio}: crop must have positive size");
         }
+    }
+
+    #endregion
+
+    #region CalculateCropRect (anchored)
+
+    [TestMethod]
+    public void CalculateCropRect_LeftAnchor_PlacesCropAtLeftEdge()
+    {
+        // 1920x1080 cropped to 1:1, anchor at left (0, 0.5)
+        var (x, _, w, _) = AspectRatioHelper.CalculateCropRect(
+            1920, 1080, AspectRatio.Square1x1, anchorX: 0.0, anchorY: 0.5);
+
+        Assert.AreEqual(0, x, "Left anchor should place crop at x=0");
+        Assert.AreEqual(1080, w);
+    }
+
+    [TestMethod]
+    public void CalculateCropRect_RightAnchor_PlacesCropAtRightEdge()
+    {
+        var (x, _, w, _) = AspectRatioHelper.CalculateCropRect(
+            1920, 1080, AspectRatio.Square1x1, anchorX: 1.0, anchorY: 0.5);
+
+        Assert.AreEqual(1920 - 1080, x, "Right anchor should place crop flush against right edge");
+    }
+
+    [TestMethod]
+    public void CalculateCropRect_TopAnchor_PlacesCropAtTop()
+    {
+        // 1000x1000 cropped to 16:9, anchor at top
+        var (_, y, _, h) = AspectRatioHelper.CalculateCropRect(
+            1000, 1000, AspectRatio.Landscape16x9, anchorX: 0.5, anchorY: 0.0);
+
+        Assert.AreEqual(0, y, "Top anchor should place crop at y=0");
+        Assert.IsTrue(h < 1000);
+    }
+
+    [TestMethod]
+    public void CalculateCropRect_BottomAnchor_PlacesCropAtBottom()
+    {
+        var (_, y, _, h) = AspectRatioHelper.CalculateCropRect(
+            1000, 1000, AspectRatio.Landscape16x9, anchorX: 0.5, anchorY: 1.0);
+
+        Assert.AreEqual(1000 - h, y, "Bottom anchor should place crop flush against bottom edge");
+    }
+
+    [TestMethod]
+    public void CalculateCropRect_OutOfRangeAnchor_ClampsToValidRange()
+    {
+        // Anchor values outside [0,1] should be clamped (no negative offsets)
+        var (x, y, w, h) = AspectRatioHelper.CalculateCropRect(
+            1920, 1080, AspectRatio.Square1x1, anchorX: -0.5, anchorY: 1.5);
+
+        Assert.IsTrue(x >= 0, "Negative anchor must clamp to 0");
+        Assert.IsTrue(x + w <= 1920);
+        Assert.IsTrue(y + h <= 1080);
     }
 
     #endregion

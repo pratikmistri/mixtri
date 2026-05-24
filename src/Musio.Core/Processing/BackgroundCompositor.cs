@@ -39,49 +39,62 @@ public sealed class BackgroundCompositor : IDisposable
     private CanvasDevice? _cachedDevice;
     private bool _disposed;
     /// <summary>
-    /// Computes the total output dimensions including padding on all sides.
+    /// Returns the output canvas dimensions. Padding now insets the content within
+    /// the canvas rather than extending it, so the canvas size matches the configured
+    /// aspect ratio regardless of padding.
     /// </summary>
     public (int width, int height) CalculateOutputSize(int sourceWidth, int sourceHeight, BackgroundStyle style)
     {
-        int totalPadding = style.Padding * 2;
-        return (sourceWidth + totalPadding, sourceHeight + totalPadding);
+        _ = style;
+        return (sourceWidth, sourceHeight);
     }
 
     /// <summary>
     /// Renders one complete composited frame: background → shadow → screen content → border.
+    /// Padding (user setting + any aspect-ratio fit gap) is implicit in the source rect's
+    /// position and dimensions — there is no separate inner-content container.
     /// </summary>
+    /// <param name="screenFrame">Cropped buffer sized exactly to (srcWidth, srcHeight).</param>
+    /// <param name="srcX">X position of the source frame inside the output canvas.</param>
+    /// <param name="srcY">Y position of the source frame inside the output canvas.</param>
+    /// <param name="srcWidth">Width of the source frame inside the output canvas.</param>
+    /// <param name="srcHeight">Height of the source frame inside the output canvas.</param>
     public void CompositeFrame(
         CanvasDrawingSession session,
         CanvasBitmap screenFrame,
         int outputWidth,
         int outputHeight,
+        int srcX,
+        int srcY,
+        int srcWidth,
+        int srcHeight,
         BackgroundStyle style)
     {
         float w = outputWidth;
         float h = outputHeight;
-        float padding = style.Padding;
-        float contentX = padding;
-        float contentY = padding;
-        float contentW = w - padding * 2;
-        float contentH = h - padding * 2;
+        float sx = srcX;
+        float sy = srcY;
+        float sw = srcWidth;
+        float sh = srcHeight;
         float radius = style.CornerRadius;
 
-        // 1. Draw background
-        DrawBackground(session, screenFrame, w, h, contentW, contentH, contentX, contentY, style);
+        // 1. Background fills the entire output canvas — everything outside the
+        //    source rect is one continuous background container.
+        DrawBackground(session, screenFrame, w, h, sw, sh, sx, sy, style);
 
-        // 2. Draw shadow behind content
+        // 2. Shadow under the source frame.
         if (style.ShadowEnabled)
         {
-            DrawShadow(session, contentX, contentY, contentW, contentH, radius, style);
+            DrawShadow(session, sx, sy, sw, sh, radius, style);
         }
 
-        // 3. Draw screen content (clipped to rounded rect if needed)
-        DrawContent(session, screenFrame, contentX, contentY, contentW, contentH, radius);
+        // 3. Source content drawn 1:1 at its rect; rounded-corner clip wraps the frame.
+        DrawContent(session, screenFrame, sx, sy, sw, sh, radius);
 
-        // 4. Draw border
+        // 4. Border around the source frame.
         if (style.BorderEnabled && style.BorderWidth > 0)
         {
-            DrawBorder(session, contentX, contentY, contentW, contentH, radius, style);
+            DrawBorder(session, sx, sy, sw, sh, radius, style);
         }
     }
 
@@ -251,7 +264,6 @@ public sealed class BackgroundCompositor : IDisposable
 
         if (radius > 0)
         {
-            // Clip to rounded rectangle
             using var clipGeometry = CanvasGeometry.CreateRoundedRectangle(
                 session.Device, x, y, w, h, radius, radius);
             using var layer = session.CreateLayer(1.0f, clipGeometry);
@@ -281,6 +293,79 @@ public sealed class BackgroundCompositor : IDisposable
             radius,
             borderColor,
             style.BorderWidth);
+    }
+
+    /// <summary>
+    /// Fills the given rectangle with the background style — without any shadow,
+    /// content, border, clipping, or padding. Used to fill letterbox/pillarbox bars
+    /// inside the content buffer when the canvas is larger than the source frame
+    /// (FitMode = Contain).
+    /// </summary>
+    /// <param name="session">Drawing session for the buffer being filled.</param>
+    /// <param name="screenFrame">
+    /// Optional screen frame used as the source for blur backgrounds. May be null
+    /// when the style is not a blur background.
+    /// </param>
+    public void FillBackgroundRect(
+        CanvasDrawingSession session,
+        CanvasBitmap? screenFrame,
+        float x, float y, float w, float h,
+        BackgroundStyle style)
+    {
+        if (w <= 0f || h <= 0f) return;
+
+        var previousTransform = session.Transform;
+        session.Transform = Matrix3x2.CreateTranslation(x, y) * previousTransform;
+        try
+        {
+            switch (style.Type)
+            {
+                case BackgroundType.SolidColor:
+                    session.FillRectangle(0, 0, w, h, ColorHelper.ParseColor(style.Color));
+                    break;
+
+                case BackgroundType.Gradient:
+                    DrawGradientBackground(session, w, h, style);
+                    break;
+
+                case BackgroundType.Image:
+                    DrawImageBackground(session, w, h, style);
+                    break;
+
+                case BackgroundType.Blur:
+                    if (screenFrame is not null)
+                        DrawBlurFill(session, screenFrame, w, h);
+                    else
+                        session.FillRectangle(0, 0, w, h, ColorHelper.ParseColor(style.Color));
+                    break;
+            }
+        }
+        finally
+        {
+            session.Transform = previousTransform;
+        }
+    }
+
+    private static void DrawBlurFill(
+        CanvasDrawingSession session, CanvasBitmap screenFrame, float w, float h)
+    {
+        var src = screenFrame.SizeInPixels;
+        float scaleX = w / src.Width;
+        float scaleY = h / src.Height;
+        float scale = Math.Max(scaleX, scaleY);
+
+        using var scaleEffect = new Transform2DEffect
+        {
+            Source = screenFrame,
+            TransformMatrix = Matrix3x2.CreateScale(scale)
+        };
+        using var blurEffect = new GaussianBlurEffect
+        {
+            Source = scaleEffect,
+            BlurAmount = 30f,
+            BorderMode = EffectBorderMode.Hard
+        };
+        session.DrawImage(blurEffect, new Vector2(0, 0));
     }
 
     public void Dispose()

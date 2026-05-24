@@ -1437,3 +1437,179 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work**:
 - Padding sub-16 compositor dims up to 16 via `Math.Max(16,...)` violated
   the no-upscale invariant for tiny degenerate inputs.
+
+## 2026-05 - Aspect Ratio Flyout (Cursor-style)
+- **Feature**: Project-level aspect-ratio + fit-mode picker with always-visible toolbar flyout (EditorPage).
+- **What worked**:
+  - Project-level state on Project (AspectRatio, FitMode, CropAnchorX/Y); ExportEngine reads from project, not ExportSettings.
+  - Generalized AspectRatioHelper.CalculateCropRect with anchorX/anchorY (0..1) for 9-point snap. Added CalculateContainCanvas for Contain mode.
+  - FrameCompositor: introduced _sourceArea*+offset fields decoupled from contentWidth/Height. Cursor/click/zoom-center math all use sourceArea.
+  - Contain mode: ComputeEffectiveViewport returns unmodified viewport (preserves source AR); CropSourceFrame fills letterbox bars via BackgroundCompositor.FillBackgroundRect (new public helper using session.Transform translate to reuse private gradient/image/blur helpers), then draws source into the centered sub-rect.
+  - Post-composite zoom GATED OFF for Contain (letterbox stays constant when zooming - else bars would scale with content).
+  - Inline Button.Flyout in EditorPage.xaml row-2 toolbar (next to styles/cursor) with RadioButton grids; _suppressAspectRatioEvents flag prevents init re-entrancy.
+- **What didn't work / pitfalls**:
+  - dotnet 9 SDK absent on this machine (only 8 + 10). Workaround: vstest.console.exe with DOTNET_ROLL_FORWARD=Major env var; do NOT use `dotnet test`.
+  - MSBuild on Musio.sln alone doesn't always rebuild Musio.Tests when only test files change - target Musio.Tests.csproj directly to force rebuild.
+  - Must kill Musio.App.exe before any build (DLL lock).
+  - When updating AspectRatio enum, also bump SettingsTests.AspectRatio_AllValues_AreDefined length assertion.
+- **Deferred to v2**: free-drag crop anchor with shift-bypass; timeline thumbnail display-time transform.
+
+## Frame style: padding & aspect ratio isolation (round 3)
+
+### Feature/area
+FrameCompositor + BackgroundCompositor � decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
+
+### What didn't work
+- Previous model had `BackgroundCompositor.CalculateOutputSize` return `(source + 2*padding, source + 2*padding)`. This made the output canvas grow with padding, so dragging the padding slider visibly changed the canvas aspect ratio.
+- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin � visible "wallpaper repeat" with two independent containers.
+
+### What worked
+- `BackgroundCompositor.CalculateOutputSize` is now identity `(w, h)`: padding insets within the canvas, never extends it.
+- `FrameCompositor.ComputeContentDimensions` now computes:
+  - `_contentWidth/_contentHeight` = output canvas at target AR (fit to source bounds), independent of padding.
+  - `_innerContentWidth/_innerContentHeight` = canvas - 2*padding (the inner content rect, where source is drawn).
+  - `_sourceAreaWidth/Height/OffsetX/Y` describe the source placement WITHIN the inner content area. Cover fills inner; Contain preserves source AR inside inner with letterbox/pillarbox.
+- `CropSourceFrame` sizes `_croppedBuffer` to inner dims and clears to transparent; letterbox bars are no longer filled in the buffer.
+- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w � h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill � padding margin + letterbox bars = single container.
+- Cursor and click coord math (`(cursor - viewport)*scale + padding + sourceAreaOffset`) is unchanged: scale uses `_sourceAreaWidth/viewport.Width`, offsets are in inner-buffer space, and `+padding` shifts to outer canvas coords (content is drawn at `(padding, padding)` by BgCompositor).
+
+### Test impact
+- Updated 4 `BackgroundCompositorTests.CalculateOutputSize_*` tests to expect identity (canvas unchanged), no longer adding padding.
+- All 268 tests pass.
+
+
+## Frame style: collapse letterbox + padding into one container (round 4)
+
+### Feature/area
+FrameCompositor + BackgroundCompositor � eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
+
+### What worked
+- Removed `_innerContentWidth/_innerContentHeight` fields entirely.
+- `_sourceAreaWidth/_sourceAreaHeight` now describe the actual visible source frame size in output canvas coords.
+- `_sourceAreaOffsetX/_sourceAreaOffsetY` now represent the source frame's position from the canvas origin (= user-padding + any AR-fit gap on that side). There is no separate "inner" coordinate space.
+- `ComputeContentDimensions`: compute canvas (target AR, padding-independent), then a max content box (canvas - 2*userPadding), then fit source into it per FitMode, finally CENTER the source within the canvas (so leftover gap is simply more background).
+- `CropSourceFrame`: buffer is sized exactly to the source-area dims (no internal letterbox padding). Drawing 1:1.
+- `BackgroundCompositor.CompositeFrame` simplified signature: takes srcX/srcY/srcWidth/srcHeight directly (no padding/inner concept). Background fills the entire canvas; shadow / rounded-corner clip / border all use the source rect.
+- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term � `_sourceAreaOffset*` now already includes total background gap.
+
+### Outcome
+- Shadow and rounded corners wrap the actual visible captured frame, not the larger "inner content" container.
+- One unified background container fills everything around the source.
+- All 268 tests still pass.
+
+
+## Zoom in Contain mode operates on full canvas (round 5)
+
+### Feature/area
+FrameCompositor.ComposeFrame zoom-path selection.
+
+### Problem
+Previously, in FitMode.Contain (non-Auto AR), zoom went through the direct path so only the source viewport zoomed while letterbox bars stayed constant. The user wants zoom to treat the entire composed canvas (background + source frame + letterbox area) as one unit so the zoom region can span the whole visible frame.
+
+### What worked
+Removed the `useContainDirect` carve-out: post-composite zoom is now always used whenever ZoomLevel > 1.01, regardless of FitMode. The composite buffer (which already contains the background fill across the whole canvas) is zoom-cropped and scaled to the output, so the visible frame zooms as a single unified unit.
+
+### Outcome
+- Zoom now spans the entire visible frame including letterbox area in Contain mode.
+- Cursor also scales with zoom in Contain mode (previously it did not).
+- All 268 tests pass.
+
+
+## ZoomScope: user choice between whole-frame and source-only zoom (round 6)
+
+### Feature/area
+Added a user-selectable `ZoomScope` (Frame | Source) on the Project / FrameCompositorConfig, surfaced in the Frame Style flyout as a "Zoom scope" radio pair ("Whole frame" / "Source only").
+
+### Wiring
+- `Musio.Core.Settings.ZoomScope` enum (Frame=default, Source).
+- `Project.ZoomScope` (default Frame).
+- `FrameCompositorConfig.ZoomScope`.
+- `ExportEngine` propagates `project.ZoomScope` to the composition used for export.
+- `FrameCompositor.ComposeFrame`: post-composite zoom path used only when `ZoomScope == Frame`; otherwise direct path so background/letterbox/padding stay fixed.
+- EditorPage XAML adds a `ZoomScopePanel` under FitModePanel inside the Frame Style flyout; always visible.
+- Code-behind: `SelectZoomScopeRadio`, `ZoomScopeOption_Checked`, `ApplyZoomScope` mirror the FitMode pattern (project + composition update + RebuildPreviewRendererAsync).
+
+### Outcome
+Users can choose whether zoom treats the entire visible frame as one unit (Frame) or constrains zoom to the captured source while keeping background fixed (Source). All 268 tests pass.
+
+
+## Round 7: Custom visual controls for Frame Style flyout
+
+- **Feature/area**: EditorPage Frame Style flyout UI controls.
+- **Approaches tried**:
+  1. Custom TileRadioStyle with iconic visuals for every option (radios with rich content).
+  2. Hybrid: default RadioButtons for aspect ratio, ctk:Segmented for binary choices (Fit, Zoom scope), single 5x5 Grid with CropCellRadioStyle for 3x3 crop position.
+- **What worked**: Approach 2. CommunityToolkit.WinUI.Controls.Segmented (already referenced) gives a clean binary toggle. For the 3x3 crop grid, a single bordered Grid with 3 content cols/rows + 2 1px divider lanes and 9 RadioButtons styled with a cell-fill template (background fills on CheckedNormal via CombinedStates VSM) produces a unified rectangle that fills the chosen segment.
+- **What didn't work**: TileRadioStyle was visually busy and inconsistent with WinUI design language for binary/segmented choices.
+
+## Round 8: Aspect-ratio tile selector
+
+- **Feature/area**: EditorPage Frame Style flyout - Aspect ratio selector.
+- **Approaches tried**: Tile-style RadioButton with proportional preview rectangle (sized to the actual aspect ratio, fitted inside a 36x26 bounding box) plus a label below; Auto tile shows a rounded outline rectangle with an 'A' glyph inside.
+- **What worked**: New `AspectRatioTileStyle` (bordered Border template with CombinedStates VSM; accent 2px border + subtle fill on CheckedNormal). Eight tiles with per-ratio Border dimensions communicate the shape at a glance and are visually consistent with the rest of the redesigned flyout.
+- **What didn't work**: Plain default RadioButtons with text content - lacked visual cues for the actual ratio so users couldn't preview at a glance.
+
+## Round 9: Accent-fill preview rectangle on aspect-ratio tiles
+
+- **Feature/area**: EditorPage Frame Style flyout - Aspect ratio tile selection signal.
+- **Approaches tried**: (1) Use VSM in AspectRatioTileStyle template to swap inner preview brush - blocked because the preview Border lives in Content, not the template, so VSM cannot retarget it. (2) Add a small `BoolToObjectConverter` (in Musio_App.Converters) and bind each preview Border's Background/BorderBrush (and the Auto glyph Foreground) to the parent tile's IsChecked via `ElementName` binding.
+- **What worked**: Approach 2. Three shared converter instances declared in Page.Resources (PreviewBgBrush, PreviewBorderBrush, PreviewGlyphBrush) keep XAML compact. When a tile is checked, its inner rectangle fills with AccentFillColorDefaultBrush and its outline switches to accent; Auto's 'A' glyph switches to TextOnAccentFillColorPrimaryBrush for contrast. Tile-level accent border was removed in favor of a SubtleFillColorSecondaryBrush background so the accent rectangle is the focal point.
+- **What didn't work**: Template-VSM approach (Content elements unreachable from style VSM).
+
+## Round 10: Crash fix - ThemeResource on converter CLR properties causes XAML layout cycle
+
+- **Feature/area**: EditorPage Frame Style flyout - aspect-ratio tile bindings, App crash post-capture (HRESULT 0x802B000A in combase.dll, XAML layout cycle).
+- **Approaches tried**: (1) Originally used three BoolToObjectConverter instances in Page.Resources whose `TrueValue`/`FalseValue` CLR properties were assigned via `{ThemeResource AccentFillColorDefaultBrush}` etc. This compiled fine but, when EditorPage was navigated to post-capture, crashed the process inside combase with XAML_E_LAYOUT_CYCLE. (2) Replaced with a single `CheckedToBrushConverter` that looks up theme brushes from `Application.Current.Resources` at runtime, keyed by `ConverterParameter` (`Bg`/`Border`/`Glyph`).
+- **What worked**: Approach 2. No ThemeResource is assigned to a non-DependencyProperty, so the XAML parser doesn't get into a resource-resolution cycle.
+- **What didn't work**: `{ThemeResource X}` markup on plain CLR properties of objects placed in `Page.Resources`. Even though XAML compilation succeeds, runtime activation of a Page that references those resources can throw XAML_E_LAYOUT_CYCLE. Avoid this pattern - use static brushes, hard-coded colors, or look up brushes in code at runtime.
+
+---
+
+## Export Bugs: Truncated to ~1s and Crash During Preview Playback
+
+**Symptoms:**
+1. Export produced a ~1-second video instead of the full recording duration.
+2. Exporting while the editor preview was playing caused frame corruption or a crash.
+
+**Root cause(s):**
+1. `VideoEncoder.ProduceSampleAsync` swallowed exceptions thrown during per-frame compositing and set `request.Sample = null` on error. `MediaStreamSource` treats `Sample = null` as end-of-stream, so the very first frame error silently truncates the output to whatever frames were already enqueued (roughly 1 second).
+2. The export pipeline composites frames on the same shared Win2D device (`CanvasDevice.GetSharedDevice()`) and reads the same source `.frames/` JPEGs as the editor preview. Running both at once causes GPU device contention and shared-buffer races -> visible corruption or a hard crash.
+
+**What worked:**
+- Capture the first per-frame error in `VideoEncoder.ExportAsync` via a new `onError` callback, drain pending sample tasks, then re-throw as an `InvalidOperationException` that includes the frame index and inner exception. This turns silent ~1s truncation into a loud, debuggable failure with the real root cause surfaced in the editor's error panel.
+- In `EditorPage.ExportFlyout_Opened`, call `Preview.Pause()` (and best-effort `_audioPlayer.Pause()`) before kicking off the export so the export pipeline owns the shared Win2D device and source frame reader.
+- Verified all 268 MSTest cases still pass.
+
+**What didn't work / not tried:**
+- Giving the encoder its own `CanvasDevice` (instead of the shared one) would also help but was not needed once the preview is paused before export. Worth revisiting if the corruption recurs.
+
+
+---
+
+## Round 13: Style changes silently dropped on re-export
+
+### Feature/area
+Export flyout state lifecycle (`src/Musio.App/Pages/EditorPage.xaml.cs`).
+
+### Symptom
+User exports ? applies shadow/rounded-corner ? exports again ? 2nd MP4 still
+has no shadow/corner even though the preview shows them correctly.
+
+### Root cause
+`ExportFlyout_Opened` short-circuits if `ExportVM.ExportSucceeded` is true.
+The flag is only reset by the explicit "Close" button (`CloseFlyout_Click`).
+Dismissing the flyout by clicking outside leaves the flag set, so the next
+"open" just re-shows the cached `ExportedFilePath` from the previous run �
+no fresh `PrepareForExport` is called and no new export runs. The user
+believes they triggered a 2nd export and inspects the 1st (pre-style) file.
+
+### Fix
+Hook `ExportFlyout.Closed` to call `PrepareForExport` whenever the flyout
+dismisses in a terminal state (Succeeded/Failed) and is not actively exporting.
+This guarantees the next `Opened` falls through to the export path and reads
+the latest `ProjectService.Instance.CurrentComposition`.
+
+### What didn't work
+Initially considered moving the reset into `ExportFlyout_Opened` itself, but
+that would re-export even when the user re-opens the flyout just to re-read
+the success message. Resetting on close is cleaner and matches user intent.
