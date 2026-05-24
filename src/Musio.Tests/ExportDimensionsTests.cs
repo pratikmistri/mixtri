@@ -77,4 +77,70 @@ public sealed class ExportDimensionsTests
         Assert.IsTrue(w >= 16);
         Assert.IsTrue(h >= 16);
     }
+
+    [TestMethod]
+    public void ComputeExportDimensions_TinyCompositor_NotUpscaledAbove16()
+    {
+        // 8×8 compositor must not be padded up to 16×16 (would violate no-upscale).
+        var (w, h) = AspectRatioHelper.ComputeExportDimensions(8, 8, VideoResolution.HD1080);
+        Assert.IsTrue(w <= 8, $"width {w} must not exceed source 8");
+        Assert.IsTrue(h <= 8, $"height {h} must not exceed source 8");
+        Assert.AreEqual(0, w % 2, "must be even for encoder");
+        Assert.AreEqual(0, h % 2, "must be even for encoder");
+    }
+
+    [TestMethod]
+    public void ComputeExportDimensions_FourThree_At1080p()
+    {
+        // 4:3 compositor output, e.g. 1440×1080
+        var (w, h) = AspectRatioHelper.ComputeExportDimensions(1440, 1080, VideoResolution.HD1080);
+        // Bounds min(1920,1440)=1440W, min(1080,1080)=1080H. Fit 4:3 in 1440×1080:
+        // width-bound at 1440 → height = 1440*(3/4)=1080. Mod-16: 1440 stays, 1080→1072.
+        Assert.AreEqual(1440, w);
+        Assert.AreEqual(1072, h);
+    }
+
+    [DataTestMethod]
+    [DataRow(1920, 1080, VideoResolution.HD720)]
+    [DataRow(1920, 1080, VideoResolution.HD1080)]
+    [DataRow(2560, 1440, VideoResolution.QHD)]
+    [DataRow(3840, 2160, VideoResolution.UHD4K)]
+    [DataRow(1080, 1920, VideoResolution.HD1080)]
+    [DataRow(1500, 1500, VideoResolution.HD1080)]
+    [DataRow(2520, 1080, VideoResolution.HD1080)]
+    [DataRow(1280, 720, VideoResolution.UHD4K)]
+    public void ComputeExportDimensions_AlwaysHonorsInvariants(int compW, int compH, VideoResolution res)
+    {
+        var (w, h) = AspectRatioHelper.ComputeExportDimensions(compW, compH, res);
+        var (maxW, maxH) = AspectRatioHelper.GetResolutionBounds(res);
+
+        // Never exceeds resolution bound
+        Assert.IsTrue(w <= maxW, $"w {w} exceeded maxW {maxW}");
+        Assert.IsTrue(h <= maxH, $"h {h} exceeded maxH {maxH}");
+
+        // Never exceeds compositor native size (no upscale)
+        Assert.IsTrue(w <= compW, $"w {w} exceeded compositor {compW}");
+        Assert.IsTrue(h <= compH, $"h {h} exceeded compositor {compH}");
+
+        // Even dimensions required by encoder
+        Assert.AreEqual(0, w % 2, $"w {w} not even");
+        Assert.AreEqual(0, h % 2, $"h {h} not even");
+
+        // Aspect drift bounded (mod-16 floor is the only source of drift)
+        double srcAr = (double)compW / compH;
+        double outAr = (double)w / h;
+        double drift = Math.Abs(srcAr - outAr) / srcAr;
+        Assert.IsTrue(drift < 0.03, $"aspect drift {drift:P} exceeds 3%");
+    }
+
+    [TestMethod]
+    public void ComputeExportDimensions_UnknownEnum_FallsBackTo1080Bounds()
+    {
+        // Cast an out-of-range int to the enum; GetResolutionBounds default arm
+        // returns (1920, 1080) and the helper must still produce sane output.
+        var (w, h) = AspectRatioHelper.ComputeExportDimensions(
+            1920, 1080, (VideoResolution)999);
+        Assert.IsTrue(w > 0 && w <= 1920);
+        Assert.IsTrue(h > 0 && h <= 1080);
+    }
 }

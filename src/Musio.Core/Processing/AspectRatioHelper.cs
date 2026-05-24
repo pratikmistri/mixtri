@@ -123,6 +123,8 @@ public static class AspectRatioHelper
     public static (int Width, int Height) ComputeExportDimensions(
         int compositorWidth, int compositorHeight, VideoResolution resolution)
     {
+        // Degenerate inputs: return the smallest encoder-friendly size rather
+        // than throwing — the encoder will produce a tiny but valid file.
         if (compositorWidth <= 0 || compositorHeight <= 0)
             return (16, 16);
 
@@ -137,9 +139,14 @@ public static class AspectRatioHelper
 
         // Floor to mod-16 for H.264 macroblock alignment (avoids horizontal
         // banding seen with hardware encoders; preserved here for safety even
-        // when the software encoder is in use).
-        int outW = Math.Max(16, (fitW / 16) * 16);
-        int outH = Math.Max(16, (fitH / 16) * 16);
+        // when the software encoder is in use). Aspect ratio is approximately
+        // preserved — for 1080-tall outputs the drift is ~0.75% (1080 -> 1072),
+        // which is imperceptible.
+        // Edge case: if the compositor itself is smaller than 16px on a side,
+        // honor "no upscale" by returning the (even-rounded) compositor size
+        // directly rather than padding up to 16.
+        int outW = fitW < 16 ? Math.Max(2, fitW - (fitW % 2)) : (fitW / 16) * 16;
+        int outH = fitH < 16 ? Math.Max(2, fitH - (fitH % 2)) : (fitH / 16) * 16;
         return (outW, outH);
     }
 

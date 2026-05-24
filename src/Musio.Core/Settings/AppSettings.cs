@@ -78,7 +78,7 @@ public sealed class AppSettings
 
     public VideoResolution DefaultExportResolution
     {
-        get => GetEnum(nameof(DefaultExportResolution), VideoResolution.HD1080);
+        get => GetEnum(nameof(DefaultExportResolution), VideoResolution.UHD4K);
         set => Set(nameof(DefaultExportResolution), value.ToString());
     }
 
