@@ -1414,3 +1414,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work / decisions deferred:**
 - ComputeBitrate's Math.Max(1.0, pixels/baseline) still gives 720p exports the same bitrate as 1080p. Left as-is to keep scope tight.
 - Did not add an option to allow upscaling; if users want it later add an opt-in toggle rather than removing the clamp.
+
+## Export resolution/quality settings - rubber-duck refinements
+
+**Feature/area**: AppSettings export defaults + AspectRatioHelper.ComputeExportDimensions
+
+**Approaches tried**:
+- Default DefaultExportResolution to HD1080 (matches ExportPreset default).
+- Use `Math.Max(16, (fitW/16)*16)` to enforce mod-16 floor.
+
+**What worked**:
+- Defaulting to UHD4K preserves prior behavior (encoder previously ignored the
+  field, so output was effectively native source resolution). HD1080 would have
+  silently downscaled existing >1080p users on upgrade.
+- For compositor dims < 16px on a side, branch to even-rounded source size
+  (`Math.Max(2, w - w%2)`) instead of padding to 16. Preserves the
+  no-upscale invariant.
+- DataTestMethod invariant tests (bounds, no-upscale, even, <3% aspect drift)
+  across 8 (compositor, resolution) pairs caught the small-input regression
+  before merge.
+
+**What didn't work**:
+- Padding sub-16 compositor dims up to 16 via `Math.Max(16,...)` violated
+  the no-upscale invariant for tiny degenerate inputs.
