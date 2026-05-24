@@ -1651,3 +1651,17 @@ the success message. Resetting on close is cleaner and matches user intent.
 - Initial pass used literal brand names (Apple Vision, Google Gemini, etc.); avoid mentioning brand names in user-facing preset labels even when colors are inspired by them.
 
 ---
+
+## Rubber-duck feedback on custom backgrounds branch
+
+**Adopted (fixes pushed):**
+- `LoadSystemWallpapersAsync` now takes an `initialCustomPath`, preserves any custom (non-system-wallpaper-dir) entries already in `_wallpaperPaths`, and re-applies the wallpaper grid selection after the async load completes (the synchronous `SyncStyleControlsToConfig` runs before items exist, so the prior code never highlighted the active wallpaper on reopen).
+- `BuildBackgroundStyleFromControls` falls back to `ProjectService.CurrentComposition?.Background.BackgroundImagePath` when image mode is active but grid selection is empty — prevents losing the project's image when other controls (slider/toggle) fire `ScheduleStyleUpdate` before wallpapers finish loading.
+- `FindMatchingPresetIndex` now also compares `GradientEndColor`, `GradientAngle` (0.5° tolerance), `ShadowEnabled`, `BorderEnabled`, and `BackgroundImagePath`; previously edits to those fields left a built-in preset selected which mislabeled the configuration as a brand preset.
+
+**Deferred (documented as known limitations):**
+- Packaged-app file access for `CanvasBitmap.LoadAsync` on arbitrary picker results: future fix should either copy into `ApplicationData.LocalFolder/CustomWallpapers` or persist a `FutureAccessList` token. Current behavior works in unpackaged dev runs and for files in user-readable locations.
+- Reentrancy guard on the "+" tile: `FileOpenPicker` is modal, so concurrent picks are unlikely. Could revisit if we ever see UI thread re-entry issues.
+- Swatch endpoint math vs compositor parity: the swatch clips at the unit-square edge while `BackgroundCompositor` uses half-diagonal endpoints. The preview direction is correct; saturation differs slightly at non-orthogonal angles. Acceptable for a small swatch.
+
+---

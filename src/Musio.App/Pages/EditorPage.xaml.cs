@@ -1918,19 +1918,21 @@ public sealed partial class EditorPage : Page
         foreach (var preset in DefaultBrandPresets.All)
             PresetCombo.Items.Add(BuildPresetItem(preset, isCustom: false));
 
-        // Load system wallpapers (async to avoid blocking UI thread)
-        _ = LoadSystemWallpapersAsync();
+        // Load system wallpapers (async). Pass the project's currently-selected
+        // background image so a custom path from a reopened project is merged
+        // into the grid and selection survives the async load.
+        _ = LoadSystemWallpapersAsync(config.Background.BackgroundImagePath);
 
         // Sync controls to current config, suppressing change events
         SyncStyleControlsToConfig(config.Background);
     }
 
-    private async Task LoadSystemWallpapersAsync()
+    private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
     {
         var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
 
         // Enumerate and sort files on a background thread to avoid freezing the UI
-        var paths = await Task.Run(() =>
+        var systemPaths = await Task.Run(() =>
         {
             if (!Directory.Exists(wallpaperDir))
                 return new List<string>();
@@ -1944,13 +1946,41 @@ public sealed partial class EditorPage : Page
                 .ToList();
         });
 
-        _wallpaperPaths = paths;
+        // Preserve any custom (non-system) paths the user already picked while
+        // the system load was in flight — otherwise we'd silently drop them.
+        var existingCustom = (_wallpaperPaths ?? new List<string>())
+            .Where(p => !p.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (!string.IsNullOrEmpty(initialCustomPath)
+            && !initialCustomPath.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase)
+            && !existingCustom.Any(p => string.Equals(p, initialCustomPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            existingCustom.Insert(0, initialCustomPath);
+        }
+
+        _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
 
         WallpaperGrid.Items.Clear();
         WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
         {
             WallpaperGrid.Items.Add(BuildWallpaperTile(path));
+        }
+
+        // After the async load completes the synchronous SyncStyleControlsToConfig
+        // call ran before the grid was populated; re-apply selection now that
+        // the items exist so the user sees the active wallpaper highlighted.
+        if (!string.IsNullOrEmpty(initialCustomPath))
+        {
+            int idx = _wallpaperPaths.FindIndex(p =>
+                string.Equals(p, initialCustomPath, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0)
+            {
+                _suppressStyleEvents = true;
+                try { WallpaperGrid.SelectedIndex = idx + 1; }
+                finally { _suppressStyleEvents = false; }
+            }
         }
     }
 
@@ -2157,14 +2187,21 @@ public sealed partial class EditorPage : Page
             var p = presets[i];
             if (p.BackgroundType == bg.Type &&
                 string.Equals(p.BackgroundColor, bg.Color, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(NormalizeHex(p.GradientEndColor), NormalizeHex(bg.GradientEndColor), StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(p.GradientAngle - bg.GradientAngle) < 0.5 &&
                 p.Padding == bg.Padding &&
-                p.CornerRadius == bg.CornerRadius)
+                p.CornerRadius == bg.CornerRadius &&
+                p.ShadowEnabled == bg.ShadowEnabled &&
+                p.BorderEnabled == bg.BorderEnabled &&
+                string.Equals(p.BackgroundImagePath ?? string.Empty, bg.BackgroundImagePath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
                 return i + 1; // +1 for the "(Custom)" entry at index 0
             }
         }
         return 0; // Custom
     }
+
+    private static string NormalizeHex(string? hex) => string.IsNullOrEmpty(hex) ? string.Empty : hex.Trim();
 
     private void PresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -2340,12 +2377,21 @@ public sealed partial class EditorPage : Page
         };
 
         string? imagePath = null;
-        if (bgType == BackgroundType.Image && _wallpaperPaths is not null)
+        if (bgType == BackgroundType.Image)
         {
             // -1 because index 0 in the grid is the "+" add-tile.
             int idx = WallpaperGrid.SelectedIndex - 1;
-            if (idx >= 0 && idx < _wallpaperPaths.Count)
+            if (_wallpaperPaths is not null && idx >= 0 && idx < _wallpaperPaths.Count)
+            {
                 imagePath = _wallpaperPaths[idx];
+            }
+            else
+            {
+                // Wallpaper list hasn't finished loading yet (or selection was
+                // cleared) — preserve the project's currently-applied image so a
+                // background sync from another control doesn't blank it out.
+                imagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+            }
         }
 
         return new BackgroundStyle
