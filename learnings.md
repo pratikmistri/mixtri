@@ -1437,3 +1437,17 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work**:
 - Padding sub-16 compositor dims up to 16 via `Math.Max(16,...)` violated
   the no-upscale invariant for tiny degenerate inputs.
+
+---
+
+## Brand Presets - Cinematic Refresh
+
+**Feature/area:** DefaultBrandPresets (src/Musio.Core/Settings/DefaultBrandPresets.cs)
+
+**Approaches tried:**
+
+1. Renamed and re-toned all 8 presets to soothing, low-saturation cinematic palettes. Display Names: Midnight, Mist, Dusk, Porcelain, Twilight, Pine, Aurora, Linen. C# property names (DarkMinimal, OceanGradient, ...) kept unchanged so existing tests and references continue to work. Increased shadow blur and softened gradient angles (155-165 deg) for cinematic depth. Replaced saturated hot pinks/greens/magentas with muted plums, sages, dusty terracottas, steel blues.
+
+**What worked:** Updating only color/angle/shadow values and Name display strings while preserving static property identifiers. Tests assert count=8 and unique names but not exact display strings, so renaming was safe.
+
+**What didn't work:** N/A on this pass.

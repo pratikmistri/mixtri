@@ -9,53 +9,53 @@ public static class DefaultBrandPresets
 {
     public static BrandPreset DarkMinimal { get; } = new()
     {
-        Name = "Dark Minimal",
+        Name = "Midnight",
         BackgroundType = BackgroundType.SolidColor,
-        BackgroundColor = "#1E1E2E",
+        BackgroundColor = "#1A1B26",
         Padding = 48,
         CornerRadius = 12,
         ShadowEnabled = true,
-        ShadowBlur = 20,
-        ShadowOpacity = 0.4,
+        ShadowBlur = 28,
+        ShadowOpacity = 0.45,
         ShadowColor = "#000000",
         BorderEnabled = false
     };
 
     public static BrandPreset OceanGradient { get; } = new()
     {
-        Name = "Ocean Gradient",
+        Name = "Mist",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#0F2027",
-        GradientEndColor = "#2C5364",
-        GradientAngle = 135.0,
+        BackgroundColor = "#1B2A41",
+        GradientEndColor = "#3E5C76",
+        GradientAngle = 160.0,
         Padding = 80,
         CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 40,
+        ShadowBlur = 48,
         ShadowOpacity = 0.5,
-        ShadowColor = "#000000",
+        ShadowColor = "#0A1322",
         BorderEnabled = false
     };
 
     public static BrandPreset SunsetGlow { get; } = new()
     {
-        Name = "Sunset Glow",
+        Name = "Dusk",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#F857A6",
-        GradientEndColor = "#FF5858",
-        GradientAngle = 120.0,
+        BackgroundColor = "#3D2A4D",
+        GradientEndColor = "#C98A6B",
+        GradientAngle = 155.0,
         Padding = 72,
         CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 36,
+        ShadowBlur = 44,
         ShadowOpacity = 0.45,
-        ShadowColor = "#3D0A1E",
+        ShadowColor = "#1F1024",
         BorderEnabled = false
     };
 
     public static BrandPreset CleanWhite { get; } = new()
     {
-        Name = "Clean White",
+        Name = "Porcelain",
         BackgroundType = BackgroundType.SolidColor,
         BackgroundColor = "#F5F5F7",
         Padding = 64,
@@ -71,65 +71,65 @@ public static class DefaultBrandPresets
 
     public static BrandPreset DeepPurple { get; } = new()
     {
-        Name = "Deep Purple",
+        Name = "Twilight",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#4A0E4E",
-        GradientEndColor = "#812F90",
-        GradientAngle = 150.0,
+        BackgroundColor = "#241B36",
+        GradientEndColor = "#5B4B7C",
+        GradientAngle = 165.0,
         Padding = 72,
         CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 40,
+        ShadowBlur = 48,
         ShadowOpacity = 0.5,
-        ShadowColor = "#1A0520",
+        ShadowColor = "#0E0820",
         BorderEnabled = false
     };
 
     public static BrandPreset ForestGreen { get; } = new()
     {
-        Name = "Forest Green",
+        Name = "Pine",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#0B3D0B",
-        GradientEndColor = "#1B8A1B",
-        GradientAngle = 140.0,
+        BackgroundColor = "#1F2E25",
+        GradientEndColor = "#4A6B5C",
+        GradientAngle = 155.0,
         Padding = 72,
         CornerRadius = 14,
         ShadowEnabled = true,
-        ShadowBlur = 36,
+        ShadowBlur = 44,
         ShadowOpacity = 0.45,
-        ShadowColor = "#041A04",
+        ShadowColor = "#0A1410",
         BorderEnabled = false
     };
 
     public static BrandPreset NeonDark { get; } = new()
     {
-        Name = "Neon Dark",
+        Name = "Aurora",
         BackgroundType = BackgroundType.SolidColor,
-        BackgroundColor = "#0D0D0D",
+        BackgroundColor = "#0F1419",
         Padding = 56,
         CornerRadius = 10,
         ShadowEnabled = true,
-        ShadowBlur = 24,
+        ShadowBlur = 28,
         ShadowOpacity = 0.6,
         ShadowColor = "#000000",
         BorderEnabled = true,
-        BorderWidth = 2,
-        BorderColor = "#00FFAB"
+        BorderWidth = 1,
+        BorderColor = "#3DDC97"
     };
 
     public static BrandPreset SoftPastel { get; } = new()
     {
-        Name = "Soft Pastel",
+        Name = "Linen",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#FADADD",
-        GradientEndColor = "#D4F1F9",
-        GradientAngle = 135.0,
+        BackgroundColor = "#EFE3D9",
+        GradientEndColor = "#C9D6DF",
+        GradientAngle = 160.0,
         Padding = 80,
         CornerRadius = 20,
         ShadowEnabled = true,
-        ShadowBlur = 32,
-        ShadowOpacity = 0.2,
-        ShadowColor = "#4A4A4A",
+        ShadowBlur = 36,
+        ShadowOpacity = 0.22,
+        ShadowColor = "#5A5560",
         BorderEnabled = false
     };
 
