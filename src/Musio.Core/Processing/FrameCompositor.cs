@@ -590,32 +590,34 @@ public class FrameCompositor : IDisposable
         int maxContentW = Math.Max(1, _contentWidth - 2 * padding);
         int maxContentH = Math.Max(1, _contentHeight - 2 * padding);
 
-        // Step 3: size the actual source frame within the max content box per FitMode.
-        // Any leftover gap on opposing sides simply becomes more background — there is
-        // no separate letterbox/pillarbox container.
-        if (targetRatio <= 0f || _config.FitMode == FitMode.Cover)
+        // Step 3: size the actual source frame within the max content box per FitMode,
+        // preserving the AR of the content being drawn. Subtracting padding equally from
+        // width and height of an already-AR-matched canvas would otherwise stretch the
+        // source non-uniformly (e.g. 1920x1080 minus 48px padding = 1824x984, ratio 1.85
+        // instead of 1.78). Any leftover gap on opposing sides simply becomes more
+        // background — there is no separate letterbox/pillarbox container.
+        float effectiveAr;
+        if (_config.FitMode == FitMode.Cover && targetRatio > 0f)
         {
-            // Auto / Cover: source fills the max content box. (For Cover the viewport
-            // upstream was already cropped to the target AR so the source matches the
-            // box AR — any slight drift from padding is absorbed by viewport scaling.)
-            _sourceAreaWidth = maxContentW;
-            _sourceAreaHeight = maxContentH;
+            // Cover: the upstream viewport was cropped to the target AR, so preserve targetAr.
+            effectiveAr = targetRatio;
         }
         else
         {
-            // Contain: source preserves its native AR fitting inside the max content box.
-            float srcAr = (float)_sourceWidth / _sourceHeight;
-            float boxAr = (float)maxContentW / maxContentH;
-            if (srcAr > boxAr)
-            {
-                _sourceAreaWidth = maxContentW;
-                _sourceAreaHeight = (int)Math.Round(maxContentW / (double)srcAr);
-            }
-            else
-            {
-                _sourceAreaHeight = maxContentH;
-                _sourceAreaWidth = (int)Math.Round(maxContentH * (double)srcAr);
-            }
+            // Auto or Contain: the source frame keeps its native AR.
+            effectiveAr = (float)_sourceWidth / _sourceHeight;
+        }
+
+        float boxAr = (float)maxContentW / maxContentH;
+        if (effectiveAr > boxAr)
+        {
+            _sourceAreaWidth = maxContentW;
+            _sourceAreaHeight = (int)Math.Round(maxContentW / (double)effectiveAr);
+        }
+        else
+        {
+            _sourceAreaHeight = maxContentH;
+            _sourceAreaWidth = (int)Math.Round(maxContentH * (double)effectiveAr);
         }
 
         // Step 4: center the source frame within the canvas. The offset is the total

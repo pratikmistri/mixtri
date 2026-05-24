@@ -317,13 +317,21 @@ public sealed partial class EditorPage : Page
 
         Timeline.Refresh();
 
-        // Build composition config with cursor effects enabled
+        // Build composition config with cursor effects enabled. Aspect-ratio fields
+        // (AR/FitMode/CropAnchor/ZoomScope) live on Project and must be mirrored into
+        // CompositionConfig so the preview renderer matches both the editor UI and
+        // the export pipeline (which sources these from Project).
         var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
         config = config with
         {
             OutputFps = previewFps,
             SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
             SmoothingStrength = SmoothingStrength.UltraSmooth,
+            AspectRatio = project.AspectRatio,
+            FitMode = project.FitMode,
+            CropAnchorX = project.CropAnchorX,
+            CropAnchorY = project.CropAnchorY,
+            ZoomScope = project.ZoomScope,
             Cursor = new CursorStyle
             {
                 Scale = 3.0f,
@@ -1218,15 +1226,11 @@ public sealed partial class EditorPage : Page
         DimRight.Height = rectH;
     }
 
-    private static double GetAspectRatioValue(AspectRatio ratio) => ratio switch
+    private static double GetAspectRatioValue(AspectRatio ratio)
     {
-        AspectRatio.Landscape16x9 => 16.0 / 9.0,
-        AspectRatio.Portrait9x16 => 9.0 / 16.0,
-        AspectRatio.Square1x1 => 1.0,
-        AspectRatio.Classic4x3 => 4.0 / 3.0,
-        AspectRatio.Tall3x4 => 3.0 / 4.0,
-        _ => -1.0,
-    };
+        var (w, h) = AspectRatioHelper.GetRatio(ratio);
+        return (w == 0 || h == 0) ? -1.0 : (double)w / h;
+    }
 
     private (double halfW, double halfH) GetNormalizedHalfExtents(double zoom)
     {
