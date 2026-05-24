@@ -113,7 +113,37 @@ public static class AspectRatioHelper
         _ => ratio.ToString(),
     };
 
-    private static (int MaxWidth, int MaxHeight) GetResolutionBounds(VideoResolution resolution) =>
+    /// <summary>
+    /// Computes the final encoder dimensions for an export, given the compositor's
+    /// already-aspect-corrected output size and the user-selected resolution cap.
+    /// The compositor's aspect ratio is preserved; dimensions are clamped within the
+    /// resolution bounds, never upscaled beyond the compositor's native size, and
+    /// floored to mod-16 for H.264 macroblock alignment.
+    /// </summary>
+    public static (int Width, int Height) ComputeExportDimensions(
+        int compositorWidth, int compositorHeight, VideoResolution resolution)
+    {
+        if (compositorWidth <= 0 || compositorHeight <= 0)
+            return (16, 16);
+
+        var (maxW, maxH) = GetResolutionBounds(resolution);
+
+        // Never upscale: cap bounds at compositor's native size so a 720p
+        // recording exported "at 4K" stays at 720p instead of wasting bits.
+        int boundW = Math.Min(maxW, compositorWidth);
+        int boundH = Math.Min(maxH, compositorHeight);
+
+        var (fitW, fitH) = FitWithinBounds(compositorWidth, compositorHeight, boundW, boundH);
+
+        // Floor to mod-16 for H.264 macroblock alignment (avoids horizontal
+        // banding seen with hardware encoders; preserved here for safety even
+        // when the software encoder is in use).
+        int outW = Math.Max(16, (fitW / 16) * 16);
+        int outH = Math.Max(16, (fitH / 16) * 16);
+        return (outW, outH);
+    }
+
+    public static (int MaxWidth, int MaxHeight) GetResolutionBounds(VideoResolution resolution) =>
         resolution switch
         {
             VideoResolution.HD720 => (1280, 720),

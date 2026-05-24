@@ -76,6 +76,26 @@ public sealed class AppSettings
         set => Set(nameof(WebcamDeviceId), value);
     }
 
+    public VideoResolution DefaultExportResolution
+    {
+        get => GetEnum(nameof(DefaultExportResolution), VideoResolution.HD1080);
+        set => Set(nameof(DefaultExportResolution), value.ToString());
+    }
+
+    public VideoQuality DefaultExportQuality
+    {
+        get => GetEnum(nameof(DefaultExportQuality), VideoQuality.High);
+        set => Set(nameof(DefaultExportQuality), value.ToString());
+    }
+
+    private T GetEnum<T>(string key, T defaultValue) where T : struct, Enum
+    {
+        var raw = Get(key, defaultValue.ToString());
+        return Enum.TryParse<T>(raw, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)
+            ? parsed
+            : defaultValue;
+    }
+
     public T Get<T>(string key, T defaultValue)
     {
         if (_settings is not null)

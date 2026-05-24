@@ -22,6 +22,11 @@ public partial class ExportViewModel : ObservableObject
         _presetManager = new PresetManager();
         _exportEngine = new ExportEngine();
 
+        // Seed defaults from AppSettings so the user's preferred export
+        // resolution/quality are applied to new export sessions.
+        _selectedResolution = AppSettings.Instance.DefaultExportResolution;
+        _selectedQuality = AppSettings.Instance.DefaultExportQuality;
+
         // Pull current state from the shared ProjectService
         CurrentProject = ProjectService.Instance.CurrentProject;
         CompositionConfig = ProjectService.Instance.CurrentComposition;

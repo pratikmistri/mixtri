@@ -130,15 +130,14 @@ public class VideoEncoder : IDisposable
         int compositorWidth = compositor.OutputWidth;
         int compositorHeight = compositor.OutputHeight;
 
-        // Encode at compositor output dimensions to preserve aspect ratio.
-        // The compositor already handles background padding and aspect-ratio
-        // cropping, so its output size is the correct final frame size.
-        // H.264 uses 16×16 macroblocks — round down to mod-16 to avoid
-        // hardware encoder alignment issues that cause horizontal banding.
-        targetWidth = (compositorWidth / 16) * 16;
-        targetHeight = (compositorHeight / 16) * 16;
-        if (targetWidth < 16) targetWidth = 16;
-        if (targetHeight < 16) targetHeight = 16;
+        // Encode at the user-selected resolution while preserving the
+        // compositor's aspect ratio (the compositor has already applied
+        // AspectRatio + padding). Never upscale beyond the compositor's
+        // native size. Floored to mod-16 for H.264 macroblock alignment.
+        var (encW, encH) = AspectRatioHelper.ComputeExportDimensions(
+            compositorWidth, compositorHeight, _settings.Resolution);
+        targetWidth = encW;
+        targetHeight = encH;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
 
         // Load source frames from .frames/ JPEGs using the RECORDING FPS so

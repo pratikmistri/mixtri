@@ -1393,3 +1393,24 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What worked:** Combination � unconditional style-menu visibility + applying Monitor defaults in `ProjectService.SetProject` (instead of every `InitializePreviewAsync`).
 
 **What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` � would clobber user edits every time the EditorPage was re-constructed.
+
+---
+
+## Export Resolution & Quality - Exposed in Settings
+
+**Feature/area:** AppSettings, SettingsPage, ExportViewModel, VideoEncoder, AspectRatioHelper
+
+**Approaches tried:**
+
+1. **Added DefaultExportResolution / DefaultExportQuality to AppSettings** stored as enum names (strings), mirroring the existing Theme/DefaultCaptureMode pattern. New GetEnum<T> helper does Enum.TryParse with Enum.IsDefined fallback.
+2. **VideoEncoder now consumes _settings.Resolution** via new AspectRatioHelper.ComputeExportDimensions(compW, compH, resolution). The helper fits the compositor's already-aspect-corrected output within the resolution bounds, caps at compositor native (no upscale), then mod-16 floors.
+3. **SettingsPage XAML/code-behind** got an Export Defaults section with Resolution + Quality ComboBoxes. Uses _suppressExportDefaultEvents during initial SelectComboBoxByTag to avoid persisting accidental defaults during page load.
+
+**What worked:**
+- Aspect ratio is preserved because the compositor has already locked in the chosen AspectRatio + padding before encoding. The resolution selector only caps the bounding box.
+- No-upscale clamp: min(resolutionBound, compositorNative) keeps 720p recordings from being uselessly upscaled to 4K.
+- mod-16 floor produces a tiny aspect drift (e.g. 1080->1072, ~0.7%) which is imperceptible and preserves the existing learnings about H.264 macroblock alignment.
+
+**What didn't work / decisions deferred:**
+- ComputeBitrate's Math.Max(1.0, pixels/baseline) still gives 720p exports the same bitrate as 1080p. Left as-is to keep scope tight.
+- Did not add an option to allow upscaling; if users want it later add an opt-in toggle rather than removing the clamp.
