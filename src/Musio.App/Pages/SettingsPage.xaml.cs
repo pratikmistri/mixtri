@@ -9,6 +9,7 @@ public sealed partial class SettingsPage : Page
 {
     private List<WebcamDeviceInfo> _webcamDevices = [];
     private bool _suppressWebcamEvents;
+    private bool _suppressExportDefaultEvents;
 
     public SettingsPage()
     {
@@ -20,6 +21,19 @@ public sealed partial class SettingsPage : Page
     {
         SystemAudioToggle.IsOn = AppSettings.Instance.IsSystemAudioEnabled;
         MicToggle.IsOn = AppSettings.Instance.IsMicEnabled;
+
+        _suppressExportDefaultEvents = true;
+        try
+        {
+            SelectComboBoxByTag(ExportResolutionCombo,
+                AppSettings.Instance.DefaultExportResolution.ToString());
+            SelectComboBoxByTag(ExportQualityCombo,
+                AppSettings.Instance.DefaultExportQuality.ToString());
+        }
+        finally
+        {
+            _suppressExportDefaultEvents = false;
+        }
 
         _suppressWebcamEvents = true;
         WebcamToggle.IsOn = AppSettings.Instance.IsWebcamEnabled;
@@ -43,6 +57,40 @@ public sealed partial class SettingsPage : Page
         finally
         {
             _suppressWebcamEvents = false;
+        }
+    }
+
+    private static void SelectComboBoxByTag(ComboBox combo, string tag)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is ComboBoxItem item
+                && string.Equals(item.Tag?.ToString(), tag, StringComparison.OrdinalIgnoreCase))
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+        if (combo.Items.Count > 0) combo.SelectedIndex = 0;
+    }
+
+    private void ExportResolutionCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressExportDefaultEvents) return;
+        if (ExportResolutionCombo.SelectedItem is ComboBoxItem item
+            && Enum.TryParse<VideoResolution>(item.Tag?.ToString(), out var resolution))
+        {
+            AppSettings.Instance.DefaultExportResolution = resolution;
+        }
+    }
+
+    private void ExportQualityCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressExportDefaultEvents) return;
+        if (ExportQualityCombo.SelectedItem is ComboBoxItem item
+            && Enum.TryParse<VideoQuality>(item.Tag?.ToString(), out var quality))
+        {
+            AppSettings.Instance.DefaultExportQuality = quality;
         }
     }
 

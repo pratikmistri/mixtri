@@ -1394,6 +1394,50 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` ï¿½ would clobber user edits every time the EditorPage was re-constructed.
 
+---
+
+## Export Resolution & Quality - Exposed in Settings
+
+**Feature/area:** AppSettings, SettingsPage, ExportViewModel, VideoEncoder, AspectRatioHelper
+
+**Approaches tried:**
+
+1. **Added DefaultExportResolution / DefaultExportQuality to AppSettings** stored as enum names (strings), mirroring the existing Theme/DefaultCaptureMode pattern. New GetEnum<T> helper does Enum.TryParse with Enum.IsDefined fallback.
+2. **VideoEncoder now consumes _settings.Resolution** via new AspectRatioHelper.ComputeExportDimensions(compW, compH, resolution). The helper fits the compositor's already-aspect-corrected output within the resolution bounds, caps at compositor native (no upscale), then mod-16 floors.
+3. **SettingsPage XAML/code-behind** got an Export Defaults section with Resolution + Quality ComboBoxes. Uses _suppressExportDefaultEvents during initial SelectComboBoxByTag to avoid persisting accidental defaults during page load.
+
+**What worked:**
+- Aspect ratio is preserved because the compositor has already locked in the chosen AspectRatio + padding before encoding. The resolution selector only caps the bounding box.
+- No-upscale clamp: min(resolutionBound, compositorNative) keeps 720p recordings from being uselessly upscaled to 4K.
+- mod-16 floor produces a tiny aspect drift (e.g. 1080->1072, ~0.7%) which is imperceptible and preserves the existing learnings about H.264 macroblock alignment.
+
+**What didn't work / decisions deferred:**
+- ComputeBitrate's Math.Max(1.0, pixels/baseline) still gives 720p exports the same bitrate as 1080p. Left as-is to keep scope tight.
+- Did not add an option to allow upscaling; if users want it later add an opt-in toggle rather than removing the clamp.
+
+## Export resolution/quality settings - rubber-duck refinements
+
+**Feature/area**: AppSettings export defaults + AspectRatioHelper.ComputeExportDimensions
+
+**Approaches tried**:
+- Default DefaultExportResolution to HD1080 (matches ExportPreset default).
+- Use `Math.Max(16, (fitW/16)*16)` to enforce mod-16 floor.
+
+**What worked**:
+- Defaulting to UHD4K preserves prior behavior (encoder previously ignored the
+  field, so output was effectively native source resolution). HD1080 would have
+  silently downscaled existing >1080p users on upgrade.
+- For compositor dims < 16px on a side, branch to even-rounded source size
+  (`Math.Max(2, w - w%2)`) instead of padding to 16. Preserves the
+  no-upscale invariant.
+- DataTestMethod invariant tests (bounds, no-upscale, even, <3% aspect drift)
+  across 8 (compositor, resolution) pairs caught the small-input regression
+  before merge.
+
+**What didn't work**:
+- Padding sub-16 compositor dims up to 16 via `Math.Max(16,...)` violated
+  the no-upscale invariant for tiny degenerate inputs.
+
 ## 2026-05 - Aspect Ratio Flyout (Cursor-style)
 - **Feature**: Project-level aspect-ratio + fit-mode picker with always-visible toolbar flyout (EditorPage).
 - **What worked**:
@@ -1413,11 +1457,11 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 ## Frame style: padding & aspect ratio isolation (round 3)
 
 ### Feature/area
-FrameCompositor + BackgroundCompositor — decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
+FrameCompositor + BackgroundCompositor ï¿½ decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
 
 ### What didn't work
 - Previous model had `BackgroundCompositor.CalculateOutputSize` return `(source + 2*padding, source + 2*padding)`. This made the output canvas grow with padding, so dragging the padding slider visibly changed the canvas aspect ratio.
-- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin — visible "wallpaper repeat" with two independent containers.
+- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin ï¿½ visible "wallpaper repeat" with two independent containers.
 
 ### What worked
 - `BackgroundCompositor.CalculateOutputSize` is now identity `(w, h)`: padding insets within the canvas, never extends it.
@@ -1426,7 +1470,7 @@ FrameCompositor + BackgroundCompositor — decoupling padding from output aspect r
   - `_innerContentWidth/_innerContentHeight` = canvas - 2*padding (the inner content rect, where source is drawn).
   - `_sourceAreaWidth/Height/OffsetX/Y` describe the source placement WITHIN the inner content area. Cover fills inner; Contain preserves source AR inside inner with letterbox/pillarbox.
 - `CropSourceFrame` sizes `_croppedBuffer` to inner dims and clears to transparent; letterbox bars are no longer filled in the buffer.
-- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w × h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill — padding margin + letterbox bars = single container.
+- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w ï¿½ h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill ï¿½ padding margin + letterbox bars = single container.
 - Cursor and click coord math (`(cursor - viewport)*scale + padding + sourceAreaOffset`) is unchanged: scale uses `_sourceAreaWidth/viewport.Width`, offsets are in inner-buffer space, and `+padding` shifts to outer canvas coords (content is drawn at `(padding, padding)` by BgCompositor).
 
 ### Test impact
@@ -1437,7 +1481,7 @@ FrameCompositor + BackgroundCompositor — decoupling padding from output aspect r
 ## Frame style: collapse letterbox + padding into one container (round 4)
 
 ### Feature/area
-FrameCompositor + BackgroundCompositor — eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
+FrameCompositor + BackgroundCompositor ï¿½ eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
 
 ### What worked
 - Removed `_innerContentWidth/_innerContentHeight` fields entirely.
@@ -1446,7 +1490,7 @@ FrameCompositor + BackgroundCompositor — eliminating the separate "inner content
 - `ComputeContentDimensions`: compute canvas (target AR, padding-independent), then a max content box (canvas - 2*userPadding), then fit source into it per FitMode, finally CENTER the source within the canvas (so leftover gap is simply more background).
 - `CropSourceFrame`: buffer is sized exactly to the source-area dims (no internal letterbox padding). Drawing 1:1.
 - `BackgroundCompositor.CompositeFrame` simplified signature: takes srcX/srcY/srcWidth/srcHeight directly (no padding/inner concept). Background fills the entire canvas; shadow / rounded-corner clip / border all use the source rect.
-- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term — `_sourceAreaOffset*` now already includes total background gap.
+- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term ï¿½ `_sourceAreaOffset*` now already includes total background gap.
 
 ### Outcome
 - Shadow and rounded corners wrap the actual visible captured frame, not the larger "inner content" container.
@@ -1555,7 +1599,7 @@ has no shadow/corner even though the preview shows them correctly.
 `ExportFlyout_Opened` short-circuits if `ExportVM.ExportSucceeded` is true.
 The flag is only reset by the explicit "Close" button (`CloseFlyout_Click`).
 Dismissing the flyout by clicking outside leaves the flag set, so the next
-"open" just re-shows the cached `ExportedFilePath` from the previous run —
+"open" just re-shows the cached `ExportedFilePath` from the previous run ï¿½
 no fresh `PrepareForExport` is called and no new export runs. The user
 believes they triggered a 2nd export and inspects the 1st (pre-style) file.
 

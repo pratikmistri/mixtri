@@ -93,6 +93,45 @@
                 </StackPanel>
             </Border>
 
+            <!-- Export Defaults -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Export Defaults" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        x:Name="ExportResolutionCombo"
+                        Header="Maximum export resolution"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="ExportResolutionCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Caps export size; aspect ratio is always preserved. Smaller recordings are not upscaled.">
+                        <ComboBoxItem Content="720p (HD)" Tag="HD720" />
+                        <ComboBoxItem Content="1080p (Full HD)" Tag="HD1080" />
+                        <ComboBoxItem Content="1440p (QHD / 2K)" Tag="QHD" />
+                        <ComboBoxItem Content="2160p (4K UHD)" Tag="UHD4K" />
+                    </ComboBox>
+                    <ComboBox
+                        x:Name="ExportQualityCombo"
+                        Header="Export quality"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="ExportQualityCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Controls H.264 bitrate. Higher quality = larger files.">
+                        <ComboBoxItem Content="Draft (5 Mbps base)" Tag="Draft" />
+                        <ComboBoxItem Content="Standard (10 Mbps base)" Tag="Standard" />
+                        <ComboBoxItem Content="High (20 Mbps base)" Tag="High" />
+                        <ComboBoxItem Content="Ultra (50 Mbps base)" Tag="Ultra" />
+                    </ComboBox>
+                </StackPanel>
+            </Border>
+
             <!-- Audio -->
             <TextBlock
                 Margin="0,16,0,8"
