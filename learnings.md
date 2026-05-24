@@ -1640,3 +1640,14 @@ the success message. Resetting on close is cleaner and matches user intent.
 - `CanvasBitmap.LoadAsync` reads via Win32 file IO from the absolute path; for packaged builds, file access beyond the picker token is not guaranteed across sessions. Picking again works.
 
 ---
+
+## Background presets — bold gradients
+
+**Approach that worked:**
+- Replaced the 8 muted `DefaultBrandPresets` entries with 8 bold two-stop gradients suitable as backdrops for screen recordings: `Nebula` (indigo?magenta), `Lagoon` (purple?teal), `Prism` (sky?coral), `Emerald` (vivid green?near-black), `Coral` (coral?magenta), `Ember` (midnight?amber), `Tide` (iris?cyan), `Sunset` (orange?violet). All gradients angled ~135-160° with consistent padding/radius/shadow defaults.
+- Updated `SettingsTests` named-preset assertions to match the new static property names. Count-based assertion (`ReturnsEightPresets`) retained.
+
+**What didn't work / pitfalls:**
+- Initial pass used literal brand names (Apple Vision, Google Gemini, etc.); avoid mentioning brand names in user-facing preset labels even when colors are inspired by them.
+
+---
