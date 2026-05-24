@@ -307,14 +307,14 @@ public sealed class SettingsTests
     public void DefaultBrandPresets_NamedPresets_AreInAllCollection()
     {
         var all = DefaultBrandPresets.All;
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.DarkMinimal);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.OceanGradient);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.SunsetGlow);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.CleanWhite);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.DeepPurple);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.ForestGreen);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.NeonDark);
-        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.SoftPastel);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Nebula);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Lagoon);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Prism);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Emerald);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Coral);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Ember);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Tide);
+        CollectionAssert.Contains((System.Collections.ICollection)all, DefaultBrandPresets.Sunset);
     }
 
     #endregion

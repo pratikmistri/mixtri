@@ -1911,25 +1911,28 @@ public sealed partial class EditorPage : Page
         StyleButton.Visibility = Visibility.Visible;
         StyleSeparator.Visibility = Visibility.Visible;
 
-        // Populate preset combo with built-in presets
+        // Populate preset combo with built-in presets — each item is a small
+        // swatch + label so users can identify gradients at a glance.
         PresetCombo.Items.Clear();
-        PresetCombo.Items.Add(new BrandPreset { Name = "(Custom)" });
+        PresetCombo.Items.Add(BuildPresetItem(new BrandPreset { Name = "(Custom)" }, isCustom: true));
         foreach (var preset in DefaultBrandPresets.All)
-            PresetCombo.Items.Add(preset);
+            PresetCombo.Items.Add(BuildPresetItem(preset, isCustom: false));
 
-        // Load system wallpapers (async to avoid blocking UI thread)
-        _ = LoadSystemWallpapersAsync();
+        // Load system wallpapers (async). Pass the project's currently-selected
+        // background image so a custom path from a reopened project is merged
+        // into the grid and selection survives the async load.
+        _ = LoadSystemWallpapersAsync(config.Background.BackgroundImagePath);
 
         // Sync controls to current config, suppressing change events
         SyncStyleControlsToConfig(config.Background);
     }
 
-    private async Task LoadSystemWallpapersAsync()
+    private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
     {
         var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
 
         // Enumerate and sort files on a background thread to avoid freezing the UI
-        var paths = await Task.Run(() =>
+        var systemPaths = await Task.Run(() =>
         {
             if (!Directory.Exists(wallpaperDir))
                 return new List<string>();
@@ -1943,28 +1946,92 @@ public sealed partial class EditorPage : Page
                 .ToList();
         });
 
-        _wallpaperPaths = paths;
+        // Preserve any custom (non-system) paths the user already picked while
+        // the system load was in flight — otherwise we'd silently drop them.
+        var existingCustom = (_wallpaperPaths ?? new List<string>())
+            .Where(p => !p.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (!string.IsNullOrEmpty(initialCustomPath)
+            && !initialCustomPath.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase)
+            && !existingCustom.Any(p => string.Equals(p, initialCustomPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            existingCustom.Insert(0, initialCustomPath);
+        }
+
+        _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
 
         WallpaperGrid.Items.Clear();
+        WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
         {
-            var img = new Microsoft.UI.Xaml.Controls.Image
-            {
-                Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
-                Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
-                {
-                    DecodePixelHeight = 96, // small thumbnails for perf
-                },
-            };
-            var border = new Border
-            {
-                Width = 72,
-                Height = 48,
-                CornerRadius = new CornerRadius(4),
-                Child = img,
-            };
-            WallpaperGrid.Items.Add(border);
+            WallpaperGrid.Items.Add(BuildWallpaperTile(path));
         }
+
+        // After the async load completes the synchronous SyncStyleControlsToConfig
+        // call ran before the grid was populated; re-apply selection now that
+        // the items exist so the user sees the active wallpaper highlighted.
+        // Prefer the project's current background image (it may have changed
+        // since the load started — e.g. the user picked a wallpaper while the
+        // system enumeration was still running) and fall back to the initial
+        // path passed in.
+        var currentImagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+        var targetPath = !string.IsNullOrEmpty(currentImagePath) ? currentImagePath : initialCustomPath;
+        if (!string.IsNullOrEmpty(targetPath))
+        {
+            int idx = _wallpaperPaths.FindIndex(p =>
+                string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0)
+            {
+                _suppressStyleEvents = true;
+                try { WallpaperGrid.SelectedIndex = idx + 1; }
+                finally { _suppressStyleEvents = false; }
+            }
+        }
+    }
+
+    // Sentinel tag used to identify the "+" tile in the wallpaper grid.
+    private const string AddWallpaperTileTag = "__add_wallpaper__";
+
+    private static Border BuildAddWallpaperTile()
+    {
+        var plus = new FontIcon
+        {
+            Glyph = "\uE710", // Add
+            FontSize = 20,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        return new Border
+        {
+            Width = 72,
+            Height = 48,
+            CornerRadius = new CornerRadius(4),
+            BorderThickness = new Thickness(1),
+            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlFillColorDefaultBrush"],
+            Child = plus,
+            Tag = AddWallpaperTileTag,
+        };
+    }
+
+    private static Border BuildWallpaperTile(string path)
+    {
+        var img = new Microsoft.UI.Xaml.Controls.Image
+        {
+            Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
+            {
+                DecodePixelHeight = 96, // small thumbnails for perf
+            },
+        };
+        return new Border
+        {
+            Width = 72,
+            Height = 48,
+            CornerRadius = new CornerRadius(4),
+            Child = img,
+        };
     }
 
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
@@ -2007,8 +2074,10 @@ public sealed partial class EditorPage : Page
 
             if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
             {
-                int wpIdx = _wallpaperPaths.IndexOf(bg.BackgroundImagePath);
-                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx : -1;
+                int wpIdx = _wallpaperPaths.FindIndex(p =>
+                    string.Equals(p, bg.BackgroundImagePath, StringComparison.OrdinalIgnoreCase));
+                // +1 because index 0 in the grid is the "+" add-tile.
+                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx + 1 : -1;
             }
 
             // Sliders
@@ -2028,6 +2097,95 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    private static ComboBoxItem BuildPresetItem(BrandPreset preset, bool isCustom)
+    {
+        var swatch = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            Width = 32,
+            Height = 18,
+            RadiusX = 4,
+            RadiusY = 4,
+            Stroke = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+            StrokeThickness = 1,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        if (isCustom)
+        {
+            swatch.Fill = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlFillColorDefaultBrush"];
+        }
+        else
+        {
+            swatch.Fill = BuildPresetSwatchBrush(preset);
+        }
+
+        var label = new TextBlock
+        {
+            Text = preset.Name,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+        };
+        panel.Children.Add(swatch);
+        panel.Children.Add(label);
+
+        return new ComboBoxItem
+        {
+            Content = panel,
+            Tag = preset,
+        };
+    }
+
+    private static Microsoft.UI.Xaml.Media.Brush BuildPresetSwatchBrush(BrandPreset preset)
+    {
+        var start = ParseHexColor(preset.BackgroundColor);
+
+        if (preset.BackgroundType != BackgroundType.Gradient
+            || string.IsNullOrEmpty(preset.GradientEndColor))
+        {
+            return new Microsoft.UI.Xaml.Media.SolidColorBrush(start);
+        }
+
+        var end = ParseHexColor(preset.GradientEndColor);
+
+        // Convert angle (degrees, 0° = →, 90° = ↓) to start/end points on the
+        // unit square so the swatch preview matches the rendered background.
+        var (sp, ep) = AngleToGradientEndpoints(preset.GradientAngle);
+
+        var brush = new Microsoft.UI.Xaml.Media.LinearGradientBrush
+        {
+            StartPoint = sp,
+            EndPoint = ep,
+        };
+        brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop { Color = start, Offset = 0 });
+        brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop { Color = end, Offset = 1 });
+        return brush;
+    }
+
+    private static (Point Start, Point End) AngleToGradientEndpoints(double angleDegrees)
+    {
+        // Normalize to [0, 360).
+        double a = angleDegrees % 360.0;
+        if (a < 0) a += 360.0;
+        double rad = a * Math.PI / 180.0;
+
+        // Direction vector for the gradient line.
+        double dx = Math.Cos(rad);
+        double dy = Math.Sin(rad);
+
+        // Project from center (0.5, 0.5) to the box edge along ±direction.
+        // Scale so the longer axis fills the unit square diagonally.
+        double scale = 0.5 / Math.Max(Math.Abs(dx), Math.Abs(dy));
+        double hx = dx * scale;
+        double hy = dy * scale;
+
+        return (new Point(0.5 - hx, 0.5 - hy), new Point(0.5 + hx, 0.5 + hy));
+    }
+
     private int FindMatchingPresetIndex(BackgroundStyle bg)
     {
         var presets = DefaultBrandPresets.All;
@@ -2036,8 +2194,18 @@ public sealed partial class EditorPage : Page
             var p = presets[i];
             if (p.BackgroundType == bg.Type &&
                 string.Equals(p.BackgroundColor, bg.Color, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(NormalizeHex(p.GradientEndColor), NormalizeHex(bg.GradientEndColor), StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(p.GradientAngle - bg.GradientAngle) < 0.5 &&
                 p.Padding == bg.Padding &&
-                p.CornerRadius == bg.CornerRadius)
+                p.CornerRadius == bg.CornerRadius &&
+                p.ShadowEnabled == bg.ShadowEnabled &&
+                p.ShadowBlur == bg.ShadowBlur &&
+                Math.Abs(p.ShadowOpacity - bg.ShadowOpacity) < 0.001 &&
+                string.Equals(NormalizeHex(p.ShadowColor), NormalizeHex(bg.ShadowColor), StringComparison.OrdinalIgnoreCase) &&
+                p.BorderEnabled == bg.BorderEnabled &&
+                p.BorderWidth == bg.BorderWidth &&
+                string.Equals(NormalizeHex(p.BorderColor), NormalizeHex(bg.BorderColor), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(p.BackgroundImagePath ?? string.Empty, bg.BackgroundImagePath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
                 return i + 1; // +1 for the "(Custom)" entry at index 0
             }
@@ -2045,10 +2213,13 @@ public sealed partial class EditorPage : Page
         return 0; // Custom
     }
 
+    private static string NormalizeHex(string? hex) => string.IsNullOrEmpty(hex) ? string.Empty : hex.Trim();
+
     private void PresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressStyleEvents) return;
-        if (PresetCombo.SelectedItem is not BrandPreset preset) return;
+        if (PresetCombo.SelectedItem is not ComboBoxItem item) return;
+        if (item.Tag is not BrandPreset preset) return;
         if (preset.Name == "(Custom)") return;
 
         var bg = BrandPresetConverter.ToBackgroundStyle(preset);
@@ -2111,6 +2282,83 @@ public sealed partial class EditorPage : Page
     private void WallpaperGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressStyleEvents) return;
+
+        // If user selected the "+" add tile, open a file picker.
+        if (WallpaperGrid.SelectedItem is Border b && (b.Tag as string) == AddWallpaperTileTag)
+        {
+            int previousIndex = -1;
+            if (e.RemovedItems.Count > 0)
+            {
+                previousIndex = WallpaperGrid.Items.IndexOf(e.RemovedItems[0]);
+            }
+            _ = PickCustomWallpaperAsync(previousIndex);
+            return;
+        }
+
+        ScheduleStyleUpdate();
+    }
+
+    private async Task PickCustomWallpaperAsync(int previousIndex)
+    {
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".bmp");
+
+        var window = App.Current.MainAppWindow;
+        if (window is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        }
+
+        Windows.Storage.StorageFile? file = null;
+        try
+        {
+            file = await picker.PickSingleFileAsync();
+        }
+        catch
+        {
+            // Picker can throw on cancellation in some scenarios — treat as no-op.
+        }
+
+        _suppressStyleEvents = true;
+        try
+        {
+            if (file is null)
+            {
+                // User cancelled — restore previous selection (or clear).
+                WallpaperGrid.SelectedIndex = previousIndex >= 1 ? previousIndex : -1;
+                return;
+            }
+
+            string path = file.Path;
+            _wallpaperPaths ??= new List<string>();
+
+            int existing = _wallpaperPaths.FindIndex(p =>
+                string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            if (existing < 0)
+            {
+                // Insert at the top of the list (right after the "+" tile).
+                _wallpaperPaths.Insert(0, path);
+                WallpaperGrid.Items.Insert(1, BuildWallpaperTile(path));
+                WallpaperGrid.SelectedIndex = 1;
+            }
+            else
+            {
+                WallpaperGrid.SelectedIndex = existing + 1;
+            }
+        }
+        finally
+        {
+            _suppressStyleEvents = false;
+        }
+
         ScheduleStyleUpdate();
     }
 
@@ -2142,11 +2390,21 @@ public sealed partial class EditorPage : Page
         };
 
         string? imagePath = null;
-        if (bgType == BackgroundType.Image && _wallpaperPaths is not null)
+        if (bgType == BackgroundType.Image)
         {
-            int idx = WallpaperGrid.SelectedIndex;
-            if (idx >= 0 && idx < _wallpaperPaths.Count)
+            // -1 because index 0 in the grid is the "+" add-tile.
+            int idx = WallpaperGrid.SelectedIndex - 1;
+            if (_wallpaperPaths is not null && idx >= 0 && idx < _wallpaperPaths.Count)
+            {
                 imagePath = _wallpaperPaths[idx];
+            }
+            else
+            {
+                // Wallpaper list hasn't finished loading yet (or selection was
+                // cleared) — preserve the project's currently-applied image so a
+                // background sync from another control doesn't blank it out.
+                imagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+            }
         }
 
         return new BackgroundStyle

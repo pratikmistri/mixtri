@@ -1613,3 +1613,55 @@ the latest `ProjectService.Instance.CurrentComposition`.
 Initially considered moving the reset into `ExportFlyout_Opened` itself, but
 that would re-export even when the user re-opens the flyout just to re-read
 the success message. Resetting on close is cleaner and matches user intent.
+
+---
+
+## Brand Presets - Cinematic Refresh
+
+**Feature/area:** DefaultBrandPresets (src/Musio.Core/Settings/DefaultBrandPresets.cs)
+
+**Approaches tried:**
+
+1. Renamed and re-toned all 8 presets to soothing, low-saturation cinematic palettes. Display Names: Midnight, Mist, Dusk, Porcelain, Twilight, Pine, Aurora, Linen. C# property names (DarkMinimal, OceanGradient, ...) kept unchanged so existing tests and references continue to work. Increased shadow blur and softened gradient angles (155-165 deg) for cinematic depth. Replaced saturated hot pinks/greens/magentas with muted plums, sages, dusty terracottas, steel blues.
+
+**What worked:** The cohesive visual refresh itself. (Note: a later pass replaced this preset set with the current bold-gradient lineup and renamed the static property identifiers — see the "Background presets - bold gradients" entry below. The "preserving identifiers" claim in this earlier pass no longer reflects the current code.)
+
+**What didn't work:** N/A on this pass.
+
+## Wallpaper picker "+" tile (EditorPage background style)
+
+**Approach that worked:**
+- Prepend a non-data "+" tile to `WallpaperGrid.Items` (sentinel `Tag = "__add_wallpaper__"`), keeping `_wallpaperPaths` as the source of truth for actual wallpapers.
+- All grid<->path index conversions shift by 1 (`gridIndex = pathIndex + 1`).
+- In `WallpaperGrid_SelectionChanged`, detect the sentinel tag and open `Windows.Storage.Pickers.FileOpenPicker` (init with main window HWND via `App.Current.MainAppWindow`). On success, insert the new path at index 0 of `_wallpaperPaths` and a freshly built tile at index 1 of the grid, then select it. On cancel, restore previous selection (or clear).
+- Wrap programmatic `SelectedIndex` mutations in `_suppressStyleEvents` to avoid recursive style updates.
+
+**Caveats:**
+- `CanvasBitmap.LoadAsync` reads via Win32 file IO from the absolute path; for packaged builds, file access beyond the picker token is not guaranteed across sessions. Picking again works.
+
+---
+
+## Background presets - bold gradients
+
+**Approach that worked:**
+- Replaced the 8 muted `DefaultBrandPresets` entries with 8 bold two-stop gradients suitable as backdrops for screen recordings: `Nebula` (indigo->magenta), `Lagoon` (purple->teal), `Prism` (sky->coral), `Emerald` (vivid green->near-black), `Coral` (coral->magenta), `Ember` (midnight->amber), `Tide` (iris->cyan), `Sunset` (orange->violet). All gradients angled ~135-160 degrees with consistent padding/radius/shadow defaults.
+- Updated `SettingsTests` named-preset assertions to match the new static property names. Count-based assertion (`ReturnsEightPresets`) retained.
+
+**What didn't work / pitfalls:**
+- Initial pass used literal brand names (Apple Vision, Google Gemini, etc.); avoid mentioning brand names in user-facing preset labels even when colors are inspired by them.
+
+---
+
+## Rubber-duck feedback on custom backgrounds branch
+
+**Adopted (fixes pushed):**
+- `LoadSystemWallpapersAsync` now takes an `initialCustomPath`, preserves any custom (non-system-wallpaper-dir) entries already in `_wallpaperPaths`, and re-applies the wallpaper grid selection after the async load completes (the synchronous `SyncStyleControlsToConfig` runs before items exist, so the prior code never highlighted the active wallpaper on reopen).
+- `BuildBackgroundStyleFromControls` falls back to `ProjectService.CurrentComposition?.Background.BackgroundImagePath` when image mode is active but grid selection is empty - prevents losing the project's image when other controls (slider/toggle) fire `ScheduleStyleUpdate` before wallpapers finish loading.
+- `FindMatchingPresetIndex` now also compares `GradientEndColor`, `GradientAngle` (0.5 degree tolerance), `ShadowEnabled`, `BorderEnabled`, and `BackgroundImagePath`; previously edits to those fields left a built-in preset selected which mislabeled the configuration as a brand preset.
+
+**Deferred (documented as known limitations):**
+- Packaged-app file access for `CanvasBitmap.LoadAsync` on arbitrary picker results: future fix should either copy into `ApplicationData.LocalFolder/CustomWallpapers` or persist a `FutureAccessList` token. Current behavior works in unpackaged dev runs and for files in user-readable locations.
+- Reentrancy guard on the "+" tile: `FileOpenPicker` is modal, so concurrent picks are unlikely. Could revisit if we ever see UI thread re-entry issues.
+- Swatch endpoint math vs compositor parity: the swatch clips at the unit-square edge while `BackgroundCompositor` uses half-diagonal endpoints. The preview direction is correct; saturation differs slightly at non-orthogonal angles. Acceptable for a small swatch.
+
+---

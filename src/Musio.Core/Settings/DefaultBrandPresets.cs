@@ -3,145 +3,150 @@ using Musio.Core.Models;
 namespace Musio.Core.Settings;
 
 /// <summary>
-/// Provides a library of built-in brand presets with professional color schemes.
+/// Built-in background presets featuring bold, saturated two-stop gradients
+/// designed to read well behind screen recordings — high contrast against
+/// typical UI content, vivid enough for marketing-grade visuals without
+/// fighting the foreground for attention.
 /// </summary>
 public static class DefaultBrandPresets
 {
-    public static BrandPreset DarkMinimal { get; } = new()
+    public static BrandPreset Nebula { get; } = new()
     {
-        Name = "Dark Minimal",
-        BackgroundType = BackgroundType.SolidColor,
-        BackgroundColor = "#1E1E2E",
-        Padding = 48,
-        CornerRadius = 12,
-        ShadowEnabled = true,
-        ShadowBlur = 20,
-        ShadowOpacity = 0.4,
-        ShadowColor = "#000000",
-        BorderEnabled = false
-    };
-
-    public static BrandPreset OceanGradient { get; } = new()
-    {
-        Name = "Ocean Gradient",
+        Name = "Nebula",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#0F2027",
-        GradientEndColor = "#2C5364",
+        BackgroundColor = "#1A0B3C",
+        GradientEndColor = "#E94560",
         GradientAngle = 135.0,
-        Padding = 80,
-        CornerRadius = 16,
+        Padding = 72,
+        CornerRadius = 18,
         ShadowEnabled = true,
-        ShadowBlur = 40,
-        ShadowOpacity = 0.5,
+        ShadowBlur = 48,
+        ShadowOpacity = 0.55,
         ShadowColor = "#000000",
-        BorderEnabled = false
+        BorderEnabled = false,
     };
 
-    public static BrandPreset SunsetGlow { get; } = new()
+    public static BrandPreset Lagoon { get; } = new()
     {
-        Name = "Sunset Glow",
+        Name = "Lagoon",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#F857A6",
-        GradientEndColor = "#FF5858",
-        GradientAngle = 120.0,
+        BackgroundColor = "#2E1A47",
+        GradientEndColor = "#00B7C3",
+        GradientAngle = 145.0,
         Padding = 72,
         CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 36,
-        ShadowOpacity = 0.45,
-        ShadowColor = "#3D0A1E",
-        BorderEnabled = false
-    };
-
-    public static BrandPreset CleanWhite { get; } = new()
-    {
-        Name = "Clean White",
-        BackgroundType = BackgroundType.SolidColor,
-        BackgroundColor = "#F5F5F7",
-        Padding = 64,
-        CornerRadius = 14,
-        ShadowEnabled = true,
-        ShadowBlur = 30,
-        ShadowOpacity = 0.25,
-        ShadowColor = "#000000",
-        BorderEnabled = true,
-        BorderWidth = 1,
-        BorderColor = "#D1D1D6"
-    };
-
-    public static BrandPreset DeepPurple { get; } = new()
-    {
-        Name = "Deep Purple",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#4A0E4E",
-        GradientEndColor = "#812F90",
-        GradientAngle = 150.0,
-        Padding = 72,
-        CornerRadius = 16,
-        ShadowEnabled = true,
-        ShadowBlur = 40,
+        ShadowBlur = 44,
         ShadowOpacity = 0.5,
-        ShadowColor = "#1A0520",
-        BorderEnabled = false
+        ShadowColor = "#0A0820",
+        BorderEnabled = false,
     };
 
-    public static BrandPreset ForestGreen { get; } = new()
+    public static BrandPreset Prism { get; } = new()
     {
-        Name = "Forest Green",
+        Name = "Prism",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#0B3D0B",
-        GradientEndColor = "#1B8A1B",
+        BackgroundColor = "#4796E3",
+        GradientEndColor = "#FF6363",
         GradientAngle = 140.0,
         Padding = 72,
-        CornerRadius = 14,
+        CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 36,
+        ShadowBlur = 40,
         ShadowOpacity = 0.45,
-        ShadowColor = "#041A04",
-        BorderEnabled = false
+        ShadowColor = "#1A1A2E",
+        BorderEnabled = false,
     };
 
-    public static BrandPreset NeonDark { get; } = new()
+    public static BrandPreset Emerald { get; } = new()
     {
-        Name = "Neon Dark",
-        BackgroundType = BackgroundType.SolidColor,
-        BackgroundColor = "#0D0D0D",
-        Padding = 56,
-        CornerRadius = 10,
-        ShadowEnabled = true,
-        ShadowBlur = 24,
-        ShadowOpacity = 0.6,
-        ShadowColor = "#000000",
-        BorderEnabled = true,
-        BorderWidth = 2,
-        BorderColor = "#00FFAB"
-    };
-
-    public static BrandPreset SoftPastel { get; } = new()
-    {
-        Name = "Soft Pastel",
+        Name = "Emerald",
         BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#FADADD",
-        GradientEndColor = "#D4F1F9",
-        GradientAngle = 135.0,
-        Padding = 80,
-        CornerRadius = 20,
+        BackgroundColor = "#1DB954",
+        GradientEndColor = "#121212",
+        GradientAngle = 160.0,
+        Padding = 72,
+        CornerRadius = 16,
         ShadowEnabled = true,
-        ShadowBlur = 32,
-        ShadowOpacity = 0.2,
-        ShadowColor = "#4A4A4A",
-        BorderEnabled = false
+        ShadowBlur = 44,
+        ShadowOpacity = 0.55,
+        ShadowColor = "#000000",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset Coral { get; } = new()
+    {
+        Name = "Coral",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#FF5A5F",
+        GradientEndColor = "#BD1E59",
+        GradientAngle = 150.0,
+        Padding = 72,
+        CornerRadius = 18,
+        ShadowEnabled = true,
+        ShadowBlur = 44,
+        ShadowOpacity = 0.45,
+        ShadowColor = "#3A0A1F",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset Ember { get; } = new()
+    {
+        Name = "Ember",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#131A22",
+        GradientEndColor = "#FF9900",
+        GradientAngle = 160.0,
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 44,
+        ShadowOpacity = 0.55,
+        ShadowColor = "#000000",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset Tide { get; } = new()
+    {
+        Name = "Tide",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#6772E5",
+        GradientEndColor = "#00D4FF",
+        GradientAngle = 135.0,
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 40,
+        ShadowOpacity = 0.4,
+        ShadowColor = "#10183A",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset Sunset { get; } = new()
+    {
+        Name = "Sunset",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#F58529",
+        GradientEndColor = "#8134AF",
+        GradientAngle = 140.0,
+        Padding = 72,
+        CornerRadius = 18,
+        ShadowEnabled = true,
+        ShadowBlur = 44,
+        ShadowOpacity = 0.45,
+        ShadowColor = "#2A0E2F",
+        BorderEnabled = false,
     };
 
     public static IReadOnlyList<BrandPreset> All { get; } = new[]
     {
-        DarkMinimal,
-        OceanGradient,
-        SunsetGlow,
-        CleanWhite,
-        DeepPurple,
-        ForestGreen,
-        NeonDark,
-        SoftPastel
+        Nebula,
+        Lagoon,
+        Prism,
+        Emerald,
+        Coral,
+        Ember,
+        Tide,
+        Sunset,
     };
 }
