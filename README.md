@@ -2,7 +2,7 @@
 
 **Professional screen recording with cinematic cursor effects for Windows.**
 
-Musio is a Screen Studio–inspired screen recorder and editor built with WinUI 3 and .NET 9. Record your screen, add beautiful effects, and export polished videos — all from a native Windows app.
+Musio is a screen recorder and editor optimized to run natively on Windows. Record your screen, add beautiful effects, and export polished videos — all from a native Windows app.
 
 ![Musio Screenshot](docs/screenshot-placeholder.png)
 
