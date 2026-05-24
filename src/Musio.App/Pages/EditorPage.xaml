@@ -595,7 +595,9 @@
                                             BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                                             BorderThickness="1"
                                             CornerRadius="4">
-                                        <Grid x:Name="CropAnchorGrid">
+                                        <Grid x:Name="CropAnchorGrid"
+                                              AutomationProperties.Name="Crop anchor position"
+                                              AutomationProperties.HelpText="Choose where the crop is anchored within the source frame">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="44" />
                                                 <ColumnDefinition Width="1" />
@@ -623,38 +625,56 @@
                                                     Background="{ThemeResource ControlStrokeColorDefaultBrush}" />
 
                                             <RadioButton GroupName="CropAnchor" Tag="0,0"
+                                                         AutomationProperties.Name="Top left"
+                                                         ToolTipService.ToolTip="Top left"
                                                          Grid.Row="0" Grid.Column="0"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="0.5,0"
+                                                         AutomationProperties.Name="Top center"
+                                                         ToolTipService.ToolTip="Top center"
                                                          Grid.Row="0" Grid.Column="2"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="1,0"
+                                                         AutomationProperties.Name="Top right"
+                                                         ToolTipService.ToolTip="Top right"
                                                          Grid.Row="0" Grid.Column="4"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="0,0.5"
+                                                         AutomationProperties.Name="Middle left"
+                                                         ToolTipService.ToolTip="Middle left"
                                                          Grid.Row="2" Grid.Column="0"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton x:Name="CropAnchorCenter" GroupName="CropAnchor" Tag="0.5,0.5"
+                                                         AutomationProperties.Name="Center"
+                                                         ToolTipService.ToolTip="Center"
                                                          Grid.Row="2" Grid.Column="2" IsChecked="True"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="1,0.5"
+                                                         AutomationProperties.Name="Middle right"
+                                                         ToolTipService.ToolTip="Middle right"
                                                          Grid.Row="2" Grid.Column="4"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="0,1"
+                                                         AutomationProperties.Name="Bottom left"
+                                                         ToolTipService.ToolTip="Bottom left"
                                                          Grid.Row="4" Grid.Column="0"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="0.5,1"
+                                                         AutomationProperties.Name="Bottom center"
+                                                         ToolTipService.ToolTip="Bottom center"
                                                          Grid.Row="4" Grid.Column="2"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />
                                             <RadioButton GroupName="CropAnchor" Tag="1,1"
+                                                         AutomationProperties.Name="Bottom right"
+                                                         ToolTipService.ToolTip="Bottom right"
                                                          Grid.Row="4" Grid.Column="4"
                                                          Style="{StaticResource CropCellRadioStyle}"
                                                          Checked="CropAnchor_Checked" />

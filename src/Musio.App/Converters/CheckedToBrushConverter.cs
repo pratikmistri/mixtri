@@ -18,20 +18,38 @@ public sealed class CheckedToBrushConverter : IValueConverter
     {
         bool isChecked = value is bool b && b;
         string key = parameter as string ?? "Bg";
-        var res = Application.Current.Resources;
+
         return key switch
         {
-            "Bg" => isChecked && res["AccentFillColorDefaultBrush"] is Brush bg
-                ? bg
-                : (object)new SolidColorBrush(Colors.Transparent),
+            "Bg" => isChecked && TryGetBrush("AccentFillColorDefaultBrush") is Brush bg
+                ? (object)bg
+                : new SolidColorBrush(Colors.Transparent),
             "Border" => isChecked
-                ? (Brush)res["AccentFillColorDefaultBrush"]
-                : (Brush)res["TextFillColorPrimaryBrush"],
+                ? (object)(TryGetBrush("AccentFillColorDefaultBrush")
+                    ?? (Brush)new SolidColorBrush(Colors.Transparent))
+                : TryGetBrush("TextFillColorPrimaryBrush")
+                    ?? (Brush)new SolidColorBrush(Colors.Gray),
             "Glyph" => isChecked
-                ? (Brush)res["TextOnAccentFillColorPrimaryBrush"]
-                : (Brush)res["TextFillColorPrimaryBrush"],
+                ? (object)(TryGetBrush("TextOnAccentFillColorPrimaryBrush")
+                    ?? (Brush)new SolidColorBrush(Colors.White))
+                : TryGetBrush("TextFillColorPrimaryBrush")
+                    ?? (Brush)new SolidColorBrush(Colors.Gray),
             _ => DependencyProperty.UnsetValue,
         };
+    }
+
+    // Application.Current can be null in design-time / early init, and the
+    // Resources indexer throws on a missing key. Look up safely and return
+    // null so the caller can substitute a fallback brush.
+    private static Brush? TryGetBrush(string key)
+    {
+        var app = Application.Current;
+        if (app is null) return null;
+        var resources = app.Resources;
+        if (resources is null) return null;
+        if (resources.TryGetValue(key, out var value) && value is Brush brush)
+            return brush;
+        return null;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)

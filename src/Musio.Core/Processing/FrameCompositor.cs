@@ -620,6 +620,12 @@ public class FrameCompositor : IDisposable
             _sourceAreaWidth = (int)Math.Round(maxContentH * (double)effectiveAr);
         }
 
+        // Guard against zero/negative sizes from extreme ratios + tiny canvases
+        // (e.g. maxContentW=1 with effectiveAr>1 rounds to 0). A 0-pixel render
+        // target throws when allocated downstream.
+        if (_sourceAreaWidth < 1) _sourceAreaWidth = 1;
+        if (_sourceAreaHeight < 1) _sourceAreaHeight = 1;
+
         // Step 4: center the source frame within the canvas. The offset is the total
         // background gap on the left/top — user-padding plus any AR-fit gap.
         _sourceAreaOffsetX = (_contentWidth - _sourceAreaWidth) / 2;

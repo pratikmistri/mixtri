@@ -318,12 +318,22 @@ public class VideoEncoder : IDisposable
             // If any frame failed during compositing, fail the export loudly.
             // Without this, MediaStreamSource silently treats Sample=null as EOS,
             // producing a truncated (often ~1 second) video on the first error.
-            if (firstFrameError is not null)
+            // Read under the same lock used by the producer tasks so the read is
+            // explicitly synchronized (Task.WhenAll already establishes happens-
+            // before, but reading under the lock makes the intent obvious).
+            Exception? capturedError;
+            int capturedIndex;
+            lock (frameErrorLock)
+            {
+                capturedError = firstFrameError;
+                capturedIndex = firstFrameErrorIndex;
+            }
+            if (capturedError is not null)
             {
                 throw new InvalidOperationException(
-                    $"Export failed while compositing frame {firstFrameErrorIndex}: " +
-                    $"{firstFrameError.Message}",
-                    firstFrameError);
+                    $"Export failed while compositing frame {capturedIndex}: " +
+                    $"{capturedError.Message}",
+                    capturedError);
             }
 
             // ── Pass 2: Mux audio (fast — no frame re-compositing) ──
