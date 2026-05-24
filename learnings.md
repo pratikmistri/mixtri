@@ -1624,7 +1624,7 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 1. Renamed and re-toned all 8 presets to soothing, low-saturation cinematic palettes. Display Names: Midnight, Mist, Dusk, Porcelain, Twilight, Pine, Aurora, Linen. C# property names (DarkMinimal, OceanGradient, ...) kept unchanged so existing tests and references continue to work. Increased shadow blur and softened gradient angles (155-165 deg) for cinematic depth. Replaced saturated hot pinks/greens/magentas with muted plums, sages, dusty terracottas, steel blues.
 
-**What worked:** Updating only color/angle/shadow values and Name display strings while preserving static property identifiers. Tests assert count=8 and unique names but not exact display strings, so renaming was safe.
+**What worked:** The cohesive visual refresh itself. (Note: a later pass replaced this preset set with the current bold-gradient lineup and renamed the static property identifiers â€” see the "Background presets - bold gradients" entry below. The "preserving identifiers" claim in this earlier pass no longer reflects the current code.)
 
 **What didn't work:** N/A on this pass.
 
@@ -1641,10 +1641,10 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 ---
 
-## Background presets — bold gradients
+## Background presets - bold gradients
 
 **Approach that worked:**
-- Replaced the 8 muted `DefaultBrandPresets` entries with 8 bold two-stop gradients suitable as backdrops for screen recordings: `Nebula` (indigo?magenta), `Lagoon` (purple?teal), `Prism` (sky?coral), `Emerald` (vivid green?near-black), `Coral` (coral?magenta), `Ember` (midnight?amber), `Tide` (iris?cyan), `Sunset` (orange?violet). All gradients angled ~135-160° with consistent padding/radius/shadow defaults.
+- Replaced the 8 muted `DefaultBrandPresets` entries with 8 bold two-stop gradients suitable as backdrops for screen recordings: `Nebula` (indigo->magenta), `Lagoon` (purple->teal), `Prism` (sky->coral), `Emerald` (vivid green->near-black), `Coral` (coral->magenta), `Ember` (midnight->amber), `Tide` (iris->cyan), `Sunset` (orange->violet). All gradients angled ~135-160 degrees with consistent padding/radius/shadow defaults.
 - Updated `SettingsTests` named-preset assertions to match the new static property names. Count-based assertion (`ReturnsEightPresets`) retained.
 
 **What didn't work / pitfalls:**
@@ -1656,8 +1656,8 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **Adopted (fixes pushed):**
 - `LoadSystemWallpapersAsync` now takes an `initialCustomPath`, preserves any custom (non-system-wallpaper-dir) entries already in `_wallpaperPaths`, and re-applies the wallpaper grid selection after the async load completes (the synchronous `SyncStyleControlsToConfig` runs before items exist, so the prior code never highlighted the active wallpaper on reopen).
-- `BuildBackgroundStyleFromControls` falls back to `ProjectService.CurrentComposition?.Background.BackgroundImagePath` when image mode is active but grid selection is empty — prevents losing the project's image when other controls (slider/toggle) fire `ScheduleStyleUpdate` before wallpapers finish loading.
-- `FindMatchingPresetIndex` now also compares `GradientEndColor`, `GradientAngle` (0.5° tolerance), `ShadowEnabled`, `BorderEnabled`, and `BackgroundImagePath`; previously edits to those fields left a built-in preset selected which mislabeled the configuration as a brand preset.
+- `BuildBackgroundStyleFromControls` falls back to `ProjectService.CurrentComposition?.Background.BackgroundImagePath` when image mode is active but grid selection is empty - prevents losing the project's image when other controls (slider/toggle) fire `ScheduleStyleUpdate` before wallpapers finish loading.
+- `FindMatchingPresetIndex` now also compares `GradientEndColor`, `GradientAngle` (0.5 degree tolerance), `ShadowEnabled`, `BorderEnabled`, and `BackgroundImagePath`; previously edits to those fields left a built-in preset selected which mislabeled the configuration as a brand preset.
 
 **Deferred (documented as known limitations):**
 - Packaged-app file access for `CanvasBitmap.LoadAsync` on arbitrary picker results: future fix should either copy into `ApplicationData.LocalFolder/CustomWallpapers` or persist a `FutureAccessList` token. Current behavior works in unpackaged dev runs and for files in user-readable locations.

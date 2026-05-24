@@ -1971,10 +1971,16 @@ public sealed partial class EditorPage : Page
         // After the async load completes the synchronous SyncStyleControlsToConfig
         // call ran before the grid was populated; re-apply selection now that
         // the items exist so the user sees the active wallpaper highlighted.
-        if (!string.IsNullOrEmpty(initialCustomPath))
+        // Prefer the project's current background image (it may have changed
+        // since the load started — e.g. the user picked a wallpaper while the
+        // system enumeration was still running) and fall back to the initial
+        // path passed in.
+        var currentImagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+        var targetPath = !string.IsNullOrEmpty(currentImagePath) ? currentImagePath : initialCustomPath;
+        if (!string.IsNullOrEmpty(targetPath))
         {
             int idx = _wallpaperPaths.FindIndex(p =>
-                string.Equals(p, initialCustomPath, StringComparison.OrdinalIgnoreCase));
+                string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
                 _suppressStyleEvents = true;
@@ -2068,7 +2074,8 @@ public sealed partial class EditorPage : Page
 
             if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
             {
-                int wpIdx = _wallpaperPaths.IndexOf(bg.BackgroundImagePath);
+                int wpIdx = _wallpaperPaths.FindIndex(p =>
+                    string.Equals(p, bg.BackgroundImagePath, StringComparison.OrdinalIgnoreCase));
                 // +1 because index 0 in the grid is the "+" add-tile.
                 WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx + 1 : -1;
             }
@@ -2192,7 +2199,12 @@ public sealed partial class EditorPage : Page
                 p.Padding == bg.Padding &&
                 p.CornerRadius == bg.CornerRadius &&
                 p.ShadowEnabled == bg.ShadowEnabled &&
+                p.ShadowBlur == bg.ShadowBlur &&
+                Math.Abs(p.ShadowOpacity - bg.ShadowOpacity) < 0.001 &&
+                string.Equals(NormalizeHex(p.ShadowColor), NormalizeHex(bg.ShadowColor), StringComparison.OrdinalIgnoreCase) &&
                 p.BorderEnabled == bg.BorderEnabled &&
+                p.BorderWidth == bg.BorderWidth &&
+                string.Equals(NormalizeHex(p.BorderColor), NormalizeHex(bg.BorderColor), StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(p.BackgroundImagePath ?? string.Empty, bg.BackgroundImagePath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
                 return i + 1; // +1 for the "(Custom)" entry at index 0
@@ -2328,7 +2340,8 @@ public sealed partial class EditorPage : Page
             string path = file.Path;
             _wallpaperPaths ??= new List<string>();
 
-            int existing = _wallpaperPaths.IndexOf(path);
+            int existing = _wallpaperPaths.FindIndex(p =>
+                string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
             if (existing < 0)
             {
                 // Insert at the top of the list (right after the "+" tile).
