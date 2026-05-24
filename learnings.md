@@ -1627,3 +1627,16 @@ the success message. Resetting on close is cleaner and matches user intent.
 **What worked:** Updating only color/angle/shadow values and Name display strings while preserving static property identifiers. Tests assert count=8 and unique names but not exact display strings, so renaming was safe.
 
 **What didn't work:** N/A on this pass.
+
+## Wallpaper picker "+" tile (EditorPage background style)
+
+**Approach that worked:**
+- Prepend a non-data "+" tile to `WallpaperGrid.Items` (sentinel `Tag = "__add_wallpaper__"`), keeping `_wallpaperPaths` as the source of truth for actual wallpapers.
+- All grid<->path index conversions shift by 1 (`gridIndex = pathIndex + 1`).
+- In `WallpaperGrid_SelectionChanged`, detect the sentinel tag and open `Windows.Storage.Pickers.FileOpenPicker` (init with main window HWND via `App.Current.MainAppWindow`). On success, insert the new path at index 0 of `_wallpaperPaths` and a freshly built tile at index 1 of the grid, then select it. On cancel, restore previous selection (or clear).
+- Wrap programmatic `SelectedIndex` mutations in `_suppressStyleEvents` to avoid recursive style updates.
+
+**Caveats:**
+- `CanvasBitmap.LoadAsync` reads via Win32 file IO from the absolute path; for packaged builds, file access beyond the picker token is not guaranteed across sessions. Picking again works.
+
+---

@@ -1946,25 +1946,55 @@ public sealed partial class EditorPage : Page
         _wallpaperPaths = paths;
 
         WallpaperGrid.Items.Clear();
+        WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
         {
-            var img = new Microsoft.UI.Xaml.Controls.Image
-            {
-                Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
-                Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
-                {
-                    DecodePixelHeight = 96, // small thumbnails for perf
-                },
-            };
-            var border = new Border
-            {
-                Width = 72,
-                Height = 48,
-                CornerRadius = new CornerRadius(4),
-                Child = img,
-            };
-            WallpaperGrid.Items.Add(border);
+            WallpaperGrid.Items.Add(BuildWallpaperTile(path));
         }
+    }
+
+    // Sentinel tag used to identify the "+" tile in the wallpaper grid.
+    private const string AddWallpaperTileTag = "__add_wallpaper__";
+
+    private static Border BuildAddWallpaperTile()
+    {
+        var plus = new FontIcon
+        {
+            Glyph = "\uE710", // Add
+            FontSize = 20,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        return new Border
+        {
+            Width = 72,
+            Height = 48,
+            CornerRadius = new CornerRadius(4),
+            BorderThickness = new Thickness(1),
+            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlFillColorDefaultBrush"],
+            Child = plus,
+            Tag = AddWallpaperTileTag,
+        };
+    }
+
+    private static Border BuildWallpaperTile(string path)
+    {
+        var img = new Microsoft.UI.Xaml.Controls.Image
+        {
+            Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
+            {
+                DecodePixelHeight = 96, // small thumbnails for perf
+            },
+        };
+        return new Border
+        {
+            Width = 72,
+            Height = 48,
+            CornerRadius = new CornerRadius(4),
+            Child = img,
+        };
     }
 
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
@@ -2008,7 +2038,8 @@ public sealed partial class EditorPage : Page
             if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
             {
                 int wpIdx = _wallpaperPaths.IndexOf(bg.BackgroundImagePath);
-                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx : -1;
+                // +1 because index 0 in the grid is the "+" add-tile.
+                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx + 1 : -1;
             }
 
             // Sliders
@@ -2111,6 +2142,82 @@ public sealed partial class EditorPage : Page
     private void WallpaperGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressStyleEvents) return;
+
+        // If user selected the "+" add tile, open a file picker.
+        if (WallpaperGrid.SelectedItem is Border b && (b.Tag as string) == AddWallpaperTileTag)
+        {
+            int previousIndex = -1;
+            if (e.RemovedItems.Count > 0)
+            {
+                previousIndex = WallpaperGrid.Items.IndexOf(e.RemovedItems[0]);
+            }
+            _ = PickCustomWallpaperAsync(previousIndex);
+            return;
+        }
+
+        ScheduleStyleUpdate();
+    }
+
+    private async Task PickCustomWallpaperAsync(int previousIndex)
+    {
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".bmp");
+
+        var window = App.Current.MainAppWindow;
+        if (window is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        }
+
+        Windows.Storage.StorageFile? file = null;
+        try
+        {
+            file = await picker.PickSingleFileAsync();
+        }
+        catch
+        {
+            // Picker can throw on cancellation in some scenarios — treat as no-op.
+        }
+
+        _suppressStyleEvents = true;
+        try
+        {
+            if (file is null)
+            {
+                // User cancelled — restore previous selection (or clear).
+                WallpaperGrid.SelectedIndex = previousIndex >= 1 ? previousIndex : -1;
+                return;
+            }
+
+            string path = file.Path;
+            _wallpaperPaths ??= new List<string>();
+
+            int existing = _wallpaperPaths.IndexOf(path);
+            if (existing < 0)
+            {
+                // Insert at the top of the list (right after the "+" tile).
+                _wallpaperPaths.Insert(0, path);
+                WallpaperGrid.Items.Insert(1, BuildWallpaperTile(path));
+                WallpaperGrid.SelectedIndex = 1;
+            }
+            else
+            {
+                WallpaperGrid.SelectedIndex = existing + 1;
+            }
+        }
+        finally
+        {
+            _suppressStyleEvents = false;
+        }
+
         ScheduleStyleUpdate();
     }
 
@@ -2144,7 +2251,8 @@ public sealed partial class EditorPage : Page
         string? imagePath = null;
         if (bgType == BackgroundType.Image && _wallpaperPaths is not null)
         {
-            int idx = WallpaperGrid.SelectedIndex;
+            // -1 because index 0 in the grid is the "+" add-tile.
+            int idx = WallpaperGrid.SelectedIndex - 1;
             if (idx >= 0 && idx < _wallpaperPaths.Count)
                 imagePath = _wallpaperPaths[idx];
         }
