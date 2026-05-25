@@ -631,8 +631,7 @@ public class VideoEncoder : IDisposable
     {
         var transcodeOp = prepResult.TranscodeAsync();
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        using var reg = linkedCts.Token.Register(() => transcodeOp.Cancel());
+        using var reg = ct.Register(() => transcodeOp.Cancel());
         transcodeOp.Completed = (info, status) =>
         {
             if (status == Windows.Foundation.AsyncStatus.Completed)

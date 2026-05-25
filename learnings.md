@@ -1259,26 +1259,26 @@ This file tracks approaches tried, what worked, and what didn't for each feature
   - Match monitor by exact `DisplayName == MonitorId` (or `StartsWith(MonitorId + ' ')` to cover `"\\.\DISPLAY1 (Primary)"`). `Contains` matched `\\.\DISPLAY1` against `\\.\DISPLAY10`.
   - Round border px/py with `Math.Round` and floor pw/ph to even numbers (`& ~1`) to match the H.264 crop math in `RecordingSession` (avoids 1-2 px drift between highlight and actual captured frame).
 - **What didn't work**:
-  - `presenter.Maximize()` to cover the virtual desktop � only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
-  - `DisplayName.Contains(MonitorId)` for monitor lookup � unsafe substring match across DISPLAY1/DISPLAY10.
+  - `presenter.Maximize()` to cover the virtual desktop - only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
+  - `DisplayName.Contains(MonitorId)` for monitor lookup - unsafe substring match across DISPLAY1/DISPLAY10.
 
-## Stale Saved Region � Disconnected Monitor
+## Stale Saved Region - Disconnected Monitor
 
 - **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected � please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` � the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
-## Region Picker � "blank on open / silent on cancel" confusion
+- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected - please select a new region'), and return null. This forces the user to reselect on the current display topology.
+- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` - the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+## Region Picker - "blank on open / silent on cancel" confusion
 
 **Approaches tried:**
 
-1. **Pre-render initial region in `RegionSelectorOverlay.OnLoaded`** � Worked. Added `ShowAsync(CaptureRegion? initialRegion)` overload; `OnLoaded` now seeds `_selX/_selY/_selW/_selH` and `_hasSelection = true` from the caller-supplied region (or persisted last region as fallback), then calls `UpdateOverlay()`. User now opens onto their existing rectangle with handles instead of a blank dark canvas. ?
-2. **Track cancel vs confirm via `WasCancelled` property on the overlay** � Worked. `CancelSelection` sets `WasCancelled = true` before resolving the TCS with null. `RecordingPage.LaunchRegionPickerAsync` reads it after `ShowAsync` returns null to distinguish "user pressed Escape ? no-op" from "first-time open with no prior selection". On Escape with an existing selection, page shows an InfoBar: *"Region selection cancelled � kept previous region."* � eliminates the pixel-identical confusion. ?
+1. **Pre-render initial region in `RegionSelectorOverlay.OnLoaded`** - Worked. Added `ShowAsync(CaptureRegion? initialRegion)` overload; `OnLoaded` now seeds `_selX/_selY/_selW/_selH` and `_hasSelection = true` from the caller-supplied region (or persisted last region as fallback), then calls `UpdateOverlay()`. User now opens onto their existing rectangle with handles instead of a blank dark canvas. ?
+2. **Track cancel vs confirm via `WasCancelled` property on the overlay** - Worked. `CancelSelection` sets `WasCancelled = true` before resolving the TCS with null. `RecordingPage.LaunchRegionPickerAsync` reads it after `ShowAsync` returns null to distinguish "user pressed Escape ? no-op" from "first-time open with no prior selection". On Escape with an existing selection, page shows an InfoBar: *"Region selection cancelled - kept previous region."* - eliminates the pixel-identical confusion. ?
 
 **What worked:** Both fixes together. Pre-render eliminates the blank-screen surprise; InfoBar makes Escape's no-op explicit.
 
 **What didn't work / not chosen:**
 
-- Returning a richer result type (e.g. `RegionPickerResult { Region, WasCancelled }`) � would be cleaner but required more surface area changes; `WasCancelled` as a property on the overlay (already a stateful UserControl) was the smaller diff.
+- Returning a richer result type (e.g. `RegionPickerResult { Region, WasCancelled }`) - would be cleaner but required more surface area changes; `WasCancelled` as a property on the overlay (already a stateful UserControl) was the smaller diff.
 
 ---
 
@@ -1286,18 +1286,18 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **Approaches tried:**
 
-1. **Per-page `RecordingViewModel` (original)** � Didn't work. `RecordingPage` declared `public RecordingViewModel ViewModel { get; } = new();` so every navigation back to the page constructed a fresh VM, losing `CaptureMode`, `SelectedWindow`, `SelectedRegion`, `HasSelectedRegion`, and audio toggles. Region survived only because it was persisted to `ApplicationData.LocalSettings` via `RegionMemory`.
-2. **Shared singleton `RecordingViewModel.Shared`** � Worked. Page now uses `ViewModel { get; } = RecordingViewModel.Shared;` so all selection state survives Editor ? Record navigation. ?
-3. **Per-navigation event subscription** � Required companion fix. Constructor-based `ViewModel.PropertyChanged += �` on a shared VM would leak page references (the VM holds the lambda which captures `this`). Moved subscription to `OnNavigatedTo` and added matching tear-down in `OnNavigatedFrom` so prior page instances can be GC'd. ?
+1. **Per-page `RecordingViewModel` (original)** - Didn't work. `RecordingPage` declared `public RecordingViewModel ViewModel { get; } = new();` so every navigation back to the page constructed a fresh VM, losing `CaptureMode`, `SelectedWindow`, `SelectedRegion`, `HasSelectedRegion`, and audio toggles. Region survived only because it was persisted to `ApplicationData.LocalSettings` via `RegionMemory`.
+2. **Shared singleton `RecordingViewModel.Shared`** - Worked. Page now uses `ViewModel { get; } = RecordingViewModel.Shared;` so all selection state survives Editor ? Record navigation. ?
+3. **Per-navigation event subscription** - Required companion fix. Constructor-based `ViewModel.PropertyChanged += -` on a shared VM would leak page references (the VM holds the lambda which captures `this`). Moved subscription to `OnNavigatedTo` and added matching tear-down in `OnNavigatedFrom` so prior page instances can be GC'd. ?
 
 **What worked:** Shared VM + navigation-scoped event lifecycle.
 
 **What didn't work / not chosen:**
 
-- Re-hydrating only `SelectedRegion` from `LoadLastRegion()` in `UpdateRegionInfoDisplay` (already existed) � insufficient because `CaptureMode` and `SelectedWindow` were not persisted, and on fresh-install `LocalSettings` is empty.
-- `NavigationCacheMode=Required` on the page � would also work but caches the entire visual tree; singleton VM is a smaller, more explicit contract.
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected � please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` � the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+- Re-hydrating only `SelectedRegion` from `LoadLastRegion()` in `UpdateRegionInfoDisplay` (already existed) - insufficient because `CaptureMode` and `SelectedWindow` were not persisted, and on fresh-install `LocalSettings` is empty.
+- `NavigationCacheMode=Required` on the page - would also work but caches the entire visual tree; singleton VM is a smaller, more explicit contract.
+- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected - please select a new region'), and return null. This forces the user to reselect on the current display topology.
+- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` - the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
 
 ---
 
@@ -1309,11 +1309,11 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **Approaches tried:**
 
-1. **Timestamp-based trim with `NotifyStopRequested()`** � Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
+1. **Timestamp-based trim with `NotifyStopRequested()`** - Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
 
 **What worked:** Signaling the mouse recorder from the overlay's `Stop_Click` and `OnOverlayClosing` handlers (earliest possible point in the stop flow), then trimming the stop-trigger click in `GetRecordedData()`. The 200ms threshold is generous enough for UI dispatch delay (~3-10ms typical) while avoiding false positives.
 
-**What didn't work:** N/A � first approach worked.
+**What didn't work:** N/A - first approach worked.
 
 **Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
 
@@ -1335,27 +1335,27 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
-## Region Selector Overlay & Recording Page � PR Review Fixes
+## Region Selector Overlay & Recording Page - PR Review Fixes
 
 **Approaches tried:**
 
-1. **TryApplyPresetRegion coordinate space bug** � Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
-2. **UpdateOverlay degenerate-selection state leak** � When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
-3. **RecordingPage._infoBarTimer navigation leak** � Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
+1. **TryApplyPresetRegion coordinate space bug** - Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
+2. **UpdateOverlay degenerate-selection state leak** - When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
+3. **RecordingPage._infoBarTimer navigation leak** - Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
 
 **What worked:** All three above.
 
 
 ---
 
-## Editor � Spacebar Play/Pause Shortcut
+## Editor - Spacebar Play/Pause Shortcut
 
 **Feature/area:** EditorPage keyboard accelerators / Preview playback.
 
 **Approaches tried:**
 
-1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** � Worked. ?
-2. **Skip handler when a text input has focus** � Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
+1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** - Worked. ?
+2. **Skip handler when a text input has focus** - Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
 
 **What worked:** XAML accelerator + focus-check guard in the handler.
 
@@ -1363,9 +1363,9 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 ---
 
-## Overlapping Zoom Segments � Center Snap Fix
+## Overlapping Zoom Segments - Center Snap Fix
 
-**Feature/area:** AutoZoomEngine � focal-point continuity across overlapping zoom segments
+**Feature/area:** AutoZoomEngine - focal-point continuity across overlapping zoom segments
 
 **Approaches tried:**
 1. Earlier fix used max-zoom-wins for both zoom level and center (cx/cy). Zoom level stayed continuous, but the *center* snapped at the instant B's zoom first exceeded A's, since the winning keyframe's center was used wholesale. Editing a segment moved where this snap occurred, making the visual jump obvious.
@@ -1377,7 +1377,7 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 - Regression test `GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` steps through the overlap and asserts per-step center delta stays well under the would-be snap magnitude.
 
 **What didn't work:**
-- Returning the max-zoom segment's center as-is � produces a discontinuous jump at the crossover when overlapping segments have different centers.
+- Returning the max-zoom segment's center as-is - produces a discontinuous jump at the crossover when overlapping segments have different centers.
 
 ---
 
@@ -1387,12 +1387,12 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 
 **Approaches tried:**
 
-1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** � Worked. Previously gated on Window/Region only; now exposed for Monitor too. ✅
-2. **Move the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) from `EditorPage.InitializePreviewAsync` into `ProjectService.SetProject`** � Worked. Defaults apply at project-load time so user edits via the now-visible style menu survive editor re-navigation. ✅
+1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** - Worked. Previously gated on Window/Region only; now exposed for Monitor too. ✅
+2. **Move the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) from `EditorPage.InitializePreviewAsync` into `ProjectService.SetProject`** - Worked. Defaults apply at project-load time so user edits via the now-visible style menu survive editor re-navigation. ✅
 
-**What worked:** Combination � unconditional style-menu visibility + applying Monitor defaults in `ProjectService.SetProject` (instead of every `InitializePreviewAsync`).
+**What worked:** Combination - unconditional style-menu visibility + applying Monitor defaults in `ProjectService.SetProject` (instead of every `InitializePreviewAsync`).
 
-**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` � would clobber user edits every time the EditorPage was re-constructed.
+**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` - would clobber user edits every time the EditorPage was re-constructed.
 
 ---
 
@@ -1457,11 +1457,11 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 ## Frame style: padding & aspect ratio isolation (round 3)
 
 ### Feature/area
-FrameCompositor + BackgroundCompositor � decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
+FrameCompositor + BackgroundCompositor - decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
 
 ### What didn't work
 - Previous model had `BackgroundCompositor.CalculateOutputSize` return `(source + 2*padding, source + 2*padding)`. This made the output canvas grow with padding, so dragging the padding slider visibly changed the canvas aspect ratio.
-- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin � visible "wallpaper repeat" with two independent containers.
+- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin - visible "wallpaper repeat" with two independent containers.
 
 ### What worked
 - `BackgroundCompositor.CalculateOutputSize` is now identity `(w, h)`: padding insets within the canvas, never extends it.
@@ -1470,7 +1470,7 @@ FrameCompositor + BackgroundCompositor � decoupling padding from output aspect
   - `_innerContentWidth/_innerContentHeight` = canvas - 2*padding (the inner content rect, where source is drawn).
   - `_sourceAreaWidth/Height/OffsetX/Y` describe the source placement WITHIN the inner content area. Cover fills inner; Contain preserves source AR inside inner with letterbox/pillarbox.
 - `CropSourceFrame` sizes `_croppedBuffer` to inner dims and clears to transparent; letterbox bars are no longer filled in the buffer.
-- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w � h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill � padding margin + letterbox bars = single container.
+- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w - h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill - padding margin + letterbox bars = single container.
 - Cursor and click coord math (`(cursor - viewport)*scale + padding + sourceAreaOffset`) is unchanged: scale uses `_sourceAreaWidth/viewport.Width`, offsets are in inner-buffer space, and `+padding` shifts to outer canvas coords (content is drawn at `(padding, padding)` by BgCompositor).
 
 ### Test impact
@@ -1481,7 +1481,7 @@ FrameCompositor + BackgroundCompositor � decoupling padding from output aspect
 ## Frame style: collapse letterbox + padding into one container (round 4)
 
 ### Feature/area
-FrameCompositor + BackgroundCompositor � eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
+FrameCompositor + BackgroundCompositor - eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
 
 ### What worked
 - Removed `_innerContentWidth/_innerContentHeight` fields entirely.
@@ -1490,7 +1490,7 @@ FrameCompositor + BackgroundCompositor � eliminating the separate "inner conte
 - `ComputeContentDimensions`: compute canvas (target AR, padding-independent), then a max content box (canvas - 2*userPadding), then fit source into it per FitMode, finally CENTER the source within the canvas (so leftover gap is simply more background).
 - `CropSourceFrame`: buffer is sized exactly to the source-area dims (no internal letterbox padding). Drawing 1:1.
 - `BackgroundCompositor.CompositeFrame` simplified signature: takes srcX/srcY/srcWidth/srcHeight directly (no padding/inner concept). Background fills the entire canvas; shadow / rounded-corner clip / border all use the source rect.
-- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term � `_sourceAreaOffset*` now already includes total background gap.
+- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term - `_sourceAreaOffset*` now already includes total background gap.
 
 ### Outcome
 - Shadow and rounded corners wrap the actual visible captured frame, not the larger "inner content" container.
@@ -1599,7 +1599,7 @@ has no shadow/corner even though the preview shows them correctly.
 `ExportFlyout_Opened` short-circuits if `ExportVM.ExportSucceeded` is true.
 The flag is only reset by the explicit "Close" button (`CloseFlyout_Click`).
 Dismissing the flyout by clicking outside leaves the flag set, so the next
-"open" just re-shows the cached `ExportedFilePath` from the previous run �
+"open" just re-shows the cached `ExportedFilePath` from the previous run -
 no fresh `PrepareForExport` is called and no new export runs. The user
 believes they triggered a 2nd export and inspects the 1st (pre-style) file.
 
@@ -1692,7 +1692,7 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **What worked:** Tracking the last persisted move timestamp and resetting it in `StartRecording()` caps high-frequency move samples without changing the binary serialization format.
 
-**What didn't work:** Full solution MSBuild still fails in pre-existing App errors (`FindMonitorBoundsForOverlayPoint`, `ClampPointToRect`); targeted Core build hits a pre-existing `Buffer` ambiguity in `VideoWriter.cs`.
+**What didn't work:** Earlier validation was blocked by pre-existing App/Core build issues, but those repo-level blockers have since been resolved by adding `FindMonitorBoundsForOverlayPoint` / `ClampPointToRect` and qualifying `Windows.Storage.Streams.Buffer` usage.
 
 ---
 
@@ -1712,7 +1712,7 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 ---
 
-## Crash/Freeze Hardening Pass � High-DPI / High-Res Stability (13 fixes)
+## Crash/Freeze Hardening Pass - High-DPI / High-Res Stability (13 fixes)
 
 **Feature/area:** Capture pipeline, compositor, export, picker overlays, mouse hook.
 
@@ -1720,30 +1720,31 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **What worked:**
 
-1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` � replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 ? H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings ? identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
-2. **In-flight write drain** � `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
-3. **Serialized crop+write** � entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
-4. **`TryGetNextFrame()` inside try/catch** � `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
-5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** � `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
-6. **Virtual-desktop screenshot guards** � `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
-7. **VRAM preflight** � `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal =4K exports unaffected.
-8. **`GraphicsCaptureItem.Closed`** � `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
-9. **`IAsyncDisposable` on `RecordingSession`** � sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
-10. **Transcode watchdog** � 2-hour timeout via linked CTS around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern).
-11. **Mouse move throttle at 250 Hz** � `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
-12. **Window picker covers virtual desktop** � `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
-13. **Region drag clamped to active monitor (Option A)** � drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what's drawn. No popup/error.
+1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` - replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 -> H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings -> identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
+2. **In-flight write drain** - `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
+3. **Serialized crop+write** - entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
+4. **`TryGetNextFrame()` inside try/catch** - `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
+5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** - `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
+6. **Virtual-desktop screenshot guards** - `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
+7. **VRAM preflight** - `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal <=4K exports unaffected.
+8. **`GraphicsCaptureItem.Closed`** - `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
+9. **`IAsyncDisposable` on `RecordingSession`** - sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
+10. **Transcode watchdog** - 2-hour timeout around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern; uses `ct.Register` directly).
+11. **Mouse move throttle at 250 Hz** - `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
+12. **Window picker covers virtual desktop** - `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
+13. **Region drag clamped to active monitor (Option A)** - drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what is drawn. No popup/error.
 
 **Validation:**
-- All three projects build clean via VS Enterprise MSBuild (`vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'` ? `Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64 /p:Configuration=Debug /restore`.
-- MSTest run could not execute in this environment (host has .NET 8 and .NET 10 but not .NET 9 runtime in x64). Build-clean is the strongest available validation; behavior verification needs end-to-end manual recording/export on a target device.
+- All three projects build clean via VS Enterprise MSBuild (`vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'` -> `Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64 /p:Configuration=Debug /restore`.
+- All 286 MSTest tests pass. The host has .NET 8 and .NET 10 SDKs/runtimes but no .NET 9 runtime, so tests were executed with `DOTNET_ROLL_FORWARD=Major` to roll forward to the .NET 10 runtime.
 
 **What didn't work / things to remember:**
 - `dotnet build` still fails for this repo (PriGen MSB4062). Use VS MSBuild.
 - `Get-Command MSBuild.exe` returns nothing; use `vswhere -latest -find` to locate it.
-- Don't rely on `dotnet test` in this environment without a .NET 9 runtime installed alongside the SDK.
-- For #1, the cleanest BGRA?H.264 path is `BitmapDecoder` ? `SoftwareBitmap` (BGRA8) ? `MediaStreamSample.CreateFromBuffer`. Avoid `MediaComposition` for any per-frame encoding.
-- For #5, do NOT recreate the device mid-frame on `DeviceLost` � surface a recoverable exception and let outer code restart cleanly.
+- Without a .NET 9 runtime installed, `dotnet test` aborts the test host; set `DOTNET_ROLL_FORWARD=Major` to run against the installed .NET 10 runtime.
+- For #1, the cleanest BGRA->H.264 path is `BitmapDecoder` -> `SoftwareBitmap` (BGRA8) -> `MediaStreamSample.CreateFromBuffer`. Avoid `MediaComposition` for any per-frame encoding.
+- For #5, do NOT recreate the device mid-frame on `DeviceLost` - surface a recoverable exception and let outer code restart cleanly.
+
 ## Window selection highlight rect overstating bounds (2026-05-24)
 
 **Feature/area**: WindowSelectorOverlay / RegionSelector
@@ -1760,4 +1761,4 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **Problem**: Precisely-selected region captures included an extra 1px on the left/top edge.
 
-**Approach tried (reverted)**: Hypothesized the cause was DIP↔physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.
+**Approach tried (reverted)**: Hypothesized the cause was DIP<->physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.
