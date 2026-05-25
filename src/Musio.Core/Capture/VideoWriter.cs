@@ -1,9 +1,13 @@
+using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Windows.Foundation;
 using Windows.Graphics.DirectX.Direct3D11;
-using Windows.Media.Editing;
+using Windows.Graphics.Imaging;
+using Windows.Media.Core;
 using Windows.Media.MediaProperties;
+using Windows.Media.Transcoding;
 using Windows.Storage;
+using Windows.Storage.Streams;
 
 namespace Musio.Core.Capture;
 
@@ -13,6 +17,8 @@ namespace Musio.Core.Capture;
 /// </summary>
 public sealed class VideoWriter : IDisposable
 {
+    private static readonly TimeSpan FinalizeTimeout = TimeSpan.FromMinutes(30);
+
     private readonly string _outputPath;
     private readonly string _framesDir;
     private readonly int _width;
@@ -24,6 +30,8 @@ public sealed class VideoWriter : IDisposable
     private CanvasRenderTarget? _cropTarget;
 
     private long _frameCount;
+    private int _writesInFlight;
+    private volatile bool _stopAccepting;
     private bool _finalized;
     private bool _disposed;
 
@@ -111,31 +119,38 @@ public sealed class VideoWriter : IDisposable
         if (_finalized)
             throw new InvalidOperationException("Writer has been finalized.");
 
+        if (_stopAccepting)
+            return;
+
+        Interlocked.Increment(ref _writesInFlight);
         try
         {
-            using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
-
-            // Determine the image to save: cropped or full frame
-            CanvasBitmap imageToSave;
-            if (_cropRect is Rect crop)
-            {
-                _cropTarget ??= new CanvasRenderTarget(_device, _width, _height, 96);
-                using (var ds = _cropTarget.CreateDrawingSession())
-                {
-                    ds.Clear(Windows.UI.Color.FromArgb(255, 0, 0, 0));
-                    ds.DrawImage(bitmap,
-                        new Rect(0, 0, _width, _height),
-                        crop);
-                }
-                imageToSave = _cropTarget;
-            }
-            else
-            {
-                imageToSave = bitmap;
-            }
+            if (_stopAccepting)
+                return;
 
             lock (_writeLock)
             {
+                using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
+
+                // Determine the image to save: cropped or full frame
+                CanvasBitmap imageToSave;
+                if (_cropRect is Rect crop)
+                {
+                    _cropTarget ??= new CanvasRenderTarget(_device, _width, _height, 96);
+                    using (var ds = _cropTarget.CreateDrawingSession())
+                    {
+                        ds.Clear(Windows.UI.Color.FromArgb(255, 0, 0, 0));
+                        ds.DrawImage(bitmap,
+                            new Rect(0, 0, _width, _height),
+                            crop);
+                    }
+                    imageToSave = _cropTarget;
+                }
+                else
+                {
+                    imageToSave = bitmap;
+                }
+
                 long index = Interlocked.Increment(ref _frameCount) - 1;
 
                 lock (_tsLock)
@@ -153,7 +168,34 @@ public sealed class VideoWriter : IDisposable
         catch (Exception ex) when (ex is not ObjectDisposedException)
         {
             // Log frame write failures prominently for debugging
-            System.Diagnostics.Debug.WriteLine($"[VideoWriter] ERROR frame {Interlocked.Read(ref _frameCount)}: {ex.GetType().Name}: {ex.Message}");
+            Debug.WriteLine($"[VideoWriter] ERROR frame {Interlocked.Read(ref _frameCount)}: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _writesInFlight);
+        }
+    }
+
+    public void StopAcceptingFrames()
+    {
+        _stopAccepting = true;
+    }
+
+    public async Task WaitForQuiescenceAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        while (Volatile.Read(ref _writesInFlight) != 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (sw.Elapsed >= timeout)
+                throw new TimeoutException($"Timed out waiting {timeout} for frame writes to finish.");
+
+            await Task.Delay(10, ct).ConfigureAwait(false);
+        }
+
+        lock (_writeLock)
+        {
+            // Drain any queued FillGapFrames call, which also uses this lock.
         }
     }
 
@@ -196,7 +238,7 @@ public sealed class VideoWriter : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
+                    Debug.WriteLine(
                         $"[VideoWriter] Gap fill failed at index {gapIndex}: {ex.Message}");
                 }
             }
@@ -204,9 +246,9 @@ public sealed class VideoWriter : IDisposable
     }
 
     /// <summary>
-    /// Assembles all captured JPEG frames into an MP4 file using <see cref="MediaComposition"/>.
+    /// Assembles all captured JPEG frames into an MP4 file by streaming BGRA8 samples to H.264.
     /// </summary>
-    public async Task FinalizeAsync()
+    public async Task FinalizeAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -230,7 +272,11 @@ public sealed class VideoWriter : IDisposable
         }
         catch { /* best effort */ }
 
-        var composition = new MediaComposition();
+        // H.264 requires even dimensions
+        uint profileWidth = (uint)(_width & ~1);
+        uint profileHeight = (uint)(_height & ~1);
+        if (profileWidth < 2) profileWidth = 2;
+        if (profileHeight < 2) profileHeight = 2;
 
         // Use constant frame duration for true CFR output.
         // The slot-based capture throttling ensures frames arrive at ~1/fps intervals,
@@ -239,84 +285,191 @@ public sealed class VideoWriter : IDisposable
 
         try
         {
-            for (long i = 0; i < totalFrames; i++)
+            File.AppendAllText(logPath,
+                $"Profile: {profileWidth}x{profileHeight}, Frames={totalFrames}\n");
+        }
+        catch { }
+
+        var videoProps = VideoEncodingProperties.CreateUncompressed(
+            MediaEncodingSubtypes.Bgra8, profileWidth, profileHeight);
+        videoProps.FrameRate.Numerator = (uint)_fps;
+        videoProps.FrameRate.Denominator = 1;
+
+        var videoDesc = new VideoStreamDescriptor(videoProps);
+        var streamSource = new MediaStreamSource(videoDesc)
+        {
+            Duration = TimeSpan.FromSeconds((double)totalFrames / _fps),
+            BufferTime = TimeSpan.Zero,
+        };
+
+        streamSource.Starting += (MediaStreamSource sender, MediaStreamSourceStartingEventArgs args) =>
+        {
+            args.Request.SetActualStartPosition(TimeSpan.Zero);
+        };
+
+        long currentFrame = -1;
+        var pendingSamples = new List<Task>();
+        var pendingSamplesLock = new object();
+        Exception? firstFrameError = null;
+        long firstFrameErrorIndex = -1;
+        var frameErrorLock = new object();
+
+        using var finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+        streamSource.SampleRequested += (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
+        {
+            long frame = Interlocked.Increment(ref currentFrame);
+            if (frame >= totalFrames)
             {
-                string framePath = Path.Combine(_framesDir, $"frame_{i:D8}.jpg");
-                if (!File.Exists(framePath))
-                    continue;
-
-                var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
-                var clip = await MediaClip.CreateFromImageFileAsync(file, constantDuration);
-                composition.Clips.Add(clip);
-            }
-
-            if (composition.Clips.Count == 0)
+                args.Request.Sample = null;
                 return;
-
-            // H.264 requires even dimensions
-            uint profileWidth = (uint)(_width & ~1);
-            uint profileHeight = (uint)(_height & ~1);
-            if (profileWidth < 2) profileWidth = 2;
-            if (profileHeight < 2) profileHeight = 2;
-
-            // Encode to MP4 — use Auto quality so the profile dimensions aren't
-            // constrained to a preset resolution, then set them explicitly.
-            var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
-            profile.Video ??= new VideoEncodingProperties();
-            profile.Video.Subtype = "H264";
-            profile.Video.Width = profileWidth;
-            profile.Video.Height = profileHeight;
-            profile.Video.FrameRate.Numerator = (uint)_fps;
-            profile.Video.FrameRate.Denominator = 1;
-            profile.Video.Bitrate = 20_000_000;
-
-            try
-            {
-                File.AppendAllText(logPath,
-                    $"Profile: {profileWidth}x{profileHeight}, Clips={composition.Clips.Count}\n");
             }
+
+            var deferral = args.Request.GetDeferral();
+            var task = ProduceFrameSampleAsync(
+                args.Request, deferral, frame, (int)profileWidth, (int)profileHeight,
+                constantDuration, finalizeCts.Token,
+                onError: (ex, frameIdx) =>
+                {
+                    lock (frameErrorLock)
+                    {
+                        if (firstFrameError is null)
+                        {
+                            firstFrameError = ex;
+                            firstFrameErrorIndex = frameIdx;
+                        }
+                    }
+                });
+
+            lock (pendingSamplesLock)
+            {
+                pendingSamples.RemoveAll(t => t.IsCompleted);
+                pendingSamples.Add(task);
+            }
+        };
+
+        var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
+        profile.Video ??= new VideoEncodingProperties();
+        profile.Video.Subtype = "H264";
+        profile.Video.Width = profileWidth;
+        profile.Video.Height = profileHeight;
+        profile.Video.FrameRate.Numerator = (uint)_fps;
+        profile.Video.FrameRate.Denominator = 1;
+        profile.Video.Bitrate = 20_000_000;
+        profile.Audio = null;
+
+        string dir = Path.GetDirectoryName(_outputPath)!;
+        var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
+        var outputFile = await folder.CreateFileAsync(
+            Path.GetFileName(_outputPath), CreationCollisionOption.ReplaceExisting);
+
+        using var outputStream = await outputFile.OpenAsync(FileAccessMode.ReadWrite);
+        var transcoder = new MediaTranscoder
+        {
+            HardwareAccelerationEnabled = false,
+        };
+
+        var prepResult = await transcoder.PrepareMediaStreamSourceTranscodeAsync(
+            streamSource, outputStream, profile);
+        if (!prepResult.CanTranscode)
+            throw new InvalidOperationException($"Transcoder cannot encode: {prepResult.FailureReason}");
+
+        var transcodeOp = prepResult.TranscodeAsync();
+        using var cancelRegistration = finalizeCts.Token.Register(() => transcodeOp.Cancel());
+        var transcodeTask = transcodeOp.AsTask(finalizeCts.Token);
+        var timeoutTask = Task.Delay(FinalizeTimeout);
+
+        if (await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false) != transcodeTask)
+        {
+            finalizeCts.Cancel();
+            try { await transcodeTask.ConfigureAwait(false); }
+            catch { /* timeout is reported below */ }
+            throw new TimeoutException($"MP4 finalization timed out after {FinalizeTimeout}.");
+        }
+
+        await transcodeTask.ConfigureAwait(false);
+
+        Task[] snapshot;
+        lock (pendingSamplesLock)
+        {
+            snapshot = pendingSamples.ToArray();
+        }
+        await Task.WhenAll(snapshot).ConfigureAwait(false);
+
+        Exception? capturedError;
+        long capturedIndex;
+        lock (frameErrorLock)
+        {
+            capturedError = firstFrameError;
+            capturedIndex = firstFrameErrorIndex;
+        }
+        if (capturedError is not null)
+        {
+            try { File.AppendAllText(logPath, $"Frame {capturedIndex} FAILED: {capturedError}\n"); }
             catch { }
 
-            string dir = Path.GetDirectoryName(_outputPath)!;
-            var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
-            var outputFile = await folder.CreateFileAsync(
-                Path.GetFileName(_outputPath), CreationCollisionOption.ReplaceExisting);
-
-            var renderOp = composition.RenderToFileAsync(
-                outputFile, MediaTrimmingPreference.Precise, profile);
-
-            var tcs = new TaskCompletionSource<object?>();
-            renderOp.Completed = (info, status) =>
-            {
-                if (status == Windows.Foundation.AsyncStatus.Completed)
-                {
-                    tcs.TrySetResult(null);
-                }
-                else if (status == Windows.Foundation.AsyncStatus.Canceled)
-                {
-                    tcs.TrySetCanceled();
-                }
-                else
-                {
-                    var err = info.ErrorCode;
-                    try { File.AppendAllText(logPath, $"RenderToFile FAILED: {err}\n"); }
-                    catch { }
-                    tcs.TrySetException(
-                        err ?? new InvalidOperationException("MP4 render failed."));
-                }
-            };
-
-            await tcs.Task;
-        }
-        finally
-        {
-            // Release all MediaClip COM objects to avoid linear memory/handle
-            // growth proportional to frame count.
-            composition.Clips.Clear();
+            throw new InvalidOperationException(
+                $"MP4 finalization failed while decoding frame {capturedIndex}: {capturedError.Message}",
+                capturedError);
         }
 
         // Keep frame images for editor preview — they'll be cleaned up
         // when the project is explicitly deleted or on next recording.
+    }
+
+    private async Task ProduceFrameSampleAsync(
+        MediaStreamSourceSampleRequest request,
+        MediaStreamSourceSampleRequestDeferral deferral,
+        long frameIndex,
+        int width,
+        int height,
+        TimeSpan frameDuration,
+        CancellationToken ct,
+        Action<Exception, long>? onError)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string framePath = Path.Combine(_framesDir, $"frame_{frameIndex:D8}.jpg");
+            if (!File.Exists(framePath))
+                throw new FileNotFoundException("Frame JPEG not found.", framePath);
+
+            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
+            using var stream = await file.OpenAsync(FileAccessMode.Read);
+            var decoder = await BitmapDecoder.CreateAsync(stream);
+            var transform = new BitmapTransform
+            {
+                ScaledWidth = (uint)width,
+                ScaledHeight = (uint)height,
+                InterpolationMode = BitmapInterpolationMode.Fant,
+            };
+
+            using var bitmap = await decoder.GetSoftwareBitmapAsync(
+                BitmapPixelFormat.Bgra8,
+                BitmapAlphaMode.Premultiplied,
+                transform,
+                ExifOrientationMode.IgnoreExifOrientation,
+                ColorManagementMode.DoNotColorManage);
+
+            var buffer = new Windows.Storage.Streams.Buffer((uint)((long)width * height * 4));
+            bitmap.CopyToBuffer(buffer);
+
+            var timestamp = TimeSpan.FromSeconds((double)frameIndex / _fps);
+            var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
+            sample.Duration = frameDuration;
+            request.Sample = sample;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoWriter] Finalize frame {frameIndex} error: {ex}");
+            onError?.Invoke(ex, frameIndex);
+            request.Sample = null;
+        }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     public void Dispose()

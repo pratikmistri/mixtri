@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
 using Musio.Core.Processing;
@@ -44,6 +45,11 @@ public class VideoEncoder : IDisposable
 {
     private readonly ExportSettings _settings;
     private bool _disposed;
+    private volatile bool _deviceLost;
+    private CanvasDevice? _deviceWithDeviceLostHandler;
+
+    private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
+    private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
 
     // Serializes frame compositing so shared state (compositor, frameReader)
     // is never accessed concurrently by overlapping SampleRequested callbacks
@@ -84,6 +90,13 @@ public class VideoEncoder : IDisposable
 
         var stopwatch = Stopwatch.StartNew();
         var device = CanvasDevice.GetSharedDevice();
+        _deviceLost = false;
+        device.DeviceLost += OnCanvasDeviceLost;
+        _deviceWithDeviceLostHandler = device;
+
+        try
+        {
+        ThrowIfDeviceLost();
 
         // Open source video for dimensions and audio tracks.
         // If the MP4 is missing or corrupt (FinalizeAsync failure during recording),
@@ -139,6 +152,7 @@ public class VideoEncoder : IDisposable
         targetWidth = encW;
         targetHeight = encH;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
+        PreflightRenderTargetMemory(targetWidth, targetHeight, needsScaling);
 
         // Load source frames from .frames/ JPEGs using the RECORDING FPS so
         // frame indices map correctly to the on-disk frame numbering.
@@ -304,7 +318,7 @@ public class VideoEncoder : IDisposable
                 throw new InvalidOperationException(
                     $"Transcoder cannot encode: {prepResult.FailureReason}");
 
-            await prepResult.TranscodeAsync().AsTask(ct);
+            await TranscodeWithTimeoutAsync(prepResult, ct);
 
             // Drain any still-running sample tasks before disposing shared state
             Task[] snapshot;
@@ -360,6 +374,13 @@ public class VideoEncoder : IDisposable
                 catch { /* best-effort */ }
             }
         }
+        }
+        finally
+        {
+            device.DeviceLost -= OnCanvasDeviceLost;
+            if (ReferenceEquals(_deviceWithDeviceLostHandler, device))
+                _deviceWithDeviceLostHandler = null;
+        }
     }
 
     /// <summary>
@@ -391,6 +412,7 @@ public class VideoEncoder : IDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
+            ThrowIfDeviceLost();
 
             // Serialize frame production: shared compositor/frame-reader/webcam
             // composition state is not thread-safe and can corrupt frames if
@@ -450,7 +472,7 @@ public class VideoEncoder : IDisposable
             // after we release the semaphore.
             if (needsScaling)
             {
-                outputSurface = new CanvasRenderTarget(device, targetWidth, targetHeight, 96);
+                outputSurface = CreateRenderTarget(device, targetWidth, targetHeight, "scaled encoder output");
                 using (var ds = outputSurface.CreateDrawingSession())
                 {
                     ds.DrawImage(composedFrame,
@@ -605,6 +627,80 @@ public class VideoEncoder : IDisposable
         muxComp.BackgroundAudioTracks.Clear();
     }
 
+    private async Task TranscodeWithTimeoutAsync(PrepareTranscodeResult prepResult, CancellationToken ct)
+    {
+        var transcodeOp = prepResult.TranscodeAsync();
+        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var reg = ct.Register(() => transcodeOp.Cancel());
+        transcodeOp.Completed = (info, status) =>
+        {
+            if (status == Windows.Foundation.AsyncStatus.Completed)
+                tcs.TrySetResult(null);
+            else if (status == Windows.Foundation.AsyncStatus.Canceled)
+                tcs.TrySetCanceled(ct);
+            else
+                tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Video transcode failed."));
+        };
+
+        var timeoutTask = Task.Delay(MainTranscodeTimeout);
+        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+        {
+            ct.ThrowIfCancellationRequested();
+            transcodeOp.Cancel();
+            throw new TimeoutException(
+                $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+        }
+
+        await tcs.Task;
+        ThrowIfDeviceLost();
+    }
+
+    private void PreflightRenderTargetMemory(int targetWidth, int targetHeight, bool needsScaling)
+    {
+        long estimatedBytes = needsScaling ? EstimateBgraBytes(targetWidth, targetHeight, 1) : 0;
+        if (estimatedBytes > MaxEstimatedRenderTargetBytes)
+            throw new InvalidOperationException(FormatRenderTargetMemoryLimitMessage(estimatedBytes));
+    }
+
+    private CanvasRenderTarget CreateRenderTarget(CanvasDevice device, int width, int height, string purpose)
+    {
+        ThrowIfDeviceLost();
+        try
+        {
+            return new CanvasRenderTarget(device, width, height, 96);
+        }
+        catch (Exception ex) when (ex is OutOfMemoryException or COMException)
+        {
+            throw new InvalidOperationException(
+                $"Failed to allocate {purpose} render target ({width}x{height}). " +
+                "Reduce export resolution or close other GPU-heavy applications.", ex);
+        }
+    }
+
+    private void OnCanvasDeviceLost(CanvasDevice sender, object args)
+    {
+        _deviceLost = true;
+    }
+
+    private void ThrowIfDeviceLost()
+    {
+        if (_deviceLost)
+            throw new RecoverableDeviceLostException(
+                "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
+    }
+
+    private static long EstimateBgraBytes(int width, int height, int surfaceCount)
+    {
+        return (long)width * height * 4 * surfaceCount;
+    }
+
+    private static string FormatRenderTargetMemoryLimitMessage(long estimatedBytes)
+    {
+        long mb = estimatedBytes / (1024 * 1024);
+        long maxMb = MaxEstimatedRenderTargetBytes / (1024 * 1024);
+        return $"Estimated render target memory ({mb} MB) exceeds safe limit ({maxMb} MB). Reduce export resolution or close other GPU-heavy applications.";
+    }
+
     private MediaEncodingProfile CreateEncodingProfile(int width, int height)
     {
         // Use HD1080p as a well-formed template with valid Video + Audio
@@ -692,9 +788,23 @@ public class VideoEncoder : IDisposable
     {
         if (!_disposed)
         {
+            if (_deviceWithDeviceLostHandler is not null)
+            {
+                _deviceWithDeviceLostHandler.DeviceLost -= OnCanvasDeviceLost;
+                _deviceWithDeviceLostHandler = null;
+            }
+
             _frameSemaphore.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
         }
+    }
+}
+
+internal sealed class RecoverableDeviceLostException : Exception
+{
+    public RecoverableDeviceLostException(string message)
+        : base(message)
+    {
     }
 }

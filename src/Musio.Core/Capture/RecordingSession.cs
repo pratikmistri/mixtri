@@ -45,8 +45,11 @@ public class RecordingStatsEventArgs : EventArgs
 /// Master orchestrator that coordinates all capture engines
 /// (screen, mouse, audio) for a single recording session.
 /// </summary>
-public class RecordingSession : IDisposable
+public class RecordingSession : IDisposable, IAsyncDisposable
 {
+    private static readonly TimeSpan StopFinalizeTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan DisposeStopTimeout = TimeSpan.FromSeconds(30);
+
     private readonly RecordingSessionConfig _config;
     private readonly object _lock = new();
 
@@ -291,7 +294,7 @@ public class RecordingSession : IDisposable
         await Task.CompletedTask;
     }
 
-    public async Task StopAsync()
+    public async Task StopAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -309,10 +312,11 @@ public class RecordingSession : IDisposable
             // Stop elapsed timer
             _elapsedWatch.Stop();
 
-            // Stop screen capture first, then wait briefly for in-flight
-            // frame writes to complete before finalizing
+            // Stop screen capture first, then drain in-flight frame writes before finalizing.
             _screenEngine?.StopCapture();
-            await Task.Delay(500); // let queued frame writes finish
+            _videoWriter?.StopAcceptingFrames();
+            if (_videoWriter is not null)
+                await _videoWriter.WaitForQuiescenceAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
 
             _mouseRecorder?.StopRecording();
             _keyboardRecorder?.StopRecording();
@@ -336,7 +340,9 @@ public class RecordingSession : IDisposable
             {
                 try
                 {
-                    await _videoWriter.FinalizeAsync();
+                    using var finalizationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    finalizationCts.CancelAfter(StopFinalizeTimeout);
+                    await _videoWriter.FinalizeAsync(finalizationCts.Token).ConfigureAwait(false);
                 }
                 catch (Exception finEx)
                 {
@@ -817,6 +823,41 @@ public class RecordingSession : IDisposable
 
     // ── IDisposable ─────────────────────────────────────────────────
 
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+            return;
+
+        try
+        {
+            _statsTimer?.Dispose();
+            _statsTimer = null;
+
+            if (State is RecordingState.Recording or RecordingState.Paused)
+            {
+                try
+                {
+                    using var stopCts = new CancellationTokenSource(DisposeStopTimeout);
+                    await StopAsync(stopCts.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[RecordingSession] Async dispose stop failed: {ex.Message}");
+                    CleanupEngines();
+                }
+            }
+            else
+            {
+                CleanupEngines();
+            }
+        }
+        finally
+        {
+            _disposed = true;
+            GC.SuppressFinalize(this);
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -829,8 +870,12 @@ public class RecordingSession : IDisposable
 
         if (State is RecordingState.Recording or RecordingState.Paused)
         {
-            try { StopAsync().GetAwaiter().GetResult(); }
-            catch { /* best-effort stop */ }
+            Debug.WriteLine("[RecordingSession] Dispose called while recording; stopping capture without MP4 finalization.");
+            try { _videoWriter?.StopAcceptingFrames(); } catch { }
+            try { _screenEngine?.StopCapture(); } catch { }
+            try { _mouseRecorder?.StopRecording(); } catch { }
+            try { _keyboardRecorder?.StopRecording(); } catch { }
+            try { _audioEngine?.StopRecording(); } catch { }
         }
 
         CleanupEngines();

@@ -23,6 +23,8 @@ public sealed partial class WindowSelectorOverlay : UserControl
     private List<WindowInfo> _windows = new();
     private WindowInfo? _hoveredWindow;
 
+    private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
+
     // Virtual desktop bounds (physical pixels)
     private int _vdLeft, _vdTop, _vdWidth, _vdHeight;
 
@@ -91,7 +93,15 @@ public sealed partial class WindowSelectorOverlay : UserControl
             {
                 presenter.SetBorderAndTitleBar(false, false);
                 presenter.IsAlwaysOnTop = true;
-                presenter.Maximize();
+                presenter.IsResizable = false;
+                presenter.IsMaximizable = false;
+                presenter.IsMinimizable = false;
+            }
+
+            if (_vdWidth > 0 && _vdHeight > 0)
+            {
+                _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                    _vdLeft, _vdTop, _vdWidth, _vdHeight));
             }
 
             if (screenshotSource is not null)
@@ -402,17 +412,44 @@ public sealed partial class WindowSelectorOverlay : UserControl
             int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
             int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
-            if (width <= 0 || height <= 0)
+            if (width <= 0 || height <= 0 || width > 16384 || height > 16384)
+                return null;
+
+            long byteCount;
+            try
+            {
+                byteCount = checked((long)width * height * 4L);
+            }
+            catch (OverflowException)
+            {
+                return null;
+            }
+
+            if (byteCount > MaxScreenshotBytes)
                 return null;
 
             hdcScreen = GetDC(IntPtr.Zero);
+            if (hdcScreen == IntPtr.Zero)
+                return null;
+
             hdcMem = CreateCompatibleDC(hdcScreen);
+            if (hdcMem == IntPtr.Zero)
+                return null;
+
             hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            if (hBitmap == IntPtr.Zero)
+                return null;
+
             oldObj = SelectObject(hdcMem, hBitmap);
+            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
+                return null;
 
-            BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY);
+            if (!BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
+                return null;
 
-            SelectObject(hdcMem, oldObj);
+            IntPtr restoredObj = SelectObject(hdcMem, oldObj);
+            if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
+                return null;
             oldObj = IntPtr.Zero;
 
             var bmi = new BITMAPINFO
@@ -425,8 +462,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
                 biCompression = 0,
             };
 
-            var pixelData = new byte[width * height * 4];
-            GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            var pixelData = new byte[(int)byteCount];
+            int scanLines = GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            if (scanLines != height)
+                return null;
 
             using var softwareBitmap = new SoftwareBitmap(
                 BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);

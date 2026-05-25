@@ -28,6 +28,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private bool _isResizing;
     private string _resizeHandle = "";
     private Point _resizeStart;
+    private Rect? _activeDragBounds;
 
     private double _selX, _selY, _selW, _selH;
     private bool _hasSelection;
@@ -63,6 +64,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private const double MinSelectionSize = 10;
     private const int SnapRadius = 15;
     private const float SnapMinContrast = 12.0f;
+    private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
 
     public event EventHandler<CaptureRegion>? RegionSelected;
     public event EventHandler? SelectionCancelled;
@@ -290,25 +292,56 @@ public sealed partial class RegionSelectorOverlay : UserControl
         IntPtr hdcMem = IntPtr.Zero;
         IntPtr hBitmap = IntPtr.Zero;
         IntPtr oldObj = IntPtr.Zero;
+        int width = 0;
+        int height = 0;
 
         try
         {
             int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
             int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
             if (width <= 0 || height <= 0)
                 return (null, null, 0, 0);
+            if (width > 16384 || height > 16384)
+                return (null, null, width, height);
+
+            long byteCount;
+            try
+            {
+                byteCount = checked((long)width * height * 4L);
+            }
+            catch (OverflowException)
+            {
+                return (null, null, width, height);
+            }
+
+            if (byteCount > MaxScreenshotBytes)
+                return (null, null, width, height);
 
             hdcScreen = GetDC(IntPtr.Zero);
+            if (hdcScreen == IntPtr.Zero)
+                return (null, null, width, height);
+
             hdcMem = CreateCompatibleDC(hdcScreen);
+            if (hdcMem == IntPtr.Zero)
+                return (null, null, width, height);
+
             hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            if (hBitmap == IntPtr.Zero)
+                return (null, null, width, height);
+
             oldObj = SelectObject(hdcMem, hBitmap);
+            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
+                return (null, null, width, height);
 
-            BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY);
+            if (!BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
+                return (null, null, width, height);
 
-            SelectObject(hdcMem, oldObj);
+            IntPtr restoredObj = SelectObject(hdcMem, oldObj);
+            if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
+                return (null, null, width, height);
             oldObj = IntPtr.Zero;
 
             // Read pixel data from the HBITMAP
@@ -322,8 +355,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
                 biCompression = 0, // BI_RGB
             };
 
-            var pixelData = new byte[width * height * 4];
-            GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            var pixelData = new byte[(int)byteCount];
+            int scanLines = GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            if (scanLines != height)
+                return (null, null, width, height);
 
             // Convert BGRA pixel data to SoftwareBitmap
             using var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
@@ -336,7 +371,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         }
         catch
         {
-            return (null, null, 0, 0);
+            return width > 0 && height > 0 ? (null, null, width, height) : (null, null, 0, 0);
         }
         finally
         {
@@ -514,6 +549,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         // Start new selection
         _isDragging = true;
         _dragStart = pos;
+        _activeDragBounds = FindMonitorBoundsForOverlayPoint(pos);
         _selX = pos.X;
         _selY = pos.Y;
         _selW = 0;
@@ -530,6 +566,9 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
         if (_isDragging)
         {
+            if (_activeDragBounds is Rect bounds)
+                pos = ClampPointToRect(pos, bounds);
+
             _selX = Math.Min(_dragStart.X, pos.X);
             _selY = Math.Min(_dragStart.Y, pos.Y);
             _selW = Math.Abs(pos.X - _dragStart.X);
@@ -580,6 +619,56 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _            => InputSystemCursorShape.Cross,
     };
 
+    private Rect? FindMonitorBoundsForOverlayPoint(Point point)
+    {
+        double canvasW = ActualWidth;
+        double canvasH = ActualHeight;
+        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (canvasW <= 0 || canvasH <= 0 || vdWidth <= 0 || vdHeight <= 0)
+            return null;
+
+        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        double scaleX = canvasW / vdWidth;
+        double scaleY = canvasH / vdHeight;
+
+        foreach (var monitor in _regionSelector.GetMonitors())
+        {
+            var bounds = new Rect(
+                (monitor.X - vdLeft) * scaleX,
+                (monitor.Y - vdTop) * scaleY,
+                monitor.Width * scaleX,
+                monitor.Height * scaleY);
+
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+                continue;
+
+            if (point.X >= bounds.X && point.X <= bounds.X + bounds.Width
+                && point.Y >= bounds.Y && point.Y <= bounds.Y + bounds.Height)
+                return bounds;
+        }
+
+        return null;
+    }
+
+    private static Point ClampPointToRect(Point point, Rect bounds) => new(
+        Math.Clamp(point.X, bounds.X, bounds.X + bounds.Width),
+        Math.Clamp(point.Y, bounds.Y, bounds.Y + bounds.Height));
+
+    private void ClampSelectionToRect(Rect bounds)
+    {
+        double left = Math.Clamp(_selX, bounds.X, bounds.X + bounds.Width);
+        double top = Math.Clamp(_selY, bounds.Y, bounds.Y + bounds.Height);
+        double right = Math.Clamp(_selX + _selW, bounds.X, bounds.X + bounds.Width);
+        double bottom = Math.Clamp(_selY + _selH, bounds.Y, bounds.Y + bounds.Height);
+
+        _selX = Math.Min(left, right);
+        _selY = Math.Min(top, bottom);
+        _selW = Math.Abs(right - left);
+        _selH = Math.Abs(bottom - top);
+    }
+
     private void Grid_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
         bool shiftHeld = IsShiftHeld();
@@ -587,12 +676,16 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (_isDragging)
         {
             _isDragging = false;
+            var activeDragBounds = _activeDragBounds;
+            _activeDragBounds = null;
             RootGrid.ReleasePointerCapture(e.Pointer);
 
             if (_selW > MinSelectionSize && _selH > MinSelectionSize)
             {
                 if (!shiftHeld)
                     SnapSelectionEdges(snapLeft: true, snapTop: true, snapRight: true, snapBottom: true);
+                if (activeDragBounds is Rect bounds)
+                    ClampSelectionToRect(bounds);
                 ButtonPanel.Visibility = Visibility.Visible;
             }
             else
@@ -856,8 +949,16 @@ public sealed partial class RegionSelectorOverlay : UserControl
             return;
 
         // Overlay DIPs → virtual desktop physical pixels (screen-absolute).
-        double scaleX = ActualWidth > 0 ? _screenshotWidth / ActualWidth : 1.0;
-        double scaleY = ActualHeight > 0 ? _screenshotHeight / ActualHeight : 1.0;
+        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vdWidth <= 0 || vdHeight <= 0)
+        {
+            CancelSelection();
+            return;
+        }
+
+        double scaleX = ActualWidth > 0 ? vdWidth / ActualWidth : 1.0;
+        double scaleY = ActualHeight > 0 ? vdHeight / ActualHeight : 1.0;
         int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
         int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
 

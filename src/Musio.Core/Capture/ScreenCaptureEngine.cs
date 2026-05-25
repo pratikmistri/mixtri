@@ -27,7 +27,12 @@ public sealed class ScreenCaptureEngine : IDisposable
     private long _droppedFrames;
     private long _throttledFrames;
     private volatile bool _isPaused;
-    private bool _disposed;
+    private volatile bool _itemClosed;
+    private volatile bool _disposed;
+    private readonly Windows.Foundation.TypedEventHandler<GraphicsCaptureItem, object> _captureItemClosedHandler;
+    private int _itemClosedHandled;
+    private int _captureItemClosedUnsubscribed;
+    private int _disposeStarted;
 
     // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
     private long _lastEmittedSlot = -1;
@@ -50,6 +55,8 @@ public sealed class ScreenCaptureEngine : IDisposable
         _captureItem = item;
         _fps = fps;
         _frameInterval = TimeSpan.FromSeconds(1.0 / fps);
+        _captureItemClosedHandler = OnCaptureItemClosed;
+        _captureItem.Closed += _captureItemClosedHandler;
     }
 
     /// <summary>
@@ -156,18 +163,21 @@ public sealed class ScreenCaptureEngine : IDisposable
 
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
     {
-        using var frame = sender.TryGetNextFrame();
-        if (frame is null)
-        {
-            Interlocked.Increment(ref _droppedFrames);
-            return;
-        }
-
-        if (_isPaused)
-            return;
-
         try
         {
+            if (_itemClosed)
+                return;
+
+            using var frame = sender.TryGetNextFrame();
+            if (frame is null)
+            {
+                Interlocked.Increment(ref _droppedFrames);
+                return;
+            }
+
+            if (_isPaused)
+                return;
+
             var size = frame.ContentSize;
 
             // Recreate frame pool if capture size changed
@@ -211,9 +221,68 @@ public sealed class ScreenCaptureEngine : IDisposable
                 size.Height,
                 skippedSlots));
         }
+        catch (ObjectDisposedException ex)
+        {
+            HandleFrameArrivedException(ex);
+        }
+        catch (COMException ex)
+        {
+            HandleFrameArrivedException(ex);
+        }
         catch (Exception ex)
         {
-            Error?.Invoke(this, ex.Message);
+            HandleFrameArrivedException(ex);
+        }
+    }
+
+    private void OnCaptureItemClosed(GraphicsCaptureItem sender, object args)
+    {
+        _itemClosed = true;
+
+        if (Interlocked.Exchange(ref _itemClosedHandled, 1) != 0)
+            return;
+
+        try
+        {
+            StopCapture();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (COMException ex)
+        {
+            if (!_disposed)
+                Error?.Invoke(this, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            if (!_disposed)
+                Error?.Invoke(this, ex.Message);
+        }
+    }
+
+    private void HandleFrameArrivedException(Exception ex)
+    {
+        if (_disposed || _itemClosed || !IsRecording)
+            return;
+
+        Error?.Invoke(this, ex.Message);
+    }
+
+    private void UnsubscribeCaptureItemClosed()
+    {
+        if (Interlocked.Exchange(ref _captureItemClosedUnsubscribed, 1) != 0)
+            return;
+
+        try
+        {
+            _captureItem.Closed -= _captureItemClosedHandler;
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (COMException)
+        {
         }
     }
 
@@ -286,11 +355,12 @@ public sealed class ScreenCaptureEngine : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0)
             return;
 
         _disposed = true;
 
+        UnsubscribeCaptureItemClosed();
         StopCapture();
         _device.Dispose();
     }
