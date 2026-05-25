@@ -1777,3 +1777,16 @@ the success message. Resetting on close is cleaner and matches user intent.
 **What worked:**
 - Cleaning bin/obj before each platform build avoids stale artifacts.
 - Building x64 and ARM64 separately (Platform=x64 then Platform=ARM64) produces per-arch .msix in bin\{Platform}\Release\net9.0-windows10.0.26100.0\win-{rid}\AppPackages\.
+
+---
+
+## HANG_QUIESCE Comprehensive Fix (44% of crash bucket)
+
+- **Feature/area**: App lifecycle / OS quiesce handling (`App.xaml.cs`, `MainWindow.xaml.cs`)
+- **Approaches tried**:
+  1. **Catch WM_QUERYENDSESSION and treat it as quiesce signal** — previous code only handled WM_ENDSESSION, and even that used wrong constant (`0x0026` instead of `0x0016`) so it never fired. Now WndProc returns 1 to WM_QUERYENDSESSION and routes both messages to `BeginQuiesce`. âœ…
+  2. **`BeginQuiesce` with hard 1.5 s safety timer** — sets `_isExiting` + `_quiesceStarted`, disposes tray/hotkey/extended-execution, posts `Window.Close()` via dispatcher, and starts a `Threading.Timer` that calls `Environment.Exit(0)` so we never exceed the OS quiesce budget. âœ…
+  3. **Guarded `OnWindowClosing`** — only cancels close when `_trayService` is actually alive AND not exiting; lets OS-initiated/Task-Manager closes proceed. âœ…
+  4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. âœ…
+- **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
+- **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.

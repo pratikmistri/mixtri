@@ -22,6 +22,8 @@ public partial class App : Application
     private GlobalHotkeyService? _hotkeyService;
     private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
+    private bool _quiesceStarted;
+    private System.Threading.Timer? _quiesceTimer;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
     public Window? MainAppWindow => _window;
@@ -119,17 +121,46 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Called by MainWindow when WM_ENDSESSION is received — allows the
-    /// app to exit cleanly during system shutdown instead of cancelling the
-    /// close and triggering a HANG_QUIESCE timeout.
+    /// Called when the OS asks the app to close (logoff, shutdown, MSIX
+    /// update, Task Manager end-task). Starts a bounded shutdown so the
+    /// process always exits within the OS quiesce budget instead of
+    /// hanging in <see cref="OnWindowClosing"/> and producing HANG_QUIESCE.
+    /// Safe to call multiple times.
     /// </summary>
-    public void HandleSystemShutdown()
+    public void BeginQuiesce()
     {
+        if (_quiesceStarted) return;
+        _quiesceStarted = true;
         _isExiting = true;
-        ReleaseExtendedExecution();
-        _hotkeyService?.Dispose();
-        _trayService?.Dispose();
+
+        try { ReleaseExtendedExecution(); } catch { }
+        try { _hotkeyService?.Dispose(); } catch { }
+        try { _trayService?.Dispose(); } catch { }
+
+        // Hard safety net: if the dispatcher can't drain in time, force
+        // exit before the OS marks us as hung. OS quiesce budget is
+        // ~5 seconds on the shutdown path and as low as ~2 s on update.
+        _quiesceTimer = new System.Threading.Timer(
+            _ => Environment.Exit(0), null, 1500, System.Threading.Timeout.Infinite);
+
+        try
+        {
+            _window?.DispatcherQueue.TryEnqueue(() =>
+            {
+                try { _window?.Close(); }
+                catch { Environment.Exit(0); }
+            });
+        }
+        catch
+        {
+            Environment.Exit(0);
+        }
     }
+
+    /// <summary>
+    /// Back-compat shim — older call sites used this name.
+    /// </summary>
+    public void HandleSystemShutdown() => BeginQuiesce();
 
     private void OnWindowVisibilityChanged(object sender, WindowVisibilityChangedEventArgs args)
     {
@@ -208,21 +239,30 @@ public partial class App : Application
 
     private void OnExitRequested(object? sender, EventArgs e)
     {
+        if (_quiesceStarted) return;
+        _quiesceStarted = true;
         _isExiting = true;
-        _hotkeyService?.Dispose();
-        _trayService?.Dispose();
-        _window?.Close();
-        // WinUI 3 may not terminate after the last window closes, and
-        // Window.Closed may not fire reliably for hidden windows.
-        // Force exit so the process never lingers in the task manager.
-        Environment.Exit(0);
+
+        try { _hotkeyService?.Dispose(); } catch { }
+        try { _trayService?.Dispose(); } catch { }
+
+        // Safety net so we never linger after user-initiated exit either.
+        _quiesceTimer = new System.Threading.Timer(
+            _ => Environment.Exit(0), null, 2000, System.Threading.Timeout.Infinite);
+
+        try { _window?.Close(); } catch { Environment.Exit(0); }
     }
 
     private void OnWindowClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
     {
+        // Never block an OS- or user-initiated exit.
         if (_isExiting || _window is null) return;
 
-        // Minimize to tray instead of exiting
+        // If the tray isn't available we have no way to bring the app
+        // back, so let the close proceed instead of stranding the process.
+        if (_trayService is null) return;
+
+        // User clicked the window's X — minimize to tray.
         args.Cancel = true;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         ShowWindow(hwnd, SW_HIDE);
@@ -230,11 +270,16 @@ public partial class App : Application
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
-        // WinUI 3 does not terminate the process when the last window closes.
-        // Handles the non-tray exit path (no OnExitRequested).
-        // Skip service disposal here — the OS reclaims all resources on exit,
-        // and Dispose during window teardown can be unreliable.
-        Environment.Exit(0);
+        // The main window has closed. Ask the framework to shut the app
+        // down cleanly, with a hard timer as a safety net in case the
+        // dispatcher can't drain (e.g. during OS quiesce).
+        if (_quiesceTimer is null)
+        {
+            _quiesceTimer = new System.Threading.Timer(
+                _ => Environment.Exit(0), null, 1500, System.Threading.Timeout.Infinite);
+        }
+
+        try { Exit(); } catch { Environment.Exit(0); }
     }
 
     private const int SW_HIDE = 0;
