@@ -104,7 +104,7 @@ public class RegionSelector
     {
         try
         {
-            if (!GetWindowRect(hwnd, out var rect))
+            if (!TryGetVisibleBounds(hwnd, out var rect))
                 return null;
 
             var titleBuffer = new char[256];
@@ -144,9 +144,26 @@ public class RegionSelector
         }
     }
 
+    /// <summary>
+    /// Returns the window's visible bounds using DWM extended frame bounds when available,
+    /// which excludes the invisible resize border that <see cref="GetWindowRect"/> includes.
+    /// This matches what Windows Graphics Capture actually records for the window.
+    /// </summary>
+    private static bool TryGetVisibleBounds(IntPtr hwnd, out RECT rect)
+    {
+        if (DwmGetWindowAttributeRect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                out rect, Marshal.SizeOf<RECT>()) == 0 &&
+            rect.Right > rect.Left && rect.Bottom > rect.Top)
+        {
+            return true;
+        }
+        return GetWindowRect(hwnd, out rect);
+    }
+
     #region P/Invoke declarations
 
     private const uint MONITORINFOF_PRIMARY = 1;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
     private delegate bool MonitorEnumProc(
         IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
@@ -197,6 +214,9 @@ public class RegionSelector
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
     #endregion
 }
