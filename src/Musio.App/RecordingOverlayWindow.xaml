@@ -8,7 +8,7 @@
     <Grid x:Name="RootGrid" Padding="16,8,8,8"
           Background="Transparent">
 
-        <!-- Recording state: indicator dot + elapsed time + stop button -->
+        <!-- Recording state: elapsed time + stop button -->
         <StackPanel x:Name="RecordingPanel" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center" HorizontalAlignment="Left">
             <TextBlock
                 x:Name="ElapsedText"

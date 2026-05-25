@@ -51,7 +51,7 @@ public sealed partial class RecordingOverlayWindow : Window
         }
         else
         {
-            RootGrid.Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["RecordingOverlayBackgroundBrush"];
+            RootGrid.Background = (Brush)Application.Current.Resources["RecordingOverlayBackgroundBrush"];
         }
 
         // Show initial elapsed time
