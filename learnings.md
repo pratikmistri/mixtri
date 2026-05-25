@@ -1680,3 +1680,21 @@ the success message. Resetting on close is cleaner and matches user intent.
 **What worked:** `DesktopAcrylicBackdrop` (Microsoft.UI.Xaml.Media) as the window backdrop with default DWM corner rounding; removed the GDI region clip that decoupled the body from the shadow.
 
 **What didn't work:** `SetWindowRgn` for a full pill shape - it clips only the window contents, not the DWM shadow, so the shadow stayed rectangular.
+
+## Window selection highlight rect overstating bounds (2026-05-24)
+
+**Feature/area**: WindowSelectorOverlay / RegionSelector
+
+**Problem**: Highlight rect during window-picker hover extended ~7px beyond the visible window edges, creating confusion about whether the recording would include the extra region.
+
+**Root cause**: GetWindowRect on Windows 10/11 includes the invisible DWM resize/shadow border for thick-framed windows. GraphicsCaptureItem.CreateForWindow captures roughly the visible bounds, so the highlight overstated the recorded area.
+
+**Fix that worked**: Replaced GetWindowRect with DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) (with GetWindowRect fallback for non-DWM/classic-themed cases). Applied in WindowSelectorOverlay.EnumerateWindows() and RegionSelector.BuildWindowInfo(). Added a DwmGetWindowAttributeRect P/Invoke overload returning a RECT struct.
+
+## Region capture off-by-1px at fractional DPI — DID NOT WORK (2026-05-24)
+
+**Feature/area**: RegionSelectorOverlay / CaptureRegion / RecordingSession
+
+**Problem**: Precisely-selected region captures included an extra 1px on the left/top edge.
+
+**Approach tried (reverted)**: Hypothesized the cause was DIP↔physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.
