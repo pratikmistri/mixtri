@@ -51,7 +51,7 @@ public sealed partial class RecordingOverlayWindow : Window
         }
         else
         {
-            RootGrid.Background = (Brush)Application.Current.Resources["RecordingOverlayBackgroundBrush"];
+            RootGrid.Background = (Brush)Application.Current.Resources["RecordingOverlaySolidBackgroundBrush"];
         }
 
         // Show initial elapsed time
@@ -251,13 +251,13 @@ public sealed partial class RecordingOverlayWindow : Window
         Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(inOp, "Opacity");
         sb.Children.Add(inOp);
 
-        sb.Begin();
         _currentPhraseStoryboard?.Stop();
         _currentPhraseStoryboard = sb;
         sb.Completed += (_, _) =>
         {
             if (ReferenceEquals(_currentPhraseStoryboard, sb)) _currentPhraseStoryboard = null;
         };
+        sb.Begin();
         _showingA = !_showingA;
     }
 

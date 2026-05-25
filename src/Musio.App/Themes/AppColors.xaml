@@ -38,6 +38,7 @@
             <AcrylicBrush x:Key="RecordingOverlayBackgroundBrush"
                           TintColor="#1E1E1E" TintOpacity="0.8"
                           FallbackColor="#E01E1E1E" />
+            <SolidColorBrush x:Key="RecordingOverlaySolidBackgroundBrush" Color="#E01E1E1E" />
             <SolidColorBrush x:Key="RecordingIndicatorBrush"       Color="#FFFF3B30" />
             <SolidColorBrush x:Key="RecordingStopRestBrush"        Color="#FFD13438" />
             <SolidColorBrush x:Key="RecordingStopHoverBrush"       Color="#FFE74C3C" />
@@ -77,6 +78,7 @@
             <AcrylicBrush x:Key="RecordingOverlayBackgroundBrush"
                           TintColor="#F0F0F0" TintOpacity="0.8"
                           FallbackColor="#E0F0F0F0" />
+            <SolidColorBrush x:Key="RecordingOverlaySolidBackgroundBrush" Color="#E0F0F0F0" />
             <SolidColorBrush x:Key="RecordingIndicatorBrush"       Color="#FFFF3B30" />
             <SolidColorBrush x:Key="RecordingStopRestBrush"        Color="#FFC42B1C" />
             <SolidColorBrush x:Key="RecordingStopHoverBrush"       Color="#FFD13438" />
@@ -114,6 +116,7 @@
 
             <!-- ── Recording overlay ── -->
             <SolidColorBrush x:Key="RecordingOverlayBackgroundBrush" Color="{StaticResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="RecordingOverlaySolidBackgroundBrush" Color="{StaticResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="RecordingIndicatorBrush"       Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="RecordingStopRestBrush"        Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="RecordingStopHoverBrush"       Color="{StaticResource SystemColorHighlightColor}" />
