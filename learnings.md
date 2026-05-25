@@ -1712,7 +1712,7 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 ---
 
-## Crash/Freeze Hardening Pass — High-DPI / High-Res Stability (13 fixes)
+## Crash/Freeze Hardening Pass ï¿½ High-DPI / High-Res Stability (13 fixes)
 
 **Feature/area:** Capture pipeline, compositor, export, picker overlays, mouse hook.
 
@@ -1720,19 +1720,19 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **What worked:**
 
-1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` — replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 ? H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings ? identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
-2. **In-flight write drain** — `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
-3. **Serialized crop+write** — entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
-4. **`TryGetNextFrame()` inside try/catch** — `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
-5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** — `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
-6. **Virtual-desktop screenshot guards** — `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
-7. **VRAM preflight** — `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal =4K exports unaffected.
-8. **`GraphicsCaptureItem.Closed`** — `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
-9. **`IAsyncDisposable` on `RecordingSession`** — sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
-10. **Transcode watchdog** — 2-hour timeout via linked CTS around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern).
-11. **Mouse move throttle at 250 Hz** — `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
-12. **Window picker covers virtual desktop** — `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
-13. **Region drag clamped to active monitor (Option A)** — drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what's drawn. No popup/error.
+1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` ï¿½ replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 ? H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings ? identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
+2. **In-flight write drain** ï¿½ `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
+3. **Serialized crop+write** ï¿½ entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
+4. **`TryGetNextFrame()` inside try/catch** ï¿½ `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
+5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** ï¿½ `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
+6. **Virtual-desktop screenshot guards** ï¿½ `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
+7. **VRAM preflight** ï¿½ `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal =4K exports unaffected.
+8. **`GraphicsCaptureItem.Closed`** ï¿½ `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
+9. **`IAsyncDisposable` on `RecordingSession`** ï¿½ sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
+10. **Transcode watchdog** ï¿½ 2-hour timeout via linked CTS around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern).
+11. **Mouse move throttle at 250 Hz** ï¿½ `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
+12. **Window picker covers virtual desktop** ï¿½ `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
+13. **Region drag clamped to active monitor (Option A)** ï¿½ drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what's drawn. No popup/error.
 
 **Validation:**
 - All three projects build clean via VS Enterprise MSBuild (`vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'` ? `Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64 /p:Configuration=Debug /restore`.
@@ -1743,4 +1743,21 @@ the success message. Resetting on close is cleaner and matches user intent.
 - `Get-Command MSBuild.exe` returns nothing; use `vswhere -latest -find` to locate it.
 - Don't rely on `dotnet test` in this environment without a .NET 9 runtime installed alongside the SDK.
 - For #1, the cleanest BGRA?H.264 path is `BitmapDecoder` ? `SoftwareBitmap` (BGRA8) ? `MediaStreamSample.CreateFromBuffer`. Avoid `MediaComposition` for any per-frame encoding.
-- For #5, do NOT recreate the device mid-frame on `DeviceLost` — surface a recoverable exception and let outer code restart cleanly.
+- For #5, do NOT recreate the device mid-frame on `DeviceLost` ï¿½ surface a recoverable exception and let outer code restart cleanly.
+## Window selection highlight rect overstating bounds (2026-05-24)
+
+**Feature/area**: WindowSelectorOverlay / RegionSelector
+
+**Problem**: Highlight rect during window-picker hover extended ~7px beyond the visible window edges, creating confusion about whether the recording would include the extra region.
+
+**Root cause**: GetWindowRect on Windows 10/11 includes the invisible DWM resize/shadow border for thick-framed windows. GraphicsCaptureItem.CreateForWindow captures roughly the visible bounds, so the highlight overstated the recorded area.
+
+**Fix that worked**: Replaced GetWindowRect with DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) (with GetWindowRect fallback for non-DWM/classic-themed cases). Applied in WindowSelectorOverlay.EnumerateWindows() and RegionSelector.BuildWindowInfo(). Added a DwmGetWindowAttributeRect P/Invoke overload returning a RECT struct.
+
+## Region capture off-by-1px at fractional DPI â€” DID NOT WORK (2026-05-24)
+
+**Feature/area**: RegionSelectorOverlay / CaptureRegion / RecordingSession
+
+**Problem**: Precisely-selected region captures included an extra 1px on the left/top edge.
+
+**Approach tried (reverted)**: Hypothesized the cause was DIPâ†”physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.

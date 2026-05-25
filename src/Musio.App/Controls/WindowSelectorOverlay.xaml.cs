@@ -169,7 +169,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
             DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, sizeof(int));
             if (cloaked != 0) return true;
 
-            if (!GetWindowRect(hwnd, out var rect)) return true;
+            if (!TryGetVisibleBounds(hwnd, out var rect)) return true;
             int w = rect.Right - rect.Left;
             int h = rect.Bottom - rect.Top;
             if (w <= 0 || h <= 0) return true;
@@ -494,6 +494,22 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     #endregion
 
+    /// <summary>
+    /// Returns the window's visible bounds using DWM extended frame bounds when available,
+    /// which excludes the invisible resize border that <see cref="GetWindowRect"/> includes.
+    /// This matches what Windows Graphics Capture actually records for the window.
+    /// </summary>
+    private static bool TryGetVisibleBounds(IntPtr hwnd, out RECT rect)
+    {
+        if (DwmGetWindowAttributeRect(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                out rect, Marshal.SizeOf<RECT>()) == 0 &&
+            rect.Right > rect.Left && rect.Bottom > rect.Top)
+        {
+            return true;
+        }
+        return GetWindowRect(hwnd, out rect);
+    }
+
     #region P/Invoke
 
     private const int SW_MINIMIZE = 6;
@@ -506,6 +522,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int DWMWA_CLOAKED = 14;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
     private const int WH_KEYBOARD_LL = 13;
     private static readonly IntPtr WM_KEYDOWN = 0x0100;
@@ -565,6 +582,9 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr hwnd);
