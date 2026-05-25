@@ -53,7 +53,8 @@ public sealed partial class MainWindow : Window
     private IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
         const uint WM_GETMINMAXINFO = 0x0024;
-        const uint WM_ENDSESSION = 0x0026;
+        const uint WM_QUERYENDSESSION = 0x0011;
+        const uint WM_ENDSESSION = 0x0016;
 
         if (msg == WM_GETMINMAXINFO)
         {
@@ -64,11 +65,20 @@ public sealed partial class MainWindow : Window
             return IntPtr.Zero;
         }
 
-        // System shutdown / logoff — let the app exit cleanly instead of
-        // hiding to tray and causing a HANG_QUIESCE timeout.
+        // Any OS-initiated session/quiesce signal: tell the OS we can close
+        // and start a bounded shutdown so we never exceed the quiesce timeout.
+        // This covers logoff, shutdown, MSIX update (ENDSESSION_CLOSEAPP), and
+        // Task Manager's "End task" path.
+        if (msg == WM_QUERYENDSESSION)
+        {
+            App.Current.BeginQuiesce();
+            return new IntPtr(1);
+        }
+
         if (msg == WM_ENDSESSION && wParam != IntPtr.Zero)
         {
-            App.Current.HandleSystemShutdown();
+            App.Current.BeginQuiesce();
+            return IntPtr.Zero;
         }
 
         return CallWindowProc(_originalWndProc, hwnd, msg, wParam, lParam);
