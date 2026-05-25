@@ -1784,9 +1784,9 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 - **Feature/area**: App lifecycle / OS quiesce handling (`App.xaml.cs`, `MainWindow.xaml.cs`)
 - **Approaches tried**:
-  1. **Catch WM_QUERYENDSESSION and treat it as quiesce signal** � previous code only handled WM_ENDSESSION, and even that used wrong constant (`0x0026` instead of `0x0016`) so it never fired. Now WndProc returns 1 to WM_QUERYENDSESSION and routes both messages to `BeginQuiesce`. ✅
-  2. **`BeginQuiesce` with hard 1.5 s safety timer** � sets `_isExiting` + `_quiesceStarted`, disposes tray/hotkey/extended-execution, posts `Window.Close()` via dispatcher, and starts a `Threading.Timer` that calls `Environment.Exit(0)` so we never exceed the OS quiesce budget. ✅
-  3. **Guarded `OnWindowClosing`** � only cancels close when `_trayService` is actually alive AND not exiting; lets OS-initiated/Task-Manager closes proceed. ✅
-  4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** � prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
-- **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help � the handler was dead code.
+  1. **Catch WM_QUERYENDSESSION and treat it as quiesce signal** — previous code only handled WM_ENDSESSION, and even that used wrong constant (`0x0026` instead of `0x0016`) so it never fired. Now WndProc returns 1 to WM_QUERYENDSESSION and routes both messages to `BeginQuiesce`. ✅
+  2. **`BeginQuiesce` with hard 1.5 s safety timer** — sets `_isExiting`, disposes tray/hotkey/extended-execution, posts `Window.Close()` via dispatcher, and starts a `Threading.Timer` that calls `Environment.Exit(0)` so we never exceed the OS quiesce budget. ✅
+  3. **Guarded `OnWindowClosing`** — only cancels close when `_trayService` is actually alive AND not exiting; lets OS-initiated/Task-Manager closes proceed. ✅
+  4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
+- **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
 - **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.

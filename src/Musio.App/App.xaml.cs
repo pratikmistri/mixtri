@@ -22,7 +22,6 @@ public partial class App : Application
     private GlobalHotkeyService? _hotkeyService;
     private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
-    private bool _quiesceStarted;
     private System.Threading.Timer? _quiesceTimer;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
@@ -121,27 +120,28 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Called when the OS asks the app to close (logoff, shutdown, MSIX
-    /// update, Task Manager end-task). Starts a bounded shutdown so the
-    /// process always exits within the OS quiesce budget instead of
-    /// hanging in <see cref="OnWindowClosing"/> and producing HANG_QUIESCE.
-    /// Safe to call multiple times.
+    /// Begins a bounded shutdown. Used for both OS-initiated quiesce
+    /// (logoff, shutdown, MSIX update, Task Manager end-task) and the
+    /// user-initiated tray "Exit" command, so the two paths can't drift.
+    /// Idempotent. Always exits the process within the OS quiesce budget
+    /// via a hard <see cref="System.Threading.Timer"/> safety net.
     /// </summary>
-    public void BeginQuiesce()
+    /// <param name="timeoutMs">
+    /// Hard upper bound (ms) before <c>Environment.Exit</c> is forced.
+    /// Defaults to 1500 ms to stay well under the OS quiesce window
+    /// (~2 s on package update, ~5 s on shutdown).
+    /// </param>
+    public void BeginQuiesce(int timeoutMs = 1500)
     {
-        if (_quiesceStarted) return;
-        _quiesceStarted = true;
+        if (_isExiting) return;
         _isExiting = true;
 
         try { ReleaseExtendedExecution(); } catch { }
         try { _hotkeyService?.Dispose(); } catch { }
         try { _trayService?.Dispose(); } catch { }
 
-        // Hard safety net: if the dispatcher can't drain in time, force
-        // exit before the OS marks us as hung. OS quiesce budget is
-        // ~5 seconds on the shutdown path and as low as ~2 s on update.
         _quiesceTimer = new System.Threading.Timer(
-            _ => Environment.Exit(0), null, 1500, System.Threading.Timeout.Infinite);
+            _ => Environment.Exit(0), null, timeoutMs, System.Threading.Timeout.Infinite);
 
         try
         {
@@ -239,18 +239,11 @@ public partial class App : Application
 
     private void OnExitRequested(object? sender, EventArgs e)
     {
-        if (_quiesceStarted) return;
-        _quiesceStarted = true;
-        _isExiting = true;
-
-        try { _hotkeyService?.Dispose(); } catch { }
-        try { _trayService?.Dispose(); } catch { }
-
-        // Safety net so we never linger after user-initiated exit either.
-        _quiesceTimer = new System.Threading.Timer(
-            _ => Environment.Exit(0), null, 2000, System.Threading.Timeout.Infinite);
-
-        try { _window?.Close(); } catch { Environment.Exit(0); }
+        // User-initiated exit shares the same shutdown routine as OS
+        // quiesce so the two paths can't drift; a slightly longer
+        // timeout gives the dispatcher more room to drain cleanly when
+        // we're not racing the OS quiesce budget.
+        BeginQuiesce(timeoutMs: 2000);
     }
 
     private void OnWindowClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
@@ -272,7 +265,8 @@ public partial class App : Application
     {
         // The main window has closed. Ask the framework to shut the app
         // down cleanly, with a hard timer as a safety net in case the
-        // dispatcher can't drain (e.g. during OS quiesce).
+        // dispatcher can't drain (e.g. during OS quiesce). If BeginQuiesce
+        // already armed a timer we don't need a second one.
         if (_quiesceTimer is null)
         {
             _quiesceTimer = new System.Threading.Timer(
