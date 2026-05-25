@@ -1665,3 +1665,18 @@ the success message. Resetting on close is cleaner and matches user intent.
 - Swatch endpoint math vs compositor parity: the swatch clips at the unit-square edge while `BackgroundCompositor` uses half-diagonal endpoints. The preview direction is correct; saturation differs slightly at non-orthogonal angles. Acceptable for a small swatch.
 
 ---
+
+---
+
+## Recording Overlay - System Backdrop Acrylic & Matching Shadow
+
+**Feature/area:** `RecordingOverlayWindow`
+
+**Approaches tried:**
+
+1. **`AcrylicBrush` on Grid + `SetWindowRgn` pill clip** - Worked for the body, but DWM's drop shadow still followed the rectangular window bounds, so the shadow appeared square around a rounded body.
+2. **Switched to `SystemBackdrop = new DesktopAcrylicBackdrop()` and removed `SetWindowRgn` + Grid `CornerRadius`** - Worked. The window itself is acrylic, DWM rounds the corners via `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND` (~8px), and the DWM shadow now follows those rounded corners. Grid background is `Transparent`. Guarded with `DesktopAcrylicController.IsSupported()`.
+
+**What worked:** `DesktopAcrylicBackdrop` (Microsoft.UI.Xaml.Media) as the window backdrop with default DWM corner rounding; removed the GDI region clip that decoupled the body from the shadow.
+
+**What didn't work:** `SetWindowRgn` for a full pill shape - it clips only the window contents, not the DWM shadow, so the shadow stayed rectangular.
