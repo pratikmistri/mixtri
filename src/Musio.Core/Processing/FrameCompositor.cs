@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.AI;
 using Musio.Core.Capture;
@@ -41,6 +42,9 @@ public class FrameCompositor : IDisposable
     private readonly AutoZoomEngine _zoomEngine;
     private readonly CursorSmoother _smoother;
     private readonly CompositionConfig _config;
+    private volatile bool _deviceLost;
+
+    private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
 
     // Optional overlay renderers
     private WebcamCompositor? _webcamCompositor;
@@ -96,6 +100,7 @@ public class FrameCompositor : IDisposable
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _device = CanvasDevice.GetSharedDevice();
+        _device.DeviceLost += OnCanvasDeviceLost;
         _bgCompositor = new BackgroundCompositor();
         _cursorRenderer = new CursorRenderer(config.Cursor);
         _zoomEngine = new AutoZoomEngine(config.Zoom);
@@ -137,6 +142,7 @@ public class FrameCompositor : IDisposable
         float dpiScale = 0)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDeviceLost();
         ArgumentNullException.ThrowIfNull(mouseData);
         if (sourceWidth <= 0) throw new ArgumentOutOfRangeException(nameof(sourceWidth));
         if (sourceHeight <= 0) throw new ArgumentOutOfRangeException(nameof(sourceHeight));
@@ -168,6 +174,7 @@ public class FrameCompositor : IDisposable
             _contentWidth, _contentHeight, _config.Background);
         OutputWidth = outW;
         OutputHeight = outH;
+        PreflightRenderTargetMemory();
 
         // Smooth cursor path at the target FPS, subtract crop offset for
         // region recordings, and apply time offset. Mouse hook coordinates
@@ -368,6 +375,7 @@ public class FrameCompositor : IDisposable
     public CanvasRenderTarget ComposeFrame(CanvasBitmap sourceFrame, double sourceTimeSeconds)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfDeviceLost();
         if (!_initialized)
             throw new InvalidOperationException("Call InitializeAsync before compositing frames.");
         ArgumentNullException.ThrowIfNull(sourceFrame);
@@ -425,7 +433,7 @@ public class FrameCompositor : IDisposable
         var croppedFrame = CropSourceFrame(sourceFrame, viewport);
 
         // Create output render target
-        var output = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+        var output = CreateRenderTarget(OutputWidth, OutputHeight, "direct composition output");
         using (var ds = output.CreateDrawingSession())
         {
             // Background + shadow + content + border
@@ -507,7 +515,7 @@ public class FrameCompositor : IDisposable
             cy_comp - cropH / 2f, 0f, Math.Max(0f, OutputHeight - cropH));
 
         // 5. Draw zoomed composite + fixed overlays
-        var output = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+        var output = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom output");
         using (var ds = output.CreateDrawingSession())
         {
             // Use high-quality interpolation only when zoomed; linear is cheaper at 1:1
@@ -551,8 +559,65 @@ public class FrameCompositor : IDisposable
             || _compositeBuffer.SizeInPixels.Height != (uint)OutputHeight)
         {
             _compositeBuffer?.Dispose();
-            _compositeBuffer = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+            _compositeBuffer = null;
+            _compositeBuffer = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom buffer");
         }
+    }
+
+    private void PreflightRenderTargetMemory()
+    {
+        long estimatedBytes = EstimateBgraBytes(OutputWidth, OutputHeight, 2)
+            + EstimateBgraBytes(_sourceAreaWidth, _sourceAreaHeight, 1);
+        if (estimatedBytes > MaxEstimatedRenderTargetBytes)
+            throw new InvalidOperationException(FormatRenderTargetMemoryLimitMessage(estimatedBytes));
+    }
+
+    private CanvasRenderTarget CreateRenderTarget(int width, int height, string purpose)
+    {
+        ThrowIfDeviceLost();
+        try
+        {
+            return new CanvasRenderTarget(_device, width, height, 96);
+        }
+        catch (Exception ex) when (ex is OutOfMemoryException or COMException)
+        {
+            ReleaseCachedRenderTargets();
+            throw new InvalidOperationException(
+                $"Failed to allocate {purpose} render target ({width}x{height}). " +
+                "Reduce export resolution or close other GPU-heavy applications.", ex);
+        }
+    }
+
+    private void ReleaseCachedRenderTargets()
+    {
+        _croppedBuffer?.Dispose();
+        _croppedBuffer = null;
+        _compositeBuffer?.Dispose();
+        _compositeBuffer = null;
+    }
+
+    private void OnCanvasDeviceLost(CanvasDevice sender, object args)
+    {
+        _deviceLost = true;
+    }
+
+    private void ThrowIfDeviceLost()
+    {
+        if (_deviceLost)
+            throw new RecoverableDeviceLostException(
+                "The graphics device was lost while compositing frames. Retry the export after closing other GPU-heavy applications.");
+    }
+
+    private static long EstimateBgraBytes(int width, int height, int surfaceCount)
+    {
+        return (long)width * height * 4 * surfaceCount;
+    }
+
+    private static string FormatRenderTargetMemoryLimitMessage(long estimatedBytes)
+    {
+        long mb = estimatedBytes / (1024 * 1024);
+        long maxMb = MaxEstimatedRenderTargetBytes / (1024 * 1024);
+        return $"Estimated render target memory ({mb} MB) exceeds safe limit ({maxMb} MB). Reduce export resolution or close other GPU-heavy applications.";
     }
 
     #region Aspect Ratio
@@ -710,7 +775,8 @@ public class FrameCompositor : IDisposable
             || _croppedBuffer.SizeInPixels.Height != (uint)_sourceAreaHeight)
         {
             _croppedBuffer?.Dispose();
-            _croppedBuffer = new CanvasRenderTarget(_device, _sourceAreaWidth, _sourceAreaHeight, 96);
+            _croppedBuffer = null;
+            _croppedBuffer = CreateRenderTarget(_sourceAreaWidth, _sourceAreaHeight, "source crop buffer");
         }
 
         // Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
@@ -869,10 +935,8 @@ public class FrameCompositor : IDisposable
     {
         if (!_disposed)
         {
-            _croppedBuffer?.Dispose();
-            _croppedBuffer = null;
-            _compositeBuffer?.Dispose();
-            _compositeBuffer = null;
+            _device.DeviceLost -= OnCanvasDeviceLost;
+            ReleaseCachedRenderTargets();
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
             _webcamCompositor?.Dispose();
@@ -882,5 +946,13 @@ public class FrameCompositor : IDisposable
             _disposed = true;
             GC.SuppressFinalize(this);
         }
+    }
+}
+
+internal sealed class RecoverableDeviceLostException : Exception
+{
+    public RecoverableDeviceLostException(string message)
+        : base(message)
+    {
     }
 }

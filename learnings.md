@@ -1680,3 +1680,67 @@ the success message. Resetting on close is cleaner and matches user intent.
 **What worked:** `DesktopAcrylicBackdrop` (Microsoft.UI.Xaml.Media) as the window backdrop with default DWM corner rounding; removed the GDI region clip that decoupled the body from the shadow.
 
 **What didn't work:** `SetWindowRgn` for a full pill shape - it clips only the window contents, not the DWM shadow, so the shadow stayed rectangular.
+
+---
+
+## Mouse Move Sample Throttling at 250Hz
+
+**Feature/area:** MouseHookRecorder move-event recording.
+
+**Approaches tried:**
+1. **Stopwatch-based pure `WM_MOUSEMOVE` gate in `HookCallback()`** â€” Worked. Added a 4ms minimum interval between persisted move samples while leaving button and scroll samples unthrottled.
+
+**What worked:** Tracking the last persisted move timestamp and resetting it in `StartRecording()` caps high-frequency move samples without changing the binary serialization format.
+
+**What didn't work:** Full solution MSBuild still fails in pre-existing App errors (`FindMonitorBoundsForOverlayPoint`, `ClampPointToRect`); targeted Core build hits a pre-existing `Buffer` ambiguity in `VideoWriter.cs`.
+
+---
+
+## Crash/freeze hardening - D3D, Win2D, VRAM, export watchdog
+
+**Feature/area:** `Direct3DDeviceHelper`, `FrameCompositor`, `VideoEncoder`
+
+**Approaches tried:**
+- Checked `D3D11CreateDevice` HRESULT and retried hardware failures with WARP (`D3D_DRIVER_TYPE_WARP = 5`).
+- Subscribed shared `CanvasDevice.DeviceLost` handlers and converted later use into recoverable exceptions instead of recreating devices mid-frame.
+- Added BGRA render-target memory preflights plus OOM/COM allocation wrapping for full-frame `CanvasRenderTarget` allocations.
+- Wrapped first-pass `TranscodeAsync` with a 2-hour watchdog using cancellation, mirroring the audio mux timeout pattern.
+
+**What worked:** Fail-fast validation and recoverable exception paths keep exports from crashing/freezing while preserving quality and normal <=4K behavior.
+
+**What didn't work:** `MSBuild.exe` was not available via `Get-Command MSBuild.exe`, so validation was limited to re-reading modified files and `git diff --check`; do not use `dotnet build` for this repo.
+
+---
+
+## Crash/Freeze Hardening Pass — High-DPI / High-Res Stability (13 fixes)
+
+**Feature/area:** Capture pipeline, compositor, export, picker overlays, mouse hook.
+
+**Context:** Reports of freezes/crashes on high-DPI and high-resolution devices. Rubber-duck reviewed the codebase; 13 hardening items implemented in parallel by 5 sub-agents across non-overlapping file groups. No functionality or export-quality change.
+
+**What worked:**
+
+1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` — replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 ? H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings ? identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
+2. **In-flight write drain** — `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
+3. **Serialized crop+write** — entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
+4. **`TryGetNextFrame()` inside try/catch** — `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
+5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** — `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
+6. **Virtual-desktop screenshot guards** — `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
+7. **VRAM preflight** — `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal =4K exports unaffected.
+8. **`GraphicsCaptureItem.Closed`** — `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
+9. **`IAsyncDisposable` on `RecordingSession`** — sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
+10. **Transcode watchdog** — 2-hour timeout via linked CTS around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern).
+11. **Mouse move throttle at 250 Hz** — `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
+12. **Window picker covers virtual desktop** — `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
+13. **Region drag clamped to active monitor (Option A)** — drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what's drawn. No popup/error.
+
+**Validation:**
+- All three projects build clean via VS Enterprise MSBuild (`vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'` ? `Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64 /p:Configuration=Debug /restore`.
+- MSTest run could not execute in this environment (host has .NET 8 and .NET 10 but not .NET 9 runtime in x64). Build-clean is the strongest available validation; behavior verification needs end-to-end manual recording/export on a target device.
+
+**What didn't work / things to remember:**
+- `dotnet build` still fails for this repo (PriGen MSB4062). Use VS MSBuild.
+- `Get-Command MSBuild.exe` returns nothing; use `vswhere -latest -find` to locate it.
+- Don't rely on `dotnet test` in this environment without a .NET 9 runtime installed alongside the SDK.
+- For #1, the cleanest BGRA?H.264 path is `BitmapDecoder` ? `SoftwareBitmap` (BGRA8) ? `MediaStreamSample.CreateFromBuffer`. Avoid `MediaComposition` for any per-frame encoding.
+- For #5, do NOT recreate the device mid-frame on `DeviceLost` — surface a recoverable exception and let outer code restart cleanly.

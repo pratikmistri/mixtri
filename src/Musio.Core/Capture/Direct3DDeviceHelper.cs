@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using Windows.Graphics.DirectX.Direct3D11;
 using WinRT;
@@ -11,17 +13,26 @@ public static class Direct3DDeviceHelper
 {
     public static IDirect3DDevice CreateDevice()
     {
-        D3D11CreateDevice(
-            IntPtr.Zero,
-            D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_HARDWARE,
-            IntPtr.Zero,
-            D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            null,
-            0,
-            D3D11_SDK_VERSION,
-            out var d3dDevice,
-            out _,
-            out _);
+        object d3dDevice;
+
+        try
+        {
+            d3dDevice = CreateD3D11Device(D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_HARDWARE);
+        }
+        catch (Exception hardwareException)
+        {
+            Debug.WriteLine($"[Direct3DDeviceHelper] Hardware D3D11 device creation failed; falling back to WARP: {hardwareException.Message}");
+
+            try
+            {
+                d3dDevice = CreateD3D11Device(D3D_DRIVER_TYPE.D3D_DRIVER_TYPE_WARP);
+            }
+            catch
+            {
+                ExceptionDispatchInfo.Capture(hardwareException).Throw();
+                throw;
+            }
+        }
 
         // The D3D11 device implements IDXGIDevice; get its IUnknown for the DXGI interop call
         var dxgiDevicePtr = Marshal.GetIUnknownForObject(d3dDevice);
@@ -39,6 +50,23 @@ public static class Direct3DDeviceHelper
         }
     }
 
+    private static object CreateD3D11Device(D3D_DRIVER_TYPE driverType)
+    {
+        var hr = D3D11CreateDevice(
+            IntPtr.Zero,
+            driverType,
+            IntPtr.Zero,
+            D3D11_CREATE_DEVICE_FLAG.D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            null,
+            0,
+            D3D11_SDK_VERSION,
+            out var d3dDevice,
+            out _,
+            out _);
+        Marshal.ThrowExceptionForHR(hr);
+        return d3dDevice;
+    }
+
     private const uint D3D11_SDK_VERSION = 7;
 
     [Flags]
@@ -49,7 +77,8 @@ public static class Direct3DDeviceHelper
 
     private enum D3D_DRIVER_TYPE
     {
-        D3D_DRIVER_TYPE_HARDWARE = 1
+        D3D_DRIVER_TYPE_HARDWARE = 1,
+        D3D_DRIVER_TYPE_WARP = 5
     }
 
     [DllImport("d3d11.dll", EntryPoint = "D3D11CreateDevice", SetLastError = true)]

@@ -92,6 +92,7 @@ public sealed class MouseHookRecorder : IDisposable
 
     private const int DefaultSampleCapacity = 100_000;
     private const int DefaultClickCapacity  = 1_000;
+    private const double MinMoveIntervalMs = 4.0; // 250Hz cap
 
     // Binary file format constants
     private static readonly byte[] MagicBytes = "MCUR"u8.ToArray();
@@ -107,6 +108,7 @@ public sealed class MouseHookRecorder : IDisposable
     private long _startTicks;
     private long _endTicks;
     private long _stopRequestedTicks;
+    private long _lastMoveTicks;
     private bool _paused;
     private bool _disposed;
 
@@ -134,6 +136,7 @@ public sealed class MouseHookRecorder : IDisposable
             _clicks.Clear();
         }
 
+        _lastMoveTicks = 0;
         _paused = false;
         _hookReady.Reset();
         _startTicks = Stopwatch.GetTimestamp();
@@ -273,7 +276,18 @@ public sealed class MouseHookRecorder : IDisposable
 
                 lock (_lock)
                 {
-                    _samples.Add(sample);
+                    bool isPureMove = msg == WM_MOUSEMOVE;
+                    bool shouldRecordSample = !isPureMove ||
+                        _lastMoveTicks == 0 ||
+                        (ticks - _lastMoveTicks) * 1000.0 / Stopwatch.Frequency >= MinMoveIntervalMs;
+
+                    if (shouldRecordSample)
+                    {
+                        _samples.Add(sample);
+
+                        if (isPureMove)
+                            _lastMoveTicks = ticks;
+                    }
 
                     if (isClick)
                     {
