@@ -1762,3 +1762,18 @@ the success message. Resetting on close is cleaner and matches user intent.
 **Problem**: Precisely-selected region captures included an extra 1px on the left/top edge.
 
 **Approach tried (reverted)**: Hypothesized the cause was DIP<->physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.
+
+---
+
+## Version Bump 1.0.4 -> 1.1.0 & Store MSIX Packages
+
+**Feature/area:** Version metadata + MSIX packaging
+
+**What was done:**
+- Incremented Package.appxmanifest Version from 1.0.4.0 to 1.1.0.0.
+- Updated SettingsPage.xaml "Version 0.1.0" -> "Version 1.1.0" (stale string was out of sync with manifest).
+- Built unsigned Store MSIX for x64 and ARM64 via VS MSBuild with /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never, copied both to %USERPROFILE%\Downloads.
+
+**What worked:**
+- Cleaning bin/obj before each platform build avoids stale artifacts.
+- Building x64 and ARM64 separately (Platform=x64 then Platform=ARM64) produces per-arch .msix in bin\{Platform}\Release\net9.0-windows10.0.26100.0\win-{rid}\AppPackages\.
