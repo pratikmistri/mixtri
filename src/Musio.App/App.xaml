@@ -10,6 +10,23 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <ResourceDictionary Source="Themes/AppColors.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- Collapse the reserved drag strip the TitleBar template keeps between
+                 RightHeader content and the caption buttons (default 48px) so the
+                 properties-pane toggle sits flush beside min/max/close. The template
+                 reads this via {ThemeResource}, which prioritizes ThemeDictionaries,
+                 so the override must live here (not as a plain app-root key) to win. -->
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <x:Double x:Key="TitleBarMinDragRegionWidth">0</x:Double>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <x:Double x:Key="TitleBarMinDragRegionWidth">0</x:Double>
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <x:Double x:Key="TitleBarMinDragRegionWidth">0</x:Double>
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

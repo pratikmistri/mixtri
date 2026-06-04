@@ -1790,3 +1790,147 @@ the success message. Resetting on close is cleaner and matches user intent.
   4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
 - **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
 - **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.
+---
+
+## Style/Cursor flyouts → persistent right side pane (After Effects style)
+
+- **Feature/area**: `EditorPage.xaml` + `EditorPage.xaml.cs`. Migrated the toolbar-anchored "Frame style" (`StyleFlyout`) and "Cursor" (`CursorFlyout`) flyouts into a persistent, collapsible right-side properties pane.
+- **Approaches tried**:
+  1. Added a 2nd Grid column (col0=*, col1=Auto) to the root Grid; placed a `SidePane` Border at Grid.Row=0 RowSpan=4 Column=1.
+  2. Moved the flyout inner StackPanels verbatim into two WinUI `Expander`s (`StyleSection` always visible, `CursorSection` visibility-toggled) inside a ScrollViewer. Used a PowerShell ReadAllLines/WriteAllLines (UTF8 no BOM) script to relocate exact line ranges so all x:Name controls + classic event handlers were preserved.
+  3. Collapse/expand via two overlapping children in the pane Grid: `SidePaneCollapsed` (44px rail) vs `SidePaneExpanded` (300px); `ToggleSidePane_Click` swaps their Visibility (element Visibility is the source of truth, no bool field).
+- **What worked**: Build succeeded (VS MSBuild, Release x64, exit 0). Code-behind repoint: `InitializeCursorControls` sets `CursorSection.Visibility`; `InitializeStyleControls` no longer touches button visibility. Removed `StyleButton`/`StyleSeparator`/`CursorButton`/`CursorSeparator`. Moving named controls out of `<Flyout>` into the normal visual tree is safe for x:Name field generation (NOT into a DataTemplate/ControlTemplate). Nested ColorPicker flyouts set `Placement="Left"` so they open inward.
+- **What didn't work / gotchas**: Must clean bin/obj before building after XAML name/structure changes (stale .g.cs → COMException "Element not found" → blank page). Preserved the existing rule that cursor/style controls must NOT carry XAML default IsChecked/Value (handlers fire during InitializeComponent before suppress flags); defaults are applied only in the Sync*ToConfig methods. Only pre-existing MVVMTK0045 warnings remained.
+
+### Refinement: categorized Style expanders + toggle rows
+- Split the single `StyleSection` Expander into three collapsed-by-default Expanders: `LayoutSection` (aspect/fit/zoom/crop), `BackgroundSection` (preset/bg type/color/gradient/wallpaper), `EffectsSection` (padding/corner/toggles). `StyleSection` had no code-behind references (only a comment), so renaming/splitting was safe — all inner x:Name controls + handlers preserved.
+- Side pane now spans `Grid.RowSpan=3` (stops above timeline); `TimelineControl` given `Grid.ColumnSpan=2` to fill full width. ScrollViewer padding removed + StackPanel Spacing=0 for edge-to-edge.
+- Toggle rows: replaced `ToggleSwitch Header="..."` (label-on-top) with a Grid row (label left col=*, switch right col=Auto), ToggleSwitch `MinWidth=0 OnContent="" OffContent=""` to make it compact/right-aligned, wrapped in a Border with hairline `DividerStrokeColorDefaultBrush` (first row 0,1,0,1; second 0,0,0,1 to avoid doubled line).
+- arm64 build/launch: same Process.Start + VS MSBuild wrapper, `/p:Platform=arm64`; exe at `bin\arm64\Release\net9.0-windows10.0.26100.0\win-arm64\Musio.App.exe`. Must stop running Musio.App by PID (Stop-Process -Name is blocked by shell policy) before rebuild to release the DLL lock.
+
+### Refinement: merge Background+Effects, remove collapsed rail, title-bar toggle
+- Merged `EffectsSection` content into `BackgroundSection` (header "Background & effects"); removed the separate Effects expander wrapper.
+- Removed the collapsed rail (`SidePaneCollapsed` with rotated vertical "PROPERTIES" TextBlock — it clipped) and the `SidePaneExpanded` header (Properties title + inline collapse button). `SidePane` Border now directly hosts `<Grid Width="300"><ScrollViewer><StackPanel>...expanders`. Pane visibility model simplified to a single source of truth: `SidePane.Visibility`.
+- EditorPage now exposes a PUBLIC pane API for cross-boundary control from the title bar: `bool IsSidePaneOpen`, `void ToggleSidePane()`, `void SetSidePaneOpen(bool)`, and `event EventHandler<bool>? SidePaneVisibilityChanged`.
+- Title-bar toggle: placed a `ToggleButton` in **`TitleBar.RightHeader`** (the area immediately left of the system caption buttons). GOTCHA: `TitleBar.Footer` does NOT exist — XamlCompiler WMC0011 "Unknown member 'Footer'". WinUI `TitleBar` (Microsoft.UI.Xaml.Controls) content areas are only `LeftHeader`, `Content`, `RightHeader`. Use `RightHeader` for content next to caption controls.
+- MainWindow wiring: hook `NavFrame.Navigated` (NOT just `NavView_SelectionChanged`) so the toggle appears when EditorPage is shown — RecordingPage navigates to EditorPage via `Frame.Navigate` (RecordingPage.xaml.cs:61), bypassing NavView selection. `UpdatePropertiesPaneToggle()` shows the toggle only when `NavFrame.Content is EditorPage`, syncs `IsChecked`, and subscribes to `SidePaneVisibilityChanged`.
+- arm64 build + launch verified (exit 0, app responding).
+
+## Animated geometry pane-toggle icon (title bar)
+
+**Feature/area**: `MainWindow.xaml` / `MainWindow.xaml.cs` — title-bar properties-pane toggle icon.
+
+**Approaches tried**:
+- Font glyph (Segoe Fluent e90d DockRight) — rejected; user wanted vector geometry that animates between open/closed states.
+- Custom vector glyph: Viewbox > Border frame > Grid with `*` + `6px` divider column; right cell is a named `PaneFill` Rectangle. **(worked)**
+
+**What worked**:
+- Animate `CompositeTransform.ScaleX` (named `PaneFillTransform`) + `Opacity` on `PaneFill` via a code-behind `Storyboard` (`SetPaneIconState(open, animate)`). Both are independent/composition animations, so no `EnableDependentAnimation` and no jank (avoided animating Width/layout).
+- ScaleX default CenterX=0 grows the fill from the divider (left edge) outward — reads as the right sub-pane filling in.
+- Neutralized the ToggleButton checked accent by overriding ToggleButtonBackground*/BorderBrush*Checked* brush resources locally to Transparent so the geometry is the sole state indicator.
+- Call `SetPaneIconState(..., animate:false)` on navigation sync; `animate:true` from `EditorPage_SidePaneVisibilityChanged`.
+
+**What didn't work / pitfalls**:
+- WinUI XAML has no `RelativeSource AncestorType`; can't bind shapes to parent ToggleButton.Foreground — used `{ThemeResource TextFillColorPrimaryBrush}` instead.
+- `TitleBar.Footer` does not exist; toggle lives in `TitleBar.RightHeader` (col 9, adjacent to caption buttons).
+
+## Positioning the pane toggle beside caption buttons
+
+**Feature/area**: `MainWindow.xaml` — title-bar pane toggle position.
+
+**Root cause**: WinUI `TitleBar` template column order is …col8 Content (`*`) | col9 RightHeader (Auto) | **col10 MinDragRegion** | col11 RightPadding. The MinDragRegion column is a fixed `TitleBarMinDragRegionWidth` = **48px** that guarantees a draggable strip between RightHeader and the system caption buttons. That 48px is what pushed the toggle away from min/max/close (it was NOT a layout bug in our content).
+
+**What worked**: Override the theme resource locally in `<TitleBar.Resources>`:
+`<x:Double x:Key="TitleBarMinDragRegionWidth">4</x:Double>`
+RightHeader content then sits ~4px from the caption buttons. Safe because `TitleBar.Content` is unset, so the col8 `*` column still provides a large drag region on the left.
+
+**What didn't work / avoided**: No need to abandon RightHeader and hand-roll an overlay + custom InputNonClientPointerSource passthrough regions — the resource override is far simpler and keeps the control's automatic drag/caption handling intact.
+
+---
+
+## Title-bar Pane Toggle Spacing & Side-Pane Slide Animation
+
+**Approaches tried:**
+
+1. **MinDragRegion override in <TitleBar.Resources> (48 -> 4)** - Did not close the gap. A {ThemeResource} referenced *inside the ControlTemplate* (ColumnDefinition.Width) does not reliably resolve from the control instance's own Resources.
+2. **Override `TitleBarMinDragRegionWidth` in App.xaml `Application.Resources` (set to 0)** - Worked. Putting it at application scope guarantees it is in the template's resource lookup chain, collapsing the caption-adjacent drag strip so the toggle sits flush beside min/max/close.
+3. **Pane open/close via Visibility swap** - Snapped instantly (no animation), and the Auto column reflowed content.
+4. **Slide animation: animate inner `SidePaneContent.Width` 0<->300 with `DoubleAnimation` (`EnableDependentAnimation=true`, `CubicEase` EaseOut, 220ms)** - Worked. Content (ScrollViewer) is pinned `Width=300 HorizontalAlignment=Right` and clipped by `SidePaneClip` (RectangleGeometry updated in `SidePaneContent_SizeChanged`), so the panel glides against the window's right edge without squishing/reflowing. Pane collapsed to `Visibility.Collapsed` in `Storyboard.Completed` when closing (removes residual border/slot); set Visible before opening. State backed by `_sidePaneOpen` field with a guard to avoid re-triggering.
+
+**What worked:** App-scope `TitleBarMinDragRegionWidth=0` for spacing; dependent Width animation on a fixed-width, right-anchored, clipped inner grid for a true slide.
+
+**What didn't work:** Control-instance `TitleBar.Resources` override for an in-template ThemeResource; plain Visibility swap for animation.
+
+---
+
+## Properties Pane — Fixed, Resizable, No Backplate
+
+**Approaches tried:**
+- Removed the collapsible toggle (title-bar ToggleButton + animation infra) entirely; pane is now always visible.
+- Manual pointer-drag resize via a left-edge grip (no GridSplitter package in repo).
+- Custom grip element subclass to set the resize cursor.
+
+**What worked:**
+- 3-column outer grid: content (*), grip (Auto, 6px), pane (Auto). Grip uses PointerPressed/Moved/Released with CapturePointer; newWidth = startWidth + (startPointerX - currentX), clamped 220..620, applied to SidePaneContent.Width.
+- Cursor: ProtectedCursor is protected, so subclass a non-sealed container. Border IS sealed in WinUI 3 (WindowsAppSDK 1.7) — derive from Panel instead (override Measure/Arrange returning 0/finalSize) and set Background="Transparent" in XAML for hit-testing.
+- Backplate removal: override ExpanderContentBackground (and ExpanderContentBorderBrush) to Transparent in Page.Resources as plain keys.
+- Default-expanded: IsExpanded="True" on the section.
+
+**What didn't work:**
+- Deriving PaneResizeGrip from Border → CS0509 'cannot derive from sealed type Border'. Use Panel.
+
+## MicaAlt backdrop + two-tier editor surfaces + 28px expanders (EditorPage/Timeline/AppColors)
+
+**Approaches tried:**
+- Switched app backdrop Mica -> MicaAlt via `<MicaBackdrop Kind="BaseAlt" />`.
+- Consolidated "too many surfaces" into a two-tier model with two new semantic brushes in Themes/AppColors.xaml ThemeDictionaries: `EditorPanelBrush` (chrome: pane/toolbar/preview-letterbox/timeline-ruler+label-gutter; dark #FF141414 to match preview) and `EditorTrackBrush` (timeline track lanes; #FF1E1E1E). Dividers stay as existing CardStrokeColorDefaultBrush hairlines.
+- Timeline track lanes are Win2D canvases that resolve clear colors via `GetSystemBrushColor(key, fallback)` -> `Application.Current.Resources.TryGetValue`. TryGetValue DOES resolve keys defined inside a merged dict's ThemeDictionaries, so the same new brush keys work in both XAML `{ThemeResource}` and code.
+- Expander header 28px + no chevron hover backplate.
+
+**What worked:**
+- Chevron backplate removal + flatten header: override `ExpanderHeaderBackground`, `ExpanderChevronPointerOverBackground`, `ExpanderChevronPressedBackground` (all Transparent) and `ExpanderChevronButtonSize`=24 as PLAIN keys in Page.Resources. These are referenced via `{ThemeResource}` in the framework template, so a page-level plain key wins (found before reaching Application.Resources). Same mechanism as the prior ExpanderContentBackground override.
+- 28px header height: set `MinHeight="28"` DIRECTLY on each Expander instance. Also shrink ExpanderChevronButtonSize to <=28 (used 24) or the 32px chevron border forces the row taller.
+
+**What didn't work / avoided:**
+- Do NOT rely on overriding `ExpanderMinHeight` (and `ExpanderHeaderPadding`) via a page-level key: the framework Expander style references these via `{StaticResource}`, not `{ThemeResource}`, so a page key does not win. Set MinHeight on the instance instead.
+
+## Reverted two-tier surface colors (editor)
+- **Approach tried**: Consolidated pane/toolbar/preview/timeline onto two custom dark brushes (EditorPanelBrush #141414 / EditorTrackBrush #1E1E1E).
+- **What didn't work**: User found the uniform dark surfaces 'too big of a departure' and asked to revert.
+- **What worked**: Removed both brushes from AppColors.xaml (all 3 themes) and reverted every reference back to system brushes (CardBackgroundFillColorDefault/Secondary, SolidBackgroundFillColorBase) in EditorPage.xaml, PreviewCanvas.xaml, TimelineControl.xaml + .cs. KEPT MicaAlt backdrop, 28px Expander MinHeight, ExpanderChevronButtonSize=24, and transparent chevron backplates (separate explicit requests). Verified no EditorPanelBrush/EditorTrackBrush references remain. arm64 build exit 0.
+
+## Timeline playhead overlapping labels + expander polish
+- **Playhead bleed**: PlayheadLine is a Border in Grid.Column=1 positioned via Margin.Left = TimeToX(pos). When PlayheadPosition < ScrollOffset, TimeToX returns a NEGATIVE x, so the Border rendered left into the label column (Grid cells don't clip children). Fix: in UpdatePlayheadVisual, collapse the line when x < TrackContentInset or x > ruler ActualWidth; otherwise show + set margin. InvalidateAll already calls UpdatePlayheadVisual so scroll/zoom refresh it.
+- **Expanders**: bumped MinHeight 28->32 on all 3 Expander instances (StaticResource ExpanderMinHeight can't be overridden via page key), ExpanderChevronButtonSize 24->28. Reduced framework 16px header left pad with Margin='-8,0,0,0' on each header StackPanel. Gave Layout a distinct glyph E80A (grid) vs Background E790 (color) to stop duplicate icons.
+
+## Crop-position / aspect-ratio selection feedback (EditorPage.xaml)
+- Feature/area: CropCellRadioStyle and AspectRatioTileStyle (RadioButton-derived selection tiles).
+- Bug: VisualStates were named UncheckedNormal/UncheckedPointerOver/.../CheckedNormal in a group called "CombinedStates". ToggleButton-derived controls (RadioButton) drive the COMBINED CommonStates names: Normal, PointerOver, Pressed, Disabled, Checked, CheckedPointerOver, CheckedPressed, CheckedDisabled, Indeterminate. State matching is by NAME (group name irrelevant). So "CheckedNormal" never activated -> a selected, non-hovered cell showed NO fill at rest.
+- What worked: Rename states to standard combined CommonStates convention: UncheckedNormal->Normal, UncheckedPointerOver->PointerOver, UncheckedPressed->Pressed, UncheckedDisabled->Disabled, CheckedNormal->Checked (keep CheckedPointerOver/CheckedPressed/CheckedDisabled/Indeterminate). Resting Checked now applies AccentFillColorDefaultBrush (crop) so the selected rectangle fills.
+- What didn't work / avoid: Relying on CheckedNormal/Unchecked* names for a ToggleButton-derived control. They only resolve if you manually GoToState with those exact names from code-behind, which we don't.
+
+## New "More" expander with Zoom scope (EditorPage.xaml)
+- Feature/area: Properties side pane expanders.
+- Change: Moved the Zoom scope segmented control (ZoomScopePanel / ZoomScopeSegmented) out of the Layout expander into a new "More" expander (x:Name=MoreSection, glyph E712, IsExpanded=False), placed after the Background & effects section and before the collapsed Cursor section.
+- Kept x:Name on ZoomScopePanel/ZoomScopeSegmented unchanged so existing code-behind handlers (ZoomScopeSegmented_SelectionChanged, SelectZoomScopeRadio, ApplyZoomScope) keep working with no code-behind edits.
+
+## Background preset variety: solid / gradient / wallpaper (DefaultBrandPresets.cs)
+- Feature/area: Background expander Preset dropdown (PresetCombo) in EditorPage.
+- Change: Reworked DefaultBrandPresets from 8 all-gradient presets into a mix of 3 solid (Charcoal/Graphite/Porcelain), 3 gradient (Nebula/Lagoon/Sunset), 2 wallpaper (Daylight->Windows\img0.jpg, Vista->Windows\img19.jpg). Kept count at exactly 8 so DefaultBrandPresets_All_ReturnsEightPresets test stays green.
+- Wallpaper presets resolve the OS wallpaper dir via Environment.GetFolderPath(SpecialFolder.Windows) + Web\Wallpaper (robust to non-C: installs). Each image preset still sets a representative BackgroundColor so BackgroundCompositor falls back gracefully if the file is missing (it already does this).
+- Swatch: BuildPresetSwatchBrush (EditorPage.xaml.cs) now returns an ImageBrush (UniformToFill) thumbnail for Image-type presets when the file exists; otherwise solid/gradient as before. Distinguishes photo presets visually in the dropdown.
+- Selecting an image preset works with existing wallpaper grid highlight because img0/img19 live under the system wallpaper dir already scanned by LoadSystemWallpapersAsync.
+
+---
+
+## Background presets — gradients replace 2 solids, Custom moved last, Windows wallpaper rename
+
+**Feature/area:** src/Musio.Core/Settings/DefaultBrandPresets.cs, EditorPage.xaml.cs (preset combo), ProjectService.cs (default composition).
+
+**Changes:**
+- Replaced the two extra solids (Charcoal, Porcelain) with two new gradients (Emerald #06402B->#10B981, Tide #1E3A8A->#22D3EE). Kept Graphite as the only solid. Set now: Graphite (solid), Nebula/Lagoon/Sunset/Emerald/Tide (gradient), Windows Light/Windows Dark (image). Still exactly 8 to satisfy DefaultBrandPresets_All_ReturnsEightPresets.
+- Renamed wallpaper presets Daylight->"Windows Light" (img0.jpg) and Vista->"Windows Dark" (img19.jpg); property identifiers WindowsLight/WindowsDark.
+- Moved "(Custom)" combo item from index 0 to the END. PopulateBackgroundPresetCombo now adds presets first, then Custom. FindMatchingPresetIndex returns i (not i+1) for a match and presets.Count (last index) for no match. Both SelectedIndex callers unchanged.
+- Made a real preset the default selection: ProjectService.CurrentComposition now initializes Background = BrandPresetConverter.ToBackgroundStyle(DefaultBrandPresets.Graphite), so the dropdown lands on Graphite rather than "(Custom)" on load. Monitor captures still zero padding/shadow/etc. (won't match -> Custom), which is intended for full-screen.
+
+**What worked:** Round-trip ToBackgroundStyle(Graphite) matches FindMatchingPresetIndex comparison (BorderColor/Width/GradientEndColor defaults round-trip consistently). Build arm64 EXITCODE=0, launched.

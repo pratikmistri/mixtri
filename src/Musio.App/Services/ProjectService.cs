@@ -1,6 +1,7 @@
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Settings;
 using Musio.Core.Timeline;
 
 namespace Musio_App.Services;
@@ -15,7 +16,13 @@ public class ProjectService
     public static ProjectService Instance => _instance ??= new();
 
     public Project? CurrentProject { get; set; }
-    public CompositionConfig CurrentComposition { get; set; } = new();
+
+    // Default to the Graphite preset (a neutral dark solid) so the Background
+    // preset dropdown lands on a real preset rather than "(Custom)" on load.
+    public CompositionConfig CurrentComposition { get; set; } = new()
+    {
+        Background = BrandPresetConverter.ToBackgroundStyle(DefaultBrandPresets.Graphite),
+    };
     public TimelineModel? CurrentTimeline { get; set; }
 
     public event EventHandler? ProjectChanged;

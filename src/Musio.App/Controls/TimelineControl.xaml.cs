@@ -369,6 +369,15 @@ public sealed partial class TimelineControl : UserControl
     {
         if (PlayheadLine is null) return;
         double x = TimeToX(PlayheadPosition);
+        double rightEdge = TimeRulerCanvas?.ActualWidth ?? ActualWidth;
+        // Clip to the track content area so the line never bleeds over the
+        // labels (column 0) or past the right edge — matching the clips/ruler.
+        if (x < TrackContentInset || x > rightEdge)
+        {
+            PlayheadLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+        PlayheadLine.Visibility = Visibility.Visible;
         PlayheadLine.Margin = new Thickness(x, 0, 0, 0);
     }
 

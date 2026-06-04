@@ -14,6 +14,18 @@
     <Page.Resources>
         <conv:CheckedToBrushConverter x:Key="CheckedToBrush" />
 
+        <!-- Remove the expander content backplate so pane sections read edge-to-edge. -->
+        <SolidColorBrush x:Key="ExpanderContentBackground" Color="Transparent" />
+        <SolidColorBrush x:Key="ExpanderContentBorderBrush" Color="Transparent" />
+
+        <!-- Flatten expander headers (no extra hover backplate) and strip the chevron
+             hover/pressed backplate. Header height comes from MinHeight="32" on each
+             Expander; the chevron button is 28 so it fits the 32px row. A -8 left
+             margin on each header content panel trims the framework's 16px header pad. -->
+        <SolidColorBrush x:Key="ExpanderChevronPointerOverBackground" Color="Transparent" />
+        <SolidColorBrush x:Key="ExpanderChevronPressedBackground" Color="Transparent" />
+        <x:Double x:Key="ExpanderChevronButtonSize">28</x:Double>
+
         <!-- Crop-position cell: a flat fill-on-check RadioButton with no border or
              padding so 9 of them can tile into a single rectangle. -->
         <Style x:Key="CropCellRadioStyle" TargetType="RadioButton">
@@ -29,26 +41,26 @@
                     <ControlTemplate TargetType="RadioButton">
                         <Grid x:Name="CellRoot" Background="{TemplateBinding Background}">
                             <VisualStateManager.VisualStateGroups>
-                                <VisualStateGroup x:Name="CombinedStates">
-                                    <VisualState x:Name="UncheckedNormal" />
-                                    <VisualState x:Name="UncheckedPointerOver">
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
                                         <VisualState.Setters>
                                             <Setter Target="CellRoot.Background"
                                                     Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="UncheckedPressed">
+                                    <VisualState x:Name="Pressed">
                                         <VisualState.Setters>
                                             <Setter Target="CellRoot.Background"
                                                     Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="UncheckedDisabled">
+                                    <VisualState x:Name="Disabled">
                                         <VisualState.Setters>
                                             <Setter Target="CellRoot.Opacity" Value="0.4" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="CheckedNormal">
+                                    <VisualState x:Name="Checked">
                                         <VisualState.Setters>
                                             <Setter Target="CellRoot.Background"
                                                     Value="{ThemeResource AccentFillColorDefaultBrush}" />
@@ -105,26 +117,26 @@
                                 Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                             <VisualStateManager.VisualStateGroups>
-                                <VisualStateGroup x:Name="CombinedStates">
-                                    <VisualState x:Name="UncheckedNormal" />
-                                    <VisualState x:Name="UncheckedPointerOver">
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
                                         <VisualState.Setters>
                                             <Setter Target="TileRoot.Background"
                                                     Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="UncheckedPressed">
+                                    <VisualState x:Name="Pressed">
                                         <VisualState.Setters>
                                             <Setter Target="TileRoot.Background"
                                                     Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="UncheckedDisabled">
+                                    <VisualState x:Name="Disabled">
                                         <VisualState.Setters>
                                             <Setter Target="TileRoot.Opacity" Value="0.4" />
                                         </VisualState.Setters>
                                     </VisualState>
-                                    <VisualState x:Name="CheckedNormal">
+                                    <VisualState x:Name="Checked">
                                         <VisualState.Setters>
                                             <Setter Target="TileRoot.Background"
                                                     Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
@@ -188,6 +200,11 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="0" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
 
         <!-- InfoBar for editor status -->
         <InfoBar
@@ -401,21 +418,178 @@
                     Text="Drag on zoom track to add segment"
                     FontStyle="Italic" />
 
-                <!-- Background style controls -->
-                <AppBarSeparator x:Name="StyleSeparator" />
+
+                <!-- Webcam overlay settings (visible when webcam overlay is active) -->
+                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
                 <Button
-                    x:Name="StyleButton"
+                    x:Name="WebcamShapeButton"
                     Padding="8,6"
-                    ToolTipService.ToolTip="Frame style (aspect ratio, background, padding)">
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Webcam overlay settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon FontSize="14" Glyph="&#xE790;" />
-                        <TextBlock Text="Frame style" />
+                        <FontIcon FontSize="14" Glyph="&#xE714;" />
+                        <TextBlock Text="Camera" />
                     </StackPanel>
                     <Button.Flyout>
-                        <Flyout x:Name="StyleFlyout" Placement="Top">
-                            <ScrollViewer MaxHeight="600" VerticalScrollBarVisibility="Auto">
-                            <StackPanel Width="280" Spacing="14" Padding="4">
-                                <TextBlock Text="Frame Style" FontWeight="SemiBold" FontSize="14" />
+                        <Flyout Placement="Top">
+                            <StackPanel Width="260" Spacing="12" Padding="4">
+                                <TextBlock Text="Camera Overlay" FontWeight="SemiBold" FontSize="14" />
+
+                                <!-- Shape -->
+                                <ComboBox
+                                    x:Name="WebcamShapeCombo"
+                                    Header="Shape"
+                                    HorizontalAlignment="Stretch"
+                                    SelectionChanged="WebcamShapeCombo_SelectionChanged">
+                                    <ComboBoxItem Content="Circle" Tag="Circle" />
+                                    <ComboBoxItem Content="Square" Tag="RoundedRect" />
+                                </ComboBox>
+
+                                <!-- Border width -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Border Thickness" />
+                                    <Slider
+                                        x:Name="WebcamBorderSlider"
+                                        Minimum="0"
+                                        Maximum="20"
+                                        StepFrequency="1"
+                                        Value="8"
+                                        ValueChanged="WebcamBorderSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Mirror -->
+                                <ToggleSwitch
+                                    x:Name="WebcamMirrorToggle"
+                                    Header="Mirror"
+                                    Toggled="WebcamMirrorToggle_Toggled" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
+                <AppBarSeparator />
+
+                <Button
+                    x:Name="ExportButton"
+                    Padding="8,6"
+                    Style="{ThemeResource AccentButtonStyle}"
+                    ToolTipService.ToolTip="Export recording">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE898;" />
+                        <TextBlock Text="Export" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="ExportFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="16" Padding="8">
+                                <!-- Exporting state -->
+                                <StackPanel
+                                    x:Name="ExportingPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Visible">
+                                    <ProgressRing
+                                        Width="80"
+                                        Height="80"
+                                        IsIndeterminate="False"
+                                        Maximum="100"
+                                        Value="{x:Bind ExportVM.ProgressPercent, Mode=OneWay}" />
+                                    <TextBlock
+                                        FontSize="14"
+                                        TextAlignment="Center"
+                                        Text="Exporting…" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CancelExport_Click"
+                                        Content="Cancel" />
+                                </StackPanel>
+
+                                <!-- Success state -->
+                                <StackPanel
+                                    x:Name="ExportedPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                        Glyph="&#xE73E;" />
+                                    <TextBlock
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Exported!" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        IsTextSelectionEnabled="True"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ExportedFilePath, Mode=OneWay}" />
+                                    <StackPanel
+                                        HorizontalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                        <Button
+                                            Click="OpenFileLocation_Click"
+                                            Style="{ThemeResource AccentButtonStyle}"
+                                            Content="Open file location" />
+                                        <Button
+                                            Click="CloseFlyout_Click"
+                                            Content="Close" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Error state -->
+                                <StackPanel
+                                    x:Name="ExportErrorPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                        Glyph="&#xE783;" />
+                                    <TextBlock
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Export Failed" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ErrorMessage, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CloseFlyout_Click"
+                                        Content="Close" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- Resize grip for the properties pane (drag to widen/narrow) -->
+        <!-- Properties side pane (After Effects style, right edge) -->
+        <Border x:Name="SidePane"
+                Grid.Row="0" Grid.RowSpan="3" Grid.Column="2"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1,0,0,0">
+            <Grid x:Name="SidePaneContent" Width="320">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Spacing="0">
+                            <Expander x:Name="LayoutSection" MinHeight="32" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="True">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="-8,0,0,0">
+                                        <FontIcon FontSize="14" Glyph="&#xE80A;" />
+                                        <TextBlock Text="Layout" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Expander.Header>
+                            <StackPanel Spacing="14" Padding="4">
 
                                 <!-- Aspect ratio grid: tile radios showing a proportional preview + label -->
                                 <StackPanel Spacing="6">
@@ -572,20 +746,6 @@
                                     </ctk:Segmented>
                                 </StackPanel>
 
-                                <!-- Zoom scope: binary choice rendered as a segmented control -->
-                                <StackPanel x:Name="ZoomScopePanel" Spacing="6">
-                                    <TextBlock Text="Zoom scope" FontSize="12"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    <ctk:Segmented x:Name="ZoomScopeSegmented"
-                                                   HorizontalAlignment="Stretch"
-                                                   SelectionChanged="ZoomScopeSegmented_SelectionChanged">
-                                        <ctk:SegmentedItem Content="Whole frame" Tag="Frame"
-                                                           ToolTipService.ToolTip="Zoom region spans the entire visible canvas, including background, letterbox and padding." />
-                                        <ctk:SegmentedItem Content="Source only" Tag="Source"
-                                                           ToolTipService.ToolTip="Zoom region is constrained to the captured source; background, letterbox and padding stay fixed." />
-                                    </ctk:Segmented>
-                                </StackPanel>
-
                                 <!-- Crop position picker: single rectangle subdivided into 9 cells.
                                      The selected cell fills with the accent color. -->
                                 <StackPanel x:Name="CropAnchorPanel" Spacing="6">
@@ -681,10 +841,17 @@
                                         </Grid>
                                     </Border>
                                 </StackPanel>
+                            </StackPanel>
+                            </Expander>
 
-                                <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-
-                                <TextBlock Text="Background" FontWeight="SemiBold" FontSize="13" />
+                            <Expander x:Name="BackgroundSection" MinHeight="32" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="True">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="-8,0,0,0">
+                                        <FontIcon FontSize="14" Glyph="&#xE790;" />
+                                        <TextBlock Text="Background &amp; effects" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Expander.Header>
+                            <StackPanel Spacing="14" Padding="4">
 
                                 <!-- Preset picker -->
                                 <ComboBox
@@ -719,7 +886,7 @@
                                             <TextBlock x:Name="BgColorText" Text="#1a1a2e" VerticalAlignment="Center" />
                                         </StackPanel>
                                         <DropDownButton.Flyout>
-                                            <Flyout>
+                                            <Flyout Placement="Left">
                                                 <ColorPicker
                                                     x:Name="BgColorPicker"
                                                     IsAlphaEnabled="False"
@@ -744,7 +911,7 @@
                                             <TextBlock x:Name="GradEndColorText" Text="#16213e" VerticalAlignment="Center" />
                                         </StackPanel>
                                         <DropDownButton.Flyout>
-                                            <Flyout>
+                                            <Flyout Placement="Left">
                                                 <ColorPicker
                                                     x:Name="GradEndColorPicker"
                                                     IsAlphaEnabled="False"
@@ -788,37 +955,54 @@
                                     StepFrequency="2"
                                     ValueChanged="StyleSlider_ValueChanged" />
 
-                                <!-- Shadow -->
-                                <ToggleSwitch
-                                    x:Name="ShadowToggle"
-                                    Header="Shadow"
-                                    Toggled="StyleToggle_Toggled" />
-
-                                <!-- Border -->
-                                <ToggleSwitch
-                                    x:Name="BorderToggle"
-                                    Header="Border"
-                                    Toggled="StyleToggle_Toggled" />
+                                <!-- Toggle rows: label left, switch right, hairline dividers -->
+                                <StackPanel Spacing="0">
+                                    <Border BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,1">
+                                        <Grid Height="40">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Shadow" VerticalAlignment="Center" />
+                                            <ToggleSwitch Grid.Column="1"
+                                                          x:Name="ShadowToggle"
+                                                          MinWidth="0"
+                                                          OnContent=""
+                                                          OffContent=""
+                                                          HorizontalAlignment="Right"
+                                                          VerticalAlignment="Center"
+                                                          Toggled="StyleToggle_Toggled" />
+                                        </Grid>
+                                    </Border>
+                                    <Border BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                                        <Grid Height="40">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Border" VerticalAlignment="Center" />
+                                            <ToggleSwitch Grid.Column="1"
+                                                          x:Name="BorderToggle"
+                                                          MinWidth="0"
+                                                          OnContent=""
+                                                          OffContent=""
+                                                          HorizontalAlignment="Right"
+                                                          VerticalAlignment="Center"
+                                                          Toggled="StyleToggle_Toggled" />
+                                        </Grid>
+                                    </Border>
+                                </StackPanel>
                             </StackPanel>
-                            </ScrollViewer>
-                        </Flyout>
-                    </Button.Flyout>
-                </Button>
+                            </Expander>
 
-                <!-- Cursor style controls -->
-                <AppBarSeparator x:Name="CursorSeparator" Visibility="Collapsed" />
-                <Button
-                    x:Name="CursorButton"
-                    Padding="8,6"
-                    Visibility="Collapsed"
-                    ToolTipService.ToolTip="Cursor settings">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon FontSize="14" Glyph="&#xE7C9;" />
-                        <TextBlock Text="Cursor" />
-                    </StackPanel>
-                    <Button.Flyout>
-                        <Flyout x:Name="CursorFlyout" Placement="Top">
-                            <StackPanel Width="260" Spacing="16" Padding="4">
+                            <Expander x:Name="CursorSection" MinHeight="32" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Visibility="Collapsed" IsExpanded="False">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="-8,0,0,0">
+                                        <FontIcon FontSize="14" Glyph="&#xE7C9;" />
+                                        <TextBlock Text="Cursor" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Expander.Header>
+                            <StackPanel Spacing="16" Padding="4">
                                 <TextBlock Text="Cursor" FontWeight="SemiBold" FontSize="14" />
 
                                 <!-- Cursor type: Mouse / Touch -->
@@ -980,167 +1164,53 @@
                                     </StackPanel>
                                 </StackPanel>
                             </StackPanel>
-                        </Flyout>
-                    </Button.Flyout>
-                </Button>
+                            </Expander>
 
-                <!-- Webcam overlay settings (visible when webcam overlay is active) -->
-                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
-                <Button
-                    x:Name="WebcamShapeButton"
-                    Padding="8,6"
-                    Visibility="Collapsed"
-                    ToolTipService.ToolTip="Webcam overlay settings">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon FontSize="14" Glyph="&#xE714;" />
-                        <TextBlock Text="Camera" />
-                    </StackPanel>
-                    <Button.Flyout>
-                        <Flyout Placement="Top">
-                            <StackPanel Width="260" Spacing="12" Padding="4">
-                                <TextBlock Text="Camera Overlay" FontWeight="SemiBold" FontSize="14" />
-
-                                <!-- Shape -->
-                                <ComboBox
-                                    x:Name="WebcamShapeCombo"
-                                    Header="Shape"
-                                    HorizontalAlignment="Stretch"
-                                    SelectionChanged="WebcamShapeCombo_SelectionChanged">
-                                    <ComboBoxItem Content="Circle" Tag="Circle" />
-                                    <ComboBoxItem Content="Square" Tag="RoundedRect" />
-                                </ComboBox>
-
-                                <!-- Border width -->
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="Border Thickness" />
-                                    <Slider
-                                        x:Name="WebcamBorderSlider"
-                                        Minimum="0"
-                                        Maximum="20"
-                                        StepFrequency="1"
-                                        Value="8"
-                                        ValueChanged="WebcamBorderSlider_ValueChanged" />
-                                </StackPanel>
-
-                                <!-- Mirror -->
-                                <ToggleSwitch
-                                    x:Name="WebcamMirrorToggle"
-                                    Header="Mirror"
-                                    Toggled="WebcamMirrorToggle_Toggled" />
-                            </StackPanel>
-                        </Flyout>
-                    </Button.Flyout>
-                </Button>
-
-                <AppBarSeparator />
-
-                <Button
-                    x:Name="ExportButton"
-                    Padding="8,6"
-                    Style="{ThemeResource AccentButtonStyle}"
-                    ToolTipService.ToolTip="Export recording">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon FontSize="14" Glyph="&#xE898;" />
-                        <TextBlock Text="Export" />
-                    </StackPanel>
-                    <Button.Flyout>
-                        <Flyout x:Name="ExportFlyout" Placement="Top">
-                            <StackPanel Width="280" Spacing="16" Padding="8">
-                                <!-- Exporting state -->
-                                <StackPanel
-                                    x:Name="ExportingPanel"
-                                    HorizontalAlignment="Center"
-                                    Spacing="12"
-                                    Visibility="Visible">
-                                    <ProgressRing
-                                        Width="80"
-                                        Height="80"
-                                        IsIndeterminate="False"
-                                        Maximum="100"
-                                        Value="{x:Bind ExportVM.ProgressPercent, Mode=OneWay}" />
-                                    <TextBlock
-                                        FontSize="14"
-                                        TextAlignment="Center"
-                                        Text="Exporting…" />
-                                    <Button
-                                        HorizontalAlignment="Center"
-                                        Click="CancelExport_Click"
-                                        Content="Cancel" />
-                                </StackPanel>
-
-                                <!-- Success state -->
-                                <StackPanel
-                                    x:Name="ExportedPanel"
-                                    HorizontalAlignment="Center"
-                                    Spacing="12"
-                                    Visibility="Collapsed">
-                                    <FontIcon
-                                        HorizontalAlignment="Center"
-                                        FontSize="40"
-                                        Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                        Glyph="&#xE73E;" />
-                                    <TextBlock
-                                        FontSize="20"
-                                        FontWeight="SemiBold"
-                                        TextAlignment="Center"
-                                        Text="Exported!" />
-                                    <TextBlock
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        IsTextSelectionEnabled="True"
-                                        TextAlignment="Center"
-                                        TextWrapping="Wrap"
-                                        Text="{x:Bind ExportVM.ExportedFilePath, Mode=OneWay}" />
-                                    <StackPanel
-                                        HorizontalAlignment="Center"
-                                        Orientation="Horizontal"
-                                        Spacing="8">
-                                        <Button
-                                            Click="OpenFileLocation_Click"
-                                            Style="{ThemeResource AccentButtonStyle}"
-                                            Content="Open file location" />
-                                        <Button
-                                            Click="CloseFlyout_Click"
-                                            Content="Close" />
+                            <Expander x:Name="MoreSection" MinHeight="32" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="False">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="-8,0,0,0">
+                                        <FontIcon FontSize="14" Glyph="&#xE712;" />
+                                        <TextBlock Text="More" VerticalAlignment="Center" />
                                     </StackPanel>
-                                </StackPanel>
+                                </Expander.Header>
+                            <StackPanel Spacing="14" Padding="4">
 
-                                <!-- Error state -->
-                                <StackPanel
-                                    x:Name="ExportErrorPanel"
-                                    HorizontalAlignment="Center"
-                                    Spacing="12"
-                                    Visibility="Collapsed">
-                                    <FontIcon
-                                        HorizontalAlignment="Center"
-                                        FontSize="40"
-                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                        Glyph="&#xE783;" />
-                                    <TextBlock
-                                        FontSize="16"
-                                        FontWeight="SemiBold"
-                                        TextAlignment="Center"
-                                        Text="Export Failed" />
-                                    <TextBlock
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        TextAlignment="Center"
-                                        TextWrapping="Wrap"
-                                        Text="{x:Bind ExportVM.ErrorMessage, Mode=OneWay}" />
-                                    <Button
-                                        HorizontalAlignment="Center"
-                                        Click="CloseFlyout_Click"
-                                        Content="Close" />
+                                <!-- Zoom scope: binary choice rendered as a segmented control -->
+                                <StackPanel x:Name="ZoomScopePanel" Spacing="6">
+                                    <TextBlock Text="Zoom scope" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ctk:Segmented x:Name="ZoomScopeSegmented"
+                                                   HorizontalAlignment="Stretch"
+                                                   SelectionChanged="ZoomScopeSegmented_SelectionChanged">
+                                        <ctk:SegmentedItem Content="Whole frame" Tag="Frame"
+                                                           ToolTipService.ToolTip="Zoom region spans the entire visible canvas, including background, letterbox and padding." />
+                                        <ctk:SegmentedItem Content="Source only" Tag="Source"
+                                                           ToolTipService.ToolTip="Zoom region is constrained to the captured source; background, letterbox and padding stay fixed." />
+                                    </ctk:Segmented>
                                 </StackPanel>
                             </StackPanel>
-                        </Flyout>
-                    </Button.Flyout>
-                </Button>
-            </StackPanel>
-        </Grid>
+                            </Expander>
+                        </StackPanel>
+                    </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <!-- Pane resize grip: overlays the pane's left seam (no layout gap) so it
+             sits on top for hit-testing while content stays flush to the pane. -->
+        <local:PaneResizeGrip x:Name="SidePaneResizeHandle"
+                Grid.Row="0" Grid.RowSpan="3" Grid.Column="2"
+                Width="6" HorizontalAlignment="Left" Margin="-3,0,0,0"
+                Background="Transparent"
+                PointerPressed="SidePaneResizeHandle_PointerPressed"
+                PointerMoved="SidePaneResizeHandle_PointerMoved"
+                PointerReleased="SidePaneResizeHandle_PointerReleased" />
 
         <!-- Timeline editor control -->
         <controls:TimelineControl
             x:Name="Timeline"
             Grid.Row="3"
+            Grid.Column="0"
+            Grid.ColumnSpan="3"
             Height="280"
             Margin="0,4,0,0"
             Model="{x:Bind ViewModel.Model}" />

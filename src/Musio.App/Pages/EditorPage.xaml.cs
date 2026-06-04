@@ -1774,6 +1774,48 @@ public sealed partial class EditorPage : Page
         ShowExportingState();
     }
 
+    // ─── Properties Side Pane ───────────────────────────────────────────
+
+    // The properties pane is always visible. Users can resize it by dragging the
+    // grip on its left edge; the resulting width is clamped to a sensible range.
+    private const double SidePaneMinWidth = 220;
+    private const double SidePaneMaxWidth = 620;
+    private bool _isResizingPane;
+    private double _resizeStartPointerX;
+    private double _resizeStartWidth;
+
+    private void SidePaneResizeHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        _isResizingPane = true;
+        _resizeStartPointerX = e.GetCurrentPoint(this).Position.X;
+        _resizeStartWidth = SidePaneContent.Width;
+        SidePaneResizeHandle.CapturePointer(e.Pointer);
+    }
+
+    private void SidePaneResizeHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isResizingPane)
+        {
+            return;
+        }
+
+        double x = e.GetCurrentPoint(this).Position.X;
+        // The grip sits on the pane's left edge, so dragging left widens the pane.
+        double newWidth = _resizeStartWidth + (_resizeStartPointerX - x);
+        SidePaneContent.Width = Math.Clamp(newWidth, SidePaneMinWidth, SidePaneMaxWidth);
+    }
+
+    private void SidePaneResizeHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isResizingPane)
+        {
+            return;
+        }
+
+        _isResizingPane = false;
+        SidePaneResizeHandle.ReleasePointerCapture(e.Pointer);
+    }
+
     // ─── Background Style Editing ───────────────────────────────────────
 
     // ─── Cursor Style Editing ───────────────────────────────────────────
@@ -1782,8 +1824,7 @@ public sealed partial class EditorPage : Page
     {
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
         var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
-        CursorButton.Visibility = vis;
-        CursorSeparator.Visibility = vis;
+        CursorSection.Visibility = vis;
 
         if (!hasCursor) return;
 
@@ -1905,18 +1946,19 @@ public sealed partial class EditorPage : Page
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
-        // Style menu is available for all capture types. Monitor (full-screen)
+        // Style controls are available for all capture types. Monitor (full-screen)
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
-        StyleButton.Visibility = Visibility.Visible;
-        StyleSeparator.Visibility = Visibility.Visible;
+        // The StyleSection in the side pane is always visible.
 
         // Populate preset combo with built-in presets — each item is a small
         // swatch + label so users can identify gradients at a glance.
         PresetCombo.Items.Clear();
-        PresetCombo.Items.Add(BuildPresetItem(new BrandPreset { Name = "(Custom)" }, isCustom: true));
         foreach (var preset in DefaultBrandPresets.All)
             PresetCombo.Items.Add(BuildPresetItem(preset, isCustom: false));
+        // "(Custom)" is appended last so a real preset leads the list and can
+        // be the default selection; Custom only surfaces for off-preset edits.
+        PresetCombo.Items.Add(BuildPresetItem(new BrandPreset { Name = "(Custom)" }, isCustom: true));
 
         // Load system wallpapers (async). Pass the project's currently-selected
         // background image so a custom path from a reopened project is merged
@@ -2142,6 +2184,20 @@ public sealed partial class EditorPage : Page
 
     private static Microsoft.UI.Xaml.Media.Brush BuildPresetSwatchBrush(BrandPreset preset)
     {
+        // Wallpaper presets: show a real thumbnail of the image when it exists,
+        // so the dropdown clearly distinguishes photo backgrounds from flat fills.
+        if (preset.BackgroundType == BackgroundType.Image
+            && !string.IsNullOrEmpty(preset.BackgroundImagePath)
+            && System.IO.File.Exists(preset.BackgroundImagePath))
+        {
+            return new Microsoft.UI.Xaml.Media.ImageBrush
+            {
+                ImageSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(
+                    new Uri(preset.BackgroundImagePath)),
+                Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+            };
+        }
+
         var start = ParseHexColor(preset.BackgroundColor);
 
         if (preset.BackgroundType != BackgroundType.Gradient
@@ -2207,10 +2263,10 @@ public sealed partial class EditorPage : Page
                 string.Equals(NormalizeHex(p.BorderColor), NormalizeHex(bg.BorderColor), StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(p.BackgroundImagePath ?? string.Empty, bg.BackgroundImagePath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
-                return i + 1; // +1 for the "(Custom)" entry at index 0
+                return i; // presets now lead the list; "(Custom)" is appended last
             }
         }
-        return 0; // Custom
+        return presets.Count; // "(Custom)" — the last item
     }
 
     private static string NormalizeHex(string? hex) => string.IsNullOrEmpty(hex) ? string.Empty : hex.Trim();
@@ -2896,4 +2952,22 @@ public sealed partial class EditorPage : Page
 
         _ = RebuildPreviewRendererAsync(config);
     }
+}
+
+// A thin draggable grip that shows a horizontal-resize cursor when hovered,
+// used on the left edge of the properties pane to let users resize it. Derives
+// from Panel (Border is sealed) so it can carry a hit-testable background.
+public sealed class PaneResizeGrip : Microsoft.UI.Xaml.Controls.Panel
+{
+    public PaneResizeGrip()
+    {
+        ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(
+            Microsoft.UI.Input.InputSystemCursorShape.SizeWestEast);
+    }
+
+    protected override Windows.Foundation.Size MeasureOverride(Windows.Foundation.Size availableSize)
+        => new(0, 0);
+
+    protected override Windows.Foundation.Size ArrangeOverride(Windows.Foundation.Size finalSize)
+        => finalSize;
 }

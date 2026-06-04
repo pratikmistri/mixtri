@@ -1,15 +1,40 @@
+using System.IO;
 using Musio.Core.Models;
 
 namespace Musio.Core.Settings;
 
 /// <summary>
-/// Built-in background presets featuring bold, saturated two-stop gradients
-/// designed to read well behind screen recordings — high contrast against
-/// typical UI content, vivid enough for marketing-grade visuals without
-/// fighting the foreground for attention.
+/// Built-in background presets offering a spread of styles — a clean neutral
+/// solid for distraction-free framing; bold saturated two-stop gradients for
+/// marketing-grade visuals; and photographic Windows wallpapers (sourced from
+/// the system wallpaper folder) for richer scenes.
 /// </summary>
 public static class DefaultBrandPresets
 {
+    // Resolved once: the OS wallpaper folder (e.g. C:\Windows\Web\Wallpaper).
+    // Used by the image presets below. If a file is missing on a given
+    // machine, BackgroundCompositor falls back to the preset's solid color.
+    private static readonly string WallpaperDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
+
+    // --- Solid color ----------------------------------------------------
+
+    public static BrandPreset Graphite { get; } = new()
+    {
+        Name = "Graphite",
+        BackgroundType = BackgroundType.SolidColor,
+        BackgroundColor = "#2B2D31",
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 40,
+        ShadowOpacity = 0.5,
+        ShadowColor = "#000000",
+        BorderEnabled = false,
+    };
+
+    // --- Gradients ------------------------------------------------------
+
     public static BrandPreset Nebula { get; } = new()
     {
         Name = "Nebula",
@@ -42,86 +67,6 @@ public static class DefaultBrandPresets
         BorderEnabled = false,
     };
 
-    public static BrandPreset Prism { get; } = new()
-    {
-        Name = "Prism",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#4796E3",
-        GradientEndColor = "#FF6363",
-        GradientAngle = 140.0,
-        Padding = 72,
-        CornerRadius = 16,
-        ShadowEnabled = true,
-        ShadowBlur = 40,
-        ShadowOpacity = 0.45,
-        ShadowColor = "#1A1A2E",
-        BorderEnabled = false,
-    };
-
-    public static BrandPreset Emerald { get; } = new()
-    {
-        Name = "Emerald",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#1DB954",
-        GradientEndColor = "#121212",
-        GradientAngle = 160.0,
-        Padding = 72,
-        CornerRadius = 16,
-        ShadowEnabled = true,
-        ShadowBlur = 44,
-        ShadowOpacity = 0.55,
-        ShadowColor = "#000000",
-        BorderEnabled = false,
-    };
-
-    public static BrandPreset Coral { get; } = new()
-    {
-        Name = "Coral",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#FF5A5F",
-        GradientEndColor = "#BD1E59",
-        GradientAngle = 150.0,
-        Padding = 72,
-        CornerRadius = 18,
-        ShadowEnabled = true,
-        ShadowBlur = 44,
-        ShadowOpacity = 0.45,
-        ShadowColor = "#3A0A1F",
-        BorderEnabled = false,
-    };
-
-    public static BrandPreset Ember { get; } = new()
-    {
-        Name = "Ember",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#131A22",
-        GradientEndColor = "#FF9900",
-        GradientAngle = 160.0,
-        Padding = 72,
-        CornerRadius = 16,
-        ShadowEnabled = true,
-        ShadowBlur = 44,
-        ShadowOpacity = 0.55,
-        ShadowColor = "#000000",
-        BorderEnabled = false,
-    };
-
-    public static BrandPreset Tide { get; } = new()
-    {
-        Name = "Tide",
-        BackgroundType = BackgroundType.Gradient,
-        BackgroundColor = "#6772E5",
-        GradientEndColor = "#00D4FF",
-        GradientAngle = 135.0,
-        Padding = 72,
-        CornerRadius = 16,
-        ShadowEnabled = true,
-        ShadowBlur = 40,
-        ShadowOpacity = 0.4,
-        ShadowColor = "#10183A",
-        BorderEnabled = false,
-    };
-
     public static BrandPreset Sunset { get; } = new()
     {
         Name = "Sunset",
@@ -138,15 +83,81 @@ public static class DefaultBrandPresets
         BorderEnabled = false,
     };
 
+    // --- Gradients (continued) ------------------------------------------
+
+    public static BrandPreset Emerald { get; } = new()
+    {
+        Name = "Emerald",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#06402B",
+        GradientEndColor = "#10B981",
+        GradientAngle = 135.0,
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 44,
+        ShadowOpacity = 0.5,
+        ShadowColor = "#04231A",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset Tide { get; } = new()
+    {
+        Name = "Tide",
+        BackgroundType = BackgroundType.Gradient,
+        BackgroundColor = "#1E3A8A",
+        GradientEndColor = "#22D3EE",
+        GradientAngle = 150.0,
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 44,
+        ShadowOpacity = 0.5,
+        ShadowColor = "#0A1B3A",
+        BorderEnabled = false,
+    };
+
+    // --- Wallpapers (photographic) -------------------------------------
+
+    public static BrandPreset WindowsLight { get; } = new()
+    {
+        Name = "Windows Light",
+        BackgroundType = BackgroundType.Image,
+        BackgroundImagePath = Path.Combine(WallpaperDir, "Windows", "img0.jpg"),
+        BackgroundColor = "#1B3A5B",
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 48,
+        ShadowOpacity = 0.55,
+        ShadowColor = "#000000",
+        BorderEnabled = false,
+    };
+
+    public static BrandPreset WindowsDark { get; } = new()
+    {
+        Name = "Windows Dark",
+        BackgroundType = BackgroundType.Image,
+        BackgroundImagePath = Path.Combine(WallpaperDir, "Windows", "img19.jpg"),
+        BackgroundColor = "#2B2336",
+        Padding = 72,
+        CornerRadius = 16,
+        ShadowEnabled = true,
+        ShadowBlur = 48,
+        ShadowOpacity = 0.55,
+        ShadowColor = "#000000",
+        BorderEnabled = false,
+    };
+
     public static IReadOnlyList<BrandPreset> All { get; } = new[]
     {
+        Graphite,
         Nebula,
         Lagoon,
-        Prism,
-        Emerald,
-        Coral,
-        Ember,
-        Tide,
         Sunset,
+        Emerald,
+        Tide,
+        WindowsLight,
+        WindowsDark,
     };
 }
