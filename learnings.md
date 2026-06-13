@@ -1847,3 +1847,59 @@ the success message. Resetting on close is cleaner and matches user intent.
 
 **Deferred (intentional):** nit #5 (resolving `MiniSetupControl.GetHostWindow()` via `XamlRoot`) â€” Phase B's `AppShellWindow` will set up the owner relationship properly, so the current `return null` is left in place.
 
+
+---
+
+## Phase B — Unified AppShellWindow + 4-state state machine (mini-mode)
+
+**Feature/area:** Replaced `MainWindow` + `RecordingOverlayWindow` with a single `AppShellWindow` that hosts `MiniSetupControl`, `RecordingPillControl`, and `FullShellControl` in a shared `Grid x:Name="StateHost"`. Drove a 4-state machine (`MiniSetup`, `MiniRecording`, `Full`, `FullRecording`) with per-frame `AppWindow.MoveAndResize` morph animations and XAML cross-fade between inner controls. Wired all expand/collapse/record/stop events from the inner controls into `TransitionToAsync(target)`.
+
+### What worked
+- **Single window, three children, mutually-exclusive Visibility + Opacity storyboards** for cross-fade — simplest model, no z-order surprises, no second-HWND state to keep in sync. Avoided WinUI 3 multi-window/visual-tree gymnastics entirely.
+- **`DispatcherTimer` at 16 ms for `AppWindow.MoveAndResize` interpolation** with static easing helpers (`QuadraticEaseInOut`, `CubicEaseOut`). Matches WinUI rendering cadence, smooth on test hardware, no jitter. Re-entrancy made safe via a lock + `_activeTransition` Task + `_queuedTarget` (newest queued target wins; running transition completes first).
+- **Per-state config block** (`ConfigureForState(target, animate)`): one switch statement deciding (a) which inner control becomes the visible one, (b) target `RectInt32`, (c) `ChromeProfile`, (d) presenter flags (`IsAlwaysOnTop`, `IsResizable`, capture-exclusion, min/max/minimize buttons). Keeps the morph orchestration in `RunSingleTransitionAsync` short.
+- **High-level `Window.SystemBackdrop` swap** (`new MicaBackdrop()` for Full, `new DesktopAcrylicBackdrop()` for Mini). Only re-assigned when the kind changes — avoids backdrop reset flicker. Much simpler than the lower-level `MicaController` plumbing.
+- **Real `WindowChromeService.ApplyFull`**: restores `WDA_NONE`, restores DWM border/caption to `DWMWA_COLOR_DEFAULT`, re-adds `WS_BORDER|WS_DLGFRAME`. Phase A had this as a no-op; without it, switching from Mini → Full left the stripped chrome behind. New `SetCaptureExclusion(window, exclude)` helper isolates the WDA toggle for `FullRecording`.
+- **Ported `WndProc` min-size subclass** from `MainWindow` into `AppShellWindow`; conditionalised on `_currentState ∈ {Full, FullRecording}` so the Mini states don't get min-size clamped. Installed via `InitializeAfterActivation()` invoked from `App.OnLaunched` after `Activate()` so the HWND is real.
+- **Origin tracking** (`_originStateBeforeRecording`) at the moment of entering a recording state — works for Phase B's "back to origin on Stop" semantics. Auto-Editor-on-Stop (Phase C) will piggy-back on this same field.
+- **DPI-aware sizing** via `GetDpiForWindow(hwnd)` × base-96 constants, with `DisplayArea.GetFromWindowId(..., Primary)` for work-area centering. Verified geometry on a 1536×976 work area: Mini = `(508, 16, 520, 200)`; Full = `(256, 104, 1024, 768)`.
+- **Smoke-test verification pattern**: launch unpackaged exe via `Start-Process -PassThru`, read `MainWindowHandle`, P/Invoke `GetWindowRect`, kill by literal PID. Confirms both initial states land at the right rect without needing UI automation.
+
+### What didn't work / wrinkles
+- **Spec target of 64 px MiniSetup height** couldn't be hit in Phase B because the current `MiniSetupControl` still has the legacy hero-Record vertical layout (~200 px). Phase B uses 200 px and defers the compact horizontal redesign to Phase C. State machine + chrome are independent of the inner control's intrinsic height, so this is purely a visual deferral.
+- **Full docked-pill (ticker / stopping animation)** — Phase B implements the slot in the title bar plus `ShowDockedPill(vm) / HideDockedPill()` plus `DockedPillStopRequested / DockedPillCollapseRequested` events, but the inner pill is a simplified `ElapsedText + Stop + Collapse` trio (no spinning ring / stopping ticker). Deferred to Phase C; functional contract is complete (capture-exclusion flips, Stop/Collapse work).
+- **`Stop-Process -Id $variable -Force`** is blocked by this session's PowerShell policy; have to use a literal PID. Bake the PID into the command after the launch echoes it.
+- **One transient observation** of Full launching at the Mini rect on the very first cold launch after switching the code path — could not reproduce after a clean rebuild and was almost certainly a leftover env-var override from an earlier smoke-test run. Re-tested with a clean env: Full launches at `(256, 104, 1024, 768)` reliably.
+- **`dotnet test --no-build`** silently reports 0 tests when the test project hasn't been built yet (e.g., when the previous build only built `Musio.App`). Always MSBuild `Musio.Tests.csproj` first, then `dotnet test --no-build`. With `DOTNET_ROLL_FORWARD=LatestMajor`, .NET 10 SDK on the box runs the .NET 9 test target fine.
+
+### Final state
+Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `MiniSetup` initial states (window geometry measured via P/Invoke `GetWindowRect`). Old `MainWindow` / `RecordingOverlayWindow` types deleted; no references remain. Docked-pill visuals deferred to Phase C; everything else in Phase B scope landed.
+
+---
+
+## Phase B — Rubber-duck review fixes (mini-mode)
+
+**Feature/area:** Tightened the unified `AppShellWindow` shell after a rubber-duck review surfaced two reds, four yellows, and the 64 px MiniSetup height verdict. All defects fixed; build clean, 286/286 tests pass, smoke-loop verified Record→Stop→Record yields `pill.IsReadyForRecording=True` on the second entry.
+
+### What worked
+- **`RecordingPillControl.ResetToRecordingState()` + `PauseTickerWhileHidden()`**: the pill is now a long-lived instance inside `AppShellWindow` (it goes `Visibility.Collapsed`, not Unloaded, between recordings), so an explicit reset on re-entry is required. `ResetToRecordingState` stops the phrase timer + storyboard, restores `RecordingPanel`/`ButtonRow` visibility, collapses `StoppingTextHost`/`StoppingSpinner`, re-enables Stop+Expand, and clears `_stopRequested`. `PauseTickerWhileHidden` kills the ticker without dropping the VM subscription so a hidden pill doesn't churn CPU. The shell calls both at the right transition seams (`RunSingleTransitionAsync`).
+- **Same-control short-circuit in `RunSingleTransitionAsync`**: `Full ↔ FullRecording` (both use `FullShell`) now skips cross-fade + morph entirely — only chrome, presenter, state flags, docked-pill visibility, and `_currentState` are touched, then we return. Eliminates the unnecessary ~240 ms shell flash and matches spec §4.6.
+- **Origin-honouring Stop handlers**: both `OnPillStopRequested` and `OnFullDockedStopRequested` now consume `_originStateBeforeRecording` (with the literal heuristic as a fallback) and clear it after read. Verified path: MiniSetup → MiniRecording → expand to FullRecording → docked Stop lands back in MiniSetup, not Full.
+- **Stop-before-record-starts race fix**: `OnMiniSetupRecordRequested` and `RecordingPage.OnToolbarRecordRequested` re-check `CurrentState == MiniRecording` after the `await TransitionToAsync(...)` before firing `StartRecordingCommand`. Prevents the bug where Stop fires during the morph and we'd otherwise spawn a recording with no visible pill.
+- **`SetWindowPos(... SWP_FRAMECHANGED)`** appended to both `ApplyMini` and `ApplyFull` in `WindowChromeService` — non-client area now recomputes after every style flip, even on the new no-morph Full ↔ FullRecording path.
+- **IntPtr-typed `GetWindowLong`/`SetWindowLong` P/Invokes** in `WindowChromeService` (8 bytes on x64 instead of int). Style math now casts via `long` to keep the bitwise ops symmetric, then back to `IntPtr`. Mirrors the correct declaration already in `AppShellWindow.xaml.cs`.
+- **Dead branch removal in `ComputeWindowRect` source rect**: `AppWindow.Position` is a struct, so the always-true `is { } pos` pattern was dead. Simplified to direct field read.
+- **MiniSetup 64 px height — actually achieved**: restructured `MiniSetupControl.xaml` into a single horizontal toolbar Border containing the segmented capture-mode picker + inline window/region selectors + audio toggles + an opt-in compact inline Record / Stop+timer. Moved the hero centered Record button + Stop+timer + selection-metadata caption OUT of `MiniSetupControl` and INTO `RecordingPage.xaml` (so the Full-state Record page still has its rich layout). MiniSetupControl gained a `ShowInlineRecordButton` DP (defaults true; `RecordingPage` sets false to avoid two Record buttons in Full state) and a `SelectionMetadataChanged` event (null = hide). Measured: 520×64 at top-center on 1536×976 work area.
+- **Pill loop smoke test**: temporary `MUSIO_PILL_LOOP=1` env-var hook in `App.OnLaunched` drove `AppShellWindow.TransitionToAsync(MiniRecording → MiniSetup → MiniRecording)` and wrote `pill.IsReadyForRecording` after each cycle to `crash.log`. Result: `ready=True` on BOTH the first AND second Record entries. Hook + introspection probes removed after verification.
+
+### What didn't work / wrinkles
+- **WinAppSDK `DependencyProperty` boilerplate**: `[ObservableProperty]` source-gen wouldn't work cleanly on `MiniSetupControl` for an `x:Bind`-target property because `x:Bind` requires the property surface at code-gen time. Used a plain `DependencyProperty.Register` instead.
+- **`RecordingPage` now has both the toolbar and a hero Record button** (with `ShowInlineRecordButton="False"` to suppress the toolbar's compact one). Two physical instances of `MiniSetupControl` exist app-wide (one in `AppShellWindow`, one in `RecordingPage`) and both subscribe to `IsRecording`. NIT 9 explicitly allowed deferring full consolidation to Phase C; left as-is.
+- **Test project can't reference `AppShellWindow`** (Musio.Tests only references Musio.Core, and creating a `Window` in xUnit on a non-STA thread is impractical), so the Phase B verification couldn't take the form of a unit test. The temporary `MUSIO_PILL_LOOP=1` env-var hook + structured log probe was the pragmatic substitute and produced cleanly-asserted evidence (`ready=True` on both Record entries).
+
+### Final state
+- Build PASS, tests **286/286 PASS**, sanity launch PASS:
+  - Full state: `(256, 104, 1024, 768)` ✓
+  - MiniSetup state: `(508, 16, 520, 64)` ✓ — spec target met
+- Pill smoke: Record→Stop→Record loop ends with `ready=True` on second entry ✓
+- All review items addressed; smoke-test hooks + probes removed.

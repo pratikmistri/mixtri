@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio_App.Pages;
 using Musio_App.Services;
+using Musio_App.Shell;
 using Musio.Core.Services;
 using Musio.Core.Settings;
 using Windows.ApplicationModel.ExtendedExecution;
@@ -17,14 +18,21 @@ namespace Musio_App;
 /// </summary>
 public partial class App : Application
 {
-    private Window? _window;
+    private AppShellWindow? _window;
     private SystemTrayService? _trayService;
     private GlobalHotkeyService? _hotkeyService;
     private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
     private System.Threading.Timer? _quiesceTimer;
 
-    /// <summary>The main application window, accessible for minimize/restore operations.</summary>
+    /// <summary>The unified app shell window, or <c>null</c> before launch / after shutdown.</summary>
+    public AppShellWindow? Shell => _window;
+
+    /// <summary>
+    /// Back-compat shim — older call sites (pickers, EditorPage) used this
+    /// name to grab a host <see cref="Window"/> for parenting/minimizing.
+    /// Points at <see cref="Shell"/> in Phase B.
+    /// </summary>
     public Window? MainAppWindow => _window;
 
     public static new App Current => (App)Application.Current;
@@ -61,10 +69,28 @@ public partial class App : Application
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
+        // Phase B: the app launches as the unified AppShellWindow. Initial
+        // state comes from ShellSettings.StartupMode (default Full for
+        // existing installs; Phase C flips new-install default to Mini).
+        var startup = ShellSettings.Instance.StartupMode;
+        var initialState = startup == StartupMode.Mini
+            ? AppShellState.MiniSetup
+            : AppShellState.Full;
+
+        _window = new AppShellWindow(initialState);
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
         _window.Activate();
+        _window.InitializeAfterActivation();
+
+        // If we launched directly into Full, navigate to the default Record
+        // page so the user lands somewhere meaningful. (FullShellControl's
+        // NavigationView already auto-selects "Record" but does not
+        // automatically navigate the frame on first display.)
+        if (initialState == AppShellState.Full && _window.ContentFrame is { Content: null } frame)
+        {
+            try { frame.Navigate(typeof(RecordingPage)); } catch { /* navigation optional */ }
+        }
 
         // Clean up .frames/ from previously-exported sessions in the background
         var savePath = AppSettings.Instance.DefaultSavePath;
@@ -177,8 +203,7 @@ public partial class App : Application
 
     private void PauseEditorPlayback()
     {
-        if (_window is MainWindow mainWindow
-            && mainWindow.ContentFrame.Content is EditorPage editor)
+        if (_window?.ContentFrame?.Content is EditorPage editor)
         {
             editor.PausePlayback();
         }

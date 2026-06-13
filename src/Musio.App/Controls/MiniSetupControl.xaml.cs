@@ -28,6 +28,27 @@ public sealed partial class MiniSetupControl : UserControl
     private bool _isLoading = true;
 
     /// <summary>
+    /// Whether the toolbar should show its own inline Record / Stop button.
+    /// <c>true</c> by default (used by <c>AppShellWindow</c> where the
+    /// toolbar IS the entire Mini surface). <c>RecordingPage</c> sets this
+    /// to <c>false</c> because it renders its own hero Record button below
+    /// the toolbar; surfacing two Record buttons in Full state would be
+    /// confusing.
+    /// </summary>
+    public bool ShowInlineRecordButton
+    {
+        get => (bool)GetValue(ShowInlineRecordButtonProperty);
+        set => SetValue(ShowInlineRecordButtonProperty, value);
+    }
+
+    public static readonly DependencyProperty ShowInlineRecordButtonProperty =
+        DependencyProperty.Register(
+            nameof(ShowInlineRecordButton),
+            typeof(bool),
+            typeof(MiniSetupControl),
+            new PropertyMetadata(true));
+
+    /// <summary>
     /// Raised when the user presses the hero Record button. The host page
     /// owns recording orchestration (window minimize, overlay lifecycle).
     /// </summary>
@@ -44,6 +65,16 @@ public sealed partial class MiniSetupControl : UserControl
     /// message (e.g. "Region selection cancelled — kept previous region.").
     /// </summary>
     public event EventHandler<string>? TransientInfoRequested;
+
+    /// <summary>
+    /// Raised when the toolbar wants the host to update a "selected
+    /// window/region" caption. Phase B moved the caption out of the
+    /// toolbar (it would have pushed the compact 64 px target back to
+    /// ~80 px); hosts that want to surface it (e.g. <c>RecordingPage</c>)
+    /// subscribe and render it in their own layout. A <c>null</c> value
+    /// means "hide the caption".
+    /// </summary>
+    public event EventHandler<string?>? SelectionMetadataChanged;
 
     public MiniSetupControl()
     {
@@ -68,6 +99,19 @@ public sealed partial class MiniSetupControl : UserControl
     // x:Bind helper: inverted bool → Visibility
     public Visibility InvertBoolToVisibility(bool value) =>
         value ? Visibility.Collapsed : Visibility.Visible;
+
+    // x:Bind helper: separator + inline Record/Stop visible only when the
+    // host opted in via ShowInlineRecordButton.
+    public Visibility ShowInlineRecordVisibility(bool show) =>
+        show ? Visibility.Visible : Visibility.Collapsed;
+
+    // x:Bind helper: inline Record visible iff host opted in AND not recording.
+    public Visibility InlineRecordVisibility(bool show, bool isRecording) =>
+        show && !isRecording ? Visibility.Visible : Visibility.Collapsed;
+
+    // x:Bind helper: inline Stop+timer visible iff host opted in AND recording.
+    public Visibility InlineStopVisibility(bool show, bool isRecording) =>
+        show && isRecording ? Visibility.Visible : Visibility.Collapsed;
 
     // x:Bind helper: dim options grid while recording
     public double RecordingOpacity(bool isRecording) =>
@@ -225,15 +269,12 @@ public sealed partial class MiniSetupControl : UserControl
 
     private void ShowSelectionMetadata(string text)
     {
-        if (SelectionMetadataText is null) return;
-        SelectionMetadataText.Text = text;
-        SelectionMetadataText.Visibility = Visibility.Visible;
+        SelectionMetadataChanged?.Invoke(this, text);
     }
 
     private void HideSelectionMetadata()
     {
-        if (SelectionMetadataText is null) return;
-        SelectionMetadataText.Visibility = Visibility.Collapsed;
+        SelectionMetadataChanged?.Invoke(this, null);
     }
 
     private void StartRecordButton_Click(object sender, RoutedEventArgs e)

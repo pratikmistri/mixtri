@@ -33,3 +33,5 @@ BundleArtifacts/
 
 # Windows
 Thumbs.db
+build.log
+build-tests.log

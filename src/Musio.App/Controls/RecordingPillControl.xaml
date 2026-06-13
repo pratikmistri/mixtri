@@ -23,32 +23,58 @@
                 MinWidth="48" />
         </StackPanel>
 
-        <Button
-            x:Name="StopButton"
-            Click="Stop_Click"
-            Width="32"
-            Height="32"
-            CornerRadius="8"
-            Padding="0"
-            Background="{ThemeResource RecordingStopRestBrush}"
-            BorderBrush="{ThemeResource RecordingStopRestBrush}"
-            Foreground="{ThemeResource RecordingStopForegroundBrush}"
+        <StackPanel
+            x:Name="ButtonRow"
+            Orientation="Horizontal"
+            Spacing="6"
             HorizontalAlignment="Right"
-            VerticalAlignment="Center"
-            ToolTipService.ToolTip="Stop recording"
-            AutomationProperties.Name="Stop recording">
-            <Button.Resources>
-                <!-- Hover: brighter red for clear feedback -->
-                <StaticResource x:Key="ButtonBackgroundPointerOver"  ResourceKey="RecordingStopHoverBrush" />
-                <StaticResource x:Key="ButtonBorderBrushPointerOver" ResourceKey="RecordingStopHoverBrush" />
-                <StaticResource x:Key="ButtonForegroundPointerOver"  ResourceKey="RecordingStopForegroundBrush" />
-                <!-- Pressed: darker red to signal the press -->
-                <StaticResource x:Key="ButtonBackgroundPressed"  ResourceKey="RecordingStopPressedBrush" />
-                <StaticResource x:Key="ButtonBorderBrushPressed" ResourceKey="RecordingStopPressedBrush" />
-                <StaticResource x:Key="ButtonForegroundPressed"  ResourceKey="RecordingStopForegroundBrush" />
-            </Button.Resources>
-            <FontIcon Glyph="&#xE71A;" FontSize="12" />
-        </Button>
+            VerticalAlignment="Center">
+            <Button
+                x:Name="StopButton"
+                Click="Stop_Click"
+                Width="32"
+                Height="32"
+                CornerRadius="8"
+                Padding="0"
+                Background="{ThemeResource RecordingStopRestBrush}"
+                BorderBrush="{ThemeResource RecordingStopRestBrush}"
+                Foreground="{ThemeResource RecordingStopForegroundBrush}"
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="Stop recording"
+                AutomationProperties.Name="Stop recording">
+                <Button.Resources>
+                    <!-- Hover: brighter red for clear feedback -->
+                    <StaticResource x:Key="ButtonBackgroundPointerOver"  ResourceKey="RecordingStopHoverBrush" />
+                    <StaticResource x:Key="ButtonBorderBrushPointerOver" ResourceKey="RecordingStopHoverBrush" />
+                    <StaticResource x:Key="ButtonForegroundPointerOver"  ResourceKey="RecordingStopForegroundBrush" />
+                    <!-- Pressed: darker red to signal the press -->
+                    <StaticResource x:Key="ButtonBackgroundPressed"  ResourceKey="RecordingStopPressedBrush" />
+                    <StaticResource x:Key="ButtonBorderBrushPressed" ResourceKey="RecordingStopPressedBrush" />
+                    <StaticResource x:Key="ButtonForegroundPressed"  ResourceKey="RecordingStopForegroundBrush" />
+                </Button.Resources>
+                <FontIcon Glyph="&#xE71A;" FontSize="12" />
+            </Button>
+
+            <!-- Expand-to-Full button. Hidden by default; AppShellWindow flips
+                 it visible only in the MiniRecording state (in FullRecording the
+                 docked title-bar pill handles its own collapse button). -->
+            <Button
+                x:Name="ExpandButton"
+                Click="Expand_Click"
+                Visibility="Collapsed"
+                Width="28"
+                Height="28"
+                CornerRadius="6"
+                Padding="0"
+                Background="Transparent"
+                BorderThickness="0"
+                Foreground="{ThemeResource OverlayForegroundBrush}"
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="Expand to full app"
+                AutomationProperties.Name="Expand to full app">
+                <FontIcon Glyph="&#xE740;" FontSize="12" />
+            </Button>
+        </StackPanel>
 
         <!-- Stopping state: text left-aligned (where timer was), spinner right-aligned (where stop button was) -->
         <Grid

@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio_App.Controls;
 using Musio_App.Services;
+using Musio_App.Shell;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
@@ -16,9 +17,7 @@ public sealed partial class RecordingPage : Page
 {
     public RecordingViewModel ViewModel { get; } = RecordingViewModel.Shared;
 
-    private RecordingOverlayWindow? _overlayWindow;
     private RegionBorderHighlight? _regionBorder;
-    private bool _recordingMinimizedWindow;
 
     private System.ComponentModel.PropertyChangedEventHandler? _viewModelHandler;
 
@@ -31,10 +30,39 @@ public sealed partial class RecordingPage : Page
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         // Bridge the Mini Setup toolbar's events into the page-level
-        // orchestration (overlay/window lifecycle, transient InfoBar).
+        // orchestration (state-machine transitions + transient InfoBar +
+        // selection-metadata caption, which Phase B moved out of the
+        // compact toolbar so it could hit the 64 px height target).
         Toolbar.RecordRequested += OnToolbarRecordRequested;
         Toolbar.TransientInfoRequested += OnToolbarTransientInfoRequested;
+        Toolbar.SelectionMetadataChanged += OnToolbarSelectionMetadataChanged;
     }
+
+    private void OnToolbarSelectionMetadataChanged(object? sender, string? text)
+    {
+        if (SelectionMetadataText is null) return;
+        if (string.IsNullOrEmpty(text))
+        {
+            SelectionMetadataText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        SelectionMetadataText.Text = text;
+        SelectionMetadataText.Visibility = Visibility.Visible;
+    }
+
+    private void HeroRecordButton_Click(object sender, RoutedEventArgs e)
+    {
+        // The hero Record button in the page mirrors the toolbar's inline
+        // Record button (which RecordingPage suppresses via
+        // ShowInlineRecordButton="False"). Both share the same orchestration
+        // path so the state machine + StartRecordingCommand wiring stays in
+        // one place.
+        OnToolbarRecordRequested(sender, EventArgs.Empty);
+    }
+
+    // x:Bind helper: inverted bool → Visibility (used by the hero Record button).
+    public Visibility InvertBoolToVisibility(bool value) =>
+        value ? Visibility.Collapsed : Visibility.Visible;
 
     protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
     {
@@ -46,7 +74,8 @@ public sealed partial class RecordingPage : Page
 
         // Wire up IsRecording observation per-navigation; tear down in
         // OnNavigatedFrom so the VM doesn't accumulate handlers from prior page
-        // instances.
+        // instances. The shell window owns the morph; this page is only
+        // responsible for the region-border highlight + post-stop nav.
         _viewModelHandler = (_, args) =>
         {
             if (args.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
@@ -55,11 +84,16 @@ public sealed partial class RecordingPage : Page
             {
                 if (ViewModel.IsRecording)
                 {
-                    ShowRecordingOverlay();
+                    ShowRegionBorderIfNeeded();
+                    // Open the capture gate now that the shell has finished
+                    // morphing to MiniRecording / FullRecording — all frames
+                    // and audio before this point are discarded, eliminating
+                    // the startup delta.
+                    ViewModel.OpenCaptureGate();
                 }
                 else
                 {
-                    CloseRecordingOverlay();
+                    HideRegionBorder();
 
                     if (ViewModel.LastProject is not null)
                         Frame.Navigate(typeof(EditorPage));
@@ -95,19 +129,26 @@ public sealed partial class RecordingPage : Page
     {
         try
         {
-            // Minimize the main window before recording starts so the
-            // minimize animation is never captured in the recording.
-            var mainWindow = App.Current.MainAppWindow;
-            if (mainWindow is not null)
-            {
-                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-                ShowWindow(hwnd, SW_MINIMIZE);
-                _recordingMinimizedWindow = true;
-                // Wait for the minimize animation to finish
-                await Task.Delay(600);
-            }
+            // Phase B: drive the shell state machine instead of minimising
+            // the window + spawning a separate RecordingOverlayWindow. The
+            // shell decides whether to morph to MiniRecording (from Mini /
+            // Full) and starts recording itself when invoked from its own
+            // toolbar — but this page hosts its own MiniSetupControl
+            // instance, so we must drive the transition + start the
+            // recording from here too.
+            var shell = App.Current.Shell;
+            if (shell is null) return;
 
-            ViewModel.StartRecordingCommand.Execute(null);
+            // Always end up in MiniRecording on Record-press (matches spec
+            // §3.6 — recording from Full collapses to top-center pill).
+            await shell.TransitionToAsync(AppShellState.MiniRecording);
+
+            // Re-check state after the await: if Stop fired or any other
+            // transition took us out of MiniRecording during the morph, do
+            // NOT start a recording — we'd otherwise spawn one with no pill
+            // visible to stop it.
+            if (shell.CurrentState == AppShellState.MiniRecording && !ViewModel.IsRecording)
+                ViewModel.StartRecordingCommand.Execute(null);
         }
         catch (Exception ex)
         {
@@ -120,78 +161,42 @@ public sealed partial class RecordingPage : Page
         ShowTransientInfo(message);
     }
 
-    private void ShowRecordingOverlay()
+    private void ShowRegionBorderIfNeeded()
     {
         // Show a border around the selected region so the user can see
         // what area is being captured. The region coordinates are in DIP
         // (logical pixels) from the selector overlay, so scale them to
         // physical screen pixels for the native Win32 border windows.
-        if (ViewModel.CaptureMode == CaptureMode.CustomRegion
-            && ViewModel.SelectedRegion is CaptureRegion region
-            && region.Width > 0 && region.Height > 0)
+        if (ViewModel.CaptureMode != CaptureMode.CustomRegion
+            || ViewModel.SelectedRegion is not CaptureRegion region
+            || region.Width <= 0 || region.Height <= 0)
         {
-            _regionBorder = new RegionBorderHighlight();
-            float dpiScale = GetRegionMonitorDpiScale(region);
-            var (monLeft, monTop) = GetRegionMonitorOrigin(region);
-            // region.X/Y are monitor-local DIPs. Convert to monitor-local
-            // physical pixels and offset by the monitor's screen-absolute
-            // physical origin so the Win32 border windows land on the
-            // correct monitor. Use Math.Round + even-dimension flooring to
-            // match the crop rect computed by RecordingSession (which rounds
-            // origin to int and floors W/H to multiples of 2 for H.264).
-            int px = monLeft + (int)Math.Round(region.X * dpiScale);
-            int py = monTop + (int)Math.Round(region.Y * dpiScale);
-            int pw = ((int)(region.Width * dpiScale)) & ~1;
-            int ph = ((int)(region.Height * dpiScale)) & ~1;
-            if (pw < 2) pw = 2;
-            if (ph < 2) ph = 2;
-            _regionBorder.Show(px, py, pw, ph);
-        }
-
-        // Create and show the compact overlay
-        _overlayWindow = new RecordingOverlayWindow(ViewModel);
-        _overlayWindow.StopRequested += OnOverlayStopRequested;
-        _overlayWindow.Activate();
-
-        // Open the capture gate now that the overlay is visible.
-        // All frames and audio before this point are discarded,
-        // eliminating the startup delta.
-        ViewModel.OpenCaptureGate();
-    }
-
-    private void CloseRecordingOverlay()
-    {
-        if (_overlayWindow is not null)
-        {
-            _overlayWindow.StopRequested -= OnOverlayStopRequested;
-            _overlayWindow.CloseOverlay();
-            _overlayWindow = null;
+            return;
         }
 
         _regionBorder?.Dispose();
-        _regionBorder = null;
-
-        // Restore main window only if recording was what minimized it
-        if (_recordingMinimizedWindow)
-        {
-            _recordingMinimizedWindow = false;
-            var mainWindow = App.Current.MainAppWindow;
-            if (mainWindow is not null)
-            {
-                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-                ShowWindow(hwnd, SW_RESTORE);
-                mainWindow.Activate();
-            }
-        }
+        _regionBorder = new RegionBorderHighlight();
+        float dpiScale = GetRegionMonitorDpiScale(region);
+        var (monLeft, monTop) = GetRegionMonitorOrigin(region);
+        // region.X/Y are monitor-local DIPs. Convert to monitor-local
+        // physical pixels and offset by the monitor's screen-absolute
+        // physical origin so the Win32 border windows land on the
+        // correct monitor. Use Math.Round + even-dimension flooring to
+        // match the crop rect computed by RecordingSession (which rounds
+        // origin to int and floors W/H to multiples of 2 for H.264).
+        int px = monLeft + (int)Math.Round(region.X * dpiScale);
+        int py = monTop + (int)Math.Round(region.Y * dpiScale);
+        int pw = ((int)(region.Width * dpiScale)) & ~1;
+        int ph = ((int)(region.Height * dpiScale)) & ~1;
+        if (pw < 2) pw = 2;
+        if (ph < 2) ph = 2;
+        _regionBorder.Show(px, py, pw, ph);
     }
 
-    private void OnOverlayStopRequested(object? sender, EventArgs e)
+    private void HideRegionBorder()
     {
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (ViewModel.IsRecording)
-                ViewModel.StopRecordingCommand.Execute(null);
-        });
+        _regionBorder?.Dispose();
+        _regionBorder = null;
     }
 
     // x:Bind helper: bool → Visibility (used by the status bar)
@@ -224,12 +229,6 @@ public sealed partial class RecordingPage : Page
             RecordingInfoBar.IsOpen = false;
         sender.Stop();
     }
-
-    private const int SW_MINIMIZE = 6;
-    private const int SW_RESTORE = 9;
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 
     private static CaptureTarget? FindMonitorForRegion(CaptureRegion region)
     {

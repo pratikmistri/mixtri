@@ -24,22 +24,80 @@
                 <ImageIconSource ImageSource="ms-appx:///Assets/AppIcon.ico" />
             </TitleBar.IconSource>
 
-            <!-- Placeholder Collapse-to-Mini button (Phase A: hidden until shell wiring lands) -->
+            <!-- Title bar right-aligned content. Two mutually-exclusive
+                 panels: the static Collapse-to-Mini button (default), and the
+                 docked recording pill (shown only in FullRecording state). -->
             <TitleBar.Content>
-                <Button
-                    x:Name="CollapseButton"
-                    Visibility="Collapsed"
-                    Click="CollapseButton_Click"
-                    HorizontalAlignment="Right"
-                    VerticalAlignment="Center"
-                    Width="36" Height="32" Padding="0"
-                    Margin="0,0,8,0"
-                    Background="Transparent"
-                    BorderThickness="0"
-                    ToolTipService.ToolTip="Collapse to Mini"
-                    AutomationProperties.Name="Collapse to Mini">
-                    <FontIcon Glyph="&#xE73F;" FontSize="14" />
-                </Button>
+                <Grid HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0">
+                    <!-- Static state: just the Collapse-to-Mini button. -->
+                    <Button
+                        x:Name="CollapseButton"
+                        Visibility="Collapsed"
+                        Click="CollapseButton_Click"
+                        Width="36" Height="32" Padding="0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTipService.ToolTip="Collapse to Mini"
+                        AutomationProperties.Name="Collapse to Mini">
+                        <FontIcon Glyph="&#xE73F;" FontSize="14" />
+                    </Button>
+
+                    <!-- FullRecording state: docked pill (Phase B uses a
+                         simplified Stop + elapsed time + Collapse trio; the
+                         full RecordingPillControl visuals + stopping ticker
+                         move into the title bar in Phase C). -->
+                    <StackPanel
+                        x:Name="DockedPillPanel"
+                        Visibility="Collapsed"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        VerticalAlignment="Center">
+                        <TextBlock
+                            x:Name="DockedElapsedText"
+                            Text="00:00"
+                            Foreground="{ThemeResource OverlayForegroundBrush}"
+                            FontSize="14"
+                            FontWeight="SemiBold"
+                            FontFamily="Consolas"
+                            VerticalAlignment="Center"
+                            MinWidth="44" />
+                        <Button
+                            x:Name="DockedStopButton"
+                            Click="DockedStopButton_Click"
+                            Width="28" Height="28"
+                            CornerRadius="6"
+                            Padding="0"
+                            Background="{ThemeResource RecordingStopRestBrush}"
+                            BorderBrush="{ThemeResource RecordingStopRestBrush}"
+                            Foreground="{ThemeResource RecordingStopForegroundBrush}"
+                            VerticalAlignment="Center"
+                            ToolTipService.ToolTip="Stop recording"
+                            AutomationProperties.Name="Stop recording">
+                            <Button.Resources>
+                                <StaticResource x:Key="ButtonBackgroundPointerOver"  ResourceKey="RecordingStopHoverBrush" />
+                                <StaticResource x:Key="ButtonBorderBrushPointerOver" ResourceKey="RecordingStopHoverBrush" />
+                                <StaticResource x:Key="ButtonForegroundPointerOver"  ResourceKey="RecordingStopForegroundBrush" />
+                                <StaticResource x:Key="ButtonBackgroundPressed"  ResourceKey="RecordingStopPressedBrush" />
+                                <StaticResource x:Key="ButtonBorderBrushPressed" ResourceKey="RecordingStopPressedBrush" />
+                                <StaticResource x:Key="ButtonForegroundPressed"  ResourceKey="RecordingStopForegroundBrush" />
+                            </Button.Resources>
+                            <FontIcon Glyph="&#xE71A;" FontSize="10" />
+                        </Button>
+                        <Button
+                            x:Name="DockedCollapseButton"
+                            Click="DockedCollapseButton_Click"
+                            Width="28" Height="28"
+                            CornerRadius="6"
+                            Padding="0"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            VerticalAlignment="Center"
+                            ToolTipService.ToolTip="Collapse to Mini Recording"
+                            AutomationProperties.Name="Collapse to Mini Recording">
+                            <FontIcon Glyph="&#xE73F;" FontSize="12" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
             </TitleBar.Content>
         </TitleBar>
 

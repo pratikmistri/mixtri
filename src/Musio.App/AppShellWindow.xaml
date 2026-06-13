@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Musio_App.AppShellWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:controls="using:Musio_App.Controls"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="Musio"
+    mc:Ignorable="d">
+
+    <!--
+        StateHost is the single child of the window; it hosts the three
+        mutually-exclusive state controls and cross-fades opacity between
+        them as the state machine transitions. The backdrop is set in code
+        per state (Mica for Full, Desktop Acrylic for Mini*).
+    -->
+    <Grid x:Name="StateHost">
+
+        <controls:MiniSetupControl
+            x:Name="MiniSetup"
+            Visibility="Collapsed"
+            Opacity="0" />
+
+        <controls:RecordingPillControl
+            x:Name="RecordingPill"
+            Visibility="Collapsed"
+            Opacity="0" />
+
+        <controls:FullShellControl
+            x:Name="FullShell"
+            Visibility="Collapsed"
+            Opacity="0" />
+    </Grid>
+</Window>

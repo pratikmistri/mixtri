@@ -35,10 +35,28 @@ public sealed partial class RecordingPillControl : UserControl
     /// <summary>Raised when the user requests to stop recording (Stop button).</summary>
     public event EventHandler? StopRequested;
 
+    /// <summary>
+    /// Raised when the user clicks the Expand-to-Full button (only visible in
+    /// the MiniRecording state). The host shell window morphs to
+    /// <c>FullRecording</c>; the active recording is NOT stopped.
+    /// </summary>
+    public event EventHandler? ExpandRequested;
+
     public RecordingPillControl()
     {
         InitializeComponent();
         Unloaded += OnUnloaded;
+    }
+
+    /// <summary>
+    /// Show or hide the Expand-to-Full button. The button is hidden by default
+    /// so the recording overlay window (Phase A) doesn't accidentally surface
+    /// it; <c>AppShellWindow</c> sets it true while in MiniRecording.
+    /// </summary>
+    public bool IsExpandButtonVisible
+    {
+        get => ExpandButton.Visibility == Visibility.Visible;
+        set => ExpandButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>
@@ -104,6 +122,54 @@ public sealed partial class RecordingPillControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Reset the pill back to its initial recording UI: timer + Stop + Expand
+    /// row visible, stopping ticker hidden, Stop button re-enabled, and the
+    /// internal "stop requested" latch cleared. Required because the pill is
+    /// a long-lived instance inside <c>AppShellWindow</c> (it goes
+    /// <see cref="Visibility.Collapsed"/> rather than unloaded between
+    /// recordings), so without an explicit reset a second Record cycle would
+    /// surface in the disabled stopping state.
+    /// </summary>
+    public void ResetToRecordingState()
+    {
+        // Tear down any in-flight stopping animation.
+        _phraseTimer?.Stop();
+        _phraseTimer = null;
+        _currentPhraseStoryboard?.Stop();
+        _currentPhraseStoryboard = null;
+
+        // Restore the recording-row UI.
+        RecordingPanel.Visibility = Visibility.Visible;
+        ButtonRow.Visibility = Visibility.Visible;
+        StoppingTextHost.Visibility = Visibility.Collapsed;
+        StoppingSpinner.Visibility = Visibility.Collapsed;
+
+        StopButton.IsEnabled = true;
+        ExpandButton.IsEnabled = true;
+
+        _stopRequested = false;
+
+        // Keep the elapsed-time text fresh on re-entry (the VM may already
+        // be at 00:00 for the new recording).
+        if (_viewModel is not null)
+            ElapsedText.Text = _viewModel.ElapsedTime;
+    }
+
+    /// <summary>
+    /// Stop the stopping-ticker timer + storyboard without dropping the
+    /// view-model subscription. Called by the host shell when the pill is
+    /// about to be hidden (cross-fade out), so a hidden pill doesn't keep
+    /// churning CPU on a stopping animation no one can see.
+    /// </summary>
+    public void PauseTickerWhileHidden()
+    {
+        _phraseTimer?.Stop();
+        _phraseTimer = null;
+        _currentPhraseStoryboard?.Stop();
+        _currentPhraseStoryboard = null;
+    }
+
     private async void Stop_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -112,6 +178,7 @@ public sealed partial class RecordingPillControl : UserControl
             _stopRequested = true;
             _viewModel?.NotifyStopRequested();
             StopButton.IsEnabled = false;
+            ExpandButton.IsEnabled = false;
             ShowStoppingState();
 
             // Yield to let the UI render the stopping state before the heavy stop work begins
@@ -125,6 +192,14 @@ public sealed partial class RecordingPillControl : UserControl
         }
     }
 
+    private void Expand_Click(object sender, RoutedEventArgs e)
+    {
+        // Don't fire after a stop request — the pill is on its way out and the
+        // shell should not start morphing to FullRecording underneath it.
+        if (_stopRequested) return;
+        ExpandRequested?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>
     /// Swap the pill from "elapsed time + Stop" into the animated
     /// "Stopping…" ticker. Public so the host window can trigger this when
@@ -133,9 +208,10 @@ public sealed partial class RecordingPillControl : UserControl
     /// </summary>
     public void ShowStoppingState()
     {
-        // Swap to the stopping UI
+        // Swap to the stopping UI (collapse the whole button row so the
+        // Expand button — when surfaced in MiniRecording — also goes away).
         RecordingPanel.Visibility = Visibility.Collapsed;
-        StopButton.Visibility = Visibility.Collapsed;
+        ButtonRow.Visibility = Visibility.Collapsed;
         StoppingTextHost.Visibility = Visibility.Visible;
         StoppingSpinner.Visibility = Visibility.Visible;
 
