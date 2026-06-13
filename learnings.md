@@ -1790,3 +1790,60 @@ the success message. Resetting on close is cleaner and matches user intent.
   4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
 - **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
 - **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.
+
+---
+
+## Mini Mode â€” Phase A (extract controls + services, no behaviour change)
+
+**Feature/area:** App shell refactor for the unified Mini-Mode window (spec v4 Â§5 & Â§10).
+
+**Approaches tried:**
+
+1. **Extract `RecordingPillControl` from `RecordingOverlayWindow`** â€” worked. Moved the entire `<Grid x:Name="RootGrid">` plus stopping-ticker logic (phrase cycling, `Stop_Click`, `ShowStoppingState`, `AnimateToPhrase`, the `StoppingPhrases` table) into `Musio_App.Controls.RecordingPillControl`. Window now hosts the control and forwards `StopRequested`. âœ…
+2. **Extract `MiniSetupControl` from `RecordingPage`** â€” worked. Moved the toolbar `Border` + the metadata `TextBlock` + the hero Record/Stop visuals into the control. Picker handlers now delegate to `CapturePickerService.Shared`. The page subscribes to `RecordRequested`/`TransientInfoRequested` to keep overlay lifecycle + InfoBar on the page (per spec). âœ…
+3. **Extract `FullShellControl` from `MainWindow`** â€” worked. `MainWindow.xaml` becomes a one-element host; the WndProc subclass / min-size / quiesce logic stays in `MainWindow.xaml.cs` so the OS quiesce handler (the dead-code fix from a prior pass) is preserved. âœ…
+4. **`CapturePickerService.PickRegionAsync` / `PickWindowAsync`** â€” works. Took an `IDimmable? dimTarget` parameter today (passes through `NoOpDimmable` when `null`) so Phase C wiring can drop the dim implementation in without touching call sites. Inferring "kept previous region" from "service returned false AND VM still has a region" preserves today's `overlay.WasCancelled` UX without leaking overlay state. âœ…
+5. **`WindowChromeService.ApplyTo(window, ChromeProfile)`** â€” centralised the four Win32/DWM calls (`WDA_EXCLUDEFROMCAPTURE`, `DWMWA_BORDER_COLOR`, `DWMWA_CAPTION_COLOR`, `DWMWA_WINDOW_CORNER_PREFERENCE`, plus `WS_BORDER`/`WS_DLGFRAME` strip) that used to live inline in `RecordingOverlayWindow.ConfigureWindow`. `ChromeProfile.Full` exists but is a no-op until the unified shell window lands. âœ…
+6. **`WindowMatcher.FindWindow(processName, windowTitle)`** â€” walks `EnumWindows`, filters `IsWindowVisible`, requires exact (`Ordinal`) title match and case-insensitive process-name match. Returns `null` when no window matches (spec Â§5.4 forbids fuzzy fallback). Not yet called from any flow. âœ…
+7. **`ShellSettings` typed facade** â€” lives in `Musio.App\Services\` (not `Musio.Core`) because `StartupMode` (in `Musio_App.Shell`) and `CaptureMode` (in `Musio_App.ViewModels`) are App-side types; Core doesn't reference App. Reads/writes go through `AppSettings.Instance` underneath so we share the existing settings store. Serialises `Rect` + window selection via `System.Text.Json`. âœ…
+
+**What worked:**
+
+- Adding the new "Expand" / "Collapse-to-Mini" placeholder buttons with `Visibility="Collapsed"` satisfies *both* "the slot must exist + emit an event" and "no visible UI change" from the Phase A constraints. Wire-up is one XAML line + a `Visibility="Visible"` toggle later.
+- The recording overlay solid-background fallback path (used when `DesktopAcrylicController.IsSupported()` is false) needs a tiny public setter on `RecordingPillControl` because XAML-generated `x:Name` fields default to `private`. Exposed `SetRootBackground(Brush)` rather than making `RootGrid` public.
+- Title-bar icon path: when moving the `<TitleBar.IconSource>` out of `MainWindow.xaml` into the `FullShellControl` UserControl, prefer the explicit `ms-appx:///Assets/AppIcon.ico` URI over the bare `Assets/AppIcon.ico` path so the asset still resolves once the markup lives in a control resource tree.
+
+**What didn't work:**
+
+- `dotnet test --no-build` returns exit 0 with no output (and runs 0 tests) when the test assembly hasn't been built yet â€” `MSBuild src\Musio.App\Musio.App.csproj` does NOT transitively build `Musio.Tests`. You must invoke MSBuild on `src\Musio.Tests\Musio.Tests.csproj` (with `/restore`) before running `dotnet test --no-build`, otherwise you get a silent green that hides the fact zero tests ran.
+- Forgetting `using Musio.Core.Settings;` when moving region-related code: `CaptureRegion` lives there, not in `Musio.Core.Capture`. The pages compile fine until you reference `CaptureRegion` by name.
+
+**Validation:**
+
+- VS Community MSBuild (`C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`) `/p:Platform=x64 /p:Configuration=Debug /restore` â€” PASS, no new errors/warnings.
+- `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -c Debug /p:Platform=x64` with `DOTNET_ROLL_FORWARD=LatestMajor` â€” PASS, 286/286 tests.
+- Sanity launch of `Musio.App.exe` â€” PASS, window appears, process is responsive (`Responding=True`, `MainWindowTitle='Musio'`).
+
+
+
+---
+
+## Mini Mode â€” Phase A rubber-duck review fixes
+
+**Feature/area:** `CapturePickerService`, `MiniSetupControl`, `WindowMatcher`, `ShellSettings`, `RecordingPillControl`.
+
+**Fixes applied:**
+
+1. **`PickerResult` tri-state** â€” replaced `Task<bool>` on `CapturePickerService.PickRegionAsync`/`PickWindowAsync` with `Task<PickerResult>` (`Selected` / `Cancelled` / `AlreadyOpen`). `MiniSetupControl` now only fires the "kept previous selectionâ€¦" InfoBar on an actual `Cancelled` with a prior selection in the VM; the re-entrancy `AlreadyOpen` path is a silent no-op (was previously misclassified as cancellation when nothing had actually been shown).
+2. **WindowMatcher DWM-cloaked filter** â€” added `DwmGetWindowAttribute(DWMWA_CLOAKED)` check between `IsWindowVisible` and the title check so UWP/Settings/Start/virtual-desktop ghost HWNDs don't satisfy a remembered selection.
+3. **ShellSettings setter normalisation** â€” `LastRegion` setter writes `string.Empty` (â‰¡ null) when given a `Rect` with `Width <= 0` or `Height <= 0`; `LastWindowSelection` setter writes `string.Empty` when both `ProcessName` *and* `WindowTitle` are empty. Prevents WindowMatcher from ever being called with empty strings.
+4. **`RecordingPillControl.OnUnloaded` â†’ `Teardown()`** â€” unified the unload path with the explicit teardown so a future host swapping the control out can't leak a ticking `DispatcherTimer` or a re-entering phrase storyboard on a detached control.
+
+**Validation:**
+
+- VS Community MSBuild `/p:Platform=x64 /p:Configuration=Debug /restore` on both `Musio.App` and `Musio.Tests` â€” PASS (no errors, no new warnings).
+- `dotnet test --no-build` with `DOTNET_ROLL_FORWARD=LatestMajor` â€” PASS, 286/286.
+- Sanity launch â€” PASS, window appears, `Responding=True`, `MainWindowTitle='Musio'`.
+
+**Deferred (intentional):** nit #5 (resolving `MiniSetupControl.GetHostWindow()` via `XamlRoot`) â€” Phase B's `AppShellWindow` will set up the owner relationship properly, so the current `return null` is left in place.
+

@@ -9,7 +9,6 @@ using Musio_App.Services;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
-using Windows.Foundation;
 
 namespace Musio_App.Pages;
 
@@ -17,12 +16,9 @@ public sealed partial class RecordingPage : Page
 {
     public RecordingViewModel ViewModel { get; } = RecordingViewModel.Shared;
 
-    private readonly RegionSelector _regionSelector = new();
     private RecordingOverlayWindow? _overlayWindow;
     private RegionBorderHighlight? _regionBorder;
     private bool _recordingMinimizedWindow;
-    private bool _isPageLoading = true;
-    private bool _isPickerOpen;
 
     private System.ComponentModel.PropertyChangedEventHandler? _viewModelHandler;
 
@@ -30,6 +26,14 @@ public sealed partial class RecordingPage : Page
     {
         InitializeComponent();
         Loaded += OnLoaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        // Bridge the Mini Setup toolbar's events into the page-level
+        // orchestration (overlay/window lifecycle, transient InfoBar).
+        Toolbar.RecordRequested += OnToolbarRecordRequested;
+        Toolbar.TransientInfoRequested += OnToolbarTransientInfoRequested;
     }
 
     protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
@@ -87,7 +91,7 @@ public sealed partial class RecordingPage : Page
         base.OnNavigatedFrom(e);
     }
 
-    private async void StartRecordButton_Click(object sender, RoutedEventArgs e)
+    private async void OnToolbarRecordRequested(object? sender, EventArgs e)
     {
         try
         {
@@ -107,8 +111,13 @@ public sealed partial class RecordingPage : Page
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[RecordingPage] StartRecordButton_Click failed: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[RecordingPage] OnToolbarRecordRequested failed: {ex.Message}");
         }
+    }
+
+    private void OnToolbarTransientInfoRequested(object? sender, string message)
+    {
+        ShowTransientInfo(message);
     }
 
     private void ShowRecordingOverlay()
@@ -185,162 +194,9 @@ public sealed partial class RecordingPage : Page
         });
     }
 
-    // x:Bind helper: invert boolean
-    public bool InvertBool(bool value) => !value;
-
-    // x:Bind helper: bool → Visibility
+    // x:Bind helper: bool → Visibility (used by the status bar)
     public Visibility BoolToVisibility(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
-
-    // x:Bind helper: inverted bool → Visibility
-    public Visibility InvertBoolToVisibility(bool value) =>
-        value ? Visibility.Collapsed : Visibility.Visible;
-
-    // x:Bind helper: dim options grid while recording
-    public double RecordingOpacity(bool isRecording) =>
-        isRecording ? 0.4 : 1.0;
-
-    private void OnLoaded(object sender, RoutedEventArgs e)
-    {
-        CaptureModeSelector.SelectedIndex = (int)ViewModel.CaptureMode;
-        UpdateRegionPanelVisibility();
-        _isPageLoading = false;
-    }
-
-    private async void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (CaptureModeSelector?.SelectedItem is FrameworkElement item && item.Tag is string tag)
-        {
-            ViewModel.CaptureMode = Enum.Parse<CaptureMode>(tag);
-            UpdateRegionPanelVisibility();
-
-            // Auto-launch the appropriate picker when the user selects a mode
-            if (!_isPageLoading && !_isPickerOpen)
-            {
-                try
-                {
-                    if (ViewModel.CaptureMode == CaptureMode.Window)
-                        await LaunchWindowPickerAsync();
-                    else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                        await LaunchRegionPickerAsync();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[RecordingPage] Picker launch failed: {ex.Message}");
-                }
-            }
-        }
-    }
-
-    private void UpdateRegionPanelVisibility()
-    {
-        if (RegionPanel is not null)
-        {
-            RegionPanel.Visibility = ViewModel.CaptureMode == CaptureMode.CustomRegion
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-
-            if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                UpdateRegionInfoDisplay();
-        }
-
-        if (WindowPanel is not null)
-        {
-            WindowPanel.Visibility = ViewModel.CaptureMode == CaptureMode.Window
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-
-            if (ViewModel.CaptureMode == CaptureMode.Window)
-                UpdateWindowInfoDisplay();
-        }
-
-        // Hide metadata when in FullScreen mode (no selection to show)
-        if (ViewModel.CaptureMode == CaptureMode.FullScreen)
-            HideSelectionMetadata();
-    }
-
-    private void UpdateRegionInfoDisplay()
-    {
-        if (ViewModel.HasSelectedRegion && ViewModel.SelectedRegion is not null)
-        {
-            var r = ViewModel.SelectedRegion;
-            ShowSelectionMetadata($"Region: {r.Width}\u00d7{r.Height} at ({r.X}, {r.Y})");
-            return;
-        }
-
-        var saved = _regionSelector.LoadLastRegion();
-        if (saved is not null)
-        {
-            ViewModel.SelectedRegion = saved;
-            ViewModel.HasSelectedRegion = true;
-            ShowSelectionMetadata($"Region: {saved.Width}\u00d7{saved.Height} at ({saved.X}, {saved.Y})");
-        }
-        else
-        {
-            HideSelectionMetadata();
-        }
-    }
-
-    private async void SelectRegionButton_Click(object sender, RoutedEventArgs e)
-    {
-        await LaunchRegionPickerAsync();
-    }
-
-    private async void SelectWindowButton_Click(object sender, RoutedEventArgs e)
-    {
-        await LaunchWindowPickerAsync();
-    }
-
-    private async Task LaunchWindowPickerAsync()
-    {
-        if (_isPickerOpen) return;
-        _isPickerOpen = true;
-
-        try
-        {
-            var overlay = new WindowSelectorOverlay();
-            var window = await overlay.ShowAsync();
-
-            if (window is not null)
-            {
-                ViewModel.SelectedWindow = window;
-                UpdateWindowInfoDisplay();
-            }
-        }
-        finally
-        {
-            _isPickerOpen = false;
-        }
-    }
-
-    private async Task LaunchRegionPickerAsync()
-    {
-        if (_isPickerOpen) return;
-        _isPickerOpen = true;
-
-        try
-        {
-            var overlay = new RegionSelectorOverlay();
-            var region = await overlay.ShowAsync(ViewModel.SelectedRegion);
-
-            if (region is not null)
-            {
-                ViewModel.SelectedRegion = region;
-                ViewModel.HasSelectedRegion = true;
-                UpdateRegionInfoDisplay();
-            }
-            else if (overlay.WasCancelled && ViewModel.HasSelectedRegion)
-            {
-                // Pixel-identical dimensions before/after cancel make the no-op
-                // invisible — surface an explicit "kept previous region" hint.
-                ShowTransientInfo("Region selection cancelled — kept previous region.");
-            }
-        }
-        finally
-        {
-            _isPickerOpen = false;
-        }
-    }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _infoBarTimer;
 
@@ -367,31 +223,6 @@ public sealed partial class RecordingPage : Page
         if (RecordingInfoBar is not null)
             RecordingInfoBar.IsOpen = false;
         sender.Stop();
-    }
-
-    private void UpdateWindowInfoDisplay()
-    {
-        if (ViewModel.SelectedWindow is not null)
-        {
-            ShowSelectionMetadata($"{ViewModel.SelectedWindow.Title} — {ViewModel.SelectedWindow.ProcessName}");
-        }
-        else
-        {
-            HideSelectionMetadata();
-        }
-    }
-
-    private void ShowSelectionMetadata(string text)
-    {
-        if (SelectionMetadataText is null) return;
-        SelectionMetadataText.Text = text;
-        SelectionMetadataText.Visibility = Visibility.Visible;
-    }
-
-    private void HideSelectionMetadata()
-    {
-        if (SelectionMetadataText is null) return;
-        SelectionMetadataText.Visibility = Visibility.Collapsed;
     }
 
     private const int SW_MINIMIZE = 6;

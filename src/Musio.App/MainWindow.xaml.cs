@@ -2,22 +2,27 @@ using System;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Musio_App.Pages;
 using Windows.Graphics;
 
 namespace Musio_App;
 
+/// <summary>
+/// Today's full-app window. Phase A: the visual tree lives in
+/// <see cref="Controls.FullShellControl"/>; this window keeps the WndProc
+/// subclass (min-size enforcement + quiesce signal handling) and the
+/// initial sizing logic.
+/// </summary>
 public sealed partial class MainWindow : Window
 {
     /// <summary>Exposes the navigation frame so App can reach the current page.</summary>
-    public Frame ContentFrame => NavFrame;
+    public Frame ContentFrame => Shell.ContentFrame;
 
     public MainWindow()
     {
         InitializeComponent();
 
         ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
+        SetTitleBar(Shell.TitleBarElement);
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         AppWindow.SetIcon("Assets/AppIcon.ico");
 
@@ -106,37 +111,4 @@ public sealed partial class MainWindow : Window
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-    private void TitleBar_PaneToggleRequested(TitleBar sender, object args)
-    {
-        NavView.IsPaneOpen = !NavView.IsPaneOpen;
-    }
-
-    private void TitleBar_BackRequested(TitleBar sender, object args)
-    {
-        NavFrame.GoBack();
-    }
-
-    private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
-    {
-        if (args.IsSettingsSelected)
-        {
-            NavFrame.Navigate(typeof(SettingsPage));
-        }
-        else if (args.SelectedItem is NavigationViewItem item)
-        {
-            switch (item.Tag)
-            {
-                case "record":
-                    NavFrame.Navigate(typeof(RecordingPage));
-                    break;
-                case "editor":
-                    NavFrame.Navigate(typeof(EditorPage));
-                    break;
-                default:
-                    System.Diagnostics.Debug.WriteLine($"[MainWindow] Unknown navigation item tag: {item.Tag}");
-                    break;
-            }
-        }
-    }
 }
