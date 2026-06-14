@@ -70,6 +70,30 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
             new PropertyMetadata(true));
 
     /// <summary>
+    /// Whether the compact toolbar's Expand-to-Full button is visible.
+    /// Hidden by default so secondary hosts can opt in only when Mini Setup
+    /// is the active shell state.
+    /// </summary>
+    public bool IsExpandButtonVisible
+    {
+        get => (bool)GetValue(IsExpandButtonVisibleProperty);
+        set => SetValue(IsExpandButtonVisibleProperty, value);
+    }
+
+    public static readonly DependencyProperty IsExpandButtonVisibleProperty =
+        DependencyProperty.Register(
+            nameof(IsExpandButtonVisible),
+            typeof(bool),
+            typeof(MiniSetupControl),
+            new PropertyMetadata(false, OnIsExpandButtonVisibleChanged));
+
+    private static void OnIsExpandButtonVisibleChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is MiniSetupControl control)
+            control.Bindings.Update();
+    }
+
+    /// <summary>
     /// Raised when the user presses the hero Record button. The host page
     /// owns recording orchestration (window minimize, overlay lifecycle).
     /// </summary>

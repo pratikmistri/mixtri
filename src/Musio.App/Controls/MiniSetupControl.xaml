@@ -163,10 +163,10 @@
             </StackPanel>
 
             <!-- Expand-to-Full button. Hidden by default; AppShellWindow flips
-                 it visible when this control is the active state. -->
+                 IsExpandButtonVisible when this control is the active state. -->
             <Button
                 x:Name="ExpandButton"
-                Visibility="Collapsed"
+                Visibility="{x:Bind BoolToVisibility(IsExpandButtonVisible), Mode=OneWay}"
                 Click="ExpandButton_Click"
                 Width="36" Height="36" Padding="0"
                 VerticalAlignment="Center"

@@ -45,6 +45,17 @@ public sealed class MiniModeStateMachineTests
     }
 
     [TestMethod]
+    public void Expand_FromMiniSetup_OpensFull()
+    {
+        var destination = AppShellStateMachine.NextState(
+            AppShellState.MiniSetup,
+            AppShellEvent.MiniSetupExpand,
+            new());
+
+        Assert.AreEqual(AppShellState.Full, destination);
+    }
+
+    [TestMethod]
     public void Record_FromFull_EntersFullRecordingAndCapturesOrigin()
     {
         var machine = new AppShellStateMachine(AppShellState.Full);

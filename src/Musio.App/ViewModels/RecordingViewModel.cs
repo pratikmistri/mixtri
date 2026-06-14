@@ -199,19 +199,6 @@ public partial class RecordingViewModel : ObservableObject
         try { ShellSettings.Instance.LastCaptureMode = value; } catch { }
     }
 
-    partial void OnSelectedRegionChanged(CaptureRegion? value)
-    {
-        try
-        {
-            if (value is null)
-                ShellSettings.Instance.LastRegion = null;
-            else
-                ShellSettings.Instance.LastRegion = new Windows.Foundation.Rect(
-                    value.X, value.Y, value.Width, value.Height);
-        }
-        catch { /* persistence is best-effort */ }
-    }
-
     [RelayCommand]
     private async Task StartRecordingAsync()
     {

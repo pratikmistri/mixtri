@@ -3,7 +3,6 @@ using System.Text.Json;
 using Musio.Core.Settings;
 using Musio_App.Shell;
 using Musio_App.ViewModels;
-using Windows.Foundation;
 
 namespace Musio_App.Services;
 
@@ -86,49 +85,6 @@ public sealed class ShellSettings
     }
 
     /// <summary>
-    /// Last custom region rectangle (logical screen coordinates), or
-    /// <c>null</c> if the user has never picked one.
-    /// </summary>
-    public Rect? LastRegion
-    {
-        get
-        {
-            var raw = Store.Get<string>(KeyLastRegion, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return null;
-            try
-            {
-                var dto = JsonSerializer.Deserialize<RectDto>(raw);
-                if (dto is null) return null;
-                return new Rect(dto.X, dto.Y, dto.Width, dto.Height);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-        set
-        {
-            // Normalize degenerate rectangles to "no value" so downstream
-            // restore code doesn't get a zero-area region (which would never
-            // re-resolve to anything useful and could confuse the picker).
-            if (value is null || value.Value.Width <= 0 || value.Value.Height <= 0)
-            {
-                Store.Set(KeyLastRegion, string.Empty);
-                return;
-            }
-            var r = value.Value;
-            var json = JsonSerializer.Serialize(new RectDto
-            {
-                X = r.X,
-                Y = r.Y,
-                Width = r.Width,
-                Height = r.Height,
-            });
-            Store.Set(KeyLastRegion, json);
-        }
-    }
-
-    /// <summary>
     /// Identifying tuple for the last selected window, used by
     /// <c>WindowMatcher</c> to re-resolve the HWND at next launch.
     /// </summary>
@@ -199,19 +155,10 @@ public sealed class ShellSettings
     private const string KeyStartupMode = "Shell.StartupMode";
     private const string KeyStartupModeHasBeenSet = "Shell.StartupMode.HasBeenSet";
     private const string KeyLastCaptureMode = "Recording.LastCaptureMode";
-    private const string KeyLastRegion = "Recording.LastRegion";
     private const string KeyLastWindowSelection = "Recording.LastWindowSelection";
     private const string KeyLastMicEnabled = "Recording.LastMicEnabled";
     private const string KeyLastSystemAudioEnabled = "Recording.LastSystemAudioEnabled";
     private const string KeyLastWebcamEnabled = "Recording.LastWebcamEnabled";
-
-    private sealed class RectDto
-    {
-        public double X { get; set; }
-        public double Y { get; set; }
-        public double Width { get; set; }
-        public double Height { get; set; }
-    }
 
     private sealed class WindowDto
     {

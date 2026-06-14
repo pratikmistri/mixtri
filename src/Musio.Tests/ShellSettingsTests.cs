@@ -3,7 +3,6 @@ using Musio.Core.Settings;
 using Musio_App.Services;
 using Musio_App.Shell;
 using Musio_App.ViewModels;
-using Windows.Foundation;
 using Windows.Storage;
 
 namespace Musio.Tests;
@@ -16,7 +15,6 @@ public sealed class ShellSettingsTests
         "Shell.StartupMode",
         "Shell.StartupMode.HasBeenSet",
         "Recording.LastCaptureMode",
-        "Recording.LastRegion",
         "Recording.LastWindowSelection",
         "Recording.LastMicEnabled",
         "Recording.LastSystemAudioEnabled",
@@ -33,12 +31,10 @@ public sealed class ShellSettingsTests
     public void RoundTrip_AllMiniModeProperties()
     {
         var settings = ShellSettings.Instance;
-        var region = new Rect(1, 2, 300, 400);
         var window = (ProcessName: "proc", WindowTitle: "title", ClassName: "class");
 
         settings.StartupMode = StartupMode.Full;
         settings.LastCaptureMode = CaptureMode.Window;
-        settings.LastRegion = region;
         settings.LastWindowSelection = window;
         settings.LastMicEnabled = true;
         settings.LastSystemAudioEnabled = true;
@@ -46,7 +42,6 @@ public sealed class ShellSettingsTests
 
         Assert.AreEqual(StartupMode.Full, settings.StartupMode);
         Assert.AreEqual(CaptureMode.Window, settings.LastCaptureMode);
-        Assert.AreEqual(region, settings.LastRegion);
         Assert.AreEqual(window, settings.LastWindowSelection);
         Assert.IsTrue(settings.LastMicEnabled);
         Assert.IsTrue(settings.LastSystemAudioEnabled);
@@ -71,7 +66,6 @@ public sealed class ShellSettingsTests
         Assert.AreEqual(StartupMode.Mini, settings.StartupMode);
         Assert.IsFalse(settings.StartupModeHasBeenSet);
         Assert.IsNull(settings.LastCaptureMode);
-        Assert.IsNull(settings.LastRegion);
         Assert.IsNull(settings.LastWindowSelection);
         Assert.IsFalse(settings.LastMicEnabled);
         Assert.IsFalse(settings.LastSystemAudioEnabled);

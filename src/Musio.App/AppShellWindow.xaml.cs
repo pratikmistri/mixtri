@@ -351,6 +351,7 @@ public sealed partial class AppShellWindow : Window
     {
         // Inner-control visibility flags that depend on state (Expand button
         // in the recording pill, docked-pill swap in the full shell title bar).
+        MiniSetup.IsExpandButtonVisible = state == AppShellState.MiniSetup;
         RecordingPill.IsExpandButtonVisible = state == AppShellState.MiniRecording;
 
         if (state == AppShellState.FullRecording)

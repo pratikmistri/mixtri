@@ -59,6 +59,39 @@
                 </StackPanel>
             </Border>
 
+            <!-- Startup Mode -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Startup Mode" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <StackPanel Spacing="8">
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Choose how Musio opens when launched."
+                        TextWrapping="Wrap" />
+                    <RadioButton
+                        x:Name="StartupModeMiniRadio"
+                        GroupName="StartupMode"
+                        Content="Mini toolbar"
+                        Tag="Mini"
+                        Checked="StartupModeRadio_Checked" />
+                    <RadioButton
+                        x:Name="StartupModeFullRadio"
+                        GroupName="StartupMode"
+                        Content="Full window"
+                        Tag="Full"
+                        Checked="StartupModeRadio_Checked" />
+                </StackPanel>
+            </Border>
+
             <!-- Recording Defaults -->
             <TextBlock
                 Margin="0,16,0,8"

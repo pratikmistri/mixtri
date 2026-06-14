@@ -2,6 +2,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
+using Musio_App.Services;
+using Musio_App.Shell;
 
 namespace Musio_App.Pages;
 
@@ -10,6 +12,7 @@ public sealed partial class SettingsPage : Page
     private List<WebcamDeviceInfo> _webcamDevices = [];
     private bool _suppressWebcamEvents;
     private bool _suppressExportDefaultEvents;
+    private bool _suppressStartupModeEvents;
 
     public SettingsPage()
     {
@@ -21,6 +24,19 @@ public sealed partial class SettingsPage : Page
     {
         SystemAudioToggle.IsOn = AppSettings.Instance.IsSystemAudioEnabled;
         MicToggle.IsOn = AppSettings.Instance.IsMicEnabled;
+
+        _suppressStartupModeEvents = true;
+        try
+        {
+            if (ShellSettings.Instance.StartupMode == StartupMode.Full)
+                StartupModeFullRadio.IsChecked = true;
+            else
+                StartupModeMiniRadio.IsChecked = true;
+        }
+        finally
+        {
+            _suppressStartupModeEvents = false;
+        }
 
         _suppressExportDefaultEvents = true;
         try
@@ -102,6 +118,16 @@ public sealed partial class SettingsPage : Page
     private void MicToggle_Toggled(object sender, RoutedEventArgs e)
     {
         AppSettings.Instance.IsMicEnabled = MicToggle.IsOn;
+    }
+
+    private void StartupModeRadio_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressStartupModeEvents) return;
+        if (sender is RadioButton { Tag: string tag }
+            && Enum.TryParse<StartupMode>(tag, ignoreCase: true, out var mode))
+        {
+            ShellSettings.Instance.StartupMode = mode;
+        }
     }
 
     private void WebcamToggle_Toggled(object sender, RoutedEventArgs e)

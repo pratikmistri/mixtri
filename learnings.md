@@ -2036,3 +2036,19 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 **What worked:** Option A for Y1 kept the tests tied to production transition decisions instead of a test-only fork. Build passed, `dotnet test --no-build` remained 324/324 passing, and sanity launch stayed alive for 6+ seconds.
 
 **What didn't work / limitations:** No new UI automation was added; visual morphing, real picker Esc routing, and native tray/window behavior remain covered by logic seams plus sanity launch rather than full UI tests.
+
+---
+
+## Mini Mode Phase E — Final Spec Review Gaps
+
+**Feature/area:** Mini Setup expand affordance, Settings startup mode UI, and region-persistence cleanup.
+
+**Approaches tried:**
+1. **MiniSetup expand visibility DP** — Worked. Added `MiniSetupControl.IsExpandButtonVisible` (default false), bound the XAML button to it, and set it from `AppShellWindow.ApplyStateFlags` when state is `MiniSetup`.
+2. **Reuse existing state-machine expand event** — Worked. Existing `ExpandRequested` wiring already routes through `OnMiniSetupExpandRequested` and `AppShellStateMachine.NextState(...MiniSetupExpand...)`; added a unit test for MiniSetup → Full.
+3. **Settings startup-mode radio buttons** — Worked. Added a Startup Mode settings card with Mini toolbar / Full window radio buttons and immediate writes to `ShellSettings.Instance.StartupMode`.
+4. **Single region source of truth** — Worked. Removed dead `ShellSettings.LastRegion` accessors and the `RecordingViewModel.OnSelectedRegionChanged` writer, leaving the existing `RegionSelector`/`RegionMemory` path as the sole region store.
+
+**What worked:** Small UI + settings changes compiled cleanly. VS MSBuild App and Tests passed; `dotnet test --no-build` with `DOTNET_ROLL_FORWARD=LatestMajor` now reports 325/325 passing (324 → 325 from the new expand transition test). Sanity launch stayed alive 6+ seconds.
+
+**What didn't work / limitations:** `dotnet test --no-build --arch x64` looked in the non-x64 bin path and failed before running tests; using `-p:Platform=x64` matched the MSBuild output path and ran successfully.
