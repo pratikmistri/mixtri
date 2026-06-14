@@ -53,9 +53,9 @@
                             </ResourceDictionary.ThemeDictionaries>
                         </ResourceDictionary>
                     </ctk:Segmented.Resources>
-                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
+                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
                         <ctk:SegmentedItem.Icon>
-                            <FontIcon Glyph="&#xE740;" />
+                            <FontIcon Glyph="&#xE7A8;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
                     <ctk:SegmentedItem Content="Window" Tag="Window">
@@ -63,9 +63,9 @@
                             <FontIcon Glyph="&#xE737;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
+                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
                         <ctk:SegmentedItem.Icon>
-                            <FontIcon Glyph="&#xE7A8;" />
+                            <FontIcon Glyph="&#xE740;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
                 </ctk:Segmented>

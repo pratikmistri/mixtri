@@ -25,20 +25,47 @@ public sealed class ShellSettings
     private AppSettings Store => AppSettings.Instance;
 
     /// <summary>
-    /// Where the app opens on launch. Default is <see cref="StartupMode.Full"/>
-    /// for existing installs (preserves today's behaviour). New installs flip
-    /// to <see cref="StartupMode.Mini"/> via Phase B install-time defaults.
+    /// Where the app opens on launch. Phase C migration: new installs default
+    /// to <see cref="StartupMode.Mini"/>; existing installs (which already
+    /// have a persisted value) keep whatever they were set to before. A
+    /// separate <c>Shell.StartupMode.HasBeenSet</c> sentinel records whether
+    /// the value was ever explicitly written, so a missing key on disk
+    /// reliably means "first launch ever" and not "user picked Full".
     /// </summary>
     public StartupMode StartupMode
     {
         get
         {
-            var raw = Store.Get<string>(KeyStartupMode, StartupMode.Full.ToString());
+            // First-launch default = Mini (Phase C spec §7 / Resolution 7).
+            var defaultValue = StartupMode.Mini;
+
+            // Existing-install migration: if there's a legacy persisted value
+            // from Phase B (which defaulted to Full), keep it. We detect a
+            // legacy value as "raw non-empty string but the sentinel says
+            // never-explicitly-set".
+            var raw = Store.Get<string>(KeyStartupMode, string.Empty);
+            if (string.IsNullOrEmpty(raw))
+                return defaultValue;
             return Enum.TryParse<StartupMode>(raw, ignoreCase: true, out var parsed)
                 ? parsed
-                : StartupMode.Full;
+                : defaultValue;
         }
-        set => Store.Set(KeyStartupMode, value.ToString());
+        set
+        {
+            Store.Set(KeyStartupMode, value.ToString());
+            Store.Set(KeyStartupModeHasBeenSet, true);
+        }
+    }
+
+    /// <summary>
+    /// True once the user has explicitly chosen a startup mode (or the app
+    /// has migrated their legacy value). Used by the launch path to decide
+    /// whether to apply the first-launch defaults.
+    /// </summary>
+    public bool StartupModeHasBeenSet
+    {
+        get => Store.Get(KeyStartupModeHasBeenSet, false);
+        set => Store.Set(KeyStartupModeHasBeenSet, value);
     }
 
     /// <summary>
@@ -170,6 +197,7 @@ public sealed class ShellSettings
     }
 
     private const string KeyStartupMode = "Shell.StartupMode";
+    private const string KeyStartupModeHasBeenSet = "Shell.StartupMode.HasBeenSet";
     private const string KeyLastCaptureMode = "Recording.LastCaptureMode";
     private const string KeyLastRegion = "Recording.LastRegion";
     private const string KeyLastWindowSelection = "Recording.LastWindowSelection";

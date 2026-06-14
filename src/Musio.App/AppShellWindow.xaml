@@ -19,17 +19,32 @@
 
         <controls:MiniSetupControl
             x:Name="MiniSetup"
+            x:FieldModifier="public"
             Visibility="Collapsed"
             Opacity="0" />
 
         <controls:RecordingPillControl
             x:Name="RecordingPill"
+            x:FieldModifier="public"
             Visibility="Collapsed"
             Opacity="0" />
 
         <controls:FullShellControl
             x:Name="FullShell"
+            x:FieldModifier="public"
             Visibility="Collapsed"
             Opacity="0" />
+
+        <!-- Transient InfoBar host (overlay above all states). Used by
+             AppShellWindow.ShowTransientInfo to surface stop-failure /
+             restore-discarded messages regardless of current state. -->
+        <InfoBar
+            x:Name="ShellInfoBar"
+            x:FieldModifier="public"
+            IsOpen="False"
+            IsClosable="True"
+            VerticalAlignment="Bottom"
+            HorizontalAlignment="Stretch"
+            Margin="12,0,12,12" />
     </Grid>
 </Window>

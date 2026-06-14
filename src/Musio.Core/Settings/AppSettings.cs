@@ -116,6 +116,19 @@ public sealed class AppSettings
         return defaultValue;
     }
 
+    /// <summary>
+    /// True when <paramref name="key"/> has a persisted value in the backing
+    /// store (LocalSettings or in-memory fallback). Used by version-to-version
+    /// migrations that need to distinguish "never written" from "explicitly
+    /// set to the default value".
+    /// </summary>
+    public bool HasKey(string key)
+    {
+        if (_settings is not null && _settings.Values.ContainsKey(key))
+            return true;
+        return _memoryStore.ContainsKey(key);
+    }
+
     public void Set<T>(string key, T value)
     {
         if (_settings is not null)

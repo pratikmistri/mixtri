@@ -95,8 +95,11 @@ public sealed partial class RecordingPage : Page
                 {
                     HideRegionBorder();
 
-                    if (ViewModel.LastProject is not null)
-                        Frame.Navigate(typeof(EditorPage));
+                    // Phase C rubber-duck R2/R3: editor navigation is owned
+                    // by AppShellWindow.HandleRecordingStoppedAsync now so
+                    // that success/failure branches stay in one place and
+                    // the second-clip re-navigation works. Leave that
+                    // navigation to the shell.
                 }
             });
         };
@@ -205,7 +208,7 @@ public sealed partial class RecordingPage : Page
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _infoBarTimer;
 
-    private void ShowTransientInfo(string message)
+    internal void ShowTransientInfo(string message)
     {
         if (RecordingInfoBar is null) return;
         RecordingInfoBar.Severity = InfoBarSeverity.Informational;

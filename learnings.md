@@ -1903,3 +1903,105 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
   - MiniSetup state: `(508, 16, 520, 64)` ✓ — spec target met
 - Pill smoke: Record→Stop→Record loop ends with `ready=True` on second entry ✓
 - All review items addressed; smoke-test hooks + probes removed.
+
+
+## Mini Mode — Phase C (App.xaml.cs + tray + persistence + summon + docked pill)
+
+**Feature/area:** Mini Mode (spec §3.1, §3.3, §3.4, §3.7, §3.8, §4.2, §4.3.1, §4.5, §4.6, §4.7, §5.3, §5.4, §5.6, §5.8, §5.9). Largest user-visible phase: persistence wiring, dim-while-picking, auto-Editor-on-Stop, close-to-tray, tray menu rebuild, segmented-control reorder, summon hotkey, CLI flags, single-instance, docked-pill promotion.
+
+**Approaches tried:**
+
+1. **Persistence (`ShellSettings` + VM partial methods).** Added `Shell.StartupMode.HasBeenSet` sentinel so existing installs keep the prior `Full` value while new installs default to `Mini`. Audio/cam/region/mode toggles ride the `[ObservableProperty]` partial-method hooks; window picker confirms write `LastWindowSelection` from inside `CapturePickerService.PickWindowAsync` (single source of truth — keeps the persistence + dim flow in one place). **Worked.** Restoration runs once on launch via new `SelectionRestoreService.RestoreOnLaunch(viewModel)` which returns `SelectionRestoreOutcome(AppliedMode, AutoLaunchPicker, RegionDiscardedReason)`. `RegionMemory.LoadLastRegion()` (which carries `MonitorId`) is what we use for actual restore validation; `ShellSettings.LastRegion` is the spec-compliant simple rect mirror.
+
+2. **`MiniSetupControl` as `IDimmable`.** XAML root `Border` opacity is animated with a 120 ms `QuadraticEase`-In-Out storyboard. Used a theme resource `MiniToolbarDimmedOpacity` (0.15 default, 0.4 HighContrast) plus a runtime `AccessibilitySettings.HighContrast` check to pick the right value — the WinUI theme-dictionary lookup from code-behind is unreliable so the `AccessibilitySettings` shortcut is the safer fallback. **Worked.** Driven by `CapturePickerService.PickerOpening/Closed` events; both `MiniSetupControl` (via the picker call site) and `AppShellWindow` (via PickerOpening/Closed events) participate. Focus-watchdog: `DispatcherTimer 2 s` defensively calls `UndimAsync` when `GetForegroundWindow()` is neither shell HWND nor picker HWND.
+
+3. **Tag-based segmented selection.** Spec §4.2 reordered the segments Region → Window → FullScreen. We decoupled XAML order from `CaptureMode` enum integer values by switching `MiniSetupControl.SelectCaptureModeSegment(CaptureMode)` to walk items by `Tag`. **Worked.** Survives further reorderings without code changes.
+
+4. **`RequestRemeasure` event + 150 ms width morph.** `MiniSetupControl` raises `RequestRemeasure` after every capture-mode switch. `AppShellWindow.RemeasureMiniSetupWidthAsync` runs a center-anchored width morph (top-center fixed, half-width delta on the left edge) with the same per-frame `QuadraticEase` animator used by state morphs. **Worked.** Anchoring is critical — interpolating just `Width` without re-centering causes the toolbar to drift left.
+
+5. **Hotkey semantics flip (Ctrl+Shift+R).** Was start/stop, now SUMMON when not recording, STOP when recording. We did NOT rename `GlobalHotkeyService.StartStopRecording` (the constant ID), only changed what `App.OnHotkeyPressed` does with it. `SummonAsync(bool suppressMiniMorph = false)` lives on `AppShellWindow`: it `ShowWindow(SW_SHOW/RESTORE)`, calls `AllowSetForegroundWindow(Environment.ProcessId)` before `SetForegroundWindow`, morphs to `MiniSetup` only when not recording, focuses Record, stamps `_lastSummonAt`. `WasRecentlySummoned` (5 s window) gates the Esc-dismiss behavior. **Worked.**
+
+6. **Single-instance via `Microsoft.Windows.AppLifecycle.AppInstance`.** `AppInstance.FindOrRegisterForKey("MusioMainInstance")` + `RedirectActivationToAsync` for second-launch handoff. The receiver translates the activation's argument string through `ParseCliFlags` and re-routes to the same `SummonAsync` / page-navigation / `HandleNewRecordingRequestAsync` code paths used by the tray and the in-process launch. **Worked.** Watch out for the activation-argument extraction: `args.Data as ILaunchActivatedEventArgs` is the canonical path but we fall back to `Environment.GetCommandLineArgs()` because some packaging configurations don't surface launch args via `ILaunchActivatedEventArgs.Arguments`.
+
+7. **Tray menu rebuild.** `SystemTrayService` now exposes `NewRecordingRequested(NewRecordingRequestedEventArgs.PreselectedMode?)`, `OpenFullRequested(OpenFullRequestedEventArgs.Page?)`, `StopRecordingRequested`, `ShowRecordingPillRequested`. Menu is rebuilt on every right-click using `IsRecordingProbe : Func<bool>?` (App wires it to `RecordingViewModel.Shared.IsRecording`). New-recording entries are *disabled* (greyed) while recording. **Worked.** Left-click still raises `NewRecordingRequested(null)`. `ShowCloseToTrayBalloon()` is one-shot/idempotent.
+
+8. **Close-to-tray.** `App.OnWindowClosing`: if `_isExiting || _isQuittingFromTray` → never cancel; if recording → cancel + `StopRecordingViaSharedPathAsync()` (delegates to the shared VM's `StopRecordingCommand`); else cancel + `ShowWindow(SW_HIDE)` + `ShowCloseToTrayBalloon()`. `OnExitRequested` (tray "Quit") sets `_isQuittingFromTray = true` before `BeginQuiesce` so the closing handler short-circuits. **Worked.**
+
+9. **Auto-Editor on Stop.** New `AppShellWindow.OnViewModelPropertyChanged` watches the false-edge of `IsRecording` via a `_wasRecordingLastTick` flag. On a successful stop (`LastProject != null`) it morphs to `Full` and navigates the frame to `EditorPage` (the project is already on `ProjectService.Instance.CurrentProject`, so EditorPage picks it up without a navigation parameter). Idempotent: skips re-navigation when `frame.Content is already EditorPage` (RecordingPage's own `IsRecording` observer can beat us to it). **Worked.**
+
+10. **Docked-pill full visuals.** Replaced the Phase B "elapsed text + Stop + Collapse trio" in the FullShell title bar with a real `RecordingPillControl` instance (acrylic backdrop neutralised via `SetRootBackground(Transparent)`, `IsExpandButtonVisible = false`). The Collapse-to-Mini button stays outside the pill because its semantics differ from the pill's own expand button. Bridged the hosted pill's `StopRequested` → `DockedPillStopRequested` so `AppShellWindow` wiring stays unchanged. **Worked.** Both pills end up subscribed to `RecordingViewModel.Shared.PropertyChanged` simultaneously during FullRecording, but only the visible one matters; the floating pill's Stop button can't be clicked because the floating pill is `Visibility.Collapsed`.
+
+11. **CLI flag parsing.** Tokenised by whitespace; supports `--mini`, `--full[=record|editor|settings]`, `--new-recording[=fullscreen|window|region]`. Defaults: `--new-recording` alone → `CustomRegion`, `--full` alone → record page. Implemented as `App.ParseCliFlags(string)` returning a `record struct CliFlags(AppShellState? InitialState, string? FullPage, CaptureMode? NewRecordingMode)`. **Worked.**
+
+**What didn't work / non-obvious gotchas:**
+
+- **XAML field default visibility is `private`.** `App.xaml.cs` couldn't see `AppShellWindow.MiniSetup` / `FullShell` / `RecordingPill` until we added `x:FieldModifier="public"` on each XAML element. Code-only public properties are also viable but `x:FieldModifier` is one line and survives generated-code regeneration.
+- **`RecordingViewModel.StopRecordingAsync` is private** (annotated `[RelayCommand]`). The generated public surface is `StopRecordingCommand`. Calling `.StopRecordingCommand.ExecuteAsync(null)` is the correct re-entry.
+- **`RecordingPage.ShowTransientInfo` was private** — changed to `internal` so `App.ShowTransientInfoOnPageAsync` can hand the region-discarded message to the InfoBar host.
+- **`MiniSetup.FocusRecordButton()` did not exist initially**; added a public method that no-ops when `StartRecordButton.Visibility != Visible` so it's safe to call regardless of the inline-record-button gating.
+- **First-launch detection without migration**: the empty-string sentinel via `Store.Get<string>(KeyStartupMode, "")` works because Phase B never wrote `Shell.StartupMode` (we know that from the Phase B learnings entry); no migration code needed.
+- **CaptureRegion lives in `Musio.Core.Settings`, not `Musio.Core.Capture`** — `SelectionRestoreService` needed both usings (CaptureTarget vs CaptureRegion split). Pre-flight grep saved us here.
+- **Tests project does not reference Musio.App**; all Phase C tests would need to be in Musio.Core (none added in Phase C — out of scope per spec). Baseline 286 tests still pass.
+
+**Build / test confirmation (after final edits):**
+- VS MSBuild `Musio.App.csproj` Debug|x64 → **PASS** (only pre-existing MVVMTK0045 warnings).
+- VS MSBuild `Musio.Tests.csproj` Debug|x64 → **PASS**.
+- `dotnet test --no-build` with `DOTNET_ROLL_FORWARD=LatestMajor` → **286/286 passed**.
+- Sanity launch (default StartupMode) → PID stayed alive 6+ s without exit.
+
+**Files created (Phase C):**
+- `src\Musio.App\Services\SelectionRestoreService.cs` — stateless restore service + outcome record.
+- `src\Musio.App\Services\TrayEventArgs.cs` — `NewRecordingRequestedEventArgs(PreselectedMode)`, `OpenFullRequestedEventArgs(Page)`.
+
+**Files modified (Phase C):** `App.xaml.cs` (massive — CLI + single-instance + tray events + hotkey rebind + close-to-tray + auto-Editor wiring); `AppShellWindow.xaml{.cs}` (`x:FieldModifier="public"`, SummonAsync, DismissRequested handler, RemeasureMiniSetupWidthAsync, OnPickerOpening/Closed, focus watchdog, HandleRecordingStoppedAsync); `Controls\MiniSetupControl.xaml{.cs}` (segment reorder + Tag selection + IDimmable + DimWhilePicking DP + RequestRemeasure + DismissRequested + FocusRecordButton + SyncCaptureModeFromViewModel); `Controls\FullShellControl.xaml{.cs}` (docked-pill swap to RecordingPillControl); `Pages\RecordingPage.xaml.cs` (`ShowTransientInfo` → internal); `Services\ShellSettings.cs` (StartupMode default + HasBeenSet sentinel); `Services\CapturePickerService.cs` (LastWindowSelection persistence); `Services\SystemTrayService.cs` (new events + dynamic menu + balloon + probe); `ViewModels\RecordingViewModel.cs` (partial methods write to ShellSettings); `Themes\AppColors.xaml` (MiniToolbarDimmedOpacity).
+
+
+
+## Mini Mode — Phase C v2 (rubber-duck fix-up)
+
+**Feature/area:** Mini Mode follow-up to address rubber-duck review of Phase C. Five reds (R1-R3), three yellows (Y1-Y3), and one nit (N1).
+
+**Approaches tried:**
+
+1. **R1a — Clear LastProject at record start.** `RecordingViewModel.StartRecordingAsync` now sets `LastProject = null` before the start-recording flow runs. Without this, a failed stop could leave the previous recording's clip as the "current" project and the editor would open it. **Worked.**
+
+2. **R1b — Shell-level overlay InfoBar.** Spec rubber-duck rejected the "briefly switch to Full" trick. Added an `InfoBar x:Name="ShellInfoBar" x:FieldModifier="public"` overlay to `AppShellWindow.xaml` (Bottom-aligned over the StateHost grid). `AppShellWindow.ShowTransientInfo(string, InfoBarSeverity)` is the single entry point. Auto-dismiss via a `DispatcherQueueTimer` (6 s, non-repeating). **Worked.** Visible in every state; no state-machine coupling required.
+
+3. **R1c + R2 — Centralised stop completion.** `HandleRecordingStoppedAsync` is now the single completion path for ALL stop sources (pill / docked / hotkey / tray / close-during-recording). It fires once via `OnViewModelPropertyChanged` on the IsRecording false-edge, guarded by `_handlingStop` re-entrancy flag. Branching:
+   - **Success** (`LastProject != null`): morph to Full → navigate Editor (always, even when already on EditorPage — see R3).
+   - **Failure** (`LastProject == null`): fall back to `_originStateBeforeRecording` (or current state's natural non-recording counterpart) and surface `_viewModel.RecordingStatus` in a red InfoBar via Severity=Error.
+   `OnPillStopRequested` and `OnFullDockedStopRequested` are stripped down to just `await _viewModel.StopRecordingCommand.ExecuteAsync(null)` — the optimistic state transition is gone, so a stop failure no longer leaves the UI in a non-recording state mid-transition. **Worked.** Single source of truth for stop completion.
+
+4. **R3 — EditorPage reload on second clip.** Removed the "skip Navigate if already on EditorPage" guard. `Frame.Navigate(typeof(EditorPage))` always re-runs even when already on the editor; since EditorPage doesn't set `NavigationCacheMode` and its constructor calls `_ = InitializePreviewAsync()` (which reads `ProjectService.Instance.CurrentProject`), a fresh instance picks up the new clip cleanly. Also removed the duplicate `Frame.Navigate(typeof(EditorPage))` call from `RecordingPage.OnNavigatedTo` since `AppShellWindow` owns post-stop navigation now. **Worked.**
+
+5. **Y1 — Bare `--new-recording` flag.** `ParseCliFlags` now distinguishes `--new-recording` (no value, opens Mini Setup without an auto-picker) from `--new-recording=region` (opens Mini Setup AND auto-launches the region picker). The unknown-value branch returns `null` instead of falling back to `CustomRegion` so a typo doesn't silently trigger a picker. **Worked.**
+
+6. **Y2 — No-flag second launch.** Added an `hasIntent` predicate in `OnInstanceActivated` (true iff `InitialState`, `NewRecordingMode`, or `FullPage` is set). When there's no intent, we route to a new `BringToForegroundOnly()` helper that just does `ShowWindow(SW_SHOW/RESTORE)` + `AllowSetForegroundWindow(ProcessId)` + `SetForegroundWindow(hwnd)` + `Activate()` — no state transition, no `SummonAsync` (which would morph Full/Editor→MiniSetup and surprise a user mid-edit). **Worked.**
+
+7. **Y3 — StartupMode migration for existing installs.** Added `bool HasKey(string)` to `Musio.Core.Settings.AppSettings`. In `App.OnLaunched`, before reading StartupMode, if `StartupModeHasBeenSet == false` we probe for any pre-existing settings key (`DefaultSavePath` / `Theme` / `DefaultFps` / `DefaultCaptureMode` / `IsSystemAudioEnabled` / `IsMicEnabled` / `IsWebcamEnabled`). If any are present, the install is pre-Phase-C and we write `StartupMode = Full` to preserve the prior default; otherwise we write `Mini` (the new fresh-install default). Either way we set the sentinel, so the migration runs at most once per install. **Worked.**
+
+8. **N1 — Docked pill height.** Changed the hosted `RecordingPillControl` in `FullShellControl.xaml` from a hard `Height="36"` to `MaxHeight="44"` so it sizes naturally while still being constrained inside the 48 px title bar. **Worked.**
+
+**What didn't work / non-obvious gotchas:**
+
+- **Stop trigger paths previously did optimistic transitions.** Phase C v1 had `OnPillStopRequested` calling `await TransitionToAsync(destination)` immediately while stop ran in background. This made centralising fragile because the origin was consumed before failure detection. The fix was to make stop triggers *only* fire the command, and let the IsRecording=false event drive the transition; that meant the visual feedback during the "Stopping..." phase comes from `RecordingPillControl.ShowStoppingState()` which the pill already calls in `Stop_Click`. No visual regression.
+- **`RecordingPage.OnNavigatedTo` also navigated to EditorPage on `IsRecording=false`** — left over from Phase B's page-level handling. With the centralised path in `AppShellWindow.HandleRecordingStoppedAsync`, that branch caused a double-Navigate on every successful stop. Removed the page branch and left a comment pointing readers at the shell-owned path. The page still owns the region-border highlight + OpenCaptureGate hook.
+- **`AppSettings.HasKey` was a Musio.Core change.** Made sure it's purely additive (no signature changes) so the Musio.Tests project still compiles + all 286 tests still pass.
+- **`InfoBar` overlay z-order.** Placed it as the LAST child of `StateHost` so it sits above all three state controls naturally (StateHost is a `Grid`, last-child-wins for z-order). Margin keeps it 12 px from the bottom so it doesn't fight with content.
+- **Migration false-positives.** A fresh install where the user opens Settings and the SettingsPage's `Get(nameof(Theme), "System")` somehow writes the key would incorrectly trigger the existing-install branch. Inspection of `AppSettings.Get` confirms it does NOT write on Get — only Set does — so the probe is safe.
+
+**Build / test confirmation (after final edits):**
+- VS MSBuild `Musio.App.csproj` Debug|x64 → **PASS** (only pre-existing MVVMTK0045 warnings).
+- VS MSBuild `Musio.Tests.csproj` Debug|x64 → **PASS**.
+- `dotnet test --no-build` w/ `DOTNET_ROLL_FORWARD=LatestMajor` → **286/286 passed**.
+- Sanity launch (default StartupMode) → PID stayed alive 6+ s without exit.
+
+**Files modified (Phase C v2):**
+- `src\Musio.Core\Settings\AppSettings.cs` — added `bool HasKey(string)` for migration probes.
+- `src\Musio.App\App.xaml.cs` — one-time StartupMode migration; `ParseCliFlags` Y1 fix; `OnInstanceActivated` Y2 + `BringToForegroundOnly()`; `ShowTransientInfoOnPageAsync` re-targeted at the shell InfoBar; added `SetForegroundWindow` + `AllowSetForegroundWindow` + `SW_RESTORE` P/Invokes.
+- `src\Musio.App\AppShellWindow.xaml` — added `ShellInfoBar` overlay.
+- `src\Musio.App\AppShellWindow.xaml.cs` — `_handlingStop` guard; `HandleRecordingStoppedAsync` success/failure branching; `ShowTransientInfo(string,InfoBarSeverity)` + DispatcherQueueTimer; `OnPillStopRequested` / `OnFullDockedStopRequested` stripped to command-only.
+- `src\Musio.App\Controls\FullShellControl.xaml` — docked pill `Height="36"` → `MaxHeight="44"`.
+- `src\Musio.App\Pages\RecordingPage.xaml.cs` — removed duplicate EditorPage navigation on stop.
+- `src\Musio.App\ViewModels\RecordingViewModel.cs` — clear `LastProject` at start of `StartRecordingAsync`.
+

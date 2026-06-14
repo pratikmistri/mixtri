@@ -10,6 +10,9 @@
              ═══════════════════════════════════════════════════════════════ -->
         <ResourceDictionary x:Key="Default">
 
+            <!-- ── Mini Mode — dim-while-picking opacity (spec §4.5 / §4.8) ── -->
+            <x:Double x:Key="MiniToolbarDimmedOpacity">0.15</x:Double>
+
             <!-- ── Shared overlay colors ── -->
             <SolidColorBrush x:Key="OverlayDimBrush"          Color="#80000000" />
             <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
@@ -51,6 +54,9 @@
              ═══════════════════════════════════════════════════════════════ -->
         <ResourceDictionary x:Key="Light">
 
+            <!-- ── Mini Mode — dim-while-picking opacity ── -->
+            <x:Double x:Key="MiniToolbarDimmedOpacity">0.15</x:Double>
+
             <!-- ── Shared overlay colors ── -->
             <SolidColorBrush x:Key="OverlayDimBrush"          Color="#80000000" />
             <SolidColorBrush x:Key="OverlayDenseBrush"        Color="#C0000000" />
@@ -90,6 +96,9 @@
              HIGH CONTRAST — maps to system colors for accessibility
              ═══════════════════════════════════════════════════════════════ -->
         <ResourceDictionary x:Key="HighContrast">
+
+            <!-- ── Mini Mode — dim-while-picking opacity (HC override per spec §4.8) ── -->
+            <x:Double x:Key="MiniToolbarDimmedOpacity">0.4</x:Double>
 
             <!-- ── Shared overlay colors ── -->
             <SolidColorBrush x:Key="OverlayDimBrush"          Color="{StaticResource SystemColorWindowColor}" />

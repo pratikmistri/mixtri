@@ -1,4 +1,7 @@
 using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Musio_App.Controls;
@@ -118,6 +121,8 @@ public sealed class CapturePickerService
             if (window is not null)
             {
                 ViewModel.SelectedWindow = window;
+                try { ShellSettings.Instance.LastWindowSelection = BuildWindowSelectionTuple(window); }
+                catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] Persist window failed: {ex.Message}"); }
                 return PickerResult.Selected;
             }
 
@@ -130,6 +135,32 @@ public sealed class CapturePickerService
             PickerClosed?.Invoke(this, EventArgs.Empty);
         }
     }
+
+    private static (string ProcessName, string WindowTitle, string ClassName) BuildWindowSelectionTuple(WindowInfo window)
+    {
+        string className = TryGetClassName(window.Handle) ?? string.Empty;
+        // WindowInfo.ProcessName is already without the .exe suffix.
+        return (window.ProcessName ?? string.Empty,
+                window.Title ?? string.Empty,
+                className);
+    }
+
+    private static string? TryGetClassName(IntPtr hwnd)
+    {
+        try
+        {
+            var sb = new StringBuilder(256);
+            int copied = GetClassName(hwnd, sb, sb.Capacity);
+            return copied > 0 ? sb.ToString() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 }
 
 /// <summary>

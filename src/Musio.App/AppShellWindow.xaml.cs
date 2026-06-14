@@ -81,12 +81,24 @@ public sealed partial class AppShellWindow : Window
         // TransitionToAsync calls.
         MiniSetup.RecordRequested += OnMiniSetupRecordRequested;
         MiniSetup.ExpandRequested += OnMiniSetupExpandRequested;
+        MiniSetup.RequestRemeasure += OnMiniSetupRequestRemeasure;
+        MiniSetup.DismissRequested += OnMiniSetupDismissRequested;
+        // The shell's MiniSetupControl owns the dim-while-picking flow.
+        MiniSetup.DimWhilePicking = true;
         RecordingPill.Initialize(_viewModel);
         RecordingPill.StopRequested += OnPillStopRequested;
         RecordingPill.ExpandRequested += OnPillExpandRequested;
         FullShell.CollapseRequested += OnFullCollapseRequested;
         FullShell.DockedPillStopRequested += OnFullDockedStopRequested;
         FullShell.DockedPillCollapseRequested += OnFullDockedCollapseRequested;
+
+        // Dim driven by the picker service (single source of truth — every
+        // picker code path goes through CapturePickerService).
+        CapturePickerService.Shared.PickerOpening += OnPickerOpening;
+        CapturePickerService.Shared.PickerClosed += OnPickerClosed;
+
+        // Watch for successful Stop so we can auto-open the Editor (spec §3.4).
+        _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
         ConfigureForState(initialState, animate: false);
     }
@@ -566,26 +578,19 @@ public sealed partial class AppShellWindow : Window
 
     private async void OnPillStopRequested(object? sender, EventArgs e)
     {
-        // Phase B: return to whichever non-recording state we came from.
-        // The origin field is set on entry to a recording state and cleared
-        // by RunSingleTransitionAsync after we leave one; consume + clear
-        // here so a stale origin can't leak into a subsequent transition.
+        // Spec §3.4 / Phase C rubber-duck R2: all stop sources funnel
+        // through HandleRecordingStoppedAsync — fired when the VM's
+        // IsRecording transitions to false. Trigger the command here and
+        // let the centralised post-stop handler own the visual transition
+        // (success → Full+Editor, failure → origin + red InfoBar).
         try
         {
-            var destination = _originStateBeforeRecording
-                ?? (_currentState == AppShellState.FullRecording
-                    ? AppShellState.Full
-                    : AppShellState.MiniSetup);
-            _originStateBeforeRecording = null;
-
             if (_viewModel.IsRecording)
-                _viewModel.StopRecordingCommand.Execute(null);
-
-            await TransitionToAsync(destination);
+                await _viewModel.StopRecordingCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[AppShellWindow] Stop transition failed: {ex}");
+            Debug.WriteLine($"[AppShellWindow] Pill stop failed: {ex}");
         }
     }
 
@@ -612,21 +617,13 @@ public sealed partial class AppShellWindow : Window
 
     private async void OnFullDockedStopRequested(object? sender, EventArgs e)
     {
-        // Same origin-honouring logic as the pill's Stop: if the user came
-        // in via Mini → MiniRecording → expanded to FullRecording, Stop
-        // should land them back in MiniSetup, not Full.
+        // Funnel through the same centralised completion path as the pill
+        // (rubber-duck R2). HandleRecordingStoppedAsync drives the transition
+        // once the VM's IsRecording lands at false.
         try
         {
-            var destination = _originStateBeforeRecording
-                ?? (_currentState == AppShellState.FullRecording
-                    ? AppShellState.Full
-                    : AppShellState.MiniSetup);
-            _originStateBeforeRecording = null;
-
             if (_viewModel.IsRecording)
-                _viewModel.StopRecordingCommand.Execute(null);
-
-            await TransitionToAsync(destination);
+                await _viewModel.StopRecordingCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {
@@ -736,4 +733,343 @@ public sealed partial class AppShellWindow : Window
             try { SetTitleBar(FullShell.TitleBarElement); } catch { }
         }
     }
+
+    // ---------------------------------------------------------------
+    // Phase C: width morph on capture-mode switch (spec §4.6)
+    // ---------------------------------------------------------------
+
+    private async void OnMiniSetupRequestRemeasure(object? sender, EventArgs e)
+    {
+        if (_currentState != AppShellState.MiniSetup) return;
+        try { await RemeasureMiniSetupWidthAsync(); }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Remeasure failed: {ex}"); }
+    }
+
+    private async Task RemeasureMiniSetupWidthAsync()
+    {
+        // Give XAML a chance to relayout after the inline panel toggled
+        // visibility, then read the toolbar's intrinsic width and morph
+        // the AppWindow to match (preserving the top-center anchor).
+        MiniSetup.InvalidateMeasure();
+        MiniSetup.UpdateLayout();
+        await Task.Yield();
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var dpi = GetDpiForWindow(hwnd);
+        var scale = (dpi <= 0 ? 96 : dpi) / 96.0;
+
+        double desiredDip = MiniSetup.ActualWidth;
+        if (desiredDip <= 0)
+        {
+            desiredDip = MiniSetup.DesiredSize.Width;
+        }
+        if (desiredDip <= 0) return;
+
+        // Add a small horizontal breathing margin so the toolbar's drop shadow
+        // and border don't get clipped at the window edge. The toolbar uses a
+        // Border with padding=6 + segmented Height=36; ~24 DIP extra is enough.
+        int targetWidth = (int)((desiredDip + 24) * scale);
+        // Never shrink below a reasonable minimum (avoid a hairline window if
+        // ActualWidth happens to be stale on the very first measure).
+        int minWidth = (int)(280 * scale);
+        if (targetWidth < minWidth) targetWidth = minWidth;
+
+        var pos = AppWindow.Position;
+        var currentSize = AppWindow.Size;
+        if (currentSize.Width == targetWidth) return;
+
+        // Top-center anchor: preserve center X (and Y) as width morphs.
+        int centerX = pos.X + currentSize.Width / 2;
+        int newX = centerX - targetWidth / 2;
+        var fromRect = new RectInt32(pos.X, pos.Y, currentSize.Width, currentSize.Height);
+        var toRect = new RectInt32(newX, pos.Y, targetWidth, currentSize.Height);
+
+        await AnimateWindowAsync(fromRect, toRect, TimeSpan.FromMilliseconds(150), QuadraticEaseInOut);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase C: dim-while-picking glue + focus watchdog (spec §4.5)
+    // ---------------------------------------------------------------
+
+    private DispatcherTimer? _focusWatchdog;
+
+    private void OnPickerOpening(object? sender, EventArgs e)
+    {
+        // The actual Dim/Undim animation runs inside CapturePickerService via
+        // the IDimmable handed in by MiniSetupControl. This event-side hook
+        // just arms the defensive focus watchdog (spec §4.5: 2 s without the
+        // picker as the foreground window → undim so the user can recover).
+        try
+        {
+            _focusWatchdog?.Stop();
+            _focusWatchdog = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _focusWatchdog.Tick += OnFocusWatchdogTick;
+            _focusWatchdog.Start();
+        }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Picker opening hook failed: {ex.Message}"); }
+    }
+
+    private void OnPickerClosed(object? sender, EventArgs e)
+    {
+        try { _focusWatchdog?.Stop(); _focusWatchdog = null; } catch { }
+    }
+
+    private async void OnFocusWatchdogTick(object? sender, object e)
+    {
+        // Best-effort: if neither the shell nor any other Musio window owns the
+        // foreground 2 s after the picker opened, the picker is probably hung
+        // or has lost focus to some other app — restore the toolbar so the
+        // user isn't stuck with a dimmed-and-untouchable UI.
+        try
+        {
+            var foreground = GetForegroundWindow();
+            var shellHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            if (foreground != shellHwnd && !IsOurProcessWindow(foreground))
+            {
+                if (sender is DispatcherTimer t) t.Stop();
+                await MiniSetup.UndimAsync();
+            }
+        }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Focus watchdog failed: {ex.Message}"); }
+    }
+
+    private static bool IsOurProcessWindow(IntPtr hwnd)
+    {
+        try
+        {
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+            return pid == (uint)Environment.ProcessId;
+        }
+        catch { return false; }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase C: auto-open Editor on a successful Stop (spec §3.4)
+    // ---------------------------------------------------------------
+
+    private bool _wasRecordingLastTick;
+    private bool _handlingStop;
+    private DateTime _lastSummonAt = DateTime.MinValue;
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
+        bool isRecording = _viewModel.IsRecording;
+        bool justStopped = _wasRecordingLastTick && !isRecording;
+        _wasRecordingLastTick = isRecording;
+
+        if (!justStopped) return;
+
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            try { await HandleRecordingStoppedAsync(); }
+            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Post-stop handler failed: {ex}"); }
+        });
+    }
+
+    /// <summary>
+    /// Single completion path for ALL stop sources (pill / docked pill /
+    /// hotkey / tray / close-to-tray). Fires once per recording session via
+    /// <see cref="OnViewModelPropertyChanged"/> on the IsRecording false-edge.
+    /// </summary>
+    /// <remarks>
+    /// Rubber-duck R1c/R2: failure detection uses <c>LastProject == null</c>
+    /// as the only reliable signal — sniffing RecordingStatus strings is
+    /// fragile. On success we morph to Full + navigate Editor; on failure we
+    /// fall back to <see cref="_originStateBeforeRecording"/> and surface
+    /// a red InfoBar via <see cref="ShowTransientInfo(string,InfoBarSeverity)"/>.
+    /// </remarks>
+    private async Task HandleRecordingStoppedAsync()
+    {
+        if (_handlingStop) return;
+        _handlingStop = true;
+
+        try
+        {
+            var origin = _originStateBeforeRecording;
+            _originStateBeforeRecording = null;
+
+            if (_viewModel.LastProject is null)
+            {
+                // Failed stop: return to origin (or sensible fallback) and
+                // surface the error in a red InfoBar.
+                var fallback = origin
+                    ?? (_currentState == AppShellState.FullRecording
+                        ? AppShellState.Full
+                        : AppShellState.MiniSetup);
+
+                if (_currentState != fallback)
+                {
+                    try { await TransitionToAsync(fallback); }
+                    catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Failure transition failed: {ex}"); }
+                }
+
+                var message = string.IsNullOrWhiteSpace(_viewModel.RecordingStatus)
+                    ? "Recording could not be saved."
+                    : _viewModel.RecordingStatus;
+                ShowTransientInfo(message, InfoBarSeverity.Error);
+                return;
+            }
+
+            // Successful Stop: morph to Full and navigate to the Editor page
+            // (the project is already on ProjectService.Instance via
+            // RecordingViewModel.StopRecordingAsync, so the Editor will pick
+            // it up via its existing ProjectService.Instance.CurrentProject
+            // read).
+            if (_currentState != AppShellState.Full)
+                await TransitionToAsync(AppShellState.Full);
+
+            try
+            {
+                // R3: always navigate, even when the editor is already the
+                // current page, so a second recording's clip replaces the
+                // first instead of leaving the stale clip on screen.
+                FullShell.ContentFrame.Navigate(typeof(Pages.EditorPage));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[AppShellWindow] Navigate to Editor failed: {ex}");
+            }
+        }
+        finally
+        {
+            _handlingStop = false;
+        }
+    }
+
+    /// <summary>
+    /// Surface a transient message in the shell's overlay <see cref="InfoBar"/>.
+    /// Visible regardless of current state (Mini Setup / Mini Recording /
+    /// Full / Full Recording). Auto-dismisses after 6 s.
+    /// </summary>
+    public void ShowTransientInfo(string message, InfoBarSeverity severity = InfoBarSeverity.Informational)
+    {
+        if (ShellInfoBar is null) return;
+        try
+        {
+            ShellInfoBar.Severity = severity;
+            ShellInfoBar.Title = string.Empty;
+            ShellInfoBar.Message = message;
+            ShellInfoBar.IsOpen = true;
+
+            _infoBarTimer?.Stop();
+            _infoBarTimer ??= DispatcherQueue.CreateTimer();
+            _infoBarTimer.Interval = TimeSpan.FromSeconds(6);
+            _infoBarTimer.IsRepeating = false;
+            _infoBarTimer.Tick -= OnShellInfoBarTimerTick;
+            _infoBarTimer.Tick += OnShellInfoBarTimerTick;
+            _infoBarTimer.Start();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AppShellWindow] ShowTransientInfo failed: {ex.Message}");
+        }
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _infoBarTimer;
+
+    private void OnShellInfoBarTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        try { if (ShellInfoBar is not null) ShellInfoBar.IsOpen = false; } catch { }
+        sender.Stop();
+    }
+
+    // ---------------------------------------------------------------
+    // Phase C: summon (spec §4.7) — bring to front, switch to MiniSetup,
+    // un-minimize if needed, focus the Record button.
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Bring the shell to the foreground, un-minimize, switch to
+    /// <see cref="AppShellState.MiniSetup"/>, and place focus on the Record
+    /// button so the user can confirm with Space/Enter. Used by the global
+    /// summon hotkey, the system tray, and CLI activation.
+    /// </summary>
+    /// <param name="suppressMiniMorph">
+    /// When the caller wants the window to come to the foreground in its
+    /// current state (e.g. the tray "Show recording pill" entry during an
+    /// active recording), pass true to skip the implicit MiniSetup morph.
+    /// </param>
+    public async Task SummonAsync(bool suppressMiniMorph = false)
+    {
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+            // Restore toolbar opacity in case a stale picker left it dimmed.
+            try { await MiniSetup.UndimAsync(); } catch { }
+
+            // Un-hide / un-minimize.
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
+
+            // If recording, prefer the user's current shell state (don't morph
+            // a FullRecording into MiniSetup; spec §4.7 keeps recording state).
+            if (!suppressMiniMorph && !_viewModel.IsRecording && _currentState != AppShellState.MiniSetup)
+            {
+                await TransitionToAsync(AppShellState.MiniSetup);
+            }
+
+            AllowSetForegroundWindow(unchecked((uint)Environment.ProcessId));
+            SetForegroundWindow(hwnd);
+            Activate();
+
+            _lastSummonAt = DateTime.UtcNow;
+
+            // Focus the Record button (when applicable).
+            MiniSetup.FocusRecordButton();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AppShellWindow] Summon failed: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// True when the most recent <see cref="SummonAsync"/> happened within
+    /// the last 5 seconds. Used by the Esc-dismiss-summon rule (spec §4.7).
+    /// </summary>
+    public bool WasRecentlySummoned => (DateTime.UtcNow - _lastSummonAt) < TimeSpan.FromSeconds(5);
+
+    /// <summary>Returns the captured origin state at record-start, or <c>null</c>.</summary>
+    public AppShellState? OriginStateBeforeRecording => _originStateBeforeRecording;
+
+    private void OnMiniSetupDismissRequested(object? sender, EventArgs e)
+    {
+        // Spec §4.7: Esc within ~5 s of a summon dismisses the toolbar back
+        // to the tray; outside that window, it's a no-op. We also require
+        // we're in MiniSetup and not actively recording.
+        if (_viewModel.IsRecording) return;
+        if (_currentState != AppShellState.MiniSetup) return;
+        if (!WasRecentlySummoned) return;
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            ShowWindow(hwnd, SW_HIDE);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AppShellWindow] Esc-dismiss failed: {ex.Message}");
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool AllowSetForegroundWindow(uint dwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
+    private const int SW_RESTORE = 9;
 }

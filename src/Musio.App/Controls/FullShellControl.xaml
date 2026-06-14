@@ -42,47 +42,24 @@
                         <FontIcon Glyph="&#xE73F;" FontSize="14" />
                     </Button>
 
-                    <!-- FullRecording state: docked pill (Phase B uses a
-                         simplified Stop + elapsed time + Collapse trio; the
-                         full RecordingPillControl visuals + stopping ticker
-                         move into the title bar in Phase C). -->
+                    <!-- FullRecording state: docked pill hosts the full
+                         RecordingPillControl visuals (stopping ticker,
+                         phrase animation, etc.) with the acrylic backdrop
+                         neutralised since the title bar provides its own
+                         (spec §4.3.1). The Collapse-to-Mini-Recording
+                         button sits next to it because its semantics differ
+                         from the pill's own expand-to-Full button. -->
                     <StackPanel
                         x:Name="DockedPillPanel"
                         Visibility="Collapsed"
                         Orientation="Horizontal"
-                        Spacing="8"
-                        VerticalAlignment="Center">
-                        <TextBlock
-                            x:Name="DockedElapsedText"
-                            Text="00:00"
-                            Foreground="{ThemeResource OverlayForegroundBrush}"
-                            FontSize="14"
-                            FontWeight="SemiBold"
-                            FontFamily="Consolas"
+                        Spacing="6"
+                        VerticalAlignment="Center"
+                        xmlns:controls="using:Musio_App.Controls">
+                        <controls:RecordingPillControl
+                            x:Name="DockedRecordingPill"
                             VerticalAlignment="Center"
-                            MinWidth="44" />
-                        <Button
-                            x:Name="DockedStopButton"
-                            Click="DockedStopButton_Click"
-                            Width="28" Height="28"
-                            CornerRadius="6"
-                            Padding="0"
-                            Background="{ThemeResource RecordingStopRestBrush}"
-                            BorderBrush="{ThemeResource RecordingStopRestBrush}"
-                            Foreground="{ThemeResource RecordingStopForegroundBrush}"
-                            VerticalAlignment="Center"
-                            ToolTipService.ToolTip="Stop recording"
-                            AutomationProperties.Name="Stop recording">
-                            <Button.Resources>
-                                <StaticResource x:Key="ButtonBackgroundPointerOver"  ResourceKey="RecordingStopHoverBrush" />
-                                <StaticResource x:Key="ButtonBorderBrushPointerOver" ResourceKey="RecordingStopHoverBrush" />
-                                <StaticResource x:Key="ButtonForegroundPointerOver"  ResourceKey="RecordingStopForegroundBrush" />
-                                <StaticResource x:Key="ButtonBackgroundPressed"  ResourceKey="RecordingStopPressedBrush" />
-                                <StaticResource x:Key="ButtonBorderBrushPressed" ResourceKey="RecordingStopPressedBrush" />
-                                <StaticResource x:Key="ButtonForegroundPressed"  ResourceKey="RecordingStopForegroundBrush" />
-                            </Button.Resources>
-                            <FontIcon Glyph="&#xE71A;" FontSize="10" />
-                        </Button>
+                            MaxHeight="44" />
                         <Button
                             x:Name="DockedCollapseButton"
                             Click="DockedCollapseButton_Click"

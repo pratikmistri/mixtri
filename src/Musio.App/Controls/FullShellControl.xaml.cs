@@ -58,29 +58,38 @@ public sealed partial class FullShellControl : UserControl
     }
 
     /// <summary>
-    /// Reveal the docked title-bar recording pill and bind it to the supplied
-    /// <see cref="RecordingViewModel"/> so the elapsed-time text updates in
-    /// real time. Hides the static Collapse-to-Mini button while shown.
+    /// Reveal the docked title-bar recording pill and initialise the hosted
+    /// <see cref="RecordingPillControl"/> with the supplied
+    /// <see cref="RecordingViewModel"/>. The hosted pill provides the full
+    /// stopping-ticker + phrase animation visuals; we only neutralise the
+    /// acrylic backdrop here because the title bar provides its own (spec
+    /// §4.3.1).
     /// </summary>
-    /// <remarks>
-    /// Phase B uses a simplified title-bar treatment (elapsed text + Stop +
-    /// Collapse) rather than the full <see cref="RecordingPillControl"/>
-    /// visuals; the stopping ticker animation does not run in this slot.
-    /// Promoting to the full pill (and adding the connected-element morph)
-    /// is Phase C work — see spec §4.3.1 / §4.6.
-    /// </remarks>
     public void ShowDockedPill(RecordingViewModel viewModel)
     {
         if (viewModel is null) throw new ArgumentNullException(nameof(viewModel));
 
-        if (_dockedPillViewModel is not null)
-            _dockedPillViewModel.PropertyChanged -= OnDockedPillViewModelPropertyChanged;
-
         _dockedPillViewModel = viewModel;
-        DockedElapsedText.Text = _dockedPillViewModel.ElapsedTime;
-        _dockedPillViewModel.PropertyChanged += OnDockedPillViewModelPropertyChanged;
 
-        DockedStopButton.IsEnabled = true;
+        try
+        {
+            DockedRecordingPill.SetRootBackground(
+                new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent));
+            DockedRecordingPill.IsExpandButtonVisible = false;
+            DockedRecordingPill.Initialize(viewModel);
+            DockedRecordingPill.ResetToRecordingState();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FullShellControl] ShowDockedPill init failed: {ex.Message}");
+        }
+
+        // Bridge the hosted pill's Stop event into our existing
+        // DockedPillStopRequested event so AppShellWindow's wiring stays
+        // unchanged.
+        DockedRecordingPill.StopRequested -= OnDockedRecordingPillStopRequested;
+        DockedRecordingPill.StopRequested += OnDockedRecordingPillStopRequested;
+
         DockedPillPanel.Visibility = Visibility.Visible;
         CollapseButton.Visibility = Visibility.Collapsed;
     }
@@ -91,22 +100,22 @@ public sealed partial class FullShellControl : UserControl
     /// </summary>
     public void HideDockedPill()
     {
-        if (_dockedPillViewModel is not null)
+        try
         {
-            _dockedPillViewModel.PropertyChanged -= OnDockedPillViewModelPropertyChanged;
-            _dockedPillViewModel = null;
+            DockedRecordingPill.StopRequested -= OnDockedRecordingPillStopRequested;
+            DockedRecordingPill.Teardown();
         }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FullShellControl] HideDockedPill teardown failed: {ex.Message}");
+        }
+        _dockedPillViewModel = null;
         DockedPillPanel.Visibility = Visibility.Collapsed;
     }
 
-    private void OnDockedPillViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnDockedRecordingPillStopRequested(object? sender, EventArgs e)
     {
-        if (e.PropertyName != nameof(RecordingViewModel.ElapsedTime)) return;
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (_dockedPillViewModel is not null)
-                DockedElapsedText.Text = _dockedPillViewModel.ElapsedTime;
-        });
+        DockedPillStopRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void TitleBar_PaneToggleRequested(TitleBar sender, object args)
@@ -145,13 +154,6 @@ public sealed partial class FullShellControl : UserControl
     private void CollapseButton_Click(object sender, RoutedEventArgs e)
     {
         CollapseRequested?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void DockedStopButton_Click(object sender, RoutedEventArgs e)
-    {
-        DockedStopButton.IsEnabled = false;
-        _dockedPillViewModel?.NotifyStopRequested();
-        DockedPillStopRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void DockedCollapseButton_Click(object sender, RoutedEventArgs e)

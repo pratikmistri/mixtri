@@ -175,18 +175,41 @@ public partial class RecordingViewModel : ObservableObject
     public bool IsCustomRegionMode => CaptureMode == CaptureMode.CustomRegion;
 
     partial void OnIsMicEnabledChanged(bool value)
-        => AppSettings.Instance.IsMicEnabled = value;
+    {
+        AppSettings.Instance.IsMicEnabled = value;
+        try { ShellSettings.Instance.LastMicEnabled = value; } catch { }
+    }
 
     partial void OnIsSystemAudioEnabledChanged(bool value)
-        => AppSettings.Instance.IsSystemAudioEnabled = value;
+    {
+        AppSettings.Instance.IsSystemAudioEnabled = value;
+        try { ShellSettings.Instance.LastSystemAudioEnabled = value; } catch { }
+    }
 
     partial void OnIsWebcamEnabledChanged(bool value)
-        => AppSettings.Instance.IsWebcamEnabled = value;
+    {
+        AppSettings.Instance.IsWebcamEnabled = value;
+        try { ShellSettings.Instance.LastWebcamEnabled = value; } catch { }
+    }
 
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsCustomRegionMode));
         OnPropertyChanged(nameof(IsWindowMode));
+        try { ShellSettings.Instance.LastCaptureMode = value; } catch { }
+    }
+
+    partial void OnSelectedRegionChanged(CaptureRegion? value)
+    {
+        try
+        {
+            if (value is null)
+                ShellSettings.Instance.LastRegion = null;
+            else
+                ShellSettings.Instance.LastRegion = new Windows.Foundation.Rect(
+                    value.X, value.Y, value.Width, value.Height);
+        }
+        catch { /* persistence is best-effort */ }
     }
 
     [RelayCommand]
@@ -194,6 +217,10 @@ public partial class RecordingViewModel : ObservableObject
     {
         if (IsRecording)
             return;
+
+        // Clear the previous recording's project so a failed stop can't
+        // resurrect it as the "current clip" in Editor.
+        LastProject = null;
 
         try
         {
