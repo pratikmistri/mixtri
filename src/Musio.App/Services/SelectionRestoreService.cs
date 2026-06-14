@@ -28,8 +28,31 @@ public static class SelectionRestoreService
 
         var settings = ShellSettings.Instance;
 
-        // Always restore audio/cam toggles up front — they're independent of
-        // the capture-mode flow and never trigger picker launches.
+        CaptureRegion? savedRegion = null;
+        try { savedRegion = new RegionSelector().LoadLastRegion(); }
+        catch (Exception ex) { Debug.WriteLine($"[SelectionRestoreService] LoadLastRegion failed: {ex.Message}"); }
+
+        var persisted = new PersistedSelectionState(
+            settings.LastCaptureMode,
+            savedRegion,
+            settings.LastWindowSelection,
+            settings.LastMicEnabled,
+            settings.LastSystemAudioEnabled,
+            settings.LastWebcamEnabled);
+
+        return RestoreOnLaunch(viewModel, persisted, WindowMatcher.FindWindow, DoesRegionFit);
+    }
+
+    internal static SelectionRestoreOutcome RestoreOnLaunch(
+        RecordingViewModel viewModel,
+        PersistedSelectionState settings,
+        Func<string, string, IntPtr?> findWindow,
+        Func<CaptureRegion, bool> doesRegionFit)
+    {
+        if (viewModel is null) throw new ArgumentNullException(nameof(viewModel));
+        if (findWindow is null) throw new ArgumentNullException(nameof(findWindow));
+        if (doesRegionFit is null) throw new ArgumentNullException(nameof(doesRegionFit));
+
         try { viewModel.IsMicEnabled = settings.LastMicEnabled; } catch { }
         try { viewModel.IsSystemAudioEnabled = settings.LastSystemAudioEnabled; } catch { }
         try { viewModel.IsWebcamEnabled = settings.LastWebcamEnabled; } catch { }
@@ -57,33 +80,28 @@ public static class SelectionRestoreService
                 return new SelectionRestoreOutcome(CaptureMode.FullScreen, AutoLaunchPicker: false, RegionDiscardedReason: null);
 
             case CaptureMode.CustomRegion:
-                return RestoreRegion(viewModel);
+                return RestoreRegion(viewModel, settings.LastRegion, doesRegionFit);
 
             case CaptureMode.Window:
-                return RestoreWindow(viewModel);
+                return RestoreWindow(viewModel, settings.LastWindowSelection, findWindow);
 
             default:
                 return new SelectionRestoreOutcome(savedMode.Value, AutoLaunchPicker: false, RegionDiscardedReason: null);
         }
     }
 
-    private static SelectionRestoreOutcome RestoreRegion(RecordingViewModel viewModel)
+    private static SelectionRestoreOutcome RestoreRegion(
+        RecordingViewModel viewModel,
+        CaptureRegion? saved,
+        Func<CaptureRegion, bool> doesRegionFit)
     {
-        // The richer CaptureRegion (with MonitorId) lives in RegionMemory via
-        // RegionSelector.LoadLastRegion. Prefer it over the simpler
-        // ShellSettings.LastRegion (which only has a logical x/y/w/h) so the
-        // restored selection can land on the correct monitor.
-        CaptureRegion? saved = null;
-        try { saved = new RegionSelector().LoadLastRegion(); }
-        catch (Exception ex) { Debug.WriteLine($"[SelectionRestoreService] LoadLastRegion failed: {ex.Message}"); }
-
         if (saved is null)
             return new SelectionRestoreOutcome(CaptureMode.CustomRegion, AutoLaunchPicker: false, RegionDiscardedReason: null);
 
         // Validate the region fits the current display layout. If the user's
         // resolution changed (or the owning monitor is gone) we discard it
         // and fall back to FullScreen with a toast (spec §6).
-        if (!DoesRegionFit(saved))
+        if (!doesRegionFit(saved))
         {
             try { viewModel.SelectedRegion = null; } catch { }
             try { viewModel.HasSelectedRegion = false; } catch { }
@@ -99,9 +117,11 @@ public static class SelectionRestoreService
         return new SelectionRestoreOutcome(CaptureMode.CustomRegion, AutoLaunchPicker: false, RegionDiscardedReason: null);
     }
 
-    private static SelectionRestoreOutcome RestoreWindow(RecordingViewModel viewModel)
+    private static SelectionRestoreOutcome RestoreWindow(
+        RecordingViewModel viewModel,
+        (string ProcessName, string WindowTitle, string ClassName)? saved,
+        Func<string, string, IntPtr?> findWindow)
     {
-        var saved = ShellSettings.Instance.LastWindowSelection;
         if (saved is null)
         {
             // No prior selection — land in Window mode and ask the host to
@@ -109,7 +129,7 @@ public static class SelectionRestoreService
             return new SelectionRestoreOutcome(CaptureMode.Window, AutoLaunchPicker: true, RegionDiscardedReason: null);
         }
 
-        var hwnd = WindowMatcher.FindWindow(saved.Value.ProcessName, saved.Value.WindowTitle);
+        var hwnd = findWindow(saved.Value.ProcessName, saved.Value.WindowTitle);
         if (hwnd is null)
         {
             // Last window is gone — surface the picker (spec §6 / §5.4).
@@ -188,3 +208,11 @@ public sealed record SelectionRestoreOutcome(
     CaptureMode AppliedMode,
     bool AutoLaunchPicker,
     string? RegionDiscardedReason);
+
+internal readonly record struct PersistedSelectionState(
+    CaptureMode? LastCaptureMode,
+    CaptureRegion? LastRegion,
+    (string ProcessName, string WindowTitle, string ClassName)? LastWindowSelection,
+    bool LastMicEnabled,
+    bool LastSystemAudioEnabled,
+    bool LastWebcamEnabled);

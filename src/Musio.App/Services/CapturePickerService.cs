@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Musio_App.Controls;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
+using Musio.Core.Settings;
 
 namespace Musio_App.Services;
 
@@ -27,7 +28,27 @@ public sealed class CapturePickerService
     /// <summary>Shared singleton mirroring <see cref="RecordingViewModel.Shared"/>.</summary>
     public static CapturePickerService Shared { get; } = new();
 
-    private CapturePickerService() { }
+    private readonly Func<CaptureRegion?, Task<CaptureRegion?>> _showRegionPickerAsync;
+    private readonly Func<Task<WindowInfo?>> _showWindowPickerAsync;
+    private readonly RecordingViewModel _viewModel;
+
+    private CapturePickerService()
+        : this(
+            previous => new RegionSelectorOverlay().ShowAsync(previous),
+            () => new WindowSelectorOverlay().ShowAsync(),
+            RecordingViewModel.Shared)
+    {
+    }
+
+    internal CapturePickerService(
+        Func<CaptureRegion?, Task<CaptureRegion?>> showRegionPickerAsync,
+        Func<Task<WindowInfo?>> showWindowPickerAsync,
+        RecordingViewModel viewModel)
+    {
+        _showRegionPickerAsync = showRegionPickerAsync ?? throw new ArgumentNullException(nameof(showRegionPickerAsync));
+        _showWindowPickerAsync = showWindowPickerAsync ?? throw new ArgumentNullException(nameof(showWindowPickerAsync));
+        _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+    }
 
     private bool _isPickerOpen;
 
@@ -43,7 +64,7 @@ public sealed class CapturePickerService
     /// <summary>Raised after a picker overlay has been dismissed (confirmed or cancelled).</summary>
     public event EventHandler? PickerClosed;
 
-    private RecordingViewModel ViewModel => RecordingViewModel.Shared;
+    private RecordingViewModel ViewModel => _viewModel;
 
     /// <summary>
     /// Show the region picker. On confirm, updates
@@ -75,8 +96,7 @@ public sealed class CapturePickerService
             PickerOpening?.Invoke(this, EventArgs.Empty);
             await dim.DimAsync();
 
-            var overlay = new RegionSelectorOverlay();
-            var region = await overlay.ShowAsync(ViewModel.SelectedRegion);
+            var region = await _showRegionPickerAsync(ViewModel.SelectedRegion);
 
             if (region is not null)
             {
@@ -115,8 +135,7 @@ public sealed class CapturePickerService
             PickerOpening?.Invoke(this, EventArgs.Empty);
             await dim.DimAsync();
 
-            var overlay = new WindowSelectorOverlay();
-            var window = await overlay.ShowAsync();
+            var window = await _showWindowPickerAsync();
 
             if (window is not null)
             {

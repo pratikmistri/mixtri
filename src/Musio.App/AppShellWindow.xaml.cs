@@ -555,13 +555,16 @@ public sealed partial class AppShellWindow : Window
     {
         try
         {
-            await TransitionToAsync(AppShellState.MiniRecording);
+            var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.RecordPressed, new())
+                ?? AppShellState.MiniRecording;
+            await TransitionToAsync(target);
             // Re-check state after the await: if the user (or any other
             // event) drove us back out of MiniRecording while the morph was
             // in flight (e.g. Stop fired before recording even started), do
             // NOT spawn a recording — we'd otherwise leave the shell sitting
             // in MiniSetup with an invisible recording running underneath.
-            if (_currentState == AppShellState.MiniRecording && !_viewModel.IsRecording)
+            if ((_currentState == AppShellState.MiniRecording || _currentState == AppShellState.FullRecording)
+                && !_viewModel.IsRecording)
                 _viewModel.StartRecordingCommand.Execute(null);
         }
         catch (Exception ex)
@@ -572,7 +575,12 @@ public sealed partial class AppShellWindow : Window
 
     private async void OnMiniSetupExpandRequested(object? sender, EventArgs e)
     {
-        try { await TransitionToAsync(AppShellState.Full); }
+        try
+        {
+            var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.MiniSetupExpand, new());
+            if (target is AppShellState destination)
+                await TransitionToAsync(destination);
+        }
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Expand failed: {ex}"); }
     }
 
@@ -596,7 +604,12 @@ public sealed partial class AppShellWindow : Window
 
     private async void OnPillExpandRequested(object? sender, EventArgs e)
     {
-        try { await TransitionToAsync(AppShellState.FullRecording); }
+        try
+        {
+            var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.RecordingExpand, new());
+            if (target is AppShellState destination)
+                await TransitionToAsync(destination);
+        }
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Pill expand failed: {ex}"); }
     }
 
@@ -604,10 +617,9 @@ public sealed partial class AppShellWindow : Window
     {
         try
         {
-            var destination = _currentState == AppShellState.FullRecording
-                ? AppShellState.MiniRecording
-                : AppShellState.MiniSetup;
-            await TransitionToAsync(destination);
+            var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.FullCollapse, new());
+            if (target is AppShellState destination)
+                await TransitionToAsync(destination);
         }
         catch (Exception ex)
         {
@@ -633,7 +645,12 @@ public sealed partial class AppShellWindow : Window
 
     private async void OnFullDockedCollapseRequested(object? sender, EventArgs e)
     {
-        try { await TransitionToAsync(AppShellState.MiniRecording); }
+        try
+        {
+            var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.DockedPillCollapse, new());
+            if (target is AppShellState destination)
+                await TransitionToAsync(destination);
+        }
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Docked collapse failed: {ex}"); }
     }
 
@@ -889,15 +906,16 @@ public sealed partial class AppShellWindow : Window
         {
             var origin = _originStateBeforeRecording;
             _originStateBeforeRecording = null;
+            var transitionContext = new AppShellTransitionContext(origin);
 
             if (_viewModel.LastProject is null)
             {
                 // Failed stop: return to origin (or sensible fallback) and
                 // surface the error in a red InfoBar.
-                var fallback = origin
-                    ?? (_currentState == AppShellState.FullRecording
-                        ? AppShellState.Full
-                        : AppShellState.MiniSetup);
+                var fallback = AppShellStateMachine.NextState(
+                    _currentState,
+                    AppShellEvent.StopFailed,
+                    transitionContext) ?? AppShellState.MiniSetup;
 
                 if (_currentState != fallback)
                 {
@@ -917,8 +935,13 @@ public sealed partial class AppShellWindow : Window
             // RecordingViewModel.StopRecordingAsync, so the Editor will pick
             // it up via its existing ProjectService.Instance.CurrentProject
             // read).
-            if (_currentState != AppShellState.Full)
-                await TransitionToAsync(AppShellState.Full);
+            var successDestination = AppShellStateMachine.NextState(
+                _currentState,
+                AppShellEvent.StopSucceeded,
+                transitionContext) ?? AppShellState.Full;
+
+            if (_currentState != successDestination)
+                await TransitionToAsync(successDestination);
 
             try
             {
@@ -1040,9 +1063,15 @@ public sealed partial class AppShellWindow : Window
         // Spec §4.7: Esc within ~5 s of a summon dismisses the toolbar back
         // to the tray; outside that window, it's a no-op. We also require
         // we're in MiniSetup and not actively recording.
-        if (_viewModel.IsRecording) return;
-        if (_currentState != AppShellState.MiniSetup) return;
-        if (!WasRecentlySummoned) return;
+        var target = AppShellStateMachine.NextState(
+            _currentState,
+            AppShellEvent.EscDismiss,
+            new AppShellTransitionContext(
+                OriginStateBeforeRecording: _originStateBeforeRecording,
+                IsPickerOpen: CapturePickerService.Shared.IsPickerOpen,
+                IsRecording: _viewModel.IsRecording,
+                WasRecentlySummoned: WasRecentlySummoned));
+        if (target is null) return;
         try
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);

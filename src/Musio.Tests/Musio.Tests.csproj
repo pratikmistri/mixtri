@@ -18,6 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Musio.App\Musio.App.csproj" />
     <ProjectReference Include="..\Musio.Core\Musio.Core.csproj" />
   </ItemGroup>
 

@@ -123,6 +123,9 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
     {
         if (e.Key == Windows.System.VirtualKey.Escape)
         {
+            if (CapturePickerService.Shared.IsPickerOpen || RecordingViewModel.Shared.IsRecording)
+                return;
+
             DismissRequested?.Invoke(this, EventArgs.Empty);
             e.Handled = true;
         }

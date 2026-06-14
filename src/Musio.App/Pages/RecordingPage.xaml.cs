@@ -142,15 +142,19 @@ public sealed partial class RecordingPage : Page
             var shell = App.Current.Shell;
             if (shell is null) return;
 
-            // Always end up in MiniRecording on Record-press (matches spec
-            // §3.6 — recording from Full collapses to top-center pill).
-            await shell.TransitionToAsync(AppShellState.MiniRecording);
+            // Full records in-place with a docked pill; Mini records with the
+            // top-center pill.
+            var target = AppShellStateMachine.NextState(shell.CurrentState, AppShellEvent.RecordPressed, new())
+                ?? AppShellState.MiniRecording;
+            await shell.TransitionToAsync(target);
 
             // Re-check state after the await: if Stop fired or any other
             // transition took us out of MiniRecording during the morph, do
             // NOT start a recording — we'd otherwise spawn one with no pill
             // visible to stop it.
-            if (shell.CurrentState == AppShellState.MiniRecording && !ViewModel.IsRecording)
+            if ((shell.CurrentState == AppShellState.MiniRecording
+                 || shell.CurrentState == AppShellState.FullRecording)
+                && !ViewModel.IsRecording)
                 ViewModel.StartRecordingCommand.Execute(null);
         }
         catch (Exception ex)

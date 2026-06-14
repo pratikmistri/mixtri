@@ -234,35 +234,18 @@ public sealed class SystemTrayService : IDisposable
             bool isRecording = false;
             try { isRecording = IsRecordingProbe?.Invoke() == true; } catch { }
 
-            if (isRecording)
+            foreach (var item in BuildMenuItems(isRecording))
             {
-                // Recording menu (spec §3.8): only Stop / Show pill are enabled.
-                AppendMenu(hMenu, MF_STRING, IDM_STOP_RECORDING, "Stop recording");
-                AppendMenu(hMenu, MF_STRING, IDM_SHOW_PILL, "Show recording pill");
-                AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                AppendMenu(hMenu, MF_STRING | MF_GRAYED, IDM_NEW_RECORDING, "New recording");
-                AppendMenu(hMenu, MF_STRING | MF_GRAYED, IDM_NEW_REGION_RECORDING, "New region recording");
-                AppendMenu(hMenu, MF_STRING | MF_GRAYED, IDM_NEW_WINDOW_RECORDING, "New window recording");
-                AppendMenu(hMenu, MF_STRING | MF_GRAYED, IDM_NEW_FULLSCREEN_RECORDING, "New full-screen recording");
-                AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                AppendMenu(hMenu, MF_STRING, IDM_OPEN, "Open Musio");
-                AppendMenu(hMenu, MF_STRING, IDM_SETTINGS, "Settings");
-                AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                AppendMenu(hMenu, MF_STRING, IDM_EXIT, "Quit Musio");
-            }
-            else
-            {
-                // Not-recording menu (spec §3.8 / §5.8). First entry is the
-                // default — left-click on the icon mirrors this.
-                AppendMenu(hMenu, MF_STRING | MF_DEFAULT, IDM_NEW_RECORDING, "New recording");
-                AppendMenu(hMenu, MF_STRING, IDM_NEW_REGION_RECORDING, "New region recording");
-                AppendMenu(hMenu, MF_STRING, IDM_NEW_WINDOW_RECORDING, "New window recording");
-                AppendMenu(hMenu, MF_STRING, IDM_NEW_FULLSCREEN_RECORDING, "New full-screen recording");
-                AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                AppendMenu(hMenu, MF_STRING, IDM_OPEN, "Open Musio");
-                AppendMenu(hMenu, MF_STRING, IDM_SETTINGS, "Settings");
-                AppendMenu(hMenu, MF_SEPARATOR, 0, null);
-                AppendMenu(hMenu, MF_STRING, IDM_EXIT, "Quit Musio");
+                if (item.IsSeparator)
+                {
+                    AppendMenu(hMenu, MF_SEPARATOR, 0, null);
+                    continue;
+                }
+
+                var flags = MF_STRING;
+                if (!item.Enabled) flags |= MF_GRAYED;
+                if (item.IsDefault) flags |= MF_DEFAULT;
+                AppendMenu(hMenu, flags, item.Id, item.Text);
             }
 
             GetCursorPos(out var pt);
@@ -274,6 +257,45 @@ public sealed class SystemTrayService : IDisposable
         {
             DestroyMenu(hMenu);
         }
+    }
+
+    internal static IReadOnlyList<TrayMenuItemSpec> BuildMenuItems(bool isRecording)
+    {
+        static TrayMenuItemSpec Command(uint id, string text, bool enabled = true, bool isDefault = false)
+            => new(id, text, enabled, isDefault, IsSeparator: false);
+        static TrayMenuItemSpec Separator() => new(0, null, true, false, IsSeparator: true);
+
+        if (isRecording)
+        {
+            return new[]
+            {
+                Command(IDM_STOP_RECORDING, "Stop recording"),
+                Command(IDM_SHOW_PILL, "Show recording pill"),
+                Separator(),
+                Command(IDM_NEW_RECORDING, "New recording", enabled: false),
+                Command(IDM_NEW_REGION_RECORDING, "New region recording", enabled: false),
+                Command(IDM_NEW_WINDOW_RECORDING, "New window recording", enabled: false),
+                Command(IDM_NEW_FULLSCREEN_RECORDING, "New full-screen recording", enabled: false),
+                Separator(),
+                Command(IDM_OPEN, "Open Musio"),
+                Command(IDM_SETTINGS, "Settings"),
+                Separator(),
+                Command(IDM_EXIT, "Quit Musio"),
+            };
+        }
+
+        return new[]
+        {
+            Command(IDM_NEW_RECORDING, "New recording", isDefault: true),
+            Command(IDM_NEW_REGION_RECORDING, "New region recording"),
+            Command(IDM_NEW_WINDOW_RECORDING, "New window recording"),
+            Command(IDM_NEW_FULLSCREEN_RECORDING, "New full-screen recording"),
+            Separator(),
+            Command(IDM_OPEN, "Open Musio"),
+            Command(IDM_SETTINGS, "Settings"),
+            Separator(),
+            Command(IDM_EXIT, "Quit Musio"),
+        };
     }
 
     /// <summary>
@@ -441,3 +463,10 @@ public sealed class SystemTrayService : IDisposable
 
     #endregion
 }
+
+internal readonly record struct TrayMenuItemSpec(
+    uint Id,
+    string? Text,
+    bool Enabled,
+    bool IsDefault,
+    bool IsSeparator);

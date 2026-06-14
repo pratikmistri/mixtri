@@ -36,30 +36,29 @@ public static class WindowMatcher
         {
             try
             {
-                // Skip invisible windows — they're never user-pickable.
-                if (!IsWindowVisible(hwnd)) return true;
-
-                // Skip DWM-cloaked windows. Many UWP/Settings/Start/virtual-
-                // desktop windows are visible-but-cloaked and have non-empty
-                // titles that can collide with a remembered selection,
-                // resolving to a ghost HWND that captures black/garbage.
-                if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0
-                    && cloaked != 0)
+                // Production path is deliberately lazy/early-exit: visibility
+                // and title are cheap, process lookup is comparatively
+                // expensive on launch.
+                if (!IsWindowVisible(hwnd))
                     return true;
 
-                // Title must match exactly (spec §5.4: case-sensitive, exact whitespace).
+                bool cloaked = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloakedValue, sizeof(int)) == 0
+                    && cloakedValue != 0;
+                if (cloaked)
+                    return true;
+
                 var title = GetWindowTitle(hwnd);
                 if (!string.Equals(title, windowTitle, StringComparison.Ordinal))
                     return true;
 
-                // Process name must match (case-insensitive, no .exe).
-                if (!TryGetProcessName(hwnd, out var owningProcessName))
-                    return true;
-                if (!string.Equals(owningProcessName, processName, StringComparison.OrdinalIgnoreCase))
+                TryGetProcessName(hwnd, out var owningProcessName);
+                var candidate = new WindowSnapshot(hwnd, owningProcessName, title, IsVisible: true, IsCloaked: false);
+                var candidateMatch = FindWindow([candidate], processName, windowTitle);
+                if (candidateMatch is null)
                     return true;
 
-                match = hwnd;
-                return false; // stop enumeration
+                match = candidateMatch.Value;
+                return false;
             }
             catch
             {
@@ -71,6 +70,30 @@ public static class WindowMatcher
 
         return match == IntPtr.Zero ? null : match;
     }
+
+    internal static IntPtr? FindWindow(IEnumerable<WindowSnapshot> windows, string processName, string windowTitle)
+    {
+        if (string.IsNullOrEmpty(processName) || windowTitle is null)
+            return null;
+
+        foreach (var window in windows)
+        {
+            if (!window.IsVisible || window.IsCloaked)
+                continue;
+            if (!string.Equals(window.Title, windowTitle, StringComparison.Ordinal))
+                continue;
+            if (!string.Equals(NormalizeProcessName(window.ProcessName), NormalizeProcessName(processName), StringComparison.OrdinalIgnoreCase))
+                continue;
+            return window.Handle;
+        }
+
+        return null;
+    }
+
+    private static string NormalizeProcessName(string value)
+        => value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? value[..^4]
+            : value;
 
     private static string GetWindowTitle(IntPtr hwnd)
     {
@@ -122,3 +145,10 @@ public static class WindowMatcher
 
     private const int DWMWA_CLOAKED = 14;
 }
+
+internal readonly record struct WindowSnapshot(
+    IntPtr Handle,
+    string ProcessName,
+    string Title,
+    bool IsVisible,
+    bool IsCloaked);

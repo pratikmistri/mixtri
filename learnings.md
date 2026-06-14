@@ -2005,3 +2005,34 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 - `src\Musio.App\Pages\RecordingPage.xaml.cs` — removed duplicate EditorPage navigation on stop.
 - `src\Musio.App\ViewModels\RecordingViewModel.cs` — clear `LastProject` at start of `StartRecordingAsync`.
 
+
+---
+
+## Mini Mode Phase D — Logic Test Coverage
+
+**Feature/area:** Mini Mode state machine, selection restoration, picker/tray/CLI/settings seams.
+
+**Approaches tried:**
+1. **Pure `AppShellStateMachine` seam** — Worked. Covered Record/Stop success/failure origin handling and Esc-dismiss rules without instantiating WinUI `AppShellWindow`.
+2. **Delegate-based seams for restore/picker/window matching** — Worked. `SelectionRestoreService`, `CapturePickerService`, and `WindowMatcher` can now be tested with fake persisted state, picker delegates, and window snapshots instead of real UI/native windows.
+3. **Pure tray menu spec builder** — Worked. Menu contents can be asserted without creating Win32 menus; rebuild stability covers the no-managed-handler-leak case.
+4. **Direct WinUI window automation** — Not used. `AppShellWindow`, picker overlays, and native tray display still require a UI thread/WinUI runtime and were intentionally not instantiated in unit tests.
+
+**What worked:** Added 38 logic tests (286 → 324 total) across state machine, selection restore, window matcher, shell settings, picker tri-state/re-entrancy, tray menu rebuild, and CLI flags. `InternalsVisibleTo("Musio.Tests")` plus small pure/delegate seams kept production changes minimal while avoiding UI automation.
+
+**What didn't work / limitations:** Full visual morphing, actual InfoBar rendering, real DWM cloaking via native windows, and real tray menu handler leak detection remain outside unit/integration scope without UI/native automation. MSTest parallel execution conflicted with singleton settings state, so the test assembly is marked `DoNotParallelize`.
+
+---
+
+## Mini Mode Phase D v2 — Production Seam Rubber-Duck Fixes
+
+**Feature/area:** Mini Mode production seams for transition rules, Esc routing, and window matching performance.
+
+**Approaches tried:**
+1. **Wired `AppShellStateMachine.NextState(...)` into production paths** — Worked. `AppShellWindow` and the Full Record page now use the reducer for Record, Stop success/failure, Esc-dismiss, Expand, and Collapse destination decisions while keeping WinUI side effects in the shell.
+2. **Esc short-circuit in `MiniSetupControl`** — Worked. The control now returns without handling Esc while a picker is open (or recording), allowing picker cancel semantics to receive the key; the shell guard remains defense-in-depth.
+3. **Restored lazy `WindowMatcher` production enumeration** — Worked. The live path now filters visible/cloaked/title first, calls `TryGetProcessName` only for title candidates, and stops on the first match. The pure snapshot helper remains for unit tests.
+
+**What worked:** Option A for Y1 kept the tests tied to production transition decisions instead of a test-only fork. Build passed, `dotnet test --no-build` remained 324/324 passing, and sanity launch stayed alive for 6+ seconds.
+
+**What didn't work / limitations:** No new UI automation was added; visual morphing, real picker Esc routing, and native tray/window behavior remain covered by logic seams plus sanity launch rather than full UI tests.
