@@ -24,58 +24,26 @@
                 <ImageIconSource ImageSource="ms-appx:///Assets/AppIcon.ico" />
             </TitleBar.IconSource>
 
-            <!-- Title bar right-aligned content. Two mutually-exclusive
-                 panels: the static Collapse-to-Mini button (default), and the
-                 docked recording pill (shown only in FullRecording state). -->
             <TitleBar.Content>
-                <Grid HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0">
-                    <!-- Static state: just the Collapse-to-Mini button. -->
+                <Grid Width="1024" Height="48" HorizontalAlignment="Stretch">
                     <Button
                         x:Name="CollapseButton"
-                        Visibility="Collapsed"
+                        Visibility="Visible"
                         Click="CollapseButton_Click"
-                        Width="36" Height="32" Padding="0"
+                        Width="36" Height="36" Padding="0"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center"
+                        Margin="0,0,138,0"
                         Background="Transparent"
                         BorderThickness="0"
                         ToolTipService.ToolTip="Collapse to Mini"
-                        AutomationProperties.Name="Collapse to Mini">
+                        AutomationProperties.Name="Collapse to Mini"
+                        AutomationProperties.HelpText="Collapse the full app into the compact mini toolbar">
                         <FontIcon Glyph="&#xE73F;" FontSize="14" />
                     </Button>
-
-                    <!-- FullRecording state: docked pill hosts the full
-                         RecordingPillControl visuals (stopping ticker,
-                         phrase animation, etc.) with the acrylic backdrop
-                         neutralised since the title bar provides its own
-                         (spec §4.3.1). The Collapse-to-Mini-Recording
-                         button sits next to it because its semantics differ
-                         from the pill's own expand-to-Full button. -->
-                    <StackPanel
-                        x:Name="DockedPillPanel"
-                        Visibility="Collapsed"
-                        Orientation="Horizontal"
-                        Spacing="6"
-                        VerticalAlignment="Center"
-                        xmlns:controls="using:Musio_App.Controls">
-                        <controls:RecordingPillControl
-                            x:Name="DockedRecordingPill"
-                            VerticalAlignment="Center"
-                            MaxHeight="44" />
-                        <Button
-                            x:Name="DockedCollapseButton"
-                            Click="DockedCollapseButton_Click"
-                            Width="28" Height="28"
-                            CornerRadius="6"
-                            Padding="0"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            VerticalAlignment="Center"
-                            ToolTipService.ToolTip="Collapse to Mini Recording"
-                            AutomationProperties.Name="Collapse to Mini Recording">
-                            <FontIcon Glyph="&#xE73F;" FontSize="12" />
-                        </Button>
-                    </StackPanel>
                 </Grid>
             </TitleBar.Content>
+
         </TitleBar>
 
         <NavigationView
@@ -106,5 +74,62 @@
             </NavigationView.MenuItems>
             <Frame x:Name="NavFrame" />
         </NavigationView>
+
+        <!-- Right-aligned docked-pill action area. The static Full collapse
+             button lives in TitleBar.Content so it participates in title-bar
+             hit testing next to the caption controls. -->
+        <Grid
+            Grid.Row="0"
+            MinWidth="36"
+            Height="48"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            Margin="0,0,138,0">
+            <StackPanel
+                x:Name="DockedPillPanel"
+                Visibility="Collapsed"
+                Orientation="Horizontal"
+                Spacing="6"
+                VerticalAlignment="Center"
+                xmlns:controls="using:Musio_App.Controls">
+                <controls:RecordingPillControl
+                    x:Name="DockedRecordingPill"
+                    VerticalAlignment="Center"
+                    MaxHeight="44" />
+                <Button
+                    x:Name="DockedCollapseButton"
+                    Click="DockedCollapseButton_Click"
+                    Width="28" Height="28"
+                    CornerRadius="6"
+                    Padding="0"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    VerticalAlignment="Center"
+                    ToolTipService.ToolTip="Collapse to Mini Recording"
+                    AutomationProperties.Name="Collapse to Mini Recording">
+                    <FontIcon Glyph="&#xE73F;" FontSize="12" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <Canvas Grid.RowSpan="2">
+            <Button
+                x:Name="CollapseOverlayButton"
+                Visibility="Visible"
+                Click="CollapseButton_Click"
+                Width="36"
+                Height="36"
+                Padding="0"
+                Canvas.Left="850"
+                Canvas.Top="6"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                ToolTipService.ToolTip="Collapse to Mini"
+                AutomationProperties.Name="Collapse to Mini"
+                AutomationProperties.HelpText="Collapse the full app into the compact mini toolbar">
+                <FontIcon Glyph="&#xE73F;" FontSize="14" />
+            </Button>
+        </Canvas>
     </Grid>
 </UserControl>

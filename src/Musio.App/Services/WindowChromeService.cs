@@ -14,7 +14,7 @@ public enum ChromeProfile
     /// <summary>
     /// Borderless rounded pill chrome shared by the recording overlay and the
     /// future Mini Setup toolbar: no border, no caption colour, OS-rounded
-    /// corners, excluded from screen capture.
+    /// corners. Recording states opt into capture exclusion separately.
     /// </summary>
     Mini,
 
@@ -57,8 +57,10 @@ public static class WindowChromeService
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
 
-        // Exclude overlay from screen capture
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        // Mini Setup must be visible to screenshots/accessibility checks.
+        // Recording states opt into WDA_EXCLUDEFROMCAPTURE via
+        // SetCaptureExclusion when they need to stay out of recordings.
+        SetWindowDisplayAffinity(hwnd, WDA_NONE);
 
         // Remove DWM-drawn border and caption
         uint colorNone = DWMWA_COLOR_NONE;

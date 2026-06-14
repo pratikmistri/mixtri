@@ -6,11 +6,16 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    IsTabStop="True"
+    UseSystemFocusVisuals="True"
+    TabFocusNavigation="Cycle"
+    AutomationProperties.Name="Musio Mini"
+    AutomationProperties.HelpText="Compact toolbar for choosing what to record"
     mc:Ignorable="d">
 
     <Border
         x:Name="ToolbarBorder"
-        HorizontalAlignment="Center"
+        HorizontalAlignment="Stretch"
         VerticalAlignment="Center"
         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -23,7 +28,7 @@
             </TransitionCollection>
         </Border.Transitions>
 
-        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+        <StackPanel x:Name="ToolbarContentPanel" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
             <!-- Options section (disabled during recording) -->
             <StackPanel
                 Orientation="Horizontal"
@@ -36,6 +41,10 @@
                 <ctk:Segmented
                     x:Name="CaptureModeSelector"
                     Height="36"
+                    IsTabStop="True"
+                    TabIndex="0"
+                    AutomationProperties.Name="Capture mode"
+                    AutomationProperties.HelpText="Choose region, window, or full screen recording"
                     SelectionChanged="CaptureModeSelector_SelectionChanged">
                     <ctk:Segmented.Resources>
                         <ResourceDictionary>
@@ -53,17 +62,17 @@
                             </ResourceDictionary.ThemeDictionaries>
                         </ResourceDictionary>
                     </ctk:Segmented.Resources>
-                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
+                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion" IsTabStop="True" TabIndex="0" AutomationProperties.Name="Region">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE7A8;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Window" Tag="Window">
+                    <ctk:SegmentedItem Content="Window" Tag="Window" IsTabStop="True" TabIndex="1" AutomationProperties.Name="Window">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE737;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
+                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen" IsTabStop="True" TabIndex="2" AutomationProperties.Name="Full screen">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE740;" />
                         </ctk:SegmentedItem.Icon>
@@ -76,9 +85,13 @@
                     <Button
                         x:Name="SelectWindowButton"
                         VerticalAlignment="Center"
+                        IsTabStop="True"
+                        TabIndex="3"
                         Click="SelectWindowButton_Click"
                         Content="Select Window"
-                        ToolTipService.ToolTip="Click to visually select a window" />
+                        ToolTipService.ToolTip="Click to visually select a window"
+                        AutomationProperties.Name="Select window"
+                        AutomationProperties.HelpText="Open the window picker to choose a window to record" />
                 </StackPanel>
 
                 <!-- Inline: Region selector (expands when Region mode selected) -->
@@ -87,9 +100,13 @@
                     <Button
                         x:Name="SelectRegionButton"
                         VerticalAlignment="Center"
+                        IsTabStop="True"
+                        TabIndex="3"
                         Click="SelectRegionButton_Click"
                         Content="Select Region"
-                        ToolTipService.ToolTip="Click to select a custom screen region" />
+                        ToolTipService.ToolTip="Click to select a custom screen region"
+                        AutomationProperties.Name="Select region"
+                        AutomationProperties.HelpText="Open the region picker to choose a screen area to record" />
                 </StackPanel>
 
                 <AppBarSeparator />
@@ -98,6 +115,10 @@
                 <ToggleButton
                     IsChecked="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
                     ToolTipService.ToolTip="Microphone"
+                    IsTabStop="True"
+                    TabIndex="4"
+                    AutomationProperties.Name="Microphone"
+                    AutomationProperties.HelpText="Turn microphone recording on or off"
                     VerticalAlignment="Center"
                     Width="36" Height="36" Padding="0">
                     <FontIcon Glyph="&#xE720;" FontSize="14" />
@@ -105,6 +126,10 @@
                 <ToggleButton
                     IsChecked="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
                     ToolTipService.ToolTip="System Audio"
+                    IsTabStop="True"
+                    TabIndex="5"
+                    AutomationProperties.Name="System audio"
+                    AutomationProperties.HelpText="Turn system audio recording on or off"
                     VerticalAlignment="Center"
                     Width="36" Height="36" Padding="0">
                     <FontIcon Glyph="&#xE767;" FontSize="14" />
@@ -112,6 +137,10 @@
                 <ToggleButton
                     IsChecked="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
                     ToolTipService.ToolTip="Camera"
+                    IsTabStop="True"
+                    TabIndex="6"
+                    AutomationProperties.Name="Camera"
+                    AutomationProperties.HelpText="Turn camera recording on or off"
                     VerticalAlignment="Center"
                     Width="36" Height="36" Padding="0">
                     <FontIcon Glyph="&#xE714;" FontSize="14" />
@@ -124,13 +153,17 @@
             <Button
                 x:Name="StartRecordButton"
                 Click="StartRecordButton_Click"
+                IsTabStop="True"
+                TabIndex="7"
                 Height="36"
                 Padding="14,0"
                 CornerRadius="18"
                 Style="{StaticResource AccentButtonStyle}"
                 VerticalAlignment="Center"
                 Visibility="{x:Bind InlineRecordVisibility(ShowInlineRecordButton, ViewModel.IsRecording), Mode=OneWay}"
-                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
+                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)"
+                AutomationProperties.Name="Record"
+                AutomationProperties.HelpText="Start recording with the selected capture mode">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xE7C8;" />
                     <TextBlock Text="Record" VerticalAlignment="Center" FontWeight="SemiBold" />
@@ -146,12 +179,15 @@
                 Visibility="{x:Bind InlineStopVisibility(ShowInlineRecordButton, ViewModel.IsRecording), Mode=OneWay}">
                 <Button
                     x:Name="StopRecordButton"
+                    IsTabStop="True"
+                    TabIndex="7"
                     Height="36"
                     Width="36"
                     Padding="0"
                     CornerRadius="18"
                     Command="{x:Bind ViewModel.StopRecordingCommand}"
-                    ToolTipService.ToolTip="Stop recording">
+                    ToolTipService.ToolTip="Stop recording"
+                    AutomationProperties.Name="Stop recording">
                     <FontIcon FontSize="14" Foreground="Red" Glyph="&#xE71A;" />
                 </Button>
                 <TextBlock
@@ -168,12 +204,15 @@
                 x:Name="ExpandButton"
                 Visibility="{x:Bind BoolToVisibility(IsExpandButtonVisible), Mode=OneWay}"
                 Click="ExpandButton_Click"
+                IsTabStop="True"
+                TabIndex="8"
                 Width="36" Height="36" Padding="0"
                 VerticalAlignment="Center"
                 Background="Transparent"
                 BorderThickness="0"
                 ToolTipService.ToolTip="Expand to full app"
-                AutomationProperties.Name="Expand to full app">
+                AutomationProperties.Name="Expand to full app"
+                AutomationProperties.HelpText="Open the full Musio app">
                 <FontIcon Glyph="&#xE740;" FontSize="14" />
             </Button>
         </StackPanel>

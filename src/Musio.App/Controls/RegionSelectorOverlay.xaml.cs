@@ -190,11 +190,15 @@ public sealed partial class RegionSelectorOverlay : UserControl
         WasCancelled = false;
         _tcs = new TaskCompletionSource<CaptureRegion?>();
 
-        // Minimize Musio so it doesn't appear in the screenshot
+        // In Mini Setup, the toolbar must remain visible (dimmed) while the
+        // picker is open. It is already excluded from capture by mini chrome,
+        // so only minimize the shell for non-mini picker entry points.
         bool didMinimize = false;
         IntPtr mainHwnd = IntPtr.Zero;
         var mainWindow = Musio_App.App.Current.MainAppWindow;
-        if (mainWindow is not null)
+        bool keepShellVisible = mainWindow is AppShellWindow shell
+            && shell.CurrentState == Musio_App.Shell.AppShellState.MiniSetup;
+        if (mainWindow is not null && !keepShellVisible)
         {
             mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
             ShowWindow(mainHwnd, SW_MINIMIZE);
@@ -219,7 +223,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(false, false);
-            presenter.IsAlwaysOnTop = true;
+            presenter.IsAlwaysOnTop = !keepShellVisible;
             presenter.IsResizable = false;
             presenter.IsMaximizable = false;
             presenter.IsMinimizable = false;
@@ -258,6 +262,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
         _hostWindow.Activate();
+        if (keepShellVisible)
+            mainWindow?.Activate();
 
         var result = await _tcs.Task;
 

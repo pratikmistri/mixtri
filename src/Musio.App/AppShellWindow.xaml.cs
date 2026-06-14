@@ -13,6 +13,7 @@ using Musio_App.Controls;
 using Musio_App.Services;
 using Musio_App.Shell;
 using Musio_App.ViewModels;
+using Windows.Foundation;
 using Windows.Graphics;
 
 namespace Musio_App;
@@ -26,13 +27,9 @@ namespace Musio_App;
 /// </summary>
 public sealed partial class AppShellWindow : Window
 {
-    private const double MiniSetupWidth = 520;
-    // Spec §4.1 calls for ~520×64; Phase B restructured MiniSetupControl
-    // into a single horizontal toolbar (~50 px content + border + padding)
-    // so we now hit the 64 px target. The hero centered Record button +
-    // selection-metadata caption that used to live in the control moved
-    // to RecordingPage for the Full state's Record page.
+    private const double MiniSetupFallbackWidth = 1040;
     private const double MiniSetupHeight = 64;
+    private const double WindowChromeBorder = 1;
     private const double MiniRecordingWidth = 220;
     private const double MiniRecordingHeight = 52;
     private const double FullWidth = 1024;
@@ -42,6 +39,7 @@ public sealed partial class AppShellWindow : Window
     private readonly RecordingViewModel _viewModel = RecordingViewModel.Shared;
     private AppShellState _currentState;
     private AppShellState? _originStateBeforeRecording;
+    private AppShellState? _minTrackStateOverride;
 
     // Re-entrancy: if a transition is requested while one is in flight, the
     // newest target replaces any previously-queued target. The running
@@ -83,6 +81,7 @@ public sealed partial class AppShellWindow : Window
         MiniSetup.ExpandRequested += OnMiniSetupExpandRequested;
         MiniSetup.RequestRemeasure += OnMiniSetupRequestRemeasure;
         MiniSetup.DismissRequested += OnMiniSetupDismissRequested;
+        MiniSetup.Loaded += OnMiniSetupLoadedForRemeasure;
         // The shell's MiniSetupControl owns the dim-while-picking flow.
         MiniSetup.DimWhilePicking = true;
         RecordingPill.Initialize(_viewModel);
@@ -222,6 +221,7 @@ public sealed partial class AppShellWindow : Window
         ApplyChromeFor(target);
         ApplyPresenterFor(target);
         UpdateBackdropFor(target);
+        _minTrackStateOverride = target;
 
         // Show the target control hidden, then animate the rect; this lets
         // its inner layout settle before fading in. For the pill, always
@@ -244,6 +244,7 @@ public sealed partial class AppShellWindow : Window
 
         ApplyStateFlags(target);
         _currentState = target;
+        _minTrackStateOverride = null;
 
         await CrossFadeInAsync(targetControl);
 
@@ -273,7 +274,7 @@ public sealed partial class AppShellWindow : Window
         UpdateBackdropFor(target);
 
         var rect = ComputeWindowRect(target);
-        AppWindow.MoveAndResize(rect);
+        MoveAndResizeWindow(rect);
 
         // Hide all, show target.
         MiniSetup.Visibility = Visibility.Collapsed; MiniSetup.Opacity = 0;
@@ -301,9 +302,14 @@ public sealed partial class AppShellWindow : Window
         switch (state)
         {
             case AppShellState.MiniSetup:
+                ExtendsContentIntoTitleBar = true;
+                WindowChromeService.ApplyTo(this, ChromeProfile.Mini);
+                WindowChromeService.SetCaptureExclusion(this, exclude: false);
+                break;
             case AppShellState.MiniRecording:
                 ExtendsContentIntoTitleBar = true;
                 WindowChromeService.ApplyTo(this, ChromeProfile.Mini);
+                WindowChromeService.SetCaptureExclusion(this, exclude: true);
                 break;
             case AppShellState.Full:
                 ExtendsContentIntoTitleBar = true;
@@ -378,25 +384,30 @@ public sealed partial class AppShellWindow : Window
         {
             case AppShellState.MiniSetup:
             {
-                int w = (int)(MiniSetupWidth * scale);
-                int h = (int)(MiniSetupHeight * scale);
-                int x = work.X + (work.Width - w) / 2;
-                int y = work.Y + (int)(TopMarginDip * scale);
+                var sizeDip = GetMiniSetupWindowSizeDip();
+                int workX = (int)Math.Round(work.X / scale);
+                int workY = (int)Math.Round(work.Y / scale);
+                int workWidth = (int)Math.Round(work.Width / scale);
+                int w = (int)Math.Ceiling(sizeDip.Width);
+                int h = (int)Math.Ceiling(sizeDip.Height);
+                w = Math.Min(w, Math.Max(1, workWidth - 32));
+                int x = workX + (workWidth - w) / 2;
+                int y = workY + TopMarginDip;
                 return new RectInt32(x, y, w, h);
             }
             case AppShellState.MiniRecording:
             {
-                int w = (int)(MiniRecordingWidth * scale);
-                int h = (int)(MiniRecordingHeight * scale);
+                int w = (int)MiniRecordingWidth;
+                int h = (int)MiniRecordingHeight;
                 int x = work.X + (work.Width - w) / 2;
-                int y = work.Y + (int)(TopMarginDip * scale);
+                int y = work.Y + TopMarginDip;
                 return new RectInt32(x, y, w, h);
             }
             case AppShellState.Full:
             case AppShellState.FullRecording:
             {
-                int w = (int)(FullWidth * scale);
-                int h = (int)(FullHeight * scale);
+                int w = (int)FullWidth;
+                int h = (int)FullHeight;
                 int x = work.X + (work.Width - w) / 2;
                 int y = work.Y + (work.Height - h) / 2;
                 return new RectInt32(x, y, w, h);
@@ -459,11 +470,11 @@ public sealed partial class AppShellWindow : Window
                 double t = Math.Min(1.0, sw.Elapsed.TotalMilliseconds / total);
                 double eased = easing(t);
                 var current = Interpolate(from, to, eased);
-                AppWindow.MoveAndResize(current);
+                MoveAndResizeWindow(current);
                 if (t >= 1.0)
                 {
                     timer.Stop();
-                    AppWindow.MoveAndResize(to);
+                    MoveAndResizeWindow(to);
                     tcs.TrySetResult();
                 }
             }
@@ -485,6 +496,31 @@ public sealed partial class AppShellWindow : Window
         int w = (int)Math.Round(from.Width + (to.Width - from.Width) * t);
         int h = (int)Math.Round(from.Height + (to.Height - from.Height) * t);
         return new RectInt32(x, y, w, h);
+    }
+
+    private void MoveAndResizeWindow(RectInt32 rect)
+    {
+        if (AppWindow.Presenter is not OverlappedPresenter p)
+        {
+            AppWindow.MoveAndResize(rect);
+            return;
+        }
+
+        bool restoreNonResizable = false;
+        try
+        {
+            restoreNonResizable = !p.IsResizable;
+            if (restoreNonResizable)
+                p.IsResizable = true;
+            AppWindow.MoveAndResize(rect);
+        }
+        finally
+        {
+            if (restoreNonResizable)
+            {
+                try { p.IsResizable = false; } catch { }
+            }
+        }
     }
 
     private static Task CrossFadeOutAsync(UIElement element)
@@ -671,10 +707,8 @@ public sealed partial class AppShellWindow : Window
         _wndProcInstalled = true;
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        var dpi = GetDpiForWindow(hwnd);
-        var scale = (dpi <= 0 ? 96 : dpi) / 96.0;
-        _minWidth = (int)(FullWidth * scale);
-        _minHeight = (int)(FullHeight * scale);
+        _minWidth = (int)FullWidth;
+        _minHeight = (int)FullHeight;
         _wndProcDelegate = new WndProcDelegate(WndProc);
         _originalWndProc = SetWindowLongPtr(hwnd, GWLP_WNDPROC,
             Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
@@ -688,9 +722,12 @@ public sealed partial class AppShellWindow : Window
         const uint WM_QUERYENDSESSION = 0x0011;
         const uint WM_ENDSESSION = 0x0016;
 
-        if (msg == WM_GETMINMAXINFO
-            && (_currentState == AppShellState.Full || _currentState == AppShellState.FullRecording))
+        if (msg == WM_GETMINMAXINFO)
         {
+            var minState = _minTrackStateOverride ?? _currentState;
+            if (minState != AppShellState.Full && minState != AppShellState.FullRecording)
+                return CallWindowProc(_originalWndProc, hwnd, msg, wParam, lParam);
+
             var info = Marshal.PtrToStructure<MINMAXINFO>(lParam);
             info.ptMinTrackSize.X = _minWidth;
             info.ptMinTrackSize.Y = _minHeight;
@@ -750,6 +787,18 @@ public sealed partial class AppShellWindow : Window
         {
             try { SetTitleBar(FullShell.TitleBarElement); } catch { }
         }
+        else if (_currentState == AppShellState.MiniSetup)
+        {
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await Task.Delay(100);
+                    await RemeasureMiniSetupWidthAsync();
+                }
+                catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Post-activation MiniSetup remeasure failed: {ex}"); }
+            });
+        }
     }
 
     // ---------------------------------------------------------------
@@ -763,46 +812,69 @@ public sealed partial class AppShellWindow : Window
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Remeasure failed: {ex}"); }
     }
 
+    private async void OnMiniSetupLoadedForRemeasure(object sender, RoutedEventArgs e)
+    {
+        if (_currentState != AppShellState.MiniSetup) return;
+        try
+        {
+            await Task.Yield();
+            await RemeasureMiniSetupWidthAsync();
+        }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Initial MiniSetup remeasure failed: {ex}"); }
+    }
+
     private async Task RemeasureMiniSetupWidthAsync()
     {
         // Give XAML a chance to relayout after the inline panel toggled
         // visibility, then read the toolbar's intrinsic width and morph
         // the AppWindow to match (preserving the top-center anchor).
         MiniSetup.InvalidateMeasure();
+        MiniSetup.Measure(new Size(double.PositiveInfinity, MiniSetupHeight));
         MiniSetup.UpdateLayout();
         await Task.Yield();
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         var dpi = GetDpiForWindow(hwnd);
         var scale = (dpi <= 0 ? 96 : dpi) / 96.0;
-
-        double desiredDip = MiniSetup.ActualWidth;
-        if (desiredDip <= 0)
-        {
-            desiredDip = MiniSetup.DesiredSize.Width;
-        }
-        if (desiredDip <= 0) return;
-
-        // Add a small horizontal breathing margin so the toolbar's drop shadow
-        // and border don't get clipped at the window edge. The toolbar uses a
-        // Border with padding=6 + segmented Height=36; ~24 DIP extra is enough.
-        int targetWidth = (int)((desiredDip + 24) * scale);
-        // Never shrink below a reasonable minimum (avoid a hairline window if
-        // ActualWidth happens to be stale on the very first measure).
-        int minWidth = (int)(280 * scale);
-        if (targetWidth < minWidth) targetWidth = minWidth;
+        var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
+        var work = displayArea.WorkArea;
+        var sizeDip = GetMiniSetupWindowSizeDip();
+        int workX = (int)Math.Round(work.X / scale);
+        int workY = (int)Math.Round(work.Y / scale);
+        int workWidth = (int)Math.Round(work.Width / scale);
+        int targetWidth = (int)Math.Ceiling(sizeDip.Width);
+        int targetHeight = (int)Math.Ceiling(sizeDip.Height);
+        targetWidth = Math.Min(targetWidth, Math.Max(1, workWidth - 32));
+        int targetX = workX + (workWidth - targetWidth) / 2;
+        int targetY = workY + TopMarginDip;
 
         var pos = AppWindow.Position;
         var currentSize = AppWindow.Size;
-        if (currentSize.Width == targetWidth) return;
-
-        // Top-center anchor: preserve center X (and Y) as width morphs.
-        int centerX = pos.X + currentSize.Width / 2;
-        int newX = centerX - targetWidth / 2;
         var fromRect = new RectInt32(pos.X, pos.Y, currentSize.Width, currentSize.Height);
-        var toRect = new RectInt32(newX, pos.Y, targetWidth, currentSize.Height);
+        var toRect = new RectInt32(targetX, targetY, targetWidth, targetHeight);
+        if (IsSameRect(fromRect, toRect)) return;
 
         await AnimateWindowAsync(fromRect, toRect, TimeSpan.FromMilliseconds(150), QuadraticEaseInOut);
+    }
+
+    private Size GetMiniSetupWindowSizeDip()
+    {
+        try
+        {
+            var desired = MiniSetup.MeasureToolbarDesiredSize(MiniSetupHeight);
+            if (desired.Width > 0 && desired.Height > 0)
+            {
+                return new Size(
+                    Math.Ceiling(Math.Max(desired.Width + (2 * WindowChromeBorder), MiniSetupFallbackWidth)),
+                    Math.Ceiling(Math.Max(desired.Height + (2 * WindowChromeBorder), MiniSetupHeight)));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AppShellWindow] MiniSetup measure failed: {ex.Message}");
+        }
+
+        return new Size(MiniSetupFallbackWidth, MiniSetupHeight);
     }
 
     // ---------------------------------------------------------------

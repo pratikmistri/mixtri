@@ -30,7 +30,12 @@ public sealed partial class FullShellControl : UserControl
     public bool IsCollapseButtonVisible
     {
         get => CollapseButton.Visibility == Visibility.Visible;
-        set => CollapseButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        set
+        {
+            CollapseButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            CollapseOverlayButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            UpdateLayout();
+        }
     }
 
     /// <summary>
@@ -92,6 +97,7 @@ public sealed partial class FullShellControl : UserControl
 
         DockedPillPanel.Visibility = Visibility.Visible;
         CollapseButton.Visibility = Visibility.Collapsed;
+        CollapseOverlayButton.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>

@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
+using Windows.Foundation;
 
 namespace Musio_App.Controls;
 
@@ -160,6 +161,7 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         SelectCaptureModeSegment(ViewModel.CaptureMode);
         UpdateRegionPanelVisibility();
         _isLoading = false;
+        DispatcherQueue.TryEnqueue(() => Focus(FocusState.Programmatic));
     }
 
     /// <summary>
@@ -420,6 +422,56 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         {
             System.Diagnostics.Debug.WriteLine($"[MiniSetupControl] FocusRecordButton failed: {ex.Message}");
         }
+    }
+
+    public Size MeasureToolbarDesiredSize(double availableHeight)
+    {
+        double content = MeasureVisibleWidth(ToolbarContentPanel, availableHeight);
+        ToolbarBorder.Measure(new Size(double.PositiveInfinity, availableHeight));
+        double width = ToolbarBorder.DesiredSize.Width;
+        if (content > 0)
+        {
+            width = Math.Max(width, content + ToolbarBorder.Padding.Left + ToolbarBorder.Padding.Right
+                + ToolbarBorder.BorderThickness.Left + ToolbarBorder.BorderThickness.Right);
+        }
+
+        double height = Math.Max(ToolbarBorder.DesiredSize.Height, ToolbarBorder.ActualHeight);
+        if (height <= 0)
+            height = availableHeight;
+        return new Size(width, height);
+    }
+
+    private static double MeasureVisibleWidth(FrameworkElement element, double availableHeight)
+    {
+        if (element.Visibility != Visibility.Visible)
+            return 0;
+
+        if (element is StackPanel stack && stack.Orientation == Orientation.Horizontal)
+        {
+            double width = 0;
+            int visibleChildren = 0;
+            foreach (var child in stack.Children)
+            {
+                if (child is FrameworkElement childElement
+                    && childElement.Visibility == Visibility.Visible)
+                {
+                    width += MeasureVisibleWidth(childElement, availableHeight);
+                    visibleChildren++;
+                }
+            }
+            if (visibleChildren > 1)
+                width += stack.Spacing * (visibleChildren - 1);
+            return width;
+        }
+
+        element.InvalidateMeasure();
+        element.Measure(new Size(double.PositiveInfinity, availableHeight));
+        double measuredWidth = Math.Max(element.DesiredSize.Width, element.ActualWidth);
+        if (!double.IsNaN(element.Width) && element.Width > 0)
+            measuredWidth = Math.Max(measuredWidth, element.Width);
+        if (element.MinWidth > 0)
+            measuredWidth = Math.Max(measuredWidth, element.MinWidth);
+        return measuredWidth;
     }
 
     // ===========================================================

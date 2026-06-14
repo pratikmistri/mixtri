@@ -2052,3 +2052,41 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 **What worked:** Small UI + settings changes compiled cleanly. VS MSBuild App and Tests passed; `dotnet test --no-build` with `DOTNET_ROLL_FORWARD=LatestMajor` now reports 325/325 passing (324 → 325 from the new expand transition test). Sanity launch stayed alive 6+ seconds.
 
 **What didn't work / limitations:** `dotnet test --no-build --arch x64` looked in the non-x64 bin path and failed before running tests; using `-p:Platform=x64` matched the MSBuild output path and ran successfully.
+
+---
+
+## Mini Mode — User-Reported Bug Fixes
+
+**Feature/area:** AppShellWindow, MiniSetupControl, FullShellControl, capture pickers
+
+**Approaches tried:**
+
+1. **Content-driven MiniSetup sizing** — Replaced the fixed MiniSetup width path with measurement of the toolbar's desired width after load and on capture-mode remeasure. Worked with AppWindow remeasure hooks, but AppWindow DPI/min-size behavior required preserving the existing DPI-scaled rect path.
+2. **Full title bar collapse placement** — Moving the button out of `TitleBar.Content` into a right-aligned overlay was needed; `TitleBar.Content` did not honor the desired app-right alignment.
+3. **Full→Mini morph min-size fix** — Added a target-state min-track override during transitions so the Full min-size handler does not veto MiniSetup dimensions.
+4. **Picker dim flow** — Region/window picker overlays must not minimize the shell for MiniSetup entry; keeping the shell visible allows `IDimmable` to show the dimmed toolbar.
+5. **Mini keyboard accessibility** — Added tab stops, tab order, automation names/help text, cycle tab navigation, and initial focus on Record.
+
+**What worked:**
+- Measuring MiniSetup on load and RequestRemeasure, paired with target-state min-size handling, avoids clipping and allows Full→Mini size changes.
+- Overlaying Full title-bar actions at the right edge with a 138px right margin matches caption-control spacing better than `TitleBar.Content`.
+- Keeping picker launch from minimizing MiniSetup preserves the dimmed toolbar while the picker is active.
+- `TabFocusNavigation="Cycle"` plus `FocusRecordButton()` gives keyboard users a predictable starting point and cyclic tab order.
+
+**What didn't work / pitfalls:**
+- `KeyboardNavigation.TabNavigation` is not a WinUI 3 attachable property; use `TabFocusNavigation`.
+- `Canvas.ZIndex` on a Grid row overlay compiles, but `Panel.ZIndex` does not in this WinUI project.
+- Recomputing AppWindow rects without the existing DPI scaling made Mini windows too small on the test display.
+
+### Mini Mode bug-fix follow-up (v2)
+
+**Feature/area:** MiniSetup window sizing/positioning
+
+**Approaches tried:**
+
+1. **Recenter after remeasure** — Required. The first fix widened MiniSetup but preserved the old center during some paths, causing the toolbar to extend off the right side in screenshots. Recompute the target rect from the work area every time: width/height from measured content, X from work-area center, Y from top margin.
+2. **DPI coordinate experiments** — Mixed behavior observed between AppWindow coordinates, Win32 rects, and screenshots at 150% DPI. The stable MiniSetup path uses the measured size and recenters against the current DisplayArea work area on load, remeasure, and transition.
+
+**What worked:** Recomputing the whole MiniSetup target rect instead of only changing width. This keeps both margins balanced and prevents right-edge clipping after launch and Full→Mini collapse.
+
+**What didn't work / pitfalls:** Preserving the previous X/center during remeasure can leave a widened MiniSetup off-screen. Screenshot verification must minimize/avoid foreground terminal windows or they obscure the toolbar.

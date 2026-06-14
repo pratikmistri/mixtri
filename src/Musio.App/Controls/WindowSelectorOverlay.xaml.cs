@@ -66,7 +66,9 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
         try
         {
-            if (mainWindow is not null)
+            bool keepShellVisible = mainWindow is AppShellWindow shell
+                && shell.CurrentState == Musio_App.Shell.AppShellState.MiniSetup;
+            if (mainWindow is not null && !keepShellVisible)
             {
                 mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
                 ShowWindow(mainHwnd, SW_MINIMIZE);
@@ -92,7 +94,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
             if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 presenter.SetBorderAndTitleBar(false, false);
-                presenter.IsAlwaysOnTop = true;
+                presenter.IsAlwaysOnTop = !keepShellVisible;
                 presenter.IsResizable = false;
                 presenter.IsMaximizable = false;
                 presenter.IsMinimizable = false;
@@ -119,6 +121,8 @@ public sealed partial class WindowSelectorOverlay : UserControl
             _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
             _hostWindow.Activate();
+            if (keepShellVisible)
+                mainWindow?.Activate();
 
             return await _tcs.Task;
         }
