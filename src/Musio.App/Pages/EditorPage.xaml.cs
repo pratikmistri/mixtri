@@ -70,8 +70,14 @@ public sealed partial class EditorPage : Page
 
         Preview.Duration = GetMappedDuration();
 
-        // Load frames and initialize compositor with cursor effects
-        _ = InitializePreviewAsync();
+        // Defer preview/thumbnail init to Loaded — the Canvas controls inside
+        // Timeline/Preview need to be in the live visual tree for thumbnail
+        // generation and first-frame rendering to actually paint. When this
+        // page is constructed as a result of programmatic Frame.Navigate (e.g.
+        // the auto-Editor jump after a Stop), the constructor runs before the
+        // page is wired into the Frame, so the original "fire from ctor" call
+        // raced ahead of the visual tree and silently produced no thumbnails.
+        Loaded += OnEditorPageLoaded;
 
         // Keep webcam overlay in sync with preview frame layout
         Preview.FrameLayoutChanged += (_, _) =>
@@ -201,6 +207,8 @@ public sealed partial class EditorPage : Page
         // Clean up when page is unloaded to prevent leaks
         Unloaded += (_, _) =>
         {
+            Loaded -= OnEditorPageLoaded;
+
             _styleDebounceTimer?.Stop();
             _styleDebounceTimer = null;
             _cursorDebounceTimer?.Stop();
@@ -235,6 +243,15 @@ public sealed partial class EditorPage : Page
     /// becomes hidden (minimize-to-tray / system suspension).
     /// </summary>
     public void PausePlayback() => Preview.Pause();
+
+    private void OnEditorPageLoaded(object sender, RoutedEventArgs e)
+    {
+        // Subscribe-once: detach immediately so a re-Loaded (which fires when
+        // the page is brought back to the foreground after being navigated
+        // away from) doesn't repeatedly tear down + rebuild a working preview.
+        Loaded -= OnEditorPageLoaded;
+        _ = InitializePreviewAsync();
+    }
 
     private async Task InitializePreviewAsync()
     {

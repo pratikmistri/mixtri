@@ -18,10 +18,8 @@ namespace Musio_App.Services;
 /// </summary>
 /// <remarks>
 /// Centralising this lets both the page (Phase A) and the future
-/// <c>AppShellWindow</c> (Phase B+) launch pickers via the same code path,
-/// and lets the Mini Setup toolbar plug in its dim-while-picking behaviour
-/// through <see cref="IDimmable"/> without each call site duplicating the
-/// orchestration.
+/// <c>AppShellWindow</c> (Phase B+) launch pickers via the same code path
+/// without each call site duplicating the orchestration.
 /// </remarks>
 public sealed class CapturePickerService
 {
@@ -182,18 +180,12 @@ public sealed class CapturePickerService
     /// Window that should own the picker overlay (used today only by
     /// future-phase positioning logic; the picker itself self-hosts).
     /// </param>
-    /// <param name="dimTarget">
-    /// Optional dim target (e.g. the Mini Setup toolbar). Phase A wires the
-    /// dim/undim around the picker await; concrete implementations land in
-    /// Phase C.
-    /// </param>
-    public async Task<PickerResult> PickRegionAsync(Window? owner, IDimmable? dimTarget = null)
+    public async Task<PickerResult> PickRegionAsync(Window? owner)
     {
         if (_isPickerOpen) return PickerResult.AlreadyOpen;
         _isPickerOpen = true;
         _pickerClosedSignal = new TaskCompletionSource<object?>();
 
-        var dim = dimTarget ?? NoOpDimmable.Instance;
         try
         {
             var args = new PickerOpeningEventArgs(PickerKind.Region);
@@ -238,13 +230,12 @@ public sealed class CapturePickerService
     /// the picker, or <see cref="PickerResult.AlreadyOpen"/> if the
     /// re-entrancy guard rejected the call.
     /// </summary>
-    public async Task<PickerResult> PickWindowAsync(Window? owner, IDimmable? dimTarget = null)
+    public async Task<PickerResult> PickWindowAsync(Window? owner)
     {
         if (_isPickerOpen) return PickerResult.AlreadyOpen;
         _isPickerOpen = true;
         _pickerClosedSignal = new TaskCompletionSource<object?>();
 
-        var dim = dimTarget ?? NoOpDimmable.Instance;
         try
         {
             var args = new PickerOpeningEventArgs(PickerKind.Window);

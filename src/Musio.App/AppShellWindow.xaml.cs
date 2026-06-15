@@ -91,8 +91,6 @@ public sealed partial class AppShellWindow : Window
         MiniSetup.RequestRemeasure += OnMiniSetupRequestRemeasure;
         MiniSetup.DismissRequested += OnMiniSetupDismissRequested;
         MiniSetup.Loaded += OnMiniSetupLoadedForRemeasure;
-        // The shell's MiniSetupControl owns the dim-while-picking flow.
-        MiniSetup.DimWhilePicking = true;
         RecordingPill.Initialize(_viewModel);
         RecordingPill.StopRequested += OnPillStopRequested;
         RecordingPill.ExpandRequested += OnPillExpandRequested;
@@ -1046,12 +1044,12 @@ public sealed partial class AppShellWindow : Window
         return AnimateWindowAsync(fromRect, toRect, TimeSpan.FromMilliseconds(220), QuadraticEaseInOut);
     }
 
-    private async void OnFocusWatchdogTick(object? sender, object e)
+    private void OnFocusWatchdogTick(object? sender, object e)
     {
         // Best-effort: if neither the shell nor any other Musio window owns the
         // foreground 2 s after the picker opened, the picker is probably hung
-        // or has lost focus to some other app — restore the toolbar so the
-        // user isn't stuck with a dimmed-and-untouchable UI.
+        // or has lost focus to some other app — stop the watchdog so we don't
+        // keep ticking.
         try
         {
             var foreground = GetForegroundWindow();
@@ -1059,7 +1057,6 @@ public sealed partial class AppShellWindow : Window
             if (foreground != shellHwnd && !IsOurProcessWindow(foreground))
             {
                 if (sender is DispatcherTimer t) t.Stop();
-                await MiniSetup.UndimAsync();
             }
         }
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Focus watchdog failed: {ex.Message}"); }
@@ -1081,6 +1078,7 @@ public sealed partial class AppShellWindow : Window
     // ---------------------------------------------------------------
 
     private bool _wasRecordingLastTick;
+    private readonly RegionBorderManager _regionBorder = new();
     private bool _handlingStop;
     private DateTime _lastSummonAt = DateTime.MinValue;
 
@@ -1088,10 +1086,37 @@ public sealed partial class AppShellWindow : Window
     {
         if (e.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
         bool isRecording = _viewModel.IsRecording;
+        bool justStarted = !_wasRecordingLastTick && isRecording;
         bool justStopped = _wasRecordingLastTick && !isRecording;
         _wasRecordingLastTick = isRecording;
 
+        if (justStarted)
+        {
+            // Show the red region border (only in CustomRegion mode; no-op
+            // otherwise) — RecordingPage's copy of this only fires in the
+            // Full shell, so without this Mini-mode region recordings give
+            // the user no visual indication of what's being captured.
+            try { _regionBorder.ShowIfNeeded(_viewModel); }
+            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] ShowRegionBorder failed: {ex}"); }
+
+            // Open the capture gate now that the shell has already morphed
+            // to MiniRecording / FullRecording (the morph awaits in
+            // OnMiniSetupRecordRequested before StartRecordingCommand runs).
+            // Without this, the gate stays closed in Mini mode (RecordingPage
+            // — which used to own this call — is never navigated) and every
+            // captured frame is discarded → empty video.mp4 / no .frames dir
+            // → blue-track + empty preview in the Editor.
+            try { _viewModel.OpenCaptureGate(); }
+            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] OpenCaptureGate failed: {ex}"); }
+            return;
+        }
+
         if (!justStopped) return;
+
+        // Tear down the region border on stop (covers Mini-mode stops; the
+        // Full shell's RecordingPage also hides its own border but its
+        // handler may not run if the page isn't loaded).
+        try { _regionBorder.Hide(); } catch { }
 
         DispatcherQueue.TryEnqueue(async () =>
         {
@@ -1164,6 +1189,11 @@ public sealed partial class AppShellWindow : Window
                 // current page, so a second recording's clip replaces the
                 // first instead of leaving the stale clip on screen.
                 FullShell.ContentFrame.Navigate(typeof(Pages.EditorPage));
+                // Keep the left-nav highlight in sync with the visible page;
+                // programmatic Frame.Navigate doesn't update NavigationView's
+                // SelectedItem, which would otherwise leave "Record" selected
+                // while the Editor is on screen.
+                FullShell.SelectNavItem("editor");
             }
             catch (Exception ex)
             {
@@ -1235,9 +1265,6 @@ public sealed partial class AppShellWindow : Window
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             bool wasHidden = !IsWindowVisible(hwnd);
-
-            // Restore toolbar opacity in case a stale picker left it dimmed.
-            try { await MiniSetup.UndimAsync(); } catch { }
 
             bool keepCurrent = suppressMiniMorph || _viewModel.IsRecording;
             var desiredState = keepCurrent ? _currentState : AppShellState.MiniSetup;

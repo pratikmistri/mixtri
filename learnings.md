@@ -2370,3 +2370,20 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 **What worked:** Matches the existing helper pattern (`BoolToVisibility`, `InvertBoolToVisibility`) used elsewhere on the page. The literal `"Ready to record"` is the initial value of `_recordingStatus` in `RecordingViewModel.cs` line 71 — kept the comparison string-equality with no constant extraction to stay surgical.
 
 **What didn't work:** N/A — single-attempt change.
+
+---
+
+## Mini Mode Editor Auto-Open — Nav Highlight, Dim Mechanism, Capture Gate
+
+**Approaches tried:**
+
+1. **Nav highlight stuck on "Record" after auto-Editor.** Added `FullShellControl.SelectNavItem(string tag)` and called it after `Frame.Navigate(typeof(EditorPage))` in `AppShellWindow.HandleRecordingStoppedAsync`. Setting `NavigationView.SelectedItem` from outside `SelectionChanged` re-entered the handler and double-navigated, tearing down the loading Editor. Added `_suppressSelectionChangedNavigation` guard flag and `NavView_SelectionChanged` early-returns when the guard is set. ✅
+2. **Removed the dim-while-picking mechanism end-to-end** (per user request "remove the dim mechanism, I do not want it to dim"): deleted `IDimmable.cs`, stripped `DimWhilePicking` DP / `DimAsync` / `UndimAsync` / `_dimStoryboard` from `MiniSetupControl`, removed `IDimmable? dimTarget` parameters from `CapturePickerService.PickRegionAsync` / `PickWindowAsync`, removed `MiniSetup.DimWhilePicking = true` and `await MiniSetup.UndimAsync()` calls from `AppShellWindow`, removed `MiniToolbarDimmedOpacity` from `Themes/AppColors.xaml`, removed `CountingDimmable` test helper from `CapturePickerServiceTests`. Also fixed the toolbar-behind-smoke issue during picker selection as a side effect. ✅
+3. **Mini-mode recordings produced empty `video.mp4` (root cause of blue clip / no preview in Editor).** Diagnosed via file-based logging in `EditorPage.InitializePreviewAsync`: session folder only contained `cursor.mcur` + `keyboard.mkbd`; no `video.mp4` and no `.frames/`. The frame-write gate `_captureGateOpen` in `RecordingSession` is opened from `RecordingPage.OnNavigatedTo`'s `IsRecording` PropertyChanged handler — but in Mini mode `RecordingPage` is never navigated (shell morphs MiniSetup → MiniRecording directly), so the gate stayed closed and every captured frame was discarded. Same root cause for the missing red region rectangle in Mini-mode recordings (`ShowRegionBorderIfNeeded` lived in the same handler). ✅
+4. **Fix:** In `AppShellWindow.OnViewModelPropertyChanged`, detect the IsRecording false→true edge and call (a) `_viewModel.OpenCaptureGate()` and (b) `RegionBorderManager.ShowIfNeeded(_viewModel)`. Hide the border on the true→false edge. Created `src/Musio.App/Services/RegionBorderManager.cs` to encapsulate the monitor/DPI/PInvoke logic that used to live as `private` helpers on `RecordingPage` so both shells can use it. `OpenCaptureGate` is idempotent (just sets a bool) so the Full-mode `RecordingPage` call still works. ✅
+
+**What worked:** All four fixes shipped together on `feature/mini-mode`. Verified by user: Mini-mode recording now produces a real `video.mp4`, the Editor opens with thumbnails + preview frame, and the red region rectangle shows during region recordings.
+
+**What didn't work:** Deferring `InitializePreviewAsync` from `EditorPage` ctor to the `Loaded` event was a reasonable hygiene change but did NOT fix the empty-preview symptom on its own — the actual issue was that `video.mp4` never existed on disk. Kept the Loaded-deferral anyway since it's correct (the ctor ran before the visual tree was attached so `Timeline.SetThumbnails` could have silently no-op'd in edge cases).
+
+**Lesson:** When the recording-flow code moves between shells (Full → Mini), any responsibility wired to a specific page's lifecycle (e.g. `RecordingPage.OnNavigatedTo`) needs to be hoisted to a shell-agnostic owner (`AppShellWindow` or a service) — otherwise the new shell silently loses that behavior.

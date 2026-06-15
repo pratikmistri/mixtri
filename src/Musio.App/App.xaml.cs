@@ -581,24 +581,24 @@ public partial class App : Application
         RecordingViewModel.Shared.CaptureMode = mode;
         _window.MiniSetup.SyncCaptureModeFromViewModel();
         if (mode == CaptureMode.CustomRegion)
-            await CapturePickerService.Shared.PickRegionAsync(_window, _window.MiniSetup);
+            await CapturePickerService.Shared.PickRegionAsync(_window);
         else if (mode == CaptureMode.Window)
-            await CapturePickerService.Shared.PickWindowAsync(_window, _window.MiniSetup);
+            await CapturePickerService.Shared.PickWindowAsync(_window);
         _window.MiniSetup.FocusRecordButton();
     }
 
     private async Task LaunchPickerForCurrentModeAsync()
     {
         if (_window is null) return;
-        // Defer one tick so the shell is shown before we dim.
+        // Defer one tick so the shell is shown before launching the picker.
         await Task.Yield();
         var mode = RecordingViewModel.Shared.CaptureMode;
         try
         {
             if (mode == CaptureMode.CustomRegion)
-                await CapturePickerService.Shared.PickRegionAsync(_window, _window.MiniSetup);
+                await CapturePickerService.Shared.PickRegionAsync(_window);
             else if (mode == CaptureMode.Window)
-                await CapturePickerService.Shared.PickWindowAsync(_window, _window.MiniSetup);
+                await CapturePickerService.Shared.PickWindowAsync(_window);
         }
         catch (Exception ex)
         {

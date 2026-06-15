@@ -122,6 +122,36 @@ public sealed partial class FullShellControl : UserControl
         DockedPillStopRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    private bool _suppressSelectionChangedNavigation;
+
+    /// <summary>
+    /// Select the left-nav item whose Tag matches <paramref name="tag"/>
+    /// without triggering a duplicate Frame navigation. Used by the host
+    /// window when it navigates the content Frame programmatically (e.g.
+    /// auto-opening the Editor after a successful Stop) so the nav pane
+    /// highlight stays in sync with the visible page.
+    /// </summary>
+    public void SelectNavItem(string tag)
+    {
+        if (string.IsNullOrEmpty(tag)) return;
+
+        foreach (var item in NavView.MenuItems)
+        {
+            if (item is NavigationViewItem navItem &&
+                navItem.Tag is string itemTag &&
+                string.Equals(itemTag, tag, StringComparison.Ordinal))
+            {
+                if (!ReferenceEquals(NavView.SelectedItem, navItem))
+                {
+                    _suppressSelectionChangedNavigation = true;
+                    try { NavView.SelectedItem = navItem; }
+                    finally { _suppressSelectionChangedNavigation = false; }
+                }
+                return;
+            }
+        }
+    }
+
     private void TitleBar_PaneToggleRequested(TitleBar sender, object args)
     {
         NavView.IsPaneOpen = !NavView.IsPaneOpen;
@@ -134,6 +164,8 @@ public sealed partial class FullShellControl : UserControl
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
+        if (_suppressSelectionChangedNavigation) return;
+
         if (args.IsSettingsSelected)
         {
             NavFrame.Navigate(typeof(SettingsPage));

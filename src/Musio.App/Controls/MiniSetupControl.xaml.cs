@@ -2,7 +2,6 @@ using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Animation;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Musio.Core.Capture;
@@ -22,32 +21,12 @@ namespace Musio_App.Controls;
 /// same control will also be hosted inside <c>AppShellWindow</c>. All shared
 /// state continues to live on <see cref="RecordingViewModel.Shared"/>.
 /// </remarks>
-public sealed partial class MiniSetupControl : UserControl, IDimmable
+public sealed partial class MiniSetupControl : UserControl
 {
     public RecordingViewModel ViewModel { get; } = RecordingViewModel.Shared;
 
     private readonly RegionSelector _regionSelector = new();
     private bool _isLoading = true;
-    private Storyboard? _dimStoryboard;
-
-    /// <summary>
-    /// Whether picker launches from this toolbar should dim the toolbar
-    /// itself (per spec §4.5). True when hosted in <c>AppShellWindow</c>'s
-    /// MiniSetup slot; false when hosted in <c>RecordingPage</c> (the Full
-    /// state never dims its picker host).
-    /// </summary>
-    public bool DimWhilePicking
-    {
-        get => (bool)GetValue(DimWhilePickingProperty);
-        set => SetValue(DimWhilePickingProperty, value);
-    }
-
-    public static readonly DependencyProperty DimWhilePickingProperty =
-        DependencyProperty.Register(
-            nameof(DimWhilePicking),
-            typeof(bool),
-            typeof(MiniSetupControl),
-            new PropertyMetadata(false));
 
     /// <summary>
     /// Whether the toolbar should show its own inline Record / Stop button.
@@ -295,8 +274,7 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         // picker was actually shown and the user explicitly cancelled.
         bool hadPriorWindow = ViewModel.SelectedWindow is not null;
         var window = GetHostWindow();
-        IDimmable? dim = DimWhilePicking ? this : null;
-        var result = await CapturePickerService.Shared.PickWindowAsync(window, dimTarget: dim);
+        var result = await CapturePickerService.Shared.PickWindowAsync(window);
 
         switch (result)
         {
@@ -320,8 +298,7 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         // never on an AlreadyOpen re-entrancy rejection where no picker was shown.
         bool hadPriorRegion = ViewModel.HasSelectedRegion;
         var window = GetHostWindow();
-        IDimmable? dim = DimWhilePicking ? this : null;
-        var result = await CapturePickerService.Shared.PickRegionAsync(window, dimTarget: dim);
+        var result = await CapturePickerService.Shared.PickRegionAsync(window);
 
         switch (result)
         {
@@ -456,87 +433,5 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         if (element.MinWidth > 0)
             measuredWidth = Math.Max(measuredWidth, element.MinWidth);
         return measuredWidth;
-    }
-
-    // ===========================================================
-    // IDimmable — spec §4.5 dim-while-picking flow
-    // ===========================================================
-
-    /// <summary>
-    /// Animate the toolbar opacity down to the theme's
-    /// <c>MiniToolbarDimmedOpacity</c> resource (0.15 default, 0.4 in high
-    /// contrast) and disable hit-testing so clicks fall through to the
-    /// picker overlay beneath. Idempotent + cancellable: restarting a dim
-    /// while one is in flight just hops to the most recent target opacity.
-    /// </summary>
-    public Task DimAsync()
-    {
-        double target = ResolveDimmedOpacity();
-        ToolbarBorder.IsHitTestVisible = false;
-        return AnimateOpacityAsync(ToolbarBorder, target);
-    }
-
-    /// <summary>
-    /// Restore the toolbar to 100% opacity and re-enable hit-testing.
-    /// </summary>
-    public Task UndimAsync()
-    {
-        ToolbarBorder.IsHitTestVisible = true;
-        return AnimateOpacityAsync(ToolbarBorder, 1.0);
-    }
-
-    private double ResolveDimmedOpacity()
-    {
-        try
-        {
-            // First preference: a XAML resource the host can override
-            // (Phase C ships MiniToolbarDimmedOpacity in AppColors.xaml).
-            if (Application.Current.Resources.TryGetValue("MiniToolbarDimmedOpacity", out var raw)
-                && raw is double d && d > 0)
-                return d;
-        }
-        catch { /* resource lookup is best-effort */ }
-
-        // Fallback: spec §4.8 — high-contrast override 0.4, default 0.15.
-        try
-        {
-            var hc = new Windows.UI.ViewManagement.AccessibilitySettings();
-            if (hc.HighContrast) return 0.4;
-        }
-        catch { /* AccessibilitySettings may not be available in some shells */ }
-        return 0.15;
-    }
-
-    private Task AnimateOpacityAsync(UIElement element, double to)
-    {
-        var tcs = new TaskCompletionSource();
-        try
-        {
-            _dimStoryboard?.Stop();
-            var sb = new Storyboard();
-            var anim = new DoubleAnimation
-            {
-                From = element.Opacity,
-                To = to,
-                Duration = TimeSpan.FromMilliseconds(120),
-                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut },
-            };
-            Storyboard.SetTarget(anim, element);
-            Storyboard.SetTargetProperty(anim, "Opacity");
-            sb.Children.Add(anim);
-            sb.Completed += (_, _) =>
-            {
-                element.Opacity = to;
-                tcs.TrySetResult();
-            };
-            _dimStoryboard = sb;
-            sb.Begin();
-        }
-        catch
-        {
-            element.Opacity = to;
-            tcs.TrySetResult();
-        }
-        return tcs.Task;
     }
 }
