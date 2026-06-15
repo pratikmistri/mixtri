@@ -918,7 +918,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     private void OnEscapePressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        CancelSelection();
+        HandleEscape();
         args.Handled = true;
     }
 
@@ -929,11 +929,52 @@ public sealed partial class RegionSelectorOverlay : UserControl
             int vkCode = Marshal.ReadInt32(lParam);
             if (vkCode == VK_ESCAPE)
             {
-                DispatcherQueue.TryEnqueue(CancelSelection);
+                DispatcherQueue.TryEnqueue(HandleEscape);
                 return (IntPtr)1;
             }
         }
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+    }
+
+    /// <summary>
+    /// Escape behavior: if a region is currently drawn (or a drag/resize is
+    /// in progress) clear it so the user can draw a fresh one with the smoke
+    /// still on screen. If there is nothing to reset, ask the host shell to
+    /// dismiss the entire toolbar (one Escape, not two) and cancel the
+    /// picker so the shell can hide.
+    /// </summary>
+    private void HandleEscape()
+    {
+        if (_hasSelection || _isDragging || _isResizing)
+        {
+            ResetSelection();
+        }
+        else
+        {
+            Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
+            CancelSelection();
+        }
+    }
+
+    /// <summary>
+    /// Clears any in-progress drag/resize and the current drawn region without
+    /// dismissing the overlay. Bound to the first Escape press so the user
+    /// can start a fresh selection while the dim/smoke stays on screen,
+    /// instead of being kicked back to the toolbar on a mistaken drag.
+    /// </summary>
+    private void ResetSelection()
+    {
+        if (_isDragging || _isResizing)
+        {
+            try { RootGrid.ReleasePointerCaptures(); } catch { }
+        }
+        _isDragging = false;
+        _isResizing = false;
+        _resizeHandle = "";
+        _activeDragBounds = null;
+        _hasSelection = false;
+        _selX = _selY = _selW = _selH = 0;
+        UpdateOverlay();
     }
 
     private void OnEnterPressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

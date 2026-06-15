@@ -210,6 +210,15 @@ public sealed partial class RecordingPage : Page
     public Visibility BoolToVisibility(bool value) =>
         value ? Visibility.Visible : Visibility.Collapsed;
 
+    // x:Bind helper: hide the status bar when the VM is in its default
+    // "Ready to record" state — the user only cares about the strip when
+    // there is something noteworthy to show (recording in progress, save
+    // confirmation, error, missing selection, etc.).
+    public Visibility StatusToVisibility(string? status) =>
+        string.IsNullOrEmpty(status) || status == "Ready to record"
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _infoBarTimer;
 
     internal void ShowTransientInfo(string message)

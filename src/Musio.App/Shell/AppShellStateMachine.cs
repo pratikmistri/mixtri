@@ -43,7 +43,6 @@ internal sealed class AppShellStateMachine
     {
         if (CurrentState != AppShellState.MiniSetup) return false;
         if (IsPickerOpen) return false;
-        if (!WasRecentlySummoned) return false;
         return true;
     }
 
@@ -75,7 +74,6 @@ internal sealed class AppShellStateMachine
             AppShellEvent.EscDismiss => currentState == AppShellState.MiniSetup
                                       && !context.IsRecording
                                       && !context.IsPickerOpen
-                                      && context.WasRecentlySummoned
                 ? AppShellState.MiniSetup
                 : null,
 

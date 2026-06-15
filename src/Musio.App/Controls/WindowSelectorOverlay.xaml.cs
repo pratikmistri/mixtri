@@ -380,7 +380,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     private void OnEscapePressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        _tcs?.TrySetResult(null);
+        HandleEscape();
         args.Handled = true;
     }
 
@@ -409,7 +409,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
     {
         if (e.Key == Windows.System.VirtualKey.Escape)
         {
-            _tcs?.TrySetResult(null);
+            HandleEscape();
             e.Handled = true;
         }
     }
@@ -421,11 +421,43 @@ public sealed partial class WindowSelectorOverlay : UserControl
             int vkCode = Marshal.ReadInt32(lParam);
             if (vkCode == VK_ESCAPE)
             {
-                DispatcherQueue.TryEnqueue(() => _tcs?.TrySetResult(null));
+                DispatcherQueue.TryEnqueue(HandleEscape);
                 return (IntPtr)1;
             }
         }
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+    }
+
+    /// <summary>
+    /// Escape behavior: if a window has been clicked (locked) clear it so
+    /// the user can pick another while the smoke stays on screen. If
+    /// nothing is locked, ask the host shell to dismiss the entire toolbar
+    /// (one Escape, not two) and cancel the picker so the shell can hide.
+    /// </summary>
+    private void HandleEscape()
+    {
+        if (_lockedWindow is not null)
+        {
+            ResetSelection();
+        }
+        else
+        {
+            Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
+            _tcs?.TrySetResult(null);
+        }
+    }
+
+    /// <summary>
+    /// Clears the locked/hovered window selection without dismissing the
+    /// picker. Bound to the first Escape press so the user can pick a
+    /// different window while the dim/smoke stays on screen, instead of
+    /// being kicked back to the toolbar after a mistaken click.
+    /// </summary>
+    private void ResetSelection()
+    {
+        _lockedWindow = null;
+        _hoveredWindow = null;
+        UpdateOverlay(null);
     }
 
     #region Desktop Screenshot

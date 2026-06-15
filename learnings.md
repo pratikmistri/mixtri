@@ -2289,3 +2289,84 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 - **What worked:** Keep Window.SystemBackdrop = MicaBackdrop{BaseAlt} for ALL states (so WinUI sets root background to Transparent and initialises the Mica compositor). Then in ApplyChromeFor (which now runs AFTER UpdateBackdropFor), strip WS_DLGFRAME/WS_BORDER. Mica keeps rendering even without WS_DLGFRAME because the compositor was already hooked up. Result: Mica visible AND no 1px Win11 accent edge.
 - **Lesson:** Win11 `SystemBackdrop` provides TWO things — DWM backdrop AND root-transparency. You can't replace it with raw DWM attributes without separately handling the XAML root background. Keep SystemBackdrop, just strip the frame style after.
 - **Final ordering in ConfigureForState:** ApplyPresenterFor → UpdateBackdropFor (SystemBackdrop) → ApplyChromeFor (strip WS_DLGFRAME) → ApplyStateFlags.
+
+## Escape Resets Selection Instead of Cancelling Picker
+
+**Feature/area:** RegionSelectorOverlay / WindowSelectorOverlay — Escape key handling
+
+**Approaches tried:**
+1. **Reroute Escape paths (XAML accelerator, OnKeyDown, low-level keyboard hook) from `CancelSelection` / `_tcs.TrySetResult(null)` to a new `ResetSelection` method** — Worked. ✅
+
+**What worked:** Both overlays now expose `ResetSelection` that clears the in-progress selection state (region: `_isDragging/_isResizing/_activeDragBounds/_hasSelection/_sel{X,Y,W,H}` + `ReleasePointerCaptures`; window: `_lockedWindow/_hoveredWindow`) and calls `UpdateOverlay` to repaint the full smoke without completing the `TaskCompletionSource`. The smoke/dim stays on screen so the user can immediately make another selection. The host-driven `Cancel()` (used on tab switch via `CapturePickerService.CancelActivePickerAsync`) still completes the TCS with null so picker dismissal on tab switch is unaffected.
+
+**What didn't work:** Initial attempt used `RootGrid.ReleasePointerCapture(null!)` — that overload requires a `Pointer` instance which isn't available from the keyboard-hook callback. Switched to `ReleasePointerCaptures()` (plural) which releases all active captures without needing a Pointer reference.
+
+## Progressive Escape in Picker Overlays
+
+**Feature/area:** RegionSelectorOverlay / WindowSelectorOverlay — Escape key handling (follow-up to `ResetSelection`)
+
+**Approaches tried:**
+1. **Escape always resets selection** — Broke dismiss. Once the picker was open, Escape never bubbled to `MiniSetupControl.OnKeyDown` (which gates `DismissRequested` on `!CapturePickerService.Shared.IsPickerOpen`), so the user had no keyboard path back to the tray. ❌
+2. **Progressive Escape: reset if there's a selection, otherwise cancel the picker** — Worked. ✅
+
+**What worked:** Added `HandleEscape` in both overlays. Region overlay cancels when `!_hasSelection && !_isDragging && !_isResizing`; otherwise calls `ResetSelection`. Window overlay cancels when `_lockedWindow is null`; otherwise calls `ResetSelection`. First Escape clears the drawn region / locked window (smoke stays). Second Escape (nothing to reset) closes the picker, which lets the next Escape reach `MiniSetupControl.OnKeyDown` and fire `DismissRequested` to return to the tray.
+
+**What didn't work:** Gating window-overlay reset on `_hoveredWindow` would have been too eager — `_hoveredWindow` is set the instant the cursor moves over any window, so Escape would almost never cancel. Only `_lockedWindow` (explicit click) reliably indicates an active selection to clear.
+
+## Picker Escape → Single-Step Tray Dismiss + First-Launch Esc Fix
+
+**Feature/area:** RegionSelectorOverlay / WindowSelectorOverlay / CapturePickerService / AppShellWindow — Escape semantics
+
+**Approaches tried:**
+1. **Two-step Escape: 1st clears picker selection, 2nd closes picker, 3rd reaches MiniSetupControl.OnKeyDown to dismiss** — Rejected by user (UX is too many keystrokes; closing picker shouldn't be a visible step). ❌
+2. **One-step Escape from picker → directly hide the shell window via a new `CapturePickerService.EscapeToDismissRequested` event** — Worked. ✅
+
+**What worked:**
+- Added `EscapeToDismissRequested` event + `RaiseEscapeToDismissRequested()` on `CapturePickerService`.
+- Both overlays' `HandleEscape`: if there is a selection (`_hasSelection` / `_isDragging` / `_isResizing` for region; `_lockedWindow` for window) call `ResetSelection`; otherwise raise the event AND cancel the picker.
+- `AppShellWindow` subscribes; handler awaits `CancelActivePickerAsync` (so `_pickerClosedSignal` fires before we hide) then calls `ShowWindow(hwnd, SW_HIDE)` when in `MiniSetup` and not recording. Intentionally bypasses the `AppShellStateMachine` `EscDismiss` reducer's `WasRecentlySummoned` gate — user already pressed Esc to open the picker and again to exit, so intent is unambiguous.
+- Fixed first-launch dismiss bug by seeding `_lastSummonAt = DateTime.UtcNow` in the `AppShellWindow` constructor. Without it `WasRecentlySummoned` was false on cold start (`DateTime.MinValue`), so the regular toolbar-focus Escape was a silent no-op until the user round-tripped through a real summon (expand → collapse → hotkey).
+
+**What didn't work:**
+- Routing picker-Esc through `MiniSetupControl.OnKeyDown` / `DismissRequested`: that handler explicitly returns when `CapturePickerService.Shared.IsPickerOpen` is true, and unblocking it would require an extra keystroke.
+- Going through `AppShellStateMachine.EscDismiss` for the picker path: requires `!IsPickerOpen` AND `WasRecentlySummoned`, both of which fight the "user wants out now" intent. Bypass + direct `SW_HIDE` is cleaner.
+
+## First-Launch Esc Focus + Slide-Out Dismiss Animation
+
+**Feature/area:** AppShellWindow — initial focus and dismiss animation
+
+**Approaches tried:**
+1. **Seed `_lastSummonAt = DateTime.UtcNow` in constructor to fix first-launch Esc** — Necessary but insufficient; `EscDismiss` reducer was satisfied but `MiniSetupControl` never received focus on cold start so its `KeyDown` never fired. ❌ alone
+2. **Call `MiniSetup.FocusRecordButton()` from `InitializeAfterActivation` after the post-activation remeasure** — Worked. ✅ (combined with #1)
+3. **Replace `SW_HIDE` flash with slide-up animation via new `DismissToTrayWithSlideAsync()`** — Worked. Mirrors the summon slide-down: animates `AppWindow.Position/Size` to `(X, Y - Height - 24)` over 200 ms with `QuadraticEaseInOut`, then `SW_HIDE`, then `MoveAndResizeWindow(fromRect)` to restore on-screen position for non-summon re-shows. ✅
+
+**What worked:** Both `OnMiniSetupDismissRequested` (toolbar Esc) and `OnPickerEscapeToDismissRequested` (picker Esc with no selection) now route through `DismissToTrayWithSlideAsync` instead of raw `SW_HIDE`.
+
+**What didn't work:**
+- Relying on `Activate()` alone for first-launch keyboard focus — XAML islands in WinUI 3 don't focus a child control until something explicitly calls `Focus(FocusState.Programmatic)` (already done in `MiniSetupControl.OnLoaded`, but evidently lost by the time the user presses Esc; calling `FocusRecordButton` after the 100 ms remeasure delay reliably sticks).
+- Skipping the post-hide `MoveAndResizeWindow(fromRect)` restore — left the window parked above the work area, so any subsequent path that `SW_SHOW`s without recomputing rect (rare but possible via tray click code paths) would open invisible.
+
+## Esc on Toolbar — Drop 5s WasRecentlySummoned Gate
+
+**Feature/area:** AppShellStateMachine — EscDismiss reducer
+
+**Approaches tried:**
+1. **Keep `WasRecentlySummoned` gate (spec §4.7) and seed `_lastSummonAt` at launch** — Worked for the first 5s after summon/launch but became a silent no-op afterwards. User reported "toolbar is up, pressing escape on it is doing nothing". ❌
+2. **Remove the `WasRecentlySummoned` check entirely from both `EscDismiss` switch arm and `TryDismissMiniSetup` helper** — Worked. ✅
+
+**What worked:** `EscDismiss` now succeeds whenever `currentState == MiniSetup && !IsRecording && !IsPickerOpen`. Updated `MiniModeStateMachineTests.EscDismiss_FromMiniSetup_IsAllowedOnlyAfterRecentSummonAndNoPicker` to `EscDismiss_FromMiniSetup_IsAllowedWhenNoPickerOpen` and dropped `WasRecentlySummoned = true` from both test setups. All 12 `MiniModeStateMachine` tests pass.
+
+**What didn't work:** The 5s grace was originally to prevent stale Esc from dismissing a deliberately-pinned toolbar, but the toolbar in practice is summoned-on-demand only, so the grace just made Esc feel broken after the user paused.
+
+**Note:** `WasRecentlySummoned` / `_lastSummonAt` are kept on the context struct and `AppShellWindow` (still set on summon and at launch) in case other consumers need them, but no reducer arm currently reads them.
+
+## Hide "Ready to record" Status Bar in Default State
+
+**Feature/area:** RecordingPage status bar (Grid.Row=2 `Border`)
+
+**Approaches tried:**
+1. **x:Bind helper `StatusToVisibility(string)` on `RecordingPage` code-behind, bound to `Border.Visibility`** — Worked. ✅ Returns `Collapsed` when `RecordingStatus` is empty or equals the default `"Ready to record"` literal; `Visible` for any other status (Recording…, Saved, errors, missing-selection warnings).
+
+**What worked:** Matches the existing helper pattern (`BoolToVisibility`, `InvertBoolToVisibility`) used elsewhere on the page. The literal `"Ready to record"` is the initial value of `_recordingStatus` in `RecordingViewModel.cs` line 71 — kept the comparison string-equality with no constant extraction to stay surgical.
+
+**What didn't work:** N/A — single-attempt change.

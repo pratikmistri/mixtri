@@ -104,6 +104,10 @@ public sealed partial class AppShellWindow : Window
         // picker code path goes through CapturePickerService).
         CapturePickerService.Shared.PickerOpening += OnPickerOpening;
         CapturePickerService.Shared.PickerClosed += OnPickerClosed;
+        // Bare-Escape inside an open picker means "exit completely" — the
+        // overlay raises this BEFORE cancelling itself so we can await the
+        // close and then hide the shell.
+        CapturePickerService.Shared.EscapeToDismissRequested += OnPickerEscapeToDismissRequested;
         // Async hooks: the picker service AWAITS these so the slide-out
         // animation completes BEFORE the region picker grabs the screen
         // (otherwise the toolbar gets captured in the frozen backdrop).
@@ -112,6 +116,13 @@ public sealed partial class AppShellWindow : Window
 
         // Watch for successful Stop so we can auto-open the Editor (spec §3.4).
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+
+        // Seed the summon timestamp so Esc-dismiss works during the initial
+        // launch window (same ~5s grace as a real summon). Without this,
+        // Esc on first launch was a no-op because _lastSummonAt was
+        // DateTime.MinValue and the EscDismiss reducer requires
+        // WasRecentlySummoned.
+        _lastSummonAt = DateTime.UtcNow;
 
         ConfigureForState(initialState, animate: false);
     }
@@ -879,6 +890,13 @@ public sealed partial class AppShellWindow : Window
                 {
                     await Task.Delay(100);
                     await RemeasureMiniSetupWidthAsync();
+                    // Place focus on the toolbar so first-launch Escape can
+                    // reach MiniSetupControl.OnKeyDown — without this, the
+                    // initial activation leaves focus unset and Esc was a
+                    // silent no-op until the user round-tripped through a
+                    // hotkey summon (which calls FocusRecordButton).
+                    try { MiniSetup.FocusRecordButton(); }
+                    catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Initial FocusRecordButton failed: {ex.Message}"); }
                 }
                 catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Post-activation MiniSetup remeasure failed: {ex}"); }
             });
@@ -1323,14 +1341,61 @@ public sealed partial class AppShellWindow : Window
                 IsRecording: _viewModel.IsRecording,
                 WasRecentlySummoned: WasRecentlySummoned));
         if (target is null) return;
+        _ = DismissToTrayWithSlideAsync();
+    }
+
+    /// <summary>
+    /// Esc inside an open picker with nothing selected: cancel the picker
+    /// and hide the shell. Bypasses the WasRecentlySummoned gate because
+    /// the user explicitly pressed Esc inside the picker — the intent is
+    /// unambiguous.
+    /// </summary>
+    private async void OnPickerEscapeToDismissRequested(object? sender, EventArgs e)
+    {
+        try { await CapturePickerService.Shared.CancelActivePickerAsync(); }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] CancelActivePickerAsync failed: {ex.Message}"); }
+
+        if (_currentState != AppShellState.MiniSetup || _viewModel.IsRecording)
+            return;
+
+        await DismissToTrayWithSlideAsync();
+    }
+
+    /// <summary>
+    /// Mirror of the summon slide-down (see <see cref="SummonAsync"/>): animate
+    /// the window upward off the work area, then <c>SW_HIDE</c>. Replaces the
+    /// instant SW_HIDE flash so dismiss reads as a deliberate retraction
+    /// matching the slide-in on summon.
+    /// </summary>
+    private async Task DismissToTrayWithSlideAsync()
+    {
         try
         {
+            var pos = AppWindow.Position;
+            var size = AppWindow.Size;
+            var fromRect = new RectInt32(pos.X, pos.Y, size.Width, size.Height);
+            var toRect = new RectInt32(pos.X, pos.Y - size.Height - 24, size.Width, size.Height);
+
+            await AnimateWindowAsync(fromRect, toRect,
+                TimeSpan.FromMilliseconds(200), QuadraticEaseInOut);
+
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             ShowWindow(hwnd, SW_HIDE);
+
+            // Restore on-screen position so the next non-summon path (e.g.
+            // tray click that just SW_SHOWs without recomputing rect) doesn't
+            // open with the window parked off-screen.
+            try { MoveAndResizeWindow(fromRect); } catch { }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[AppShellWindow] Esc-dismiss failed: {ex.Message}");
+            Debug.WriteLine($"[AppShellWindow] Slide-out dismiss failed: {ex.Message}");
+            try
+            {
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                ShowWindow(hwnd, SW_HIDE);
+            }
+            catch { }
         }
     }
 

@@ -147,6 +147,18 @@ public sealed class CapturePickerService
     public event EventHandler? PickerClosed;
 
     /// <summary>
+    /// Raised by an open picker overlay when the user presses Escape with
+    /// nothing selected. Signals the host shell that the user wants to
+    /// dismiss the entire toolbar (not just close the picker). The overlay
+    /// cancels itself immediately after raising this; the shell handler
+    /// should await <see cref="CancelActivePickerAsync"/> and then hide.
+    /// </summary>
+    public event EventHandler? EscapeToDismissRequested;
+
+    internal void RaiseEscapeToDismissRequested()
+        => EscapeToDismissRequested?.Invoke(this, EventArgs.Empty);
+
+    /// <summary>
     /// Optional async hook invoked AFTER the picker overlay has been
     /// dismissed and AFTER <see cref="PickerClosed"/> fires. The picker
     /// service awaits it so callers can finish a slide-back-in animation

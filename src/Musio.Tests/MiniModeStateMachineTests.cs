@@ -91,11 +91,10 @@ public sealed class MiniModeStateMachineTests
     }
 
     [TestMethod]
-    public void EscDismiss_FromMiniSetup_IsAllowedOnlyAfterRecentSummonAndNoPicker()
+    public void EscDismiss_FromMiniSetup_IsAllowedWhenNoPickerOpen()
     {
         var machine = new AppShellStateMachine(AppShellState.MiniSetup)
         {
-            WasRecentlySummoned = true,
             IsPickerOpen = false,
         };
 
@@ -107,7 +106,6 @@ public sealed class MiniModeStateMachineTests
     {
         var machine = new AppShellStateMachine(AppShellState.MiniSetup)
         {
-            WasRecentlySummoned = true,
             IsPickerOpen = true,
         };
 
