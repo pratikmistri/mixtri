@@ -62,15 +62,44 @@ public sealed class CapturePickerServiceTests
     }
 
     [TestMethod]
-    public async Task PickRegionAsync_DimsAndUndimsAroundPicker()
+    public async Task PickRegionAsync_FiresPickerEventsWithRegionKind()
     {
         var dimmable = new CountingDimmable();
         var service = new CapturePickerService(_ => Task.FromResult<CaptureRegion?>(null), () => Task.FromResult<WindowInfo?>(null), new RecordingViewModel());
 
+        PickerKind? openingKind = null;
+        var closedFired = false;
+        service.PickerOpening += (_, args) => openingKind = args.Kind;
+        service.PickerClosed += (_, _) => closedFired = true;
+
         await service.PickRegionAsync(owner: null, dimmable);
 
-        Assert.AreEqual(1, dimmable.DimCount);
-        Assert.AreEqual(1, dimmable.UndimCount);
+        // The shell now slides the toolbar instead of calling IDimmable, so the
+        // dimmable should never be touched. The events still bracket the picker
+        // and identify which picker is open.
+        Assert.AreEqual(0, dimmable.DimCount);
+        Assert.AreEqual(0, dimmable.UndimCount);
+        Assert.AreEqual(PickerKind.Region, openingKind);
+        Assert.IsTrue(closedFired);
+    }
+
+    [TestMethod]
+    public async Task PickWindowAsync_FiresPickerEventsWithWindowKind()
+    {
+        var dimmable = new CountingDimmable();
+        var service = new CapturePickerService(_ => Task.FromResult<CaptureRegion?>(null), () => Task.FromResult<WindowInfo?>(null), new RecordingViewModel());
+
+        PickerKind? openingKind = null;
+        var closedFired = false;
+        service.PickerOpening += (_, args) => openingKind = args.Kind;
+        service.PickerClosed += (_, _) => closedFired = true;
+
+        await service.PickWindowAsync(owner: null, dimmable);
+
+        Assert.AreEqual(0, dimmable.DimCount);
+        Assert.AreEqual(0, dimmable.UndimCount);
+        Assert.AreEqual(PickerKind.Window, openingKind);
+        Assert.IsTrue(closedFired);
     }
 
     private sealed class CountingDimmable : IDimmable

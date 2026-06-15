@@ -16,12 +16,12 @@
     <Border
         x:Name="ToolbarBorder"
         HorizontalAlignment="Stretch"
-        VerticalAlignment="Center"
-        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-        BorderThickness="1"
+        VerticalAlignment="Stretch"
+        Background="Transparent"
+        BorderBrush="Transparent"
+        BorderThickness="0"
         CornerRadius="12"
-        Padding="6">
+        Padding="14,6,14,6">
         <Border.Transitions>
             <TransitionCollection>
                 <EntranceThemeTransition FromVerticalOffset="30" />
@@ -62,9 +62,9 @@
                             </ResourceDictionary.ThemeDictionaries>
                         </ResourceDictionary>
                     </ctk:Segmented.Resources>
-                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion" IsTabStop="True" TabIndex="0" AutomationProperties.Name="Region">
+                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen" IsTabStop="True" TabIndex="0" AutomationProperties.Name="Full screen">
                         <ctk:SegmentedItem.Icon>
-                            <FontIcon Glyph="&#xE7A8;" />
+                            <FontIcon Glyph="&#xE740;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
                     <ctk:SegmentedItem Content="Window" Tag="Window" IsTabStop="True" TabIndex="1" AutomationProperties.Name="Window">
@@ -72,42 +72,16 @@
                             <FontIcon Glyph="&#xE737;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen" IsTabStop="True" TabIndex="2" AutomationProperties.Name="Full screen">
+                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion" IsTabStop="True" TabIndex="2" AutomationProperties.Name="Region">
                         <ctk:SegmentedItem.Icon>
-                            <FontIcon Glyph="&#xE740;" />
+                            <FontIcon Glyph="&#xE7A8;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
                 </ctk:Segmented>
 
-                <!-- Inline: Window picker (expands when Window mode selected) -->
-                <StackPanel x:Name="WindowPanel" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Visibility="Collapsed">
-                    <AppBarSeparator />
-                    <Button
-                        x:Name="SelectWindowButton"
-                        VerticalAlignment="Center"
-                        IsTabStop="True"
-                        TabIndex="3"
-                        Click="SelectWindowButton_Click"
-                        Content="Select Window"
-                        ToolTipService.ToolTip="Click to visually select a window"
-                        AutomationProperties.Name="Select window"
-                        AutomationProperties.HelpText="Open the window picker to choose a window to record" />
-                </StackPanel>
-
-                <!-- Inline: Region selector (expands when Region mode selected) -->
-                <StackPanel x:Name="RegionPanel" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center" Visibility="Collapsed">
-                    <AppBarSeparator />
-                    <Button
-                        x:Name="SelectRegionButton"
-                        VerticalAlignment="Center"
-                        IsTabStop="True"
-                        TabIndex="3"
-                        Click="SelectRegionButton_Click"
-                        Content="Select Region"
-                        ToolTipService.ToolTip="Click to select a custom screen region"
-                        AutomationProperties.Name="Select region"
-                        AutomationProperties.HelpText="Open the region picker to choose a screen area to record" />
-                </StackPanel>
+                <!-- The old "Select Region" / "Select Window" inline buttons
+                     were removed; selecting the corresponding tab now auto-
+                     launches the picker, which is the only entry point. -->
 
                 <AppBarSeparator />
 

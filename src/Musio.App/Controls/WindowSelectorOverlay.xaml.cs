@@ -22,6 +22,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
     private TaskCompletionSource<WindowInfo?>? _tcs;
     private List<WindowInfo> _windows = new();
     private WindowInfo? _hoveredWindow;
+    // Window the user has clicked. Once set, the mask/highlight stays locked
+    // around it (mirrors RegionSelectorOverlay where a drawn region persists)
+    // until the user clicks a different window or hits Record/Esc.
+    private WindowInfo? _lockedWindow;
 
     private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
 
@@ -49,7 +53,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        UpdateOverlay(_hoveredWindow);
+        UpdateOverlay(_lockedWindow ?? _hoveredWindow);
     }
 
     /// <summary>
@@ -99,6 +103,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
                 presenter.IsMaximizable = false;
                 presenter.IsMinimizable = false;
             }
+            Musio_App.Services.WindowChromeService.ApplyOverlayChrome(_hostWindow);
 
             if (_vdWidth > 0 && _vdHeight > 0)
             {
@@ -347,7 +352,11 @@ public sealed partial class WindowSelectorOverlay : UserControl
         if (window?.Handle != _hoveredWindow?.Handle)
         {
             _hoveredWindow = window;
-            UpdateOverlay(window);
+            // Once the user has clicked a window the smoke stays locked
+            // around it — hover only changes the visible mask when no
+            // selection has been made yet. The next click will re-lock.
+            if (_lockedWindow is null)
+                UpdateOverlay(window);
         }
 
         e.Handled = true;
@@ -357,10 +366,11 @@ public sealed partial class WindowSelectorOverlay : UserControl
     {
         if (_hoveredWindow is not null)
         {
-            // Validate the window is still alive before returning it
+            // Validate the window is still alive before locking it in.
             if (IsWindow(_hoveredWindow.Handle) && IsWindowVisible(_hoveredWindow.Handle))
             {
-                _tcs?.TrySetResult(_hoveredWindow);
+                _lockedWindow = _hoveredWindow;
+                UpdateOverlay(_lockedWindow);
             }
             e.Handled = true;
         }
@@ -372,6 +382,27 @@ public sealed partial class WindowSelectorOverlay : UserControl
     {
         _tcs?.TrySetResult(null);
         args.Handled = true;
+    }
+
+    /// <summary>
+    /// Programmatically cancel the picker — used by hosts when the user
+    /// switches the capture-mode tab away from Window while the picker is
+    /// still on screen. Mirrors <see cref="RegionSelectorOverlay.Cancel"/>.
+    /// </summary>
+    public void Cancel() => _tcs?.TrySetResult(null);
+
+    /// <summary>
+    /// Commit the currently-locked (or hovered) window selection. Used by
+    /// the toolbar's Record button to act as an implicit confirm so the
+    /// in-overlay click only needs to lock the smoke around the window.
+    /// Returns true when a selection was committed.
+    /// </summary>
+    public bool TryConfirmCurrent()
+    {
+        var candidate = _lockedWindow ?? _hoveredWindow;
+        if (candidate is null) return false;
+        if (!IsWindow(candidate.Handle) || !IsWindowVisible(candidate.Handle)) return false;
+        return _tcs?.TrySetResult(candidate) ?? false;
     }
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)

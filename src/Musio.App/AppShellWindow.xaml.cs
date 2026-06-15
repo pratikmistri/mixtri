@@ -74,6 +74,15 @@ public sealed partial class AppShellWindow : Window
     {
         InitializeComponent();
 
+        // Recording timer callbacks fire on a background ThreadPool thread.
+        // Without a dispatcher set, ElapsedTime PropertyChanged would update
+        // bound TextBlocks off-thread → COMException (RPC_E_WRONG_THREAD)
+        // and process termination. RecordingPage also sets this on its own
+        // construction; doing it here too means the shell works even when
+        // recording is launched directly from the mini toolbar without ever
+        // visiting RecordingPage.
+        _viewModel.SetDispatcher(this.DispatcherQueue);
+
         // Wire inner-control events. The shell is the single state-machine
         // driver — these handlers translate user-action events into
         // TransitionToAsync calls.
@@ -95,6 +104,11 @@ public sealed partial class AppShellWindow : Window
         // picker code path goes through CapturePickerService).
         CapturePickerService.Shared.PickerOpening += OnPickerOpening;
         CapturePickerService.Shared.PickerClosed += OnPickerClosed;
+        // Async hooks: the picker service AWAITS these so the slide-out
+        // animation completes BEFORE the region picker grabs the screen
+        // (otherwise the toolbar gets captured in the frozen backdrop).
+        CapturePickerService.Shared.OnPickerOpeningAsync = OnPickerOpeningAsyncHook;
+        CapturePickerService.Shared.OnPickerClosedAsync = OnPickerClosedAsyncHook;
 
         // Watch for successful Stop so we can auto-open the Editor (spec §3.4).
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -176,6 +190,10 @@ public sealed partial class AppShellWindow : Window
         }
 
         var previous = _currentState;
+        // Set state-dependent inner-control visibility flags (ExpandButton,
+        // docked-pill swap) BEFORE measuring, otherwise GetMiniSetupWindowSizeDip
+        // will miss the ExpandButton width and the toolbar will be clipped.
+        ApplyStateFlags(target);
         // AppWindow.Position is a struct, so the always-non-null pattern was
         // dead code — read it directly. Use the current size/position as the
         // animation start so the morph picks up wherever we are (rather than
@@ -192,9 +210,9 @@ public sealed partial class AppShellWindow : Window
         bool sameControl = GetControlForState(previous) == GetControlForState(target);
         if (sameControl)
         {
-            ApplyChromeFor(target);
             ApplyPresenterFor(target);
             UpdateBackdropFor(target);
+            ApplyChromeFor(target);
             ApplyStateFlags(target);
             _currentState = target;
 
@@ -214,39 +232,44 @@ public sealed partial class AppShellWindow : Window
         // a hidden control doesn't keep running a DispatcherTimer.
         if (outgoing is RecordingPillControl pillOut)
             pillOut.PauseTickerWhileHidden();
-        await CrossFadeOutAsync(outgoing);
 
         // Apply chrome for the target state BEFORE the morph animation so
         // the window border colours/rounding don't flicker mid-resize.
-        ApplyChromeFor(target);
+        // Order: presenter & backdrop first (both touch DWM attributes),
+        // then chrome last so our border-colour override sticks.
         ApplyPresenterFor(target);
         UpdateBackdropFor(target);
+        ApplyChromeFor(target);
         _minTrackStateOverride = target;
 
-        // Show the target control hidden, then animate the rect; this lets
-        // its inner layout settle before fading in. For the pill, always
-        // reset to the recording UI on re-entry — the pill is a long-lived
-        // instance, so without this a second Record cycle would surface in
-        // the disabled "Stopping…" state.
         var targetControl = GetControlForState(target);
         if (targetControl is RecordingPillControl pillIn)
             pillIn.ResetToRecordingState();
+        // Both controls stay in the visual tree during the morph so the
+        // window rect animation and the opacity cross-fade run in parallel
+        // (~125 Hz timer). This is what gives the expand/collapse its 120fps
+        // "snappy" feel — previously fade-out → resize → fade-in ran
+        // sequentially for ~580 ms total.
         targetControl.Opacity = 0;
         targetControl.Visibility = Visibility.Visible;
 
-        // No window morph animation needed if the rect didn't change.
         if (!IsSameRect(fromRect, toRect))
         {
             var duration = GetTransitionDuration(previous, target);
             var easing = GetEasingFor(previous, target);
-            await AnimateWindowAsync(fromRect, toRect, duration, easing);
+            await AnimateMorphAsync(fromRect, toRect, duration, easing, outgoing, targetControl);
         }
+        else
+        {
+            // Same rect, just swap visuals quickly.
+            outgoing.Opacity = 0;
+            targetControl.Opacity = 1;
+        }
+        outgoing.Visibility = Visibility.Collapsed;
 
         ApplyStateFlags(target);
         _currentState = target;
         _minTrackStateOverride = null;
-
-        await CrossFadeInAsync(targetControl);
 
         // Bookkeeping: track origin only on entry to a *recording* state.
         if (IsRecordingState(target) && !IsRecordingState(previous))
@@ -269,9 +292,16 @@ public sealed partial class AppShellWindow : Window
         if (animate)
             throw new InvalidOperationException("Use TransitionToAsync for animated state changes.");
 
-        ApplyChromeFor(target);
         ApplyPresenterFor(target);
         UpdateBackdropFor(target);
+        // Chrome last so our DWM border-colour / style strip survives any
+        // resets that the presenter or SystemBackdrop assignment do.
+        ApplyChromeFor(target);
+
+        // Apply state-dependent inner-control flags (ExpandButton visibility,
+        // etc.) BEFORE measuring/sizing the window so the toolbar measurement
+        // sees its final visible children.
+        ApplyStateFlags(target);
 
         var rect = ComputeWindowRect(target);
         MoveAndResizeWindow(rect);
@@ -285,7 +315,6 @@ public sealed partial class AppShellWindow : Window
         control.Visibility = Visibility.Visible;
         control.Opacity = 1;
 
-        ApplyStateFlags(target);
         _currentState = target;
     }
 
@@ -385,29 +414,27 @@ public sealed partial class AppShellWindow : Window
             case AppShellState.MiniSetup:
             {
                 var sizeDip = GetMiniSetupWindowSizeDip();
-                int workX = (int)Math.Round(work.X / scale);
-                int workY = (int)Math.Round(work.Y / scale);
-                int workWidth = (int)Math.Round(work.Width / scale);
-                int w = (int)Math.Ceiling(sizeDip.Width);
-                int h = (int)Math.Ceiling(sizeDip.Height);
-                w = Math.Min(w, Math.Max(1, workWidth - 32));
-                int x = workX + (workWidth - w) / 2;
-                int y = workY + TopMarginDip;
+                int w = (int)Math.Ceiling(sizeDip.Width * scale);
+                int h = (int)Math.Ceiling(sizeDip.Height * scale);
+                int marginPx = (int)Math.Ceiling(16 * scale);
+                w = Math.Min(w, Math.Max(1, work.Width - 2 * marginPx));
+                int x = work.X + (work.Width - w) / 2;
+                int y = work.Y + (int)Math.Round(TopMarginDip * scale);
                 return new RectInt32(x, y, w, h);
             }
             case AppShellState.MiniRecording:
             {
-                int w = (int)MiniRecordingWidth;
-                int h = (int)MiniRecordingHeight;
+                int w = (int)Math.Round(MiniRecordingWidth * scale);
+                int h = (int)Math.Round(MiniRecordingHeight * scale);
                 int x = work.X + (work.Width - w) / 2;
-                int y = work.Y + TopMarginDip;
+                int y = work.Y + (int)Math.Round(TopMarginDip * scale);
                 return new RectInt32(x, y, w, h);
             }
             case AppShellState.Full:
             case AppShellState.FullRecording:
             {
-                int w = (int)FullWidth;
-                int h = (int)FullHeight;
+                int w = (int)Math.Round(FullWidth * scale);
+                int h = (int)Math.Round(FullHeight * scale);
                 int x = work.X + (work.Width - w) / 2;
                 int y = work.Y + (work.Height - h) / 2;
                 return new RectInt32(x, y, w, h);
@@ -429,10 +456,12 @@ public sealed partial class AppShellWindow : Window
 
     private static TimeSpan GetTransitionDuration(AppShellState from, AppShellState to)
     {
-        // Mini <-> Mini = ~340 ms, anything involving Full = ~400 ms (per spec §4.6).
+        // Snappy: mini<->mini ~200ms, anything involving Full ~280ms.
+        // Spec §4.6 originally specified 340/400, but the parallel
+        // cross-fade + faster timer make those feel sluggish.
         if (!IsFullLike(from) && !IsFullLike(to))
-            return TimeSpan.FromMilliseconds(340);
-        return TimeSpan.FromMilliseconds(400);
+            return TimeSpan.FromMilliseconds(200);
+        return TimeSpan.FromMilliseconds(280);
     }
 
     private static bool IsFullLike(AppShellState s)
@@ -458,10 +487,28 @@ public sealed partial class AppShellWindow : Window
     }
 
     private Task AnimateWindowAsync(RectInt32 from, RectInt32 to, TimeSpan duration, Func<double, double> easing)
+        => AnimateMorphAsync(from, to, duration, easing, fadingOut: null, fadingIn: null);
+
+    /// <summary>
+    /// Drives the window-rect morph and, optionally, the opacity cross-fade
+    /// of two inner controls in a single ~125 Hz (8 ms) timer loop. Doing
+    /// both in one tick means the fade tracks the resize frame-for-frame,
+    /// which is what makes expand/collapse feel snappy instead of segmented.
+    /// </summary>
+    private Task AnimateMorphAsync(
+        RectInt32 from,
+        RectInt32 to,
+        TimeSpan duration,
+        Func<double, double> easing,
+        UIElement? fadingOut,
+        UIElement? fadingIn)
     {
         var tcs = new TaskCompletionSource();
         var sw = Stopwatch.StartNew();
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        // 8 ms tick = ~125 Hz; on a 120 Hz display this gives one frame per
+        // tick. WinUI's Window.MoveAndResize doesn't sub-frame interpolate so
+        // we cap at one update per refresh anyway.
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(8) };
         timer.Tick += (_, _) =>
         {
             try
@@ -471,10 +518,27 @@ public sealed partial class AppShellWindow : Window
                 double eased = easing(t);
                 var current = Interpolate(from, to, eased);
                 MoveAndResizeWindow(current);
+                if (fadingOut is not null)
+                {
+                    // Crossfade compressed into the first ~55% of the morph
+                    // so the outgoing control is gone before the rect grows
+                    // past its layout bounds.
+                    double fo = Math.Min(1.0, eased / 0.55);
+                    fadingOut.Opacity = 1 - fo;
+                }
+                if (fadingIn is not null)
+                {
+                    // Incoming fades in over the last ~55%, overlapping the
+                    // outgoing fade by ~10% for a smooth handoff.
+                    double fi = Math.Max(0.0, (eased - 0.45) / 0.55);
+                    fadingIn.Opacity = Math.Min(1.0, fi);
+                }
                 if (t >= 1.0)
                 {
                     timer.Stop();
                     MoveAndResizeWindow(to);
+                    if (fadingOut is not null) fadingOut.Opacity = 0;
+                    if (fadingIn is not null) fadingIn.Opacity = 1;
                     tcs.TrySetResult();
                 }
             }
@@ -565,22 +629,16 @@ public sealed partial class AppShellWindow : Window
 
     private void UpdateBackdropFor(AppShellState state)
     {
-        // Use Window.SystemBackdrop (the high-level API) — WinUI manages the
-        // SystemBackdropConfiguration + controller lifecycle for us. Setting
-        // the same type repeatedly is cheap; we only allocate a new instance
-        // when the kind actually changes.
-        bool wantMini = state == AppShellState.MiniSetup || state == AppShellState.MiniRecording;
-        bool wantFull = state == AppShellState.Full || state == AppShellState.FullRecording;
-
-        if (wantMini && SystemBackdrop is not DesktopAcrylicBackdrop)
+        // Keep SystemBackdrop=MicaBackdrop for ALL states. WinUI sets the
+        // window root background to Transparent when a SystemBackdrop is
+        // assigned, which is what lets Mica show through. ApplyChromeFor
+        // (which runs AFTER this) then strips WS_DLGFRAME to kill the
+        // 1px Win11 accent edge — Mica keeps rendering because the
+        // SystemBackdrop machinery is already hooked up by that point.
+        if (SystemBackdrop is not MicaBackdrop mica || mica.Kind != MicaKind.BaseAlt)
         {
-            try { SystemBackdrop = new DesktopAcrylicBackdrop(); }
-            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Acrylic backdrop failed: {ex.Message}"); }
-        }
-        else if (wantFull && SystemBackdrop is not MicaBackdrop)
-        {
-            try { SystemBackdrop = new MicaBackdrop(); }
-            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Mica backdrop failed: {ex.Message}"); }
+            try { SystemBackdrop = new MicaBackdrop { Kind = MicaKind.BaseAlt }; }
+            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Mica Alt backdrop failed: {ex.Message}"); }
         }
     }
 
@@ -592,6 +650,27 @@ public sealed partial class AppShellWindow : Window
     {
         try
         {
+            // If the region picker is open (we auto-launch it when the user
+            // selects the Region tab), the Record button acts as the implicit
+            // confirm — commit whatever is currently drawn. The await on the
+            // picker in MiniSetupControl.LaunchRegionPickerAsync then resolves
+            // and writes ViewModel.SelectedRegion before we transition.
+            if (CapturePickerService.Shared.IsPickerOpen
+                && _viewModel.CaptureMode == CaptureMode.CustomRegion)
+            {
+                CapturePickerService.Shared.TryConfirmActiveRegionPicker();
+                // Yield so the picker's TCS completion + the awaiting
+                // LaunchRegionPickerAsync continuation get a chance to write
+                // ViewModel.SelectedRegion before we read it downstream.
+                await Task.Yield();
+            }
+            else if (CapturePickerService.Shared.IsPickerOpen
+                && _viewModel.CaptureMode == CaptureMode.Window)
+            {
+                CapturePickerService.Shared.TryConfirmActiveWindowPicker();
+                await Task.Yield();
+            }
+
             var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.RecordPressed, new())
                 ?? AppShellState.MiniRecording;
             await TransitionToAsync(target);
@@ -781,6 +860,11 @@ public sealed partial class AppShellWindow : Window
     internal void InitializeAfterActivation()
     {
         InstallWndProcOnce();
+        // Re-apply chrome now that the HWND is fully realised. Some Win11
+        // DWM attributes (DWMWA_BORDER_COLOR in particular) silently no-op
+        // when set before the window has been activated for the first time.
+        try { ApplyChromeFor(_currentState); }
+        catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Post-activation ApplyChromeFor failed: {ex}"); }
         // The XAML title bar element is needed for SetTitleBar in Full states;
         // re-apply now that the visual tree is realised.
         if (_currentState == AppShellState.Full || _currentState == AppShellState.FullRecording)
@@ -839,14 +923,12 @@ public sealed partial class AppShellWindow : Window
         var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
         var work = displayArea.WorkArea;
         var sizeDip = GetMiniSetupWindowSizeDip();
-        int workX = (int)Math.Round(work.X / scale);
-        int workY = (int)Math.Round(work.Y / scale);
-        int workWidth = (int)Math.Round(work.Width / scale);
-        int targetWidth = (int)Math.Ceiling(sizeDip.Width);
-        int targetHeight = (int)Math.Ceiling(sizeDip.Height);
-        targetWidth = Math.Min(targetWidth, Math.Max(1, workWidth - 32));
-        int targetX = workX + (workWidth - targetWidth) / 2;
-        int targetY = workY + TopMarginDip;
+        int targetWidth = (int)Math.Ceiling(sizeDip.Width * scale);
+        int targetHeight = (int)Math.Ceiling(sizeDip.Height * scale);
+        int marginPx = (int)Math.Ceiling(16 * scale);
+        targetWidth = Math.Min(targetWidth, Math.Max(1, work.Width - 2 * marginPx));
+        int targetX = work.X + (work.Width - targetWidth) / 2;
+        int targetY = work.Y + (int)Math.Round(TopMarginDip * scale);
 
         var pos = AppWindow.Position;
         var currentSize = AppWindow.Size;
@@ -864,9 +946,14 @@ public sealed partial class AppShellWindow : Window
             var desired = MiniSetup.MeasureToolbarDesiredSize(MiniSetupHeight);
             if (desired.Width > 0 && desired.Height > 0)
             {
+                // Pure content-driven width — the toolbar hugs whatever its
+                // visible children require. Height is pinned to MiniSetupHeight
+                // (64 DIP per spec §4.1); the ToolbarBorder is stretched
+                // vertically so the visible pill IS the window — no acrylic
+                // gap above/below it.
                 return new Size(
-                    Math.Ceiling(Math.Max(desired.Width + (2 * WindowChromeBorder), MiniSetupFallbackWidth)),
-                    Math.Ceiling(Math.Max(desired.Height + (2 * WindowChromeBorder), MiniSetupHeight)));
+                    Math.Ceiling(desired.Width + (2 * WindowChromeBorder)),
+                    Math.Ceiling(MiniSetupHeight));
             }
         }
         catch (Exception ex)
@@ -878,17 +965,17 @@ public sealed partial class AppShellWindow : Window
     }
 
     // ---------------------------------------------------------------
-    // Phase C: dim-while-picking glue + focus watchdog (spec §4.5)
+    // Phase C: slide-out-of-view-while-picking glue + focus watchdog (spec §4.5)
     // ---------------------------------------------------------------
 
     private DispatcherTimer? _focusWatchdog;
+    private PointInt32? _positionBeforeSlide;
 
-    private void OnPickerOpening(object? sender, EventArgs e)
+    private void OnPickerOpening(object? sender, PickerOpeningEventArgs e)
     {
-        // The actual Dim/Undim animation runs inside CapturePickerService via
-        // the IDimmable handed in by MiniSetupControl. This event-side hook
-        // just arms the defensive focus watchdog (spec §4.5: 2 s without the
-        // picker as the foreground window → undim so the user can recover).
+        // Sync hook: just arm the defensive focus watchdog (spec §4.5). The
+        // slide-out animation runs in OnPickerOpeningAsyncHook, which the
+        // picker service awaits before showing the picker overlay.
         try
         {
             _focusWatchdog?.Stop();
@@ -899,9 +986,46 @@ public sealed partial class AppShellWindow : Window
         catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Picker opening hook failed: {ex.Message}"); }
     }
 
+    private async Task OnPickerOpeningAsyncHook(PickerOpeningEventArgs e)
+    {
+        // Intentionally a no-op for now. The slide-out-of-view experiment for
+        // region picking is disabled — the toolbar stays put so the user can
+        // see it while dragging. Method retained so the picker service still
+        // has something to await (cheap) and so the hook is easy to re-enable
+        // if we revisit the behaviour.
+        await Task.CompletedTask;
+    }
+
     private void OnPickerClosed(object? sender, EventArgs e)
     {
         try { _focusWatchdog?.Stop(); _focusWatchdog = null; } catch { }
+    }
+
+    private async Task OnPickerClosedAsyncHook()
+    {
+        // No slide-back required while the slide-out is disabled. Kept as a
+        // no-op for symmetry with the opening hook.
+        await Task.CompletedTask;
+    }
+
+    private Task SlideOutOfViewAsync()
+    {
+        var pos = AppWindow.Position;
+        var size = AppWindow.Size;
+        _positionBeforeSlide = pos;
+        int targetY = -(size.Height + 40);
+        var fromRect = new RectInt32(pos.X, pos.Y, size.Width, size.Height);
+        var toRect = new RectInt32(pos.X, targetY, size.Width, size.Height);
+        return AnimateWindowAsync(fromRect, toRect, TimeSpan.FromMilliseconds(180), QuadraticEaseInOut);
+    }
+
+    private Task SlideBackIntoViewAsync(PointInt32 originalPos)
+    {
+        var pos = AppWindow.Position;
+        var size = AppWindow.Size;
+        var fromRect = new RectInt32(pos.X, pos.Y, size.Width, size.Height);
+        var toRect = new RectInt32(originalPos.X, originalPos.Y, size.Width, size.Height);
+        return AnimateWindowAsync(fromRect, toRect, TimeSpan.FromMilliseconds(220), QuadraticEaseInOut);
     }
 
     private async void OnFocusWatchdogTick(object? sender, object e)
@@ -1092,33 +1216,87 @@ public sealed partial class AppShellWindow : Window
         try
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            bool wasHidden = !IsWindowVisible(hwnd);
 
             // Restore toolbar opacity in case a stale picker left it dimmed.
             try { await MiniSetup.UndimAsync(); } catch { }
 
-            // Un-hide / un-minimize.
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
+            bool keepCurrent = suppressMiniMorph || _viewModel.IsRecording;
+            var desiredState = keepCurrent ? _currentState : AppShellState.MiniSetup;
 
-            // If recording, prefer the user's current shell state (don't morph
-            // a FullRecording into MiniSetup; spec §4.7 keeps recording state).
-            if (!suppressMiniMorph && !_viewModel.IsRecording && _currentState != AppShellState.MiniSetup)
+            if (wasHidden && desiredState == AppShellState.MiniSetup)
             {
-                await TransitionToAsync(AppShellState.MiniSetup);
+                // PrepareForSummonInBackground (called from OnWindowClosing)
+                // has already put the shell into MiniSetup with the correct
+                // chrome / size / layout — so we can safely position the
+                // window above the work area and slide it down without any
+                // first-paint stale-content flash.
+                if (_currentState != AppShellState.MiniSetup)
+                    ConfigureForState(AppShellState.MiniSetup, animate: false);
+
+                var target = ComputeWindowRect(AppShellState.MiniSetup);
+                var startRect = new RectInt32(
+                    target.X,
+                    target.Y - target.Height - 24,
+                    target.Width,
+                    target.Height);
+                MoveAndResizeWindow(startRect);
+                StateHost.UpdateLayout();
+
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                AllowSetForegroundWindow(unchecked((uint)Environment.ProcessId));
+                SetForegroundWindow(hwnd);
+
+                await AnimateWindowAsync(startRect, target,
+                    TimeSpan.FromMilliseconds(240), CubicEaseOut);
+
+                Activate();
+            }
+            else
+            {
+                ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
+
+                if (!keepCurrent && _currentState != AppShellState.MiniSetup)
+                    await TransitionToAsync(AppShellState.MiniSetup);
+
+                AllowSetForegroundWindow(unchecked((uint)Environment.ProcessId));
+                SetForegroundWindow(hwnd);
+                Activate();
             }
 
-            AllowSetForegroundWindow(unchecked((uint)Environment.ProcessId));
-            SetForegroundWindow(hwnd);
-            Activate();
-
             _lastSummonAt = DateTime.UtcNow;
-
-            // Focus the Record button (when applicable).
             MiniSetup.FocusRecordButton();
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[AppShellWindow] Summon failed: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Called by <see cref="App"/> right before <c>SW_HIDE</c> on close-to-tray.
+    /// Reconfigures the shell into <see cref="AppShellState.MiniSetup"/>
+    /// (chrome, presenter, controls, size, position) WHILE the window is
+    /// still visible — i.e. all the layout work happens up-front, so the
+    /// next summon can just slide the already-configured window in from
+    /// above without a first-paint flash of the old Full content.
+    /// </summary>
+    public void PrepareForSummonInBackground()
+    {
+        if (_viewModel.IsRecording) return; // don't disturb an active recording
+        if (_currentState == AppShellState.MiniSetup) return;
+
+        try
+        {
+            ConfigureForState(AppShellState.MiniSetup, animate: false);
+            var target = ComputeWindowRect(AppShellState.MiniSetup);
+            MoveAndResizeWindow(target);
+            StateHost.UpdateLayout();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AppShellWindow] PrepareForSummonInBackground failed: {ex}");
         }
     }
 
@@ -1159,6 +1337,9 @@ public sealed partial class AppShellWindow : Window
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool AllowSetForegroundWindow(uint dwProcessId);
 
@@ -1172,6 +1353,7 @@ public sealed partial class AppShellWindow : Window
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     private const int SW_HIDE = 0;
+    private const int SW_SHOWNOACTIVATE = 4;
     private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
 }

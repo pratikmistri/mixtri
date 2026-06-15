@@ -2090,3 +2090,202 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 **What worked:** Recomputing the whole MiniSetup target rect instead of only changing width. This keeps both margins balanced and prevents right-edge clipping after launch and Full→Mini collapse.
 
 **What didn't work / pitfalls:** Preserving the previous X/center during remeasure can leave a widened MiniSetup off-screen. Screenshot verification must minimize/avoid foreground terminal windows or they obscure the toolbar.
+
+## Mini Mode — region-picker dim approach pivot
+
+- **What didn't work**: SystemBackdrop swap + DwmExtendFrameIntoClientArea(-1,-1,-1,-1) to make the toolbar feel transparent during region picking. Even with the glass-frame trick the result still felt like a frozen app, and the whole codepath was complex (backdrop save/restore, P/Invoke, MARGINS struct).
+- **What worked**: Slide the toolbar straight up off-screen during the *region* picker only (180ms ease-in/out via existing AnimateWindowAsync); window picker leaves toolbar in place (single-click target, nothing to obscure).
+- **Wiring**: CapturePickerService.PickerOpening now carries a PickerKind (Region/Window). AppShellWindow.OnPickerOpening branches on Kind. IDimmable interface kept for back-compat but DimAsync/UndimAsync are no longer called by the picker service.
+
+
+## Mini Mode bug-fix loop — round 3
+
+- **Duplicate Full collapse button (2 chevrons in the title bar)**: CollapseOverlayButton in FullShellControl.xaml was a Canvas-positioned hit-test workaround for the in-TitleBar.Content button. Removed it entirely; the in-content button alone hit-tests fine. Don't add a backplate'd overlay button — there is only one collapse button now.
+- **ExpandButton clipped + 16 DIP extra height in MiniSetup**: two root causes. (a) `RunSingleTransitionAsync` / `ConfigureForState` called `ComputeWindowRect` BEFORE `ApplyStateFlags`, so `MiniSetup.IsExpandButtonVisible` was still false at measure time → the 36 DIP ExpandButton was treated as Collapsed (width=0). Fix: call ApplyStateFlags first. (b) Window height was `MiniSetupHeight + 2*chromeBorder` (=66 DIP) with `ToolbarBorder VerticalAlignment=Center`, leaving ~16 DIP of acrylic above/below the visible pill. Fix: window height = exactly MiniSetupHeight (64 DIP) and `VerticalAlignment=Stretch` on the border so the pill IS the window.
+- **Slide-out animation lost because picker grabbed the screen first**: `async void OnPickerOpening` returns to the picker service immediately and the region picker takes its frozen-frame backdrop BEFORE the slide finishes — the toolbar gets baked into the picker background. Fix: added `CapturePickerService.OnPickerOpeningAsync` (and `OnPickerClosedAsync`) — `Func<…, Task>` hooks that the picker service AWAITS. Slide now runs to completion before the picker overlay is constructed.
+
+
+## RecordingViewModel dispatcher must be set on *every* host
+
+- `RecordingViewModel` is a shared singleton consumed by both `RecordingPage` and `AppShellWindow`. Its recording-elapsed timer fires on a ThreadPool thread, then it marshals to the UI via `RunOnUI` which depends on `_dispatcher` being set.
+- `RecordingPage` calls `ViewModel.SetDispatcher(DispatcherQueue)` in its ctor. `AppShellWindow` didn't. Starting a recording from the mini toolbar without ever visiting RecordingPage left `_dispatcher` null → `RunOnUI` invoked the action directly on the timer thread → setting bound TextBlock.Text off-thread threw `COMException 0x8001010E (RPC_E_WRONG_THREAD)` and terminated the process.
+- Fix: every host that constructs/consumes the shared VM and may trigger a recording must call `SetDispatcher(this.DispatcherQueue)` from its UI thread. `AppShellWindow` ctor now does it.
+
+## Theme-aware brushes inside the recording pill
+
+- `OverlayForegroundBrush` in AppColors.xaml is hardcoded `#FFFFFFFF` for both light & dark themes — intentional for dark-overlay surfaces (region picker, window picker). Don't use it inside the recording pill chrome (`RecordingPillControl`): the pill sits on the system acrylic, so in Light mode white is unreadable. Use `TextFillColorPrimaryBrush` for the elapsed-time + stopping-phrase text and the expand-button glyph there instead.
+
+
+## Mini Mode — remove startup auto-launch of region/window picker
+
+**Feature/area:** `App.OnLaunched` + `SelectionRestoreService`
+
+**Symptom:** App opened with the region picker auto-launched. Picker overlay took noticeable time to appear and rendered a stale screenshot of the desktop (BitBlt grabbed the half-painted launch state). Whole experience felt slow on every launch.
+
+**Approach tried:**
+1. **Drop the `LaunchPickerForCurrentModeAsync` call from the launch path.** Toolbar still comes up pre-selected (spec §3.1 default of Region survives), but the heavy picker capture only runs when the user explicitly clicks the picker affordance. CLI `--new-recording=region|window` is unchanged because it goes through a different branch (`HandleNewRecordingRequestAsync`).
+
+**What worked:** Single one-branch removal in `App.OnLaunched`. `SelectionRestoreOutcome.AutoLaunchPicker` is now unused at the host level — kept in the record so existing unit tests on `SelectionRestoreService` still compile/pass without churn.
+
+**What didn't work:** Trying to make the picker faster on launch would require rewriting the BitBlt path (e.g., Windows.Graphics.Capture) — not worth it because the right UX answer is "don't capture during launch".
+
+## Mini Mode — Region picker becomes inline; Record is implicit confirm
+
+**Feature/area:** `MiniSetupControl`, `RegionSelectorOverlay`, `CapturePickerService`, `AppShellWindow.OnMiniSetupRecordRequested`
+
+**Goal:** Make region selection feel ambient — selecting the Region tab auto-launches the overlay (pre-populated with the persisted region); clicking Record on the toolbar is the implicit confirm; Esc cancels. No more dedicated "Select Region" / "Confirm" / "Cancel" buttons.
+
+**Approaches tried:**
+1. **Remove the inline "Select Region" / "Select Window" buttons + their `StackPanel` containers.** The auto-launch in `CaptureModeSelector_SelectionChanged` already handled this case; the buttons were a redundant duplicate trigger.
+2. **Hide the in-overlay action buttons (Confirm / Cancel / Use Last)** in `RegionSelectorOverlay.xaml` and remove every code-behind reference to `ButtonPanel` / `UseLastButton`. Updated the instruction text to "Click and drag to adjust. Click Record on the toolbar to start. Esc to cancel.".
+3. **Add `RegionSelectorOverlay.TryConfirmCurrent()` + `CapturePickerService.TryConfirmActiveRegionPicker()`.** The picker service tracks the active overlay in a static `ActiveRegionOverlay` property set by its default factory and cleared via `ContinueWith` when `ShowAsync` completes. `AppShellWindow.OnMiniSetupRecordRequested` calls `TryConfirmActiveRegionPicker` (when in Region mode + picker open) before transitioning to `MiniRecording`; a `Task.Yield()` lets the picker's TCS continuation write `ViewModel.SelectedRegion` before the transition reads it.
+
+**What worked:** Picker auto-launch was already wired in `MiniSetupControl` for tab selection. `RegionSelectorOverlay.ShowAsync` already supports pre-populated regions via its `initialRegion` argument, which `CapturePickerService.PickRegionAsync` already passes (`ViewModel.SelectedRegion`). So the only behavior changes needed were: (a) delete the inline buttons + their handlers, (b) hide the in-overlay action buttons, (c) plumb Record-as-confirm.
+
+**What didn't work / wrinkles:** `CaptureMode` lives in `Musio_App.ViewModels`, not `Musio.Core.Capture` — using `Musio.Core.Capture.CaptureMode` as a fully-qualified name fails. Use the unqualified `CaptureMode` (covered by `using Musio_App.ViewModels;`).
+
+## Mini Mode — Capture-mode tab switch must cancel any open picker
+
+**Feature/area:** `CapturePickerService`, `WindowSelectorOverlay`, `MiniSetupControl`
+
+**Symptom:** With auto-launch on tab selection, switching from Window → Region (or Window → Full Screen) left the window picker on screen because the previous picker was never cancelled and the new launch hit the `IsPickerOpen` re-entrancy guard.
+
+**Approach tried:**
+1. **Add `public void Cancel()` to `WindowSelectorOverlay`** (mirrors the existing `RegionSelectorOverlay.Cancel`) that signals `_tcs?.TrySetResult(null)`.
+2. **Track `ActiveWindowOverlay` in `CapturePickerService`** (parallel to `ActiveRegionOverlay`); set in the default factory via `ContinueWith` clearing.
+3. **Add `Task CancelActivePickerAsync()` to `CapturePickerService`.** It calls `Cancel` on both active overlays then awaits a per-call `TaskCompletionSource` (`_pickerClosedSignal`) that the picker's `finally` completes. Avoids the polling/yield races of "just call cancel and hope it's done".
+4. **In `MiniSetupControl.CaptureModeSelector_SelectionChanged`**: before re-launching, if a picker is open, `await CapturePickerService.Shared.CancelActivePickerAsync()`. Works for both "switch to another picker mode" and "switch to Full Screen" (which simply doesn't relaunch anything).
+
+**What worked:** The TCS-signal approach is the only race-free way: `Cancel` resolves the overlay's TCS, the picker's awaiting `ShowAsync` returns null, the picker service's `finally` runs (sets `_isPickerOpen=false`, clears active overlay, signals our TCS). Caller awaits the signal and can safely launch the next picker.
+
+**What didn't work:** A naive `CancelActivePicker()` (sync) plus a single `await Task.Yield()` on the caller side is brittle — the cancel-to-finally chain crosses multiple await points (overlay close, `OnPickerClosedAsync` hook) so the number of yields needed isn't statically known. The explicit completion signal removes that fragility.
+
+## Window picker — lock smoke around clicked window (parity with region picker)
+
+**Feature/area:** `WindowSelectorOverlay`, `CapturePickerService`, `AppShellWindow`
+
+**Symptom:** Clicking a window in the window picker immediately resolved the picker TCS and closed the overlay, so the dim `smoke` mask disappeared and the user lost visual confirmation of what they had selected. Region picker keeps the selection visible after drag — the two flows should match.
+
+**Approach tried:**
+1. Added `_lockedWindow` field to `WindowSelectorOverlay`. `Grid_PointerPressed` no longer resolves the TCS — it just sets `_lockedWindow = _hoveredWindow` and re-runs `UpdateOverlay`. The smoke mask + highlight border + info label stay rendered around the locked window.
+2. `Grid_PointerMoved` still tracks hover (so the next click can switch the lock) but only updates the rendered overlay while `_lockedWindow is null` — once locked, hovering other windows doesn't repaint the mask. A subsequent click switches the lock.
+3. Added `public bool TryConfirmCurrent()` that validates `_lockedWindow ?? _hoveredWindow` is still alive then `_tcs.TrySetResult(candidate)`. Used by the toolbar Record button.
+4. `CapturePickerService.TryConfirmActiveWindowPicker()` mirrors `TryConfirmActiveRegionPicker`; `AppShellWindow.OnMiniSetupRecordRequested` adds the Window branch — same yield-then-transition pattern as Region.
+
+**What worked:** Keeping hover detection alive after lock means the user can re-pick a different window without an explicit reset — clicking another window seamlessly swaps the lock. `TryConfirmCurrent` falls back to `_hoveredWindow` for the edge case where the user clicks Record without ever clicking a window (they're hovering it but haven't pressed down).
+
+**What didn't work:** Initially considered making `Grid_PointerMoved` keep updating the overlay after lock so the mask previewed the hovered window. That ended up flickering the smoke between the locked and hovered window on every mouse-move — the locked-stays-locked-until-next-click model is much calmer.
+
+## Shell summon + expand/collapse — slide-down + 125 Hz parallel morph
+
+**Feature/area:** `AppShellWindow.SummonAsync`, `AppShellWindow.RunSingleTransitionAsync`, `AnimateMorphAsync`
+
+**Symptom:**
+1. Pressing the global summon hotkey while hidden in the tray made the window appear in its last persisted state (often Full), then morph down to the toolbar — the user saw the full chrome flash briefly.
+2. The expand/collapse morph felt segmented and slow: `CrossFadeOut (120 ms) → AnimateWindow (340 ms) → CrossFadeIn (120 ms)` ran strictly sequentially, totaling ~580 ms, and the timer ran at 16 ms (~60 Hz).
+
+**Approach tried:**
+1. **Slide-down summon.** In `SummonAsync`, detect `!IsWindowVisible(hwnd)`. If hidden AND desired target is MiniSetup, call `ConfigureForState(MiniSetup, animate:false)` while still hidden (so chrome/presenter/backdrop/inner-control swap happens off-screen), compute the final mini rect, `MoveAndResize` to `{X, Y - Height - 24, W, H}`, `ShowWindow(SW_SHOW)`, then `AnimateWindowAsync` Y back down to the target with a 240 ms `CubicEaseOut`. The user perceives a toolbar dropping from above the screen, never sees the prior chrome.
+2. **Parallel morph.** Replaced the sequential fade-out → resize → fade-in chain with a single `AnimateMorphAsync` that drives the rect interpolation AND the opacity of both controls in the same 8 ms timer tick. Outgoing opacity ramps 1→0 over the first ~55 % of progress; incoming opacity ramps 0→1 over the last ~55 % (10 % overlap for a smooth handoff). Both inner controls stay `Visible` for the duration of the morph so the visual swap tracks the resize frame-for-frame.
+3. **Snappier durations.** Cut mini↔mini from 340 ms to 200 ms; full-involving from 400 ms to 280 ms. With parallel cross-fades these no longer feel rushed.
+
+**What worked:** Driving rect + opacity in one timer (instead of three separate animations) is what makes it feel "120 fps smooth" — the control swap is literally on the same frame as the resize, so there's no perception of two separate phases. Reconfiguring while hidden eliminates the Full-chrome flash entirely.
+
+**What didn't work:** Initially tried running `CrossFadeOutAsync` as a separate Storyboard concurrently with `AnimateWindowAsync` via `Task.WhenAll` — this still drifted because the Storyboard runs on the composition timeline while the timer runs on the dispatcher, so the two timings diverged by ~20 ms (visible as a brief opacity lag at the start). Folding both into the same dispatcher tick eliminated the drift.
+
+## App shell backdrop — Mica Alt instead of base Mica
+
+**Feature/area:** `AppShellWindow.UpdateBackdropFor`
+
+**Change:** `new MicaBackdrop { Kind = MicaKind.BaseAlt }` for Full / FullRecording states. MiniSetup / MiniRecording keep DesktopAcrylic. Only one call site in the app uses `MicaBackdrop` so this is the single source of truth.
+
+## Mini toolbar — transparent fill to expose acrylic backdrop
+
+**Feature/area:** `MiniSetupControl.xaml` (`ToolbarBorder`)
+
+**Change:** `ToolbarBorder.Background` from `{ThemeResource CardBackgroundFillColorDefaultBrush}` (opaque dark card fill) → `Transparent`. The 1 px `CardStrokeColorDefaultBrush` outline + `CornerRadius=12` stay so the pill shape is still defined. With `DesktopAcrylicBackdrop` set on the window for MiniSetup, the area inside the pill now renders the acrylic blur of the desktop behind the window instead of a flat dark card.
+
+**Why:** The card fill was opaque and visually swallowed the backdrop, defeating the point of using acrylic for the mini shell.
+
+## Win11 system backdrop requires WS_DLGFRAME — don't strip it for chromeless windows
+
+**Feature/area:** `WindowChromeService.ApplyMini`
+
+**Symptom:** Setting `SystemBackdrop = new DesktopAcrylicBackdrop()` on the mini shell window had no visible effect — the window painted as solid black/default colour. Mica on the full shell rendered fine.
+
+**Root cause:** `ApplyMini` was stripping `WS_BORDER | WS_DLGFRAME` from the window style (to remove any DWM-drawn frame on the borderless mini toolbar). Windows 11's `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, …)` — which is what `WinUI` `SystemBackdrop` wires up — REQUIRES `WS_DLGFRAME` to be present. Without it DWM silently falls back to the solid window background and the backdrop never renders. `WS_BORDER` alone is fine to strip; `WS_DLGFRAME` is the killer.
+
+**Fix:** Removed the manual `GetWindowLong / SetWindowLong` style strip from `ApplyMini`. Chrome hiding is still handled by `OverlappedPresenter.SetBorderAndTitleBar(false, false)` + `ExtendsContentIntoTitleBar = true`, and OS-level rounding by `DWMWA_WINDOW_CORNER_PREFERENCE`. Together those hide the visible caption/border without disabling the backdrop.
+
+**What didn't work earlier:** Setting `ToolbarBorder.Background = Transparent` alone — the area below the border still painted solid because the backdrop itself was disabled at the DWM layer, so there was nothing to see through to.
+
+## Mini chromeless window — sheet-of-glass frame extension + single Mica Alt backdrop
+
+**Feature/area:** `WindowChromeService.ApplyMini`, `AppShellWindow.UpdateBackdropFor`
+
+**Symptom A:** After keeping `WS_DLGFRAME` so the Win11 system backdrop would render, a 1 px white outline (the DWM dialog frame edge) appeared around the mini toolbar.
+
+**Symptom B:** Per-state backdrop swap (`DesktopAcrylic` for mini, `Mica` for full) caused a visible re-tint flash on every morph, and the user wanted a single consistent material across both halves of the same window.
+
+**Fix A — sheet-of-glass:** Call `DwmExtendFrameIntoClientArea(hwnd, MARGINS{-1,-1,-1,-1})` in `ApplyMini`. The -1 sentinel tells DWM the entire client area is part of the frame, so there is no visible client/non-client boundary to render and the WS_DLGFRAME edge line disappears — without removing the style itself, which keeps the backdrop alive.
+
+**Fix B — one backdrop:** `UpdateBackdropFor` now sets `MicaBackdrop { Kind = MicaKind.BaseAlt }` for every state and only re-allocates if the current backdrop isn't already that. Mica works for both the floating mini pill (the toolbar's `Background=Transparent` lets it show through) and the expanded full shell. The recording pill, whose `RootGrid` was already transparent, now also inherits the Mica Alt material.
+
+**What didn't work:** Stripping `WS_DLGFRAME` (original code) — DWM silently disables `DWMWA_SYSTEMBACKDROP_TYPE` and falls back to the solid window colour, so Mica/Acrylic never renders. `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE` alone is also insufficient: the edge that shows is the frame itself, not its colour.
+
+## Win11 chromeless border + summon-from-Full first-paint flash
+
+**Feature/area:** `WindowChromeService.ApplyMini`, `AppShellWindow.SummonAsync`
+
+**Symptom A (border):** After enabling the Mica Alt backdrop + `DwmExtendFrameIntoClientArea({-1,-1,-1,-1})`, a 1 px white outline still rendered around the mini toolbar.
+
+**Root cause A:** `DwmSetWindowAttribute(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE)` is documented as "suppress border" but on current Win11 builds with a dark system backdrop it actually paints a light/white 1 px edge. The sheet-of-glass frame extension on its own can't hide that edge because it's the OUTER frame line, not the client/non-client boundary.
+
+**Fix A:** Set `DWMWA_BORDER_COLOR` (and `DWMWA_CAPTION_COLOR`) to a specific dark `COLORREF` (`0x00202020` — alpha byte ignored, `0x00BBGGRR`) that approximates the Mica Alt tint. The frame edge still renders, but blends visually into the material.
+
+**Symptom B (summon flash):** Hotkey-summoning the shell while hidden in Full state briefly flashed the Full layout before the slide-down animation started.
+
+**Root cause B:** `ConfigureForState(MiniSetup)` updated chrome + presenter + control visibility, but WinUI hadn't run a layout pass yet. `ShowWindow(SW_SHOW)` then triggered the first paint using whatever was in the visual tree's cached layout — often the previous Full state — for one frame before the next layout pass swapped in MiniSetup.
+
+**Fix B:** In `SummonAsync`'s wasHidden + MiniSetup branch: (1) park the window at `y = -10000` BEFORE showing, (2) call `StateHost.UpdateLayout()` to force a synchronous layout for the new state, (3) `ShowWindow(SW_SHOWNOACTIVATE)`, (4) `await Task.Yield()` so WinUI commits one frame at the parked-off-screen rect, (5) only then move the window to the visible startRect just above the work area and animate down. Any stale paint now lands far off-screen.
+
+## Strip WS_THICKFRAME to kill the white edge; pre-configure mini before SW_HIDE to kill summon flash
+
+**Feature/area:** `WindowChromeService.ApplyMini`, `AppShellWindow.PrepareForSummonInBackground`, `App.OnWindowClosing`
+
+**Symptom A:** Even with sheet-of-glass `DwmExtendFrameIntoClientArea` and a dark `DWMWA_BORDER_COLOR`, the mini toolbar still rendered a 1-2 px white outline.
+
+**Root cause A:** The visible edge was the `WS_THICKFRAME` (sizing border) drawn by Windows, not the `WS_DLGFRAME` dialog border. `DWMWA_BORDER_COLOR` controls the rounded-window outline but doesn't suppress the sizing-frame draw.
+
+**Fix A:** In `ApplyMini`, strip `WS_THICKFRAME | WS_CAPTION | WS_SYSMENU` from the window style. **Keep `WS_DLGFRAME`** — it's the one style Win11's system backdrop hard-requires. The mini shell is non-resizable, so losing `WS_THICKFRAME` is functionally a no-op.
+
+**Symptom B:** Hotkey-summoning the shell after closing it while in Full state flashed the Full layout for one frame before the slide-down.
+
+**Root cause B:** `OnWindowClosing` did `SW_HIDE` immediately — the window kept its Full state, chrome, size, and content in memory. On summon, even with off-screen parking + layout pumping, WinUI committed one frame of cached Full layout before the new chrome/size took effect.
+
+**Fix B (per user suggestion):** Added `AppShellWindow.PrepareForSummonInBackground()` that runs `ConfigureForState(MiniSetup, animate:false) → ComputeWindowRect → MoveAndResizeWindow → StateHost.UpdateLayout` synchronously. `App.OnWindowClosing` calls it BEFORE `SW_HIDE`, so the window is already mini-shaped and mini-laid-out before it disappears. Next `SummonAsync` just slides it in — no layout work during the show, no stale-content frame.
+
+## 2026-06-13 — Mini toolbar white border: chrome-after-backdrop + post-activation re-apply
+- **Area:** AppShellWindow ConfigureForState ordering; InitializeAfterActivation.
+- **Tried:** Reordered ApplyChromeFor to run AFTER ApplyPresenterFor and UpdateBackdropFor in all three ConfigureForState call sites. Also re-stamp ApplyChromeFor from InitializeAfterActivation so DWM border-color attributes that no-op pre-activation get applied to the realized HWND.
+- **Rationale:** Window.SystemBackdrop assignment internally touches DWM attributes; if chrome runs first, the backdrop init clobbers DWMWA_BORDER_COLOR back to default. Some Win11 DWM attributes also silently no-op when set before first activation.
+- **Status:** Pending user verification.
+
+## 2026-06-13 — Mini toolbar white border was XAML, not DWM
+- **Area:** MiniSetupControl.xaml ToolbarBorder.
+- **Root cause:** ToolbarBorder had `BorderBrush={ThemeResource CardStrokeColorDefaultBrush}` + `BorderThickness=1`. CardStrokeColorDefaultBrush is a near-white stroke that pops against the dark Mica Alt backdrop once ToolbarBorder.Background was made transparent. Did NOT appear in Full state because Full uses a different control (FullShell) with its own chrome.
+- **Fix:** BorderBrush=Transparent, BorderThickness=0 on ToolbarBorder.
+- **Lesson:** Before chasing DWM/window-chrome theories for a "border", first inspect the topmost XAML Border element in the affected control. A 1px stroke on a transparent-background Border looks identical to a DWM frame edge.
+
+## 2026-06-13 — White border was WS_DLGFRAME, not XAML or DWMWA_BORDER_COLOR
+- **Area:** WindowChromeService.ApplyMini, AppShellWindow.UpdateBackdropFor, RegionSelectorOverlay, WindowSelectorOverlay.
+- **Root cause:** Win11 draws a 1px lighter accent-coloured edge around any window that has WS_DLGFRAME set. We previously kept WS_DLGFRAME because Window.SystemBackdrop = MicaBackdrop wouldn't render Mica without it. DWMWA_BORDER_COLOR=0x00202020 was either ignored or rendered visibly anyway.
+- **Fix:** Strip WS_DLGFRAME (and WS_BORDER) entirely in Mini chrome. Re-establish Mica via DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE=DWMSBT_TABBEDWINDOW) which does NOT require WS_DLGFRAME. UpdateBackdropFor now nulls out Window.SystemBackdrop for Mini states (so it can't re-add WS_DLGFRAME) and only assigns MicaBackdrop for Full/FullRecording. Added WindowChromeService.ApplyOverlayChrome for the region/window picker overlays (same WS strip, no backdrop).
+- **Lesson:** Window.SystemBackdrop forces WS_DLGFRAME on. To get Mica WITHOUT the border edge, use the raw DWM attribute (DWMWA_SYSTEMBACKDROP_TYPE) instead.
+
+## 2026-06-13 — White border vs Mica: BOTH solved by order, not by stripping backdrop
+- **Area:** WindowChromeService.ApplyMini, AppShellWindow.UpdateBackdropFor.
+- **What didn't work:** Switching from Window.SystemBackdrop to raw DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE). The DWM backdrop renders, but ONLY where XAML pixels are transparent. Without Window.SystemBackdrop, WinUI never marks its root background as Transparent — so the root paints opaque white and hides the DWM backdrop. DWMWA_USE_IMMERSIVE_DARK_MODE doesn't fix this because the white is XAML, not DWM.
+- **What worked:** Keep Window.SystemBackdrop = MicaBackdrop{BaseAlt} for ALL states (so WinUI sets root background to Transparent and initialises the Mica compositor). Then in ApplyChromeFor (which now runs AFTER UpdateBackdropFor), strip WS_DLGFRAME/WS_BORDER. Mica keeps rendering even without WS_DLGFRAME because the compositor was already hooked up. Result: Mica visible AND no 1px Win11 accent edge.
+- **Lesson:** Win11 `SystemBackdrop` provides TWO things — DWM backdrop AND root-transparency. You can't replace it with raw DWM attributes without separately handling the XAML root background. Keep SystemBackdrop, just strip the frame style after.
+- **Final ordering in ConfigureForState:** ApplyPresenterFor → UpdateBackdropFor (SystemBackdrop) → ApplyChromeFor (strip WS_DLGFRAME) → ApplyStateFlags.

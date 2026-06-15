@@ -15,7 +15,7 @@
         them as the state machine transitions. The backdrop is set in code
         per state (Mica for Full, Desktop Acrylic for Mini*).
     -->
-    <Grid x:Name="StateHost">
+    <Grid x:Name="StateHost" Background="Transparent">
 
         <controls:MiniSetupControl
             x:Name="MiniSetup"

@@ -76,34 +76,11 @@
             FontSize="16"
             Foreground="{ThemeResource OverlayForegroundBrush}"
             IsHitTestVisible="False"
-            Text="Click and drag to select region. Press Escape to cancel." />
+            Text="Click and drag to adjust. Click Record on the toolbar to start. Esc to cancel." />
 
-        <!-- Action buttons (visible after selection is drawn) -->
-        <StackPanel
-            x:Name="ButtonPanel"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Bottom"
-            Margin="0,0,0,40"
-            Orientation="Horizontal"
-            Spacing="12"
-            Visibility="Collapsed">
-            <Button
-                x:Name="ConfirmButton"
-                MinWidth="100"
-                Click="ConfirmButton_Click"
-                Content="Confirm"
-                Style="{StaticResource AccentButtonStyle}" />
-            <Button
-                x:Name="UseLastButton"
-                MinWidth="120"
-                Click="UseLastButton_Click"
-                Content="Use Last Region"
-                Visibility="Collapsed" />
-            <Button
-                x:Name="CancelButton"
-                MinWidth="100"
-                Click="CancelButton_Click"
-                Content="Cancel" />
-        </StackPanel>
+        <!-- The Confirm/Cancel/UseLast action buttons were removed; the
+             toolbar's Record button is now the implicit confirm, Esc is
+             cancel, and the previous region (if any) is pre-populated by
+             the picker service via the initialRegion argument. -->
     </Grid>
 </UserControl>

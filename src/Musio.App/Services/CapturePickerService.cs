@@ -34,11 +34,85 @@ public sealed class CapturePickerService
 
     private CapturePickerService()
         : this(
-            previous => new RegionSelectorOverlay().ShowAsync(previous),
-            () => new WindowSelectorOverlay().ShowAsync(),
+            previous =>
+            {
+                var overlay = new RegionSelectorOverlay();
+                // Track the live overlay so the toolbar's Record button can
+                // confirm-and-record without an in-overlay Confirm button.
+                ActiveRegionOverlay = overlay;
+                var task = overlay.ShowAsync(previous);
+                _ = task.ContinueWith(_ => { ActiveRegionOverlay = null; }, TaskScheduler.Default);
+                return task;
+            },
+            () =>
+            {
+                var overlay = new WindowSelectorOverlay();
+                // Track so a tab-switch away from Window can programmatically
+                // cancel the open picker.
+                ActiveWindowOverlay = overlay;
+                var task = overlay.ShowAsync();
+                _ = task.ContinueWith(_ => { ActiveWindowOverlay = null; }, TaskScheduler.Default);
+                return task;
+            },
             RecordingViewModel.Shared)
     {
     }
+
+    /// <summary>
+    /// The active region overlay, set while a region picker is on screen.
+    /// Exposed (internally) so <see cref="TryConfirmActiveRegionPicker"/>
+    /// can drive Record-button-as-implicit-confirm UX.
+    /// </summary>
+    internal static RegionSelectorOverlay? ActiveRegionOverlay { get; set; }
+
+    /// <summary>The active window overlay, set while a window picker is on screen.</summary>
+    internal static WindowSelectorOverlay? ActiveWindowOverlay { get; set; }
+
+    /// <summary>
+    /// If a region picker is currently open AND has a selection drawn,
+    /// programmatically commit it (the picker's await in
+    /// <see cref="PickRegionAsync"/> resolves with the region). Returns true
+    /// when something was confirmed; false otherwise (no picker open or no
+    /// selection drawn yet).
+    /// </summary>
+    public bool TryConfirmActiveRegionPicker()
+        => ActiveRegionOverlay?.TryConfirmCurrent() ?? false;
+
+    /// <summary>
+    /// If a window picker is currently open AND a window has been clicked
+    /// (or is hovered), programmatically commit it. Mirrors
+    /// <see cref="TryConfirmActiveRegionPicker"/> so the toolbar's Record
+    /// button works for both inline pickers.
+    /// </summary>
+    public bool TryConfirmActiveWindowPicker()
+        => ActiveWindowOverlay?.TryConfirmCurrent() ?? false;
+
+    /// <summary>
+    /// Cancel whichever picker (region or window) is currently open and
+    /// wait until it has fully closed (so the next <see cref="PickRegionAsync"/>
+    /// / <see cref="PickWindowAsync"/> call won't be rejected by the
+    /// re-entrancy guard). No-op when no picker is open.
+    /// </summary>
+    public async Task CancelActivePickerAsync()
+    {
+        if (!_isPickerOpen) return;
+
+        try { ActiveRegionOverlay?.Cancel(); } catch { /* best-effort */ }
+        try { ActiveWindowOverlay?.Cancel(); } catch { /* best-effort */ }
+
+        // Wait for the currently-running PickXxxAsync to complete its finally
+        // block (which clears _isPickerOpen + the active overlay refs).
+        var signal = _pickerClosedSignal;
+        if (signal is not null)
+        {
+            try { await signal.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { /* timeout or already completed — fall through */ }
+        }
+    }
+
+    // Per-call signal completed in the picker's finally so cancellers can
+    // await actual close, not just the cancel signal.
+    private TaskCompletionSource<object?>? _pickerClosedSignal;
 
     internal CapturePickerService(
         Func<CaptureRegion?, Task<CaptureRegion?>> showRegionPickerAsync,
@@ -59,10 +133,26 @@ public sealed class CapturePickerService
     public bool IsPickerOpen => _isPickerOpen;
 
     /// <summary>Raised right before a picker overlay is shown.</summary>
-    public event EventHandler? PickerOpening;
+    public event EventHandler<PickerOpeningEventArgs>? PickerOpening;
+
+    /// <summary>
+    /// Optional async hook invoked AFTER <see cref="PickerOpening"/> and BEFORE
+    /// the picker overlay is shown. The picker service awaits it so callers
+    /// (e.g. <c>AppShellWindow</c>) can finish a slide-out animation before
+    /// the picker grabs the screen contents.
+    /// </summary>
+    public Func<PickerOpeningEventArgs, Task>? OnPickerOpeningAsync { get; set; }
 
     /// <summary>Raised after a picker overlay has been dismissed (confirmed or cancelled).</summary>
     public event EventHandler? PickerClosed;
+
+    /// <summary>
+    /// Optional async hook invoked AFTER the picker overlay has been
+    /// dismissed and AFTER <see cref="PickerClosed"/> fires. The picker
+    /// service awaits it so callers can finish a slide-back-in animation
+    /// before control returns to them.
+    /// </summary>
+    public Func<Task>? OnPickerClosedAsync { get; set; }
 
     private RecordingViewModel ViewModel => _viewModel;
 
@@ -89,12 +179,18 @@ public sealed class CapturePickerService
     {
         if (_isPickerOpen) return PickerResult.AlreadyOpen;
         _isPickerOpen = true;
+        _pickerClosedSignal = new TaskCompletionSource<object?>();
 
         var dim = dimTarget ?? NoOpDimmable.Instance;
         try
         {
-            PickerOpening?.Invoke(this, EventArgs.Empty);
-            await dim.DimAsync();
+            var args = new PickerOpeningEventArgs(PickerKind.Region);
+            PickerOpening?.Invoke(this, args);
+            if (OnPickerOpeningAsync is { } prepareAsync)
+            {
+                try { await prepareAsync(args); }
+                catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] PickerOpeningAsync hook failed: {ex.Message}"); }
+            }
 
             var region = await _showRegionPickerAsync(ViewModel.SelectedRegion);
 
@@ -109,9 +205,15 @@ public sealed class CapturePickerService
         }
         finally
         {
-            try { await dim.UndimAsync(); } catch { /* never let undim crash the caller */ }
             _isPickerOpen = false;
             PickerClosed?.Invoke(this, EventArgs.Empty);
+            if (OnPickerClosedAsync is { } closedAsync)
+            {
+                try { await closedAsync(); }
+                catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] PickerClosedAsync hook failed: {ex.Message}"); }
+            }
+            _pickerClosedSignal?.TrySetResult(null);
+            _pickerClosedSignal = null;
         }
     }
 
@@ -128,12 +230,18 @@ public sealed class CapturePickerService
     {
         if (_isPickerOpen) return PickerResult.AlreadyOpen;
         _isPickerOpen = true;
+        _pickerClosedSignal = new TaskCompletionSource<object?>();
 
         var dim = dimTarget ?? NoOpDimmable.Instance;
         try
         {
-            PickerOpening?.Invoke(this, EventArgs.Empty);
-            await dim.DimAsync();
+            var args = new PickerOpeningEventArgs(PickerKind.Window);
+            PickerOpening?.Invoke(this, args);
+            if (OnPickerOpeningAsync is { } prepareAsync)
+            {
+                try { await prepareAsync(args); }
+                catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] PickerOpeningAsync hook failed: {ex.Message}"); }
+            }
 
             var window = await _showWindowPickerAsync();
 
@@ -149,9 +257,15 @@ public sealed class CapturePickerService
         }
         finally
         {
-            try { await dim.UndimAsync(); } catch { /* never let undim crash the caller */ }
             _isPickerOpen = false;
             PickerClosed?.Invoke(this, EventArgs.Empty);
+            if (OnPickerClosedAsync is { } closedAsync)
+            {
+                try { await closedAsync(); }
+                catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] PickerClosedAsync hook failed: {ex.Message}"); }
+            }
+            _pickerClosedSignal?.TrySetResult(null);
+            _pickerClosedSignal = null;
         }
     }
 
@@ -180,6 +294,25 @@ public sealed class CapturePickerService
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+}
+
+/// <summary>
+/// Which kind of picker is being opened. Lets the shell decide whether to
+/// slide the toolbar out of view (Region picker uses the whole screen as a
+/// drag surface) or leave it in place (Window picker only needs clicks on
+/// existing windows).
+/// </summary>
+public enum PickerKind
+{
+    Region,
+    Window,
+}
+
+/// <summary>Event args for <see cref="CapturePickerService.PickerOpening"/>.</summary>
+public sealed class PickerOpeningEventArgs : EventArgs
+{
+    public PickerOpeningEventArgs(PickerKind kind) { Kind = kind; }
+    public PickerKind Kind { get; }
 }
 
 /// <summary>

@@ -227,48 +227,42 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
             // the inline Window/Region selector showing/hiding (spec §4.6).
             RequestRemeasure?.Invoke(this, EventArgs.Empty);
 
-            // Auto-launch the appropriate picker when the user selects a mode
-            if (!_isLoading && !CapturePickerService.Shared.IsPickerOpen)
+            if (_isLoading)
+                return;
+
+            try
             {
-                try
-                {
-                    if (ViewModel.CaptureMode == CaptureMode.Window)
-                        await LaunchWindowPickerAsync();
-                    else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                        await LaunchRegionPickerAsync();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[MiniSetupControl] Picker launch failed: {ex.Message}");
-                }
+                // If a different picker is still open from the previous mode,
+                // cancel it and wait for it to fully close so the next launch
+                // isn't rejected by the re-entrancy guard. Also covers the
+                // "switch to Full Screen while picker open" case — cancel
+                // closes the overlay and we simply don't launch anything new.
+                if (CapturePickerService.Shared.IsPickerOpen)
+                    await CapturePickerService.Shared.CancelActivePickerAsync();
+
+                if (ViewModel.CaptureMode == CaptureMode.Window)
+                    await LaunchWindowPickerAsync();
+                else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
+                    await LaunchRegionPickerAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MiniSetupControl] Picker launch failed: {ex.Message}");
             }
         }
     }
 
     private void UpdateRegionPanelVisibility()
     {
-        if (RegionPanel is not null)
-        {
-            RegionPanel.Visibility = ViewModel.CaptureMode == CaptureMode.CustomRegion
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-
-            if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                UpdateRegionInfoDisplay();
-        }
-
-        if (WindowPanel is not null)
-        {
-            WindowPanel.Visibility = ViewModel.CaptureMode == CaptureMode.Window
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-
-            if (ViewModel.CaptureMode == CaptureMode.Window)
-                UpdateWindowInfoDisplay();
-        }
-
-        // Hide metadata when in FullScreen mode (no selection to show)
-        if (ViewModel.CaptureMode == CaptureMode.FullScreen)
+        // The Region/Window inline buttons were removed (selecting the tab now
+        // auto-launches the picker). This method survives only to refresh the
+        // selection-metadata caption that hosts surface via
+        // SelectionMetadataChanged.
+        if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
+            UpdateRegionInfoDisplay();
+        else if (ViewModel.CaptureMode == CaptureMode.Window)
+            UpdateWindowInfoDisplay();
+        else
             HideSelectionMetadata();
     }
 
@@ -292,16 +286,6 @@ public sealed partial class MiniSetupControl : UserControl, IDimmable
         {
             HideSelectionMetadata();
         }
-    }
-
-    private async void SelectRegionButton_Click(object sender, RoutedEventArgs e)
-    {
-        await LaunchRegionPickerAsync();
-    }
-
-    private async void SelectWindowButton_Click(object sender, RoutedEventArgs e)
-    {
-        await LaunchWindowPickerAsync();
     }
 
     private async Task LaunchWindowPickerAsync()

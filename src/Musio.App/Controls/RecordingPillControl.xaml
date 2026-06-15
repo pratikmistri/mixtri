@@ -15,7 +15,7 @@
             <TextBlock
                 x:Name="ElapsedText"
                 Text="00:00"
-                Foreground="{ThemeResource OverlayForegroundBrush}"
+                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                 FontSize="18"
                 FontWeight="SemiBold"
                 FontFamily="Consolas"
@@ -68,7 +68,7 @@
                 Padding="0"
                 Background="Transparent"
                 BorderThickness="0"
-                Foreground="{ThemeResource OverlayForegroundBrush}"
+                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                 VerticalAlignment="Center"
                 ToolTipService.ToolTip="Expand to full app"
                 AutomationProperties.Name="Expand to full app">
@@ -90,7 +90,7 @@
             </Grid.Clip>
             <TextBlock
                 x:Name="StoppingTextA"
-                Foreground="{ThemeResource OverlayForegroundBrush}"
+                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                 FontSize="16"
                 FontWeight="SemiBold"
                 VerticalAlignment="Center"
@@ -101,7 +101,7 @@
             </TextBlock>
             <TextBlock
                 x:Name="StoppingTextB"
-                Foreground="{ThemeResource OverlayForegroundBrush}"
+                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                 FontSize="16"
                 FontWeight="SemiBold"
                 VerticalAlignment="Center"
@@ -116,7 +116,7 @@
             x:Name="StoppingSpinner"
             Width="18" Height="18"
             IsActive="True"
-            Foreground="{ThemeResource OverlayForegroundBrush}"
+            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
             HorizontalAlignment="Right"
             VerticalAlignment="Center"
             Margin="0,0,7,0"

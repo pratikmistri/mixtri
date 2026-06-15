@@ -68,15 +68,15 @@ public sealed class SelectionRestoreServiceTests
     }
 
     [TestMethod]
-    public void Restore_NoPersistedSelection_DefaultsToRegionAndPicker()
+    public void Restore_NoPersistedSelection_DefaultsToFullScreenWithoutPicker()
     {
         var vm = new RecordingViewModel();
 
         var outcome = Restore(vm, new(null, null, null, false, false, false));
 
-        Assert.AreEqual(CaptureMode.CustomRegion, outcome.AppliedMode);
-        Assert.IsTrue(outcome.AutoLaunchPicker);
-        Assert.AreEqual(CaptureMode.CustomRegion, vm.CaptureMode);
+        Assert.AreEqual(CaptureMode.FullScreen, outcome.AppliedMode);
+        Assert.IsFalse(outcome.AutoLaunchPicker);
+        Assert.AreEqual(CaptureMode.FullScreen, vm.CaptureMode);
     }
 
     private static SelectionRestoreOutcome Restore(

@@ -74,6 +74,6 @@
             FontSize="16"
             Foreground="{ThemeResource OverlayForegroundBrush}"
             IsHitTestVisible="False"
-            Text="Click on a window to select it. Press Escape to cancel." />
+            Text="Click a window to select it. Click Record on the toolbar to start. Esc to cancel." />
     </Grid>
 </UserControl>

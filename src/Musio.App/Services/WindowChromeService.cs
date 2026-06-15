@@ -53,34 +53,51 @@ public static class WindowChromeService
         }
     }
 
+    /// <summary>
+    /// Strip frame styles for full-screen overlay/picker windows. Same
+    /// rationale as <see cref="ApplyMini"/> — kills the 1px lighter
+    /// WS_DLGFRAME edge Win11 draws around any window — but does NOT
+    /// touch the backdrop (overlays paint their own dim/smoke layer).
+    /// </summary>
+    public static void ApplyOverlayChrome(Window window)
+    {
+        if (window is null) throw new ArgumentNullException(nameof(window));
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        var style = (long)GetWindowLong(hwnd, GWL_STYLE);
+        style &= ~(long)(WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_DLGFRAME | WS_BORDER);
+        SetWindowLong(hwnd, GWL_STYLE, (IntPtr)style);
+        uint colorNone = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+
     private static void ApplyMini(Window window)
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
 
-        // Mini Setup must be visible to screenshots/accessibility checks.
-        // Recording states opt into WDA_EXCLUDEFROMCAPTURE via
-        // SetCaptureExclusion when they need to stay out of recordings.
         SetWindowDisplayAffinity(hwnd, WDA_NONE);
 
-        // Remove DWM-drawn border and caption
-        uint colorNone = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
-        uint colorCaption = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref colorCaption, sizeof(uint));
-
-        // Strip WS_BORDER and WS_DLGFRAME from the window style
+        // Strip ALL frame styles. The thin 1px lighter edge users were
+        // seeing was Win11's WS_DLGFRAME border rendered by DWM in the
+        // active-window accent colour. WinUI's SystemBackdrop=MicaBackdrop
+        // (set in AppShellWindow.UpdateBackdropFor) initialises the Mica
+        // compositor BEFORE we reach this strip, so Mica keeps rendering
+        // even without WS_DLGFRAME.
         var style = (long)GetWindowLong(hwnd, GWL_STYLE);
-        style &= ~(long)(WS_BORDER | WS_DLGFRAME);
+        style &= ~(long)(WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_DLGFRAME | WS_BORDER);
         SetWindowLong(hwnd, GWL_STYLE, (IntPtr)style);
 
-        // Round the window corners at the OS level for a pill shape
+        // Belt-and-suspenders: also tell DWM not to paint any border
+        // (COLOR_NONE) in case the compositor still draws an active-window
+        // accent line.
+        uint colorNone = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref colorNone, sizeof(uint));
+
         uint roundPreference = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
 
-        // Force the non-client area to recompute now that the style flipped.
-        // Without SWP_FRAMECHANGED the frame can stay stale until the next
-        // move/resize, which matters for the Full <-> FullRecording no-morph
-        // path where MoveAndResize never fires.
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
@@ -133,6 +150,12 @@ public static class WindowChromeService
         SetWindowDisplayAffinity(hwnd, exclude ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE);
     }
 
+    private const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    private const uint DWMSBT_NONE = 1;
+    private const uint DWMSBT_MAINWINDOW = 2;
+    private const uint DWMSBT_TRANSIENTWINDOW = 3;
+    private const uint DWMSBT_TABBEDWINDOW = 4;
     private const uint WDA_NONE = 0x00000000;
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
     private const int DWMWA_BORDER_COLOR = 34;
@@ -144,6 +167,9 @@ public static class WindowChromeService
     private const int GWL_STYLE = -16;
     private const int WS_BORDER = 0x00800000;
     private const int WS_DLGFRAME = 0x00400000;
+    private const int WS_THICKFRAME = 0x00040000;
+    private const int WS_CAPTION = 0x00C00000;
+    private const int WS_SYSMENU = 0x00080000;
 
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
@@ -155,6 +181,18 @@ public static class WindowChromeService
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS pMarInset);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MARGINS
+    {
+        public int cxLeftWidth;
+        public int cxRightWidth;
+        public int cyTopHeight;
+        public int cyBottomHeight;
+    }
 
     // Use the *Ptr variants so the LONG_PTR return/parameter is the natural
     // 8-byte width on x64 (the int versions silently truncated the top half).

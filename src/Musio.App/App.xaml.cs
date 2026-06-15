@@ -224,13 +224,15 @@ public partial class App : Application
             _ = _window.SummonAsync();
             _ = HandleNewRecordingRequestAsync(initialMode);
         }
-        else if (initialState == AppShellState.MiniSetup
-                 && restoreOutcome is { AutoLaunchPicker: true })
-        {
-            // Spec §3.1: first launch (or remembered window gone) → auto-launch
-            // the appropriate picker as soon as the toolbar is shown.
-            _ = LaunchPickerForCurrentModeAsync();
-        }
+        // NOTE: we intentionally no longer auto-launch the region/window picker
+        // on launch when SelectionRestoreOutcome.AutoLaunchPicker is true. The
+        // picker capture is heavy (BitBlt of the virtual desktop) and running
+        // it on the launch path made the app feel slow AND surfaced a stale
+        // frame because the screenshot was taken before the desktop had fully
+        // painted. The toolbar now appears immediately pre-selected for the
+        // intended mode; the user explicitly clicks the picker affordance when
+        // they're ready. CLI `--new-recording=region|window` still launches
+        // the picker because the user opted in via the flag.
 
         if (restoreOutcome?.RegionDiscardedReason is { Length: > 0 } discardReason)
         {
@@ -409,8 +411,13 @@ public partial class App : Application
         }
 
         // User clicked the window's X — minimize to tray + one-shot balloon.
+        // Before hiding, pre-configure the shell into MiniSetup so the next
+        // summon doesn't first paint a stale Full layout (eliminates the
+        // flash the user sees when the hotkey brings the toolbar back).
         args.Cancel = true;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        try { _window.PrepareForSummonInBackground(); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[App] PrepareForSummon failed: {ex.Message}"); }
         ShowWindow(hwnd, SW_HIDE);
         try { _trayService.ShowCloseToTrayBalloon(); } catch { }
     }

@@ -60,12 +60,14 @@ public static class SelectionRestoreService
         var savedMode = settings.LastCaptureMode;
         if (savedMode is null)
         {
-            // First launch ever (spec §3.1 / §7 Resolution 7): pick Region
-            // and tell the caller to auto-launch the picker.
-            viewModel.CaptureMode = CaptureMode.CustomRegion;
+            // First launch ever: default to FullScreen (the safest/zero-config
+            // capture mode — no picker required). Earlier we defaulted to
+            // CustomRegion + auto-launched the region picker, but that made the
+            // app feel slow on first run.
+            viewModel.CaptureMode = CaptureMode.FullScreen;
             return new SelectionRestoreOutcome(
-                CaptureMode.CustomRegion,
-                AutoLaunchPicker: true,
+                CaptureMode.FullScreen,
+                AutoLaunchPicker: false,
                 RegionDiscardedReason: null);
         }
 

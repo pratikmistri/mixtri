@@ -83,10 +83,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         var lastRegion = _regionSelector.LoadLastRegion();
-        if (lastRegion != null)
-        {
-            UseLastButton.Visibility = Visibility.Visible;
-        }
 
         // Pre-render the caller-supplied region (or fall back to the persisted
         // last region) so the user opens to their existing selection rather
@@ -161,11 +157,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _selW = overlayW;
         _selH = overlayH;
         _hasSelection = true;
-
-        // Pre-rendered selections need the Confirm/Cancel buttons immediately —
-        // they're normally only shown on pointer-up of a fresh drag.
-        if (ButtonPanel is not null)
-            ButtonPanel.Visibility = Visibility.Visible;
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -228,6 +219,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
             presenter.IsMaximizable = false;
             presenter.IsMinimizable = false;
         }
+        Musio_App.Services.WindowChromeService.ApplyOverlayChrome(_hostWindow);
 
         // Position and size the window to span the entire virtual desktop
         // (all monitors) in physical pixels. This matches the dimensions of
@@ -435,12 +427,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (sw <= 0 || sh <= 0)
         {
             // Degenerate selection (entirely off-screen) — clear selection
-            // state so Confirm/Cancel buttons hide and the next pointer-down
-            // starts a fresh drag rather than resizing the invisible region.
+            // state so the next pointer-down starts a fresh drag rather than
+            // resizing the invisible region.
             _hasSelection = false;
             _selX = _selY = _selW = _selH = 0;
-            if (ButtonPanel is not null)
-                ButtonPanel.Visibility = Visibility.Collapsed;
 
             // Show the blank overlay so the user can drag a new one.
             Canvas.SetLeft(TopMask, 0);
@@ -692,12 +682,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
                     SnapSelectionEdges(snapLeft: true, snapTop: true, snapRight: true, snapBottom: true);
                 if (activeDragBounds is Rect bounds)
                     ClampSelectionToRect(bounds);
-                ButtonPanel.Visibility = Visibility.Visible;
             }
             else
             {
                 _hasSelection = false;
-                ButtonPanel.Visibility = Visibility.Collapsed;
             }
 
             UpdateOverlay();
@@ -909,16 +897,24 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     #region Confirmation / cancellation
 
-    private void ConfirmButton_Click(object sender, RoutedEventArgs e) => ConfirmSelection();
-
-    private void UseLastButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Programmatically commit whatever selection is currently drawn — used
+    /// by the toolbar's Record button to confirm-and-record in one click,
+    /// replacing the old in-overlay Confirm button. Returns true when a
+    /// selection existed (and the picker has been completed); false when
+    /// nothing is drawn (caller should show a hint or wait for the user to
+    /// drag).
+    /// </summary>
+    public bool TryConfirmCurrent()
     {
-        var lastRegion = _regionSelector.LoadLastRegion();
-        if (lastRegion is not null)
-            CompleteWithRegion(lastRegion);
+        if (!_hasSelection)
+            return false;
+        ConfirmSelection();
+        return true;
     }
 
-    private void CancelButton_Click(object sender, RoutedEventArgs e) => CancelSelection();
+    /// <summary>Programmatically cancel — used by hosts that switch tabs.</summary>
+    public void Cancel() => CancelSelection();
 
     private void OnEscapePressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {

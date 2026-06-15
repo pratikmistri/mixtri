@@ -25,23 +25,7 @@
             </TitleBar.IconSource>
 
             <TitleBar.Content>
-                <Grid Width="1024" Height="48" HorizontalAlignment="Stretch">
-                    <Button
-                        x:Name="CollapseButton"
-                        Visibility="Visible"
-                        Click="CollapseButton_Click"
-                        Width="36" Height="36" Padding="0"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Center"
-                        Margin="0,0,138,0"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        ToolTipService.ToolTip="Collapse to Mini"
-                        AutomationProperties.Name="Collapse to Mini"
-                        AutomationProperties.HelpText="Collapse the full app into the compact mini toolbar">
-                        <FontIcon Glyph="&#xE73F;" FontSize="14" />
-                    </Button>
-                </Grid>
+                <Grid Height="48" HorizontalAlignment="Stretch" />
             </TitleBar.Content>
 
         </TitleBar>
@@ -75,9 +59,28 @@
             <Frame x:Name="NavFrame" />
         </NavigationView>
 
-        <!-- Right-aligned docked-pill action area. The static Full collapse
-             button lives in TitleBar.Content so it participates in title-bar
-             hit testing next to the caption controls. -->
+        <!-- Static Full collapse button — anchored 150 px from the right edge
+             of the window so it sits immediately left of the system caption
+             controls regardless of window width. (Lived inside
+             TitleBar.Content before, but that slot is sized between the title
+             and caption area and got clipped on narrow windows.) -->
+        <Button
+            x:Name="CollapseButton"
+            Grid.Row="0"
+            Click="CollapseButton_Click"
+            Width="36" Height="36" Padding="0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            Margin="0,0,150,0"
+            Background="Transparent"
+            BorderThickness="0"
+            ToolTipService.ToolTip="Collapse to Mini"
+            AutomationProperties.Name="Collapse to Mini"
+            AutomationProperties.HelpText="Collapse the full app into the compact mini toolbar">
+            <FontIcon Glyph="&#xE73F;" FontSize="14" />
+        </Button>
+
+        <!-- Right-aligned docked-pill action area. -->
         <Grid
             Grid.Row="0"
             MinWidth="36"
@@ -112,24 +115,6 @@
             </StackPanel>
         </Grid>
 
-        <Canvas Grid.RowSpan="2">
-            <Button
-                x:Name="CollapseOverlayButton"
-                Visibility="Visible"
-                Click="CollapseButton_Click"
-                Width="36"
-                Height="36"
-                Padding="0"
-                Canvas.Left="850"
-                Canvas.Top="6"
-                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                BorderThickness="1"
-                ToolTipService.ToolTip="Collapse to Mini"
-                AutomationProperties.Name="Collapse to Mini"
-                AutomationProperties.HelpText="Collapse the full app into the compact mini toolbar">
-                <FontIcon Glyph="&#xE73F;" FontSize="14" />
-            </Button>
-        </Canvas>
+        <Canvas Grid.RowSpan="2" />
     </Grid>
 </UserControl>
