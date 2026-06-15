@@ -70,7 +70,10 @@ public sealed partial class MiniSetupControl : UserControl
     private static void OnIsExpandButtonVisibleChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is MiniSetupControl control)
+        {
             control.Bindings.Update();
+            control.UpdateExpandEnabled();
+        }
     }
 
     /// <summary>
@@ -120,7 +123,58 @@ public sealed partial class MiniSetupControl : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
         KeyDown += OnKeyDown;
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        // Keep the segmented control in sync with shared VM state regardless
+        // of which MiniSetupControl instance flipped CaptureMode (Full-state
+        // RecordingPage hosts a separate instance from AppShellWindow). Run
+        // on the UI thread; defensive against early-init notifications.
+        if (e.PropertyName == nameof(RecordingViewModel.CaptureMode))
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (CaptureModeSelector is null) return;
+                var prev = _isLoading;
+                _isLoading = true; // suppress picker re-launch from SelectionChanged
+                try { SelectCaptureModeSegment(ViewModel.CaptureMode); }
+                finally { _isLoading = prev; }
+                UpdateRegionPanelVisibility();
+                UpdateExpandEnabled();
+            });
+            return;
+        }
+
+        if (e.PropertyName == nameof(RecordingViewModel.HasSelectedRegion)
+            || e.PropertyName == nameof(RecordingViewModel.SelectedWindow))
+        {
+            DispatcherQueue.TryEnqueue(UpdateExpandEnabled);
+        }
+    }
+
+    /// <summary>
+    /// Programmatically set the Expand button's IsEnabled state. Called from
+    /// the VM PropertyChanged listener (CaptureMode / HasSelectedRegion /
+    /// SelectedWindow) and from OnLoaded. We do this in code rather than
+    /// via x:Bind because the x:Bind function form with nested ViewModel
+    /// paths through a non-DP getter was not re-evaluating reliably.
+    /// </summary>
+    private void UpdateExpandEnabled()
+    {
+        if (ExpandButton is null) return;
+        ExpandButton.IsEnabled = ComputeExpandEnabled(
+            ViewModel.CaptureMode,
+            ViewModel.HasSelectedRegion,
+            ViewModel.SelectedWindow);
     }
 
     private void OnKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -139,6 +193,7 @@ public sealed partial class MiniSetupControl : UserControl
     {
         SelectCaptureModeSegment(ViewModel.CaptureMode);
         UpdateRegionPanelVisibility();
+        UpdateExpandEnabled();
         _isLoading = false;
         DispatcherQueue.TryEnqueue(() => Focus(FocusState.Programmatic));
     }
@@ -176,6 +231,19 @@ public sealed partial class MiniSetupControl : UserControl
     public Visibility InvertBoolToVisibility(bool value) =>
         value ? Visibility.Collapsed : Visibility.Visible;
 
+    // x:Bind helper: Expand button enablement. Disabled once the user has
+    // already chosen a region/window so the next gesture is "Record". A
+    // picker may be open at the time — that's intentional: if the user
+    // explicitly wants to expand mid-pick, OnMiniSetupExpandRequested
+    // cancels the picker safely. Resetting the selection (HasSelectedRegion
+    // -> false or SelectedWindow -> null) re-enables Expand immediately.
+    public bool ComputeExpandEnabled(CaptureMode mode, bool hasRegion, WindowInfo? window)
+    {
+        if (mode == CaptureMode.CustomRegion) return !hasRegion;
+        if (mode == CaptureMode.Window) return window is null;
+        return true;
+    }
+
     // x:Bind helper: separator + inline Record/Stop visible only when the
     // host opted in via ShowInlineRecordButton.
     public Visibility ShowInlineRecordVisibility(bool show) =>
@@ -209,25 +277,62 @@ public sealed partial class MiniSetupControl : UserControl
             if (_isLoading)
                 return;
 
-            try
-            {
-                // If a different picker is still open from the previous mode,
-                // cancel it and wait for it to fully close so the next launch
-                // isn't rejected by the re-entrancy guard. Also covers the
-                // "switch to Full Screen while picker open" case — cancel
-                // closes the overlay and we simply don't launch anything new.
-                if (CapturePickerService.Shared.IsPickerOpen)
-                    await CapturePickerService.Shared.CancelActivePickerAsync();
+            await LaunchPickerForModeAsync(parsedMode);
+        }
+    }
 
-                if (ViewModel.CaptureMode == CaptureMode.Window)
-                    await LaunchWindowPickerAsync();
-                else if (ViewModel.CaptureMode == CaptureMode.CustomRegion)
-                    await LaunchRegionPickerAsync();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[MiniSetupControl] Picker launch failed: {ex.Message}");
-            }
+    /// <summary>
+    /// Handle taps on a <see cref="CommunityToolkit.WinUI.Controls.SegmentedItem"/>
+    /// even when it's already selected. <see cref="ListViewBase.SelectionChanged"/>
+    /// only fires when the selection actually changes — so a user who dismissed
+    /// the picker (Cancel/Esc) and then re-clicks the same tab would otherwise
+    /// see nothing happen. This handler re-launches the picker for the tapped
+    /// mode if no selection currently exists for it.
+    /// </summary>
+    private async void SegmentedItem_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    {
+        if (_isLoading) return;
+        if (sender is not FrameworkElement fe || fe.Tag is not string tag) return;
+        if (!Enum.TryParse<CaptureMode>(tag, out var tappedMode)) return;
+
+        // If the tap is going to change the segment, let SelectionChanged
+        // handle the picker launch — don't double-launch.
+        if (tappedMode != ViewModel.CaptureMode) return;
+
+        // Same-mode re-tap: only relaunch if there's no current selection
+        // for that mode (i.e. the user dismissed it and wants to try again).
+        bool needsSelection = tappedMode switch
+        {
+            CaptureMode.CustomRegion => !ViewModel.HasSelectedRegion,
+            CaptureMode.Window => ViewModel.SelectedWindow is null,
+            _ => false,
+        };
+        if (!needsSelection) return;
+        if (CapturePickerService.Shared.IsPickerOpen) return;
+
+        await LaunchPickerForModeAsync(tappedMode);
+    }
+
+    private async Task LaunchPickerForModeAsync(CaptureMode mode)
+    {
+        try
+        {
+            // If a different picker is still open from the previous mode,
+            // cancel it and wait for it to fully close so the next launch
+            // isn't rejected by the re-entrancy guard. Also covers the
+            // "switch to Full Screen while picker open" case — cancel
+            // closes the overlay and we simply don't launch anything new.
+            if (CapturePickerService.Shared.IsPickerOpen)
+                await CapturePickerService.Shared.CancelActivePickerAsync();
+
+            if (mode == CaptureMode.Window)
+                await LaunchWindowPickerAsync();
+            else if (mode == CaptureMode.CustomRegion)
+                await LaunchRegionPickerAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MiniSetupControl] Picker launch failed: {ex.Message}");
         }
     }
 
@@ -269,48 +374,25 @@ public sealed partial class MiniSetupControl : UserControl
 
     private async Task LaunchWindowPickerAsync()
     {
-        // Snapshot prior state so we can replicate the "kept previous window"
-        // hint analogous to the region path — only fire the InfoBar when the
-        // picker was actually shown and the user explicitly cancelled.
-        bool hadPriorWindow = ViewModel.SelectedWindow is not null;
+        // Phase C: every dismiss preserves the latest selection (click commits
+        // immediately, Esc just closes the picker without resetting). The
+        // old "kept previous window" infobar from the Confirm/Cancel era is
+        // gone — the toolbar's caption already reflects current state.
         var window = GetHostWindow();
         var result = await CapturePickerService.Shared.PickWindowAsync(window);
-
-        switch (result)
-        {
-            case PickerResult.Selected:
-                UpdateWindowInfoDisplay();
-                break;
-            case PickerResult.Cancelled when hadPriorWindow && ViewModel.SelectedWindow is not null:
-                TransientInfoRequested?.Invoke(this,
-                    "Window selection cancelled \u2014 kept previous window.");
-                break;
-            // PickerResult.AlreadyOpen: silent no-op — no picker was shown,
-            // nothing changed, so do NOT surface a "kept previous" message.
-        }
+        if (result == PickerResult.Selected) UpdateWindowInfoDisplay();
     }
 
     private async Task LaunchRegionPickerAsync()
     {
-        // Snapshot prior state so we can replicate the "kept previous region"
-        // hint that used to live in RecordingPage.LaunchRegionPickerAsync —
-        // only fire the InfoBar on an actual user cancel (PickerResult.Cancelled),
-        // never on an AlreadyOpen re-entrancy rejection where no picker was shown.
-        bool hadPriorRegion = ViewModel.HasSelectedRegion;
+        // Phase C: drag-end commits + persists. Esc just closes the picker
+        // without clearing, so a Cancelled result no longer implies "user
+        // kept previous region" — it may also be "user committed a fresh
+        // region then pressed Esc". The infobar is therefore omitted; the
+        // toolbar's region caption reflects current state immediately.
         var window = GetHostWindow();
         var result = await CapturePickerService.Shared.PickRegionAsync(window);
-
-        switch (result)
-        {
-            case PickerResult.Selected:
-                UpdateRegionInfoDisplay();
-                break;
-            case PickerResult.Cancelled when hadPriorRegion && ViewModel.HasSelectedRegion:
-                TransientInfoRequested?.Invoke(this,
-                    "Region selection cancelled \u2014 kept previous region.");
-                break;
-            // PickerResult.AlreadyOpen: silent no-op.
-        }
+        if (result == PickerResult.Selected) UpdateRegionInfoDisplay();
     }
 
     private Window? GetHostWindow()

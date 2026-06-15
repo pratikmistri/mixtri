@@ -2387,3 +2387,236 @@ Build PASS, tests **286/286 PASS**, sanity launch PASS for both `Full` and `Mini
 **What didn't work:** Deferring `InitializePreviewAsync` from `EditorPage` ctor to the `Loaded` event was a reasonable hygiene change but did NOT fix the empty-preview symptom on its own — the actual issue was that `video.mp4` never existed on disk. Kept the Loaded-deferral anyway since it's correct (the ctor ran before the visual tree was attached so `Timeline.SetThumbnails` could have silently no-op'd in edge cases).
 
 **Lesson:** When the recording-flow code moves between shells (Full → Mini), any responsibility wired to a specific page's lifecycle (e.g. `RecordingPage.OnNavigatedTo`) needs to be hoisted to a shell-agnostic owner (`AppShellWindow` or a service) — otherwise the new shell silently loses that behavior.
+
+---
+
+## Hotkey summon: restore inline picker with previous selection
+
+**Feature/area:** `App.OnHotkeyPressed` summon path.
+
+**Problem:** Pressing the global hotkey (Ctrl+Shift+R) while not recording slid the MiniSetup toolbar in, but if the previous capture mode was Region or Window, the picker smoke (with the last selection pre-seeded) did NOT appear. The user had to click the segment to re-trigger the picker.
+
+**Root cause:** `OnHotkeyPressed` called `_window.SummonAsync()` only. `SummonAsync` transitions the shell to `MiniSetup` and focuses the Record button, but the picker is launched by `MiniSetupControl.CaptureModeSelector_SelectionChanged` â€” which doesnâ€™t fire when the segment is already on the previous value. A no-op helper `LaunchPickerForCurrentModeAsync` already existed in `App.xaml.cs` but was never invoked.
+
+**What worked:** After `await _window.SummonAsync()` in the hotkey handler, call `await LaunchPickerForCurrentModeAsync()`. That helper inspects `RecordingViewModel.Shared.CaptureMode` and calls `CapturePickerService.Shared.PickRegionAsync` / `PickWindowAsync` accordingly. `RegionSelectorOverlay` already pre-seeds the last region via `_regionSelector.LoadLastRegion()` in its loaded path, so the picker comes up with the previous rectangle drawn. Stop-recording branch unchanged.
+
+**What didnâ€™t work:** Considered auto-launching the picker from inside `SummonAsync` itself, but that path is also used by `--new-recording` CLI and tray menu â€” both of which already explicitly drive the picker through `HandleNewRecordingRequestAsync`. Doing it in `OnHotkeyPressed` keeps the responsibility scoped to the user-facing summon gesture without double-launching in CLI/tray flows. `CapturePickerService.IsPickerOpen` would safely guard duplicates anyway, but avoiding redundant calls is cleaner.
+
+---
+
+## Expand from MiniSetup with active picker leaves dual toolbars
+
+**Feature/area:** `AppShellWindow.OnMiniSetupExpandRequested`.
+
+**Problem:** With the Region (or Window) picker open and a region drawn, clicking the Expand button morphed the window to Full size but left the picker overlay alive. Result: Mini toolbar pinned at top of screen (with picker hint text), Full shell rendered underneath â€” unusable.
+
+**Root cause:** Expand handler called `TransitionToAsync(Full)` without cancelling the picker. `CapturePickerService` ownership outlives the host shellâ€™s state because the picker is a separate top-level overlay window.
+
+**What worked:** Guard at the top of `OnMiniSetupExpandRequested`: `if (CapturePickerService.Shared.IsPickerOpen) await CapturePickerService.Shared.CancelActivePickerAsync();` before computing/applying the next state. Same pattern already used by `MiniSetupControl.CaptureModeSelector_SelectionChanged` when switching capture modes.
+
+**What didnâ€™t work:** Considered hiding the picker overlay while keeping its state so re-collapse would re-open it. Too much complexity for a low-frequency path; the picker is cheap to re-launch and the last selection is already pre-seeded by `RegionSelectorOverlay`. Pill Expand path (`OnPillExpandRequested`) doesnâ€™t need the same guard â€” the picker can only be open before recording starts, never during.
+
+---
+
+## Full-state picker should morph to MiniSetup, not minimize
+
+**Feature/area:** `AppShellWindow.OnPickerOpeningAsyncHook`, `MiniSetupControl.ExpandButton`.
+
+**Problem:** In Full state, opening the Region/Window picker minimized the shell to the taskbar (legacy `RegionSelectorOverlay`/`WindowSelectorOverlay` `SW_MINIMIZE` behavior). After selecting, the user had no toolbar surface to hit Record from â€” they had to restore the app first.
+
+**What worked:** In `OnPickerOpeningAsyncHook`, if `_currentState == AppShellState.Full` `await TransitionToAsync(AppShellState.MiniSetup)` before the picker shows. The picker overlays already special-case MiniSetup (`keepShellVisible` check on `mainWindow is AppShellWindow shell && shell.CurrentState == MiniSetup`) and skip the `SW_MINIMIZE` call. So no overlay change needed â€” the morph alone is enough. After the picker closes, the user is left in MiniSetup with the selection ready and one click away from Record.
+
+**Companion change:** Disabled `MiniSetupControl.ExpandButton` when a selection already exists for the current mode (`HasSelectedRegion` for `CustomRegion`, `SelectedWindow != null` for `Window`; always enabled for `FullScreen`). Implemented via x:Bind to `ComputeExpandEnabled(ViewModel.CaptureMode, ViewModel.HasSelectedRegion, ViewModel.SelectedWindow)`. Prevents the user from accidentally morphing back to Full mid-setup and losing the picker context.
+
+**What didnâ€™t work:** Tried hiding the Expand button entirely when a selection existed â€” jarring layout shift in the toolbar. Disabling (greying) the button keeps the slot stable and communicates intent better. Also considered keeping the legacy minimize for Full but switching the post-pick destination â€” more state to track and the morph-down is a smoother UX.
+
+---
+
+## MiniSetup picker/segment-control consistency pass
+
+**Feature/area:** `MiniSetupControl`, `AppShellWindow.ApplyStateFlags`.
+
+**Bugs reported:**
+1. With Region picker open and a rectangle drawn (but not yet committed via Record), the Expand button was still clickable â€” the prior `ComputeExpandEnabled(HasSelectedRegion, SelectedWindow)` only looked at the VMâ€™s committed selection state, which a picker overlay doesnâ€™t set until `PickerResult.Selected`.
+2. Switching capture mode from inside the Full-state RecordingPageâ€™s `MiniSetupControl` triggered a Full ? MiniSetup morph (via the new `OnPickerOpeningAsyncHook`), but the AppShellWindowâ€™s own MiniSetup `Segmented` showed the previous mode â€” itâ€™s a separate control instance and was never re-synced.
+3. Re-clicking the already-selected segment (after dismissing the picker) did nothing â€” `Segmented.SelectionChanged` only fires when the selection actually changes.
+
+**What worked:**
+1. `MiniSetupControl` now subscribes to `CapturePickerService.Shared.PickerOpening/PickerClosed` and exposes `IsPickerActive` as a DP. `ComputeExpandEnabled` takes that flag too, so Expand goes disabled the moment a picker opens, irrespective of whether the user has dragged a region yet. Unsubscribe on `Unloaded`.
+2. `AppShellWindow.ApplyStateFlags` now calls `MiniSetup.SyncCaptureModeFromViewModel()` whenever the destination state is `MiniSetup`. `ApplyStateFlags` runs before every transition and on the â€œno-opâ€ path, so the segment lands on the right tab regardless of who flipped `CaptureMode`.
+3. Added `Tapped="SegmentedItem_Tapped"` on each `ctk:SegmentedItem` plus a handler that no-ops unless (a) the tapped mode matches the current VM mode (otherwise SelectionChanged owns it), (b) no selection exists for that mode, and (c) no picker is currently open. In that narrow case it calls a new shared `LaunchPickerForModeAsync` helper. The original SelectionChanged path now also funnels through this helper.
+
+**What didnâ€™t work:** Considered hiding Expand entirely while `IsPickerActive` â€” still leaves the layout slot, but the disabled greyed state already communicates intent and avoids a flash. Considered subscribing to `RegionSelectorOverlay`-level events (`selection drawn`) to drive Expand state â€” far too coupled; the global `PickerOpening/Closed` events are sufficient.
+
+---
+
+## MiniSetup Expand re-enable on selection reset + bidirectional segment sync
+
+**Feature/area:** `MiniSetupControl`.
+
+**Bugs reported:**
+1. Expand remained disabled even after the user reset the selection because the previous fix gated it on `IsPickerActive` â€” the picker could still be open mid-reset, keeping Expand greyed out.
+2. Switching capture mode in MiniSetup didnâ€™t propagate to the Full-state RecordingPageâ€™s `MiniSetupControl` segment (or vice-versa). Example: user picks Full Screen in mini, then expands â€” the Full shell still showed the previous Region segment on the inline `MiniSetupControl`.
+
+**What worked:**
+1. Dropped `IsPickerActive` (and its event subscriptions / DP) from `ComputeExpandEnabled`. The button now depends purely on the committed selection (`HasSelectedRegion` / `SelectedWindow`). `OnMiniSetupExpandRequested` already cancels any open picker before transitioning, so an Expand mid-pick is now an explicit, supported escape hatch rather than a footgun.
+2. Subscribed every `MiniSetupControl` instance to `RecordingViewModel.PropertyChanged(CaptureMode)` in its constructor; on a notification, the handler dispatches to UI thread and calls `SelectCaptureModeSegment`. Both MiniSetup instances (AppShellWindowâ€™s and RecordingPageâ€™s) share `RecordingViewModel.Shared`, so one notification keeps both segments aligned regardless of which one the user clicked. Wraps the call in a temporary `_isLoading = true` so the resulting `SelectionChanged` doesnâ€™t re-launch the picker.
+
+**What didnâ€™t work:** Considered exposing a `HasUncommittedSelection` signal from the picker overlays to drive Expand. Too much extra plumbing for the gain â€” explicit committed-state is a cleaner contract. Also considered manually calling `SyncCaptureModeFromViewModel` at each state transition (kept in `ApplyStateFlags` as belt-and-suspenders), but a global VM listener avoids forgetting any future transition path.
+
+---
+
+## Region/Window picker invisible behind normal windows in Mini mode
+
+**Feature/area:** `RegionSelectorOverlay`, `WindowSelectorOverlay`.
+
+**Bug:** In Mini mode, opening the Region (or Window) picker showed only the instruction text near the top of the screen â€” no dim/smoke overlay and the user couldn't interact with the picker. Any other foreground app (terminal, browser) appeared on top of the picker, hiding it.
+
+**Root cause:** Both overlays set `presenter.IsAlwaysOnTop = !keepShellVisible` so in Mini mode (`keepShellVisible == true`) the overlay was non-topmost. After `_hostWindow.Activate()` followed by `mainWindow?.Activate()` (to re-focus the mini shell), the overlay window dropped behind any normal-z-order windows that happened to be foreground â€” the user only saw it where it bled through (the very top strip beside the mini toolbar).
+
+**What worked:** Set `presenter.IsAlwaysOnTop = true` unconditionally in both overlays. The mini shell is also configured as always-on-top via `OverlappedPresenter.IsAlwaysOnTop` and gets activated *after* the overlay, so it still lands above the overlay in z-order â€” both topmost windows coexist fine. Now the overlay reliably sits above any other normal-z-order app.
+
+**What didnâ€™t work:** Considered not re-activating the mini shell after the overlay (`mainWindow?.Activate()` removal) â€” but the shell loses focus and Esc/keyboard input go to the wrong window. Easier and safer to just make the overlay topmost too.
+
+---
+
+## Mini toolbar buried under picker overlay smoke
+
+**Feature/area:** `RegionSelectorOverlay`, `WindowSelectorOverlay` (post-activation z-order).
+
+**Bug:** After making both pickers topmost (previous fix), the mini toolbar was now buried under the picker dim. The user could see what looked like the toolbar (it was actually the toolbarâ€™s likeness baked into the picker screenshot) but couldnâ€™t click Record.
+
+**Root cause:** Activation order was `_hostWindow.Activate()` then `mainWindow?.Activate()` â€” but `Window.Activate()` doesnâ€™t reliably swap z-order when the just-activated window (the picker) is also topmost and currently has foreground. Windows refuses many focus-steal attempts so the shell stays below.
+
+**What worked:** Replaced the second `mainWindow.Activate()` with a direct `SetWindowPos(shellHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)`. `SWP_NOACTIVATE` keeps keyboard focus on the picker (so Escape and the low-level keyboard hook still work) while raising the shell to the top of the topmost band so the real toolbar is visible/clickable above the picker smoke. Falls back to `Activate()` if the P/Invoke throws. Added the necessary `SetWindowPos` P/Invoke + `HWND_TOPMOST` / `SWP_*` consts to both overlays.
+
+**What didnâ€™t work:** Plain `mainWindow.Activate()` alone (focus-steal blocked). Considered turning the shell into a child of the overlay (would lose Mica + tray hookups). Considered hiding the shell during pick (defeats the whole "Record from toolbar" UX).
+
+### Mini shell reliably topmost; pickers non-topmost when shell visible (2026-06-14)
+**Approaches tried:** (1) Both shell + picker IsAlwaysOnTop=true with SetWindowPos re-raise of shell — fragile, two topmost windows still race and the shell sometimes ended up buried under the picker dim. User reported toolbar unreachable. (2) Switched picker to NON-topmost when keepShellVisible=true; mini shell stays topmost. With only one topmost window in play, z-order is deterministic — mini shell is naturally above picker, and picker's fullscreen screenshot already hides everything beneath.
+**What worked:** RegionSelectorOverlay/WindowSelectorOverlay now set `presenter.IsAlwaysOnTop = !keepShellVisible`. Also added `ForceTopmost()` helper in AppShellWindow that calls `SetWindowPos(hwnd, HWND_TOPMOST, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)` after every Mini state ApplyPresenterFor — belt-and-suspenders for cases where `OverlappedPresenter.IsAlwaysOnTop = true` doesn't actually move the HWND into the topmost band (e.g., after Full→Mini transition).
+**What didn't work:** Relying on Window.Activate() to swap z-order between two topmost windows — Windows refuses focus-steal from a freshly-foregrounded topmost picker, leaving the shell buried. Relying solely on `OverlappedPresenter.IsAlwaysOnTop = true` to keep the mini shell above ALL other apps — inconsistent in practice.
+
+### Expand-button disabled-on-selection regression: force Bindings.Update() (2026-06-14)
+**Approaches tried:** (1) Relied solely on `x:Bind ComputeExpandEnabled(ViewModel.CaptureMode, ViewModel.HasSelectedRegion, ViewModel.SelectedWindow), Mode=OneWay` to re-evaluate when the VM properties change. In practice the binding sometimes did not refresh after picker completion — the ExpandButton stayed enabled even with a region selected. Likely an x:Bind quirk with function arguments using nested `ViewModel.X` paths against a non-DP `ViewModel` getter (returns the Shared singleton).
+**What worked:** Extended `MiniSetupControl.OnViewModelPropertyChanged` to also handle `HasSelectedRegion` and `SelectedWindow` notifications and explicitly call `Bindings.Update()` from the dispatcher. This pushes a re-evaluation of every x:Bind function on the control, guaranteeing the ExpandButton's IsEnabled refreshes immediately when the selection state changes.
+**What didn't work:** Relying purely on x:Bind auto-subscription for function bindings whose inputs are nested paths through a non-observable wrapper property. Safer pattern: subscribe to VM PropertyChanged + Bindings.Update() for any x:Bind function whose result must flip on those properties.
+
+### Set ExpandButton.IsEnabled programmatically instead of x:Bind function (2026-06-14)
+**Approaches tried:** (1) `IsEnabled={x:Bind ComputeExpandEnabled(ViewModel.CaptureMode, ViewModel.HasSelectedRegion, ViewModel.SelectedWindow), Mode=OneWay}` — did not refresh after selection committed. (2) Added VM PropertyChanged handler that called `Bindings.Update()` — still did not flip IsEnabled in practice. (3) **Removed the IsEnabled x:Bind entirely and now set `ExpandButton.IsEnabled` programmatically** from a single `UpdateExpandEnabled()` helper called from: VM PropertyChanged (CaptureMode/HasSelectedRegion/SelectedWindow), OnLoaded, and OnIsExpandButtonVisibleChanged.
+**What worked:** Direct programmatic IsEnabled assignment — eliminates the x:Bind function-with-nested-paths edge case and is trivially debuggable.
+**What didn't work:** x:Bind functions whose arguments are nested `Wrapper.NestedINPC.Property` paths, where `Wrapper` is a non-DP getter returning a Shared singleton — the inner PropertyChanged subscription is unreliable in WinUI 3 even when the wrapper instance never changes. `Bindings.Update()` from VM PropertyChanged also did not consistently refresh the function binding.
+
+### Drag-end commits region to VM (Phase C no-confirm-button UX) (2026-06-14)
+**Approaches tried:** (1) Kept HasSelectedRegion=false until the user pressed Record/Enter, then tried to gate ExpandButton via various binding patterns. Brittle — required picker-active tracking, Bindings.Update() calls, and still didn't match user intent. (2) **Committed the drawn region to the shared VM at drag-end (and resize-end) directly, leaving the picker open for further refinement.** Mirrors the Phase C UX premise: the in-overlay Confirm button is gone, so drag-end IS the implicit confirm. HasSelectedRegion + SelectedRegion update immediately; the toolbar's Expand button auto-disables; Record button becomes the explicit ""confirm + start recording"" gesture; Esc-once still resets (and now also clears the VM selection); Esc-twice dismisses.
+**What worked:** Refactored `RegionSelectorOverlay.ConfirmSelection` to extract `ComputeRegionFromSelection()` (DIPs → physical → monitor-local DIPs, monitor disambiguation by largest intersection). Added `SyncCurrentSelectionToViewModel()` called from `Grid_PointerReleased` after drag-end and resize-end. Added `ClearViewModelSelection()` called from `ResetSelection()` so the first Escape press also clears the VM. `ConfirmSelection()` now calls both: sync to VM (idempotent) and complete the TCS to close the picker.
+**What didn't work:** Trying to derive Expand-button state purely from picker open/closed state — semantically incorrect because the user wants Expand disabled the moment a region exists (drawn or committed), not merely while the picker is open with nothing drawn.
+
+### Picker interaction polish: window commit, region click-to-not-reset, persist on drag-end (2026-06-14)
+**Approaches tried:**
+1. Window picker: previously click only `_lockedWindow` locally — toolbar's Expand button never disabled. **Fixed:** Click → `RecordingViewModel.Shared.SelectedWindow = locked` (mirrors region drag-end commit). Esc-once reset → `SelectedWindow = null`.
+2. Yellow stroke confirmation: added `WindowPickerLockedStrokeBrush` theme dictionary (Light=#B8860B / Dark=#FFD24A / HighContrast=SystemHighlight). `UpdateOverlay` flips `HighlightRect.Stroke` + `StrokeThickness` (1→3) when `highlight == _lockedWindow`.
+3. Region picker losing selection on stray click: `Grid_PointerPressed` always started a fresh zero-size drag, even on a click inside the existing selection. **Fixed:** (a) Click inside selection (not on a handle) → no-op. (b) Click outside → snapshot `_priorSelX/Y/W/H` + `_priorHasSelection`; `Grid_PointerReleased` restores them when the release size is below `MinSelectionSize` instead of wiping selection.
+4. Region picker not pre-seeding after dismiss-and-reopen: drag-end only updated VM (in-memory) and Esc-once cleared VM, so a reopen with no VM region fell back to a stale `LoadLastRegion`. **Fixed:** `Grid_PointerReleased` (drag and resize) now also calls `PersistCurrentSelection()` → `_regionSelector.SaveRegion(region)`, so the latest drag-end survives even Esc-twice dismiss.
+
+**What worked:** Treating drag-end / click as the implicit Confirm consistently across both pickers, with VM commit + persistence; using prior-state snapshots to make stray clicks idempotent. Stroke styling via theme resources keeps Light/Dark/HighContrast correct without hardcoding.
+**What didn't work:** Relying solely on VM state for picker re-seeding without persistence — Esc-once clearing the VM cascaded into losing the last region on reopen. Always persist on every drag/resize end.
+
+### Picker Esc semantics: one Esc = back out one level (2026-06-14)
+**Approaches tried:** Previous: Esc-once reset the in-picker drawing (and cleared VM), Esc-twice dismissed picker + shell. Side effect: there was no way to dismiss the picker WITHOUT first clearing the selection, so reopening always lost the previous region/window.
+**What worked:** Simplified to **Esc = dismiss picker, keep selection**. Both `RegionSelectorOverlay.HandleEscape` and `WindowSelectorOverlay.HandleEscape` now just close the picker via `CancelSelection` / `_tcs.TrySetResult(null)`. The mini toolbar's own `OnKeyDown` handler picks up a subsequent Esc to dismiss the shell to tray (when no picker is open and not recording). This gives the user a clean "one Esc = back out one level" gesture. To replace a region, drag a new one. To replace a window, click another. To clear, switch capture mode.
+**What worked (window pre-seed):** Added `TryRestorePreviousLockedWindow()` called after `_hostWindow.Activate()` — if `RecordingViewModel.Shared.SelectedWindow` is still alive in the freshly enumerated list, the picker opens with that window pre-locked (yellow stroke + thicker border). Parity with `RegionSelectorOverlay.TryApplyPresetRegion`.
+**What didn't work:** Showing a "kept previous selection" infobar after Cancelled — now that drag-end is the implicit commit and Esc never resets, every dismiss might or might not have changed the selection, so the infobar was misleading. Removed.
+
+### Picker Esc collapses both picker AND mini toolbar (2026-06-14)
+**Approaches tried:** Previous: Esc in picker just closed the picker; a second Esc dismissed the shell. User feedback: "no meaning to dismissing the picker if I cannot bring it back". The intermediate state (toolbar visible with the same segment selected, but no picker) had no useful actions — the only thing to do was re-tap the segment to relaunch the picker that was just closed.
+**What worked:** `RegionSelectorOverlay.HandleEscape` and `WindowSelectorOverlay.HandleEscape` now BOTH call `CapturePickerService.Shared.RaiseEscapeToDismissRequested()` (which the AppShellWindow listens for to slide the shell back to the tray) AND close the picker via `CancelSelection` / `_tcs.TrySetResult(null)`. One Esc collapses both layers. Committed selection stays in VM + persisted settings, so the next hotkey summon restores it.
+**What didn't work:** Two-tier Esc (close picker → close shell) felt convoluted and left a useless intermediate state. Single Esc-collapses-all is simpler and matches the user's mental model.
+
+### Window selection cross-session persistence on click-commit (2026-06-14)
+**Symptom:** After click-locking a window and Esc-dismissing the toolbar, the next hotkey summon did NOT pre-lock the previously selected window.
+**Root cause:** `ShellSettings.Instance.LastWindowSelection` was only written from the Confirm path inside `CapturePickerService.PickWindowAsync` (line ~254). Phase C removed Confirm — Esc now returns `PickerResult.Cancelled`, so the persisted setting was never updated. Only the in-memory VM had the choice, and that's gone on app restart.
+**Fix:** (1) Exposed `CapturePickerService.PersistSelectedWindow(WindowInfo)` as a public static helper wrapping the existing `BuildWindowSelectionTuple` + `ShellSettings` write. (2) `WindowSelectorOverlay.Grid_PointerPressed` calls it right after committing to `RecordingViewModel.Shared.SelectedWindow`. Now click IS the durable commit — survives Esc-dismiss, app restart, hotkey re-summon. Parity with `RegionSelectorOverlay.PersistCurrentSelection` which calls `_regionSelector.SaveRegion` on drag-end.
+
+### Defensive window-restore fallbacks in picker (2026-06-14)
+**Symptom:** Even after persisting LastWindowSelection on click-commit, the next picker launch (after Esc-dismiss + hotkey resummon) did not pre-lock the previously selected window.
+**Hypothesis:** `TryRestorePreviousLockedWindow` only read from `RecordingViewModel.Shared.SelectedWindow` and matched by exact handle. If the VM was cleared for any reason (or the handle drifted between picker invocations), restore silently failed.
+**Fix:** Made restore defensive on three axes:
+1. **Fallback source:** If VM.SelectedWindow is null/dead, fall back to `ShellSettings.Instance.LastWindowSelection` via a new `TryResolveFromPersistedSettings` helper that re-enumerates and matches by ProcessName+Title (then ProcessName-only as a soft fallback for title drift).
+2. **Defensive matching:** When matching `prev` against `_windows`, try handle first, then ProcessName+Title — handles can change when a window is recreated even within a session.
+3. **VM resync:** After successful restore, re-assign `RecordingViewModel.Shared.SelectedWindow = _lockedWindow` so VM and overlay stay in lockstep. Added Debug.WriteLine traces for diagnosability.
+**Gotcha:** `ShellSettings` lives in `Musio_App.Services` namespace (NOT `Musio.Core.Settings` despite the file path under `src/Musio.App/Services/`). Tuple field is named `WindowTitle` not `Title`.
+
+### Automated verification of window-restore (2026-06-14)
+**Method:** Instrumented `WindowSelectorOverlay` with file logging (`MusioLog` to `%TEMP%\musio-trace.log`) at: ENUM (windows enumerated), PointerPressed (hovered), COMMIT (after VM+settings write), RESTORE entry (VM+Persisted state + window count), RESTORE result (matched? fresh?). Drove UI via PowerShell `SendInput` (absolute coords with MOUSEEVENTF_ABSOLUTE) + `keybd_event` for Ctrl+Shift+R hotkey and Esc. Used `UIAutomationClient` to find the `Window` segmented-item's BoundingRectangle for a reliable click. **Important:** `SetForegroundWindow` on the picker host BEFORE clicking — otherwise WinUI3 pointer events don't fire even when WindowFromPoint reports the picker as the topmost.
+**Verified outcomes:**
+1. Click in picker → COMMIT logged, VM set, Persisted set ✓
+2. Esc → toolbar dismissed, VM survives (verified by next RESTORE entry showing `VM=...alive=True`) ✓
+3. Hotkey resummon → picker auto-launches via `LaunchPickerForCurrentModeAsync` ✓
+4. `TryRestorePreviousLockedWindow` reads VM, matches against fresh enumeration by handle, returns `matchedFresh=True`, locks the window, paints yellow stroke ✓
+**Conclusion:** Restore flow IS working programmatically. If a user reports "visually not working", suspect: (a) yellow stroke too subtle (consider increasing StrokeThickness from 3 → 4 or saturating the Light-theme color from `#B8860B` to something brighter), (b) picker re-enumeration excluded the target window (window minimized/closed between sessions). Use the same MusioLog approach to re-instrument if needed.
+
+### Two-issue fix: hover-broken-after-pre-lock + cross-session persistence (2026-06-14)
+**Issue 1: Hover-to-highlight stopped working.** `Grid_PointerMoved` only called `UpdateOverlay(window)` when `_lockedWindow is null`. The new Phase-C pre-lock-on-restore behavior makes `_lockedWindow` non-null on picker open, so hover did nothing — user couldn't see hover preview to pick a different window. **Fix:** always call `UpdateOverlay(window ?? _lockedWindow)` on hover; the locked-vs-default stroke logic inside UpdateOverlay (`ReferenceEquals(highlight, _lockedWindow)`) preserves yellow stroke when hovering back over the locked window.
+
+**Issue 2: Settings not persisted across app restarts in dev (unpackaged exe).** `Windows.Storage.ApplicationData.Current.LocalSettings` throws for unpackaged WinAppSDK apps; the existing `catch { _settings = null; }` fell through to in-memory-only — value gone on restart. **Fix:** when LocalSettings init fails, fall back to a JSON file at `%LOCALAPPDATA%\Musio\settings.json`. Added `LoadJsonFallback` (called from ctor) and `SaveJsonFallback` (called from `Set<T>`) in `AppSettings`. Loader parses string/number/bool JsonElement types into the in-memory `Dictionary<string,object>`; saver serializes the whole dict on every write (small enough — keys count is ~10). Verified by killing + restarting the app: `Recording.LastCaptureMode` and `Recording.LastWindowSelection` keys survive.
+
+**Verification technique:** `settings.json` is human-readable, can be inspected after any state change to confirm writes happen. Easier than instrumenting AppSettings with file logging.
+
+### Hover-when-locked policy: track but don't repaint (2026-06-14)
+**User direction:** "Once the window is selected, we should not do hover to select and rather let user click to select. If window selection isn't there, then let user do hover to select a window."
+**Fix:** `Grid_PointerMoved` always updates `_hoveredWindow` (so a subsequent click still commits the hovered window — lock-swap on click stays functional), but only calls `UpdateOverlay(window)` when `_lockedWindow is null`. With a lock present, the yellow-stroked window stays visually committed until a click swaps it.
+
+### Hover gate uses in-session click flag, not _lockedWindow (2026-06-14)
+**Problem with last fix:** The gate `if (_lockedWindow is null)` blocked hover whenever there was ANY locked window — including a restored pre-lock from a prior session. So fresh picker open with persisted `LastWindowSelection` had hover disabled from the start, making the picker feel "stuck".
+**Fix:** Added `_userClickedThisSession` bool on `WindowSelectorOverlay` (resets to false on every fresh instance since it's per-ShowAsync). Set to `true` in `Grid_PointerPressed` after a successful click-commit. `Grid_PointerMoved` now gates hover repaint on `!_userClickedThisSession` — restored pre-locks don't disable hover; only an in-session click does. `UpdateOverlay(window ?? _lockedWindow)` keeps the restored highlight visible if the cursor leaves all windows.
+
+## Mini Mode — Verifying Window segment is preselected after Esc + hotkey
+**Reported symptom**: "Window is remembered with yellow stroke around it, but never gets preselected in window mode when I invoke it with hotkey."
+
+**Approach**: Instrumented MiniSetupControl.SelectCaptureModeSegment to append to `%TEMP%\musio-trace.log` each call (mode received, Items.Count, current SelectedIndex, matched tag → SelectedIndex set, or no match). Built, launched with persisted `LastCaptureMode=Window`, captured trace.
+
+**What worked / finding**: Trace conclusively shows the Window segment IS selected at launch:
+```
+SelectCaptureModeSegment(mode=FullScreen)  → SelectedIndex=0   (initial VM default)
+SelectCaptureModeSegment(mode=Window)      → SelectedIndex=1   (after RestoreOnLaunch sets VM)
+SelectCaptureModeSegment(mode=Window)      → SelectedIndex=1   (SyncCaptureModeFromViewModel from App.OnLaunched)
+SelectCaptureModeSegment(mode=Window)      → SelectedIndex=1   (MiniSetupControl.OnLoaded)
+```
+The three convergent paths (PropertyChanged listener, explicit Sync, OnLoaded) all land on idx=1 = Window. No code path overrides it. SummonAsync does not change VM.CaptureMode.
+
+**Conclusion**: Code is correct; final `CaptureModeSelector.SelectedIndex` IS the Window segment. Earlier UIA-based introspection misled because CommunityToolkit Segmented exposes only ScrollItemPattern on items and does not surface IsSelected reliably through UIA — that was the false negative driving the previous "all segments report False" reading.
+
+**What didn't work**: UIA IsSelectedProperty on SegmentedItem returned False for all items even when the underlying SelectedIndex was 1. Do not rely on UIA for Segmented selection state; instrument the control directly or eyeball it.
+
+**Cleanup**: Trace lines removed from SelectCaptureModeSegment. Built clean, relaunched (PID 26184).
+
+## Mini Mode — Window picker fails to show pre-lock highlight on hotkey-summon
+**Symptom**: User selected Window X, dismissed (Esc), invoked picker via hotkey. Expected: yellow stroke around X already (pre-lock). Actual: full dim with no highlight; only hover would reveal yellow.
+
+**Root cause**: `SelectionRestoreService.RestoreWindow` synthesizes the restored `WindowInfo` with `X/Y/W/H = 0,0,0,0` (it only knows handle + process + title at app launch time). `WindowSelectorOverlay.TryRestorePreviousLockedWindow` then:
+1. Reads `RecordingViewModel.Shared.SelectedWindow` (rect=0,0,0,0).
+2. Tries to match by handle in freshly-enumerated `_windows` — if the saved window isn't in the enum (cloaked, on a different desktop, transient handle-drift, etc.) match is null.
+3. Falls back to `_lockedWindow = prev` — but `prev` still has rect=0,0,0,0.
+4. `UpdateOverlay(_lockedWindow)` computes cx=cy=cw=ch=0 → `HighlightRect` 0×0 (invisible) and `BottomMask` covers the whole canvas → looks exactly like "no lock, full dim selection mode" — the user's symptom.
+
+**Fix**: In `TryRestorePreviousLockedWindow`, when the freshly-enumerated match is null, refresh the rect from the live handle via `TryGetVisibleBounds(prev.Handle, …)` before storing it as `_lockedWindow`. Use `GetWindowRect`/DWM extended-frame-bounds so the highlight paints correctly even when the window wasn't in `_windows`.
+
+**File**: `src/Musio.App/Controls/WindowSelectorOverlay.xaml.cs` ~line 549 (replaced `_lockedWindow = match ?? prev` with a match-first / live-rect-fallback branch).
+
+**What didn't work**: Earlier "verified" approach assumed `match` would always be non-null because the previously-selected window is "obviously still alive". That assumption is fine for handle validity but doesn't account for enumeration gaps (cloaking, virtual desktops, minimize). Rect-from-VM is unreliable because SelectionRestoreService never populates it.
+
+## Mini Mode — Window picker lock cleared by OnLoaded right after SizeChanged painted it
+**Symptom (continuation)**: After fixing the zero-rect issue, the trace showed `_lockedWindow` was correctly set with a valid rect AND `UpdateOverlay` painted it (cx=205.3 cy=178.6 cw=1156 ch=617.6) — but immediately afterwards there was a `UpdateOverlay highlight=null` call wiping the highlight. Result: lock briefly visible then erased; only hover would re-paint.
+
+**Root cause**: `WindowSelectorOverlay.OnLoaded` (called after the first arrange) unconditionally called `UpdateOverlay(null)`. Order of events on picker open:
+1. `Activate` → arrange → `OnSizeChanged` fires → paints `_lockedWindow` correctly.
+2. `Loaded` fires later → `OnLoaded` calls `UpdateOverlay(null)` → wipes the lock.
+
+The original code assumed the picker always opens with no lock (true before pre-restore was added), so `UpdateOverlay(null)` was just "draw the full dim". With pre-lock restore, this assumption no longer holds.
+
+**Fix**: Change `OnLoaded` to `UpdateOverlay(_lockedWindow ?? _hoveredWindow)` so it respects any pre-existing restored lock. File: `src/Musio.App/Controls/WindowSelectorOverlay.xaml.cs` line 55.
+
+**Diagnostic technique that worked**: File-based trace appended into `%TEMP%\musio-trace.log` from `TryRestorePreviousLockedWindow`, `OnSizeChanged`, and `UpdateOverlay`. The trace pattern `paint→null` (4ms after paint) immediately pinpointed an "after-paint wipe" rather than a "never-paint" — without it the bug would have looked identical to the earlier zero-rect bug.
+
+**What didn't work**: Assuming the earlier rect fix would resolve everything. Trace was essential to discover the second, independent failure ordering.

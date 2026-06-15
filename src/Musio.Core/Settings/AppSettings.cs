@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text.Json;
 using Windows.Storage;
 
 namespace Musio.Core.Settings;
@@ -13,6 +15,7 @@ public sealed class AppSettings
 
     private readonly ApplicationDataContainer? _settings;
     private readonly Dictionary<string, object> _memoryStore = new();
+    private readonly string? _jsonFallbackPath;
 
     private AppSettings()
     {
@@ -22,8 +25,67 @@ public sealed class AppSettings
         }
         catch
         {
-            // App may not have package identity — use in-memory store only
+            // App may not have package identity — fall back to a JSON file
+            // under %LOCALAPPDATA%\Musio\settings.json so dev builds and
+            // unpackaged runs still persist across restarts.
             _settings = null;
+            try
+            {
+                var dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Musio");
+                Directory.CreateDirectory(dir);
+                _jsonFallbackPath = Path.Combine(dir, "settings.json");
+                LoadJsonFallback();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AppSettings] JSON fallback init failed: {ex.Message}");
+                _jsonFallbackPath = null;
+            }
+        }
+    }
+
+    private void LoadJsonFallback()
+    {
+        if (_jsonFallbackPath is null || !File.Exists(_jsonFallbackPath)) return;
+        try
+        {
+            var json = File.ReadAllText(_jsonFallbackPath);
+            if (string.IsNullOrWhiteSpace(json)) return;
+            using var doc = JsonDocument.Parse(json);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                object? val = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number => prop.Value.TryGetInt32(out var i) ? (object)i
+                                          : prop.Value.TryGetInt64(out var l) ? l
+                                          : prop.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    _ => null
+                };
+                if (val is not null) _memoryStore[prop.Name] = val;
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[AppSettings] LoadJsonFallback failed: {ex.Message}");
+        }
+    }
+
+    private void SaveJsonFallback()
+    {
+        if (_jsonFallbackPath is null) return;
+        try
+        {
+            var json = JsonSerializer.Serialize(_memoryStore, new JsonSerializerOptions { WriteIndented = false });
+            File.WriteAllText(_jsonFallbackPath, json);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[AppSettings] SaveJsonFallback failed: {ex.Message}");
         }
     }
 
@@ -148,6 +210,9 @@ public sealed class AppSettings
         }
 
         if (value is not null)
+        {
             _memoryStore[key] = value;
+            SaveJsonFallback();
+        }
     }
 }

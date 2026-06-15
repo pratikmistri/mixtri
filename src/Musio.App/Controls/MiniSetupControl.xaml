@@ -62,17 +62,17 @@
                             </ResourceDictionary.ThemeDictionaries>
                         </ResourceDictionary>
                     </ctk:Segmented.Resources>
-                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen" IsTabStop="True" TabIndex="0" AutomationProperties.Name="Full screen">
+                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen" IsTabStop="True" TabIndex="0" AutomationProperties.Name="Full screen" Tapped="SegmentedItem_Tapped">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE740;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Window" Tag="Window" IsTabStop="True" TabIndex="1" AutomationProperties.Name="Window">
+                    <ctk:SegmentedItem Content="Window" Tag="Window" IsTabStop="True" TabIndex="1" AutomationProperties.Name="Window" Tapped="SegmentedItem_Tapped">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE737;" />
                         </ctk:SegmentedItem.Icon>
                     </ctk:SegmentedItem>
-                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion" IsTabStop="True" TabIndex="2" AutomationProperties.Name="Region">
+                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion" IsTabStop="True" TabIndex="2" AutomationProperties.Name="Region" Tapped="SegmentedItem_Tapped">
                         <ctk:SegmentedItem.Icon>
                             <FontIcon Glyph="&#xE7A8;" />
                         </ctk:SegmentedItem.Icon>
@@ -173,7 +173,11 @@
             </StackPanel>
 
             <!-- Expand-to-Full button. Hidden by default; AppShellWindow flips
-                 IsExpandButtonVisible when this control is the active state. -->
+                 IsExpandButtonVisible when this control is the active state.
+                 IsEnabled is set programmatically (see UpdateExpandEnabled in
+                 code-behind) — x:Bind on a function with nested ViewModel
+                 paths against a non-DP ViewModel getter does not reliably
+                 re-subscribe in WinUI 3. -->
             <Button
                 x:Name="ExpandButton"
                 Visibility="{x:Bind BoolToVisibility(IsExpandButtonVisible), Mode=OneWay}"

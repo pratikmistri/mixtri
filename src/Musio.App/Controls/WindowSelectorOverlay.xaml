@@ -8,6 +8,25 @@
     mc:Ignorable="d"
     IsTabStop="True">
 
+    <UserControl.Resources>
+        <!-- Confirmation stroke shown around a window once the user has
+             clicked to lock it in. Light/dark variants tuned so the yellow
+             reads as "confirmed" against either theme's dim mask. -->
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="WindowPickerLockedStrokeBrush" Color="#B8860B" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="WindowPickerLockedStrokeBrush" Color="#FFD24A" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="WindowPickerLockedStrokeBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
     <Grid
         x:Name="RootGrid"
         Background="Transparent"
@@ -31,7 +50,9 @@
             <Rectangle x:Name="LeftMask" Fill="#99000000" />
             <Rectangle x:Name="RightMask" Fill="#99000000" />
 
-            <!-- Highlight border around hovered window -->
+            <!-- Highlight border around hovered/locked window. Stroke flips
+                 to the yellow ""locked"" brush in code-behind once the user
+                 clicks to commit a window. -->
             <Rectangle
                 x:Name="HighlightRect"
                 Fill="Transparent"

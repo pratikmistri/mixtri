@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
+using Musio_App.ViewModels;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
 
@@ -45,6 +46,13 @@ public sealed partial class RegionSelectorOverlay : UserControl
     // Cached cursors to avoid allocating on every pointer-move
     private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
     private static readonly Dictionary<InputSystemCursorShape, InputSystemCursor> _cursorCache = new();
+
+    // Snapshot of the selection rect taken at PointerPressed when a brand-new
+    // drag begins. If the user releases without moving far enough to form a
+    // valid selection (a stray click), we restore these values instead of
+    // wiping the previously committed region.
+    private double _priorSelX, _priorSelY, _priorSelW, _priorSelH;
+    private bool _priorHasSelection;
 
     // Region passed by the caller to be pre-rendered on open. Set by ShowAsync
     // before the overlay window is activated so OnLoaded can apply it.
@@ -214,6 +222,13 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(false, false);
+            // When the mini shell stays visible we keep the picker NON-topmost
+            // so the topmost mini shell is naturally above it. Two topmost
+            // windows fighting for z-order is unreliable. The picker covers
+            // the full virtual desktop with a screenshot, so non-topmost is
+            // fine — the screenshot hides everything underneath.
+            // When the shell is minimized (legacy Full path) we still want
+            // topmost so the picker sits above normal apps.
             presenter.IsAlwaysOnTop = !keepShellVisible;
             presenter.IsResizable = false;
             presenter.IsMaximizable = false;
@@ -254,8 +269,19 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
         _hostWindow.Activate();
-        if (keepShellVisible)
-            mainWindow?.Activate();
+        if (keepShellVisible && mainWindow is not null)
+        {
+            // Force the mini shell back to the top of the topmost band so the
+            // toolbar (which the user must click for Record) is visible above
+            // the (non-topmost) picker dim. Don't steal focus.
+            try
+            {
+                var shellHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+                SetWindowPos(shellHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+            catch { mainWindow.Activate(); }
+        }
 
         var result = await _tcs.Task;
 
@@ -540,9 +566,29 @@ public sealed partial class RegionSelectorOverlay : UserControl
                 e.Handled = true;
                 return;
             }
+
+            // Click inside the existing selection (and not on a handle) is a
+            // no-op — the user is just focusing the picker or about to grab
+            // a handle. Do NOT start a fresh drag, which would discard the
+            // committed region. (Fixes "click on screen after focusing
+            // toolbar resets the selection".)
+            if (pos.X >= _selX && pos.X <= _selX + _selW
+                && pos.Y >= _selY && pos.Y <= _selY + _selH)
+            {
+                e.Handled = true;
+                return;
+            }
         }
 
-        // Start new selection
+        // Start a new drag OUTSIDE the current selection. Snapshot the prior
+        // selection so PointerReleased can restore it if the user just
+        // clicked (no real drag).
+        _priorHasSelection = _hasSelection;
+        _priorSelX = _selX;
+        _priorSelY = _selY;
+        _priorSelW = _selW;
+        _priorSelH = _selH;
+
         _isDragging = true;
         _dragStart = pos;
         _activeDragBounds = FindMonitorBoundsForOverlayPoint(pos);
@@ -685,10 +731,35 @@ public sealed partial class RegionSelectorOverlay : UserControl
             }
             else
             {
-                _hasSelection = false;
+                // Stray click (or drag too small to be a valid region). Restore
+                // the previously committed selection rather than wiping it —
+                // a click should never destroy what the user already drew.
+                if (_priorHasSelection)
+                {
+                    _selX = _priorSelX;
+                    _selY = _priorSelY;
+                    _selW = _priorSelW;
+                    _selH = _priorSelH;
+                    _hasSelection = true;
+                }
+                else
+                {
+                    _hasSelection = false;
+                }
             }
 
             UpdateOverlay();
+            // Phase C: drag-end IS the implicit confirm. Push the freshly
+            // drawn region into the shared VM so HasSelectedRegion flips
+            // immediately — the mini toolbar's Expand button disables and
+            // the Record button is ready to fire without a separate
+            // Confirm gesture. Also persist so reopening the picker after a
+            // dismiss restores the last drag-end region.
+            if (_hasSelection)
+            {
+                SyncCurrentSelectionToViewModel();
+                PersistCurrentSelection();
+            }
             e.Handled = true;
         }
         else if (_isResizing)
@@ -715,7 +786,33 @@ public sealed partial class RegionSelectorOverlay : UserControl
                 UpdateOverlay();
             }
 
+            // Resize-end also re-syncs the VM AND persists so an edge nudge
+            // updates SelectedRegion and survives a dismiss-and-reopen.
+            if (_hasSelection)
+            {
+                SyncCurrentSelectionToViewModel();
+                PersistCurrentSelection();
+            }
             e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// Save the currently drawn selection to the persisted region settings so
+    /// that a subsequent dismiss-and-reopen of the picker restores it via
+    /// <see cref="RegionSelector.LoadLastRegion"/>. Without this, only the
+    /// in-memory <see cref="RecordingViewModel.SelectedRegion"/> would hold
+    /// the drag-end region — and that gets cleared by Esc-once-reset, so the
+    /// next open would show a blank picker.
+    /// </summary>
+    private void PersistCurrentSelection()
+    {
+        var region = ComputeRegionFromSelection();
+        if (region is null) return;
+        try { _regionSelector.SaveRegion(region); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RegionSelectorOverlay] PersistCurrentSelection failed: {ex.Message}");
         }
     }
 
@@ -937,23 +1034,17 @@ public sealed partial class RegionSelectorOverlay : UserControl
     }
 
     /// <summary>
-    /// Escape behavior: if a region is currently drawn (or a drag/resize is
-    /// in progress) clear it so the user can draw a fresh one with the smoke
-    /// still on screen. If there is nothing to reset, ask the host shell to
-    /// dismiss the entire toolbar (one Escape, not two) and cancel the
-    /// picker so the shell can hide.
+    /// Escape: dismiss the picker AND the mini toolbar in one gesture. Since
+    /// the toolbar's only useful action from this state is to re-launch the
+    /// same picker we just closed, collapsing both back to the tray is the
+    /// least surprising behavior. Any selection committed via drag-end stays
+    /// in the VM + persisted settings, so a subsequent hotkey summon
+    /// restores it.
     /// </summary>
     private void HandleEscape()
     {
-        if (_hasSelection || _isDragging || _isResizing)
-        {
-            ResetSelection();
-        }
-        else
-        {
-            Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
-            CancelSelection();
-        }
+        Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
+        CancelSelection();
     }
 
     /// <summary>
@@ -975,6 +1066,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _hasSelection = false;
         _selX = _selY = _selW = _selH = 0;
         UpdateOverlay();
+        // Drop the VM-side selection too so HasSelectedRegion goes back to
+        // false — re-enables the mini toolbar's Expand button (the drag-end
+        // sync flipped it true; resetting must undo that).
+        ClearViewModelSelection();
     }
 
     private void OnEnterPressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -988,17 +1083,33 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     private void ConfirmSelection()
     {
-        if (!_hasSelection)
-            return;
-
-        // Overlay DIPs → virtual desktop physical pixels (screen-absolute).
-        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (vdWidth <= 0 || vdHeight <= 0)
+        var region = ComputeRegionFromSelection();
+        if (region is null)
         {
             CancelSelection();
             return;
         }
+        // Picker UX (Phase C): no separate Confirm button — drag-end already
+        // committed to the VM. Confirm just closes the picker with the
+        // current region so the host can chain into recording.
+        _regionSelector.SaveRegion(region);
+        SyncSelectionToViewModel(region);
+        CompleteWithRegion(region);
+    }
+
+    /// <summary>
+    /// Convert the currently drawn selection (overlay DIPs) into a
+    /// monitor-local <see cref="CaptureRegion"/>. Returns <c>null</c> when
+    /// nothing is drawn or when the selection lies entirely outside any
+    /// monitor (e.g., in the gap between displays).
+    /// </summary>
+    private CaptureRegion? ComputeRegionFromSelection()
+    {
+        if (!_hasSelection) return null;
+
+        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vdWidth <= 0 || vdHeight <= 0) return null;
 
         double scaleX = ActualWidth > 0 ? vdWidth / ActualWidth : 1.0;
         double scaleY = ActualHeight > 0 ? vdHeight / ActualHeight : 1.0;
@@ -1010,9 +1121,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
         int physW = (int)Math.Round(_selW * scaleX);
         int physH = (int)Math.Round(_selH * scaleY);
 
-        // Pick the monitor with the largest intersection with the selection.
-        // This handles cross-monitor drags and gaps between displays better
-        // than a simple "center is inside" test.
         var monitors = _regionSelector.GetMonitors();
         MonitorInfo? hostMonitor = null;
         long bestArea = 0;
@@ -1028,14 +1136,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
             }
         }
 
-        if (hostMonitor is null || bestArea <= 0)
-        {
-            // Selection lies entirely in a gap between monitors — invalid.
-            CancelSelection();
-            return;
-        }
+        if (hostMonitor is null || bestArea <= 0) return null;
 
-        // Clamp to host monitor (now guaranteed to have non-empty intersection).
         int monLeft = hostMonitor.X;
         int monTop = hostMonitor.Y;
         int monRight = hostMonitor.X + hostMonitor.Width;
@@ -1047,10 +1149,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
         int clampedW = clampedRight - clampedLeft;
         int clampedH = clampedBottom - clampedTop;
 
-        // Convert physical pixels → monitor-local DIPs using THIS monitor's
-        // effective DPI (handles mixed-DPI multi-monitor). Use the host
-        // monitor's HMONITOR directly so we never disagree with the chosen
-        // monitor (e.g., gaps near boundaries with MonitorFromPoint).
         float dpiScale = GetMonitorDpiScale(hostMonitor.Handle);
         if (dpiScale <= 0) dpiScale = 1.0f;
 
@@ -1059,9 +1157,51 @@ public sealed partial class RegionSelectorOverlay : UserControl
         int dipW = Math.Max(1, (int)Math.Round(clampedW / dpiScale));
         int dipH = Math.Max(1, (int)Math.Round(clampedH / dpiScale));
 
-        var region = new CaptureRegion(dipX, dipY, dipW, dipH, hostMonitor.Id);
-        _regionSelector.SaveRegion(region);
-        CompleteWithRegion(region);
+        return new CaptureRegion(dipX, dipY, dipW, dipH, hostMonitor.Id);
+    }
+
+    /// <summary>
+    /// Commit the current drawn selection to the shared
+    /// <see cref="RecordingViewModel"/> WITHOUT closing the picker. Called
+    /// from drag-end / resize-end so HasSelectedRegion flips to true the
+    /// moment the user finishes a gesture — there is no separate Confirm
+    /// button in Phase C, so the drag-end IS the confirm. The picker stays
+    /// open so the user can refine the edges; the Record button (or Enter)
+    /// is the explicit close.
+    /// </summary>
+    private void SyncCurrentSelectionToViewModel()
+    {
+        var region = ComputeRegionFromSelection();
+        if (region is null) return;
+        SyncSelectionToViewModel(region);
+    }
+
+    private static void SyncSelectionToViewModel(CaptureRegion region)
+    {
+        try
+        {
+            var vm = RecordingViewModel.Shared;
+            vm.SelectedRegion = region;
+            vm.HasSelectedRegion = true;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RegionSelectorOverlay] SyncSelectionToViewModel failed: {ex.Message}");
+        }
+    }
+
+    private static void ClearViewModelSelection()
+    {
+        try
+        {
+            var vm = RecordingViewModel.Shared;
+            vm.HasSelectedRegion = false;
+            vm.SelectedRegion = null;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RegionSelectorOverlay] ClearViewModelSelection failed: {ex.Message}");
+        }
     }
 
     private static float GetMonitorDpiScale(IntPtr hMonitor)
@@ -1126,6 +1266,16 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr hwnd);

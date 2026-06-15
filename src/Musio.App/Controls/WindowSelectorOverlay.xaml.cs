@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
+using Musio_App.ViewModels;
 using Windows.Graphics.Imaging;
 
 namespace Musio_App.Controls;
@@ -26,6 +27,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
     // around it (mirrors RegionSelectorOverlay where a drawn region persists)
     // until the user clicks a different window or hits Record/Esc.
     private WindowInfo? _lockedWindow;
+    // True only after the user clicks a window in THIS picker open. A
+    // restored pre-lock (from a prior session) does NOT set this — so hover
+    // preview stays enabled until the user actively commits in-session.
+    private bool _userClickedThisSession;
 
     private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
 
@@ -47,7 +52,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        UpdateOverlay(null);
+        UpdateOverlay(_lockedWindow ?? _hoveredWindow);
         Focus(FocusState.Programmatic);
     }
 
@@ -98,6 +103,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
             if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 presenter.SetBorderAndTitleBar(false, false);
+                // When the mini shell stays visible, keep picker NON-topmost
+                // so the topmost mini shell is naturally above it (avoids
+                // unreliable two-topmost z-order races). The fullscreen
+                // screenshot already hides everything beneath it.
                 presenter.IsAlwaysOnTop = !keepShellVisible;
                 presenter.IsResizable = false;
                 presenter.IsMaximizable = false;
@@ -126,8 +135,22 @@ public sealed partial class WindowSelectorOverlay : UserControl
             _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
             _hostWindow.Activate();
-            if (keepShellVisible)
-                mainWindow?.Activate();
+            if (keepShellVisible && mainWindow is not null)
+            {
+                try
+                {
+                    var shellHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+                    SetWindowPos(shellHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
+                catch { mainWindow.Activate(); }
+            }
+
+            // Pre-lock the previously selected window if it still exists in
+            // the freshly enumerated list. Gives the user immediate visual
+            // confirmation of "this is what you had selected"; matches the
+            // region picker pre-seeding via TryApplyPresetRegion.
+            TryRestorePreviousLockedWindow();
 
             return await _tcs.Task;
         }
@@ -327,6 +350,30 @@ public sealed partial class WindowSelectorOverlay : UserControl
         HighlightRect.Width = cw;
         HighlightRect.Height = ch;
         HighlightRect.Visibility = Visibility.Visible;
+        // Yellow + thicker stroke when the user has clicked to lock this
+        // window (= confirmed). Default theme stroke when only hovering.
+        bool isLocked = _lockedWindow is not null
+            && ReferenceEquals(highlight, _lockedWindow);
+        try
+        {
+            if (isLocked && Resources.TryGetValue("WindowPickerLockedStrokeBrush", out var lockedBrush)
+                && lockedBrush is Microsoft.UI.Xaml.Media.Brush brush)
+            {
+                HighlightRect.Stroke = brush;
+                HighlightRect.StrokeThickness = 3;
+            }
+            else if (Application.Current.Resources.TryGetValue("OverlayForegroundBrush", out var defaultBrush)
+                && defaultBrush is Microsoft.UI.Xaml.Media.Brush db)
+            {
+                HighlightRect.Stroke = db;
+                HighlightRect.StrokeThickness = 1;
+            }
+            else
+            {
+                HighlightRect.StrokeThickness = isLocked ? 3 : 1;
+            }
+        }
+        catch { /* best effort styling */ }
 
         // Window info label — position below the window (or above if near bottom)
         WindowTitleText.Text = highlight.Title;
@@ -352,11 +399,13 @@ public sealed partial class WindowSelectorOverlay : UserControl
         if (window?.Handle != _hoveredWindow?.Handle)
         {
             _hoveredWindow = window;
-            // Once the user has clicked a window the smoke stays locked
-            // around it — hover only changes the visible mask when no
-            // selection has been made yet. The next click will re-lock.
-            if (_lockedWindow is null)
-                UpdateOverlay(window);
+            // Visual hover preview only when nothing has been committed
+            // in THIS picker open. A restored pre-lock (from prior session)
+            // shouldn't disable hover — the user hasn't actively picked yet
+            // and should be able to preview alternates. Once they click,
+            // _userClickedThisSession freezes the highlight on their pick.
+            if (!_userClickedThisSession)
+                UpdateOverlay(window ?? _lockedWindow);
         }
 
         e.Handled = true;
@@ -370,7 +419,23 @@ public sealed partial class WindowSelectorOverlay : UserControl
             if (IsWindow(_hoveredWindow.Handle) && IsWindowVisible(_hoveredWindow.Handle))
             {
                 _lockedWindow = _hoveredWindow;
+                _userClickedThisSession = true;
                 UpdateOverlay(_lockedWindow);
+                // Phase C parity with region picker: click IS the implicit
+                // confirm. Push the selection into the shared VM so the
+                // toolbar's Expand button disables, the Record button can
+                // fire, and a dismiss-and-reopen restores the choice.
+                try { RecordingViewModel.Shared.SelectedWindow = _lockedWindow; }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[WindowSelectorOverlay] commit selection failed: {ex.Message}");
+                }
+                // Persist for cross-session restore. Previously this only
+                // happened on the Confirm path inside CapturePickerService,
+                // which Phase C removed — Esc now dismisses the toolbar
+                // without going through that path, so we'd lose the choice.
+                Musio_App.Services.CapturePickerService.PersistSelectedWindow(_lockedWindow);
             }
             e.Handled = true;
         }
@@ -429,22 +494,136 @@ public sealed partial class WindowSelectorOverlay : UserControl
     }
 
     /// <summary>
-    /// Escape behavior: if a window has been clicked (locked) clear it so
-    /// the user can pick another while the smoke stays on screen. If
-    /// nothing is locked, ask the host shell to dismiss the entire toolbar
-    /// (one Escape, not two) and cancel the picker so the shell can hide.
+    /// Escape: dismiss the picker AND the mini toolbar in one gesture. Since
+    /// the toolbar's only useful action from this state is to re-launch the
+    /// same picker we just closed, collapsing both back to the tray is the
+    /// least surprising behavior. The committed window selection stays in
+    /// the VM, so the next summon restores it.
     /// </summary>
     private void HandleEscape()
     {
-        if (_lockedWindow is not null)
+        Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
+        _tcs?.TrySetResult(null);
+    }
+
+    private void TryRestorePreviousLockedWindow()
+    {
+        try
         {
-            ResetSelection();
+            var prev = RecordingViewModel.Shared.SelectedWindow;
+
+            // Fallback to persisted ShellSettings if VM has no selection
+            // (e.g. after the app was restarted between picker invocations).
+            if (prev is null || prev.Handle == IntPtr.Zero
+                || !IsWindow(prev.Handle) || !IsWindowVisible(prev.Handle))
+            {
+                prev = TryResolveFromPersistedSettings();
+                if (prev is null)
+                {
+                    Debug.WriteLine("[WindowSelectorOverlay] no previous window to restore");
+                    return;
+                }
+            }
+
+            // Prefer the freshly enumerated instance (rect/title may have
+            // changed). Match by handle first, then by ProcessName+Title as a
+            // robust fallback if the handle is stale.
+            WindowInfo? match = null;
+            foreach (var w in _windows)
+            {
+                if (w.Handle == prev.Handle) { match = w; break; }
+            }
+            if (match is null)
+            {
+                foreach (var w in _windows)
+                {
+                    if (string.Equals(w.ProcessName, prev.ProcessName, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(w.Title, prev.Title, StringComparison.Ordinal))
+                    {
+                        match = w;
+                        break;
+                    }
+                }
+            }
+
+            // If freshly enumerated match exists, use it (has correct rect).
+            // Otherwise fall back to `prev` but REFRESH its rect from the live
+            // handle — `prev` from SelectionRestoreService.RestoreWindow has
+            // X/Y/W/H = 0 since it was synthesized at app launch without
+            // querying the live window. Without this refresh the highlight
+            // paints as a 0x0 rect (invisible), which looks identical to "no
+            // lock at all" — the exact symptom users hit when their window
+            // wasn't in the fresh enum (cloaked / different desktop / etc.).
+            if (match is not null)
+            {
+                _lockedWindow = match;
+            }
+            else
+            {
+                var refreshed = prev;
+                if (prev.Width <= 0 || prev.Height <= 0)
+                {
+                    if (IsWindow(prev.Handle) && TryGetVisibleBounds(prev.Handle, out var liveRect))
+                    {
+                        int lw = liveRect.Right - liveRect.Left;
+                        int lh = liveRect.Bottom - liveRect.Top;
+                        if (lw > 0 && lh > 0)
+                        {
+                            refreshed = new WindowInfo(prev.Handle, prev.Title, prev.ProcessName,
+                                liveRect.Left, liveRect.Top, lw, lh, prev.ExecutablePath);
+                        }
+                    }
+                }
+                _lockedWindow = refreshed;
+            }
+            // Re-sync the VM in case we resolved from persisted settings or
+            // matched a fresh handle — keeps VM and overlay state in lockstep.
+            try { RecordingViewModel.Shared.SelectedWindow = _lockedWindow; } catch { }
+            UpdateOverlay(_lockedWindow);
+            Debug.WriteLine($"[WindowSelectorOverlay] restored locked window: {_lockedWindow?.Title} rect={_lockedWindow?.X},{_lockedWindow?.Y} {_lockedWindow?.Width}x{_lockedWindow?.Height}");
         }
-        else
+        catch (Exception ex)
         {
-            Musio_App.Services.CapturePickerService.Shared.RaiseEscapeToDismissRequested();
-            _tcs?.TrySetResult(null);
+            System.Diagnostics.Debug.WriteLine(
+                $"[WindowSelectorOverlay] TryRestorePreviousLockedWindow failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Resolves the persisted ``ShellSettings.LastWindowSelection`` tuple into
+    /// a live ``WindowInfo`` by enumerating current windows. Returns null if
+    /// no persisted selection exists or it can't be re-located.
+    /// </summary>
+    private WindowInfo? TryResolveFromPersistedSettings()
+    {
+        try
+        {
+            var saved = Musio_App.Services.ShellSettings.Instance.LastWindowSelection;
+            if (saved is null) return null;
+            var procName = saved.Value.ProcessName;
+            var title = saved.Value.WindowTitle;
+
+            foreach (var w in _windows)
+            {
+                if (string.Equals(w.ProcessName, procName, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(w.Title, title, StringComparison.Ordinal))
+                {
+                    return w;
+                }
+            }
+            // Title may have drifted (e.g., document name changed). Fall back
+            // to process-name-only as a softer match.
+            foreach (var w in _windows)
+            {
+                if (string.Equals(w.ProcessName, procName, StringComparison.OrdinalIgnoreCase))
+                    return w;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[WindowSelectorOverlay] TryResolveFromPersistedSettings failed: {ex.Message}");
+        }
+        return null;
     }
 
     /// <summary>
@@ -458,6 +637,15 @@ public sealed partial class WindowSelectorOverlay : UserControl
         _lockedWindow = null;
         _hoveredWindow = null;
         UpdateOverlay(null);
+        // Mirror RegionSelectorOverlay.ResetSelection: clear the VM too so
+        // the mini toolbar's Expand button re-enables when there is no
+        // selection in flight.
+        try { RecordingViewModel.Shared.SelectedWindow = null; }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[WindowSelectorOverlay] clear selection failed: {ex.Message}");
+        }
     }
 
     #region Desktop Screenshot
@@ -619,6 +807,16 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
 
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);

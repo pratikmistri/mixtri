@@ -368,7 +368,13 @@ public partial class App : Application
                         if (RecordingViewModel.Shared.IsRecording)
                             await StopRecordingViaSharedPathAsync();
                         else
+                        {
                             await _window!.SummonAsync();
+                            // Re-open the inline picker (with last selection
+                            // pre-seeded by RegionSelectorOverlay) so the user
+                            // sees the same setup they left behind.
+                            await LaunchPickerForCurrentModeAsync();
+                        }
                     }
                     catch (Exception ex)
                     {

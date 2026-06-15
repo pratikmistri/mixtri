@@ -272,6 +272,18 @@ public sealed class CapturePickerService
         }
     }
 
+    /// <summary>
+    /// Persists the given window as the most recently selected window so the
+    /// next picker launch can pre-lock it. Safe to call from the picker's
+    /// implicit-commit (click) path — does not throw.
+    /// </summary>
+    public static void PersistSelectedWindow(WindowInfo window)
+    {
+        if (window is null) return;
+        try { ShellSettings.Instance.LastWindowSelection = BuildWindowSelectionTuple(window); }
+        catch (Exception ex) { Debug.WriteLine($"[CapturePickerService] PersistSelectedWindow failed: {ex.Message}"); }
+    }
+
     private static (string ProcessName, string WindowTitle, string ClassName) BuildWindowSelectionTuple(WindowInfo window)
     {
         string className = TryGetClassName(window.Handle) ?? string.Empty;

@@ -379,6 +379,7 @@ public sealed partial class AppShellWindow : Window
                 p.IsResizable = false;
                 p.IsMaximizable = false;
                 p.IsMinimizable = false;
+                ForceTopmost();
                 break;
             case AppShellState.Full:
             case AppShellState.FullRecording:
@@ -391,12 +392,35 @@ public sealed partial class AppShellWindow : Window
         }
     }
 
+    // Belt-and-suspenders: OverlappedPresenter.IsAlwaysOnTop occasionally
+    // fails to actually move the HWND into the topmost band (especially after
+    // a state transition where the previous state was NOT topmost). Force it
+    // with an explicit SetWindowPos call so the mini shell is reliably above
+    // normal app windows AND above non-topmost picker overlays.
+    private void ForceTopmost()
+    {
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        catch { /* best effort */ }
+    }
+
     private void ApplyStateFlags(AppShellState state)
     {
         // Inner-control visibility flags that depend on state (Expand button
         // in the recording pill, docked-pill swap in the full shell title bar).
         MiniSetup.IsExpandButtonVisible = state == AppShellState.MiniSetup;
         RecordingPill.IsExpandButtonVisible = state == AppShellState.MiniRecording;
+
+        // Re-sync the segmented control with the shared VM whenever we enter
+        // MiniSetup. The MiniSetup hosted in Full's RecordingPage is a
+        // separate instance, so a CaptureMode change there doesn't move the
+        // segment on this MiniSetup control until we explicitly sync.
+        if (state == AppShellState.MiniSetup)
+            MiniSetup.SyncCaptureModeFromViewModel();
 
         if (state == AppShellState.FullRecording)
         {
@@ -702,6 +726,14 @@ public sealed partial class AppShellWindow : Window
     {
         try
         {
+            // If the user is in the middle of an inline picker (Region/Window
+            // smoke is up), tear it down before morphing to the Full shell.
+            // Otherwise the picker overlay stays alive on top of the resized
+            // window and we end up with two toolbars and an unusable Full
+            // shell (Mini toolbar pinned at the top, Full underneath).
+            if (CapturePickerService.Shared.IsPickerOpen)
+                await CapturePickerService.Shared.CancelActivePickerAsync();
+
             var target = AppShellStateMachine.NextState(_currentState, AppShellEvent.MiniSetupExpand, new());
             if (target is AppShellState destination)
                 await TransitionToAsync(destination);
@@ -1004,12 +1036,20 @@ public sealed partial class AppShellWindow : Window
 
     private async Task OnPickerOpeningAsyncHook(PickerOpeningEventArgs e)
     {
-        // Intentionally a no-op for now. The slide-out-of-view experiment for
-        // region picking is disabled — the toolbar stays put so the user can
-        // see it while dragging. Method retained so the picker service still
-        // has something to await (cheap) and so the hook is easy to re-enable
-        // if we revisit the behaviour.
-        await Task.CompletedTask;
+        // If the picker is being launched from the Full shell, morph down to
+        // MiniSetup first. The picker overlay (RegionSelectorOverlay /
+        // WindowSelectorOverlay) only suppresses its SW_MINIMIZE step when
+        // the shell is already in MiniSetup, so without this transition the
+        // Full window gets minimized to the taskbar — and after the user
+        // confirms the selection they have to dig the app back out before
+        // they can hit Record. Morphing to MiniSetup keeps the toolbar
+        // visible above the picker smoke and leaves the user one click
+        // away from recording.
+        if (_currentState == AppShellState.Full)
+        {
+            try { await TransitionToAsync(AppShellState.MiniSetup); }
+            catch (Exception ex) { Debug.WriteLine($"[AppShellWindow] Picker-opening Full->Mini failed: {ex}"); }
+        }
     }
 
     private void OnPickerClosed(object? sender, EventArgs e)
@@ -1443,6 +1483,15 @@ public sealed partial class AppShellWindow : Window
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
 
     private const int SW_HIDE = 0;
     private const int SW_SHOWNOACTIVATE = 4;
