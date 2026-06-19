@@ -81,6 +81,16 @@ public sealed partial class EditorPage : Page
         {
             if (_hasWebcamOverlay)
                 UpdateWebcamOverlayPosition();
+
+            // Keep the text-slide edit overlay aligned with the preview frame
+            if (SlideEditCanvas.Visibility == Visibility.Visible && PreviewSlide() is { } s)
+                PositionSlideEditControls(s);
+        };
+
+        // Hide the in-place text editor while playing
+        Preview.IsPlayingChanged += (_, playing) =>
+        {
+            if (playing) HideSlideEditOverlay();
         };
 
         // Sync playhead: when timeline scrubs, update preview + audio
@@ -469,6 +479,7 @@ public sealed partial class EditorPage : Page
 
             if (segment is VideoSegment videoSeg)
             {
+                HideSlideEditOverlay();
                 // Map the playhead within this video segment to its source time
                 var sourceInSeg = videoSeg.SourceStart +
                     TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
@@ -477,10 +488,20 @@ public sealed partial class EditorPage : Page
             }
         }
 
+        HideSlideEditOverlay();
         // Legacy path: map output (playhead) time to source time
         TimeSpan sourcePosition = MapToSourceTime(position);
         await RenderVideoFrameAsync(sourcePosition, force);
     }
+
+    // Text slide in-place editing state
+    private string? _previewSlideId;
+    private int _previewSlideW = 1920;
+    private int _previewSlideH = 1080;
+    private string? _editingSlideId;
+    private bool _slideRegionDragging;
+    private Point _slideDragStart;
+    private double _slideDragStartX, _slideDragStartY;
 
     private void RenderTextSlidePreview(TextSlideSegment slide, TimeSpan localOffset)
     {
@@ -490,13 +511,19 @@ public sealed partial class EditorPage : Page
         int width = project?.Width > 0 ? project.Width : 1920;
         int height = project?.Height > 0 ? project.Height : 1080;
 
+        _previewSlideId = slide.Id;
+        _previewSlideW = width;
+        _previewSlideH = height;
+
         double progress = slide.Duration.TotalSeconds > 0
             ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
             : 0;
 
         try
         {
-            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height);
+            // While editing, render background only — the editable TextBox shows the text.
+            bool drawText = _editingSlideId != slide.Id;
+            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height, drawText);
             _lastRenderedFrameIndex = -1; // force redraw next time
             Preview.SetFrame(frame);
         }
@@ -505,6 +532,8 @@ public sealed partial class EditorPage : Page
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Text slide preview error: {ex.Message}");
         }
+
+        UpdateSlideEditOverlay(slide);
     }
 
     private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
@@ -3094,6 +3123,13 @@ public sealed partial class EditorPage : Page
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
         SlideFontSizeBox.Value = slide.FontSize;
 
+        // Formatting toggles
+        SlideBoldToggle.IsChecked = slide.IsBold;
+        SlideItalicToggle.IsChecked = slide.IsItalic;
+        SlideAlignLeft.IsChecked = slide.TextAlignment == SlideTextAlignment.Left;
+        SlideAlignCenter.IsChecked = slide.TextAlignment == SlideTextAlignment.Center;
+        SlideAlignRight.IsChecked = slide.TextAlignment == SlideTextAlignment.Right;
+
         // Set animation combo
         var animName = slide.Animation.ToString();
         for (int i = 0; i < SlideAnimationCombo.Items.Count; i++)
@@ -3192,6 +3228,36 @@ public sealed partial class EditorPage : Page
         _selectedTextSlideId is null ? null : ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+
+    private void SlideBold_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        slide.IsBold = SlideBoldToggle.IsChecked == true;
+        RefreshSlidePreview();
+    }
+
+    private void SlideItalic_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        slide.IsItalic = SlideItalicToggle.IsChecked == true;
+        RefreshSlidePreview();
+    }
+
+    private void SlideAlign_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents || sender is not RadioButton rb) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        if (Enum.TryParse<SlideTextAlignment>(rb.Tag?.ToString(), out var align))
+        {
+            slide.TextAlignment = align;
+            RefreshSlidePreview();
+        }
+    }
 
     private void RefreshSlidePreview()
     {
@@ -3357,5 +3423,194 @@ public sealed partial class EditorPage : Page
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
         }
+    }
+
+    // ─── In-preview text editing & repositioning ────────────────────────
+
+    private TextSlideSegment? PreviewSlide() =>
+        _previewSlideId is null ? null : ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _previewSlideId);
+
+    /// <summary>
+    /// Shows and positions the text-edit overlay over the slide's text region.
+    /// Hidden during playback.
+    /// </summary>
+    private void UpdateSlideEditOverlay(TextSlideSegment slide)
+    {
+        if (Preview.IsPlaying || _zoomRegionEditMode)
+        {
+            HideSlideEditOverlay();
+            return;
+        }
+
+        SlideEditCanvas.Visibility = Visibility.Visible;
+        PositionSlideEditControls(slide);
+    }
+
+    private void HideSlideEditOverlay()
+    {
+        if (SlideEditCanvas is null) return;
+        if (_editingSlideId is not null)
+            CommitSlideTextEdit();
+        SlideEditCanvas.Visibility = Visibility.Collapsed;
+    }
+
+    private void PositionSlideEditControls(TextSlideSegment slide)
+    {
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || _previewSlideW <= 0) return;
+
+        double scaleX = layout.Width / _previewSlideW;
+        double scaleY = layout.Height / _previewSlideH;
+
+        var textRect = TextSlideRenderer.ComputeTextRect(slide, _previewSlideW, _previewSlideH);
+        double left = layout.X + textRect.X * scaleX;
+        double top = layout.Y + textRect.Y * scaleY;
+        double w = textRect.Width * scaleX;
+        double h = textRect.Height * scaleY;
+
+        Canvas.SetLeft(SlideTextRegion, left);
+        Canvas.SetTop(SlideTextRegion, top);
+        SlideTextRegion.Width = w;
+        SlideTextRegion.Height = h;
+
+        Canvas.SetLeft(SlideEditBox, left);
+        Canvas.SetTop(SlideEditBox, top);
+        SlideEditBox.Width = w;
+        SlideEditBox.Height = h;
+
+        // Match the slide's text styling so editing looks WYSIWYG.
+        SlideEditBox.FontSize = Math.Max(8, slide.FontSize * scaleY);
+        SlideEditBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(slide.FontFamily);
+        SlideEditBox.FontWeight = slide.IsBold
+            ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal;
+        SlideEditBox.FontStyle = slide.IsItalic
+            ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal;
+        SlideEditBox.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(ParseHexColor(slide.TextColor));
+        SlideEditBox.TextAlignment = slide.TextAlignment switch
+        {
+            SlideTextAlignment.Left => TextAlignment.Left,
+            SlideTextAlignment.Right => TextAlignment.Right,
+            _ => TextAlignment.Center,
+        };
+    }
+
+    private void SlideTextRegion_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingSlideId is null)
+            ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeAll);
+    }
+
+    private void SlideTextRegion_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging)
+            ProtectedCursor = null;
+    }
+
+    private void SlideTextRegion_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingSlideId is not null) return; // editing — let the textbox handle it
+        var slide = PreviewSlide();
+        if (slide is null) return;
+
+        _slideRegionDragging = true;
+        _slideDragStart = e.GetCurrentPoint(SlideEditCanvas).Position;
+        _slideDragStartX = slide.TextX;
+        _slideDragStartY = slide.TextY;
+        SlideTextRegion.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging) return;
+        var slide = PreviewSlide();
+        var layout = Preview.FrameLayoutRect;
+        if (slide is null || layout.Width <= 0) return;
+
+        var pos = e.GetCurrentPoint(SlideEditCanvas).Position;
+        double dx = (pos.X - _slideDragStart.X) / layout.Width;
+        double dy = (pos.Y - _slideDragStart.Y) / layout.Height;
+
+        slide.TextX = Math.Clamp(_slideDragStartX + dx, 0.0, 1.0);
+        slide.TextY = Math.Clamp(_slideDragStartY + dy, 0.0, 1.0);
+
+        PositionSlideEditControls(slide);
+        RefreshSlidePreview();
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging) return;
+        _slideRegionDragging = false;
+        SlideTextRegion.ReleasePointerCapture(e.Pointer);
+        ProtectedCursor = null;
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    {
+        EnterSlideTextEdit();
+        e.Handled = true;
+    }
+
+    private void EnterSlideTextEdit()
+    {
+        var slide = PreviewSlide();
+        if (slide is null) return;
+
+        _editingSlideId = slide.Id;
+        SlideTextRegion.Visibility = Visibility.Collapsed;
+        SlideEditBox.Visibility = Visibility.Visible;
+        SlideEditBox.Text = slide.Text;
+        SlideEditBox.Focus(FocusState.Programmatic);
+        SlideEditBox.SelectAll();
+
+        // Re-render background-only so the rendered text doesn't double up.
+        RefreshSlidePreview();
+    }
+
+    private void CommitSlideTextEdit()
+    {
+        if (_editingSlideId is null) return;
+        _editingSlideId = null;
+        SlideEditBox.Visibility = Visibility.Collapsed;
+        SlideTextRegion.Visibility = Visibility.Visible;
+        RefreshSlidePreview();
+    }
+
+    private void SlideEditBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_editingSlideId is null) return;
+        var slide = ViewModel.Model.Segments.OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _editingSlideId);
+        if (slide is null) return;
+
+        slide.Text = SlideEditBox.Text;
+        if (SlideTextBox is not null && SlideTextBox.Text != slide.Text)
+            SlideTextBox.Text = slide.Text; // keep flyout in sync
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void SlideEditBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        // Enter commits (Shift+Enter inserts a newline); Esc commits too.
+        var shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
+            Windows.System.VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down)
+            == Windows.UI.Core.CoreVirtualKeyStates.Down;
+
+        if ((e.Key == Windows.System.VirtualKey.Enter && !shift)
+            || e.Key == Windows.System.VirtualKey.Escape)
+        {
+            CommitSlideTextEdit();
+            e.Handled = true;
+        }
+    }
+
+    private void SlideEditBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        CommitSlideTextEdit();
     }
 }

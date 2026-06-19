@@ -274,6 +274,34 @@
                         Padding="12,4" />
                 </StackPanel>
             </Grid>
+
+            <!-- Text slide edit overlay (reposition + in-place editing) -->
+            <Canvas x:Name="SlideEditCanvas" Visibility="Collapsed">
+                <Border x:Name="SlideTextRegion"
+                        BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                        BorderThickness="1.5"
+                        CornerRadius="2"
+                        DoubleTapped="SlideTextRegion_DoubleTapped"
+                        PointerEntered="SlideTextRegion_PointerEntered"
+                        PointerExited="SlideTextRegion_PointerExited"
+                        PointerPressed="SlideTextRegion_PointerPressed"
+                        PointerMoved="SlideTextRegion_PointerMoved"
+                        PointerReleased="SlideTextRegion_PointerReleased">
+                    <Border.Background>
+                        <SolidColorBrush Color="{ThemeResource AccentFillColorDefaultColor}" Opacity="0.06" />
+                    </Border.Background>
+                </Border>
+                <TextBox x:Name="SlideEditBox"
+                         Visibility="Collapsed"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         TextChanged="SlideEditBox_TextChanged"
+                         KeyDown="SlideEditBox_KeyDown"
+                         LostFocus="SlideEditBox_LostFocus" />
+            </Canvas>
         </Grid>
 
         <!-- Editor toolbar -->
@@ -542,6 +570,40 @@
                                             </Flyout>
                                         </DropDownButton.Flyout>
                                     </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Formatting: bold / italic / alignment -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Formatting" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <ToggleButton x:Name="SlideBoldToggle" Padding="8,6"
+                                                      ToolTipService.ToolTip="Bold"
+                                                      Click="SlideBold_Click">
+                                            <FontIcon FontSize="14" Glyph="&#xE8DD;" />
+                                        </ToggleButton>
+                                        <ToggleButton x:Name="SlideItalicToggle" Padding="8,6"
+                                                      ToolTipService.ToolTip="Italic"
+                                                      Click="SlideItalic_Click">
+                                            <FontIcon FontSize="14" Glyph="&#xE8DB;" />
+                                        </ToggleButton>
+                                        <AppBarSeparator />
+                                        <RadioButton x:Name="SlideAlignLeft" GroupName="SlideAlign"
+                                                     Padding="8,6" ToolTipService.ToolTip="Align left"
+                                                     Checked="SlideAlign_Checked" Tag="Left">
+                                            <FontIcon FontSize="14" Glyph="&#xE8E4;" />
+                                        </RadioButton>
+                                        <RadioButton x:Name="SlideAlignCenter" GroupName="SlideAlign"
+                                                     Padding="8,6" ToolTipService.ToolTip="Align center"
+                                                     Checked="SlideAlign_Checked" Tag="Center">
+                                            <FontIcon FontSize="14" Glyph="&#xE8E3;" />
+                                        </RadioButton>
+                                        <RadioButton x:Name="SlideAlignRight" GroupName="SlideAlign"
+                                                     Padding="8,6" ToolTipService.ToolTip="Align right"
+                                                     Checked="SlideAlign_Checked" Tag="Right">
+                                            <FontIcon FontSize="14" Glyph="&#xE8E2;" />
+                                        </RadioButton>
+                                    </StackPanel>
                                 </StackPanel>
 
                                 <!-- Background type -->

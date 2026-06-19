@@ -91,6 +91,15 @@ public record TextSlideSegment : TimelineSegment
     public bool IsItalic { get; set; }
     public string TextColor { get; set; } = "#FFFFFF";
 
+    /// <summary>Horizontal text alignment.</summary>
+    public SlideTextAlignment TextAlignment { get; set; } = SlideTextAlignment.Center;
+
+    /// <summary>Normalized horizontal center of the text block (0..1).</summary>
+    public double TextX { get; set; } = 0.5;
+
+    /// <summary>Normalized vertical center of the text block (0..1).</summary>
+    public double TextY { get; set; } = 0.5;
+
     // ── Background ──
     /// <summary>How the slide background is rendered.</summary>
     public SlideBackgroundType BackgroundType { get; set; } = SlideBackgroundType.Solid;
@@ -122,6 +131,14 @@ public enum SlideBackgroundType
     Gradient,
     Image,
     Video,
+}
+
+/// <summary>Horizontal text alignment for a text slide.</summary>
+public enum SlideTextAlignment
+{
+    Left,
+    Center,
+    Right,
 }
 
 /// <summary>

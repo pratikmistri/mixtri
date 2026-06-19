@@ -1914,3 +1914,19 @@ the success message. Resetting on close is cleaner and matches user intent.
 - **Export**: works automatically — `VideoEncoder.ProduceSampleAsync` already calls `RenderSlide`, so gradient/image/video backgrounds appear in exported MP4 with no extra changes.
 - **UI**: Text-slide flyout now has a Background `ComboBox` (Solid/Gradient/Image/Video) that toggles panels: solid/gradient share the color picker (label switches to "Start Color" for gradient); gradient panel adds a **presets GridView** (built from `DefaultBrandPresets.All` — Nebula, Lagoon, Prism, etc. as `LinearGradientBrush` tiles), an End Color picker, and an Angle slider; Image/Video panels use `FileOpenPicker` buttons.
 - **Reused**: `DefaultBrandPresets` (Core/Settings) for gradient presets; the wallpaper picker's `FileOpenPicker` + `InitializeWithWindow` pattern.
+
+---
+
+## Text Slides — In-Preview Editing, Reposition, Alignment & Formatting
+
+- **Feature/area**: Direct manipulation of text slides on the preview (TextSlideSegment, TextSlideRenderer, EditorPage preview overlay)
+- **Model**: `TextSlideSegment` gained `TextAlignment` (`SlideTextAlignment` Left/Center/Right) and normalized `TextX`/`TextY` (default 0.5,0.5) for the text block center.
+- **Renderer**: `RenderSlide` now takes `drawText` (skip text while editing in-place), uses `ToCanvasAlignment(slide.TextAlignment)`, and positions the text box via `ComputeTextRect` (public static — also used by the overlay for coordinate mapping) centered at (TextX,TextY).
+- **In-place editing overlay** (EditorPage, in the preview Grid):
+  - A `Canvas` (`SlideEditCanvas`) with a draggable dashed `Border` (`SlideTextRegion`) + a transparent `TextBox` (`SlideEditBox`).
+  - Shown only when the **playhead is on a text slide** and not playing (driven from `RenderTextSlidePreview`; hidden in the video/legacy branches and on play via `IsPlayingChanged`).
+  - **Drag** the region → updates `TextX`/`TextY` (mapped through `Preview.FrameLayoutRect`, same pattern as the webcam overlay).
+  - **Double-tap** → edit mode: sets `_editingSlideId`, renders **background-only** so the rendered text doesn't double up, shows a WYSIWYG `TextBox` (font/size/weight/style/color/alignment matched, scaled by `FrameLayoutRect.Height/outputHeight`). Enter commits (Shift+Enter = newline), Esc commits, blur commits. Text syncs back to the flyout TextBox.
+  - Repositions on `Preview.FrameLayoutChanged`.
+- **Formatting in flyout**: Bold/Italic `ToggleButton`s + Left/Center/Right alignment `RadioButton`s.
+- **Gotcha**: `ComputeTextRect` made `public static` so the overlay can map output-space text rect → canvas px. `ProtectedCursor` (UIElement) used for the move cursor on hover.

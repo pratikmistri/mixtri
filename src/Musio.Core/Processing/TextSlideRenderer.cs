@@ -45,7 +45,10 @@ public class TextSlideRenderer : IDisposable
     }
 
     /// <summary>Renders a full-screen text slide frame.</summary>
-    public CanvasRenderTarget RenderSlide(TextSlideSegment slide, double progress, int width, int height)
+    /// <param name="drawText">When false, only the background is drawn (used while
+    /// the text is being edited in-place over the preview).</param>
+    public CanvasRenderTarget RenderSlide(
+        TextSlideSegment slide, double progress, int width, int height, bool drawText = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -54,17 +57,40 @@ public class TextSlideRenderer : IDisposable
 
         DrawSlideBackground(ds, slide, progress, width, height);
 
+        if (!drawText)
+            return target;
+
         using var format = CreateFormat(
             slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
-            CanvasHorizontalAlignment.Center, CanvasVerticalAlignment.Center, wrap: true);
+            ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
 
-        var rect = new Rect(width * 0.08, height * 0.1, width * 0.84, height * 0.8);
+        var rect = ComputeTextRect(slide, width, height);
 
         DrawAnimatedText(ds, slide.Text, format, rect, ParseColor(slide.TextColor),
             slide.Animation, progress, width, height, (float)slide.FontSize);
 
         return target;
     }
+
+    /// <summary>
+    /// The text block rectangle for a slide, in output pixels, centered at the
+    /// slide's normalized (TextX, TextY) position.
+    /// </summary>
+    public static Rect ComputeTextRect(TextSlideSegment slide, int width, int height)
+    {
+        double boxW = width * 0.84;
+        double boxH = height * 0.8;
+        double left = slide.TextX * width - boxW / 2;
+        double top = slide.TextY * height - boxH / 2;
+        return new Rect(left, top, boxW, boxH);
+    }
+
+    private static CanvasHorizontalAlignment ToCanvasAlignment(SlideTextAlignment a) => a switch
+    {
+        SlideTextAlignment.Left => CanvasHorizontalAlignment.Left,
+        SlideTextAlignment.Right => CanvasHorizontalAlignment.Right,
+        _ => CanvasHorizontalAlignment.Center,
+    };
 
     // ─────────────────────────── Backgrounds ─────────────────────────────
 
