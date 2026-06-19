@@ -56,6 +56,9 @@ public class VideoEncoder : IDisposable
     // from the MediaStreamSource pipeline.
     private readonly SemaphoreSlim _frameSemaphore = new(1, 1);
 
+    // Renders text slide segments during export (lazily created).
+    private TextSlideRenderer? _textSlideRenderer;
+
     public VideoEncoder(ExportSettings settings)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -277,7 +280,7 @@ public class VideoEncoder : IDisposable
                     compositorWidth, compositorHeight,
                     webcamExtractW, webcamExtractH,
                     targetWidth, targetHeight,
-                    needsScaling, timelineMapper, progress, stopwatch, ct,
+                    needsScaling, timelineMapper, timeline, progress, stopwatch, ct,
                     onError: (ex, frameIdx) =>
                     {
                         lock (frameErrorLock)
@@ -355,7 +358,7 @@ public class VideoEncoder : IDisposable
                 progress?.Report(new ExportProgress(
                     totalFrames, totalFrames, 99, stopwatch.Elapsed, TimeSpan.FromSeconds(2)));
 
-                await MuxAudioAsync(videoOnlyPath, outputPath, sourceClip, project, timelineMapper, ct);
+                await MuxAudioAsync(videoOnlyPath, outputPath, sourceClip, project, timelineMapper, timeline, ct);
             }
         }
         finally
@@ -403,6 +406,7 @@ public class VideoEncoder : IDisposable
         int targetWidth, int targetHeight,
         bool needsScaling,
         TimelineMapper? timelineMapper,
+        TimelineModel? timeline,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
@@ -423,47 +427,92 @@ public class VideoEncoder : IDisposable
             await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
             semaphoreAcquired = true;
 
-            double timeSeconds = timelineMapper is not null
-                ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                : (double)frameIndex / _settings.Fps;
-            var timeSpan = TimeSpan.FromSeconds(timeSeconds);
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
-            // Webcam overlay
-            CanvasBitmap? webcamFrame = null;
-            if (webcamComp is not null)
+            // Determine which segment (if any) this output frame falls on.
+            // Segment-based timelines route text slides to the slide renderer and
+            // map video segments to their own source time.
+            TextSlideSegment? textSlide = null;
+            double slideProgress = 0;
+            double timeSeconds;
+
+            if (timeline is not null && timeline.Segments.Count > 0)
             {
-                try
+                var outputTime = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
+                var (segment, localOffset) = timeline.GetSegmentAtTime(outputTime);
+                if (segment is TextSlideSegment slide)
                 {
-                    webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
-                    compositor.SetWebcamFrame(webcamFrame);
+                    textSlide = slide;
+                    slideProgress = slide.Duration.TotalSeconds > 0
+                        ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+                        : 0;
+                    timeSeconds = 0;
                 }
-                catch
+                else if (segment is VideoSegment v)
                 {
-                    compositor.SetWebcamFrame(null);
+                    timeSeconds = v.SourceStart.TotalSeconds + localOffset.TotalSeconds * v.SpeedFactor;
+                }
+                else
+                {
+                    timeSeconds = (double)frameIndex / _settings.Fps;
                 }
             }
+            else
+            {
+                timeSeconds = timelineMapper is not null
+                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
+                    : (double)frameIndex / _settings.Fps;
+            }
+
+            var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
             CanvasRenderTarget composedFrame;
-            try
-            {
-                // Load source frame (same as editor preview)
-                using var sourceFrame = frameReader is not null
-                    ? await frameReader.LoadFrameAtTimeAsync(timeSpan)
-                        ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
-                    : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
 
-                // Composite using the exact source time so cursor, click, and zoom
-                // effects are precisely synchronized with the visual frame content.
-                composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
-            }
-            finally
+            if (textSlide is not null)
             {
-                // Always dispose webcam frame after composition — prevents GPU memory
-                // leaks if source loading or ComposeFrame throws.
-                compositor.SetWebcamFrame(null);
-                webcamFrame?.Dispose();
+                // Render the text slide at the compositor's output dimensions so
+                // it encodes at the same size as composited video frames.
+                _textSlideRenderer ??= new TextSlideRenderer(device);
+                composedFrame = _textSlideRenderer.RenderSlide(
+                    textSlide, slideProgress, compositorWidth, compositorHeight);
+            }
+            else
+            {
+                // Webcam overlay
+                CanvasBitmap? webcamFrame = null;
+                if (webcamComp is not null)
+                {
+                    try
+                    {
+                        webcamFrame = await ExtractFrameFromCompositionAsync(
+                            device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
+                        compositor.SetWebcamFrame(webcamFrame);
+                    }
+                    catch
+                    {
+                        compositor.SetWebcamFrame(null);
+                    }
+                }
+
+                try
+                {
+                    // Load source frame (same as editor preview)
+                    using var sourceFrame = frameReader is not null
+                        ? await frameReader.LoadFrameAtTimeAsync(timeSpan)
+                            ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
+                        : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
+
+                    // Composite using the exact source time so cursor, click, and zoom
+                    // effects are precisely synchronized with the visual frame content.
+                    composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
+                }
+                finally
+                {
+                    // Always dispose webcam frame after composition — prevents GPU memory
+                    // leaks if source loading or ComposeFrame throws.
+                    compositor.SetWebcamFrame(null);
+                    webcamFrame?.Dispose();
+                }
             }
 
             // Build the output surface. For scaling we need a separate render
@@ -533,13 +582,35 @@ public class VideoEncoder : IDisposable
     }
 
     /// <summary>
+    /// Trims and positions a background audio track so it plays only during the
+    /// given video segment's source range, delayed to the segment's output
+    /// position. Used to keep audio in sync when text slides insert silent gaps.
+    /// </summary>
+    private static void ApplySegmentAudioTrim(BackgroundAudioTrack track, VideoSegment seg)
+    {
+        var originalDuration = track.OriginalDuration;
+
+        var trimStart = seg.SourceStart;
+        if (trimStart > originalDuration) trimStart = originalDuration;
+        track.TrimTimeFromStart = trimStart;
+
+        var sourceEnd = seg.SourceStart + seg.SourceDuration;
+        if (sourceEnd < originalDuration)
+            track.TrimTimeFromEnd = originalDuration - sourceEnd;
+
+        // Place the audio at the segment's position on the output timeline so
+        // text-slide durations before it become silent gaps.
+        track.Delay = seg.Start;
+    }
+
+    /// <summary>
     /// Muxes audio from the source recording into the video-only MP4.
     /// Uses <see cref="MediaComposition"/> for reliable audio handling.
     /// </summary>
     private async Task MuxAudioAsync(
         string videoOnlyPath, string finalOutputPath,
         MediaClip? sourceClip, Project project,
-        TimelineMapper? timelineMapper, CancellationToken ct)
+        TimelineMapper? timelineMapper, TimelineModel? timeline, CancellationToken ct)
     {
         var muxComp = new MediaComposition();
 
@@ -548,21 +619,43 @@ public class VideoEncoder : IDisposable
         var videoClip = await MediaClip.CreateFromFileAsync(videoFile);
         muxComp.Clips.Add(videoClip);
 
+        // When the timeline has text slides, the audio must be split into
+        // per-video-segment tracks with gaps where the slides are, so audio
+        // stays in sync with the (now longer) video.
+        var primarySegments = timeline?.Segments
+            .OfType<VideoSegment>()
+            .Where(v => v.VideoFilePath == project.VideoFilePath)
+            .OrderBy(v => v.Start)
+            .ToList();
+        bool useSegmentAudio = primarySegments is { Count: > 0 }
+            && timeline!.Segments.OfType<TextSlideSegment>().Any();
+
         // Add embedded audio from the source recording
         if (sourceClip is not null && sourceClip.EmbeddedAudioTracks.Count > 0)
         {
             var audioTrack = sourceClip.EmbeddedAudioTracks.First();
-            var bgAudioTrack = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(audioTrack);
 
-            if (timelineMapper is not null)
+            if (useSegmentAudio)
             {
-                bgAudioTrack.TrimTimeFromStart = timelineMapper.TrimStart;
-                var originalDuration = bgAudioTrack.OriginalDuration;
-                if (timelineMapper.TrimEnd < originalDuration)
-                    bgAudioTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
+                foreach (var seg in primarySegments!)
+                {
+                    var t = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(audioTrack);
+                    ApplySegmentAudioTrim(t, seg);
+                    muxComp.BackgroundAudioTracks.Add(t);
+                }
             }
-
-            muxComp.BackgroundAudioTracks.Add(bgAudioTrack);
+            else
+            {
+                var bgAudioTrack = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(audioTrack);
+                if (timelineMapper is not null)
+                {
+                    bgAudioTrack.TrimTimeFromStart = timelineMapper.TrimStart;
+                    var originalDuration = bgAudioTrack.OriginalDuration;
+                    if (timelineMapper.TrimEnd < originalDuration)
+                        bgAudioTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
+                }
+                muxComp.BackgroundAudioTracks.Add(bgAudioTrack);
+            }
         }
 
         // Add separately recorded audio files
@@ -576,17 +669,28 @@ public class VideoEncoder : IDisposable
                 try
                 {
                     var audioFile = await StorageFile.GetFileFromPathAsync(audioPath);
-                    var bgTrack = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
 
-                    if (timelineMapper is not null)
+                    if (useSegmentAudio)
                     {
-                        bgTrack.TrimTimeFromStart = timelineMapper.TrimStart;
-                        var originalDuration = bgTrack.OriginalDuration;
-                        if (timelineMapper.TrimEnd < originalDuration)
-                            bgTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
+                        foreach (var seg in primarySegments!)
+                        {
+                            var t = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
+                            ApplySegmentAudioTrim(t, seg);
+                            muxComp.BackgroundAudioTracks.Add(t);
+                        }
                     }
-
-                    muxComp.BackgroundAudioTracks.Add(bgTrack);
+                    else
+                    {
+                        var bgTrack = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
+                        if (timelineMapper is not null)
+                        {
+                            bgTrack.TrimTimeFromStart = timelineMapper.TrimStart;
+                            var originalDuration = bgTrack.OriginalDuration;
+                            if (timelineMapper.TrimEnd < originalDuration)
+                                bgTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
+                        }
+                        muxComp.BackgroundAudioTracks.Add(bgTrack);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -795,6 +899,7 @@ public class VideoEncoder : IDisposable
             }
 
             _frameSemaphore.Dispose();
+            _textSlideRenderer?.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
         }

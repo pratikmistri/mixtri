@@ -506,4 +506,21 @@ public class ExportEngine
         if (timeline.SuppressedClickTicks.Count > 0)
             compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
     }
+
+    /// <summary>
+    /// Creates a <see cref="SegmentCompositor"/> for segment-based timelines.
+    /// Returns null if the timeline has no segments (legacy pipeline should be used).
+    /// </summary>
+    public static SegmentCompositor? CreateSegmentCompositor(
+        TimelineModel timeline,
+        int fps,
+        int outputWidth,
+        int outputHeight)
+    {
+        if (timeline.Segments.Count == 0)
+            return null;
+
+        var mapper = new TimelineMapper(timeline, fps);
+        return new SegmentCompositor(timeline, mapper, outputWidth, outputHeight);
+    }
 }

@@ -330,6 +330,35 @@
                     <FontIcon FontSize="16" Glyph="&#xE8C6;" />
                 </Button>
 
+                <AppBarSeparator />
+
+                <DropDownButton
+                    Padding="8,6"
+                    ToolTipService.ToolTip="Insert a segment into the timeline">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="14" Glyph="&#xE710;" />
+                        <TextBlock Text="Insert" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <MenuFlyout Placement="Top">
+                            <MenuFlyoutItem
+                                Text="Text Slide"
+                                Click="AddTextSlide_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D2;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Record More"
+                                Click="RecordMore_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xEA3A;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+
                 <ComboBox
                     x:Name="SpeedComboBox"
                     Width="100"
@@ -393,13 +422,158 @@
                     </Button>
                 </StackPanel>
 
-                <!-- Default zoom controls (no segment selected) -->
+                <!-- Default zoom controls hint (no segment selected) -->
                 <TextBlock
                     x:Name="ZoomHintText"
                     VerticalAlignment="Center"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Text="Drag on zoom track to add segment"
                     FontStyle="Italic" />
+
+                <!-- Text slide properties (button + flyout, shown when a text slide is selected) -->
+                <Button
+                    x:Name="TextSlideButton"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Text slide properties">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE8D2;" />
+                        <TextBlock Text="Text Slide" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="TextSlideFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="14" Padding="4">
+                                <TextBlock Text="Text Slide" FontWeight="SemiBold" FontSize="14" />
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Text" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBox
+                                        x:Name="SlideTextBox"
+                                        AcceptsReturn="True"
+                                        TextWrapping="Wrap"
+                                        MinHeight="60"
+                                        PlaceholderText="Slide text..."
+                                        TextChanged="SlideTextBox_TextChanged" />
+                                </StackPanel>
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Animation" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideAnimationCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectedIndex="1"
+                                        SelectionChanged="SlideAnimationCombo_SelectionChanged">
+                                        <ComboBoxItem Content="None" Tag="None" />
+                                        <ComboBoxItem Content="Fade In" Tag="FadeIn" />
+                                        <ComboBoxItem Content="Fade Out" Tag="FadeOut" />
+                                        <ComboBoxItem Content="Fade In/Out" Tag="FadeInOut" />
+                                        <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
+                                        <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
+                                        <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="4">
+                                        <TextBlock Text="Duration (s)" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <NumberBox
+                                            x:Name="SlideDurationBox"
+                                            Minimum="0.5"
+                                            Maximum="30"
+                                            Value="3"
+                                            SpinButtonPlacementMode="Inline"
+                                            SmallChange="0.5"
+                                            ValueChanged="SlideDurationBox_ValueChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="Font Size" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <NumberBox
+                                            x:Name="SlideFontSizeBox"
+                                            Minimum="12"
+                                            Maximum="200"
+                                            Value="72"
+                                            SpinButtonPlacementMode="Inline"
+                                            SmallChange="4"
+                                            ValueChanged="SlideFontSizeBox_ValueChanged" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="4">
+                                        <TextBlock Text="Text Color" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <DropDownButton x:Name="SlideTextColorButton" HorizontalAlignment="Stretch">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Border
+                                                    x:Name="SlideTextColorSwatch"
+                                                    Width="20" Height="20"
+                                                    CornerRadius="4"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" />
+                                                <TextBlock x:Name="SlideTextColorText" Text="#FFFFFF" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <DropDownButton.Flyout>
+                                                <Flyout>
+                                                    <ColorPicker
+                                                        x:Name="SlideTextColorPicker"
+                                                        IsAlphaEnabled="False"
+                                                        IsHexInputVisible="True"
+                                                        ColorChanged="SlideTextColorPicker_ColorChanged" />
+                                                </Flyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="Background" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <DropDownButton x:Name="SlideBgColorButton" HorizontalAlignment="Stretch">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Border
+                                                    x:Name="SlideBgColorSwatch"
+                                                    Width="20" Height="20"
+                                                    CornerRadius="4"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" />
+                                                <TextBlock x:Name="SlideBgColorText" Text="#1E1E1E" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <DropDownButton.Flyout>
+                                                <Flyout>
+                                                    <ColorPicker
+                                                        x:Name="SlideBgColorPicker"
+                                                        IsAlphaEnabled="False"
+                                                        IsHexInputVisible="True"
+                                                        ColorChanged="SlideBgColorPicker_ColorChanged" />
+                                                </Flyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+                                    </StackPanel>
+                                </Grid>
+
+                                <Button
+                                    HorizontalAlignment="Stretch"
+                                    Click="RemoveTextSlide_Click"
+                                    ToolTipService.ToolTip="Remove selected text slide">
+                                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                                        <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                                        <TextBlock Text="Remove Slide" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
 
                 <!-- Background style controls -->
                 <AppBarSeparator x:Name="StyleSeparator" />

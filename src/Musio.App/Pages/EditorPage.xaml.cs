@@ -29,6 +29,9 @@ public sealed partial class EditorPage : Page
     private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
 
+    // Text slide rendering for segment-based preview
+    private TextSlideRenderer? _textSlideRenderer;
+
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
 
@@ -193,6 +196,9 @@ public sealed partial class EditorPage : Page
         // Video clip selection events
         Timeline.VideoClipSelected += OnVideoClipSelected;
 
+        // Segment selection events (text slides)
+        Timeline.SegmentSelected += OnSegmentSelected;
+
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportFlyout.Closed += ExportFlyout_Closed;
@@ -214,6 +220,8 @@ public sealed partial class EditorPage : Page
             _frameReader = null;
             _previewRenderer?.Dispose();
             _previewRenderer = null;
+            _textSlideRenderer?.Dispose();
+            _textSlideRenderer = null;
             _audioPlayer?.Dispose();
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
@@ -446,8 +454,62 @@ public sealed partial class EditorPage : Page
     {
         if (_frameReader is null) return;
 
-        // Map output (playhead) time to source time, accounting for speed/cut/trim edits
+        // Segment-aware rendering: when the timeline uses segments, check which
+        // segment the playhead is over and render text slides directly.
+        var model = ViewModel.Model;
+        if (model.Segments.Count > 0)
+        {
+            var (segment, localOffset) = model.GetSegmentAtTime(position);
+
+            if (segment is TextSlideSegment slide)
+            {
+                RenderTextSlidePreview(slide, localOffset);
+                return;
+            }
+
+            if (segment is VideoSegment videoSeg)
+            {
+                // Map the playhead within this video segment to its source time
+                var sourceInSeg = videoSeg.SourceStart +
+                    TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
+                await RenderVideoFrameAsync(sourceInSeg, force);
+                return;
+            }
+        }
+
+        // Legacy path: map output (playhead) time to source time
         TimeSpan sourcePosition = MapToSourceTime(position);
+        await RenderVideoFrameAsync(sourcePosition, force);
+    }
+
+    private void RenderTextSlidePreview(TextSlideSegment slide, TimeSpan localOffset)
+    {
+        _textSlideRenderer ??= new TextSlideRenderer();
+
+        var project = ProjectService.Instance.CurrentProject;
+        int width = project?.Width > 0 ? project.Width : 1920;
+        int height = project?.Height > 0 ? project.Height : 1080;
+
+        double progress = slide.Duration.TotalSeconds > 0
+            ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+            : 0;
+
+        try
+        {
+            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height);
+            _lastRenderedFrameIndex = -1; // force redraw next time
+            Preview.SetFrame(frame);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Text slide preview error: {ex.Message}");
+        }
+    }
+
+    private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
+    {
+        if (_frameReader is null) return;
 
         int frameIndex = _frameReader.GetFrameIndex(sourcePosition);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
@@ -488,7 +550,7 @@ public sealed partial class EditorPage : Page
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
-                $"[EditorPage] Preview frame error at {position}: {ex.Message}");
+                $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             bitmap.Dispose();
         }
     }
@@ -746,6 +808,13 @@ public sealed partial class EditorPage : Page
         ViewModel.SelectedClipIndex = clipIndex;
         UpdateSpeedPanelVisibility();
 
+        // Hide text slide panel when a video clip is selected
+        if (clipIndex is not null)
+        {
+            _selectedTextSlideId = null;
+            HideTextSlidePanel();
+        }
+
         // Sync combo to match selected clip's current speed
         if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
         {
@@ -769,6 +838,23 @@ public sealed partial class EditorPage : Page
             _suppressSpeedApply = true;
             SpeedComboBox.SelectedIndex = 2;
             _suppressSpeedApply = false;
+        }
+    }
+
+    private void OnSegmentSelected(object? sender, string? segmentId)
+    {
+        _selectedTextSlideId = segmentId;
+        if (segmentId is not null)
+        {
+            var slide = ViewModel.Model.Segments
+                .OfType<TextSlideSegment>()
+                .FirstOrDefault(s => s.Id == segmentId);
+            if (slide is not null)
+                ShowTextSlidePanel(slide);
+        }
+        else
+        {
+            HideTextSlidePanel();
         }
     }
 
@@ -2895,5 +2981,189 @@ public sealed partial class EditorPage : Page
         ProjectService.Instance.CurrentComposition = config;
 
         _ = RebuildPreviewRendererAsync(config);
+    }
+
+    // ─── Text Slide & Append Recording handlers ─────────────────────────
+
+    private string? _selectedTextSlideId;
+
+    private void AddTextSlide_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = new TextSlideSegment
+        {
+            Text = "Title",
+            Duration = TimeSpan.FromSeconds(3),
+        };
+
+        var playhead = ViewModel.Model.PlayheadPosition;
+
+        // Use the split-and-insert operation which splits the video segment
+        // at the playhead, keeping audio in sync
+        var operation = new SplitAndInsertTextSlideOperation(playhead, slide);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        // Select the new slide and show properties
+        _selectedTextSlideId = slide.Id;
+        Timeline.SelectSegment(slide.Id);
+        ShowTextSlidePanel(slide);
+
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void RecordMore_Click(object sender, RoutedEventArgs e)
+    {
+        // Navigate to RecordingPage in append mode
+        Preview?.Pause();
+        _audioPlayer?.Stop();
+        Frame.Navigate(typeof(RecordingPage), "append");
+    }
+
+    private void RemoveTextSlide_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedTextSlideId is null) return;
+        var operation = new RemoveSegmentOperation(_selectedTextSlideId);
+        ViewModel.UndoRedoManager.Execute(operation);
+        _selectedTextSlideId = null;
+        HideTextSlidePanel();
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void SlideTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+        slide.Text = SlideTextBox.Text;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_selectedTextSlideId is null || SlideAnimationCombo.SelectedItem is not ComboBoxItem item) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        if (Enum.TryParse<TextSlideAnimation>(item.Tag?.ToString(), out var anim))
+            slide.Animation = anim;
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideDurationBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.Duration = TimeSpan.FromSeconds(args.NewValue);
+        ViewModel.Model.RecalculateSegmentPositions();
+        Timeline.InvalidateAllCanvases();
+        InvalidatePreview();
+    }
+
+    private void SlideFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+        slide.FontSize = args.NewValue;
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private bool _suppressSlideEvents;
+
+    private void ShowTextSlidePanel(TextSlideSegment slide)
+    {
+        if (TextSlideButton is null) return;
+
+        _suppressSlideEvents = true;
+
+        TextSlideButton.Visibility = Visibility.Visible;
+        if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
+        if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
+
+        SlideTextBox.Text = slide.Text;
+        SlideDurationBox.Value = slide.Duration.TotalSeconds;
+        SlideFontSizeBox.Value = slide.FontSize;
+
+        // Set animation combo
+        var animName = slide.Animation.ToString();
+        for (int i = 0; i < SlideAnimationCombo.Items.Count; i++)
+        {
+            if (SlideAnimationCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == animName)
+            {
+                SlideAnimationCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        // Color swatches + pickers
+        UpdateSlideColorSwatch(SlideTextColorSwatch, SlideTextColorText, SlideTextColorPicker, slide.TextColor);
+        UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
+
+        _suppressSlideEvents = false;
+
+        // Open the flyout so properties are immediately editable on selection.
+        // Deferred so it doesn't conflict with a closing menu/flyout.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (TextSlideButton.Visibility == Visibility.Visible)
+                TextSlideFlyout?.ShowAt(TextSlideButton);
+        });
+    }
+
+    private void HideTextSlidePanel()
+    {
+        if (TextSlideButton is not null)
+            TextSlideButton.Visibility = Visibility.Collapsed;
+        if (ZoomHintText is not null)
+            ZoomHintText.Visibility = Visibility.Visible;
+    }
+
+    private static void UpdateSlideColorSwatch(
+        Border swatch, TextBlock text, ColorPicker picker, string hex)
+    {
+        var color = ParseHexColor(hex);
+        swatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(color);
+        text.Text = hex;
+        picker.Color = color;
+    }
+
+    private void SlideTextColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.TextColor = ColorToHex(args.NewColor);
+        SlideTextColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideTextColorText.Text = slide.TextColor;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideBgColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.BackgroundColor = ColorToHex(args.NewColor);
+        SlideBgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideBgColorText.Text = slide.BackgroundColor;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }
 }

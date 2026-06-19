@@ -1790,3 +1790,84 @@ the success message. Resetting on close is cleaner and matches user intent.
   4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
 - **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
 - **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.
+
+---
+
+## Text Slides, Transitions & Append Recording — Foundation
+
+- **Feature/area**: Multi-segment timeline, text slides, transitions, append recording (TimelineSegment, TimelineModel, TimelineMapper, ProjectService, EditorPage, TimelineControl, ExportEngine)
+- **Approaches tried**:
+  1. **Polymorphic `TimelineSegment` base record** with `VideoSegment` and `TextSlideSegment` subtypes — Worked. Added to `Musio.Core/Timeline/TimelineSegment.cs`. Includes `TransitionConfig`, `TextOverlay`, and animation enums. ✅
+  2. **`SegmentCompositor` wrapper** instead of deeply modifying `FrameCompositor` — Worked. Created a higher-level orchestrator (`Musio.Core/Processing/SegmentCompositor.cs`) that routes frames to `TextSlideRenderer` or video compositor + `TransitionRenderer` for blending. Safer than rewriting FrameCompositor internals. ✅
+  3. **`TimelineMapper.GetSegmentFrameRef()`** — Extended TimelineMapper with segment-aware mapping that returns `SegmentFrameRef` (segment, source time, progress, transition state). Backward-compatible: falls back to legacy `GetSourceTimeForOutputFrame()` when no segments exist. ✅
+  4. **`ProjectService.AppendRecording()`** — Creates a `RecordingSource` and `VideoSegment` from the new recording's `Project`, appends to the timeline. RecordingPage handles "append" navigation parameter. ✅
+  5. **Win2D `FontWeights`** — `Windows.UI.Text.FontWeights.Bold` doesn't exist in Musio.Core (WinUISDKReferences=false). Fixed by using `new FontWeight { Weight = 700 }` directly. ✅
+- **What worked**: All approaches. Key design decision was creating `SegmentCompositor` as a new orchestration layer rather than modifying the complex `FrameCompositor` — this keeps the existing single-video pipeline untouched and adds multi-source/text-slide support cleanly.
+- **What didn't work**: `TimelineControl.InvalidateAllCanvases()` was private — had to make it public for EditorPage to trigger redraws after segment edits.
+- **Key files created**: `TimelineSegment.cs`, `TextSlideRenderer.cs`, `TransitionRenderer.cs`, `SegmentCompositor.cs`
+- **Key files modified**: `TimelineModel.cs`, `Project.cs`, `TimelineMapper.cs`, `EditOperation.cs`, `ExportEngine.cs`, `ProjectService.cs`, `EditorPage.xaml/.cs`, `RecordingPage.xaml.cs`, `TimelineControl.xaml.cs`
+
+---
+
+## Text Slides — Timeline Integration Fixes
+
+- **Feature/area**: Text slide rendering on timeline, playhead access, video splitting (TimelineControl, EditorPage, EditOperation, TimelineModel)
+- **Approaches tried**:
+  1. **`DisplayDuration` property on TimelineModel** — `TimeToX`/`XToTime` used `model.Duration` (source video duration), so segments beyond the video end were off-screen and unreachable by playhead. Added `DisplayDuration` which returns `TotalSegmentsDuration` when segments exist, else `Duration`. Updated `TimeToX`, `XToTime`, and `TimeRulerCanvas_Draw` to use it. ✅
+  2. **Full-height segment rendering** — Segments were drawn as a 10px thin bar at top of video track. Changed `DrawSegmentTrack` to render `TextSlideSegment` blocks at full track height (`h - pad*2`) with rounded corners, centered text labels, and selection highlighting. Video segments already drawn by the filmstrip renderer. ✅
+  3. **`SplitAndInsertTextSlideOperation`** — When inserting a text slide at playhead, the `VideoSegment` under the playhead is split into two halves with correct `SourceStart`/`SourceDuration` so audio stays in sync. Falls back to positional insert if playhead is not on a video segment. ✅
+  4. **Segment hit-testing + selection** — Added `_selectedSegmentId`, `SelectSegment()`, `SegmentSelected` event to TimelineControl. VideoTrack_PointerPressed hit-tests text slides and fires selection event. EditorPage wires `OnSegmentSelected` to show/hide the properties panel. ✅
+- **What worked**: All four together. The key insight was that `TimeToX`/`XToTime` using `model.Duration` was the root cause of segments being invisible and playhead being unreachable — they were drawn off-screen because the coordinate system ended at the source video duration.
+- **What didn't work**: Simple `AddTextSlideOperation` with `insertIndex` — it appended after the current segment but didn't split the video, so audio would go out of sync. `SplitAndInsertTextSlideOperation` was needed.
+
+---
+
+## Text Slides — Segment-Based Video Track & Preview Rendering
+
+- **Feature/area**: Unified segment rendering on video track + text slide preview (TimelineControl, EditorPage)
+- **Problem**: After inserting a text slide, the video filmstrip stayed continuous and got compressed (looked like the video was "shortened"), and the text slide block overlaid on top. Preview canvas didn't render text slides at all.
+- **Root cause**: `VideoTrackCanvas_Draw` always drew `model.Clips` (or full duration) as one continuous filmstrip across `DisplayDuration`. Since segments grew `DisplayDuration` but clips were still drawn end-to-end, the video compressed and text overlaid. Preview's `RenderFrameAtAsync` only ever loaded video frames via the legacy mapper.
+- **Approaches tried**:
+  1. **`DrawVideoTrackFromSegments`** — When `model.Segments.Count > 0`, render the video track ENTIRELY from segments and `return` early (skip `model.Clips` rendering, trim handles, speed overlays). Each `VideoSegment` draws a filmstrip via new `DrawFilmstripForSegment` (maps timeline X → segment source time using `SourceStart` + offset×`SpeedFactor`); each `TextSlideSegment` draws a full-height colored block with its text. ✅
+  2. **Segment-aware preview** — Split `RenderFrameAtAsync` into a segment check: if playhead is over a `TextSlideSegment`, render via `TextSlideRenderer.RenderSlide()` at project resolution and show in `Preview.SetFrame()`; if over a `VideoSegment`, map to that segment's source time before loading the frame. Extracted `RenderVideoFrameAsync` for the video path. ✅
+  3. **Property-change preview refresh** — Slide text/animation/font/duration handlers now force `UpdatePreviewFrameAsync(..., force:true)` (and `InvalidatePreview()` for duration changes) so edits show immediately. ✅
+- **What worked**: All three. The key fix was making the video track render from segments instead of clips when segments exist — this gives each video segment and text slide its own real timeline space.
+- **What didn't work**: Drawing segments as an overlay ON TOP of the existing clip filmstrip (the original approach) — the two representations conflicted. Must render exclusively from one or the other.
+- **Key files modified**: `TimelineControl.xaml.cs` (DrawVideoTrackFromSegments, DrawFilmstripForSegment), `EditorPage.xaml.cs` (RenderFrameAtAsync split, RenderTextSlidePreview, RenderVideoFrameAsync, _textSlideRenderer field)
+
+---
+
+## Text Slides — Zoom & Cursor Track Alignment
+
+- **Feature/area**: Source↔output time mapping so zoom segments and cursor path follow the video when text slides shift content (TimelineModel, TimelineControl, ProjectService)
+- **Problem**: Zoom keyframes and cursor data are stored in SOURCE-video time and rendered via `TimeToX` (linear over `DisplayDuration`). After inserting a text slide, the second video half shifts right but the zoom/cursor stayed at their original linear positions → misaligned with the video.
+- **Approaches tried**:
+  1. **`SourceToOutputTime` / `OutputToSourceTime` on TimelineModel** — Maps a source-video time to its output-timeline position (and inverse) by walking the primary recording's video segments. A source time in the first half maps to itself; a source time in the second half maps to `segment.Start + (sourceTime - segment.SourceStart)/SpeedFactor`, i.e. shifted right by the text-slide duration. ✅
+  2. **`PrimaryVideoFilePath` on TimelineModel** — Set in `ProjectService.SetProject`. Mapping only considers video segments whose `VideoFilePath` matches the primary recording, so appended recordings (different source files) don't interfere with the primary cursor/zoom data. ✅
+  3. **`SourceTimeToX` / `XToSourceTime` helpers in TimelineControl** — Wrap `TimeToX(model.SourceToOutputTime(t))` and `model.OutputToSourceTime(XToTime(x))`. Applied to ALL zoom rendering, hit-testing, create-preview, drag/resize commits, and cursor path + click-dot rendering. Playhead scrubbing stays in output time via `XToTime`. ✅
+- **What worked**: Consistent rule — anywhere a keyframe/cursor SOURCE time → X, use `SourceTimeToX`; anywhere X → keyframe SOURCE time, use `XToSourceTime`. Playhead is output time (`XToTime`). Identity mapping when no segments exist keeps legacy behavior intact.
+- **Note**: Audio waveform track is still one continuous strip (not split per-segment) — would need separate work; user only requested zoom + cursor.
+
+---
+
+## Text Slides — UI: Insert Menu + Properties Flyout
+
+- **Feature/area**: Editor toolbar reorg (EditorPage.xaml/.cs)
+- **Changes**:
+  1. **Insert dropdown** — Replaced the separate "Text Slide" and "Record More" toolbar buttons with a single `DropDownButton` named "Insert" (glyph E710) whose `MenuFlyout` has "Text Slide" (AddTextSlide_Click) and "Record More" (RecordMore_Click) items. ✅
+  2. **Text slide properties flyout** — Replaced the inline `TextSlidePanel` StackPanel with a `TextSlideButton` + `Flyout` (matching the Style/Cursor flyout pattern: 280px-wide StackPanel). Contains text, animation, duration, font size, and Text/Background color pickers (`ColorPicker` in `DropDownButton` with swatch + hex, same pattern as `BgColorPicker`). Button is `Visibility=Collapsed` and shown via `ShowTextSlidePanel` when a slide is selected; the flyout auto-opens (deferred via `DispatcherQueue.TryEnqueue` to avoid conflicting with the closing Insert menu). ✅
+- **Gotcha**: `ParseHexColor`/`ColorToHex` already existed in EditorPage — reused them instead of redefining (caused CS0111 duplicate-member errors). The existing `ParseHexColor` only handles 6-digit hex, which is fine since slide colors are 6-digit and pickers use `IsAlphaEnabled=False`.
+- **Gotcha**: `_suppressSlideEvents` flag guards the ColorPicker `ColorChanged` handlers so loading a slide's values into the pickers doesn't fire spurious model updates.
+
+---
+
+## Text Slides — Export (MP4) Integration
+
+- **Feature/area**: Segment-aware MP4 export incl. audio sync (VideoEncoder.cs, TimelineMapper.cs)
+- **Problem**: Text slides showed in the editor preview but NOT in the exported MP4 — the export pipeline (`VideoEncoder.ProduceSampleAsync`) only ever loaded video frames via `timelineMapper.GetSourceTimeForOutputFrame` (legacy clips/trim) and never consulted `timeline.Segments`. The frame count was also too short (didn't include slide durations).
+- **Approaches tried**:
+  1. **Frame count** — `TimelineMapper.ComputeTotalOutputFrames` now returns `TotalSegmentsDuration * fps` when segments exist, so the encoder emits enough frames to cover text slides. ✅
+  2. **Frame routing** — `ProduceSampleAsync` now takes `TimelineModel? timeline`. When segments exist it calls `timeline.GetSegmentAtTime(outputTime)`: a `TextSlideSegment` is rendered via a lazily-created `TextSlideRenderer` at `compositorWidth × compositorHeight`; a `VideoSegment` maps to `SourceStart + localOffset*SpeedFactor` before loading+compositing. Legacy path unchanged when no segments. ✅
+  3. **Audio sync** — `MuxAudioAsync` now takes `timeline`. When text slides exist, audio is split into per-`VideoSegment` `BackgroundAudioTrack`s via `ApplySegmentAudioTrim`: `TrimTimeFromStart=SourceStart`, `TrimTimeFromEnd=origDur-(SourceStart+SourceDuration)`, and `Delay=segment.Start` (so slide durations become silent gaps). Only applied to primary-recording segments (`VideoFilePath == project.VideoFilePath`). ✅
+- **What worked**: Routing per-frame at the `ProduceSampleAsync` level (rather than swapping in `SegmentCompositor`) kept the existing webcam/scaling/encoder plumbing intact. `BackgroundAudioTrack.Delay` + per-segment trim cleanly inserts the silent gaps for slides.
+- **Known limitation**: The GIF export path (`ExportEngine.ExportGifAsync`) is NOT yet segment-aware — it would show video frames during slide periods. MP4 (the primary path) is fixed. Appended-recording audio (different source files) isn't muxed yet — only the primary recording's segments get per-segment audio.

@@ -14,6 +14,29 @@ public class TimelineModel
     public List<ZoomKeyframe> ZoomKeyframes { get; } = [];
     public List<SpeedSegment> SpeedSegments { get; } = [];
 
+    /// <summary>
+    /// Ordered list of segments on the output timeline.
+    /// Each segment is either a <see cref="VideoSegment"/> or a <see cref="TextSlideSegment"/>.
+    /// When empty, the legacy <see cref="Clips"/> / trim-based pipeline is used.
+    /// </summary>
+    public List<TimelineSegment> Segments { get; } = [];
+
+    /// <summary>
+    /// Path of the primary recording's video file. Used to identify which
+    /// video segments carry the cursor/zoom data so source↔output time mapping
+    /// only considers the primary recording's segments.
+    /// </summary>
+    public string? PrimaryVideoFilePath { get; set; }
+
+    /// <summary>
+    /// Total output duration computed from segments.
+    /// Falls back to <see cref="EffectiveDuration"/> when no segments exist.
+    /// </summary>
+    public TimeSpan TotalSegmentsDuration =>
+        Segments.Count > 0
+            ? Segments.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration)
+            : EffectiveDuration;
+
     // Trim handles
     public TimeSpan TrimStart { get; set; }
     public TimeSpan TrimEnd { get; set; } // default = Duration
@@ -44,6 +67,110 @@ public class TimelineModel
 
     // Get the effective (trimmed) duration
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
+
+    /// <summary>
+    /// The total display duration for the timeline ruler and coordinate system.
+    /// Uses segment duration when segments exist, otherwise falls back to source Duration.
+    /// </summary>
+    public TimeSpan DisplayDuration =>
+        Segments.Count > 0 ? TotalSegmentsDuration : Duration;
+
+    /// <summary>
+    /// Recalculates <see cref="TimelineSegment.Start"/> for every segment so they
+    /// are contiguous (no gaps, no overlaps). Call after insert, delete, or reorder.
+    /// </summary>
+    public void RecalculateSegmentPositions()
+    {
+        var position = TimeSpan.Zero;
+        foreach (var segment in Segments)
+        {
+            segment.Start = position;
+            position += segment.Duration;
+        }
+    }
+
+    /// <summary>
+    /// Finds the segment and local offset for a given output time position.
+    /// </summary>
+    public (TimelineSegment? Segment, TimeSpan LocalOffset) GetSegmentAtTime(TimeSpan outputTime)
+    {
+        foreach (var segment in Segments)
+        {
+            if (outputTime >= segment.Start && outputTime < segment.End)
+                return (segment, outputTime - segment.Start);
+        }
+        // If at the exact end, return the last segment
+        if (Segments.Count > 0 && outputTime >= Segments[^1].End)
+            return (Segments[^1], Segments[^1].Duration);
+        return (null, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// Primary recording's video segments (those carrying cursor/zoom data),
+    /// ordered by their position in the source video.
+    /// </summary>
+    private IEnumerable<VideoSegment> PrimaryVideoSegments =>
+        Segments.OfType<VideoSegment>()
+            .Where(v => PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath)
+            .OrderBy(v => v.SourceStart);
+
+    /// <summary>
+    /// Maps a source-video time (e.g. a zoom keyframe or cursor timestamp) to its
+    /// position on the output timeline, accounting for inserted text slides that
+    /// shift later video content to the right. Identity when no segments exist.
+    /// </summary>
+    public TimeSpan SourceToOutputTime(TimeSpan sourceTime)
+    {
+        if (Segments.Count == 0) return sourceTime;
+
+        VideoSegment? last = null;
+        foreach (var v in PrimaryVideoSegments)
+        {
+            var srcStart = v.SourceStart;
+            var srcEnd = v.SourceStart + v.SourceDuration;
+
+            if (sourceTime < srcStart)
+                return v.Start; // before this segment's source range
+
+            if (sourceTime < srcEnd)
+            {
+                var localSrc = sourceTime - srcStart;
+                var localOut = v.SpeedFactor != 0
+                    ? TimeSpan.FromTicks((long)(localSrc.Ticks / v.SpeedFactor))
+                    : localSrc;
+                return v.Start + localOut;
+            }
+            last = v;
+        }
+
+        // Past the end of all primary video segments
+        return last?.End ?? sourceTime;
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="SourceToOutputTime"/>: maps an output-timeline time
+    /// to the corresponding source-video time. Returns null when the output time
+    /// falls on a text slide (no underlying source frame).
+    /// </summary>
+    public TimeSpan? OutputToSourceTime(TimeSpan outputTime)
+    {
+        if (Segments.Count == 0) return outputTime;
+
+        foreach (var segment in Segments)
+        {
+            if (outputTime >= segment.Start && outputTime < segment.End)
+            {
+                if (segment is VideoSegment v &&
+                    (PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath))
+                {
+                    var localOut = outputTime - segment.Start;
+                    return v.SourceStart + TimeSpan.FromTicks((long)(localOut.Ticks * v.SpeedFactor));
+                }
+                return null; // text slide or non-primary segment
+            }
+        }
+        return null;
+    }
 }
 
 public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)

@@ -3,6 +3,33 @@ using Musio.Core.Timeline;
 namespace Musio.Core.Export;
 
 /// <summary>
+/// Identifies which segment and source time a given output frame maps to.
+/// </summary>
+public readonly struct SegmentFrameRef
+{
+    /// <summary>The segment this frame belongs to.</summary>
+    public TimelineSegment Segment { get; init; }
+
+    /// <summary>For video segments: the source time in seconds within that video file.</summary>
+    public double SourceTimeSeconds { get; init; }
+
+    /// <summary>Normalized progress within the segment (0..1), useful for text slide animation.</summary>
+    public double Progress { get; init; }
+
+    /// <summary>True if this frame falls within a transition overlap period.</summary>
+    public bool IsInTransition { get; init; }
+
+    /// <summary>The previous segment (for crossfade transitions).</summary>
+    public TimelineSegment? OutgoingSegment { get; init; }
+
+    /// <summary>Progress of the outgoing segment source time during transition.</summary>
+    public double OutgoingSourceTimeSeconds { get; init; }
+
+    /// <summary>Transition progress (0..1) from outgoing to incoming.</summary>
+    public double TransitionProgress { get; init; }
+}
+
+/// <summary>
 /// Maps output frame indices to source timestamps, accounting for timeline edits
 /// (trim, speed changes, and cut/deleted segments).
 /// </summary>
@@ -22,7 +49,9 @@ public class TimelineMapper
 
     /// <summary>Total output duration after all edits (trim, cuts, speed).</summary>
     public TimeSpan EffectiveDuration =>
-        TimeSpan.FromSeconds(_outputSegments.Sum(s => s.OutputDuration));
+        _timeline.Segments.Count > 0
+            ? _timeline.TotalSegmentsDuration
+            : TimeSpan.FromSeconds(_outputSegments.Sum(s => s.OutputDuration));
 
     public TimelineMapper(TimelineModel timeline, int fps)
     {
@@ -36,8 +65,104 @@ public class TimelineMapper
     }
 
     /// <summary>
+    /// Maps an output frame index to a <see cref="SegmentFrameRef"/> when the
+    /// timeline uses the segment-based pipeline.
+    /// </summary>
+    public SegmentFrameRef GetSegmentFrameRef(int outputFrame)
+    {
+        if (_timeline.Segments.Count == 0)
+        {
+            // Legacy fallback: wrap the old source-time result
+            var sourceTime = GetSourceTimeForOutputFrame(outputFrame);
+            return new SegmentFrameRef
+            {
+                Segment = null!,
+                SourceTimeSeconds = sourceTime,
+                Progress = 0,
+            };
+        }
+
+        double outputTimeSec = (double)outputFrame / _fps;
+        var outputTime = TimeSpan.FromSeconds(outputTimeSec);
+
+        foreach (var segment in _timeline.Segments)
+        {
+            if (outputTime < segment.End || segment == _timeline.Segments[^1])
+            {
+                if (outputTime < segment.Start) break;
+
+                var localOffset = outputTime - segment.Start;
+                var progress = segment.Duration.TotalSeconds > 0
+                    ? Math.Clamp(localOffset.TotalSeconds / segment.Duration.TotalSeconds, 0, 1)
+                    : 0;
+
+                // Check for transition overlap
+                bool isInTransition = false;
+                TimelineSegment? outgoing = null;
+                double outgoingSource = 0;
+                double transitionProgress = 0;
+
+                if (segment.InTransition is { Type: not TransitionType.None } transition)
+                {
+                    var transitionDuration = transition.Duration;
+                    if (localOffset < transitionDuration)
+                    {
+                        isInTransition = true;
+                        transitionProgress = transitionDuration.TotalSeconds > 0
+                            ? localOffset.TotalSeconds / transitionDuration.TotalSeconds
+                            : 1.0;
+
+                        int segIdx = _timeline.Segments.IndexOf(segment);
+                        if (segIdx > 0)
+                        {
+                            outgoing = _timeline.Segments[segIdx - 1];
+                            if (outgoing is VideoSegment outVid)
+                            {
+                                // The outgoing frame is at the tail of the previous segment
+                                var outgoingLocal = outgoing.Duration - transitionDuration + localOffset;
+                                outgoingSource = outVid.SourceStart.TotalSeconds
+                                    + outgoingLocal.TotalSeconds * outVid.SpeedFactor;
+                            }
+                        }
+                    }
+                }
+
+                double sourceTimeSec = 0;
+                if (segment is VideoSegment vid)
+                {
+                    sourceTimeSec = vid.SourceStart.TotalSeconds
+                        + localOffset.TotalSeconds * vid.SpeedFactor;
+                }
+
+                return new SegmentFrameRef
+                {
+                    Segment = segment,
+                    SourceTimeSeconds = sourceTimeSec,
+                    Progress = progress,
+                    IsInTransition = isInTransition,
+                    OutgoingSegment = outgoing,
+                    OutgoingSourceTimeSeconds = outgoingSource,
+                    TransitionProgress = transitionProgress,
+                };
+            }
+        }
+
+        // Past all segments — return last
+        var last = _timeline.Segments[^1];
+        return new SegmentFrameRef
+        {
+            Segment = last,
+            SourceTimeSeconds = last is VideoSegment lv
+                ? lv.SourceStart.TotalSeconds + lv.SourceDuration.TotalSeconds
+                : 0,
+            Progress = 1.0,
+        };
+    }
+
+    /// <summary>
     /// Maps an output frame index to the corresponding source time in seconds.
     /// Returns the source time accounting for trim, speed changes, and cuts.
+    /// Used by the legacy (non-segment) pipeline.
     /// </summary>
     public double GetSourceTimeForOutputFrame(int outputFrame)
     {
@@ -206,6 +331,11 @@ public class TimelineMapper
 
     private int ComputeTotalOutputFrames()
     {
+        // Segment-based timelines (with text slides) define their own total
+        // duration that includes non-video segments.
+        if (_timeline.Segments.Count > 0)
+            return Math.Max(1, (int)(_timeline.TotalSegmentsDuration.TotalSeconds * _fps));
+
         double totalOutputSeconds = 0;
         foreach (var seg in _outputSegments)
             totalOutputSeconds += seg.OutputDuration;

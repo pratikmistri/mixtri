@@ -825,3 +825,303 @@ public class RippleDeleteOperation : IEditOperation
         model.PlayheadPosition = _previousPlayhead;
     }
 }
+
+// ─── Segment-based edit operations ───────────────────────────────────
+
+public class AddTextSlideOperation : IEditOperation
+{
+    private readonly int _insertIndex;
+    private readonly TextSlideSegment _slide;
+
+    public string Description => "Add Text Slide";
+
+    /// <param name="insertIndex">
+    /// Index in <see cref="TimelineModel.Segments"/> to insert at.
+    /// Use -1 to append at end.
+    /// </param>
+    public AddTextSlideOperation(TextSlideSegment slide, int insertIndex = -1)
+    {
+        _slide = slide ?? throw new ArgumentNullException(nameof(slide));
+        _insertIndex = insertIndex;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        int idx = _insertIndex < 0 || _insertIndex > model.Segments.Count
+            ? model.Segments.Count
+            : _insertIndex;
+        model.Segments.Insert(idx, _slide);
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Segments.Remove(_slide);
+        model.RecalculateSegmentPositions();
+    }
+}
+
+public class UpdateTextSlideOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private readonly string _newText;
+    private readonly string _newFontFamily;
+    private readonly double _newFontSize;
+    private readonly bool _newIsBold;
+    private readonly bool _newIsItalic;
+    private readonly string _newTextColor;
+    private readonly string _newBackgroundColor;
+    private readonly TimeSpan _newDuration;
+    private readonly TextSlideAnimation _newAnimation;
+
+    private string _oldText = "";
+    private string _oldFontFamily = "";
+    private double _oldFontSize;
+    private bool _oldIsBold;
+    private bool _oldIsItalic;
+    private string _oldTextColor = "";
+    private string _oldBackgroundColor = "";
+    private TimeSpan _oldDuration;
+    private TextSlideAnimation _oldAnimation;
+
+    public string Description => "Update Text Slide";
+
+    public UpdateTextSlideOperation(
+        string segmentId,
+        string text, string fontFamily, double fontSize,
+        bool isBold, bool isItalic,
+        string textColor, string backgroundColor,
+        TimeSpan duration, TextSlideAnimation animation)
+    {
+        _segmentId = segmentId;
+        _newText = text;
+        _newFontFamily = fontFamily;
+        _newFontSize = fontSize;
+        _newIsBold = isBold;
+        _newIsItalic = isItalic;
+        _newTextColor = textColor;
+        _newBackgroundColor = backgroundColor;
+        _newDuration = duration;
+        _newAnimation = animation;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
+        if (slide is null) return;
+
+        _oldText = slide.Text;
+        _oldFontFamily = slide.FontFamily;
+        _oldFontSize = slide.FontSize;
+        _oldIsBold = slide.IsBold;
+        _oldIsItalic = slide.IsItalic;
+        _oldTextColor = slide.TextColor;
+        _oldBackgroundColor = slide.BackgroundColor;
+        _oldDuration = slide.Duration;
+        _oldAnimation = slide.Animation;
+
+        slide.Text = _newText;
+        slide.FontFamily = _newFontFamily;
+        slide.FontSize = _newFontSize;
+        slide.IsBold = _newIsBold;
+        slide.IsItalic = _newIsItalic;
+        slide.TextColor = _newTextColor;
+        slide.BackgroundColor = _newBackgroundColor;
+        slide.Duration = _newDuration;
+        slide.Animation = _newAnimation;
+
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
+        if (slide is null) return;
+
+        slide.Text = _oldText;
+        slide.FontFamily = _oldFontFamily;
+        slide.FontSize = _oldFontSize;
+        slide.IsBold = _oldIsBold;
+        slide.IsItalic = _oldIsItalic;
+        slide.TextColor = _oldTextColor;
+        slide.BackgroundColor = _oldBackgroundColor;
+        slide.Duration = _oldDuration;
+        slide.Animation = _oldAnimation;
+
+        model.RecalculateSegmentPositions();
+    }
+}
+
+public class RemoveSegmentOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private TimelineSegment? _removedSegment;
+    private int _removedIndex;
+
+    public string Description => "Remove Segment";
+
+    public RemoveSegmentOperation(string segmentId)
+    {
+        _segmentId = segmentId;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _removedIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_removedIndex < 0) return;
+        _removedSegment = model.Segments[_removedIndex];
+        model.Segments.RemoveAt(_removedIndex);
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_removedSegment is null) return;
+        model.Segments.Insert(_removedIndex, _removedSegment);
+        model.RecalculateSegmentPositions();
+    }
+}
+
+public class ReorderSegmentOperation : IEditOperation
+{
+    private readonly int _fromIndex;
+    private readonly int _toIndex;
+
+    public string Description => "Reorder Segment";
+
+    public ReorderSegmentOperation(int fromIndex, int toIndex)
+    {
+        _fromIndex = fromIndex;
+        _toIndex = toIndex;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return;
+        var segment = model.Segments[_fromIndex];
+        model.Segments.RemoveAt(_fromIndex);
+        var insertAt = Math.Min(_toIndex, model.Segments.Count);
+        model.Segments.Insert(insertAt, segment);
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_toIndex < 0 || _toIndex >= model.Segments.Count) return;
+        var adjusted = _toIndex > _fromIndex ? _toIndex : Math.Min(_toIndex, model.Segments.Count - 1);
+        var segment = model.Segments[adjusted];
+        model.Segments.RemoveAt(adjusted);
+        model.Segments.Insert(_fromIndex, segment);
+        model.RecalculateSegmentPositions();
+    }
+}
+
+public class AppendVideoSegmentOperation : IEditOperation
+{
+    private readonly VideoSegment _segment;
+
+    public string Description => "Append Recording";
+
+    public AppendVideoSegmentOperation(VideoSegment segment)
+    {
+        _segment = segment ?? throw new ArgumentNullException(nameof(segment));
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        model.Segments.Add(_segment);
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Segments.Remove(_segment);
+        model.RecalculateSegmentPositions();
+    }
+}
+
+/// <summary>
+/// Splits a <see cref="VideoSegment"/> at the playhead position and inserts
+/// a <see cref="TextSlideSegment"/> between the two halves. This keeps video
+/// and audio in sync by creating two video segments whose source ranges
+/// correspond to the content before and after the split point.
+/// </summary>
+public class SplitAndInsertTextSlideOperation : IEditOperation
+{
+    private readonly TimeSpan _splitTime;
+    private readonly TextSlideSegment _slide;
+    private List<TimelineSegment> _previousSegments = [];
+
+    public string Description => "Insert Text Slide";
+
+    public SplitAndInsertTextSlideOperation(TimeSpan splitTime, TextSlideSegment slide)
+    {
+        _slide = slide ?? throw new ArgumentNullException(nameof(slide));
+        _splitTime = splitTime;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _previousSegments = [.. model.Segments];
+
+        // Find the segment at the split time
+        int splitIndex = -1;
+        for (int i = 0; i < model.Segments.Count; i++)
+        {
+            var seg = model.Segments[i];
+            if (_splitTime > seg.Start && _splitTime < seg.End)
+            {
+                splitIndex = i;
+                break;
+            }
+        }
+
+        if (splitIndex >= 0 && model.Segments[splitIndex] is VideoSegment video)
+        {
+            // Split the video segment into two halves
+            var localOffset = _splitTime - video.Start;
+            var sourceOffset = TimeSpan.FromTicks(
+                (long)(localOffset.Ticks * video.SpeedFactor));
+
+            var firstHalf = video with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Duration = localOffset,
+                SourceDuration = sourceOffset,
+            };
+
+            var secondHalf = video with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                SourceStart = video.SourceStart + sourceOffset,
+                Duration = video.Duration - localOffset,
+                SourceDuration = video.SourceDuration - sourceOffset,
+            };
+
+            model.Segments.RemoveAt(splitIndex);
+            model.Segments.Insert(splitIndex, firstHalf);
+            model.Segments.Insert(splitIndex + 1, _slide);
+            model.Segments.Insert(splitIndex + 2, secondHalf);
+        }
+        else
+        {
+            // Not on a video segment — just insert at the right position
+            int insertAt = 0;
+            for (int i = 0; i < model.Segments.Count; i++)
+            {
+                if (_splitTime >= model.Segments[i].End)
+                    insertAt = i + 1;
+            }
+            model.Segments.Insert(insertAt, _slide);
+        }
+
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Segments.Clear();
+        model.Segments.AddRange(_previousSegments);
+        model.RecalculateSegmentPositions();
+    }
+}

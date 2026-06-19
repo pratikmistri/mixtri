@@ -32,9 +32,13 @@ public sealed partial class RecordingPage : Page
         Loaded += OnLoaded;
     }
 
+    private bool _isAppendMode;
+
     protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
+
+        _isAppendMode = e.Parameter as string == "append";
 
         // Re-point the shared VM's dispatcher at this page's UI thread (cheap;
         // safe to call repeatedly).
@@ -58,7 +62,15 @@ public sealed partial class RecordingPage : Page
                     CloseRecordingOverlay();
 
                     if (ViewModel.LastProject is not null)
+                    {
+                        if (_isAppendMode)
+                        {
+                            // Append the new recording to the existing project
+                            var newRecording = ViewModel.LastProject;
+                            ProjectService.Instance.AppendRecording(newRecording);
+                        }
                         Frame.Navigate(typeof(EditorPage));
+                    }
                 }
             });
         };

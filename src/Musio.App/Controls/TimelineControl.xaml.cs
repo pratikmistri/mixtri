@@ -240,7 +240,7 @@ public sealed partial class TimelineControl : UserControl
         TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
     }
 
-    private void InvalidateAllCanvases()
+    public void InvalidateAllCanvases()
     {
         TimeRulerCanvas?.Invalidate();
         VideoTrackCanvas?.Invalidate();
@@ -327,10 +327,10 @@ public sealed partial class TimelineControl : UserControl
     private double TimeToX(TimeSpan time)
     {
         var model = Model;
-        if (model is null || model.Duration.TotalSeconds <= 0)
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
             return TrackContentInset;
 
-        double totalSeconds = model.Duration.TotalSeconds;
+        double totalSeconds = model.DisplayDuration.TotalSeconds;
         double canvasWidth = TimeRulerCanvas.ActualWidth;
         if (canvasWidth <= 0) canvasWidth = ActualWidth;
         double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
@@ -340,10 +340,10 @@ public sealed partial class TimelineControl : UserControl
     private TimeSpan XToTime(double x)
     {
         var model = Model;
-        if (model is null || model.Duration.TotalSeconds <= 0)
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
             return TimeSpan.Zero;
 
-        double totalSeconds = model.Duration.TotalSeconds;
+        double totalSeconds = model.DisplayDuration.TotalSeconds;
         double canvasWidth = TimeRulerCanvas.ActualWidth;
         if (canvasWidth <= 0) canvasWidth = ActualWidth;
         double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
@@ -352,6 +352,33 @@ public sealed partial class TimelineControl : UserControl
         double seconds = ((x - TrackContentInset) / pixelsPerSecond) + model.ScrollOffset;
         seconds = Math.Clamp(seconds, 0, totalSeconds);
         return TimeSpan.FromSeconds(seconds);
+    }
+
+    /// <summary>
+    /// Converts a source-video time (zoom keyframe / cursor timestamp) to an X
+    /// coordinate, mapping through segments so it stays aligned with the video
+    /// after text slides shift later content.
+    /// </summary>
+    private double SourceTimeToX(TimeSpan sourceTime)
+    {
+        var model = Model;
+        if (model is null || model.Segments.Count == 0)
+            return TimeToX(sourceTime);
+        return TimeToX(model.SourceToOutputTime(sourceTime));
+    }
+
+    /// <summary>
+    /// Converts an X coordinate to a source-video time, the inverse of
+    /// <see cref="SourceTimeToX"/>. Falls back to plain output time when the X
+    /// lands on a text slide.
+    /// </summary>
+    private TimeSpan XToSourceTime(double x)
+    {
+        var model = Model;
+        var outputTime = XToTime(x);
+        if (model is null || model.Segments.Count == 0)
+            return outputTime;
+        return model.OutputToSourceTime(outputTime) ?? outputTime;
     }
 
     private void InvalidateAll()
@@ -383,10 +410,10 @@ public sealed partial class TimelineControl : UserControl
 
         ds.Clear(RulerBackground);
 
-        if (model is null || model.Duration.TotalSeconds <= 0)
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
             return;
 
-        double totalSeconds = model.Duration.TotalSeconds;
+        double totalSeconds = model.DisplayDuration.TotalSeconds;
         double pixelsPerSecond = ((w - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
 
         // Choose tick interval based on zoom
@@ -452,11 +479,22 @@ public sealed partial class TimelineControl : UserControl
 
         ds.Clear(VideoTrackBackground);
 
-        if (model is null || model.Duration.TotalSeconds <= 0)
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
             return;
 
         bool hasThumbnails = _thumbnails is not null && _thumbnails.Length > 0 && _thumbnailIntervalSeconds > 0;
         const float pad = 14f;
+
+        // When the timeline uses segments (video + text slides), render each
+        // segment at its own position instead of drawing the continuous clip
+        // filmstrip. This keeps text slides occupying real timeline space.
+        if (model.Segments.Count > 0)
+        {
+            DrawVideoTrackFromSegments(ds, model, w, h, pad, hasThumbnails);
+
+            // Trim handles + speed overlays don't apply to the segment view
+            return;
+        }
 
         // Draw clips
         for (int idx = 0; idx < model.Clips.Count; idx++)
@@ -570,6 +608,153 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawLine(x, 0, x, h, CutLineColor, 1.5f);
         }
     }
+
+    /// <summary>
+    /// Renders the video track from the segment list: each <see cref="VideoSegment"/>
+    /// is drawn as a filmstrip clip showing its source range, and each
+    /// <see cref="TextSlideSegment"/> as a colored block with its text.
+    /// </summary>
+    private void DrawVideoTrackFromSegments(
+        CanvasDrawingSession ds, TimelineModel model, float w, float h, float pad, bool hasThumbnails)
+    {
+        var textSlideColor = Color.FromArgb(230, 100, 149, 237); // CornflowerBlue
+        var textSlideSelectedColor = Color.FromArgb(245, 130, 170, 255);
+        var textSlideBorder = Color.FromArgb(255, 80, 120, 200);
+        var transitionColor = Color.FromArgb(180, 255, 193, 7);  // Amber
+        var textLabelColor = Color.FromArgb(255, 255, 255, 255);
+        float clipH = h - pad * 2;
+
+        foreach (var segment in model.Segments)
+        {
+            float x1 = (float)TimeToX(segment.Start);
+            float x2 = (float)TimeToX(segment.End);
+            if (x2 < 0 || x1 > w) continue;
+            float segW = Math.Max(2, x2 - x1);
+
+            using var segGeom = CanvasGeometry.CreateRoundedRectangle(
+                ds, x1, pad, segW, clipH, VideoClipCornerRadius, VideoClipCornerRadius);
+
+            if (segment is VideoSegment video)
+            {
+                bool isSelected = video.Id == _selectedSegmentId;
+                if (hasThumbnails)
+                {
+                    using (ds.CreateLayer(1f, segGeom))
+                    {
+                        ds.FillGeometry(segGeom, FilmstripBackplateColor);
+                        DrawFilmstripForSegment(ds, x1, x2, pad, clipH, video);
+                    }
+                    var strokeColor = isSelected ? VideoClipSelectedBorder : FilmstripStrokeColor;
+                    ds.DrawGeometry(segGeom, strokeColor, isSelected ? 2f : 1f);
+                }
+                else
+                {
+                    ds.FillGeometry(segGeom, isSelected ? VideoClipSelectedColor : VideoClipColor);
+                    if (isSelected) ds.DrawGeometry(segGeom, VideoClipSelectedBorder, 2f);
+                }
+            }
+            else if (segment is TextSlideSegment slide)
+            {
+                bool isSelected = slide.Id == _selectedSegmentId;
+                ds.FillGeometry(segGeom, isSelected ? textSlideSelectedColor : textSlideColor);
+                if (isSelected)
+                    ds.DrawGeometry(segGeom, textSlideBorder, 2f);
+
+                if (segW > 20)
+                {
+                    var labelText = slide.Text.Length > 24 ? slide.Text[..24] + "…" : slide.Text;
+                    using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                    {
+                        FontSize = Math.Min(15, clipH * 0.35f),
+                        FontFamily = "Segoe UI",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                        HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                        VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                        WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                        TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+                    };
+                    ds.DrawText(labelText, new Rect(x1 + 4, pad, segW - 8, clipH), textLabelColor, fmt);
+                }
+            }
+
+            // Transition marker at segment start
+            if (segment.InTransition is { Type: not TransitionType.None } transition)
+            {
+                float transW = Math.Max(4, (float)TimeToX(segment.Start + transition.Duration) - x1);
+                transW = Math.Min(transW, segW);
+                ds.FillRoundedRectangle(x1, pad, transW, 4, 2, 2, transitionColor);
+            }
+
+            // Boundary line between segments
+            if (segment.Start > TimeSpan.Zero)
+                ds.DrawLine(x1, pad, x1, h - pad, CutLineColor, 1.5f);
+        }
+    }
+
+    /// <summary>
+    /// Draws a filmstrip for a <see cref="VideoSegment"/>, mapping the segment's
+    /// timeline position to its source range so the correct thumbnails are shown.
+    /// </summary>
+    private void DrawFilmstripForSegment(CanvasDrawingSession ds, float clipX1, float clipX2,
+        float y, float trackH, VideoSegment segment)
+    {
+        if (_thumbnails is null || _thumbnails.Length == 0 || _thumbnailIntervalSeconds <= 0)
+            return;
+
+        float thumbH = trackH;
+        float thumbW = thumbH * (float)_videoAspectRatio;
+        if (thumbW < 2) return;
+
+        float canvasWidth = (float)VideoTrackCanvas.ActualWidth;
+        float visibleX1 = Math.Max(0, clipX1);
+        float visibleX2 = Math.Min(canvasWidth, clipX2);
+        if (visibleX1 >= visibleX2) return;
+
+        for (float tileX = clipX1; tileX < visibleX2; tileX += thumbW)
+        {
+            if (tileX + thumbW < visibleX1) continue;
+
+            float tileCenterX = Math.Clamp(tileX + thumbW / 2, clipX1, clipX2);
+            var timelineTime = XToTime(tileCenterX);
+
+            // Map timeline time → source time within this segment
+            var offset = timelineTime - segment.Start;
+            if (offset < TimeSpan.Zero) offset = TimeSpan.Zero;
+            var sourceTime = segment.SourceStart +
+                TimeSpan.FromTicks((long)(offset.Ticks * segment.SpeedFactor));
+
+            int thumbIndex = (int)(sourceTime.TotalSeconds / _thumbnailIntervalSeconds);
+            thumbIndex = Math.Clamp(thumbIndex, 0, _thumbnails.Length - 1);
+
+            var thumb = _thumbnails[thumbIndex];
+            if (thumb is null) continue;
+
+            float drawX = Math.Max(tileX, clipX1);
+            float drawEndX = Math.Min(tileX + thumbW, clipX2);
+            float drawW = drawEndX - drawX;
+            if (drawW <= 0) continue;
+
+            float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
+            float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
+
+            ds.DrawImage(thumb,
+                new Rect(drawX, y, drawW, thumbH),
+                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+        }
+    }
+
+    /// <summary>Currently selected segment ID for text slide highlighting.</summary>
+    private string? _selectedSegmentId;
+
+    /// <summary>Sets the selected segment ID (called from EditorPage).</summary>
+    public void SelectSegment(string? segmentId)
+    {
+        _selectedSegmentId = segmentId;
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>Raised when a text slide segment is clicked on the timeline.</summary>
+    public event EventHandler<string?>? SegmentSelected;
 
     private void DrawTrimHandle(CanvasDrawingSession ds, TimeSpan time, float trackHeight)
     {
@@ -737,8 +922,8 @@ public sealed partial class TimelineControl : UserControl
         // Draw create-preview if dragging to create
         if (_zoomCreateActive && _dragMode == DragMode.ZoomSegmentCreate)
         {
-            float cx1 = (float)TimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd);
-            float cx2 = (float)TimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart);
+            float cx1 = (float)SourceTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd);
+            float cx2 = (float)SourceTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart);
             float cw = Math.Max(2, cx2 - cx1);
             float cy = ZoomSegmentVerticalPadding;
             float ch = h - ZoomSegmentVerticalPadding * 2;
@@ -761,14 +946,14 @@ public sealed partial class TimelineControl : UserControl
             if (_dragMode == DragMode.ZoomSegmentBody)
             {
                 double deltaX = _zoomDragCurrentX - _zoomDragStartX;
-                return TimeToX(_zoomDragOriginalStart) + deltaX;
+                return SourceTimeToX(_zoomDragOriginalStart) + deltaX;
             }
             if (_dragMode == DragMode.ZoomSegmentLeftEdge)
             {
                 return _zoomDragCurrentX;
             }
         }
-        return TimeToX(kf.Start);
+        return SourceTimeToX(kf.Start);
     }
 
     /// <summary>
@@ -782,14 +967,14 @@ public sealed partial class TimelineControl : UserControl
             if (_dragMode == DragMode.ZoomSegmentBody)
             {
                 double deltaX = _zoomDragCurrentX - _zoomDragStartX;
-                return TimeToX(_zoomDragOriginalEnd) + deltaX;
+                return SourceTimeToX(_zoomDragOriginalEnd) + deltaX;
             }
             if (_dragMode == DragMode.ZoomSegmentRightEdge)
             {
                 return _zoomDragCurrentX;
             }
         }
-        return TimeToX(kf.End);
+        return SourceTimeToX(kf.End);
     }
 
     // --- Zoom Track Interaction ---
@@ -819,8 +1004,8 @@ public sealed partial class TimelineControl : UserControl
         for (int i = sorted.Count - 1; i >= 0; i--)
         {
             var kf = sorted[i];
-            float x1 = (float)TimeToX(kf.Start);
-            float x2 = (float)TimeToX(kf.End);
+            float x1 = (float)SourceTimeToX(kf.Start);
+            float x2 = (float)SourceTimeToX(kf.End);
 
             // Check edges first (only if selected)
             if (kf.Id == _selectedZoomKeyframeId)
@@ -892,9 +1077,9 @@ public sealed partial class TimelineControl : UserControl
             _zoomDragStartX = pos.X;
             _zoomDragCurrentX = pos.X;
             _zoomCreateActive = false;
-            _zoomCreateStart = XToTime(pos.X);
+            _zoomCreateStart = XToSourceTime(pos.X);
             _dragMode = DragMode.ZoomSegmentCreate;
-            PlayheadPosition = _zoomCreateStart;
+            PlayheadPosition = XToTime(pos.X);
             canvas.CapturePointer(e.Pointer);
         }
     }
@@ -924,7 +1109,7 @@ public sealed partial class TimelineControl : UserControl
                 if (dragDistance >= ZoomCreateDragThreshold)
                 {
                     _zoomCreateActive = true;
-                    _zoomCreateEnd = XToTime(pos.X);
+                    _zoomCreateEnd = XToSourceTime(pos.X);
                     InvalidateAll();
                 }
                 else
@@ -961,7 +1146,7 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.ZoomSegmentBody when _selectedZoomKeyframeId is not null:
             {
                 double deltaX = _zoomDragCurrentX - _zoomDragStartX;
-                var deltaTime = XToTime(_zoomDragStartX + deltaX) - XToTime(_zoomDragStartX);
+                var deltaTime = XToSourceTime(_zoomDragStartX + deltaX) - XToSourceTime(_zoomDragStartX);
                 var newTimestamp = _zoomDragOriginalTimestamp + deltaTime;
 
                 // Only fire move event if the segment actually moved
@@ -974,7 +1159,7 @@ public sealed partial class TimelineControl : UserControl
 
             case DragMode.ZoomSegmentLeftEdge when _selectedZoomKeyframeId is not null:
             {
-                var newEdgeTime = XToTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
+                var newEdgeTime = XToSourceTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
                 if (newEdgeTime != _zoomDragOriginalStart)
                 {
                     ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime));
@@ -984,7 +1169,7 @@ public sealed partial class TimelineControl : UserControl
 
             case DragMode.ZoomSegmentRightEdge when _selectedZoomKeyframeId is not null:
             {
-                var newEdgeTime = XToTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
+                var newEdgeTime = XToSourceTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth));
                 if (newEdgeTime != _zoomDragOriginalEnd)
                 {
                     ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime));
@@ -1233,7 +1418,7 @@ public sealed partial class TimelineControl : UserControl
             foreach (var sample in cursorData.Samples)
             {
                 double timeSec = (sample.TimestampTicks - startTicks) / tickFreq - mouseOffset;
-                float px = (float)TimeToX(TimeSpan.FromSeconds(timeSec));
+                float px = (float)SourceTimeToX(TimeSpan.FromSeconds(timeSec));
                 if (px < -1 || px > w + 1) continue;
 
                 float normX = (float)(sample.X - minX) / rangeX;
@@ -1267,7 +1452,7 @@ public sealed partial class TimelineControl : UserControl
         {
             if (!click.IsDown) continue;
             double timeSec = (click.TimestampTicks - startTicks) / tickFreq - mouseOffset;
-            float cx = (float)TimeToX(TimeSpan.FromSeconds(timeSec));
+            float cx = (float)SourceTimeToX(TimeSpan.FromSeconds(timeSec));
             if (cx < -4 || cx > w + 4) continue;
 
             float normY = (float)(click.Y - minY) / rangeY;
@@ -1337,6 +1522,26 @@ public sealed partial class TimelineControl : UserControl
         else if (_selectedClipIndex is not null)
         {
             ClearClipSelection();
+        }
+
+        // Hit-test timeline segments (text slides)
+        if (model.Segments.Count > 0)
+        {
+            string? hitSegId = null;
+            foreach (var seg in model.Segments)
+            {
+                if (seg is TextSlideSegment slide && clickTime >= seg.Start && clickTime < seg.End)
+                {
+                    hitSegId = slide.Id;
+                    break;
+                }
+            }
+            if (hitSegId != _selectedSegmentId)
+            {
+                _selectedSegmentId = hitSegId;
+                SegmentSelected?.Invoke(this, hitSegId);
+                VideoTrackCanvas?.Invalidate();
+            }
         }
 
         // Always move playhead on click
