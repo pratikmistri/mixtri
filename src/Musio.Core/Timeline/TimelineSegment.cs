@@ -90,8 +90,38 @@ public record TextSlideSegment : TimelineSegment
     public bool IsBold { get; set; }
     public bool IsItalic { get; set; }
     public string TextColor { get; set; } = "#FFFFFF";
+
+    // ── Background ──
+    /// <summary>How the slide background is rendered.</summary>
+    public SlideBackgroundType BackgroundType { get; set; } = SlideBackgroundType.Solid;
+
+    /// <summary>Solid color, and the start color of a gradient.</summary>
     public string BackgroundColor { get; set; } = "#1E1E1E";
+
+    /// <summary>End color of a gradient background.</summary>
+    public string GradientEndColor { get; set; } = "#16213E";
+
+    /// <summary>Gradient direction in degrees.</summary>
+    public double GradientAngle { get; set; } = 135;
+
+    /// <summary>Path to an image used as the background (Image type).</summary>
+    public string? BackgroundImagePath { get; set; }
+
+    /// <summary>Path to a video used as the background (Video type).</summary>
+    public string? BackgroundVideoPath { get; set; }
+
     public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
+}
+
+/// <summary>
+/// Background fill modes available for a <see cref="TextSlideSegment"/>.
+/// </summary>
+public enum SlideBackgroundType
+{
+    Solid,
+    Gradient,
+    Image,
+    Video,
 }
 
 /// <summary>

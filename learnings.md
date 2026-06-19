@@ -1898,3 +1898,19 @@ the success message. Resetting on close is cleaner and matches user intent.
   - **Per-character** — `ComputeCharParams` now computes both a staggered `inCp` (first 50%) and staggered `outCp` (last 40%); opacity = `inCp * (1 - outCp)`, offsets sum entrance + exit. Wave fades in AND out at the ends.
 - **Added easing**: `EaseInCubic` (t³) for accelerating exits.
 - **Note**: `None` stays static (no animation). `FadeOut` is visible from the start and only fades at the end (unchanged semantics).
+
+---
+
+## Text Slides — Background Types (Solid / Gradient / Image / Video)
+
+- **Feature/area**: Rich slide backgrounds matching the Frame Style flyout (TextSlideSegment, TextSlideRenderer, EditorPage)
+- **Model**: `TextSlideSegment` gained `BackgroundType` (`SlideBackgroundType` enum: Solid/Gradient/Image/Video), `GradientEndColor`, `GradientAngle`, `BackgroundImagePath`, `BackgroundVideoPath`. `BackgroundColor` now doubles as the solid color and gradient START color (back-compat preserved).
+- **Rendering** (`TextSlideRenderer.DrawSlideBackground`):
+  - Solid → `ds.Clear`
+  - Gradient → `CanvasLinearGradientBrush` (same angle math as `BackgroundCompositor`)
+  - Image → cached `CanvasBitmap` loaded via blocking `LoadAsync(...).GetAwaiter().GetResult()` (mirrors `BackgroundCompositor.DrawImageBackground`), scale-to-fill
+  - Video → cached `MediaComposition`; frames pulled with `GetThumbnailAsync` at `progress*duration` (looped), cached at ~10fps granularity, scale-to-fill; falls back to solid on any failure
+  - Cached bitmaps/composition disposed in `Dispose()`.
+- **Export**: works automatically — `VideoEncoder.ProduceSampleAsync` already calls `RenderSlide`, so gradient/image/video backgrounds appear in exported MP4 with no extra changes.
+- **UI**: Text-slide flyout now has a Background `ComboBox` (Solid/Gradient/Image/Video) that toggles panels: solid/gradient share the color picker (label switches to "Start Color" for gradient); gradient panel adds a **presets GridView** (built from `DefaultBrandPresets.All` — Nebula, Lagoon, Prism, etc. as `LinearGradientBrush` tiles), an End Color picker, and an Angle slider; Image/Video panels use `FileOpenPicker` buttons.
+- **Reused**: `DefaultBrandPresets` (Core/Settings) for gradient presets; the wallpaper picker's `FileOpenPicker` + `InitializeWithWindow` pattern.

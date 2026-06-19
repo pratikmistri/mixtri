@@ -3108,6 +3108,27 @@ public sealed partial class EditorPage : Page
         // Color swatches + pickers
         UpdateSlideColorSwatch(SlideTextColorSwatch, SlideTextColorText, SlideTextColorPicker, slide.TextColor);
         UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
+        UpdateSlideColorSwatch(SlideGradEndColorSwatch, SlideGradEndColorText, SlideGradEndColorPicker, slide.GradientEndColor);
+        SlideGradAngleSlider.Value = slide.GradientAngle;
+
+        // Background type combo
+        var bgTypeName = slide.BackgroundType.ToString();
+        for (int i = 0; i < SlideBgTypeCombo.Items.Count; i++)
+        {
+            if (SlideBgTypeCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == bgTypeName)
+            {
+                SlideBgTypeCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        SlideImagePathText.Text = string.IsNullOrEmpty(slide.BackgroundImagePath)
+            ? "No image selected" : System.IO.Path.GetFileName(slide.BackgroundImagePath);
+        SlideVideoPathText.Text = string.IsNullOrEmpty(slide.BackgroundVideoPath)
+            ? "No video selected" : System.IO.Path.GetFileName(slide.BackgroundVideoPath);
+
+        BuildGradientPresetsIfNeeded();
+        UpdateSlideBgPanels(slide.BackgroundType);
 
         _suppressSlideEvents = false;
 
@@ -3165,5 +3186,176 @@ public sealed partial class EditorPage : Page
         SlideBgColorText.Text = slide.BackgroundColor;
         Timeline.InvalidateAllCanvases();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private TextSlideSegment? SelectedSlide() =>
+        _selectedTextSlideId is null ? null : ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+
+    private void RefreshSlidePreview()
+    {
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void UpdateSlideBgPanels(SlideBackgroundType type)
+    {
+        SlideColorPanel.Visibility = type is SlideBackgroundType.Solid or SlideBackgroundType.Gradient
+            ? Visibility.Visible : Visibility.Collapsed;
+        SlideColorLabel.Text = type == SlideBackgroundType.Gradient ? "Start Color" : "Color";
+        SlideGradientPanel.Visibility = type == SlideBackgroundType.Gradient ? Visibility.Visible : Visibility.Collapsed;
+        SlideImagePanel.Visibility = type == SlideBackgroundType.Image ? Visibility.Visible : Visibility.Collapsed;
+        SlideVideoPanel.Visibility = type == SlideBackgroundType.Video ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SlideBgTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents || SlideBgTypeCombo.SelectedItem is not ComboBoxItem item) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        if (Enum.TryParse<SlideBackgroundType>(item.Tag?.ToString(), out var type))
+        {
+            slide.BackgroundType = type;
+            UpdateSlideBgPanels(type);
+            RefreshSlidePreview();
+        }
+    }
+
+    private void SlideGradEndColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        slide.GradientEndColor = ColorToHex(args.NewColor);
+        SlideGradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideGradEndColorText.Text = slide.GradientEndColor;
+        RefreshSlidePreview();
+    }
+
+    private void SlideGradAngleSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        slide.GradientAngle = e.NewValue;
+        RefreshSlidePreview();
+    }
+
+    private bool _slideGradientPresetsBuilt;
+
+    private void BuildGradientPresetsIfNeeded()
+    {
+        if (_slideGradientPresetsBuilt) return;
+        _slideGradientPresetsBuilt = true;
+
+        foreach (var preset in Musio.Core.Settings.DefaultBrandPresets.All)
+        {
+            var brush = new Microsoft.UI.Xaml.Media.LinearGradientBrush
+            {
+                StartPoint = new Windows.Foundation.Point(0, 0),
+                EndPoint = new Windows.Foundation.Point(1, 1),
+            };
+            brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
+            { Color = ParseHexColor(preset.BackgroundColor), Offset = 0 });
+            brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
+            { Color = ParseHexColor(preset.GradientEndColor), Offset = 1 });
+
+            var tile = new Border
+            {
+                Width = 56,
+                Height = 40,
+                CornerRadius = new CornerRadius(6),
+                Background = brush,
+                Tag = preset,
+                BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+                BorderThickness = new Thickness(1),
+            };
+            ToolTipService.SetToolTip(tile, preset.Name);
+            SlideGradientPresets.Items.Add(tile);
+        }
+    }
+
+    private void SlideGradientPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        if (SlideGradientPresets.SelectedItem is not Border { Tag: Musio.Core.Settings.BrandPreset preset }) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        _suppressSlideEvents = true;
+        slide.BackgroundColor = preset.BackgroundColor;
+        slide.GradientEndColor = preset.GradientEndColor;
+        slide.GradientAngle = preset.GradientAngle;
+
+        UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
+        UpdateSlideColorSwatch(SlideGradEndColorSwatch, SlideGradEndColorText, SlideGradEndColorPicker, slide.GradientEndColor);
+        SlideGradAngleSlider.Value = slide.GradientAngle;
+        _suppressSlideEvents = false;
+
+        RefreshSlidePreview();
+    }
+
+    private async void ChooseSlideImage_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".bmp");
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); } catch { }
+        if (file is null) return;
+
+        slide.BackgroundImagePath = file.Path;
+        SlideImagePathText.Text = System.IO.Path.GetFileName(file.Path);
+        RefreshSlidePreview();
+    }
+
+    private async void ChooseSlideVideo_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        picker.FileTypeFilter.Add(".mp4");
+        picker.FileTypeFilter.Add(".mov");
+        picker.FileTypeFilter.Add(".m4v");
+        picker.FileTypeFilter.Add(".webm");
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); } catch { }
+        if (file is null) return;
+
+        slide.BackgroundVideoPath = file.Path;
+        SlideVideoPathText.Text = System.IO.Path.GetFileName(file.Path);
+        RefreshSlidePreview();
+    }
+
+    private static void InitializePicker(Windows.Storage.Pickers.FileOpenPicker picker)
+    {
+        var window = App.Current.MainAppWindow;
+        if (window is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        }
     }
 }

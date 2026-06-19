@@ -518,60 +518,140 @@
                                     </StackPanel>
                                 </Grid>
 
-                                <Grid ColumnSpacing="10">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <StackPanel Grid.Column="0" Spacing="4">
-                                        <TextBlock Text="Text Color" FontSize="12"
+                                <!-- Text color -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Text Color" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <DropDownButton x:Name="SlideTextColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="SlideTextColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="SlideTextColorText" Text="#FFFFFF" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="SlideTextColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="SlideTextColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Background type -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Background" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideBgTypeCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SlideBgTypeCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Solid" Tag="Solid" />
+                                        <ComboBoxItem Content="Gradient" Tag="Gradient" />
+                                        <ComboBoxItem Content="Image" Tag="Image" />
+                                        <ComboBoxItem Content="Video" Tag="Video" />
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <!-- Solid color / gradient start color -->
+                                <StackPanel x:Name="SlideColorPanel" Spacing="4">
+                                    <TextBlock x:Name="SlideColorLabel" Text="Color" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <DropDownButton x:Name="SlideBgColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="SlideBgColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="SlideBgColorText" Text="#1E1E1E" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="SlideBgColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="SlideBgColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Gradient controls -->
+                                <StackPanel x:Name="SlideGradientPanel" Spacing="8" Visibility="Collapsed">
+                                    <TextBlock Text="Presets" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <GridView
+                                        x:Name="SlideGradientPresets"
+                                        MaxHeight="120"
+                                        SelectionMode="Single"
+                                        SelectionChanged="SlideGradientPreset_SelectionChanged" />
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="End Color" FontSize="12"
                                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <DropDownButton x:Name="SlideTextColorButton" HorizontalAlignment="Stretch">
+                                        <DropDownButton x:Name="SlideGradEndColorButton" HorizontalAlignment="Stretch">
                                             <StackPanel Orientation="Horizontal" Spacing="8">
                                                 <Border
-                                                    x:Name="SlideTextColorSwatch"
+                                                    x:Name="SlideGradEndColorSwatch"
                                                     Width="20" Height="20"
                                                     CornerRadius="4"
                                                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                                     BorderThickness="1" />
-                                                <TextBlock x:Name="SlideTextColorText" Text="#FFFFFF" VerticalAlignment="Center" />
+                                                <TextBlock x:Name="SlideGradEndColorText" Text="#16213E" VerticalAlignment="Center" />
                                             </StackPanel>
                                             <DropDownButton.Flyout>
                                                 <Flyout>
                                                     <ColorPicker
-                                                        x:Name="SlideTextColorPicker"
+                                                        x:Name="SlideGradEndColorPicker"
                                                         IsAlphaEnabled="False"
                                                         IsHexInputVisible="True"
-                                                        ColorChanged="SlideTextColorPicker_ColorChanged" />
+                                                        ColorChanged="SlideGradEndColorPicker_ColorChanged" />
                                                 </Flyout>
                                             </DropDownButton.Flyout>
                                         </DropDownButton>
                                     </StackPanel>
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Text="Background" FontSize="12"
-                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <DropDownButton x:Name="SlideBgColorButton" HorizontalAlignment="Stretch">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <Border
-                                                    x:Name="SlideBgColorSwatch"
-                                                    Width="20" Height="20"
-                                                    CornerRadius="4"
-                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                                    BorderThickness="1" />
-                                                <TextBlock x:Name="SlideBgColorText" Text="#1E1E1E" VerticalAlignment="Center" />
-                                            </StackPanel>
-                                            <DropDownButton.Flyout>
-                                                <Flyout>
-                                                    <ColorPicker
-                                                        x:Name="SlideBgColorPicker"
-                                                        IsAlphaEnabled="False"
-                                                        IsHexInputVisible="True"
-                                                        ColorChanged="SlideBgColorPicker_ColorChanged" />
-                                                </Flyout>
-                                            </DropDownButton.Flyout>
-                                        </DropDownButton>
-                                    </StackPanel>
-                                </Grid>
+                                    <Slider
+                                        x:Name="SlideGradAngleSlider"
+                                        Header="Angle"
+                                        Minimum="0" Maximum="360"
+                                        StepFrequency="5"
+                                        ValueChanged="SlideGradAngleSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Image picker -->
+                                <StackPanel x:Name="SlideImagePanel" Spacing="4" Visibility="Collapsed">
+                                    <Button HorizontalAlignment="Stretch" Click="ChooseSlideImage_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon FontSize="14" Glyph="&#xEB9F;" />
+                                            <TextBlock Text="Choose Image…" />
+                                        </StackPanel>
+                                    </Button>
+                                    <TextBlock x:Name="SlideImagePathText" FontSize="11"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+
+                                <!-- Video picker -->
+                                <StackPanel x:Name="SlideVideoPanel" Spacing="4" Visibility="Collapsed">
+                                    <Button HorizontalAlignment="Stretch" Click="ChooseSlideVideo_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon FontSize="14" Glyph="&#xE714;" />
+                                            <TextBlock Text="Choose Video…" />
+                                        </StackPanel>
+                                    </Button>
+                                    <TextBlock x:Name="SlideVideoPathText" FontSize="11"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+
 
                                 <Button
                                     HorizontalAlignment="Stretch"
