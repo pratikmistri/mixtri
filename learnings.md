@@ -1942,3 +1942,20 @@ the success message. Resetting on close is cleaner and matches user intent.
 - **Rule learned**: Any XAML/DependencyProperty access reachable from the async preview render path MUST be marshaled to the UI thread. `CanvasControl.Invalidate()` is the only thread-safe Win2D UI call used there.
 - **Bonus**: Added `AppDomain.CurrentDomain.UnhandledException` + `TaskScheduler.UnobservedTaskException` logging to `App.xaml.cs` (writes to `%LOCALAPPDATA%\Musio\crash.log`) to catch future worker-thread managed exceptions.
 - **Debugging tip**: `dotnet tool install --global dotnet-dump`, then `dotnet-dump analyze <dump>` with `clrstack -all`. Cross-thread failfasts produce NO managed exception object (`pe` / `dumpheap -type Exception` are empty) — a strong signal it's a native thread-affinity violation.
+
+---
+
+## Recording Overlay — Theme Fix (white-on-white in light theme)
+
+- **Feature/area**: `RecordingOverlayWindow.xaml.cs`
+- **Problem**: The recording mini-toolbar's text + spinner were white-on-white after the user switched the app to Light theme.
+- **Cause**: The overlay uses a `DesktopAcrylicBackdrop` that follows the window theme; in Light theme the acrylic pill went light, but the foreground was meant for a dark pill.
+- **Fix**: `RootGrid.RequestedTheme = ElementTheme.Dark` in the constructor — pins the overlay to a dark pill with light text/spinner regardless of the app theme.
+
+## Crash After Stop Recording — Investigation (UNRESOLVED, native failfast)
+
+- **Symptom**: App crashes when stopping a recording. WER bucket constant; signature: stowed exception `0xc000027b`, HRESULT `0x802b000a` (`UI_E_WRONG_THREAD`), faulting module `combase.dll` / `CoreMessagingXP.dll`.
+- **Dump analysis (dotnet-dump + custom ClrMD tool)**: Faulting thread is the **UI thread** (`Program.Main` → `Application.Start`), idle at the message pump — the exception is a stowed/deferred native failfast re-surfaced at the pump. **No managed Exception object exists on the GC heap** → it's a pure native COM thread-affinity violation, NOT a managed exception. Therefore `crash.log` / `FirstChanceException` cannot capture it, and the original throw site is not in the dump (only WinDbg `!analyze`/`!pde` stowed-exception support could retrieve it, which isn't installed).
+- **Ruled out** (all verified UI-thread-correct): preview render path (only `CanvasControl.Invalidate()` is thread-safe; overlay methods now `DispatcherQueue`-guarded), recording-stop VM path (`OnOverlayStopRequested` marshals via dispatcher; `StopRecordingAsync` resumes on UI after `await Task.Run`), capture teardown (`Direct3D11CaptureFramePool.CreateFreeThreaded` — no affinity), overlay animation/close path, theme-change handler.
+- **Key evidence the in-preview overlay is NOT the cause**: the crash persists AFTER the thread-marshaling fix (commit c9003ff) that guarded the only new XAML-in-async-path code. If the overlay were the cause, those guards would have fixed it.
+- **Leading hypothesis**: a thread-affine NATIVE object (likely `Windows.Graphics.Capture` D3D/DWM or the overlay's `DesktopAcrylicBackdrop`/SystemBackdrop lifecycle) created on one thread and torn down/accessed on another during the stop→editor transition. Possibly environment-specific (ARM64) or triggered by the recent theme change. Needs a live repro with WinDbg, or bisection by selectively disabling capture/backdrop, to confirm.
