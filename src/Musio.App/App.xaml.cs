@@ -48,6 +48,20 @@ public partial class App : Application
             LogCrash("UnobservedTask", e.Exception);
             e.SetObserved();
         };
+        // First-chance logging captures the ORIGINAL exception (incl. cross-thread
+        // UI_E_WRONG_THREAD, HRESULT 0x802B000A) before it becomes a stowed failfast
+        // that bypasses every managed handler. Filtered to COM/threading faults to
+        // keep noise down.
+        AppDomain.CurrentDomain.FirstChanceException += (_, e) =>
+        {
+            var hr = (uint)(e.Exception.HResult & 0xFFFFFFFF);
+            bool wrongThread = hr is 0x802B000A or 0x8001010E /* RPC_E_WRONG_THREAD */;
+            bool comFault = e.Exception is System.Runtime.InteropServices.COMException
+                or System.Runtime.InteropServices.InvalidComObjectException;
+            bool msgThread = e.Exception.Message?.Contains("thread", StringComparison.OrdinalIgnoreCase) == true;
+            if (wrongThread || comFault || msgThread)
+                LogCrash($"FirstChance HR=0x{hr:X8}", e.Exception);
+        };
     }
 
     private static void LogCrash(string source, Exception? ex)

@@ -42,6 +42,12 @@ public sealed partial class RecordingOverlayWindow : Window
         _viewModel = viewModel;
         InitializeComponent();
 
+        // The recording overlay is a dark pill regardless of the app's light/dark
+        // theme, so pin its content to the Dark theme. This keeps the acrylic
+        // backdrop dark and the foreground brushes (text/spinner) light — otherwise
+        // in Light app theme the text/spinner render near-invisible.
+        RootGrid.RequestedTheme = ElementTheme.Dark;
+
         // Use system desktop acrylic for the window backdrop so DWM-drawn shadow
         // follows the rounded corners of the window. Fall back to a solid theme
         // brush on systems where acrylic is unsupported (e.g., remote sessions).
