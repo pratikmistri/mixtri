@@ -126,12 +126,34 @@ public record TextOverlay
 public enum TextSlideAnimation
 {
     None,
+
+    // ── Whole-text opacity ──
     FadeIn,
     FadeOut,
     FadeInOut,
-    TypeWriter,
+
+    // ── Whole-text position ──
     SlideUp,
     SlideDown,
+    SlideLeft,
+    SlideRight,
+
+    // ── Whole-text scale / cinematic ──
+    ScalePop,      // scales in with an overshoot bounce
+    ZoomBlurIn,    // zooms from large + blur, settling sharp (cinematic title)
+    Reveal,        // left-to-right mask wipe reveal
+
+    // ── Typewriter ──
+    TypeWriter,
+    TypewriterCaret, // typewriter with a blinking caret
+
+    // ── Per-character kinetic typography ──
+    CascadeFadeUp,   // characters fade + rise in, staggered
+    CascadePop,      // characters scale-pop in, staggered (overshoot)
+    Wave,            // characters bob continuously in a sine wave
+    TrackingIn,      // letters expand from condensed to normal spacing + fade
+    RotateIn,        // characters rotate/spin into place, staggered
+    BounceIn,        // characters drop in with a bounce, staggered
 }
 
 /// <summary>

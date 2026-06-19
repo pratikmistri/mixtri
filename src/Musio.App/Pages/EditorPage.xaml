@@ -469,9 +469,21 @@
                                         <ComboBoxItem Content="Fade In" Tag="FadeIn" />
                                         <ComboBoxItem Content="Fade Out" Tag="FadeOut" />
                                         <ComboBoxItem Content="Fade In/Out" Tag="FadeInOut" />
-                                        <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
                                         <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
                                         <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
+                                        <ComboBoxItem Content="Slide Left" Tag="SlideLeft" />
+                                        <ComboBoxItem Content="Slide Right" Tag="SlideRight" />
+                                        <ComboBoxItem Content="Scale Pop" Tag="ScalePop" />
+                                        <ComboBoxItem Content="Zoom Blur In" Tag="ZoomBlurIn" />
+                                        <ComboBoxItem Content="Reveal (Wipe)" Tag="Reveal" />
+                                        <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
+                                        <ComboBoxItem Content="Typewriter + Caret" Tag="TypewriterCaret" />
+                                        <ComboBoxItem Content="Cascade Fade Up" Tag="CascadeFadeUp" />
+                                        <ComboBoxItem Content="Cascade Pop" Tag="CascadePop" />
+                                        <ComboBoxItem Content="Wave" Tag="Wave" />
+                                        <ComboBoxItem Content="Tracking In" Tag="TrackingIn" />
+                                        <ComboBoxItem Content="Rotate In" Tag="RotateIn" />
+                                        <ComboBoxItem Content="Bounce In" Tag="BounceIn" />
                                     </ComboBox>
                                 </StackPanel>
 

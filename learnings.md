@@ -1871,3 +1871,16 @@ the success message. Resetting on close is cleaner and matches user intent.
   3. **Audio sync** — `MuxAudioAsync` now takes `timeline`. When text slides exist, audio is split into per-`VideoSegment` `BackgroundAudioTrack`s via `ApplySegmentAudioTrim`: `TrimTimeFromStart=SourceStart`, `TrimTimeFromEnd=origDur-(SourceStart+SourceDuration)`, and `Delay=segment.Start` (so slide durations become silent gaps). Only applied to primary-recording segments (`VideoFilePath == project.VideoFilePath`). ✅
 - **What worked**: Routing per-frame at the `ProduceSampleAsync` level (rather than swapping in `SegmentCompositor`) kept the existing webcam/scaling/encoder plumbing intact. `BackgroundAudioTrack.Delay` + per-segment trim cleanly inserts the silent gaps for slides.
 - **Known limitation**: The GIF export path (`ExportEngine.ExportGifAsync`) is NOT yet segment-aware — it would show video frames during slide periods. MP4 (the primary path) is fixed. Appended-recording audio (different source files) isn't muxed yet — only the primary recording's segments get per-segment audio.
+
+---
+
+## Text Slides — Cinematic Animation Engine
+
+- **Feature/area**: Rich text animations (TextSlideRenderer.cs, TimelineSegment.cs enum, EditorPage.xaml combo)
+- **Added 12 new animations** to `TextSlideAnimation` (now 19 total): SlideLeft, SlideRight, ScalePop, ZoomBlurIn, Reveal, TypewriterCaret, CascadeFadeUp, CascadePop, Wave, TrackingIn, RotateIn, BounceIn.
+- **Architecture**: `TextSlideRenderer` now has two paths:
+  1. **Whole-text** (transform + opacity + optional blur/clip): computed via `ComputeWholeOpacity` + `ComputeWholeTransform` returning (scale, tx, ty, blur). Applied through `ds.Transform`. `Reveal` uses `ds.CreateLayer` with a clip rect (L→R wipe). `ZoomBlurIn` renders text to a `CanvasRenderTarget` then draws it through a `GaussianBlurEffect` (Microsoft.Graphics.Canvas.Effects) with an easing blur 28→0.
+  2. **Per-character kinetic typography**: `DrawPerCharacter` builds a `CanvasTextLayout`, uses `layout.GetCharacterRegions(i,1)` to get each glyph's `LayoutBounds`, then draws each char with its own `Matrix3x2` (rotate+scale around glyph center + translate) and per-char opacity. Stagger formula: `cp = clamp((pIntro - frac*spread)/(1-spread),0,1)` so char 0 starts at progress 0 and the last finishes by ~progress 1. `Wave` is continuous (sine), not intro-staggered.
+- **Easing helpers**: EaseOutCubic, EaseInOutCubic, EaseOutBack (overshoot), EaseOutBounce.
+- **Gotcha**: per-char drawing uses a Left/Top-aligned `charFormat` and draws at the glyph region's absolute position (`rect.X + region.X`), while the measuring layout uses center alignment — the region bounds are absolute within the layout box so they line up. Whitespace chars are skipped (not drawn, but still advance the visible-index stagger only for non-whitespace).
+- Both slides and overlays share the same `DrawAnimatedText` engine, so overlays get all animations too.
