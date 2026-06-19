@@ -41,17 +41,29 @@ public partial class App : Application
     {
         InitializeComponent();
         UnhandledException += OnUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            LogCrash("AppDomain", e.ExceptionObject as Exception);
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            LogCrash("UnobservedTask", e.Exception);
+            e.SetObserved();
+        };
     }
 
-    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    private static void LogCrash(string source, Exception? ex)
     {
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
             System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:O}] {e.Exception.GetType().Name}: {e.Exception.Message}\n{e.Exception.StackTrace}\n\n");
+                $"[{DateTime.Now:O}] ({source}) {ex?.GetType().Name}: {ex?.Message}\n{ex?.StackTrace}\n\n");
         }
         catch { }
+    }
+
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        LogCrash("XAML", e.Exception);
         e.Handled = true;
     }
 

@@ -1930,3 +1930,15 @@ the success message. Resetting on close is cleaner and matches user intent.
   - Repositions on `Preview.FrameLayoutChanged`.
 - **Formatting in flyout**: Bold/Italic `ToggleButton`s + Left/Center/Right alignment `RadioButton`s.
 - **Gotcha**: `ComputeTextRect` made `public static` so the overlay can map output-space text rect → canvas px. `ProtectedCursor` (UIElement) used for the move cursor on hover.
+
+---
+
+## Crash Fix — Cross-Thread XAML Access from Preview Render (after recording)
+
+- **Symptom**: App froze and crashed right after stopping a recording (transition into the editor).
+- **Diagnosis**: WER showed exception `0xc000027b` (stowed) with HRESULT `0x802b000a` = **`UI_E_WRONG_THREAD`** in `combase`/`CoreMessagingXP`. No `crash.log` was written (native failfast bypasses the managed `UnhandledException` handler). The crash dump (`%LOCALAPPDATA%\CrashDumps\Musio.App.exe.*.dmp`, analyzed with `dotnet-dump`) showed the **UI thread idle at `Program.Main`** — so the offending XAML access came from a **worker thread**.
+- **Root cause**: The in-preview text-slide edit overlay (added this session) called `HideSlideEditOverlay()` / `UpdateSlideEditOverlay()` directly from the async preview render path (`RenderFrameAtAsync` / `RenderTextSlidePreview`). That path can resume on a threadpool thread after an `await`, and those methods **mutate XAML** (`SlideEditCanvas.Visibility`, `Canvas.SetLeft`, read `Preview.IsPlaying`/`FrameLayoutRect`). The pre-existing render code only ever called `CanvasControl.Invalidate()` (thread-safe in Win2D), which is why it never crashed — direct XAML mutation is NOT thread-safe.
+- **Fix**: `UpdateSlideEditOverlay` and `HideSlideEditOverlay` now guard with `DispatcherQueue.HasThreadAccess` and re-enqueue via `DispatcherQueue.TryEnqueue` when off-thread.
+- **Rule learned**: Any XAML/DependencyProperty access reachable from the async preview render path MUST be marshaled to the UI thread. `CanvasControl.Invalidate()` is the only thread-safe Win2D UI call used there.
+- **Bonus**: Added `AppDomain.CurrentDomain.UnhandledException` + `TaskScheduler.UnobservedTaskException` logging to `App.xaml.cs` (writes to `%LOCALAPPDATA%\Musio\crash.log`) to catch future worker-thread managed exceptions.
+- **Debugging tip**: `dotnet tool install --global dotnet-dump`, then `dotnet-dump analyze <dump>` with `clrstack -all`. Cross-thread failfasts produce NO managed exception object (`pe` / `dumpheap -type Exception` are empty) — a strong signal it's a native thread-affinity violation.

@@ -3434,10 +3434,16 @@ public sealed partial class EditorPage : Page
 
     /// <summary>
     /// Shows and positions the text-edit overlay over the slide's text region.
-    /// Hidden during playback.
+    /// Hidden during playback. Safe to call from any thread.
     /// </summary>
     private void UpdateSlideEditOverlay(TextSlideSegment slide)
     {
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(() => UpdateSlideEditOverlay(slide));
+            return;
+        }
+
         if (Preview.IsPlaying || _zoomRegionEditMode)
         {
             HideSlideEditOverlay();
@@ -3451,6 +3457,11 @@ public sealed partial class EditorPage : Page
     private void HideSlideEditOverlay()
     {
         if (SlideEditCanvas is null) return;
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(HideSlideEditOverlay);
+            return;
+        }
         if (_editingSlideId is not null)
             CommitSlideTextEdit();
         SlideEditCanvas.Visibility = Visibility.Collapsed;
