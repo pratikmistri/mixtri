@@ -1884,3 +1884,17 @@ the success message. Resetting on close is cleaner and matches user intent.
 - **Easing helpers**: EaseOutCubic, EaseInOutCubic, EaseOutBack (overshoot), EaseOutBounce.
 - **Gotcha**: per-char drawing uses a Left/Top-aligned `charFormat` and draws at the glyph region's absolute position (`rect.X + region.X`), while the measuring layout uses center alignment — the region bounds are absolute within the layout box so they line up. Whitespace chars are skipped (not drawn, but still advance the visible-index stagger only for non-whitespace).
 - Both slides and overlays share the same `DrawAnimatedText` engine, so overlays get all animations too.
+
+---
+
+## Text Slides — Symmetric IN/OUT Animations
+
+- **Feature/area**: Exit animations for all text slide animations (TextSlideRenderer.cs)
+- **Problem**: Only the Fade variants animated out; every other animation snapped off abruptly at the slide's end.
+- **Solution**: Each animation now has an entrance (first `InDur=0.25`) and an exit (last `OutDur=0.25`) with a static hold between. Implemented by combining an `inP` and `outP` phase:
+  - **Whole-text** — `ComputeWholeState` returns (scale, tx, ty, blur, opacity) summing an entrance offset (eased by `inP`) and an exit offset (eased by `outP`). Slides continue their motion on exit (e.g. SlideUp enters from below, exits upward); ScalePop shrinks out; ZoomBlurIn zooms+blurs back out; opacity fades both ends via `EaseOutCubic(inP) * (1 - EaseInCubic(outP))`.
+  - **Reveal** — wipes in from the left then wipes back out (`min(inFrac, 1-outFrac)`).
+  - **Typewriter/Caret** — types in over first ~45%, then erases over the last ~30%.
+  - **Per-character** — `ComputeCharParams` now computes both a staggered `inCp` (first 50%) and staggered `outCp` (last 40%); opacity = `inCp * (1 - outCp)`, offsets sum entrance + exit. Wave fades in AND out at the ends.
+- **Added easing**: `EaseInCubic` (t³) for accelerating exits.
+- **Note**: `None` stays static (no animation). `FadeOut` is visible from the start and only fades at the end (unchanged semantics).
