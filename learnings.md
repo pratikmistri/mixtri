@@ -1965,3 +1965,15 @@ the success message. Resetting on close is cleaner and matches user intent.
 - **Fix**: use `{ThemeResource SystemAccentColor}` (theme-independent, always available).
 - **Correction to earlier notes**: HRESULT `0x802B000A` is the XAML **resource-lookup-failed** code, NOT `UI_E_WRONG_THREAD`. The whole thread-affinity investigation was a red herring caused by mislabeling that HRESULT. The earlier `DispatcherQueue` marshaling guards on the overlay methods are harmless/correct defensively but were not the fix.
 - **Lesson**: When adding `{ThemeResource X}` keys, verify the key exists in BOTH Light and Dark theme dictionaries (test in both themes). Prefer well-known keys (`SystemAccentColor`, `CardStrokeColorDefaultBrush`, `ControlFillColorDefaultBrush`). A bad ThemeResource only fails when that theme is active, so it can hide until a theme switch. The FirstChanceException → `crash.log` logging is what finally captured it (XAML parse failfasts bypass `UnhandledException`).
+
+---
+
+## Append Recording — Multi-Source Playback
+
+- **Feature/area**: Playing appended ("Record More") recordings from their own source files (EditorPage preview; export still TODO)
+- **Problem**: Appended recordings added a `VideoSegment` with a different `VideoFilePath`, but both the editor preview AND export only ever read from the **primary** recording's `_frameReader`/`_previewRenderer` (built from `project.VideoFilePath`). So an appended segment replayed the first recording's frames ("repeat").
+- **Preview fix (done)**: Added a per-segment `SegmentPreview` context (`VideoFrameReader` + `PreviewRenderer` + webcam `MediaComposition`), cached in `_segmentPreviews` keyed by `VideoSegment.Id`, built lazily from the segment's own `VideoFilePath`/`CursorDataFilePath`/`WebcamFilePath`/dims/offsets. `RenderSegmentVideoAsync` routes primary-recording segments (matching `project.VideoFilePath`) to the existing reader/compositor and appended segments to their own context. `_lastRenderedSegmentId` forces a redraw across segment boundaries. Contexts disposed on reload/unload. Result: appended frames + cursor/clicks + camera play correctly in the editor.
+- **Remaining TODO (not yet done)**:
+  - **Export**: `VideoEncoder.ProduceSampleAsync` still uses the primary `frameReader`/`compositor` for all video segments → appended segments repeat in the exported MP4. Needs per-source frame readers + `FrameCompositor`s (keyed by `VideoFilePath`), routed per frame, scaling each source's composited output to the common encode size (sources may differ in dimensions). Risky to change without end-to-end export testing.
+  - **Preview audio** for appended segments (currently the primary audio plays under appended video).
+  - **Export audio**: `MuxAudioAsync` only muxes the primary recording's audio (filtered by `VideoFilePath == project.VideoFilePath`); appended segments' `AudioFilePaths` need muxing at their `segment.Start` with their source trim.
