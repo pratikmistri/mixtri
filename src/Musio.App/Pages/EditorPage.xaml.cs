@@ -32,6 +32,29 @@ public sealed partial class EditorPage : Page
     // Text slide rendering for segment-based preview
     private TextSlideRenderer? _textSlideRenderer;
 
+    // Per-appended-recording preview contexts (frame reader + compositor + webcam),
+    // keyed by VideoSegment.Id. The primary recording uses _frameReader/_previewRenderer.
+    private readonly Dictionary<string, SegmentPreview> _segmentPreviews = new();
+    private string? _lastRenderedSegmentId;
+
+    private sealed class SegmentPreview : IDisposable
+    {
+        public VideoFrameReader? Reader;
+        public PreviewRenderer? Renderer;
+        public bool Ready;
+        public Windows.Media.Editing.MediaComposition? Webcam;
+        public int WebcamW, WebcamH;
+        public CanvasBitmap? LastWebcamFrame;
+
+        public void Dispose()
+        {
+            Reader?.Dispose();
+            Renderer?.Dispose();
+            Webcam?.Clips.Clear();
+            LastWebcamFrame?.Dispose();
+        }
+    }
+
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
 
@@ -232,6 +255,8 @@ public sealed partial class EditorPage : Page
             _previewRenderer = null;
             _textSlideRenderer?.Dispose();
             _textSlideRenderer = null;
+            foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+            _segmentPreviews.Clear();
             _audioPlayer?.Dispose();
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
@@ -265,6 +290,9 @@ public sealed partial class EditorPage : Page
         _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+        _segmentPreviews.Clear();
         _thumbnailGenerationId++; // cancel any in-flight generation
         Timeline.ClearThumbnails();
 
@@ -483,7 +511,17 @@ public sealed partial class EditorPage : Page
                 // Map the playhead within this video segment to its source time
                 var sourceInSeg = videoSeg.SourceStart +
                     TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
-                await RenderVideoFrameAsync(sourceInSeg, force);
+
+                // Force a redraw when crossing a segment boundary (the frame-index
+                // cache is shared across sources).
+                if (_lastRenderedSegmentId != videoSeg.Id)
+                {
+                    _lastRenderedFrameIndex = -1;
+                    _lastRenderedSegmentId = videoSeg.Id;
+                    force = true;
+                }
+
+                await RenderSegmentVideoAsync(videoSeg, sourceInSeg, force);
                 return;
             }
         }
@@ -582,6 +620,174 @@ public sealed partial class EditorPage : Page
                 $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             bitmap.Dispose();
         }
+    }
+
+    private string? PrimaryVideoPath => ProjectService.Instance.CurrentProject?.VideoFilePath;
+
+    /// <summary>
+    /// Renders a video-segment frame. Segments from the primary recording use the
+    /// main frame reader/compositor; appended recordings use their own per-segment
+    /// context so their frames, cursor, and webcam play correctly.
+    /// </summary>
+    private async Task RenderSegmentVideoAsync(VideoSegment seg, TimeSpan sourceTime, bool force)
+    {
+        if (string.Equals(seg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await RenderVideoFrameAsync(sourceTime, force);
+            return;
+        }
+
+        var ctx = await GetOrBuildSegmentPreviewAsync(seg);
+        if (ctx?.Reader is null) return;
+
+        int frameIndex = ctx.Reader.GetFrameIndex(sourceTime);
+        if (!force && frameIndex == _lastRenderedFrameIndex) return;
+
+        var bitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+        if (bitmap is null) return;
+
+        try
+        {
+            if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+            {
+                if (ctx.Webcam is not null)
+                {
+                    try
+                    {
+                        var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                        if (wf is not null)
+                        {
+                            ctx.LastWebcamFrame?.Dispose();
+                            ctx.LastWebcamFrame = wf;
+                            ctx.Renderer.SetWebcamFrame(wf);
+                        }
+                    }
+                    catch { }
+                }
+
+                var composed = ctx.Renderer.RenderPreviewFrame(bitmap, sourceTime);
+                bitmap.Dispose();
+                if (composed is not null)
+                {
+                    _lastRenderedFrameIndex = frameIndex;
+                    Preview.SetFrame(composed);
+                    return;
+                }
+            }
+
+            // Fallback: raw frame
+            var device = CanvasDevice.GetSharedDevice();
+            var rt = new CanvasRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+            using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+            bitmap.Dispose();
+            _lastRenderedFrameIndex = frameIndex;
+            Preview.SetFrame(rt);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
+            bitmap.Dispose();
+        }
+    }
+
+    private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
+    {
+        if (_segmentPreviews.TryGetValue(seg.Id, out var existing))
+            return existing;
+
+        var ctx = new SegmentPreview();
+        _segmentPreviews[seg.Id] = ctx; // insert early to avoid duplicate builds
+
+        try
+        {
+            int fps = seg.Fps > 0 ? seg.Fps : 30;
+            ctx.Reader = VideoFrameReader.OpenFromVideoPath(seg.VideoFilePath, fps);
+            if (ctx.Reader is null) return ctx;
+
+            MouseRecordingData? mouseData = null;
+            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath))
+            {
+                try { mouseData = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath); }
+                catch { }
+            }
+
+            int w = seg.SourceWidth > 0 ? seg.SourceWidth : 1920;
+            int h = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
+            int previewFps = Math.Min(fps, 30);
+
+            var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+            config = config with
+            {
+                OutputFps = previewFps,
+                SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
+                SmoothingStrength = SmoothingStrength.UltraSmooth,
+                Cursor = new CursorStyle
+                {
+                    Scale = 3.0f,
+                    ClickAnimationEnabled = true,
+                    AutoHideEnabled = true,
+                    AutoHideDelaySeconds = 3.0f,
+                },
+                Zoom = new AutoZoomConfig { Enabled = true },
+            };
+
+            if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
+                config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
+
+            if (mouseData is not null)
+            {
+                try
+                {
+                    ctx.Renderer = new PreviewRenderer();
+                    await ctx.Renderer.InitializeAsync(
+                        mouseData, config, w, h, seg.SourceDuration,
+                        seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
+                    ctx.Ready = true;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[EditorPage] Segment compositor init failed: {ex.Message}");
+                    ctx.Renderer?.Dispose();
+                    ctx.Renderer = null;
+                    ctx.Ready = false;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
+            {
+                try
+                {
+                    var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(seg.WebcamFilePath);
+                    var clip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(file);
+                    var props = clip.GetVideoEncodingProperties();
+                    ctx.WebcamW = (int)props.Width;
+                    ctx.WebcamH = (int)props.Height;
+                    ctx.Webcam = new Windows.Media.Editing.MediaComposition();
+                    ctx.Webcam.Clips.Add(clip);
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] GetOrBuildSegmentPreview failed: {ex.Message}");
+        }
+
+        return ctx;
+    }
+
+    private static async Task<CanvasBitmap?> ExtractWebcamFrameAsync(
+        Windows.Media.Editing.MediaComposition comp, TimeSpan position, int width, int height)
+    {
+        if (width <= 0 || height <= 0) return null;
+        var clamped = comp.Duration > TimeSpan.Zero && position > comp.Duration ? comp.Duration : position;
+        using var thumb = await comp.GetThumbnailAsync(
+            clamped, width, height, Windows.Media.Editing.VideoFramePrecision.NearestFrame);
+        var device = CanvasDevice.GetSharedDevice();
+        using var stream = thumb.AsStream();
+        var ras = stream.AsRandomAccessStream();
+        try { return await CanvasBitmap.LoadAsync(device, ras); }
+        finally { try { ras.Dispose(); } catch { } }
     }
 
     private async Task LoadWebcamCompositionAsync(Project project)
