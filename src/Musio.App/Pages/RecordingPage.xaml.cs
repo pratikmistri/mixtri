@@ -39,6 +39,8 @@ public sealed partial class RecordingPage : Page
         base.OnNavigatedTo(e);
 
         _isAppendMode = e.Parameter as string == "append";
+        // Tell the VM not to reset the project on stop when appending.
+        ViewModel.IsAppendMode = _isAppendMode;
 
         // Re-point the shared VM's dispatcher at this page's UI thread (cheap;
         // safe to call repeatedly).
