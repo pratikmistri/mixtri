@@ -288,7 +288,7 @@
                         PointerMoved="SlideTextRegion_PointerMoved"
                         PointerReleased="SlideTextRegion_PointerReleased">
                     <Border.Background>
-                        <SolidColorBrush Color="{ThemeResource AccentFillColorDefaultColor}" Opacity="0.06" />
+                        <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
                     </Border.Background>
                 </Border>
                 <TextBox x:Name="SlideEditBox"
