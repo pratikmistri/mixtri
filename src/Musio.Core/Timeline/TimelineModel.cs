@@ -22,6 +22,29 @@ public class TimelineModel
     public List<TimelineSegment> Segments { get; } = [];
 
     /// <summary>
+    /// Camera (webcam) overlay segments on the independent camera track. Each
+    /// segment's <see cref="TimelineSegment.Start"/>/<see cref="TimelineSegment.Duration"/>
+    /// are interpreted as a <b>source-video</b> time range, so they stay aligned with
+    /// the recording (and survive video reorder/trim) via the source↔output mapping.
+    /// When empty, the legacy single global webcam overlay behaviour is used.
+    /// </summary>
+    public List<CameraSegment> CameraSegments { get; } = [];
+
+    /// <summary>
+    /// Returns the enabled camera segment whose source range contains
+    /// <paramref name="sourceTime"/>, or null when none is active.
+    /// </summary>
+    public CameraSegment? GetCameraSegmentAtSourceTime(TimeSpan sourceTime)
+    {
+        foreach (var seg in CameraSegments)
+        {
+            if (seg.Enabled && sourceTime >= seg.Start && sourceTime < seg.End)
+                return seg;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Path of the primary recording's video file. Used to identify which
     /// video segments carry the cursor/zoom data so source↔output time mapping
     /// only considers the primary recording's segments.
@@ -107,44 +130,87 @@ public class TimelineModel
 
     /// <summary>
     /// Primary recording's video segments (those carrying cursor/zoom data),
-    /// ordered by their position in the source video.
+    /// in their actual order on the output timeline. The timeline order — not the
+    /// recorded source order — is authoritative, so that reordering/moving video
+    /// segments keeps the linked zoom, click, and cursor visualizations in sync.
     /// </summary>
     private IEnumerable<VideoSegment> PrimaryVideoSegments =>
         Segments.OfType<VideoSegment>()
-            .Where(v => PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath)
-            .OrderBy(v => v.SourceStart);
+            .Where(v => PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath);
 
     /// <summary>
     /// Maps a source-video time (e.g. a zoom keyframe or cursor timestamp) to its
-    /// position on the output timeline, accounting for inserted text slides that
-    /// shift later video content to the right. Identity when no segments exist.
+    /// position on the output timeline, accounting for inserted text slides and
+    /// reordered/trimmed video segments. Identity when no segments exist.
+    /// Unlike <see cref="TrySourceToOutputTime"/>, this always returns a value,
+    /// falling back to the nearest kept segment boundary when the source time has
+    /// been trimmed out of the timeline.
     /// </summary>
     public TimeSpan SourceToOutputTime(TimeSpan sourceTime)
     {
         if (Segments.Count == 0) return sourceTime;
+        if (TrySourceToOutputTime(sourceTime, out var output))
+            return output;
 
-        VideoSegment? last = null;
+        // Source time is not present in any kept segment (trimmed out). Map it to
+        // the nearest kept primary segment boundary so visualizations clamp sanely.
+        VideoSegment? nearest = null;
+        double nearestDist = double.MaxValue;
+        bool nearestBefore = false;
+        foreach (var v in PrimaryVideoSegments)
+        {
+            var srcStart = v.SourceStart;
+            var srcEnd = v.SourceStart + v.SourceDuration;
+            bool before = sourceTime < srcStart;
+            double dist = before
+                ? (srcStart - sourceTime).TotalSeconds
+                : (sourceTime - srcEnd).TotalSeconds;
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest = v;
+                nearestBefore = before;
+            }
+        }
+
+        if (nearest is null) return sourceTime;
+        return nearestBefore ? nearest.Start : nearest.End;
+    }
+
+    /// <summary>
+    /// Attempts to map a source-video time to its position on the output timeline,
+    /// walking segments in their actual timeline order. Returns <c>false</c> when
+    /// the source time falls outside every kept primary video segment (i.e. it was
+    /// trimmed out and has no corresponding output position). Callers that draw
+    /// source-time visualizations (zoom/click/cursor) should skip rendering when
+    /// this returns <c>false</c>.
+    /// </summary>
+    public bool TrySourceToOutputTime(TimeSpan sourceTime, out TimeSpan outputTime)
+    {
+        if (Segments.Count == 0)
+        {
+            outputTime = sourceTime;
+            return true;
+        }
+
         foreach (var v in PrimaryVideoSegments)
         {
             var srcStart = v.SourceStart;
             var srcEnd = v.SourceStart + v.SourceDuration;
 
-            if (sourceTime < srcStart)
-                return v.Start; // before this segment's source range
-
-            if (sourceTime < srcEnd)
+            if (sourceTime >= srcStart && sourceTime <= srcEnd)
             {
                 var localSrc = sourceTime - srcStart;
                 var localOut = v.SpeedFactor != 0
                     ? TimeSpan.FromTicks((long)(localSrc.Ticks / v.SpeedFactor))
                     : localSrc;
-                return v.Start + localOut;
+                outputTime = v.Start + localOut;
+                return true;
             }
-            last = v;
         }
 
-        // Past the end of all primary video segments
-        return last?.End ?? sourceTime;
+        outputTime = sourceTime;
+        return false;
     }
 
     /// <summary>
@@ -231,6 +297,14 @@ public record ZoomKeyframe
     /// when the user deletes or edits this keyframe.
     /// </summary>
     public long? SourceClickTicks { get; init; }
+
+    /// <summary>
+    /// Source video file this keyframe belongs to. Null means the primary recording.
+    /// Used to map the keyframe's source time into the correct (primary or appended)
+    /// video segment's output range, so zoom segments show on the right clip and are
+    /// available for appended recordings.
+    /// </summary>
+    public string? SourceVideoFilePath { get; init; }
 
     /// <summary>When the zoom-in animation begins.</summary>
     public TimeSpan Start => Timestamp - PreDuration;

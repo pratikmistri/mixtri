@@ -1,5 +1,7 @@
 namespace Musio.Core.Timeline;
 
+using Musio.Core.Processing;
+
 /// <summary>
 /// Base class for all segments on the output timeline.
 /// The timeline is an ordered sequence of segments; each segment
@@ -77,6 +79,18 @@ public record VideoSegment : TimelineSegment
 
     /// <summary>Text overlays rendered on top of this video segment.</summary>
     public List<TextOverlay> TextOverlays { get; init; } = [];
+
+    /// <summary>
+    /// Per-segment frame style (background) override. When null, the global
+    /// composition background is used. Frame style is a per-segment property.
+    /// </summary>
+    public BackgroundStyle? FrameStyleOverride { get; set; }
+
+    /// <summary>
+    /// Per-segment cursor style override. When null, the global composition cursor
+    /// style is used. Cursor style is a per-segment property.
+    /// </summary>
+    public CursorStyle? CursorStyleOverride { get; set; }
 }
 
 /// <summary>
@@ -120,6 +134,35 @@ public record TextSlideSegment : TimelineSegment
     public string? BackgroundVideoPath { get; set; }
 
     public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
+}
+
+/// <summary>
+/// A time-ranged camera (webcam) overlay segment living on its own track.
+/// Like zoom keyframes, its range is expressed in <b>source-video time</b>
+/// (<see cref="TimelineSegment.Start"/>/<see cref="TimelineSegment.Duration"/> are
+/// reused as the source in/out range) so it stays aligned with the recording and
+/// survives video reorder/trim through the same source↔output mapping. The webcam
+/// overlay is shown only while the playhead's source time is inside an
+/// <see cref="Enabled"/> segment; each segment can override the overlay style
+/// (position, size, shape, mirror) independently.
+/// </summary>
+public record CameraSegment : TimelineSegment
+{
+    /// <summary>Path to the webcam recording this segment draws from.</summary>
+    public string? WebcamFilePath { get; init; }
+
+    /// <summary>Whether the webcam overlay is shown for this segment's range.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Per-segment overlay style. When null the global/default style is used.</summary>
+    public WebcamOverlayStyle? StyleOverride { get; set; }
+
+    /// <summary>
+    /// Resolves the effective overlay style for this segment, layering any
+    /// <see cref="StyleOverride"/> on top of a base style.
+    /// </summary>
+    public WebcamOverlayStyle ResolveStyle(WebcamOverlayStyle? baseStyle)
+        => StyleOverride ?? baseStyle ?? new WebcamOverlayStyle();
 }
 
 /// <summary>

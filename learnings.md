@@ -2,6 +2,156 @@
 
 This file tracks approaches tried, what worked, and what didn't for each feature.
 
+> **How to use this file:** Read **Settled Playbooks** below FIRST. These are definitive
+> rules distilled from areas that were re-worked many times (often with reversals). Do not
+> re-litigate them — follow them. The dated/feature sections further down are the historical
+> record showing *why* each rule exists. Only deviate from a playbook if you have new evidence,
+> and if you do, update the playbook in the same change.
+
+---
+
+# Settled Playbooks (definitive — read before starting)
+
+These rules supersede any conflicting advice in the historical sections below. Each one
+caused repeated churn before it was settled; treat them as fixed conventions.
+
+## Playbook: Build, Deploy & Test toolchain
+
+- **ALWAYS build with VS MSBuild, NEVER `dotnet build`** — this repo fails `dotnet build`
+  with a PriGen tooling error (MSB4062). Locate MSBuild via
+  `vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'`
+  (e.g. `C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`).
+- If direct `& MSBuild.exe` is blocked by shell permissions, invoke it through a
+  `[System.Diagnostics.Process]::Start()` wrapper with redirected stdout/stderr.
+- Standard build args: `Musio.App.csproj /restore /t:Build /p:Configuration=<Debug|Release> /p:Platform=<x64|ARM64>`.
+  Always include `/restore` — a bare `/t:Build` after deleting `bin/obj` fails NuGet restore.
+- **Clean rebuild = kill the running `Musio.App` process first, then delete `bin/obj`.**
+  Locked DLLs make MSBuild `/t:Clean` fail silently (look for the PID in MSB3061 warnings).
+- After any XAML element rename/restructure, delete `bin/obj` to drop stale `.g.cs`
+  (otherwise `COMException: Element not found` → blank page at runtime).
+- **Tests:** the host often lacks the .NET 9 runtime. Run `dotnet test` with
+  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. The current suite
+  size is in the 320s–330s range and must stay green.
+- **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
+- **Deploy/run locally:** `Remove-AppxPackage` the old registration BEFORE `Add-AppxPackage -Register <AppxManifest.xml>`
+  (re-registering over deleted clean-build files fails silently). Launch with
+  `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (NOT `explorer.exe`, which returns exit 1).
+
+## Playbook: DPI & capture coordinate transforms (region / window / monitor)
+
+The single most-churned area. The process is **PerMonitorV2**, which is the key to every rule:
+
+- **`WH_MOUSE_LL` hook coordinates are already PHYSICAL pixels.** NEVER multiply them by a
+  DPI scale. Use `coordScale = 1.0f` in every transform site (FrameCompositor, AutoZoomEngine,
+  EditorPage zoom-create). Multiplying by `Project.DpiScale` double-scales and was reverted.
+- **`Project.CropOffsetX/Y` = the screen-absolute PHYSICAL-pixel top-left of the captured frame**
+  (monitor origin + crop-within-monitor), not the crop-within-monitor offset alone. Subtract it
+  from every cursor/click/zoom-center coordinate. Compute per capture type:
+  - Monitor: `GetMonitorInfo(hMonitor).rcMonitor.Left/Top`.
+  - Window: `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` (falls back to `GetWindowRect`).
+  - Region: monitor origin + physical crop-rect position.
+- **Physical capture dimensions = logical × `GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI)`**,
+  then forced even (see encoding playbook). `Project.DpiScale` is stored at record time for
+  back-compat but is NOT used for hook-coordinate transforms.
+- **NEVER trust `GetSystemDpiScale()` / dimension-ratio heuristics for region captures** — they
+  return 1.0 because the cropped dimension is smaller than the monitor logical size. Store the
+  real DPI at record time instead.
+- Native overlay windows (`RegionBorderHighlight`, pickers) expect PHYSICAL coords: multiply
+  WinUI DIP region coords by the monitor DPI scale (resolved via the same `MonitorEnumerator`
+  matching used by `BuildCaptureTarget()`).
+- Known unsolved limitation: region/window pickers use `Stretch="Fill"` over a full virtual-desktop
+  screenshot, so multi-monitor coords can still be slightly off. Don't claim a multi-monitor DPI
+  fix is complete without testing on a secondary, differently-scaled monitor.
+
+## Playbook: H.264 encoding & MediaEncodingProfile
+
+- **Force encoder-safe dimensions in BOTH pipelines — but they use DIFFERENT alignment:**
+  - Recording (`VideoWriter.FinalizeAsync`): mod-2 via `(uint)(_width & ~1)` / `(_height & ~1)`.
+    H.264 silently rejects odd dimensions (`CanTranscode = false`, no message).
+  - Export (`VideoEncoder` → `AspectRatioHelper.ComputeExportDimensions`): floored to **mod-16**
+    `(fitW / 16) * 16` for H.264 macroblock alignment (with a `Math.Max(2, fitW - fitW % 2)` mod-2
+    fallback only when a side is < 16px). Do NOT add a separate `& ~1` in `VideoEncoder` — dimension
+    safety already lives in `ComputeExportDimensions`; change it there if alignment needs adjusting.
+  - The recurring trap is forgetting one pipeline entirely, not the specific modulus — confirm both
+    `VideoWriter` and the `ComputeExportDimensions` path whenever touching encode dimensions.
+- **Recording pipeline:** `VideoEncodingQuality.Auto` + explicitly set Width/Height/Bitrate/FPS/Subtype("H264").
+- **Export pipeline:** do **NOT** use `Auto` — it yields incomplete Video/Audio properties and the
+  audio-mux pass (`MediaComposition.RenderToFileAsync`) throws `MF_E_INVALIDMEDIATYPE (0xC00D36E6)`.
+  Instead start from `MediaEncodingProfile.CreateMp4(HD1080p)` as a well-formed template and OVERRIDE
+  Width/Height/Bitrate/FPS/Subtype. The encoder auto-selects the correct H.264 Level from the real
+  dimensions (presets like `HD1080p`/`HD720p` lock Level/DPB and corrupt frames above ~1920×1088,
+  visibly on AMD AMF; NVIDIA may silently auto-promote and mask the bug).
+- **Scale bitrate by pixel count:** `VideoEncoder.ComputeBitrate(width, height)` scales the base by
+  pixel ratio. A fixed bitrate starves ~3K+ output.
+- **Per-frame GPU surface allocation in `VideoEncoder` is INTENTIONAL, not a leak to "fix".** When
+  scaling, each frame gets its own `outputSurface` (`CreateRenderTarget`) so the encoder can read it
+  asynchronously after the producer releases the `SampleRequested` semaphore — a reused buffer would
+  be overwritten mid-read. (The old `_flipBuffer`/`_scaleTarget` reuse fields no longer exist.)
+  Memory safety comes from `PreflightRenderTargetMemory` (rejects > ~1.5 GB BGRA targets) and
+  disposing each surface after the encoder consumes it, NOT from buffer reuse. Long-lived helpers
+  that ARE cached: `_textSlideRenderer` and the webcam source (opened once, extracted per frame).
+- **For per-frame encoding prefer a streaming `MediaStreamSource` + `MediaTranscoder`**
+  (BGRA8 → H.264, CFR) — both pipelines do this; NOT `MediaClip` + `MediaComposition.RenderToFileAsync`
+  per frame (spawns 100k+ COM objects on long recordings). Set
+  `MediaTranscoder.HardwareAccelerationEnabled = false` in BOTH `VideoWriter` and `VideoEncoder` to
+  avoid AMD H.264 corruption / D3D-surface interop quirks. Wrap `TranscodeAsync` in a watchdog
+  timeout (`TranscodeWithTimeoutAsync`). NOTE: export still uses `MediaComposition.RenderToFileAsync`
+  for the *audio mux* second pass — which is exactly why its profile must be a well-formed `HD1080p`
+  template rather than `Auto`.
+- **Always guard `MediaClip.CreateFromFileAsync`** — `video.mp4` is often corrupt/empty because
+  `VideoWriter.FinalizeAsync` is intentionally non-fatal during recording. On failure
+  ("The parameter is incorrect"), fall back to `project.Width/Height` and the `.frames/` JPEGs.
+
+## Playbook: WinUI flyout/control initialization & XAML resource pitfalls
+
+- **NEVER set default values (`IsChecked`, `Value`, `SelectedIndex`, …) in XAML on flyout/option
+  controls.** They fire `Checked`/`ValueChanged`/`SelectionChanged` during `InitializeComponent()`
+  — before `_suppress*` flags are set and before `x:Name` fields are assigned — racing
+  `RebuildPreviewRendererAsync` against `InitializePreviewAsync` and hanging the app after recording.
+  Set defaults ONLY inside a `Sync<X>ControlsToConfig()` method, under the suppress flag.
+- Null-guard every handler that touches `x:Name` controls (they can fire before assignment).
+- **NEVER assign `{ThemeResource ...}` to a plain CLR / non-DependencyProperty** (e.g. a converter's
+  `TrueValue`/`FalseValue` placed in `Page.Resources`). It compiles but throws
+  `XAML_E_LAYOUT_CYCLE` (HRESULT 0x802B000A) when the page is navigated to. Look brushes up at
+  runtime from `Application.Current.Resources` (keyed by `ConverterParameter`) instead.
+
+## Playbook: Frame-style / compositor coordinate model (settled after 10 rounds)
+
+- **`BackgroundCompositor.CalculateOutputSize` is identity `(w, h)`** — padding insets WITHIN the
+  canvas and never grows it. The output canvas AR is driven only by the target aspect ratio.
+- **One background container only.** Don't fill letterbox/pillarbox bars inside the cropped buffer;
+  size the cropped buffer to the visible source-area dims and let the single background fill show
+  through. `_sourceAreaOffsetX/Y` already include the total gap (user padding + AR-fit gap) — there
+  is NO separate `+padding` term or "inner content area" coordinate space.
+- **Zoom uses the post-composite path whenever `ZoomLevel > 1.01`, UNLESS `ZoomScope == Source`**
+  (which keeps background/letterbox/padding fixed and zooms only the captured source).
+- Frame style + cursor are **per-segment** (`VideoSegment.FrameStyleOverride` / `CursorStyleOverride`);
+  aspect ratio, fit/cover mode, crop anchor, and zoom scope are **global** on `CompositionConfig`.
+  Global changes must call `InvalidateSegmentPreviews()` so appended segments rebuild.
+
+## Playbook: Zoom-segment time mapping (multi-recording)
+
+- Zoom keyframes are tagged by source file via `ZoomKeyframe.SourceVideoFilePath` (null = primary).
+  **Map BOTH edges of a keyframe through the SINGLE owning segment** (`OwningSegmentForKeyframe`:
+  file match + Timestamp containment), never per-edge first-match (which collapsed appended segments
+  to a thin line) and never the primary-only `XToSourceTime` mapping for appended keyframes.
+- On any edit (move/resize/property change), promote the keyframe to `IsManual = true` (save the
+  previous value for undo). `ZoomKeyframe.MinSegmentDuration = 200ms`. Cut/split overlap logic must
+  use the full `Start`/`End` span, not just `Timestamp`.
+
+## Playbook: Crash / freeze hardening invariants
+
+- **On `CanvasDevice.DeviceLost`, surface a recoverable exception — NEVER recreate the device
+  mid-frame.** Let outer code restart cleanly. Check `D3D11CreateDevice` HRESULT and fall back to
+  WARP (`D3D_DRIVER_TYPE_WARP`).
+- VRAM/screenshot preflights: reject absurd allocations (`>1.5 GB` BGRA surface, `>16384px`, or
+  `w*h*4 > 1 GB`) with a clear exception / solid-overlay fallback, using checked `long` arithmetic.
+- Serialize crop+write under a single lock; frame-pool callbacks are free-threaded and race shared
+  render targets. Wrap `TryGetNextFrame()` in try/catch (device-lost / monitor hot-plug / shutdown).
+- Long-running encode/transcode/mux passes get a cancellation-based watchdog timeout.
+- Throttle pure `WM_MOUSEMOVE` samples (min 4ms interval); never throttle clicks/scrolls/buttons,
+  and don't change the binary serialization format.
+
 ---
 
 ## Recording Overlay â€” Acrylic Background & No Border
@@ -1979,3 +2129,167 @@ the success message. Resetting on close is cleaner and matches user intent.
   - **Export audio**: `MuxAudioAsync` only muxes the primary recording's audio (filtered by `VideoFilePath == project.VideoFilePath`); appended segments' `AudioFilePaths` need muxing at their `segment.Start` with their source trim.
 
 - **Bug fixed — append double-add**: "Record More" produced **2 duplicate segments of the new recording (original lost)**. Cause: `RecordingViewModel.StopRecordingAsync` unconditionally called `ProjectService.SetProject(LastProject)` (which REPLACES the timeline), then `RecordingPage` (append mode) called `AppendRecording(newRecording)` adding it again. Fix: added `RecordingViewModel.IsAppendMode` (set from `RecordingPage.OnNavigatedTo` based on the `"append"` nav parameter); `StopRecordingAsync` now skips `SetProject` when `IsAppendMode`, so append mode only runs `AppendRecording`, preserving the original project and adding the new recording as a distinct trailing segment.
+## FCP-style Timeline Segment Editing (select / move / trim / sync)
+
+**Feature/area:** Primary-track (video + text slide) interactive editing in the timeline — selection, drag-to-move/reorder, ripple-trim either edge, delete-ripple, snapping; sync of linked zoom/click/cursor and per-segment audio/camera.
+
+**Approaches tried:**
+1. **Reorder-safe source<->output mapping first (foundation)** — Worked. Reworked `TimelineModel.SourceToOutputTime`/`PrimaryVideoSegments` to follow the *actual* `Segments` order instead of `OrderBy(SourceStart)`, and added `TrySourceToOutputTime(out)` so trimmed-out source times report "no output position" (callers can cull). This is what keeps zoom/click/cursor in sync after reorder/trim. `TimelineMapper.GetSegmentFrameRef` already walked timeline order, so export/video frame sync was already correct — only the UI-facing model mapping needed fixing. ✅
+2. **New core ops `MoveSegmentOperation` + `TrimSegmentEdgeOperation`** — Worked. Both snapshot/clone for undo, call `RecalculateSegmentPositions()` for the magnetic re-flow. Trim adjusts `SourceStart`/`SourceDuration`/`Duration` together for video (clamped to source head and `MinDuration=100ms`), duration-only for text slides. 18 unit tests pass (`TimelineSyncMappingTests`, `SegmentEditOperationsTests`). ✅
+3. **UI in `TimelineControl.xaml.cs`** — Worked. Added DragModes `SegmentBody/LeftEdge/RightEdge`, hit-testing, drag-to-move with drop-indicator, edge ripple-trim with live preview, and snapping (`SnapX` to playhead + segment edges; Alt bypasses via `InputKeyboardSource.GetKeyStateForCurrentThread`). Control raises `SegmentMoveRequested`/`SegmentTrimRequested`; `EditorPage` executes the ops on `UndoRedoManager` (mirrors the existing zoom-segment event pattern). Delete-ripple wired in `DeleteAccelerator_Invoked` via `RemoveSegmentOperation` on the selected segment.
+
+**What worked:** Layering — fix sync mapping (tested) -> add tested core ops -> wire UI to the existing event/undo pattern. Added `Timeline.Refresh()` to `OnUndoRedoStateChanged` so undo/redo of segment ops redraws all tracks.
+
+**What didn't work / not done:**
+- **Automated interaction screenshots:** The editor is only reachable via a live recording (no project file load path in `ProjectService`), so screenshotting select/move/trim requires a FlaUI/SendInput harness that drives Record->Stop->editor. Not built this pass — app was verified to compile (ARM64) and launch to the recording page (`files/verify-01-launch.png`).
+- **Phase 7 camera track (independent `CameraSegment` + track + flyout + compositor updates):** not started.
+
+**Build/test (verified):** Build with VS MSBuild `amd64\MSBuild.exe ...csproj /restore /t:Build /p:Configuration=Debug /p:Platform=x64` (tests) or `/p:Platform=ARM64` (app). Run tests: `$env:DOTNET_ROLL_FORWARD="Major"; dotnet test ...Musio.Tests.csproj --no-build -c Debug -p:Platform=x64`. `dotnet build` fails (PriGen MSB4062).
+
+## Phase 7 — Independent Camera (Webcam) Track
+
+**Feature/area:** A separate camera track in the timeline letting users clip when the webcam overlay is visible and (via model/ops) change its style per segment, independent of video cuts.
+
+**Approach (worked, tested):**
+- **Model:** `CameraSegment : TimelineSegment` (Timeline namespace, `using Musio.Core.Processing` for `WebcamOverlayStyle`/`WebcamShape`). Its `Start`/`Duration` are reused as a **source-video time range** (like zoom keyframes) so segments stay aligned with the recording and survive video reorder/trim via the existing source<->output mapping. `TimelineModel.CameraSegments` + `GetCameraSegmentAtSourceTime(sourceTime)`. `CameraSegment.Enabled` + `StyleOverride` + `ResolveStyle(baseStyle)`.
+- **Ops:** `Add/Move/Trim/Remove/UpdateCameraSegmentPropertiesOperation` — operate only on `CameraSegments` (never call `RecalculateSegmentPositions`), keep the list sorted by Start, fully undoable. 11 tests in `CameraSegmentOperationsTests` (315 total pass).
+- **Render hook (backward-compatible):** `EditorPage.SetWebcamFrameForPreviewAsync(position)` — when `CameraSegments.Count > 0`, hides the webcam (`SetWebcamFrame(null)`) outside any enabled segment and applies the active segment's `ResolveStyle(...)` via `UpdateWebcamStyle`. With no camera segments, the legacy always-on global overlay is unchanged.
+- **Timeline UI:** Added a "Camera" row to `TimelineControl.xaml` (new RowDefinition; bumped audio Row 4->5, mic 5->6; canvases + labels updated). `CameraTrackCanvas_Draw` + `HitTestCameraSegment` + `CameraTrack_PointerPressed/Moved/Released/RightTapped` mirror the zoom track: drag-create, select, body-move, edge-trim, right-tap remove. Source-time positioning via `SourceTimeToX`/`GetCameraSegment{Start,End}X`. Control raises `CameraSegment{Selected,Created,Moved,Resized,RemoveRequested}`; `EditorPage` executes the ops on `UndoRedoManager`. Added `CameraTrackCanvas` to `InvalidateAll`/`InvalidateAllCanvases`.
+
+**What didn't / remaining:**
+- **Per-segment style flyout UI** (position/size/shape/mirror) not built — the ops + `StyleOverride` support it; right-tap currently removes. Enable/disable is in the model but has no dedicated gesture yet.
+- **Visual verification** of the camera row in the editor needs a live recording (editor unreachable otherwise); app compiles (ARM64) + launches clean (`files/verify-02-camera-track-build.png`).
+
+**Camera export parity (follow-up):** The preview honors camera segments (visibility + per-segment style); the GIF/MP4 export pipeline (ExportEngine.cs + VideoEncoder.cs) still composites the single global webcam overlay and does not yet consult TimelineModel.CameraSegments. Primary video/audio/zoom/cursor/click export sync is correct (TimelineMapper maps by actual segment order). Wiring camera segments into export requires passing the TimelineModel/active-segment lookup into the export frame loop and gating compositor.SetWebcamFrame + style per output frame.
+
+## Bugfix — Appended-recording filmstrip showed wrong (primary) frames
+
+**Symptom:** After "Record More" appended a new recording, the appended VideoSegment's filmstrip showed the PRIMARY recording's frames, although the editor preview rendered the correct appended output.
+
+**Root cause:** Filmstrip thumbnails were a single flat `CanvasBitmap[] _thumbnails` generated only from the primary `_frameReader` and indexed by source-seconds. `DrawFilmstripForSegment` indexed that one array using each segment's own source time. An appended `VideoSegment` has a *different* `VideoFilePath` with its own source coordinate space (SourceStart=0), so it indexed into the primary's thumbnails. Preview was correct because it uses per-segment `SegmentPreview` frame readers keyed by `VideoSegment.Id`.
+
+**Fix:** Thumbnails are now keyed by source video file.
+- `TimelineControl`: added `Dictionary<string,ThumbnailSet> _thumbnailsByFile` (+ `_primaryThumbnailFilePath`). `SetThumbnails(..., filePath)` registers the primary set; new `SetThumbnailsForFile(path,...)` registers appended sets; `ResolveThumbnailSet(filePath)` picks the right set (falls back to primary only when the path matches primary, else returns null → backplate, never another file's frames). `DrawFilmstripForSegment` takes the resolved `ThumbnailSet`; the filmstrip-vs-solid gate is now per-segment. `ClearThumbnails` dedups by reference to avoid double-disposing the primary array shared with the dict.
+- `EditorPage`: `GenerateTimelineThumbnailsAsync(reader, filePath, isPrimary)`; new `GenerateAllTimelineThumbnailsAsync` (primary then appended, sequential so the shared `_thumbnailGenerationId` cancel-check doesn't false-cancel) + `GenerateAppendedThumbnailsAsync` which opens a temp `VideoFrameReader` per distinct non-primary `VideoSegment.VideoFilePath` and registers via `SetThumbnailsForFile`. Appending re-runs `InitializePreviewAsync` (via `ProjectChanged`→`ModelReloaded`), so appended thumbnails regenerate automatically.
+
+**Verified:** App builds (ARM64) + launches clean. While an appended file's thumbnails are still generating, its segment shows a solid backplate (not wrong frames).
+
+## Bugfix — Split at playhead did nothing on segment timelines
+
+**Symptom:** 'Split at playhead' (toolbar + keyboard) had no effect once the timeline used Segments (video/text-slide).
+
+**Root cause:** EditorViewModel.SplitAtPlayhead always used SplitOperation, which edits the legacy Clips list (not rendered when Segments exist), and its bounds guard used _model.Duration (source duration) instead of DisplayDuration. So it operated on the wrong collection and could also be rejected by the guard.
+
+**Fix:** Added SplitSegmentAtTimeOperation (Musio.Core/Timeline/EditOperation.cs) splitting the segment under the output time into two contiguous halves — VideoSegment splits SourceStart/SourceDuration/Duration (speed-aware, like SplitAndInsertTextSlideOperation); TextSlideSegment splits Duration. MinHalf=50ms guard; DidSplit flag; undoable via snapshot. EditorViewModel.SplitAtPlayhead now routes to it when Segments.Count>0 using DisplayDuration bounds; legacy Clips path unchanged. Total timeline duration is preserved so zoom/cursor/click stay in sync. 8 tests in SplitSegmentOperationTests (323 total pass).
+
+## Feature/Fix — Appended recordings now show their own cursor/audio/camera on tracks (per-segment)
+
+**Symptom:** After Insert ▸ Record More, the appended segment's mouse/click, audio, and camera markers didn't appear on the tracks, and didn't move when the segment was moved — though the preview rendered the appended recording correctly.
+
+**Root cause:** All source-time tracks (cursor, system/mic audio, camera) rendered only the PRIMARY recording's model-level data (`model.CursorData`, `model.SystemAudioWaveformSamples`, etc.) and mapped source→output via `SourceToOutputTime`, which only maps primary-file segments. Appended `VideoSegment`s carry their own `CursorDataFilePath`/`AudioFilePaths`/`WebcamFilePath` but those were never visualized. (Same class of bug as the filmstrip-per-file fix.)
+
+**Fix — per-source-file track data + per-segment rendering:**
+- `TimelineControl`: added `SegmentTrackVisual` (cursor + sys/mic waveform + waveform-duration + HasCamera) cached in `_trackVisualsByFile` keyed by `VideoSegment.VideoFilePath`; `SetSegmentTrackVisual`/`ClearSegmentTrackVisuals`. New helper `SegmentVideoTimeToX(seg, fileVideoSeconds)` maps a sample's file-video-time into the segment's output range (NaN outside kept range). `ResolveTrackVisual(seg)` returns the per-file entry, or a model-backed visual for the primary file.
+- Rewrote cursor, audio, and mic track draws: when `Segments` exist, iterate `Segments.OfType<VideoSegment>()` and draw each segment's OWN cursor path/clicks and waveform within `[seg.Start, seg.End]` (waveform sampled by source time so it survives move/trim/split). Legacy single-recording path preserved when no segments. Camera track now also draws a per-segment "Camera" presence bar for any VideoSegment with a webcam.
+- `EditorPage`: `LoadAppendedTrackVisualsAsync()` loads each distinct non-primary segment's cursor file (MouseHookRecorder.LoadFromFile) + generates sys/mic waveforms (`GenerateFileWaveformsAsync` via AudioWaveformGenerator/NAudio) and registers via `SetSegmentTrackVisual`. Called from `InitializePreviewAsync` (re-runs on append via ModelReloaded); visuals cleared alongside thumbnails. Because rendering is relative to `seg.Start`, the markers move with the segment automatically.
+
+Note: `TimelineControl.SegmentTrackVisual` must be referenced fully-qualified from `Musio_App.Pages` (`Musio_App.Controls.TimelineControl.SegmentTrackVisual`).
+
+**Verified:** builds (ARM64) + launches clean; 323 Core tests still pass (Core unchanged).
+
+## Feature — Per-segment Frame Style & Cursor; global Aspect/Cover/Zoom-scope
+
+**Symptom:** Frame style (and cursor) only applied to the first (primary) video segment; appended segments kept stale/default style because `RebuildPreviewRendererAsync` rebuilt only the primary `_previewRenderer` while appended `_segmentPreviews` were cached with their build-time config.
+
+**Design:** Frame style + cursor are now PER-SEGMENT; aspect ratio, fit/cover mode, crop anchor, and zoom scope remain GLOBAL (on `CompositionConfig`, applied to every segment).
+
+**Implementation:**
+- Model (`VideoSegment`): added `BackgroundStyle? FrameStyleOverride` and `CursorStyle? CursorStyleOverride` (Musio.Core.Processing types; TimelineSegment.cs already `using`s it). Records `with` preserves them through split/trim/move (tested).
+- `EditorPage.BuildSegmentConfig(global, seg, previewFps)` merges per-segment overrides on top of global; global props always inherited. Appended `GetOrBuildSegmentPreviewAsync` now uses it.
+- Primary renderer: `RebuildPreviewRendererAsync` applies the ACTIVE primary segment's override (via `ActivePrimaryVideoSegment()`), tracking `_primaryRenderBackground/_primaryRenderCursor/_primaryRendererSegmentId`. `EnsurePrimaryRendererForSegmentAsync(seg)` rebuilds when the playhead crosses into a primary split with a different override.
+- Flyout routing: `ApplyBackgroundStyle` / `ApplyCursorStyleFromControls` write to the selected `VideoSegment`'s override (and rebuild just that segment via `RebuildForSegmentStyleChangeAsync`) when a video segment is selected; otherwise update global + `InvalidateSegmentPreviews()` + rebuild. `OnSegmentSelected` syncs the flyout controls to the selected segment's effective style (`SyncStyleControlsToConfig`/`SyncCursorControlsToConfig`, which suppress events).
+- Global handlers (`ApplyAspectRatio/ApplyFitMode/ApplyCropAnchor/ApplyZoomScope`) now call `InvalidateSegmentPreviews()` so appended segments rebuild and pick up the global change.
+
+**Note (follow-up):** Export (`ExportEngine`) still uses one global `CompositionConfig`; per-segment frame style/cursor is preview-only until the export frame loop consults each segment's override (same pattern needed as camera-segment export parity).
+
+**Verified:** builds (ARM64) + launches clean; 328 Core tests pass (5 new in `SegmentStyleOverrideTests` proving overrides survive split/trim/move).
+
+## Fix — Per-recording zoom segments (appended recordings get auto-zoom; create works on any clip)
+
+**Symptoms:** (1) zoom segments couldn't be added after the first / on appended clips; (2) appended recordings showed no auto-zoom segments.
+
+**Root cause:** Zoom keyframes lived in one `model.ZoomKeyframes` list in PRIMARY source time and were mapped via `SourceToOutputTime` (primary-only). Creating a zoom over an appended region produced a primary source time that clamped to the primary clip's end (so it "couldn't be added"), and appended clicks never generated keyframes.
+
+**Fix — tag zoom keyframes by source file + per-segment mapping:**
+- Model: added `ZoomKeyframe.SourceVideoFilePath` (null = primary). Independent per-file subsets in the same list.
+- Control (`TimelineControl`): `ZoomKeyframeTimeToX(kf, time)` routes a keyframe through the VideoSegment that owns it (`SourceVideoFilePath`), via `SegmentVideoTimeToX`; returns NaN when outside any kept range (skipped). Zoom draw + `HitTestZoomSegment` now use it. Zoom CREATE determines the segment under the cursor (`XToSegmentVideoTime(x, out file)`), tags `_zoomCreateFile`, maps the create-preview via `ZoomCreateTimeToX`, and fires `ZoomSegmentCreated(start, end, filePath)`.
+- EditorPage: `OnZoomSegmentCreated` tags the new keyframe with the file (`FromRange(...) with { SourceVideoFilePath = e.FilePath }`); zoom region edit mode only for the primary. `GenerateAppendedZoomKeyframes(seg, cursor)` (called from `LoadAppendedTrackVisualsAsync`) builds tagged auto-zoom keyframes from each appended recording's clicks. Primary keyframe clear now targets only `SourceVideoFilePath is null` (appended keyframes are independent → no clear-race). Primary renderer `UpdateZoomKeyframes` filtered to primary-only keyframes so appended keyframes don't apply in primary time (appended previews already auto-zoom internally).
+
+**Limitation (noted):** Manual zoom segments created on an APPENDED clip render on the track but don't yet drive that clip's preview zoom (the appended renderer uses internal auto-zoom; it isn't fed model keyframes). Export per-segment zoom parity is also a follow-up.
+
+**Verified:** builds (ARM64) + launches; 333 Core tests pass (5 new in `ZoomKeyframeSourceFileTests`).
+
+## Fix — Appended zoom segments rendered as a thin line and couldn't be resized
+
+**Symptoms:** A zoom segment on an appended (2nd) recording rendered as a thin vertical line and couldn't be resized; primary zooms were fine.
+
+**Two root causes:**
+1. **Resize/move used the primary-only mapping.** `ZoomTrack_PointerReleased` mapped the dragged edge via `XToSourceTime` (primary source space). For an appended keyframe this produced a clamped/wrong time, collapsing the keyframe → thin line + broken resize.
+2. **Each keyframe edge could map through a different segment.** The earlier `ZoomKeyframeTimeToX` independently found the first non-NaN segment per edge, so a keyframe slightly overflowing its clip (or with duplicate appended segments) could map Start/End through different segments → near-zero width.
+
+**Fix (TimelineControl):**
+- `OwningSegmentForKeyframe(kf)` picks ONE segment (file match + Timestamp containment, else first file match). `ZoomKeyframeTimeToX` now maps BOTH edges through that single owning segment (clamping-free), so the segment renders at true width even if an edge overflows the clip. Hit-test and draw use it.
+- Added `XToKeyframeFileTime(x, filePath)` (inverse, segment-aware) and `SelectedZoomKeyframeFile`; the zoom move/resize releases now map through the selected keyframe's owning file instead of `XToSourceTime`, so appended zooms move/resize within their own recording's time.
+- `ZoomCreateTimeToX` passes `_zoomCreateStart` as the representative timestamp so the create preview resolves the correct owning segment.
+
+**Verified:** builds (ARM64) + launches; 333 Core tests pass.
+
+## Meta — Distilled high-churn areas into "Settled Playbooks" (top of file)
+
+**Feature/area:** `learnings.md` structure.
+
+**What worked:** Audited all section headers and identified the clusters that were re-worked
+repeatedly (often with reversals): DPI/capture coordinate transforms (~8 revisits incl. a full
+multiply-by-DpiScale → 1.0 reversal), H.264/MediaEncodingProfile (Auto vs HD1080p flip-flop across
+recording vs export pipelines), build/deploy/test toolchain, WinUI flyout init races + ThemeResource
+layout-cycle crashes, the frame-style compositor coordinate model (10 rounds), zoom-segment
+time-mapping, and crash/freeze hardening invariants. Added a definitive **Settled Playbooks** section
+at the top that turns each open-ended "approaches tried" thread into fixed ALWAYS/NEVER rules, so
+future tasks follow the settled convention instead of rediscovering it. Historical sections retained
+as the rationale record.
+
+**What didn't work:** N/A — documentation-only change.
+
+## Meta — Verified Settled Playbooks against actual code (refined 2 claims)
+
+**Feature/area:** `learnings.md` Settled Playbooks accuracy.
+
+**Verified accurate against source:** recording uses `VideoEncodingQuality.Auto` + `& ~1`
+(`VideoWriter.cs:276,351`); export uses `HD1080p` template + `ComputeBitrate`
+(`VideoEncoder.cs:309,815`); both set `MediaTranscoder.HardwareAccelerationEnabled = false`;
+`FrameCompositor` hardcodes `coordScale = 1.0f` and subtracts physical `CropOffset`
+(`FrameCompositor.cs:162-167,188-189`); `RecordingSession.ComputeCursorOffset` uses monitor
+`rcMonitor` / `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` / monitor+crop per capture type
+(`RecordingSession.cs:701-734`); `BackgroundCompositor.CalculateOutputSize` is identity
+(`BackgroundCompositor.cs:46-50`); `ZoomKeyframe.MinSegmentDuration = 200ms` + `SourceVideoFilePath`
+(`TimelineModel.cs:274,307`); `MouseHookRecorder.MinMoveIntervalMs = 4.0`
+(`MouseHookRecorder.cs:95`); WARP fallback + `RecoverableDeviceLostException`
+(`Direct3DDeviceHelper.cs:28`, `FrameCompositor.cs:599-607`); package identity `PratikMistri.Musio`.
+
+**Refined (were inaccurate):**
+1. Even-dim alignment is NOT uniform `& ~1` across pipelines. Recording is mod-2 (`VideoWriter`);
+   export is **mod-16** via `AspectRatioHelper.ComputeExportDimensions` (`AspectRatioHelper.cs:171-172`).
+   Removed the "add `& ~1` in both" instruction.
+2. The `_flipBuffer`/`_scaleTarget` buffer-reuse claim was stale — those fields don't exist.
+   `VideoEncoder` intentionally allocates a fresh per-frame `outputSurface` (`VideoEncoder.cs:520-524`)
+   so the encoder can read it after the `SampleRequested` semaphore is released; memory is bounded by
+   `PreflightRenderTargetMemory` (~1.5 GB cap), not reuse. Corrected the playbook accordingly.
+
+
+## Fix (root cause) — Appended zoom segment rendered as a thin line
+
+**Root cause:** In TimelineControl, GetZoomSegmentEndX still returned SourceTimeToX(kf.End) (the primary-only mapping) while GetZoomSegmentStartX used the new per-segment ZoomKeyframeTimeToX. For an appended keyframe, the START edge mapped correctly into the appended clip (e.g. output 5.5s) but the END edge (kf.End in the appended file's time, e.g. 2.5s) was mapped through the PRIMARY space to ~2.5s output — LEFT of the start — so x2 < x1 and segW = Max(2, x2-x1) collapsed to a 2px line. This also blocked resize (nothing to grab).
+
+Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Videos\session_*) and confirmed the generated keyframes were a normal 1.5s wide and mapped to 1.5s-wide output ranges — proving the data was fine and the bug was a stale mapping call on the END edge only.
+
+**Fix:** GetZoomSegmentEndX final return changed to ZoomKeyframeTimeToX(kf, kf.End) so both edges map through the keyframe's owning segment. Verified: builds (ARM64), 333 Core tests pass.

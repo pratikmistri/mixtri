@@ -232,6 +232,17 @@ public sealed partial class EditorPage : Page
         // Segment selection events (text slides)
         Timeline.SegmentSelected += OnSegmentSelected;
 
+        // Primary-track segment move / ripple-trim events
+        Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
+        Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+
+        // Camera track events
+        Timeline.CameraSegmentSelected += OnCameraSegmentSelected;
+        Timeline.CameraSegmentCreated += OnCameraSegmentCreated;
+        Timeline.CameraSegmentMoved += OnCameraSegmentMoved;
+        Timeline.CameraSegmentResized += OnCameraSegmentResized;
+        Timeline.CameraSegmentRemoveRequested += OnCameraSegmentRemoveRequested;
+
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportFlyout.Closed += ExportFlyout_Closed;
@@ -295,6 +306,7 @@ public sealed partial class EditorPage : Page
         _segmentPreviews.Clear();
         _thumbnailGenerationId++; // cancel any in-flight generation
         Timeline.ClearThumbnails();
+        Timeline.ClearSegmentTrackVisuals();
 
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
@@ -308,8 +320,13 @@ public sealed partial class EditorPage : Page
         if (_frameReader is null)
             return;
 
-        // Generate filmstrip thumbnails for timeline video track
-        _ = GenerateTimelineThumbnailsAsync(_frameReader);
+        // Generate filmstrip thumbnails for the timeline video track (primary +
+        // any appended recordings, each from their own source file).
+        _ = GenerateAllTimelineThumbnailsAsync(_frameReader, project.VideoFilePath);
+
+        // Load per-file cursor + audio track data for appended recordings so their
+        // mouse/click and audio markers show on the tracks and move with the segment.
+        _ = LoadAppendedTrackVisualsAsync();
 
         // Load audio waveform data for timeline visualization
         await LoadAudioWaveformAsync(project);
@@ -345,7 +362,9 @@ public sealed partial class EditorPage : Page
         int cropOffX = project.CropOffsetX;
         int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
-        ViewModel.Model.ZoomKeyframes.Clear();
+        // Clear only the PRIMARY recording's keyframes; appended recordings manage
+        // their own (keyed by SourceVideoFilePath) in LoadAppendedTrackVisualsAsync.
+        ViewModel.Model.ZoomKeyframes.RemoveAll(k => k.SourceVideoFilePath is null);
         foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
         {
             double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
@@ -520,6 +539,11 @@ public sealed partial class EditorPage : Page
                     _lastRenderedSegmentId = videoSeg.Id;
                     force = true;
                 }
+
+                // If this primary-file segment carries a frame style / cursor override
+                // that differs from what the primary renderer was last built with,
+                // rebuild it so per-segment styles apply across primary splits.
+                await EnsurePrimaryRendererForSegmentAsync(videoSeg);
 
                 await RenderSegmentVideoAsync(videoSeg, sourceInSeg, force);
                 return;
@@ -715,19 +739,11 @@ public sealed partial class EditorPage : Page
             int h = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
             int previewFps = Math.Min(fps, 30);
 
-            var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
-            config = config with
+            var global = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+            var config = BuildSegmentConfig(global, seg, previewFps) with
             {
-                OutputFps = previewFps,
                 SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
                 SmoothingStrength = SmoothingStrength.UltraSmooth,
-                Cursor = new CursorStyle
-                {
-                    Scale = 3.0f,
-                    ClickAnimationEnabled = true,
-                    AutoHideEnabled = true,
-                    AutoHideDelaySeconds = 3.0f,
-                },
                 Zoom = new AutoZoomConfig { Enabled = true },
             };
 
@@ -823,6 +839,23 @@ public sealed partial class EditorPage : Page
     {
         if (_webcamComposition is null || _previewRenderer is null) return;
 
+        // Independent camera track: when camera segments exist, the webcam overlay
+        // is only shown while the (source) playhead is inside an enabled segment,
+        // and the active segment's style override is applied. With no camera
+        // segments, the legacy always-on global overlay behaviour is preserved.
+        var model = ViewModel.Model;
+        if (model.CameraSegments.Count > 0)
+        {
+            var active = model.GetCameraSegmentAtSourceTime(position);
+            if (active is null)
+            {
+                _previewRenderer.SetWebcamFrame(null);
+                return;
+            }
+            _previewRenderer.UpdateWebcamStyle(
+                active.ResolveStyle(ProjectService.Instance.CurrentComposition?.WebcamStyle));
+        }
+
         CanvasBitmap? webcamFrame = null;
         try
         {
@@ -887,6 +920,187 @@ public sealed partial class EditorPage : Page
     /// Uses versioning to cancel stale generation when the project changes.
     /// </summary>
     private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        await GenerateTimelineThumbnailsAsync(reader, project?.VideoFilePath, isPrimary: true);
+    }
+
+    /// <summary>
+    /// Loads per-file cursor data and audio waveforms for every appended (non-primary)
+    /// video segment, and registers them with the timeline so each segment renders its
+    /// OWN cursor/click/audio markers (positioned relative to the segment, so they move
+    /// with it). The primary recording uses the model-level data directly.
+    /// </summary>
+    private async Task LoadAppendedTrackVisualsAsync()
+    {
+        var model = ViewModel.Model;
+        var primary = PrimaryVideoPath;
+
+        var segs = model.Segments.OfType<VideoSegment>()
+            .Where(v => !string.IsNullOrEmpty(v.VideoFilePath) &&
+                        !string.Equals(v.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(v => v.VideoFilePath!, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+
+        foreach (var seg in segs)
+        {
+            var visual = new Musio_App.Controls.TimelineControl.SegmentTrackVisual
+            {
+                MouseToVideoOffsetSeconds = seg.MouseToVideoOffsetSeconds,
+                HasCamera = !string.IsNullOrEmpty(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath!),
+            };
+
+            // Cursor + click data
+            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath!))
+            {
+                try { visual.Cursor = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath!); }
+                catch { /* no cursor data for this recording */ }
+            }
+
+            // Auto-zoom keyframes from this recording's clicks, tagged with its file so
+            // they render on its segment and are available like the primary's.
+            GenerateAppendedZoomKeyframes(seg, visual.Cursor);
+
+            // Audio waveforms (system + mic), spanning the file's audio duration
+            var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+            visual.SystemWaveform = sys;
+            visual.MicWaveform = mic;
+            visual.WaveformDurationSeconds = durSec > 0
+                ? durSec
+                : (seg.SourceDuration.TotalSeconds > 0 ? seg.SourceDuration.TotalSeconds : seg.Duration.TotalSeconds);
+
+            Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
+        }
+        Timeline.Refresh();
+    }
+
+    /// <summary>
+    /// (Re)generates auto-zoom keyframes for an appended video segment from its click
+    /// events, tagged with the segment's source file so they map into its output range.
+    /// Replaces any existing keyframes for that file to stay idempotent across reloads.
+    /// </summary>
+    private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
+    {
+        var keyframes = ViewModel.Model.ZoomKeyframes;
+        keyframes.RemoveAll(k =>
+            string.Equals(k.SourceVideoFilePath, seg.VideoFilePath, StringComparison.OrdinalIgnoreCase));
+
+        if (mouse is null || mouse.Clicks.Count == 0 || mouse.TickFrequency <= 0) return;
+
+        int sw = seg.SourceWidth > 0 ? seg.SourceWidth : 1920;
+        int sh = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
+        int cox = seg.CropOffsetX;
+        int coy = seg.CropOffsetY;
+        double offset = seg.MouseToVideoOffsetSeconds;
+        double maxSrc = seg.SourceDuration.TotalSeconds;
+
+        foreach (var click in mouse.Clicks.Where(c => c.IsDown))
+        {
+            double t = (click.TimestampTicks - mouse.StartTimestampTicks) / mouse.TickFrequency - offset;
+            if (t < 0) continue;
+            if (maxSrc > 0 && t > maxSrc) continue;
+            keyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(t),
+                ZoomLevel = 2.0,
+                CenterX = Math.Clamp((click.X - cox) / (double)sw, 0, 1),
+                CenterY = Math.Clamp((click.Y - coy) / (double)sh, 0, 1),
+                SourceClickTicks = click.TimestampTicks,
+                SourceVideoFilePath = seg.VideoFilePath,
+            });
+        }
+    }
+
+    /// <summary>
+    /// Generates system + mic waveform peak arrays for a recording's audio files,
+    /// each spanning the full audio file, plus the (max) audio duration in seconds.
+    /// </summary>
+    private static async Task<(float[]? Sys, float[]? Mic, double DurationSec)> GenerateFileWaveformsAsync(
+        IReadOnlyList<string> audioFilePaths)
+    {
+        const int peaks = 1000;
+        return await Task.Run(() =>
+        {
+            float[]? sys = null, mic = null;
+            double dur = 0;
+
+            var valid = audioFilePaths.Where(File.Exists).ToList();
+            if (valid.Count == 0) return (sys, mic, dur);
+
+            var systemPath = valid.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
+            var micPath = valid.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+
+            if (systemPath is not null)
+            {
+                try { using var r = new NAudio.Wave.AudioFileReader(systemPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
+                try { sys = AudioWaveformGenerator.GenerateWaveform(systemPath, peaks); } catch { }
+            }
+            if (micPath is not null)
+            {
+                try { using var r = new NAudio.Wave.AudioFileReader(micPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
+                try { mic = AudioWaveformGenerator.GenerateWaveform(micPath, peaks); } catch { }
+            }
+
+            return (sys, mic, dur);
+        });
+    }
+
+    /// <summary>
+    /// Generates filmstrip thumbnails for the primary recording and then for each
+    /// distinct appended recording's source file, so every video segment shows its
+    /// own frames. Runs sequentially so the shared generation id never cancels an
+    /// earlier still-running pass.
+    /// </summary>
+    private async Task GenerateAllTimelineThumbnailsAsync(VideoFrameReader primaryReader, string? primaryPath)
+    {
+        await GenerateTimelineThumbnailsAsync(primaryReader, primaryPath, isPrimary: true);
+        await GenerateAppendedThumbnailsAsync(primaryPath);
+    }
+
+    /// <summary>
+    /// Generates per-file thumbnails for every appended (non-primary) video segment
+    /// file referenced by the timeline.
+    /// </summary>
+    private async Task GenerateAppendedThumbnailsAsync(string? primaryPath)
+    {
+        var model = ViewModel.Model;
+        var files = model.Segments.OfType<VideoSegment>()
+            .Select(v => v.VideoFilePath)
+            .Where(p => !string.IsNullOrEmpty(p) &&
+                        !string.Equals(p, primaryPath, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var file in files)
+        {
+            if (!File.Exists(file)) continue;
+
+            int segFps = model.Segments.OfType<VideoSegment>()
+                .FirstOrDefault(v => string.Equals(v.VideoFilePath, file, StringComparison.OrdinalIgnoreCase))?.Fps ?? 30;
+            if (segFps <= 0) segFps = 30;
+
+            VideoFrameReader? reader = null;
+            try
+            {
+                reader = VideoFrameReader.OpenFromVideoPath(file, segFps);
+                if (reader is null) continue;
+                await GenerateTimelineThumbnailsAsync(reader, file, isPrimary: false);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
+            }
+            finally
+            {
+                reader?.Dispose();
+            }
+        }
+    }
+
+    private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader, string? filePath, bool isPrimary)
     {
         var generationId = ++_thumbnailGenerationId;
 
@@ -966,8 +1180,13 @@ public sealed partial class EditorPage : Page
             return;
         }
 
-        // TimelineControl takes ownership of the bitmaps
-        Timeline.SetThumbnails(thumbnails, interval, aspectRatio);
+        // TimelineControl takes ownership of the bitmaps.
+        if (isPrimary)
+            Timeline.SetThumbnails(thumbnails, interval, aspectRatio, filePath);
+        else if (!string.IsNullOrEmpty(filePath))
+            Timeline.SetThumbnailsForFile(filePath, thumbnails, interval, aspectRatio);
+        else
+            foreach (var t in thumbnails) t?.Dispose();
     }
 
     private TimelineMapper? EnsureTimelineMapper()
@@ -1004,8 +1223,10 @@ public sealed partial class EditorPage : Page
         // Sync user-added zoom keyframes to the compositor
         if (_compositorReady && _previewRenderer is not null)
         {
+            // Only the PRIMARY recording's manual keyframes drive the primary renderer;
+            // appended recordings' keyframes belong to their own segment/source space.
             var manualKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.IsManual)
+                .Where(k => k.IsManual && k.SourceVideoFilePath is null)
                 .ToList();
             _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
             _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
@@ -1032,6 +1253,7 @@ public sealed partial class EditorPage : Page
             Timeline.ClearClipSelection();
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
+            Timeline.Refresh();
             InvalidatePreview();
         });
     }
@@ -1078,19 +1300,79 @@ public sealed partial class EditorPage : Page
 
     private void OnSegmentSelected(object? sender, string? segmentId)
     {
-        _selectedTextSlideId = segmentId;
-        if (segmentId is not null)
-        {
-            var slide = ViewModel.Model.Segments
-                .OfType<TextSlideSegment>()
-                .FirstOrDefault(s => s.Id == segmentId);
-            if (slide is not null)
-                ShowTextSlidePanel(slide);
-        }
+        _selectedPrimarySegmentId = segmentId;
+
+        // Show the text slide panel only when a text slide is selected; for a
+        // video (or no) selection, treat the slide id as cleared.
+        var slide = segmentId is null
+            ? null
+            : ViewModel.Model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == segmentId);
+
+        _selectedTextSlideId = slide?.Id;
+        if (slide is not null)
+            ShowTextSlidePanel(slide);
         else
-        {
             HideTextSlidePanel();
+
+        // Reflect the selected video segment's effective frame style + cursor in the
+        // flyout controls, so editing per-segment style starts from its current state.
+        if (SelectedVideoSegment is { } vseg)
+        {
+            var global = ProjectService.Instance.CurrentComposition;
+            if (global is not null)
+            {
+                SyncStyleControlsToConfig(vseg.FrameStyleOverride ?? global.Background);
+                SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
+            }
         }
+    }
+
+    /// <summary>Id of the currently selected primary-track segment (video or text slide).</summary>
+    private string? _selectedPrimarySegmentId;
+
+    private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e)
+    {
+        var operation = new MoveSegmentOperation(e.Id, e.TargetIndex);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectSegment(e.Id);
+    }
+
+    private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e)
+    {
+        var operation = new TrimSegmentEdgeOperation(e.Id, e.FromStart, e.NewDuration);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectSegment(e.Id);
+    }
+
+    // ── Camera track handlers ──
+
+    private void OnCameraSegmentSelected(object? sender, string? segmentId)
+    {
+        // Selection is tracked by the control; property editing is via the model/ops.
+    }
+
+    private void OnCameraSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    {
+        var operation = new AddCameraSegmentOperation(
+            e.Start, e.End - e.Start, ProjectService.Instance.CurrentProject?.WebcamFilePath);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectedCameraSegmentId = operation.CreatedId;
+    }
+
+    private void OnCameraSegmentMoved(object? sender, (string Id, TimeSpan NewStart) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new MoveCameraSegmentOperation(e.Id, e.NewStart));
+    }
+
+    private void OnCameraSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new TrimCameraSegmentOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
+    }
+
+    private void OnCameraSegmentRemoveRequested(object? sender, string segmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new RemoveCameraSegmentOperation(segmentId));
+        Timeline.ClearCameraSelection();
     }
 
     private void UpdateSpeedPanelVisibility()
@@ -1148,6 +1430,19 @@ public sealed partial class EditorPage : Page
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
             UpdateZoomPanelVisibility();
+            args.Handled = true;
+            return;
+        }
+
+        // If a primary-track segment is selected, ripple-delete it.
+        if (_selectedPrimarySegmentId is { } segId &&
+            ViewModel.Model.Segments.Any(s => s.Id == segId))
+        {
+            var operation = new RemoveSegmentOperation(segId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            _selectedPrimarySegmentId = null;
+            Timeline.SelectSegment(null);
+            HideTextSlidePanel();
             args.Handled = true;
             return;
         }
@@ -1259,17 +1554,18 @@ public sealed partial class EditorPage : Page
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
-    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
     {
         double zoomLevel = 2.0;
         if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
             double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
             zoomLevel = z;
 
-        // Use cursor position at segment midpoint as zoom center
+        // Use cursor position at segment midpoint as zoom center (primary recording
+        // only; appended recordings default to centered).
         double cx = 0.5, cy = 0.5;
         var midpoint = e.Start + (e.End - e.Start) / 2;
-        if (ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
+        if (e.FilePath is null && ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
         {
             var project = ProjectService.Instance.CurrentProject;
             int sourceW = project?.Width > 0 ? project.Width : 1920;
@@ -1296,8 +1592,14 @@ public sealed partial class EditorPage : Page
             cy = (closest.Y * dpiY - cropOffY) / sourceH;
         }
 
-        var operation = new AddZoomSegmentOperation(e.Start, e.End, zoomLevel,
-            Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1));
+        // Build the keyframe tagged with the owning source file so it renders on the
+        // correct clip and (for the primary) drives the zoom engine.
+        var keyframe = Musio.Core.Timeline.ZoomKeyframe.FromRange(e.Start, e.End, zoomLevel,
+            Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1)) with
+        {
+            SourceVideoFilePath = e.FilePath,
+        };
+        var operation = new AddZoomSegmentOperation(keyframe);
         ViewModel.UndoRedoManager.Execute(operation);
 
         // Select the newly created segment and enter zoom region edit mode
@@ -1305,7 +1607,7 @@ public sealed partial class EditorPage : Page
         OnZoomSegmentSelected(this, operation.CreatedId);
 
         var createdKf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == operation.CreatedId);
-        if (createdKf is not null)
+        if (createdKf is not null && e.FilePath is null)
             EnterZoomRegionEditMode(operation.CreatedId, createdKf);
     }
 
@@ -2216,9 +2518,18 @@ public sealed partial class EditorPage : Page
             TiltEnabled = CursorTiltToggle.IsOn,
         };
 
+        // Cursor style is per-segment: store on the selected segment when one is
+        // selected, otherwise update the global config.
+        if (SelectedVideoSegment is { } seg)
+        {
+            seg.CursorStyleOverride = newCursor;
+            _ = RebuildForSegmentStyleChangeAsync(seg);
+            return;
+        }
+
         config = config with { Cursor = newCursor };
         ProjectService.Instance.CurrentComposition = config;
-
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -2748,18 +3059,128 @@ public sealed partial class EditorPage : Page
 
     }
 
+    /// <summary>
+    /// Builds the effective composition config for a specific video segment by
+    /// layering its per-segment style overrides (frame style + cursor) on top of the
+    /// global config. Global properties (aspect ratio, fit/cover mode, crop anchor,
+    /// zoom scope) always come from the global config so they apply to every segment.
+    /// </summary>
+    private static CompositionConfig BuildSegmentConfig(CompositionConfig global, VideoSegment? seg, int previewFps)
+    {
+        var cfg = global with { OutputFps = previewFps };
+        if (seg?.FrameStyleOverride is { } bg) cfg = cfg with { Background = bg };
+        if (seg?.CursorStyleOverride is { } cur) cfg = cfg with { Cursor = cur };
+        return cfg;
+    }
+
+    /// <summary>The currently selected primary-track video segment, if any.</summary>
+    private VideoSegment? SelectedVideoSegment =>
+        _selectedPrimarySegmentId is { } id
+            ? ViewModel.Model.Segments.OfType<VideoSegment>().FirstOrDefault(v => v.Id == id)
+            : null;
+
+    /// <summary>
+    /// Returns the primary-file video segment under the playhead (for choosing the
+    /// per-segment frame style/cursor the primary renderer should use), or the first
+    /// primary segment as a fallback.
+    /// </summary>
+    private VideoSegment? ActivePrimaryVideoSegment()
+    {
+        var model = ViewModel.Model;
+        if (model.Segments.Count == 0) return null;
+        var primary = PrimaryVideoPath;
+
+        bool IsPrimary(VideoSegment v) =>
+            primary is null || string.Equals(v.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+
+        var (seg, _) = model.GetSegmentAtTime(Timeline.PlayheadPosition);
+        if (seg is VideoSegment under && IsPrimary(under)) return under;
+        return model.Segments.OfType<VideoSegment>().FirstOrDefault(IsPrimary);
+    }
+
+    /// <summary>Disposes and clears cached appended-segment preview contexts so they
+    /// rebuild with fresh (global or per-segment) config on next render.</summary>
+    private void InvalidateSegmentPreviews()
+    {
+        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+        _segmentPreviews.Clear();
+        _lastRenderedSegmentId = null;
+    }
+
+    /// <summary>
+    /// Ensures the primary renderer was built with the given primary-file segment's
+    /// per-segment frame style / cursor override. Rebuilds it when the override
+    /// differs (e.g. the playhead crossed into a differently-styled primary split).
+    /// No-op for appended segments (they use their own renderers).
+    /// </summary>
+    private async Task EnsurePrimaryRendererForSegmentAsync(VideoSegment seg)
+    {
+        var primary = PrimaryVideoPath;
+        bool isPrimary = primary is null ||
+            string.Equals(seg.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+        if (!isPrimary) return;
+
+        var global = ProjectService.Instance.CurrentComposition;
+        var wantBg = seg.FrameStyleOverride ?? global.Background;
+        var wantCursor = seg.CursorStyleOverride ?? global.Cursor;
+
+        if (Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
+            return;
+
+        await RebuildPreviewRendererAsync(global);
+    }
+
     private void ApplyBackgroundStyle(BackgroundStyle bg)
     {
-        var config = ProjectService.Instance.CurrentComposition;
-        config = config with { Background = bg };
-        ProjectService.Instance.CurrentComposition = config;
-
         // Mark preset as Custom if it no longer matches
         _suppressStyleEvents = true;
         PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
         _suppressStyleEvents = false;
 
+        // Frame style is per-segment: when a video segment is selected, store the
+        // override on it and rebuild only that segment's renderer. Otherwise update
+        // the global config so segments without an override follow it.
+        if (SelectedVideoSegment is { } seg)
+        {
+            seg.FrameStyleOverride = bg;
+            _ = RebuildForSegmentStyleChangeAsync(seg);
+            return;
+        }
+
+        var config = ProjectService.Instance.CurrentComposition with { Background = bg };
+        ProjectService.Instance.CurrentComposition = config;
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
+    }
+
+    /// <summary>
+    /// Rebuilds the preview after a per-segment style override change. If the edited
+    /// segment is an appended recording, its cached preview is dropped so it rebuilds
+    /// with the new override; if it is the primary recording (and currently active),
+    /// the primary renderer is rebuilt.
+    /// </summary>
+    private async Task RebuildForSegmentStyleChangeAsync(VideoSegment seg)
+    {
+        var primary = PrimaryVideoPath;
+        bool isPrimary = primary is null ||
+            string.Equals(seg.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+
+        if (isPrimary)
+        {
+            _primaryRenderBackground = null; // force primary rebuild to pick up the override
+            await RebuildPreviewRendererAsync(ProjectService.Instance.CurrentComposition);
+        }
+        else
+        {
+            if (_segmentPreviews.TryGetValue(seg.Id, out var ctx))
+            {
+                ctx.Dispose();
+                _segmentPreviews.Remove(seg.Id);
+            }
+            _lastRenderedSegmentId = null;
+            _lastRenderedFrameIndex = -1;
+            await UpdatePreviewFrameAsync(Timeline.PlayheadPosition, force: true);
+        }
     }
 
     /// <summary>
@@ -2770,6 +3191,16 @@ public sealed partial class EditorPage : Page
     {
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
+
+        // Apply the active primary segment's per-segment frame style / cursor override
+        // on top of the global config so the primary recording honors its own style.
+        var activePrimary = ActivePrimaryVideoSegment();
+        var effective = config;
+        if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
+        if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
+        _primaryRenderBackground = effective.Background;
+        _primaryRenderCursor = effective.Cursor;
+        _primaryRendererSegmentId = activePrimary?.Id;
 
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -2787,7 +3218,7 @@ public sealed partial class EditorPage : Page
         {
             _previewRenderer = new PreviewRenderer();
             await _previewRenderer.InitializeAsync(
-                mouseData, config,
+                mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
                 project.Duration,
@@ -2796,9 +3227,13 @@ public sealed partial class EditorPage : Page
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom keyframes from the model
-            if (ViewModel.Model.ZoomKeyframes.Count > 0)
-                _previewRenderer.UpdateZoomKeyframes(ViewModel.Model.ZoomKeyframes);
+            // Re-sync zoom keyframes from the model (primary recording only — appended
+            // recordings' keyframes are mapped in their own segment's source space).
+            var primaryKeyframes = ViewModel.Model.ZoomKeyframes
+                .Where(k => k.SourceVideoFilePath is null)
+                .ToList();
+            if (primaryKeyframes.Count > 0)
+                _previewRenderer.UpdateZoomKeyframes(primaryKeyframes);
 
             _compositorReady = true;
         }
@@ -2813,6 +3248,13 @@ public sealed partial class EditorPage : Page
         var position = Timeline.PlayheadPosition;
         await UpdatePreviewFrameAsync(position, force: true);
     }
+
+    // Tracks the per-segment style the primary renderer was last built with, so it
+    // can be rebuilt when the playhead crosses into a primary segment with a
+    // different frame style / cursor override.
+    private string? _primaryRendererSegmentId;
+    private BackgroundStyle? _primaryRenderBackground;
+    private CursorStyle? _primaryRenderCursor;
 
     private static Color ParseHexColor(string hex)
     {
@@ -3173,6 +3615,7 @@ public sealed partial class EditorPage : Page
 
         UpdateFitAndAnchorVisibility(ratio);
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -3188,6 +3631,7 @@ public sealed partial class EditorPage : Page
 
         UpdateFitAndAnchorVisibility(project.AspectRatio);
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -3202,6 +3646,7 @@ public sealed partial class EditorPage : Page
         config = config with { CropAnchorX = anchorX, CropAnchorY = anchorY };
         ProjectService.Instance.CurrentComposition = config;
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -3215,6 +3660,7 @@ public sealed partial class EditorPage : Page
         config = config with { ZoomScope = scope };
         ProjectService.Instance.CurrentComposition = config;
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 

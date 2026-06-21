@@ -1,5 +1,7 @@
 namespace Musio.Core.Timeline;
 
+using Musio.Core.Processing;
+
 public interface IEditOperation
 {
     string Description { get; }
@@ -1123,5 +1125,466 @@ public class SplitAndInsertTextSlideOperation : IEditOperation
         model.Segments.Clear();
         model.Segments.AddRange(_previousSegments);
         model.RecalculateSegmentPositions();
+    }
+}
+
+/// <summary>
+/// Splits the primary-track segment at a given output-timeline time into two
+/// contiguous halves. Works for <see cref="VideoSegment"/> (splitting the source
+/// range so audio/camera/clicks/zoom/cursor stay in sync) and
+/// <see cref="TextSlideSegment"/> (splitting the duration). Total timeline
+/// duration is unchanged, so nothing downstream shifts.
+/// </summary>
+public class SplitSegmentAtTimeOperation : IEditOperation
+{
+    /// <summary>Minimum half duration so a split never produces a degenerate segment.</summary>
+    public static readonly TimeSpan MinHalf = TimeSpan.FromMilliseconds(50);
+
+    private readonly TimeSpan _splitTime;
+    private List<TimelineSegment> _previousSegments = [];
+    private bool _didSplit;
+
+    public string Description => "Split";
+
+    public SplitSegmentAtTimeOperation(TimeSpan splitTime)
+    {
+        _splitTime = splitTime;
+    }
+
+    /// <summary>True when the split actually occurred (a segment was divided).</summary>
+    public bool DidSplit => _didSplit;
+
+    public void Execute(TimelineModel model)
+    {
+        _didSplit = false;
+
+        int splitIndex = -1;
+        for (int i = 0; i < model.Segments.Count; i++)
+        {
+            var seg = model.Segments[i];
+            if (_splitTime > seg.Start && _splitTime < seg.End)
+            {
+                splitIndex = i;
+                break;
+            }
+        }
+        if (splitIndex < 0) return;
+
+        var segment = model.Segments[splitIndex];
+        var localOffset = _splitTime - segment.Start;
+
+        // Reject splits that would create a degenerate half.
+        if (localOffset < MinHalf || segment.Duration - localOffset < MinHalf)
+            return;
+
+        _previousSegments = [.. model.Segments];
+
+        TimelineSegment firstHalf;
+        TimelineSegment secondHalf;
+
+        if (segment is VideoSegment video)
+        {
+            var sourceOffset = TimeSpan.FromTicks((long)(localOffset.Ticks * video.SpeedFactor));
+            firstHalf = video with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Duration = localOffset,
+                SourceDuration = sourceOffset,
+            };
+            secondHalf = video with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                SourceStart = video.SourceStart + sourceOffset,
+                Duration = video.Duration - localOffset,
+                SourceDuration = video.SourceDuration - sourceOffset,
+            };
+        }
+        else if (segment is TextSlideSegment slide)
+        {
+            firstHalf = slide with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Duration = localOffset,
+            };
+            secondHalf = slide with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Duration = slide.Duration - localOffset,
+            };
+        }
+        else
+        {
+            return;
+        }
+
+        model.Segments.RemoveAt(splitIndex);
+        model.Segments.Insert(splitIndex, firstHalf);
+        model.Segments.Insert(splitIndex + 1, secondHalf);
+        model.RecalculateSegmentPositions();
+        _didSplit = true;
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (!_didSplit) return;
+        model.Segments.Clear();
+        model.Segments.AddRange(_previousSegments);
+        model.RecalculateSegmentPositions();
+    }
+}
+/// mapping is driven by the segments' actual timeline order.
+/// </summary>
+public class MoveSegmentOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private readonly int _targetIndex;
+    private List<TimelineSegment> _previousSegments = [];
+
+    public string Description => "Move Segment";
+
+    public MoveSegmentOperation(string segmentId, int targetIndex)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _targetIndex = targetIndex;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _previousSegments = [.. model.Segments];
+
+        int fromIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (fromIndex < 0) return;
+
+        var segment = model.Segments[fromIndex];
+        model.Segments.RemoveAt(fromIndex);
+
+        // _targetIndex is expressed against the original list; once the segment is
+        // removed, indices after it shift left by one.
+        int insertAt = _targetIndex;
+        if (insertAt > fromIndex) insertAt--;
+        insertAt = Math.Clamp(insertAt, 0, model.Segments.Count);
+
+        model.Segments.Insert(insertAt, segment);
+        model.RecalculateSegmentPositions();
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.Segments.Clear();
+        model.Segments.AddRange(_previousSegments);
+        model.RecalculateSegmentPositions();
+    }
+}
+
+/// <summary>
+/// Ripple-trims one edge of a primary-track segment to a new output duration.
+/// For a <see cref="VideoSegment"/> the source in/out points are adjusted together
+/// with the output duration so the remaining footage — and its linked audio,
+/// camera, clicks, zoom, and cursor — stay in sync. For a
+/// <see cref="TextSlideSegment"/> only the duration changes. Following segments
+/// re-flow magnetically via <see cref="TimelineModel.RecalculateSegmentPositions"/>.
+/// </summary>
+public class TrimSegmentEdgeOperation : IEditOperation
+{
+    /// <summary>Minimum segment duration to prevent degenerate (zero-width) segments.</summary>
+    public static readonly TimeSpan MinDuration = TimeSpan.FromMilliseconds(100);
+
+    private readonly string _segmentId;
+    private readonly bool _fromStart;
+    private readonly TimeSpan _requestedDuration;
+
+    private int _index = -1;
+    private TimelineSegment? _previous;
+
+    public string Description => "Trim Segment";
+
+    /// <param name="segmentId">Id of the segment to trim.</param>
+    /// <param name="fromStart">True to trim the left (in) edge, false for the right (out) edge.</param>
+    /// <param name="newDuration">Desired output duration of the segment after trimming.</param>
+    public TrimSegmentEdgeOperation(string segmentId, bool fromStart, TimeSpan newDuration)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _fromStart = fromStart;
+        _requestedDuration = newDuration;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return;
+
+        _previous = model.Segments[_index];
+
+        switch (_previous)
+        {
+            case VideoSegment video:
+                model.Segments[_index] = TrimVideo(video);
+                break;
+            case TextSlideSegment slide:
+                model.Segments[_index] = slide with { Duration = ClampDuration(_requestedDuration) };
+                break;
+            default:
+                _previous.Duration = ClampDuration(_requestedDuration);
+                break;
+        }
+
+        model.RecalculateSegmentPositions();
+    }
+
+    private VideoSegment TrimVideo(VideoSegment video)
+    {
+        double speed = video.SpeedFactor != 0 ? video.SpeedFactor : 1.0;
+        var newDuration = ClampDuration(_requestedDuration);
+
+        if (!_fromStart)
+        {
+            // Right (out) edge: keep the in-point, change how much footage plays.
+            var newSourceDuration = TimeSpan.FromTicks((long)(newDuration.Ticks * speed));
+            return video with
+            {
+                Duration = newDuration,
+                SourceDuration = newSourceDuration,
+            };
+        }
+
+        // Left (in) edge: the head moves. Growing reveals earlier footage (limited by
+        // SourceStart >= 0); shrinking advances the in-point. The out-point is fixed.
+        var durationDelta = newDuration - video.Duration;
+        var sourceDelta = TimeSpan.FromTicks((long)(durationDelta.Ticks * speed));
+        var newSourceStart = video.SourceStart - sourceDelta;
+
+        if (newSourceStart < TimeSpan.Zero)
+        {
+            // Not enough source before the in-point: clamp to the start of the file.
+            sourceDelta = video.SourceStart;
+            newSourceStart = TimeSpan.Zero;
+            durationDelta = TimeSpan.FromTicks((long)(sourceDelta.Ticks / speed));
+            newDuration = ClampDuration(video.Duration + durationDelta);
+        }
+
+        var trimmedSourceDuration = TimeSpan.FromTicks((long)(newDuration.Ticks * speed));
+        return video with
+        {
+            SourceStart = newSourceStart,
+            Duration = newDuration,
+            SourceDuration = trimmedSourceDuration,
+        };
+    }
+
+    private static TimeSpan ClampDuration(TimeSpan requested) =>
+        requested < MinDuration ? MinDuration : requested;
+
+    public void Undo(TimelineModel model)
+    {
+        if (_previous is null || _index < 0) return;
+        if (_index >= model.Segments.Count) return;
+        model.Segments[_index] = _previous;
+        model.RecalculateSegmentPositions();
+    }
+}
+
+// ── Camera (webcam) track operations ──
+// Camera segments live on their own track; their Start/Duration are source-video
+// time ranges (independent of the primary segment list), so these operations never
+// call RecalculateSegmentPositions.
+
+/// <summary>Adds a new camera overlay segment over a source-time range.</summary>
+public class AddCameraSegmentOperation : IEditOperation
+{
+    private readonly CameraSegment _segment;
+
+    public string CreatedId => _segment.Id;
+    public string Description => "Add Camera Segment";
+
+    public AddCameraSegmentOperation(CameraSegment segment)
+    {
+        _segment = segment ?? throw new ArgumentNullException(nameof(segment));
+    }
+
+    public AddCameraSegmentOperation(TimeSpan sourceStart, TimeSpan sourceDuration,
+        string? webcamFilePath = null, WebcamOverlayStyle? style = null)
+    {
+        _segment = new CameraSegment
+        {
+            Start = sourceStart,
+            Duration = sourceDuration,
+            WebcamFilePath = webcamFilePath,
+            StyleOverride = style,
+        };
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        model.CameraSegments.Add(_segment);
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        model.CameraSegments.RemoveAll(s => s.Id == _segment.Id);
+    }
+}
+
+/// <summary>Moves a camera segment to a new source-time start, preserving its duration.</summary>
+public class MoveCameraSegmentOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private readonly TimeSpan _newStart;
+    private TimeSpan _previousStart;
+
+    public string Description => "Move Camera Segment";
+
+    public MoveCameraSegmentOperation(string segmentId, TimeSpan newStart)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _newStart = newStart;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+        _previousStart = seg.Start;
+        seg.Start = _newStart < TimeSpan.Zero ? TimeSpan.Zero : _newStart;
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+        seg.Start = _previousStart;
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+}
+
+/// <summary>Trims one edge of a camera segment (source-time range).</summary>
+public class TrimCameraSegmentOperation : IEditOperation
+{
+    /// <summary>Minimum camera segment duration.</summary>
+    public static readonly TimeSpan MinDuration = TimeSpan.FromMilliseconds(100);
+
+    private readonly string _segmentId;
+    private readonly bool _fromStart;
+    private readonly TimeSpan _newEdge;
+    private TimeSpan _previousStart;
+    private TimeSpan _previousDuration;
+
+    public string Description => "Trim Camera Segment";
+
+    /// <param name="segmentId">Segment to trim.</param>
+    /// <param name="fromStart">True for the left edge, false for the right edge.</param>
+    /// <param name="newEdgeSourceTime">New source-time position of the dragged edge.</param>
+    public TrimCameraSegmentOperation(string segmentId, bool fromStart, TimeSpan newEdgeSourceTime)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _fromStart = fromStart;
+        _newEdge = newEdgeSourceTime;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+
+        _previousStart = seg.Start;
+        _previousDuration = seg.Duration;
+
+        if (_fromStart)
+        {
+            var end = seg.End;
+            var newStart = _newEdge < TimeSpan.Zero ? TimeSpan.Zero : _newEdge;
+            if (newStart > end - MinDuration) newStart = end - MinDuration;
+            seg.Start = newStart;
+            seg.Duration = end - newStart;
+        }
+        else
+        {
+            var newEnd = _newEdge;
+            if (newEnd < seg.Start + MinDuration) newEnd = seg.Start + MinDuration;
+            seg.Duration = newEnd - seg.Start;
+        }
+
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+        seg.Start = _previousStart;
+        seg.Duration = _previousDuration;
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+}
+
+/// <summary>Removes a camera segment.</summary>
+public class RemoveCameraSegmentOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private CameraSegment? _removed;
+
+    public string Description => "Remove Camera Segment";
+
+    public RemoveCameraSegmentOperation(string segmentId)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        _removed = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (_removed is not null)
+            model.CameraSegments.RemoveAll(s => s.Id == _segmentId);
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_removed is null) return;
+        model.CameraSegments.Add(_removed);
+        model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+}
+
+/// <summary>Updates the enabled flag and/or style override of a camera segment.</summary>
+public class UpdateCameraSegmentPropertiesOperation : IEditOperation
+{
+    private readonly string _segmentId;
+    private readonly bool? _enabled;
+    private readonly WebcamOverlayStyle? _styleOverride;
+    private readonly bool _setStyle;
+
+    private bool _previousEnabled;
+    private WebcamOverlayStyle? _previousStyle;
+
+    public string Description => "Update Camera Segment";
+
+    public UpdateCameraSegmentPropertiesOperation(string segmentId, bool? enabled = null,
+        WebcamOverlayStyle? styleOverride = null, bool setStyle = false)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _enabled = enabled;
+        _styleOverride = styleOverride;
+        _setStyle = setStyle;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+
+        _previousEnabled = seg.Enabled;
+        _previousStyle = seg.StyleOverride;
+
+        if (_enabled is bool en) seg.Enabled = en;
+        if (_setStyle) seg.StyleOverride = _styleOverride;
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        if (seg is null) return;
+        seg.Enabled = _previousEnabled;
+        seg.StyleOverride = _previousStyle;
     }
 }
