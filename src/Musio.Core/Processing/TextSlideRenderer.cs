@@ -26,9 +26,38 @@ public class TextSlideRenderer : IDisposable
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
 
-    // Entrance occupies the first In fraction; exit occupies the last Out fraction.
-    private const double InDur = 0.25;
-    private const double OutDur = 0.25;
+    // Entrance and exit run for a CONSTANT wall-clock duration (in seconds), so the
+    // motion always feels the same regardless of how long the slide is held or how
+    // much text it shows. The middle is a static hold that absorbs any extra time.
+    // For very short slides the phases shrink proportionally so they always fit.
+    private const double EntranceSeconds = 0.6;
+    private const double ExitSeconds = 0.6;
+
+    // Continuous-motion rates, expressed per second so they don't stretch with duration.
+    private const double TypewriterCharsPerSecond = 28.0;
+    private const double TypewriterEraseCharsPerSecond = 38.0;
+    private const double WaveHz = 0.8;            // vertical bob cycles per second
+    private const double WaveFadeSeconds = 0.18;  // quick fade at each end
+
+    /// <summary>
+    /// Maps normalized <paramref name="progress"/> (0..1 over the whole slide) to
+    /// independent entrance/exit progresses (each 0..1) that advance over a constant
+    /// number of seconds. The hold in the middle grows or shrinks with the slide's
+    /// duration while the entrance and exit motion stay at a fixed, consistent speed.
+    /// </summary>
+    private static (double InP, double OutP) ComputeInOutProgress(double progress, double durationSeconds)
+    {
+        double dur = Math.Max(0.001, durationSeconds);
+        double elapsed = Math.Clamp(progress, 0, 1) * dur;
+
+        // Never let entrance + exit exceed the slide; keep a hold when there's room.
+        double inSec = Math.Min(EntranceSeconds, dur * 0.45);
+        double outSec = Math.Min(ExitSeconds, dur * 0.45);
+
+        double inP = inSec > 1e-6 ? Math.Clamp(elapsed / inSec, 0, 1) : 1;
+        double outP = outSec > 1e-6 ? Math.Clamp((elapsed - (dur - outSec)) / outSec, 0, 1) : 0;
+        return (inP, outP);
+    }
 
     public TextSlideRenderer(CanvasDevice? device = null)
     {
@@ -58,7 +87,7 @@ public class TextSlideRenderer : IDisposable
         var rect = ComputeTextRect(slide, width, height);
 
         DrawAnimatedText(ds, slide.Text, format, rect, ParseColor(slide.TextColor),
-            slide.Animation, progress, width, height, (float)slide.FontSize);
+            slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds);
 
         return target;
     }
@@ -271,7 +300,8 @@ public class TextSlideRenderer : IDisposable
         if (bgColor.A > 0)
         {
             double padding = 12;
-            var (_, _, _, _, op) = ComputeWholeState(overlay.Animation, progress, width, height);
+            var (boxInP, boxOutP) = ComputeInOutProgress(progress, overlay.Duration.TotalSeconds);
+            var (_, _, _, _, op) = ComputeWholeState(overlay.Animation, boxInP, boxOutP, width, height);
             byte boxAlpha = (byte)(bgColor.A * op);
             var box = Color.FromArgb(boxAlpha, bgColor.R, bgColor.G, bgColor.B);
             ds.FillRoundedRectangle(
@@ -282,7 +312,7 @@ public class TextSlideRenderer : IDisposable
 
         var rect = new Rect(x, y, textWidth, textHeight);
         DrawAnimatedText(ds, overlay.Text, format, rect, ParseColor(overlay.TextColor),
-            overlay.Animation, progress, width, height, (float)overlay.FontSize);
+            overlay.Animation, progress, width, height, (float)overlay.FontSize, overlay.Duration.TotalSeconds);
     }
 
     // ─────────────────────────── Core dispatch ───────────────────────────
@@ -290,23 +320,26 @@ public class TextSlideRenderer : IDisposable
     private void DrawAnimatedText(
         CanvasDrawingSession ds, string text, CanvasTextFormat format, Rect rect,
         Color baseColor, TextSlideAnimation anim, double progress,
-        int canvasWidth, int canvasHeight, float fontSize)
+        int canvasWidth, int canvasHeight, float fontSize, double durationSeconds)
     {
         if (string.IsNullOrEmpty(text)) return;
 
+        double elapsedSeconds = Math.Clamp(progress, 0, 1) * Math.Max(0.001, durationSeconds);
+        var (inP, outP) = ComputeInOutProgress(progress, durationSeconds);
+
         if (IsPerCharacter(anim))
         {
-            DrawPerCharacter(ds, text, format, rect, baseColor, anim, progress, fontSize);
+            DrawPerCharacter(ds, text, format, rect, baseColor, anim, inP, outP, elapsedSeconds, fontSize);
             return;
         }
 
         float cx = (float)(rect.X + rect.Width / 2);
         float cy = (float)(rect.Y + rect.Height / 2);
 
-        // Typewriter (with optional caret): type in, then erase out.
+        // Typewriter (with optional caret): type in, then erase out — at a constant rate.
         if (anim is TextSlideAnimation.TypeWriter or TextSlideAnimation.TypewriterCaret)
         {
-            var (typed, showCaret) = TypewriterText(text, progress);
+            var (typed, showCaret) = TypewriterText(text, elapsedSeconds, durationSeconds);
             var col0 = WithAlpha(baseColor, 1.0);
             ds.DrawText(typed, rect, col0, format);
             if (anim == TextSlideAnimation.TypewriterCaret && showCaret)
@@ -314,14 +347,14 @@ public class TextSlideRenderer : IDisposable
             return;
         }
 
-        var (scale, tx, ty, blur, opacity) = ComputeWholeState(anim, progress, canvasWidth, canvasHeight);
+        var (scale, tx, ty, blur, opacity) = ComputeWholeState(anim, inP, outP, canvasWidth, canvasHeight);
         var col = WithAlpha(baseColor, opacity);
 
         // Reveal: wipe in from the left, then wipe out to the left.
         if (anim == TextSlideAnimation.Reveal)
         {
-            double inFrac = EaseInOutCubic(Math.Clamp(progress / InDur, 0, 1));
-            double outFrac = EaseInOutCubic(Math.Clamp((progress - (1 - OutDur)) / OutDur, 0, 1));
+            double inFrac = EaseInOutCubic(inP);
+            double outFrac = EaseInOutCubic(outP);
             double visible = Math.Clamp(Math.Min(inFrac, 1 - outFrac), 0, 1);
             if (visible <= 0.001) return;
             var clip = new Rect(rect.X, rect.Y, rect.Width * visible, rect.Height);
@@ -348,7 +381,8 @@ public class TextSlideRenderer : IDisposable
 
     private void DrawPerCharacter(
         CanvasDrawingSession ds, string text, CanvasTextFormat format, Rect rect,
-        Color baseColor, TextSlideAnimation anim, double progress, float fontSize)
+        Color baseColor, TextSlideAnimation anim, double inP, double outP,
+        double elapsedSeconds, float fontSize)
     {
         using var layout = new CanvasTextLayout(_device, text, format,
             (float)rect.Width, (float)rect.Height);
@@ -380,7 +414,7 @@ public class TextSlideRenderer : IDisposable
             float ccy = by + (float)rb.Height / 2;
 
             double frac = visibleCount <= 1 ? 0 : (double)visibleIndex / (visibleCount - 1);
-            var p = ComputeCharParams(anim, progress, frac, visibleIndex, fontSize);
+            var p = ComputeCharParams(anim, inP, outP, elapsedSeconds, frac, visibleIndex, fontSize);
             visibleIndex++;
 
             if (p.Opacity <= 0.003) continue;
@@ -399,27 +433,25 @@ public class TextSlideRenderer : IDisposable
     private readonly record struct CharParams(float Dx, float Dy, float Scale, float Angle, double Opacity);
 
     private static CharParams ComputeCharParams(
-        TextSlideAnimation anim, double progress, double frac, int index, float fontSize)
+        TextSlideAnimation anim, double inP, double outP, double elapsedSeconds,
+        double frac, int index, float fontSize)
     {
-        // Continuous wave: bob the whole duration, fade in/out at the very ends.
+        // Continuous wave: bob at a constant frequency the whole duration, with a
+        // quick constant-time fade at the very ends.
         if (anim == TextSlideAnimation.Wave)
         {
             double amp = fontSize * 0.18;
-            double dy = Math.Sin(progress * Math.PI * 4 + index * 0.55) * amp;
-            double op = Math.Min(Math.Clamp(progress / 0.08, 0, 1),
-                                 Math.Clamp((1 - progress) / 0.08, 0, 1));
+            double dy = Math.Sin(elapsedSeconds * (2 * Math.PI * WaveHz) + index * 0.55) * amp;
+            double fadeIn = Math.Clamp(elapsedSeconds / WaveFadeSeconds, 0, 1);
+            double op = Math.Min(fadeIn, Math.Clamp(1 - outP, 0, 1));
             return new CharParams(0, (float)dy, 1f, 0f, op);
         }
 
         const double spread = 0.6;
 
-        // Entrance: staggered across first part of the slide.
-        double pIn = Math.Clamp(progress / 0.5, 0, 1);
-        double inCp = Math.Clamp((pIn - frac * spread) / (1 - spread), 0, 1);
-
-        // Exit: staggered across the last part of the slide.
-        double pOut = Math.Clamp((progress - 0.6) / 0.4, 0, 1);
-        double outCp = Math.Clamp((pOut - frac * spread) / (1 - spread), 0, 1);
+        // Entrance and exit are staggered across the (constant-time) in/out windows.
+        double inCp = Math.Clamp((inP - frac * spread) / (1 - spread), 0, 1);
+        double outCp = Math.Clamp((outP - frac * spread) / (1 - spread), 0, 1);
 
         double opacity = Math.Clamp(inCp, 0, 1) * (1 - Math.Clamp(outCp, 0, 1));
 
@@ -474,11 +506,8 @@ public class TextSlideRenderer : IDisposable
     /// Returns scale, translation, blur amount, and opacity for the given progress.
     /// </summary>
     private static (float Scale, float Tx, float Ty, float Blur, double Opacity) ComputeWholeState(
-        TextSlideAnimation anim, double progress, int width, int height)
+        TextSlideAnimation anim, double inP, double outP, int width, int height)
     {
-        double inP = Math.Clamp(progress / InDur, 0, 1);
-        double outP = Math.Clamp((progress - (1 - OutDur)) / OutDur, 0, 1);
-
         // Default opacity: fade in over IN, fully visible, fade out over OUT.
         double fadeOpacity = EaseOutCubic(inP) * (1 - EaseInCubic(outP));
 
@@ -540,17 +569,21 @@ public class TextSlideRenderer : IDisposable
         return (scale, tx, ty, blur, Math.Clamp(opacity, 0, 1));
     }
 
-    private static (string Text, bool Caret) TypewriterText(string text, double progress)
+    private static (string Text, bool Caret) TypewriterText(string text, double elapsedSeconds, double durationSeconds)
     {
-        // Type in over the first ~45%, hold, then erase over the last ~30%.
-        double typeIn = Math.Clamp(progress / 0.45, 0, 1);
-        double eraseOut = Math.Clamp((progress - 0.7) / 0.3, 0, 1);
+        // Type in at a constant rate, hold, then erase at a constant rate near the end,
+        // so the typing speed is identical regardless of slide length or text amount.
+        double dur = Math.Max(0.001, durationSeconds);
+        double eraseSeconds = Math.Min(text.Length / TypewriterEraseCharsPerSecond, dur * 0.3);
+        double eraseStart = dur - eraseSeconds;
 
-        int typed = (int)Math.Round(text.Length * typeIn);
-        int erased = (int)Math.Round(text.Length * eraseOut);
+        int typed = (int)Math.Round(elapsedSeconds * TypewriterCharsPerSecond);
+        int erased = eraseSeconds > 1e-6
+            ? (int)Math.Round(Math.Max(0, elapsedSeconds - eraseStart) * TypewriterEraseCharsPerSecond)
+            : 0;
         int shown = Math.Clamp(typed - erased, 0, text.Length);
 
-        bool caret = ((int)(progress / 0.04)) % 2 == 0;
+        bool caret = ((int)(elapsedSeconds / 0.5)) % 2 == 0;
         return (text[..shown], caret);
     }
 
