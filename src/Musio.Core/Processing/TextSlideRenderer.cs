@@ -5,8 +5,6 @@ using Microsoft.Graphics.Canvas.Effects;
 using Microsoft.Graphics.Canvas.Text;
 using Musio.Core.Timeline;
 using Windows.Foundation;
-using Windows.Media.Editing;
-using Windows.Storage;
 using Windows.UI;
 using Windows.UI.Text;
 
@@ -28,13 +26,6 @@ public class TextSlideRenderer : IDisposable
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
 
-    // Video background cache
-    private MediaComposition? _bgVideoComp;
-    private string? _bgVideoPath;
-    private TimeSpan _bgVideoDuration;
-    private CanvasBitmap? _bgVideoFrame;
-    private int _bgVideoFrameKey = -1;
-
     // Entrance occupies the first In fraction; exit occupies the last Out fraction.
     private const double InDur = 0.25;
     private const double OutDur = 0.25;
@@ -55,7 +46,7 @@ public class TextSlideRenderer : IDisposable
         var target = new CanvasRenderTarget(_device, width, height, 96);
         using var ds = target.CreateDrawingSession();
 
-        DrawSlideBackground(ds, slide, progress, width, height);
+        DrawSlideBackground(ds, slide, width, height);
 
         if (!drawText)
             return target;
@@ -95,7 +86,7 @@ public class TextSlideRenderer : IDisposable
     // ─────────────────────────── Backgrounds ─────────────────────────────
 
     private void DrawSlideBackground(
-        CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
+        CanvasDrawingSession ds, TextSlideSegment slide, int width, int height)
     {
         switch (slide.BackgroundType)
         {
@@ -104,9 +95,6 @@ public class TextSlideRenderer : IDisposable
                 break;
             case SlideBackgroundType.Image:
                 DrawImageBackground(ds, slide, width, height);
-                break;
-            case SlideBackgroundType.Video:
-                DrawVideoBackground(ds, slide, progress, width, height);
                 break;
             default:
                 ds.Clear(ParseColor(slide.BackgroundColor));
@@ -160,84 +148,6 @@ public class TextSlideRenderer : IDisposable
         }
 
         DrawScaledToFill(ds, _bgImage!, width, height);
-    }
-
-    private void DrawVideoBackground(
-        CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
-    {
-        if (string.IsNullOrEmpty(slide.BackgroundVideoPath) || !File.Exists(slide.BackgroundVideoPath))
-        {
-            ds.Clear(ParseColor(slide.BackgroundColor));
-            return;
-        }
-
-        try
-        {
-            EnsureVideoComposition(slide.BackgroundVideoPath);
-            if (_bgVideoComp is null)
-            {
-                ds.Clear(ParseColor(slide.BackgroundColor));
-                return;
-            }
-
-            // Loop the video across the slide duration.
-            double durSec = _bgVideoDuration.TotalSeconds;
-            double posSec = durSec > 0
-                ? (progress * Math.Max(1, durSec)) % durSec
-                : 0;
-
-            // Re-extract only when the source frame changes (~10 fps granularity).
-            int key = (int)(posSec * 10);
-            if (_bgVideoFrame is null || _bgVideoFrameKey != key || _bgVideoFrame.Device != ds.Device)
-            {
-                _bgVideoFrame?.Dispose();
-                _bgVideoFrame = ExtractVideoFrameAsync(
-                    _bgVideoComp, ds.Device, TimeSpan.FromSeconds(posSec), width, height)
-                    .ConfigureAwait(false).GetAwaiter().GetResult();
-                _bgVideoFrameKey = key;
-            }
-
-            if (_bgVideoFrame is not null)
-                DrawScaledToFill(ds, _bgVideoFrame, width, height);
-            else
-                ds.Clear(ParseColor(slide.BackgroundColor));
-        }
-        catch
-        {
-            ds.Clear(ParseColor(slide.BackgroundColor));
-        }
-    }
-
-    private static async Task<CanvasBitmap> ExtractVideoFrameAsync(
-        MediaComposition comp, CanvasDevice device, TimeSpan position, int width, int height)
-    {
-        var clamped = comp.Duration > TimeSpan.Zero && position > comp.Duration
-            ? comp.Duration : position;
-        using var thumb = await comp.GetThumbnailAsync(
-            clamped, width, height, VideoFramePrecision.NearestFrame);
-        return await CanvasBitmap.LoadAsync(device, thumb);
-    }
-
-    private void EnsureVideoComposition(string path)
-    {
-        if (_bgVideoComp is not null && _bgVideoPath == path) return;
-
-        _bgVideoComp = null;
-        _bgVideoPath = null;
-        _bgVideoFrame?.Dispose();
-        _bgVideoFrame = null;
-        _bgVideoFrameKey = -1;
-
-        var file = StorageFile.GetFileFromPathAsync(path)
-            .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-        var clip = MediaClip.CreateFromFileAsync(file)
-            .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-        var comp = new MediaComposition();
-        comp.Clips.Add(clip);
-
-        _bgVideoComp = comp;
-        _bgVideoPath = path;
-        _bgVideoDuration = comp.Duration;
     }
 
     private static void DrawScaledToFill(CanvasDrawingSession ds, CanvasBitmap bitmap, int width, int height)
@@ -679,8 +589,6 @@ public class TextSlideRenderer : IDisposable
         if (_disposed) return;
         _disposed = true;
         _bgImage?.Dispose();
-        _bgVideoFrame?.Dispose();
-        _bgVideoComp?.Clips.Clear();
         GC.SuppressFinalize(this);
     }
 }

@@ -3812,8 +3812,6 @@ public sealed partial class EditorPage : Page
 
         SlideImagePathText.Text = string.IsNullOrEmpty(slide.BackgroundImagePath)
             ? "No image selected" : System.IO.Path.GetFileName(slide.BackgroundImagePath);
-        SlideVideoPathText.Text = string.IsNullOrEmpty(slide.BackgroundVideoPath)
-            ? "No video selected" : System.IO.Path.GetFileName(slide.BackgroundVideoPath);
 
         BuildGradientPresetsIfNeeded();
         UpdateSlideBgPanels(slide.BackgroundType);
@@ -3924,7 +3922,6 @@ public sealed partial class EditorPage : Page
         SlideColorLabel.Text = type == SlideBackgroundType.Gradient ? "Start Color" : "Color";
         SlideGradientPanel.Visibility = type == SlideBackgroundType.Gradient ? Visibility.Visible : Visibility.Collapsed;
         SlideImagePanel.Visibility = type == SlideBackgroundType.Image ? Visibility.Visible : Visibility.Collapsed;
-        SlideVideoPanel.Visibility = type == SlideBackgroundType.Video ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SlideBgTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -4039,31 +4036,6 @@ public sealed partial class EditorPage : Page
 
         slide.BackgroundImagePath = file.Path;
         SlideImagePathText.Text = System.IO.Path.GetFileName(file.Path);
-        RefreshSlidePreview();
-    }
-
-    private async void ChooseSlideVideo_Click(object sender, RoutedEventArgs e)
-    {
-        var slide = SelectedSlide();
-        if (slide is null) return;
-
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
-        };
-        picker.FileTypeFilter.Add(".mp4");
-        picker.FileTypeFilter.Add(".mov");
-        picker.FileTypeFilter.Add(".m4v");
-        picker.FileTypeFilter.Add(".webm");
-        InitializePicker(picker);
-
-        Windows.Storage.StorageFile? file = null;
-        try { file = await picker.PickSingleFileAsync(); } catch { }
-        if (file is null) return;
-
-        slide.BackgroundVideoPath = file.Path;
-        SlideVideoPathText.Text = System.IO.Path.GetFileName(file.Path);
         RefreshSlidePreview();
     }
 

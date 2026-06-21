@@ -130,9 +130,6 @@ public record TextSlideSegment : TimelineSegment
     /// <summary>Path to an image used as the background (Image type).</summary>
     public string? BackgroundImagePath { get; set; }
 
-    /// <summary>Path to a video used as the background (Video type).</summary>
-    public string? BackgroundVideoPath { get; set; }
-
     public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
 }
 
@@ -173,7 +170,6 @@ public enum SlideBackgroundType
     Solid,
     Gradient,
     Image,
-    Video,
 }
 
 /// <summary>Horizontal text alignment for a text slide.</summary>

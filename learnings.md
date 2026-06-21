@@ -2293,3 +2293,32 @@ as the rationale record.
 Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Videos\session_*) and confirmed the generated keyframes were a normal 1.5s wide and mapped to 1.5s-wide output ranges — proving the data was fine and the bug was a stale mapping call on the END edge only.
 
 **Fix:** GetZoomSegmentEndX final return changed to ZoomKeyframeTimeToX(kf, kf.End) so both edges map through the keyframe's owning segment. Verified: builds (ARM64), 333 Core tests pass.
+
+---
+
+## Text Slide Video Background — Not Showing in Preview/Export (deadlock fix)
+
+- **Feature/area**: `TextSlideRenderer.ExtractVideoFrameAsync` (Musio.Core/Processing)
+- **Problem**: A video set as a text-slide background never appeared — not in the live preview and not in the exported MP4. The slide fell back to its solid `BackgroundColor`.
+- **Root cause**: `TextSlideRenderer.RenderSlide` is synchronous and blocks on the async video-frame extraction via `ExtractVideoFrameAsync(...).GetAwaiter().GetResult()`. The inner awaits (`MediaComposition.GetThumbnailAsync`, `CanvasBitmap.LoadAsync`) did NOT use `ConfigureAwait(false)`, so their continuations marshaled back to the captured SynchronizationContext (UI thread in preview / encoder thread in export) while that thread was blocked in `GetResult()` → deadlock; the frame never loaded. The outer `.ConfigureAwait(false)` on the `ExtractVideoFrameAsync` call does NOT propagate to the method's inner awaits.
+- **Why image worked but video didn't**: `DrawImageBackground` applies `.AsTask().ConfigureAwait(false)` directly on its single `CanvasBitmap.LoadAsync` await, so it never deadlocks. `EnsureVideoComposition` was also already correct (each `GetFileFromPathAsync`/`CreateFromFileAsync` uses `.ConfigureAwait(false).GetAwaiter().GetResult()`).
+- **What worked**: Added `.AsTask().ConfigureAwait(false)` to both inner awaits in `ExtractVideoFrameAsync`. Builds clean (VS MSBuild, x64); all 333 Core tests pass.
+- **What didn't work**: Building Musio.Core with `dotnet build` fails with `MSB4062 ExpandPriContent` (dotnet SDK 10.0.301 missing AppxPackage PRI task DLL). Use Visual Studio's MSBuild (`...\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64` instead.
+- **Rule**: All `await`s in Musio.Core (library code) must use `ConfigureAwait(false)`, especially any awaited inside a method that a synchronous caller blocks on via `GetAwaiter().GetResult()`.
+
+---
+
+## Text Slide Video Background — REMOVED (MediaClip rejects fragmented MP4s)
+
+- **Feature/area**: Text-slide background types (`SlideBackgroundType`, `TextSlideSegment`, `TextSlideRenderer`, `EditorPage` flyout).
+- **Problem**: Video background never rendered in preview or export — slide fell back to solid color.
+- **Investigation (via temp file logging in DrawVideoBackground/EnsureVideoComposition)**:
+  - Not a deadlock/ConfigureAwait issue (earlier guess) — the app never froze; an exception was silently swallowed by the catch.
+  - Not file access: `StorageFile.OpenReadAsync` succeeded (content readable).
+  - Not threading: failed identically when built on a threadpool (MTA) thread via `Task.Run`.
+  - Not codec/resolution: file was `avc1` H.264; a 1080p file also failed.
+  - Root cause: `MediaClip.CreateFromFileAsync` throws `ArgumentException "The parameter is incorrect" / "Error creating clip from file"` for the user's stock videos. They are **fragmented MP4** (`moof` box) with an **edit list** (`elst`) and **no audio track** — `Windows.Media.Editing`'s composition pipeline rejects these. Proven by: `MediaClip` succeeded on an app-recorded MP4 (`Recording ....mp4`) in the same runtime, but failed on every Pexels stock file (and on an app-owned temp copy of one).
+- **Decision (user)**: "If video isn't working as background for text slide - we should remove that option entirely and simplify."
+- **What was removed**: `SlideBackgroundType.Video` enum member; `TextSlideSegment.BackgroundVideoPath`; `TextSlideRenderer` video cache fields + `DrawVideoBackground`/`ExtractVideoFrameAsync`/`EnsureVideoComposition` (+ `Windows.Media.Editing`/`Windows.Storage` usings); EditorPage `Video` ComboBoxItem, `SlideVideoPanel`, `SlideVideoPathText`, `ChooseSlideVideo_Click`. `DrawSlideBackground` no longer takes `progress`.
+- **Result**: Builds clean (VS MSBuild ARM64); all 333 tests pass. Text slides now support Solid/Gradient/Image only.
+- **Note**: `MediaClip.CreateFromFileAsync` is only reliable here for app-recorded H.264 MP4s. Do NOT reintroduce arbitrary user-video features on top of `Windows.Media.Editing`; if needed, use the `MediaPlayer` frame-server pipeline (far more tolerant) instead.

@@ -617,7 +617,6 @@
                                         <ComboBoxItem Content="Solid" Tag="Solid" />
                                         <ComboBoxItem Content="Gradient" Tag="Gradient" />
                                         <ComboBoxItem Content="Image" Tag="Image" />
-                                        <ComboBoxItem Content="Video" Tag="Video" />
                                     </ComboBox>
                                 </StackPanel>
 
@@ -697,19 +696,6 @@
                                         </StackPanel>
                                     </Button>
                                     <TextBlock x:Name="SlideImagePathText" FontSize="11"
-                                               TextTrimming="CharacterEllipsis"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </StackPanel>
-
-                                <!-- Video picker -->
-                                <StackPanel x:Name="SlideVideoPanel" Spacing="4" Visibility="Collapsed">
-                                    <Button HorizontalAlignment="Stretch" Click="ChooseSlideVideo_Click">
-                                        <StackPanel Orientation="Horizontal" Spacing="6">
-                                            <FontIcon FontSize="14" Glyph="&#xE714;" />
-                                            <TextBlock Text="Choose Video…" />
-                                        </StackPanel>
-                                    </Button>
-                                    <TextBlock x:Name="SlideVideoPathText" FontSize="11"
                                                TextTrimming="CharacterEllipsis"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
