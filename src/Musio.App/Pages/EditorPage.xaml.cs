@@ -4378,6 +4378,14 @@ public sealed partial class EditorPage : Page
         var slide = PreviewSlide();
         if (slide is null) return;
 
+        // The taps that opened the editor may have started a region drag (and
+        // captured the pointer) without a matching PointerReleased, because the
+        // region gets collapsed below. Clear that state so the box doesn't follow
+        // the mouse after editing finishes.
+        _slideRegionDragging = false;
+        SlideTextRegion.ReleasePointerCaptures();
+        ProtectedCursor = null;
+
         _editingSlideId = slide.Id;
         SlideTextRegion.Visibility = Visibility.Collapsed;
         SlideEditBox.Visibility = Visibility.Visible;
@@ -4408,6 +4416,10 @@ public sealed partial class EditorPage : Page
         slide.Text = SlideEditBox.Text;
         if (SlideTextBox is not null && SlideTextBox.Text != slide.Text)
             SlideTextBox.Text = slide.Text; // keep flyout in sync
+
+        // Re-measure so the edit box grows/shrinks to hug the wrapped text live
+        // instead of staying at the height it had when editing started.
+        PositionSlideEditControls(slide);
         Timeline.InvalidateAllCanvases();
     }
 

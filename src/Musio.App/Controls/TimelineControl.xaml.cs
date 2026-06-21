@@ -808,9 +808,6 @@ public sealed partial class TimelineControl : UserControl
     private void DrawVideoTrackFromSegments(
         CanvasDrawingSession ds, TimelineModel model, float w, float h, float pad, bool hasThumbnails)
     {
-        var textSlideColor = Color.FromArgb(230, 100, 149, 237); // CornflowerBlue
-        var textSlideSelectedColor = Color.FromArgb(245, 130, 170, 255);
-        var textSlideBorder = Color.FromArgb(255, 80, 120, 200);
         var transitionColor = Color.FromArgb(180, 255, 193, 7);  // Amber
         var textLabelColor = Color.FromArgb(255, 255, 255, 255);
         var snapGuideColor = Color.FromArgb(255, 255, 214, 10);  // Amber snap line
@@ -874,9 +871,9 @@ public sealed partial class TimelineControl : UserControl
             else if (segment is TextSlideSegment slide)
             {
                 bool isSelected = slide.Id == _selectedSegmentId;
-                ds.FillGeometry(segGeom, isSelected ? textSlideSelectedColor : textSlideColor);
+                ds.FillGeometry(segGeom, isSelected ? VideoClipSelectedColor : VideoClipColor);
                 if (isSelected)
-                    ds.DrawGeometry(segGeom, textSlideBorder, 2f);
+                    ds.DrawGeometry(segGeom, VideoClipSelectedBorder, 2f);
 
                 if (segW > 20)
                 {

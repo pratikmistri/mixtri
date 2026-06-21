@@ -94,15 +94,37 @@ public class TextSlideRenderer : IDisposable
 
     /// <summary>
     /// The text block rectangle for a slide, in output pixels, centered at the
-    /// slide's normalized (TextX, TextY) position.
+    /// slide's normalized (TextX, TextY) position. The width is a fixed fraction
+    /// of the slide (the wrapping width); the height hugs the actual measured
+    /// text so the box doesn't fill the whole slide.
     /// </summary>
     public static Rect ComputeTextRect(TextSlideSegment slide, int width, int height)
     {
         double boxW = width * 0.84;
-        double boxH = height * 0.8;
+        double maxH = height * 0.8;
+        double boxH = MeasureTextHeight(slide, boxW, maxH);
         double left = slide.TextX * width - boxW / 2;
         double top = slide.TextY * height - boxH / 2;
         return new Rect(left, top, boxW, boxH);
+    }
+
+    /// <summary>
+    /// Measures the wrapped text height (in output pixels) for the slide, clamped
+    /// between roughly one line and <paramref name="maxHeight"/>.
+    /// </summary>
+    private static double MeasureTextHeight(TextSlideSegment slide, double maxWidth, double maxHeight)
+    {
+        double minH = Math.Min(slide.FontSize * 1.3, maxHeight);
+        if (string.IsNullOrEmpty(slide.Text) || maxWidth <= 0)
+            return minH;
+
+        using var format = CreateFormat(
+            slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+            ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Top, wrap: true);
+        using var layout = new CanvasTextLayout(
+            CanvasDevice.GetSharedDevice(), slide.Text, format, (float)maxWidth, (float)maxHeight);
+
+        return Math.Clamp(layout.LayoutBounds.Height, minH, maxHeight);
     }
 
     private static CanvasHorizontalAlignment ToCanvasAlignment(SlideTextAlignment a) => a switch
