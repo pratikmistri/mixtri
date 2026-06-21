@@ -130,7 +130,7 @@ public record TextSlideSegment : TimelineSegment
     /// <summary>Path to an image used as the background (Image type).</summary>
     public string? BackgroundImagePath { get; set; }
 
-    public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
+    public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.ZoomBlurIn;
 }
 
 /// <summary>
@@ -215,8 +215,6 @@ public enum TextSlideAnimation
 
     // ── Whole-text opacity ──
     FadeIn,
-    FadeOut,
-    FadeInOut,
 
     // ── Whole-text position ──
     SlideUp,

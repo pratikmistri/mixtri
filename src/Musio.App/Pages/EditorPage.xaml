@@ -491,12 +491,10 @@
                                     <ComboBox
                                         x:Name="SlideAnimationCombo"
                                         HorizontalAlignment="Stretch"
-                                        SelectedIndex="1"
+                                        SelectedIndex="7"
                                         SelectionChanged="SlideAnimationCombo_SelectionChanged">
                                         <ComboBoxItem Content="None" Tag="None" />
                                         <ComboBoxItem Content="Fade In" Tag="FadeIn" />
-                                        <ComboBoxItem Content="Fade Out" Tag="FadeOut" />
-                                        <ComboBoxItem Content="Fade In/Out" Tag="FadeInOut" />
                                         <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
                                         <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
                                         <ComboBoxItem Content="Slide Left" Tag="SlideLeft" />

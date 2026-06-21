@@ -2456,3 +2456,21 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - `files/cursor-destutter.html` is a self-contained visualizer mirroring the C# algorithm (path + speed-over-time plots, scenario presets, all params live, playback). Note: visualizer JS reimplements the algorithm; keep it in sync with `CursorSmoother.cs`.
 
 **Build/test:** `dotnet test`/`build` FAILS on Musio.Core (WinAppSDK `ExpandPriContent` task). Use VS MSBuild `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe` to build, then run tests via `dotnet vstest <Tests.dll> --TestCaseFilter:...` with `DOTNET_ROLL_FORWARD=LatestMajor`. All 10 CursorSmootherTests pass.
+
+---
+
+## Text slide animation default & fade option cleanup
+
+- **Feature/area**: Text slide animations (TextSlideRenderer, TextSlideSegment/TextOverlay enum, EditorPage animation ComboBox).
+- **Approaches tried**: Changed default `TextSlideAnimation` from `FadeIn` to `ZoomBlurIn` (the "blur" animation) on both `TextSlideSegment` and `TextOverlay`; removed `FadeOut` and `FadeInOut` enum members, their renderer switch cases, and their ComboBox items; updated `SlideAnimationCombo` SelectedIndex from 1 to 7 (now points at Zoom Blur In).
+- **What worked**: `FadeInOut` was identical to `FadeIn` (shared the default fade-in+fade-out opacity), so removing it lost no behavior. ComboBox is matched by Tag, so removing items needed only a SelectedIndex fix. Build verified with VS MSBuild x64 for Musio.Core and Musio.App (both exit 0).
+- **What didn't work**: `dotnet build` still fails with MSB4062 PriGen error (pre-existing env issue) — must use VS MSBuild at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe`.
+
+---
+
+## Ken Burns motion on image-backed text slides
+
+- **Feature/area**: `TextSlideRenderer.DrawImageBackground` / new `DrawKenBurns` helper.
+- **Approaches tried**: Image background was drawn statically via `DrawScaledToFill`. Added a continuous "Ken Burns" motion: overscale the cover-fit image (~1.14x) for headroom, then a breathing zoom (`1.14 + 0.05*sin(t*0.18)`) plus an elliptical slow pan (`sin/cos` of t, bounded to 70% of the available slack so edges never show). Driven by `progress` → elapsed seconds, same pattern as the gradient wave so it advances with the playhead and matches preview + export.
+- **What worked**: Computing dest Rect directly with scale+pan and bounding pan to the overscale slack guarantees the frame stays fully covered. Removed the now-unused `DrawScaledToFill`. Build verified with VS MSBuild x64 (Musio.Core, exit 0).
+- **What didn't work**: N/A — avoided rotation to prevent exposing image corners (would need more overscale); zoom+pan satisfies the "nothing feels static" goal robustly.

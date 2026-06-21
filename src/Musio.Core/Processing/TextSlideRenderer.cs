@@ -145,7 +145,7 @@ public class TextSlideRenderer : IDisposable
                 DrawGradientBackground(ds, slide, progress, width, height);
                 break;
             case SlideBackgroundType.Image:
-                DrawImageBackground(ds, slide, width, height);
+                DrawImageBackground(ds, slide, progress, width, height);
                 break;
             default:
                 ds.Clear(ParseColor(slide.BackgroundColor));
@@ -262,7 +262,7 @@ public class TextSlideRenderer : IDisposable
     }
 
     private void DrawImageBackground(
-        CanvasDrawingSession ds, TextSlideSegment slide, int width, int height)
+        CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
         if (string.IsNullOrEmpty(slide.BackgroundImagePath) || !File.Exists(slide.BackgroundImagePath))
         {
@@ -288,17 +288,50 @@ public class TextSlideRenderer : IDisposable
             }
         }
 
-        DrawScaledToFill(ds, _bgImage!, width, height);
+        DrawKenBurns(ds, _bgImage!, slide, progress, width, height);
     }
 
-    private static void DrawScaledToFill(CanvasDrawingSession ds, CanvasBitmap bitmap, int width, int height)
+    /// <summary>
+    /// Draws an image background with a slow "Ken Burns" motion (continuous gentle
+    /// zoom + elliptical pan) so an image-backed slide reads like a living shot
+    /// rather than a frozen still. The image is overscaled beyond a simple cover
+    /// fit to leave headroom, then a breathing zoom and a slow elliptical pan —
+    /// both driven by sine/cosine of elapsed time so they never settle into a
+    /// stopped end state — push the framing around within that headroom. The pan
+    /// stays inside the available slack so the image edges are never revealed.
+    /// <paramref name="progress"/> (0..1 over the slide's duration) is converted to
+    /// elapsed seconds so the motion advances with the playhead (frozen when paused)
+    /// and is identical in the live preview and the exported video.
+    /// </summary>
+    private static void DrawKenBurns(
+        CanvasDrawingSession ds, CanvasBitmap bitmap, TextSlideSegment slide,
+        double progress, int width, int height)
     {
+        // Elapsed seconds within the slide drives the motion (frozen on a static frame).
+        float t = (float)(Math.Clamp(progress, 0, 1) * Math.Max(0.001, slide.Duration.TotalSeconds));
+
         var src = bitmap.SizeInPixels;
-        float scale = Math.Max((float)width / src.Width, (float)height / src.Height);
+        float fill = Math.Max((float)width / src.Width, (float)height / src.Height);
+
+        // Overscale beyond cover-fit gives headroom for the pan + breathing zoom
+        // without ever exposing the image edges. The zoom slowly breathes and the
+        // pan slowly drifts on an elliptical path — neither ever comes to rest.
+        float zoom = 1.14f + 0.05f * MathF.Sin(t * 0.18f);
+
+        float scale = fill * zoom;
         float drawW = src.Width * scale;
         float drawH = src.Height * scale;
-        float drawX = (width - drawW) / 2f;
-        float drawY = (height - drawH) / 2f;
+
+        // Slack = how far we can shift the (over-sized) image while still covering
+        // the frame. Keep the pan within ~70% of it so a corner is never revealed.
+        float slackX = (drawW - width) * 0.5f;
+        float slackY = (drawH - height) * 0.5f;
+        float panX = MathF.Sin(t * 0.13f) * slackX * 0.7f;
+        float panY = MathF.Cos(t * 0.11f) * slackY * 0.7f;
+
+        float drawX = (width - drawW) * 0.5f + panX;
+        float drawY = (height - drawH) * 0.5f + panY;
+
         ds.DrawImage(bitmap, new Rect(drawX, drawY, drawW, drawH));
     }
 
@@ -543,13 +576,7 @@ public class TextSlideRenderer : IDisposable
                 break;
 
             case TextSlideAnimation.FadeIn:
-            case TextSlideAnimation.FadeInOut:
                 // opacity already = fade in + fade out
-                break;
-
-            case TextSlideAnimation.FadeOut:
-                // Visible from the start, fades only at the end.
-                opacity = 1 - EaseInCubic(outP);
                 break;
 
             case TextSlideAnimation.SlideUp:
