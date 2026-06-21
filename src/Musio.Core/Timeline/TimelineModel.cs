@@ -280,9 +280,9 @@ public record ZoomKeyframe
     public double ZoomLevel { get; init; } = 2.0;
     public double CenterX { get; init; } // normalized 0-1
     public double CenterY { get; init; } // normalized 0-1
-    public TimeSpan PreDuration { get; init; } = TimeSpan.FromMilliseconds(345);   // 300ms + 15%
-    public TimeSpan HoldDuration { get; init; } = TimeSpan.FromMilliseconds(575);  // 500ms + 15%
-    public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(575);  // 500ms + 15%
+    public TimeSpan PreDuration { get; init; } = TimeSpan.FromMilliseconds(450);   // graceful anticipatory zoom-in
+    public TimeSpan HoldDuration { get; init; } = TimeSpan.FromMilliseconds(600);  // settled dwell on the focal point
+    public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(700);  // slow, elegant release back to full frame
 
     /// <summary>
     /// True for keyframes added by the user via the editor UI.
@@ -325,8 +325,8 @@ public record ZoomKeyframe
         if (total < MinSegmentDuration)
             total = MinSegmentDuration;
 
-        var pre = TimeSpan.FromMilliseconds(Math.Min(345, total.TotalMilliseconds * 0.2));
-        var post = TimeSpan.FromMilliseconds(Math.Min(575, total.TotalMilliseconds * 0.3));
+        var pre = TimeSpan.FromMilliseconds(Math.Min(450, total.TotalMilliseconds * 0.2));
+        var post = TimeSpan.FromMilliseconds(Math.Min(700, total.TotalMilliseconds * 0.3));
         var hold = total - pre - post;
         if (hold < TimeSpan.Zero) hold = TimeSpan.Zero;
 

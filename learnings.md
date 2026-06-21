@@ -2359,3 +2359,21 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - **Font**: Added a `Font` `ComboBox` (`SlideFontCombo`) with a curated list of common Windows fonts; each item sets its own `FontFamily` for an in-place preview. `SlideFontCombo_SelectionChanged` sets `slide.FontFamily`; helper `SetSlideFontSelection` selects the matching item and inserts a custom item at top if the slide's font isn't in the list (so it isn't silently changed). The slide model already had `FontFamily` (string); in-place editor + renderer already honor it.
 - **Gotcha**: removing the radios means removing the old `SlideAlign_Checked` handler and the `SlideAlignLeft/Center/Right.IsChecked` population lines, else they fail to compile (named elements gone).
 - **Verified**: App ARM64 build clean (VS MSBuild), redeployed + launched.
+
+## Zoom Segment — Cinematic Easing & Timing Refresh
+
+- **Feature/area**: Auto-zoom and manual zoom-keyframe animation (`AutoZoomEngine.cs`, `CubicBezierEasing.cs`, `TimelineModel.ZoomKeyframe`).
+- **Approaches tried**:
+  1. Replaced the asymmetric private cubic-bezier (control points 0.25,0.1,0.25,1.0 — non-zero start velocity, jolt at zoom-in start and at leaving the hold) with a symmetric cinematic ease-in-out.
+  2. Added `CubicBezierEasing.EaseInOutCinematic` = cubic-bezier(0.76, 0, 0.24, 1) (easeInOutQuart) and routed `AutoZoomEngine.CubicBezierEase(from,to,t)` through it, deleting the duplicate Newton-solver + `BezierComponent`/`BezierComponentDerivative` helpers.
+  3. Lengthened/rebalanced default durations for a deliberate, graceful feel — `AutoZoomConfig`: Pre 0.345->0.45s, Hold 0.575->0.6s, EaseOut 0.575->0.7s; `ZoomKeyframe`: Pre 345->450ms, Hold 575->600ms, Post 575->700ms; `ZoomKeyframe.FromRange` caps bumped to 450/700ms. Kept zoom-in faster than zoom-out (snap-to-focus, slow release).
+- **What worked**: Both auto segments and manual keyframes share `CubicBezierEase`, so one curve change covers both. Zero-slope at both ends removes junction jolts. All 340 tests pass; tolerant assertions (monotonicity, no-snap, endpoints) unaffected. Updated the one pinned-default test (`TimelineModelTests.ZoomKeyframe_DefaultValues_AreCorrect`) to 450/600/700.
+- **What didn't work**: N/A — no perceptual/log-space zoom interpolation added (kept change focused; easing curve is the main cinematic lever).
+
+## Dev Build Missing App Icon — Loose-Layout Asset Copy
+
+- **Feature/area**: `src/Musio.App/Musio.App.csproj` packaging / local dev register-and-run flow.
+- **Symptom**: The CLI dev build (VS MSBuild `/t:Build` + `Add-AppxPackage -Register win-<arch>\AppxManifest.xml`) showed the default Windows icon, not the app icon. `AppWindow.SetIcon("Assets/AppIcon.ico")`, `TitleBar.IconSource`, and `SystemTrayService` all silently failed.
+- **Root cause**: The `<Content Include="Assets\...">` items (AppIcon.ico + tile/taskbar logo PNGs) are only emitted into the MSIX package during the packaging target (GenerateAppxPackageOnBuild/deploy). A plain `/t:Build` does NOT copy them into the loose `bin\<Plat>\Debug\net9.0-...\win-<arch>` layout, which is exactly what the dev flow registers — so the install location had no `Assets` folder at all.
+- **What worked**: Added `<Content Update="Assets\**"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>` to the csproj. After rebuild, `win-arm64\Assets\AppIcon.ico` (and all logos) are present in the registered package's InstallLocation, so the icon loads. Verified present after Build + Register.
+- **What didn't work / notes**: Don't expect the loose layout to contain Content assets without CopyToOutputDirectory; packaging-time inclusion alone is insufficient for the register-loose-manifest dev workflow.

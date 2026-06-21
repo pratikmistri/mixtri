@@ -77,4 +77,13 @@ public static class CubicBezierEasing
 
     /// <summary>Spring-out: cubic-bezier(0, 0, 0.2, 1)</summary>
     public static float SpringOut(float t) => Evaluate(t, 0f, 0f, 0.2f, 1f);
+
+    /// <summary>
+    /// Cinematic ease-in-out: cubic-bezier(0.76, 0, 0.24, 1).
+    /// A symmetric "quart" curve that starts and settles from rest with near-zero
+    /// velocity and a swift, gliding middle. Both ends have zero slope, so camera
+    /// moves enter and resolve without any visible jolt — the deliberate, elegant
+    /// feel of a hand-animated zoom.
+    /// </summary>
+    public static float EaseInOutCinematic(float t) => Evaluate(t, 0.76f, 0f, 0.24f, 1f);
 }

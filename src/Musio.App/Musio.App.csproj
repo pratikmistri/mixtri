@@ -38,6 +38,20 @@
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 
+  <!--
+    Copy packaged assets (app icon + tile/taskbar logos) into the build output so the
+    loose layout works when the app is registered for local dev via
+    `Add-AppxPackage -Register win-<arch>\AppxManifest.xml`. Without this, a plain Build
+    only packages these at MSIX-packaging time, so the dev build can't find
+    Assets\AppIcon.ico (used by AppWindow.SetIcon / TitleBar / SystemTrayService) and
+    falls back to the default Windows icon.
+  -->
+  <ItemGroup>
+    <Content Update="Assets\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
