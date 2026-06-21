@@ -2385,3 +2385,58 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - **Fix**: Drive entrance/exit by CONSTANT wall-clock seconds. Added `EntranceSeconds=0.6`, `ExitSeconds=0.6`, and a `ComputeInOutProgress(progress, durationSeconds)` helper returning independent `(inP, outP)` over fixed-time windows (each capped at `dur*0.45` so short slides still fit, with the middle hold absorbing extra time). Threaded `durationSeconds` (from `slide.Duration` / `overlay.Duration`) through `DrawAnimatedText` → `ComputeWholeState(anim, inP, outP, ...)`, `DrawPerCharacter`/`ComputeCharParams(anim, inP, outP, elapsedSeconds, ...)`, `TypewriterText(text, elapsedSeconds, durationSeconds)` (constant chars/sec), and Reveal. Wave now bobs at a constant `WaveHz` using elapsed seconds with a quick `WaveFadeSeconds` fade.
 - **What worked**: All 340 tests pass; Core (x64) + App (ARM64) build clean; redeployed + launched. The renderer already computed `elapsed = progress * Duration` for the gradient wave, so duration was straightforward to thread through.
 - **Note**: Per-character cascade still staggers via `frac*spread` but now within the constant-time in/out windows, so denser text just packs more chars into the same fixed motion duration.
+
+## Timeline — Text Slide Segments Use Video Segment Color
+
+- **Feature/area**: `src/Musio.App/Controls/TimelineControl.xaml.cs` `DrawVideoTrackFromSegments`.
+- **Request**: Make text-slide timeline segments use the same color as video segments (the segment swatch color in the timeline, NOT the rendered slide background in preview/export).
+- **Change**: Text slides were filled with a hardcoded CornflowerBlue (`textSlideColor`/`textSlideSelectedColor`/`textSlideBorder`). Now they use the shared `VideoClipColor` / `VideoClipSelectedColor` / `VideoClipSelectedBorder` like thumbnail-less video segments. Removed the three now-unused locals.
+- **Note**: Video segments WITH thumbnails draw a filmstrip; text slides have no thumbnails so they fall back to the solid `VideoClipColor` fill — matching the no-thumbnail video clip appearance. White centered text label still drawn on top.
+- **Verified**: App (ARM64) builds clean, redeployed + launched.
+
+## Text Slide — Inline Preview Edit Box Hugs Height + Stuck-Drag Fix
+
+**Feature/area:** Text slide in-place preview editing (TextSlideRenderer.ComputeTextRect, EditorPage SlideTextRegion/SlideEditBox)
+
+**Problems:** (1) The editable text region in the preview filled the whole slide (84% W x 80% H box), so the selection/edit box didn't hug the text. (2) After finishing an edit the box followed the mouse without a button press.
+
+**What worked:**
+1. `ComputeTextRect` now measures the wrapped text via a `CanvasTextLayout` (`MeasureTextHeight`, using `CanvasDevice.GetSharedDevice()`) and returns a height that hugs the text, clamped to [~1 line, 80% of slide], still centered at (TextX,TextY). Width stays 84% as the wrapping width. Renderer uses `CanvasVerticalAlignment.Center`, so shrinking the box symmetrically keeps the rendered text in the same place — overlay box and rendered text now match and hug content.
+2. Stuck-drag: the double-tap that opens the editor first fires `SlideTextRegion_PointerPressed`, which set `_slideRegionDragging=true` and captured the pointer; `EnterSlideTextEdit` then collapses the region so no `PointerReleased` arrives, leaving the flag stuck. Fix: `EnterSlideTextEdit` now resets `_slideRegionDragging=false`, calls `SlideTextRegion.ReleasePointerCaptures()`, and clears `ProtectedCursor`.
+
+**Verified:** Musio.Core + Musio.App build clean (x64, VS MSBuild).
+
+## Text Slide — Edit Box Auto-Resizes Height While Typing
+
+**Feature/area:** Text slide in-place preview editing (EditorPage.SlideEditBox_TextChanged)
+
+**Problem:** While editing the slide text in the preview, the `SlideEditBox` kept the height it had when editing began. Wrapping to new lines didn''t grow the box; the user had to click out and back in (which re-ran `PositionSlideEditControls`) to refresh.
+
+**What worked:** `SlideEditBox_TextChanged` now calls `PositionSlideEditControls(slide)` after updating `slide.Text`, so the box re-measures via `ComputeTextRect`/`MeasureTextHeight` and resizes live to hug the wrapped text (centered at TextY). No TextChanged recursion since `PositionSlideEditControls` doesn''t set `.Text`.
+
+**Verified:** Musio.App ARM64 Debug builds clean; redeployed + launched.
+
+## Zoom Easing — Tuned Cinematic Curve + Visualizer Play Preview
+
+**Feature/area:** Zoom motion curve (CubicBezierEasing.EaseInOutCinematic) + session visualizer tool (files/zoom-curve.html)
+
+**Change:** `EaseInOutCinematic` retuned from `cubic-bezier(0.76, 0, 0.24, 1)` to `cubic-bezier(0.165, 0.003, 0, 0.999)` (slow, near-zero-velocity start with a fast glide and soft settle). Updated the XML doc comment to match. This single curve drives both zoom-in and zoom-out via `AutoZoomEngine.CubicBezierEase`.
+
+**Visualizer:** `files/zoom-curve.html` is an interactive tuner — draggable Bézier handles (position + velocity plots), presets, "Copy C# line" button, a zoom-level-over-time profile, AND a live Play preview that animates the full in→hold→out profile on a mock app scene with a clickable focal point and playback-speed slider. JS `bezier()` mirrors CubicBezierEasing.cs Newton+bisection.
+
+**Verified:** Musio.App ARM64 Debug builds clean; redeployed + launched.
+
+## Zoom Timing — Slowed ~2.22x (0.45x playback feel) + Duration Slider in Visualizer
+
+**Feature/area:** Zoom animation durations (AutoZoomConfig, ZoomKeyframe defaults, FromRange) + visualizer (files/zoom-curve.html)
+
+**Change:** User found 0.45x playback speed felt right → durations multiplied by 1/0.45 ≈ 2.22x.
+- `AutoZoomConfig`: PreClickDuration 0.45→1.0f, HoldDuration 0.6→1.333f, EaseOutDuration 0.7→1.556f (AutoZoomEngine.cs:10-12).
+- `ZoomKeyframe` defaults: PreDuration 450→1000ms, HoldDuration 600→1333ms, PostDuration 700→1556ms (TimelineModel.cs:283-285); `FromRange` caps 450→1000, 700→1556.
+- Updated test `TimelineModelTests.ZoomKeyframe_DefaultValues_AreCorrect` to new defaults.
+
+**Test gotcha:** `AutoZoomEngineTests.GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` encoded the OLD durations (it asserts B's center dominates at t=3.0). With longer hold, both keyframes sit at full zoom at t=3.0 → center averages to 960px, failing. Fix: pin explicit old durations (450/600/700) on that test's keyframes so the smoothing regression test is independent of default tuning. All 77 zoom/timeline tests pass.
+
+**Visualizer:** added a master "Duration ×" multiplier slider that scales tin/hold/tout live, plus a "Copy AutoZoomConfig durations" readout. Base slider defaults updated to the new 1.0/1.333/1.556.
+
+**Verified:** Musio.App ARM64 Debug builds clean; tests pass; redeployed + launched.

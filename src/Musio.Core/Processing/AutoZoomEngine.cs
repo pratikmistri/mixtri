@@ -7,9 +7,9 @@ public record AutoZoomConfig
 {
     public bool Enabled { get; init; } = true;
     public float DefaultZoomLevel { get; init; } = 2.0f;
-    public float PreClickDuration { get; init; } = 0.45f;   // graceful anticipatory zoom-in
-    public float HoldDuration { get; init; } = 0.6f;        // settled dwell on the focal point
-    public float EaseOutDuration { get; init; } = 0.7f;     // slow, elegant release back to full frame
+    public float PreClickDuration { get; init; } = 1.0f;    // graceful anticipatory zoom-in
+    public float HoldDuration { get; init; } = 1.333f;      // settled dwell on the focal point
+    public float EaseOutDuration { get; init; } = 1.556f;   // slow, elegant release back to full frame
     public float SpringConstant { get; init; } = 200f;
     public float SpringDamping { get; init; } = 20f;
     public bool ZoomOnScroll { get; init; } = false;

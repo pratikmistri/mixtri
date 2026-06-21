@@ -103,9 +103,9 @@ public sealed class TimelineModelTests
         Assert.AreEqual(2.0, kf.ZoomLevel);
         Assert.AreEqual(0.0, kf.CenterX);
         Assert.AreEqual(0.0, kf.CenterY);
-        Assert.AreEqual(TimeSpan.FromMilliseconds(450), kf.PreDuration);
-        Assert.AreEqual(TimeSpan.FromMilliseconds(600), kf.HoldDuration);
-        Assert.AreEqual(TimeSpan.FromMilliseconds(700), kf.PostDuration);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(1000), kf.PreDuration);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(1333), kf.HoldDuration);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(1556), kf.PostDuration);
     }
 
     [TestMethod]

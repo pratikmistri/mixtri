@@ -364,6 +364,9 @@ public sealed class AutoZoomEngineTests
                 ZoomLevel = 2.0,
                 CenterX = 0.3,
                 CenterY = 0.3,
+                PreDuration = TimeSpan.FromMilliseconds(450),
+                HoldDuration = TimeSpan.FromMilliseconds(600),
+                PostDuration = TimeSpan.FromMilliseconds(700),
             },
             new ZoomKeyframe
             {
@@ -371,6 +374,9 @@ public sealed class AutoZoomEngineTests
                 ZoomLevel = 2.0,
                 CenterX = 0.7,
                 CenterY = 0.7,
+                PreDuration = TimeSpan.FromMilliseconds(450),
+                HoldDuration = TimeSpan.FromMilliseconds(600),
+                PostDuration = TimeSpan.FromMilliseconds(700),
             },
         ]);
 
