@@ -2440,3 +2440,19 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 **Visualizer:** added a master "Duration ×" multiplier slider that scales tin/hold/tout live, plus a "Copy AutoZoomConfig durations" readout. Base slider defaults updated to the new 1.0/1.333/1.556.
 
 **Verified:** Musio.App ARM64 Debug builds clean; tests pass; redeployed + launched.
+
+---
+
+**Feature/area:** Cursor smoothing — `CursorSmoother` de-stutter pre-pass (trackpad stop-and-go removal). Files: `src/Musio.Core/Processing/CursorSmoother.cs`, tests `src/Musio.Tests/CursorSmootherTests.cs`, visualizer `files/cursor-destutter.html`.
+
+**Approaches tried:**
+1. **Time-preserving arc-length re-timing pre-pass (`ApplyDestutter`)** — ✅ Worked. Runs before the spring/One-Euro/Catmull filter (only when smoothing is active so the None passthrough stays exact). Detects low-speed "stall" runs via a windowed speed estimate; classifies a run as a protected REST if it overlaps a click guard window OR is longer than `GenuineDwellSeconds`. Motion gestures between anchors are re-timed by redistributing interior sample positions along the gesture's arc length with a `RemapEase` blend (constant-speed↔smootherstep). Endpoints/anchors and protected rests are left untouched.
+2. **Global time-warp / stall compression** — ❌ Rejected. Compressing stall time would desync the cursor track from the underlying screen video (cursor must be at the right place at the right absolute time). De-stutter MUST preserve every sample timestamp; only positions are redistributed.
+
+**What worked / key facts:**
+- De-stutter is exposed via `CursorSmoother.DestutterEnabled` (default true) + `DestutterOptions` (tunable: StallSpeedPxPerSec, SpeedWindowSeconds, MinStallSeconds, GenuineDwellSeconds, ClickPre/PostGuardSeconds, EaseStrength). `FrameCompositor` gets it for free — no caller changes.
+- Click stalls (even short ones) are preserved via proximity to `rawData.Clicks`, not duration. `SnapToClickPositions` still guarantees exact click position downstream.
+- No-op on continuous stall-free motion (one gesture, endpoints preserved) — existing 6 smoothing tests still pass.
+- `files/cursor-destutter.html` is a self-contained visualizer mirroring the C# algorithm (path + speed-over-time plots, scenario presets, all params live, playback). Note: visualizer JS reimplements the algorithm; keep it in sync with `CursorSmoother.cs`.
+
+**Build/test:** `dotnet test`/`build` FAILS on Musio.Core (WinAppSDK `ExpandPriContent` task). Use VS MSBuild `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe` to build, then run tests via `dotnet vstest <Tests.dll> --TestCaseFilter:...` with `DOTNET_ROLL_FORWARD=LatestMajor`. All 10 CursorSmootherTests pass.

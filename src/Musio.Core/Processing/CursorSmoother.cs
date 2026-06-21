@@ -14,10 +14,51 @@ public struct SmoothedPosition
     public double VelocityY;
 }
 
+/// <summary>
+/// Tunable parameters for the de-stutter pre-pass that removes trackpad
+/// "stop and go" micro-stalls while preserving intentional pauses.
+/// </summary>
+public sealed class DestutterOptions
+{
+    /// <summary>Speed below which motion is considered a stall (pixels/second).</summary>
+    public double StallSpeedPxPerSec { get; set; } = 45.0;
+
+    /// <summary>Half-width of the window used to measure local speed (seconds).</summary>
+    public double SpeedWindowSeconds { get; set; } = 0.03;
+
+    /// <summary>A low-speed run shorter than this is ignored (treated as motion noise).</summary>
+    public double MinStallSeconds { get; set; } = 0.04;
+
+    /// <summary>A low-speed run at least this long is a genuine rest and is preserved.</summary>
+    public double GenuineDwellSeconds { get; set; } = 0.40;
+
+    /// <summary>Time before a click during which a stall is protected (preserved).</summary>
+    public double ClickPreGuardSeconds { get; set; } = 0.18;
+
+    /// <summary>Time after a click during which a stall is protected (preserved).</summary>
+    public double ClickPostGuardSeconds { get; set; } = 0.12;
+
+    /// <summary>
+    /// Blend between constant-speed-along-arc (0) and full ease-in-out (1) when
+    /// re-timing a motion gesture. Higher values decelerate more into rests/clicks.
+    /// </summary>
+    public double EaseStrength { get; set; } = 0.6;
+}
+
 public class CursorSmoother
 {
     public SmoothingAlgorithm Algorithm { get; set; }
     public SmoothingStrength Strength { get; set; }
+
+    /// <summary>
+    /// When enabled, a de-stutter pre-pass runs before the smoothing filter to
+    /// detect trackpad "stop and go" micro-stalls and glide the cursor through
+    /// them, while preserving intentional pauses (clicks and long dwells).
+    /// </summary>
+    public bool DestutterEnabled { get; set; } = true;
+
+    /// <summary>Tunable parameters for the de-stutter pre-pass.</summary>
+    public DestutterOptions Destutter { get; set; } = new();
 
     public List<SmoothedPosition> SmoothPath(MouseRecordingData rawData, int targetFps)
     {
@@ -25,9 +66,17 @@ public class CursorSmoother
         if (targetFps <= 0) throw new ArgumentOutOfRangeException(nameof(targetFps));
         if (rawData.Samples.Count == 0) return [];
 
-        double tickFreq = rawData.TickFrequency;
-        long startTick = rawData.StartTimestampTicks;
-        long endTick = rawData.EndTimestampTicks;
+        bool smoothingActive = Algorithm != SmoothingAlgorithm.None && Strength != SmoothingStrength.None;
+
+        // De-stutter is a time-preserving position remap: it only runs when a
+        // smoothing filter is active so the None/passthrough path stays exact.
+        MouseRecordingData data = smoothingActive && DestutterEnabled
+            ? ApplyDestutter(rawData)
+            : rawData;
+
+        double tickFreq = data.TickFrequency;
+        long startTick = data.StartTimestampTicks;
+        long endTick = data.EndTimestampTicks;
         double durationSeconds = (endTick - startTick) / tickFreq;
         if (durationSeconds <= 0) durationSeconds = 0;
 
@@ -35,21 +84,21 @@ public class CursorSmoother
 
         List<SmoothedPosition> result;
 
-        if (Algorithm == SmoothingAlgorithm.None || Strength == SmoothingStrength.None)
-            result = GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq);
+        if (!smoothingActive)
+            result = GenerateUnsmoothed(data, targetFps, frameCount, startTick, tickFreq);
         else
             result = Algorithm switch
             {
-                SmoothingAlgorithm.SpringPhysics => SmoothSpringPhysics(rawData, targetFps, frameCount, startTick, tickFreq),
-                SmoothingAlgorithm.OneEuroFilter => SmoothOneEuroFilter(rawData, targetFps, frameCount, startTick, tickFreq),
-                SmoothingAlgorithm.CatmullRomSpline => SmoothCatmullRom(rawData, targetFps, frameCount, startTick, tickFreq),
-                _ => GenerateUnsmoothed(rawData, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.SpringPhysics => SmoothSpringPhysics(data, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.OneEuroFilter => SmoothOneEuroFilter(data, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.CatmullRomSpline => SmoothCatmullRom(data, targetFps, frameCount, startTick, tickFreq),
+                _ => GenerateUnsmoothed(data, targetFps, frameCount, startTick, tickFreq),
             };
 
         // Snap cursor to raw position on click events so the smoothed cursor
         // is at the correct location when click animations play.
-        if (Algorithm != SmoothingAlgorithm.None && Strength != SmoothingStrength.None)
-            SnapToClickPositions(result, rawData, targetFps, startTick, tickFreq);
+        if (smoothingActive)
+            SnapToClickPositions(result, data, targetFps, startTick, tickFreq);
 
         return result;
     }
@@ -482,6 +531,207 @@ public class CursorSmoother
         double frac = (tick - samples[lo].TimestampTicks) / range;
         double x = samples[lo].X + (samples[hi].X - samples[lo].X) * frac;
         double y = samples[lo].Y + (samples[hi].Y - samples[lo].Y) * frac;
+        return (x, y);
+    }
+
+    #endregion
+
+    #region De-stutter (stop-and-go removal)
+
+    /// <summary>
+    /// Detects trackpad "stop and go" micro-stalls and re-times each motion
+    /// gesture so the cursor glides through them, while preserving intentional
+    /// pauses. A stall is preserved (protected) when it sits near a click or is
+    /// long enough to be a genuine rest. The pass is time-preserving: every
+    /// sample keeps its original timestamp (so the cursor stays synced to the
+    /// underlying video); only positions inside motion gestures are redistributed
+    /// along the path with a smooth, near-constant speed profile.
+    /// </summary>
+    private MouseRecordingData ApplyDestutter(MouseRecordingData data)
+    {
+        var samples = data.Samples;
+        int n = samples.Count;
+        if (n < 4) return data;
+
+        double tickFreq = data.TickFrequency;
+        if (tickFreq <= 0) return data;
+
+        var opt = Destutter;
+        long start = data.StartTimestampTicks;
+
+        // Time in seconds for each sample, relative to the recording start.
+        var time = new double[n];
+        for (int i = 0; i < n; i++)
+            time[i] = (samples[i].TimestampTicks - start) / tickFreq;
+
+        // Classify each sample as "slow" using a windowed speed estimate, which
+        // is robust to single-sample jitter that briefly cancels real motion.
+        var slow = new bool[n];
+        for (int i = 0; i < n; i++)
+        {
+            int lo = i, hi = i;
+            while (lo > 0 && time[i] - time[lo - 1] < opt.SpeedWindowSeconds) lo--;
+            while (hi < n - 1 && time[hi + 1] - time[i] < opt.SpeedWindowSeconds) hi++;
+
+            double dt = time[hi] - time[lo];
+            double dx = samples[hi].X - samples[lo].X;
+            double dy = samples[hi].Y - samples[lo].Y;
+            double speed = dt > 0 ? Math.Sqrt(dx * dx + dy * dy) / dt : 0;
+            slow[i] = speed < opt.StallSpeedPxPerSec;
+        }
+
+        // Build protected (rest) intervals: low-speed runs that are either long
+        // enough to be a genuine dwell, or overlap a click guard window.
+        var isRest = new bool[n];
+        int runStart = 0;
+        bool inRun = false;
+        for (int i = 0; i <= n; i++)
+        {
+            bool s = i < n && slow[i];
+            if (s && !inRun) { runStart = i; inRun = true; }
+            else if (!s && inRun)
+            {
+                int runEnd = i - 1;
+                double runDuration = time[runEnd] - time[runStart];
+                bool longEnough = runDuration >= opt.MinStallSeconds;
+                if (longEnough &&
+                    (runDuration >= opt.GenuineDwellSeconds ||
+                     OverlapsClickGuard(data, time[runStart], time[runEnd], start, tickFreq, opt)))
+                {
+                    for (int k = runStart; k <= runEnd; k++) isRest[k] = true;
+                }
+                inRun = false;
+            }
+        }
+
+        // Anchors: first/last sample, the boundaries of every protected rest run,
+        // and every click sample. Anchors keep their exact position and time.
+        var anchor = new bool[n];
+        anchor[0] = true;
+        anchor[n - 1] = true;
+        for (int i = 0; i < n; i++)
+        {
+            if (samples[i].EventKind is MouseEventKind.ButtonDown or MouseEventKind.ButtonUp)
+                anchor[i] = true;
+            bool restHere = isRest[i];
+            bool restPrev = i > 0 && isRest[i - 1];
+            bool restNext = i < n - 1 && isRest[i + 1];
+            if (restHere && (!restPrev || !restNext))
+                anchor[i] = true; // edge of a rest run
+        }
+
+        var result = new List<MouseSample>(samples);
+
+        // Walk consecutive anchor pairs; re-time the interior of motion gestures.
+        int prevAnchor = 0;
+        for (int b = 1; b < n; b++)
+        {
+            if (!anchor[b]) continue;
+            int a = prevAnchor;
+            prevAnchor = b;
+
+            // Skip spans that are entirely a protected rest (leave the cursor still).
+            bool allRest = true;
+            for (int k = a; k <= b; k++)
+            {
+                if (!isRest[k]) { allRest = false; break; }
+            }
+            if (allRest || b - a < 2) continue;
+
+            RetimeGesture(samples, result, time, a, b, opt.EaseStrength);
+        }
+
+        return new MouseRecordingData
+        {
+            Samples = result,
+            Clicks = data.Clicks,
+            StartTimestampTicks = data.StartTimestampTicks,
+            EndTimestampTicks = data.EndTimestampTicks,
+            TickFrequency = data.TickFrequency,
+        };
+    }
+
+    private static bool OverlapsClickGuard(
+        MouseRecordingData data, double runStartSec, double runEndSec,
+        long start, double tickFreq, DestutterOptions opt)
+    {
+        foreach (var click in data.Clicks)
+        {
+            double clickSec = (click.TimestampTicks - start) / tickFreq;
+            double guardLo = clickSec - opt.ClickPreGuardSeconds;
+            double guardHi = clickSec + opt.ClickPostGuardSeconds;
+            if (runEndSec >= guardLo && runStartSec <= guardHi)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Re-distributes the interior sample positions of a single motion gesture
+    /// (between anchors <paramref name="a"/> and <paramref name="b"/>) along the
+    /// gesture's path using a smooth speed profile. Endpoints are left untouched.
+    /// </summary>
+    private static void RetimeGesture(
+        List<MouseSample> src, List<MouseSample> dst, double[] time,
+        int a, int b, double easeStrength)
+    {
+        // Cumulative arc length of the raw polyline a..b.
+        int m = b - a + 1;
+        var cum = new double[m];
+        cum[0] = 0;
+        for (int i = 1; i < m; i++)
+        {
+            double dx = src[a + i].X - src[a + i - 1].X;
+            double dy = src[a + i].Y - src[a + i - 1].Y;
+            cum[i] = cum[i - 1] + Math.Sqrt(dx * dx + dy * dy);
+        }
+        double total = cum[m - 1];
+        if (total <= 0) return; // degenerate, nothing to redistribute
+
+        double t0 = time[a], t1 = time[b];
+        double span = t1 - t0;
+        if (span <= 0) return;
+
+        for (int i = 1; i < m - 1; i++)
+        {
+            int idx = a + i;
+            double u = (time[idx] - t0) / span;
+            double s = total * RemapEase(u, easeStrength);
+            var (x, y) = PositionAtArcLength(src, cum, a, m, s);
+
+            var sample = dst[idx];
+            sample.X = (int)Math.Round(x);
+            sample.Y = (int)Math.Round(y);
+            dst[idx] = sample;
+        }
+    }
+
+    // Blend between linear arc traversal (constant speed) and smootherstep ease.
+    private static double RemapEase(double u, double easeStrength)
+    {
+        if (u <= 0) return 0;
+        if (u >= 1) return 1;
+        double smoother = u * u * u * (u * (u * 6 - 15) + 10); // 6u^5 - 15u^4 + 10u^3
+        return (1 - easeStrength) * u + easeStrength * smoother;
+    }
+
+    private static (double x, double y) PositionAtArcLength(
+        List<MouseSample> src, double[] cum, int a, int m, double s)
+    {
+        if (s <= 0) return (src[a].X, src[a].Y);
+        if (s >= cum[m - 1]) return (src[a + m - 1].X, src[a + m - 1].Y);
+
+        int lo = 0, hi = m - 1;
+        while (lo < hi - 1)
+        {
+            int mid = (lo + hi) / 2;
+            if (cum[mid] <= s) lo = mid; else hi = mid;
+        }
+
+        double segLen = cum[hi] - cum[lo];
+        double f = segLen > 0 ? (s - cum[lo]) / segLen : 0;
+        double x = src[a + lo].X + (src[a + hi].X - src[a + lo].X) * f;
+        double y = src[a + lo].Y + (src[a + hi].Y - src[a + lo].Y) * f;
         return (x, y);
     }
 
