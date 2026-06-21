@@ -32,6 +32,9 @@ public sealed partial class EditorPage : Page
     // Text slide rendering for segment-based preview
     private TextSlideRenderer? _textSlideRenderer;
 
+    // Blends slide↔neighbour crossfades in the preview (lazily created).
+    private TransitionRenderer? _transitionRenderer;
+
     // Per-appended-recording preview contexts (frame reader + compositor + webcam),
     // keyed by VideoSegment.Id. The primary recording uses _frameReader/_previewRenderer.
     private readonly Dictionary<string, SegmentPreview> _segmentPreviews = new();
@@ -266,6 +269,8 @@ public sealed partial class EditorPage : Page
             _previewRenderer = null;
             _textSlideRenderer?.Dispose();
             _textSlideRenderer = null;
+            _transitionRenderer?.Dispose();
+            _transitionRenderer = null;
             foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
             _segmentPreviews.Clear();
             _audioPlayer?.Dispose();
@@ -516,6 +521,47 @@ public sealed partial class EditorPage : Page
         var model = ViewModel.Model;
         if (model.Segments.Count > 0)
         {
+            // Soft cut: when the playhead is within the dissolve window on the
+            // leading edge of a boundary that touches a text slide, cross-dissolve
+            // the outgoing neighbour into the incoming segment instead of hard
+            // cutting. Fully guarded — any failure falls back to the normal render.
+            var crossfade = Musio.Core.Timeline.SlideTransitions.Resolve(model, position);
+            if (crossfade.Active)
+            {
+                CanvasRenderTarget? incoming = null, outgoing = null;
+                try
+                {
+                    incoming = await ComposePreviewFrameAsync(position);
+                    outgoing = await ComposePreviewFrameAsync(crossfade.OutgoingTime);
+                    if (incoming is not null && outgoing is not null)
+                    {
+                        var project = ProjectService.Instance.CurrentProject;
+                        int w = project?.Width > 0 ? project.Width : 1920;
+                        int h = project?.Height > 0 ? project.Height : 1080;
+                        _transitionRenderer ??= new TransitionRenderer();
+                        var blended = _transitionRenderer.Render(
+                            outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
+                        HideSlideEditOverlay();
+                        // Force the normal path to fully redraw once the dissolve ends.
+                        _lastRenderedFrameIndex = -1;
+                        _lastRenderedSegmentId = null;
+                        Preview.SetFrame(blended);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[EditorPage] Slide crossfade preview error: {ex.Message}");
+                }
+                finally
+                {
+                    incoming?.Dispose();
+                    outgoing?.Dispose();
+                }
+                // Fall through to the normal render on any miss/failure.
+            }
+
             var (segment, localOffset) = model.GetSegmentAtTime(position);
 
             if (segment is TextSlideSegment slide)
@@ -554,6 +600,100 @@ public sealed partial class EditorPage : Page
         // Legacy path: map output (playhead) time to source time
         TimeSpan sourcePosition = MapToSourceTime(position);
         await RenderVideoFrameAsync(sourcePosition, force);
+    }
+
+    /// <summary>
+    /// Renders a standalone preview frame for an arbitrary output position WITHOUT
+    /// presenting it or touching the frame cache. Used to obtain both sides of a
+    /// slide↔neighbour crossfade so they can be blended. Returns null on failure
+    /// (the caller falls back to the normal render path). Text slides render at
+    /// project resolution; video frames render at their source resolution and the
+    /// transition renderer scales both to the output rect when blending.
+    /// </summary>
+    private async Task<CanvasRenderTarget?> ComposePreviewFrameAsync(TimeSpan outputPos)
+    {
+        var model = ViewModel.Model;
+        var (segment, localOffset) = model.GetSegmentAtTime(outputPos);
+
+        if (segment is TextSlideSegment slide)
+        {
+            _textSlideRenderer ??= new TextSlideRenderer();
+            var project = ProjectService.Instance.CurrentProject;
+            int w = project?.Width > 0 ? project.Width : 1920;
+            int h = project?.Height > 0 ? project.Height : 1080;
+            double progress = slide.Duration.TotalSeconds > 0
+                ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+                : 0;
+            return _textSlideRenderer.RenderSlide(slide, progress, w, h);
+        }
+
+        if (segment is not VideoSegment seg)
+            return null;
+
+        var sourceTime = seg.SourceStart +
+            TimeSpan.FromTicks((long)(localOffset.Ticks * seg.SpeedFactor));
+
+        // Primary-recording segment → main reader/compositor.
+        if (string.Equals(seg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (_frameReader is null) return null;
+            await EnsurePrimaryRendererForSegmentAsync(seg);
+            var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourceTime);
+            if (bitmap is null) return null;
+
+            if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
+            {
+                await SetWebcamFrameForPreviewAsync(sourceTime);
+                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourceTime);
+                bitmap.Dispose();
+                if (composed is not null) return composed;
+            }
+            else
+            {
+                var device = CanvasDevice.GetSharedDevice();
+                var rt = new CanvasRenderTarget(device,
+                    bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+                using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+                bitmap.Dispose();
+                return rt;
+            }
+            return null;
+        }
+
+        // Appended-recording segment → its own per-segment context.
+        var ctx = await GetOrBuildSegmentPreviewAsync(seg);
+        if (ctx?.Reader is null) return null;
+        var segBitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+        if (segBitmap is null) return null;
+
+        if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+        {
+            if (ctx.Webcam is not null)
+            {
+                try
+                {
+                    var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                    if (wf is not null)
+                    {
+                        ctx.LastWebcamFrame?.Dispose();
+                        ctx.LastWebcamFrame = wf;
+                        ctx.Renderer.SetWebcamFrame(wf);
+                    }
+                }
+                catch { }
+            }
+            var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
+            segBitmap.Dispose();
+            if (composed is not null) return composed;
+            return null;
+        }
+
+        var dev = CanvasDevice.GetSharedDevice();
+        var fallback = new CanvasRenderTarget(dev,
+            segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96);
+        using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
+        segBitmap.Dispose();
+        return fallback;
     }
 
     // Text slide in-place editing state
@@ -2406,7 +2546,6 @@ public sealed partial class EditorPage : Page
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
         var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
         CursorButton.Visibility = vis;
-        CursorSeparator.Visibility = vis;
 
         if (!hasCursor) return;
 
@@ -2541,7 +2680,6 @@ public sealed partial class EditorPage : Page
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
         StyleButton.Visibility = Visibility.Visible;
-        StyleSeparator.Visibility = Visibility.Visible;
 
         // Populate preset combo with built-in presets — each item is a small
         // swatch + label so users can identify gradients at a glance.
@@ -3778,9 +3916,15 @@ public sealed partial class EditorPage : Page
         // Formatting toggles
         SlideBoldToggle.IsChecked = slide.IsBold;
         SlideItalicToggle.IsChecked = slide.IsItalic;
-        SlideAlignLeft.IsChecked = slide.TextAlignment == SlideTextAlignment.Left;
-        SlideAlignCenter.IsChecked = slide.TextAlignment == SlideTextAlignment.Center;
-        SlideAlignRight.IsChecked = slide.TextAlignment == SlideTextAlignment.Right;
+        SlideAlignSegmented.SelectedIndex = slide.TextAlignment switch
+        {
+            SlideTextAlignment.Left => 0,
+            SlideTextAlignment.Right => 2,
+            _ => 1,
+        };
+
+        // Font dropdown
+        SetSlideFontSelection(slide.FontFamily);
 
         // Set animation combo
         var animName = slide.Animation.ToString();
@@ -3897,16 +4041,54 @@ public sealed partial class EditorPage : Page
         RefreshSlidePreview();
     }
 
-    private void SlideAlign_Checked(object sender, RoutedEventArgs e)
+    private void SlideAlignSegmented_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSlideEvents || sender is not RadioButton rb) return;
+        if (_suppressSlideEvents) return;
         var slide = SelectedSlide();
         if (slide is null) return;
-        if (Enum.TryParse<SlideTextAlignment>(rb.Tag?.ToString(), out var align))
+        if (SlideAlignSegmented.SelectedItem is CommunityToolkit.WinUI.Controls.SegmentedItem item
+            && Enum.TryParse<SlideTextAlignment>(item.Tag?.ToString(), out var align))
         {
             slide.TextAlignment = align;
             RefreshSlidePreview();
         }
+    }
+
+    private void SlideFontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        if (SlideFontCombo.SelectedItem is ComboBoxItem item && item.Tag is string font
+            && !string.IsNullOrWhiteSpace(font))
+        {
+            slide.FontFamily = font;
+            RefreshSlidePreview();
+        }
+    }
+
+    /// <summary>
+    /// Selects the combo item matching <paramref name="fontFamily"/>; if the slide
+    /// uses a font that isn't in the curated list, it is inserted at the top so the
+    /// actual font is represented (and not silently changed).
+    /// </summary>
+    private void SetSlideFontSelection(string fontFamily)
+    {
+        for (int i = 0; i < SlideFontCombo.Items.Count; i++)
+        {
+            if (SlideFontCombo.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag?.ToString(), fontFamily, StringComparison.OrdinalIgnoreCase))
+            {
+                SlideFontCombo.SelectedIndex = i;
+                return;
+            }
+        }
+
+        var custom = new ComboBoxItem { Content = fontFamily, Tag = fontFamily };
+        try { custom.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily); }
+        catch { /* unknown family — fall back to default rendering */ }
+        SlideFontCombo.Items.Insert(0, custom);
+        SlideFontCombo.SelectedIndex = 0;
     }
 
     private void RefreshSlidePreview()

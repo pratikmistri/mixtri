@@ -46,7 +46,7 @@ public class TextSlideRenderer : IDisposable
         var target = new CanvasRenderTarget(_device, width, height, 96);
         using var ds = target.CreateDrawingSession();
 
-        DrawSlideBackground(ds, slide, width, height);
+        DrawSlideBackground(ds, slide, progress, width, height);
 
         if (!drawText)
             return target;
@@ -86,12 +86,12 @@ public class TextSlideRenderer : IDisposable
     // ─────────────────────────── Backgrounds ─────────────────────────────
 
     private void DrawSlideBackground(
-        CanvasDrawingSession ds, TextSlideSegment slide, int width, int height)
+        CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
         switch (slide.BackgroundType)
         {
             case SlideBackgroundType.Gradient:
-                DrawGradientBackground(ds, slide, width, height);
+                DrawGradientBackground(ds, slide, progress, width, height);
                 break;
             case SlideBackgroundType.Image:
                 DrawImageBackground(ds, slide, width, height);
@@ -102,22 +102,112 @@ public class TextSlideRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Draws the gradient background with a subtle turbulent "wave" animation so a
+    /// playing slide reads like moving video rather than a flat gradient. The base
+    /// gradient is kept stationary; the motion comes entirely from a GPU
+    /// displacement map fed by <em>two</em> counter-rotating Perlin-noise fields.
+    /// Because the two fields drift along opposing circular paths at different
+    /// rates, their interference makes the displacement churn/boil in place
+    /// instead of sliding in one direction — an organic wave, not a linear pan.
+    /// <paramref name="progress"/> (0..1 over the slide's duration) is converted to
+    /// elapsed seconds so the motion advances with the playhead (and is frozen when
+    /// paused) and is identical in both the live preview and the exported video.
+    /// </summary>
     private void DrawGradientBackground(
-        CanvasDrawingSession ds, TextSlideSegment slide, int width, int height)
+        CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
+        // Elapsed seconds within the slide drives the motion (frozen on a static frame).
+        float t = (float)(Math.Clamp(progress, 0, 1) * Math.Max(0.001, slide.Duration.TotalSeconds));
+
+        // Stationary base gradient (no global drift — drift reads as a linear pan).
         double angleRad = slide.GradientAngle * Math.PI / 180.0;
         float cx = width / 2f, cy = height / 2f;
         float diag = MathF.Sqrt(width * width + height * height) / 2f;
         float dx = diag * MathF.Cos((float)angleRad);
         float dy = diag * MathF.Sin((float)angleRad);
 
-        using var brush = new CanvasLinearGradientBrush(
-            ds, ParseColor(slide.BackgroundColor), ParseColor(slide.GradientEndColor))
+        // Render the gradient into an intermediate target so it can be fed through
+        // GPU effects for the wave distortion.
+        using var gradientRt = new CanvasRenderTarget(_device, width, height, 96);
+        using (var gds = gradientRt.CreateDrawingSession())
+        using (var brush = new CanvasLinearGradientBrush(
+            gds, ParseColor(slide.BackgroundColor), ParseColor(slide.GradientEndColor))
         {
             StartPoint = new Vector2(cx - dx, cy - dy),
             EndPoint = new Vector2(cx + dx, cy + dy),
+        })
+        {
+            gds.FillRectangle(0, 0, width, height, brush);
+        }
+
+        // Clamp the gradient edges so displacement sampling outside the image keeps
+        // the edge color instead of revealing transparent/black borders.
+        using var clamped = new BorderEffect
+        {
+            Source = gradientRt,
+            ExtendX = CanvasEdgeBehavior.Clamp,
+            ExtendY = CanvasEdgeBehavior.Clamp,
         };
-        ds.FillRectangle(0, 0, width, height, brush);
+
+        // Two fractal-noise fields at different frequencies/seeds.
+        using var noiseA = new TurbulenceEffect
+        {
+            Frequency = new Vector2(0.006f, 0.009f),
+            Octaves = 3,
+            Size = new Vector2(width, height),
+            Seed = 1,
+            Noise = TurbulenceEffectNoise.FractalSum,
+        };
+        using var noiseB = new TurbulenceEffect
+        {
+            Frequency = new Vector2(0.010f, 0.007f),
+            Octaves = 3,
+            Size = new Vector2(width, height),
+            Seed = 37,
+            Noise = TurbulenceEffectNoise.FractalSum,
+        };
+
+        // Drift each field along an opposing circular path at a different rate. The
+        // circular (sin/cos) paths never settle into a constant direction, so the
+        // combined field swirls rather than panning linearly.
+        using var driftA = new Transform2DEffect
+        {
+            Source = noiseA,
+            TransformMatrix = Matrix3x2.CreateTranslation(
+                MathF.Sin(t * 0.55f) * 110f, MathF.Cos(t * 0.42f) * 110f),
+        };
+        using var driftB = new Transform2DEffect
+        {
+            Source = noiseB,
+            TransformMatrix = Matrix3x2.CreateTranslation(
+                MathF.Cos(t * 0.37f) * -95f, MathF.Sin(t * 0.48f) * 95f),
+        };
+
+        // Average the two fields → an evolving, turbulent displacement map centered
+        // around 0.5 (the no-displacement value for the R/G channels).
+        using var field = new ArithmeticCompositeEffect
+        {
+            Source1 = driftA,
+            Source2 = driftB,
+            Source1Amount = 0.5f,
+            Source2Amount = 0.5f,
+            MultiplyAmount = 0f,
+            Offset = 0f,
+        };
+
+        // Bend the gradient by the turbulent field. Amount ≈7.5% of the short edge —
+        // visibly wavy but still subtle/ambient.
+        using var displaced = new DisplacementMapEffect
+        {
+            Source = clamped,
+            Displacement = field,
+            Amount = MathF.Min(width, height) * 0.075f,
+            XChannelSelect = EffectChannelSelect.Red,
+            YChannelSelect = EffectChannelSelect.Green,
+        };
+
+        ds.DrawImage(displaced, new Rect(0, 0, width, height), new Rect(0, 0, width, height));
     }
 
     private void DrawImageBackground(

@@ -59,6 +59,9 @@ public class VideoEncoder : IDisposable
     // Renders text slide segments during export (lazily created).
     private TextSlideRenderer? _textSlideRenderer;
 
+    // Blends slide↔neighbour crossfades during export (lazily created).
+    private TransitionRenderer? _transitionRenderer;
+
     public VideoEncoder(ExportSettings settings)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -432,52 +435,54 @@ public class VideoEncoder : IDisposable
             // Determine which segment (if any) this output frame falls on.
             // Segment-based timelines route text slides to the slide renderer and
             // map video segments to their own source time.
-            TextSlideSegment? textSlide = null;
-            double slideProgress = 0;
-            double timeSeconds;
-
-            if (timeline is not null && timeline.Segments.Count > 0)
+            // Compose the (unscaled) output frame for a given output frame index.
+            // Factored into a local function so we can also render the *outgoing*
+            // neighbour during a text-slide crossfade and blend the two.
+            async Task<CanvasRenderTarget> ComposeAtAsync(int fIndex)
             {
-                var outputTime = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
-                var (segment, localOffset) = timeline.GetSegmentAtTime(outputTime);
-                if (segment is TextSlideSegment slide)
+                TextSlideSegment? textSlide = null;
+                double slideProgress = 0;
+                double timeSeconds;
+
+                if (timeline is not null && timeline.Segments.Count > 0)
                 {
-                    textSlide = slide;
-                    slideProgress = slide.Duration.TotalSeconds > 0
-                        ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
-                        : 0;
-                    timeSeconds = 0;
-                }
-                else if (segment is VideoSegment v)
-                {
-                    timeSeconds = v.SourceStart.TotalSeconds + localOffset.TotalSeconds * v.SpeedFactor;
+                    var outputTime = TimeSpan.FromSeconds((double)fIndex / _settings.Fps);
+                    var (segment, localOffset) = timeline.GetSegmentAtTime(outputTime);
+                    if (segment is TextSlideSegment slide)
+                    {
+                        textSlide = slide;
+                        slideProgress = slide.Duration.TotalSeconds > 0
+                            ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+                            : 0;
+                        timeSeconds = 0;
+                    }
+                    else if (segment is VideoSegment v)
+                    {
+                        timeSeconds = v.SourceStart.TotalSeconds + localOffset.TotalSeconds * v.SpeedFactor;
+                    }
+                    else
+                    {
+                        timeSeconds = (double)fIndex / _settings.Fps;
+                    }
                 }
                 else
                 {
-                    timeSeconds = (double)frameIndex / _settings.Fps;
+                    timeSeconds = timelineMapper is not null
+                        ? timelineMapper.GetSourceTimeForOutputFrame(fIndex)
+                        : (double)fIndex / _settings.Fps;
                 }
-            }
-            else
-            {
-                timeSeconds = timelineMapper is not null
-                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                    : (double)frameIndex / _settings.Fps;
-            }
 
-            var timeSpan = TimeSpan.FromSeconds(timeSeconds);
+                var timeSpan = TimeSpan.FromSeconds(timeSeconds);
 
-            CanvasRenderTarget composedFrame;
+                if (textSlide is not null)
+                {
+                    // Render the text slide at the compositor's output dimensions so
+                    // it encodes at the same size as composited video frames.
+                    _textSlideRenderer ??= new TextSlideRenderer(device);
+                    return _textSlideRenderer.RenderSlide(
+                        textSlide, slideProgress, compositorWidth, compositorHeight);
+                }
 
-            if (textSlide is not null)
-            {
-                // Render the text slide at the compositor's output dimensions so
-                // it encodes at the same size as composited video frames.
-                _textSlideRenderer ??= new TextSlideRenderer(device);
-                composedFrame = _textSlideRenderer.RenderSlide(
-                    textSlide, slideProgress, compositorWidth, compositorHeight);
-            }
-            else
-            {
                 // Webcam overlay
                 CanvasBitmap? webcamFrame = null;
                 if (webcamComp is not null)
@@ -504,7 +509,7 @@ public class VideoEncoder : IDisposable
 
                     // Composite using the exact source time so cursor, click, and zoom
                     // effects are precisely synchronized with the visual frame content.
-                    composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
+                    return compositor.ComposeFrame(sourceFrame, timeSeconds);
                 }
                 finally
                 {
@@ -512,6 +517,30 @@ public class VideoEncoder : IDisposable
                     // leaks if source loading or ComposeFrame throws.
                     compositor.SetWebcamFrame(null);
                     webcamFrame?.Dispose();
+                }
+            }
+
+            CanvasRenderTarget composedFrame = await ComposeAtAsync(frameIndex);
+
+            // Soft cut: dissolve a text slide into its neighbouring segment instead
+            // of hard-cutting. Active only on the leading edge of a boundary that
+            // touches a text slide (see SlideTransitions). The outgoing neighbour is
+            // rendered at its final instant and cross-dissolved underneath.
+            if (timeline is not null && timeline.Segments.Count > 0)
+            {
+                var outputTime = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
+                var crossfade = SlideTransitions.Resolve(timeline, outputTime);
+                if (crossfade.Active)
+                {
+                    int outgoingIndex = (int)Math.Round(crossfade.OutgoingTime.TotalSeconds * _settings.Fps);
+                    outgoingIndex = Math.Clamp(outgoingIndex, 0, Math.Max(0, totalFrames - 1));
+                    using var outgoing = await ComposeAtAsync(outgoingIndex);
+                    _transitionRenderer ??= new TransitionRenderer(device);
+                    var blended = _transitionRenderer.Render(
+                        outgoing, composedFrame, TransitionType.CrossFade, crossfade.Progress,
+                        compositorWidth, compositorHeight);
+                    composedFrame.Dispose();
+                    composedFrame = blended;
                 }
             }
 
@@ -900,6 +929,7 @@ public class VideoEncoder : IDisposable
 
             _frameSemaphore.Dispose();
             _textSlideRenderer?.Dispose();
+            _transitionRenderer?.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
         }

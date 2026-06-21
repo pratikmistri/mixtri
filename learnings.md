@@ -2322,3 +2322,40 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - **What was removed**: `SlideBackgroundType.Video` enum member; `TextSlideSegment.BackgroundVideoPath`; `TextSlideRenderer` video cache fields + `DrawVideoBackground`/`ExtractVideoFrameAsync`/`EnsureVideoComposition` (+ `Windows.Media.Editing`/`Windows.Storage` usings); EditorPage `Video` ComboBoxItem, `SlideVideoPanel`, `SlideVideoPathText`, `ChooseSlideVideo_Click`. `DrawSlideBackground` no longer takes `progress`.
 - **Result**: Builds clean (VS MSBuild ARM64); all 333 tests pass. Text slides now support Solid/Gradient/Image only.
 - **Note**: `MediaClip.CreateFromFileAsync` is only reliable here for app-recorded H.264 MP4s. Do NOT reintroduce arbitrary user-video features on top of `Windows.Media.Editing`; if needed, use the `MediaPlayer` frame-server pipeline (far more tolerant) instead.
+
+## Text Slide — Ambient animated wave gradient
+
+- **Feature/area**: `TextSlideRenderer.DrawGradientBackground` (Musio.Core/Processing).
+- **Goal**: Make gradient text-slide backgrounds animate subtly (ambient, non-monotonous) with a wave look rather than a static linear gradient.
+- **Approaches tried**:
+  1. **Win2D GPU effects (worked ✅)**: Render the linear gradient into an intermediate `CanvasRenderTarget`, wrap in a `BorderEffect` (Clamp) so displacement sampling outside bounds keeps edge color, then `DisplacementMapEffect` using a scrolling `TurbulenceEffect` (FractalSum Perlin noise) moved over time via `Transform2DEffect`. Also sway the gradient angle (±5°) and drift its center sinusoidally. Amount ≈4% of short edge keeps it subtle.
+  2. **Custom HLSL via PixelShaderEffect (not attempted)**: rejected — needs the Win2D shader compiler/bytecode tooling which is fragile in this build env. Built-in Win2D effects are already D2D pixel shaders under the hood, so they satisfy the "shader/wave" request without authoring HLSL.
+- **Continuous time source**: `RenderSlide`'s `progress` (0..1 over slide duration) × `slide.Duration.TotalSeconds` = elapsed seconds. `DrawSlideBackground`/`DrawGradientBackground` now take `progress`.
+- **Wiring**: Automatic in BOTH preview (SegmentCompositor/EditorPage) and export (VideoEncoder) because both call `RenderSlide` — no separate export wiring needed.
+- **Gotcha**: The noise enum is `TurbulenceEffectNoise.FractalSum` (NOT `Fractal`) — `Fractal` fails to compile (CS0117).
+- **Verified**: VS MSBuild x64 builds clean; all 333 tests pass.
+
+## Text Slide — gradient wave: turbulent (not linear) revision
+
+- **Feedback**: First pass animated but felt like a *linear pan*, and the user does NOT want motion on a static/paused playhead (it should behave like a video frame — move only while playing). Static-playhead repaint loop was explicitly rejected; keep motion driven by `progress` (frozen when paused).
+- **Root cause of "linear" feel**: a single noise field scrolled in one constant direction (`Transform2D translate (sin x, t*12 y)`) plus a global gradient angle/center drift — all read as uniform translation.
+- **Fix (worked ✅)**: Remove all global gradient drift (stationary base gradient). Drive motion ONLY via displacement using TWO `TurbulenceEffect` fields (different Frequency + Seed), each drifted along an OPPOSING circular path (`sin/cos`, different rates), averaged with `ArithmeticCompositeEffect` (Source1Amount=Source2Amount=0.5, MultiplyAmount=0, Offset=0), then `DisplacementMapEffect` at ~6% of the short edge. Interference of two circular-drifting fields makes the displacement swirl/boil in place instead of panning.
+- **Keep**: progress→seconds time base (`clamp(progress)*Duration`); gradient rendered to intermediate RT then `BorderEffect` Clamp before displacement. No EditorPage/VideoEncoder changes needed — motion advances with the playhead in both preview and export automatically.
+- **Verified**: Core + App build clean (ARM64 Debug, VS MSBuild), redeployed + launched.
+
+## Text Slide — stronger turbulence + auto crossfade at slide boundaries
+
+- **Turbulence tweak**: bumped displacement Amount 0.06→0.075 of the short edge and circular drift radii 90/75→110/95 so the wave reads a touch stronger (still ambient). Confirmed it is NOT a linear pan — two opposing circular-drifting noise fields interfere/churn.
+- **Transition (no more hard cut)**: Added `Musio.Core/Timeline/SlideTransitions.cs` — a PURE, unit-tested helper (`Resolve(timeline, outputTime[, maxDuration])`) that returns a crossfade Result (Active/Progress/OutgoingTime) only on the LEADING edge of a boundary that touches a `TextSlideSegment`. Default 0.5s, clamped to half of each neighbour. 7 tests in `SlideTransitionsTests` (340 total pass).
+- **Export wiring** (`VideoEncoder.ProduceSampleAsync`): refactored the per-frame composition body into a local `ComposeAtAsync(int fIndex)` so the OUTGOING neighbour can be re-rendered (held at its final instant) and blended via a new lazily-created `TransitionRenderer` (`_transitionRenderer`, disposed in Dispose). `TransitionRenderer.Render(outgoing, incoming, CrossFade, progress, w, h)` does the dissolve.
+- **Preview wiring** (`EditorPage.RenderFrameAtAsync`): at the top of the segments branch, if `SlideTransitions.Resolve` is active, compose both sides via new `ComposePreviewFrameAsync(outputPos)` (slides at project res; video frames at source res — TransitionRenderer scales) and blend. FULLY guarded by try/catch → any failure falls back to the normal render, so it can only affect the ~0.5s dissolve window. Forces a redraw (`_lastRenderedFrameIndex=-1`, `_lastRenderedSegmentId=null`) when the dissolve ends.
+- **Key insight**: the real export path is `ExportEngine → VideoEncoder` (NOT the `SegmentCompositor`/`TransitionRenderer` path, which only `ExportEngine.CreateSegmentCompositor` uses and isn't on the slide path). Preview and export remain separate code paths and BOTH had to be wired explicitly.
+- **Verified**: Core+Tests x64 build, 340 tests pass; App ARM64 build clean, redeployed + launched.
+
+## Text Slide flyout — segmented alignment + font dropdown
+
+- **Feature/area**: Text Slide properties flyout (`EditorPage.xaml` + `.xaml.cs`).
+- **Alignment**: Replaced the three `RadioButton`s (GroupName="SlideAlign", which rendered ugly radio bullets) with a `ctk:Segmented` (`SlideAlignSegmented`) of three icon `SegmentedItem`s (Left/Center/Right, Tags). Handler `SlideAlignSegmented_SelectionChanged` reads `SegmentedItem.Tag`; population sets `SelectedIndex` (0/1/2) from `slide.TextAlignment`. `CommunityToolkit.WinUI.Controls.Segmented` is already referenced and used elsewhere (FitModeSegmented, ZoomScopeSegmented); xmlns `ctk` already declared.
+- **Font**: Added a `Font` `ComboBox` (`SlideFontCombo`) with a curated list of common Windows fonts; each item sets its own `FontFamily` for an in-place preview. `SlideFontCombo_SelectionChanged` sets `slide.FontFamily`; helper `SetSlideFontSelection` selects the matching item and inserts a custom item at top if the slide's font isn't in the list (so it isn't silently changed). The slide model already had `FontFamily` (string); in-place editor + renderer already honor it.
+- **Gotcha**: removing the radios means removing the old `SlideAlign_Checked` handler and the `SlideAlignLeft/Center/Right.IsChecked` population lines, else they fail to compile (named elements gone).
+- **Verified**: App ARM64 build clean (VS MSBuild), redeployed + launched.

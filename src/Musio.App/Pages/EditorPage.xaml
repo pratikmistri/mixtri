@@ -515,6 +515,30 @@
                                     </ComboBox>
                                 </StackPanel>
 
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Font" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideFontCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SlideFontCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Segoe UI" Tag="Segoe UI" FontFamily="Segoe UI" />
+                                        <ComboBoxItem Content="Segoe UI Variable" Tag="Segoe UI Variable" FontFamily="Segoe UI Variable" />
+                                        <ComboBoxItem Content="Arial" Tag="Arial" FontFamily="Arial" />
+                                        <ComboBoxItem Content="Calibri" Tag="Calibri" FontFamily="Calibri" />
+                                        <ComboBoxItem Content="Cambria" Tag="Cambria" FontFamily="Cambria" />
+                                        <ComboBoxItem Content="Georgia" Tag="Georgia" FontFamily="Georgia" />
+                                        <ComboBoxItem Content="Times New Roman" Tag="Times New Roman" FontFamily="Times New Roman" />
+                                        <ComboBoxItem Content="Verdana" Tag="Verdana" FontFamily="Verdana" />
+                                        <ComboBoxItem Content="Tahoma" Tag="Tahoma" FontFamily="Tahoma" />
+                                        <ComboBoxItem Content="Trebuchet MS" Tag="Trebuchet MS" FontFamily="Trebuchet MS" />
+                                        <ComboBoxItem Content="Consolas" Tag="Consolas" FontFamily="Consolas" />
+                                        <ComboBoxItem Content="Courier New" Tag="Courier New" FontFamily="Courier New" />
+                                        <ComboBoxItem Content="Comic Sans MS" Tag="Comic Sans MS" FontFamily="Comic Sans MS" />
+                                        <ComboBoxItem Content="Impact" Tag="Impact" FontFamily="Impact" />
+                                    </ComboBox>
+                                </StackPanel>
+
                                 <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
@@ -587,22 +611,25 @@
                                                       Click="SlideItalic_Click">
                                             <FontIcon FontSize="14" Glyph="&#xE8DB;" />
                                         </ToggleButton>
-                                        <AppBarSeparator />
-                                        <RadioButton x:Name="SlideAlignLeft" GroupName="SlideAlign"
-                                                     Padding="8,6" ToolTipService.ToolTip="Align left"
-                                                     Checked="SlideAlign_Checked" Tag="Left">
-                                            <FontIcon FontSize="14" Glyph="&#xE8E4;" />
-                                        </RadioButton>
-                                        <RadioButton x:Name="SlideAlignCenter" GroupName="SlideAlign"
-                                                     Padding="8,6" ToolTipService.ToolTip="Align center"
-                                                     Checked="SlideAlign_Checked" Tag="Center">
-                                            <FontIcon FontSize="14" Glyph="&#xE8E3;" />
-                                        </RadioButton>
-                                        <RadioButton x:Name="SlideAlignRight" GroupName="SlideAlign"
-                                                     Padding="8,6" ToolTipService.ToolTip="Align right"
-                                                     Checked="SlideAlign_Checked" Tag="Right">
-                                            <FontIcon FontSize="14" Glyph="&#xE8E2;" />
-                                        </RadioButton>
+                                        <ctk:Segmented x:Name="SlideAlignSegmented"
+                                                       VerticalAlignment="Stretch"
+                                                       SelectionChanged="SlideAlignSegmented_SelectionChanged">
+                                            <ctk:SegmentedItem Tag="Left" ToolTipService.ToolTip="Align left">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E4;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                            <ctk:SegmentedItem Tag="Center" ToolTipService.ToolTip="Align center">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E3;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                            <ctk:SegmentedItem Tag="Right" ToolTipService.ToolTip="Align right">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E2;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                        </ctk:Segmented>
                                     </StackPanel>
                                 </StackPanel>
 
@@ -716,10 +743,10 @@
                 </Button>
 
                 <!-- Background style controls -->
-                <AppBarSeparator x:Name="StyleSeparator" />
                 <Button
                     x:Name="StyleButton"
                     Padding="8,6"
+                    Margin="4,0,0,0"
                     ToolTipService.ToolTip="Frame style (aspect ratio, background, padding)">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE790;" />
@@ -1120,10 +1147,10 @@
                 </Button>
 
                 <!-- Cursor style controls -->
-                <AppBarSeparator x:Name="CursorSeparator" Visibility="Collapsed" />
                 <Button
                     x:Name="CursorButton"
                     Padding="8,6"
+                    Margin="4,0,0,0"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Cursor settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">

@@ -210,7 +210,6 @@
         <Border
             Grid.Row="2"
             Padding="16,10"
-            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0">
             <Grid>
