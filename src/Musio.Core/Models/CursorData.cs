@@ -18,6 +18,21 @@ public enum MouseEventKind : byte
     Scroll = 3,
 }
 
+/// <summary>
+/// The active system cursor shape at the time a sample was recorded. Unknown or
+/// custom application cursors are recorded as <see cref="Arrow"/>.
+/// </summary>
+public enum CursorShape : byte
+{
+    Arrow = 0,
+    Hand = 1,
+    IBeam = 2,
+    ResizeWE = 3,
+    ResizeNS = 4,
+    ResizeNWSE = 5,
+    ResizeNESW = 6,
+}
+
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct MouseSample
 {
@@ -27,6 +42,7 @@ public struct MouseSample
     public MouseEventKind EventKind;
     public MouseButton Button;
     public short ScrollDelta;
+    public CursorShape Shape;
 }
 
 public record ClickEvent(long TimestampTicks, int X, int Y, MouseButton Button, bool IsDown);

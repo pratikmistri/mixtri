@@ -395,8 +395,11 @@ public sealed partial class EditorPage : Page
         config = config with
         {
             OutputFps = previewFps,
-            SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
-            SmoothingStrength = SmoothingStrength.UltraSmooth,
+            // Zero-phase (forward-backward) spring: smooths trackpad stop-and-go like
+            // Screen Studio with NO time lag (offline filtering uses future samples), so
+            // the cursor stays smooth yet lands on target on time. De-stutter stays off.
+            SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+            SmoothingStrength = SmoothingStrength.Smooth,
             AspectRatio = project.AspectRatio,
             FitMode = project.FitMode,
             CropAnchorX = project.CropAnchorX,
@@ -887,8 +890,8 @@ public sealed partial class EditorPage : Page
             var global = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
             var config = BuildSegmentConfig(global, seg, previewFps) with
             {
-                SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
-                SmoothingStrength = SmoothingStrength.UltraSmooth,
+                SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                SmoothingStrength = SmoothingStrength.Smooth,
                 Zoom = new AutoZoomConfig { Enabled = true },
             };
 

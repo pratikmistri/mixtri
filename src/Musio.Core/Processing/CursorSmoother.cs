@@ -2,7 +2,7 @@ using Musio.Core.Models;
 
 namespace Musio.Core.Processing;
 
-public enum SmoothingAlgorithm { None, SpringPhysics, OneEuroFilter, CatmullRomSpline }
+public enum SmoothingAlgorithm { None, SpringPhysics, OneEuroFilter, CatmullRomSpline, ZeroPhaseSpring }
 public enum SmoothingStrength { None, Subtle, Medium, Smooth, UltraSmooth }
 
 public struct SmoothedPosition
@@ -12,6 +12,7 @@ public struct SmoothedPosition
     public double TimestampSeconds;
     public double VelocityX;
     public double VelocityY;
+    public CursorShape Shape;
 }
 
 /// <summary>
@@ -92,6 +93,7 @@ public class CursorSmoother
                 SmoothingAlgorithm.SpringPhysics => SmoothSpringPhysics(data, targetFps, frameCount, startTick, tickFreq),
                 SmoothingAlgorithm.OneEuroFilter => SmoothOneEuroFilter(data, targetFps, frameCount, startTick, tickFreq),
                 SmoothingAlgorithm.CatmullRomSpline => SmoothCatmullRom(data, targetFps, frameCount, startTick, tickFreq),
+                SmoothingAlgorithm.ZeroPhaseSpring => SmoothZeroPhaseSpring(data, targetFps, frameCount, startTick, tickFreq),
                 _ => GenerateUnsmoothed(data, targetFps, frameCount, startTick, tickFreq),
             };
 
@@ -100,7 +102,109 @@ public class CursorSmoother
         if (smoothingActive)
             SnapToClickPositions(result, data, targetFps, startTick, tickFreq);
 
+        AssignShapes(result, data, startTick, tickFreq, targetFps);
+
         return result;
+    }
+
+    /// <summary>
+    /// Minimum time a cursor shape must persist before it is shown. Shorter excursions
+    /// are treated as flicker (the OS cursor briefly changing at element boundaries,
+    /// captured by the shape poller) and are suppressed so the rendered cursor does not
+    /// pop between glyphs frame-to-frame.
+    /// </summary>
+    private const double MinShapeHoldSeconds = 0.12;
+
+    /// <summary>
+    /// Assigns each output position the cursor shape of the temporally nearest source
+    /// sample, then debounces the per-frame shape track so brief flickers are removed.
+    /// Shape is discrete metadata, so it is matched by nearest-neighbour rather than
+    /// interpolated. Samples are ordered by timestamp, enabling a single forward scan.
+    /// </summary>
+    private static void AssignShapes(
+        List<SmoothedPosition> result, MouseRecordingData data, long startTick, double tickFreq, int targetFps)
+    {
+        var samples = data.Samples;
+        if (result.Count == 0 || samples.Count == 0 || tickFreq <= 0)
+            return;
+
+        int j = 0;
+        for (int i = 0; i < result.Count; i++)
+        {
+            long tick = startTick + (long)(result[i].TimestampSeconds * tickFreq);
+
+            // Advance j to the last sample whose timestamp is <= tick.
+            while (j + 1 < samples.Count && samples[j + 1].TimestampTicks <= tick)
+                j++;
+
+            int nearest = j;
+            // The next sample may be closer in time than the current one.
+            if (j + 1 < samples.Count &&
+                Math.Abs(samples[j + 1].TimestampTicks - tick) < Math.Abs(samples[j].TimestampTicks - tick))
+            {
+                nearest = j + 1;
+            }
+
+            var p = result[i];
+            p.Shape = samples[nearest].Shape;
+            result[i] = p;
+        }
+
+        StabilizeShapes(result, Math.Max(2, (int)Math.Round(MinShapeHoldSeconds * targetFps)));
+    }
+
+    /// <summary>
+    /// Debounces the per-frame shape track: any run of frames whose shape persists for
+    /// fewer than <paramref name="minHoldFrames"/> is replaced with the most recent
+    /// shape that did meet the hold threshold (forward fill). This removes single-frame
+    /// glyph "pops" caused by transient OS-cursor flicker while preserving genuine,
+    /// sustained shape changes (link hover, text I-beam, resize, ...).
+    /// </summary>
+    private static void StabilizeShapes(List<SmoothedPosition> result, int minHoldFrames)
+    {
+        if (result.Count == 0 || minHoldFrames <= 1)
+            return;
+
+        // Seed the stable shape with the first run that meets the hold threshold; if no
+        // run qualifies, fall back to the first frame's shape.
+        CursorShape stable = result[0].Shape;
+        {
+            int s = 0;
+            while (s < result.Count)
+            {
+                int e = s;
+                while (e + 1 < result.Count && result[e + 1].Shape == result[s].Shape) e++;
+                if (e - s + 1 >= minHoldFrames) { stable = result[s].Shape; break; }
+                s = e + 1;
+            }
+        }
+
+        int i = 0;
+        while (i < result.Count)
+        {
+            int runEnd = i;
+            while (runEnd + 1 < result.Count && result[runEnd + 1].Shape == result[i].Shape)
+                runEnd++;
+
+            int runLen = runEnd - i + 1;
+            if (runLen >= minHoldFrames)
+            {
+                // Long enough to be a real shape: it becomes the new stable shape.
+                stable = result[i].Shape;
+            }
+            else
+            {
+                // Flicker: overwrite this short run with the last stable shape.
+                for (int k = i; k <= runEnd; k++)
+                {
+                    var p = result[k];
+                    p.Shape = stable;
+                    result[k] = p;
+                }
+            }
+
+            i = runEnd + 1;
+        }
     }
 
     // Returns raw positions sampled at the target frame rate without any smoothing.
@@ -198,12 +302,127 @@ public class CursorSmoother
     private static (double k, double b, double mass) GetSpringParams(SmoothingStrength strength) =>
         strength switch
         {
+            // NOTE: damping is intentionally kept at the original (slightly underdamped)
+            // values. Increasing b to critically damp the spring measurably increases
+            // the cursor's tracking lag (steady-state lag ≈ (b/k)·velocity), which shows
+            // up as the rendered cursor trailing the real on-screen interaction. The
+            // small overshoot from underdamping is not what users perceive as jitter —
+            // that was shape-track flicker, handled by StabilizeShapes.
             SmoothingStrength.Subtle => (400, 28, 1.0),
             SmoothingStrength.Medium => (250, 22, 1.0),
             SmoothingStrength.Smooth => (150, 16, 1.0),
             SmoothingStrength.UltraSmooth => (80, 12, 1.0),
             _ => (400, 28, 1.0),
         };
+
+    #endregion
+
+    #region Zero-Phase Spring (offline, no lag)
+
+    // Stiffness per strength for the zero-phase spring. Because the filter is applied
+    // forward AND backward (so it has zero net lag) it can use a much stiffer spring than
+    // the causal SmoothSpringPhysics without trailing the real cursor. Higher k preserves
+    // more peak velocity (snappier) but removes less trackpad stop-and-go; lower k is
+    // smoother. ~350 is the sweet spot: stop-and-go essentially gone, good velocity,
+    // cursor still lands on target on time.
+    private static double GetZeroPhaseStiffness(SmoothingStrength strength) =>
+        strength switch
+        {
+            SmoothingStrength.Subtle => 420,
+            SmoothingStrength.Medium => 300,
+            SmoothingStrength.Smooth => 200,
+            SmoothingStrength.UltraSmooth => 130,
+            _ => 200,
+        };
+
+    /// <summary>
+    /// Zero-phase (forward-backward) critically-damped spring smoothing. Because the
+    /// whole recording is available offline, the spring is run forward over the resampled
+    /// path and then backward over the result; the two passes cancel each other's phase
+    /// lag, so the cursor is smoothed (no trackpad stop-and-go) without trailing in time —
+    /// it reaches each destination on schedule. Integrated with fixed substeps for
+    /// stability at high stiffness and across frame rates.
+    /// </summary>
+    private List<SmoothedPosition> SmoothZeroPhaseSpring(
+        MouseRecordingData rawData, int targetFps, int frameCount,
+        long startTick, double tickFreq)
+    {
+        var samples = rawData.Samples;
+        double dt = 1.0 / targetFps;
+
+        // Resample the raw path at the target frame rate.
+        var px = new double[frameCount];
+        var py = new double[frameCount];
+        for (int i = 0; i < frameCount; i++)
+        {
+            long tick = startTick + (long)(i * dt * tickFreq);
+            var (x, y) = InterpolateRawPosition(samples, tick);
+            px[i] = x; py[i] = y;
+        }
+
+        double k = GetZeroPhaseStiffness(Strength);
+        double b = 2.0 * Math.Sqrt(k); // critical damping (mass = 1), no overshoot
+
+        // Forward pass, then backward pass over the forward result → zero net phase lag.
+        var fwd = SpringPass(px, py, frameCount, dt, k, b, forward: true);
+        var both = SpringPass(fwd.x, fwd.y, frameCount, dt, k, b, forward: false);
+
+        var result = new List<SmoothedPosition>(frameCount);
+        for (int i = 0; i < frameCount; i++)
+        {
+            double vx = 0, vy = 0;
+            if (i > 0)
+            {
+                vx = (both.x[i] - both.x[i - 1]) / dt;
+                vy = (both.y[i] - both.y[i - 1]) / dt;
+            }
+            result.Add(new SmoothedPosition
+            {
+                X = both.x[i],
+                Y = both.y[i],
+                TimestampSeconds = i * dt,
+                VelocityX = vx,
+                VelocityY = vy,
+            });
+        }
+
+        return result;
+    }
+
+    // One causal damped-spring pass over a position array (optionally reversed), using
+    // fixed substeps so the explicit integrator stays stable at high stiffness.
+    private static (double[] x, double[] y) SpringPass(
+        double[] inX, double[] inY, int count, double dt, double k, double b, bool forward)
+    {
+        const int substeps = 8;
+        double h = dt / substeps;
+
+        var outX = new double[count];
+        var outY = new double[count];
+        if (count == 0) return (outX, outY);
+
+        int first = forward ? 0 : count - 1;
+        int step = forward ? 1 : -1;
+
+        double posX = inX[first], posY = inY[first], velX = 0, velY = 0;
+        outX[first] = posX; outY[first] = posY;
+
+        for (int n = 1; n < count; n++)
+        {
+            int i = forward ? n : count - 1 - n;
+            double targetX = inX[i], targetY = inY[i];
+            for (int s = 0; s < substeps; s++)
+            {
+                double ax = -k * (posX - targetX) - b * velX;
+                double ay = -k * (posY - targetY) - b * velY;
+                velX += ax * h; velY += ay * h;
+                posX += velX * h; posY += velY * h;
+            }
+            outX[i] = posX; outY[i] = posY;
+        }
+
+        return (outX, outY);
+    }
 
     #endregion
 

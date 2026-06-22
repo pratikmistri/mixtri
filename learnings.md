@@ -861,3 +861,111 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - Encoding-path divergence: VideoWriter.cs NOT changed on this branch; VideoEncoder.cs changes are transition/crossfade/audio only — no codec/resolution/bitrate divergence introduced.
 
 **NOT fixed (cannot resolve headlessly):** stop-recording crash — requires an interactive capture+stop session to reproduce/verify; static review (UI agent) found the teardown/append flow clean. Needs manual runtime testing before deploy.
+
+## Real Cursor Shapes — Capture & Render (arrow/hand/ibeam/resize)
+
+- **Feature/area**: cursor shape pipeline — `MouseHookRecorder`, `CursorShapeResolver` (new), `CursorData`, `CursorSmoother`, `CursorGeometryLibrary` (new), `CursorRenderer`, `FrameCompositor` (all Musio.Core).
+- **Goal**: record which system cursor shape was active and render the matching geometry instead of always drawing one arrow. Touch cursor path left untouched.
+- **What worked**:
+  - Detection via new `CursorShapeResolver` (`GetCursorInfo` + cached `LoadCursor(IDC_*)` handles); sampled per mouse-move in `MouseHookRecorder.HookCallback`. Unknown/custom cursors map to `Arrow`.
+  - Persisted by bumping MCUR file format v1->v2 with a per-sample shape byte; `LoadFromFile` accepts versions 1 and 2 (v1 -> `CursorShape.Arrow`). New `CursorShape` byte field added to `MouseSample` (Pack=1 struct).
+  - Shape propagated to output frames by a single nearest-neighbour post-pass `AssignShapes` in `CursorSmoother.SmoothPath` (added `Shape` to `SmoothedPosition`); all `SmoothedPosition` copies in `FrameCompositor` must carry `Shape`.
+  - Shapes authored as SVG path-data + per-shape hotspot in `CursorGeometryLibrary`, parsed into `CanvasGeometry` via a minimal SVG parser (M/L/H/V/C/Q/Z, abs+rel). `DrawDefaultCursor` selects glyph by shape and prepends `Matrix3x2.CreateTranslation(-hotspot)` so the hotspot lands on the pointer point; keeps existing fill/outline/tilt/scale.
+- **Testing note**: `dotnet test` fails with the same `MSB4062 ExpandPriContent` PriGen error as `dotnet build`. Working approach: build `Musio.Tests.csproj` with **VS MSBuild** (`/p:Platform=x64`), then run `vstest.console.exe` (under `...\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`) against `bin\x64\Debug\...\Musio.Tests.dll` with `/Platform:x64`. Full suite = 364 tests green.
+- **Win2D in tests**: `new CanvasDevice(forceSoftwareRenderer: true)` works in this test host, so geometry/`ComputeBounds` tests run; guarded with `Assert.Inconclusive` fallback if a device can't be created.
+
+## Cursor Shapes — Follow-ups: input-lag regression + Windows-consistent geometries
+
+- **Feature/area**: `MouseHookRecorder`, `CursorShapeResolver`, `CursorGeometryLibrary` (Musio.Core).
+- **Problem 1 (freeze/slow)**: Sampling the cursor shape via `GetCursorInfo` *inside* the WH_MOUSE_LL hook callback on every event added latency to the system input queue, making the live (and therefore recorded) cursor feel laggy/slow in preview/export.
+  - **Fix**: Sample the shape on a ~60Hz background `System.Threading.Timer` that writes a `volatile int _currentShape`; the hook only reads the cached value. Timer started in `StartRecording`, disposed in `StopRecording`/`Dispose`. Never call `GetCursorInfo` (or any syscall) from the low-level hook hot path.
+- **Problem 2 (geometries out of place)**: Hand-authored cursor glyphs had inconsistent sizes (e.g. resize ~10px tall vs arrow ~27px), so switching shapes made the cursor visibly shrink/grow, and looked unlike Windows.
+  - **Fix**: Rewrote `CursorGeometryLibrary` paths as closed filled silhouettes (white body + contrast outline = the Windows look) normalized to a consistent ~26-30px main dimension, with correct hotspots (arrow tip 0,0; resize/I-beam centered; hand at the index fingertip). Licensing: app is MIT, so cursor art must be CC0/self-authored — do NOT pull GPL sets (Bibata/Adwaita). Note `CursorRenderer` fills geometry, so stroke-only SVG paths don't render; author closed outlines.
+- **Test guard**: `CursorGeometryLibrary_ShapesAreConsistentlySized_WithHotspotsInBounds` asserts every glyph's max dimension is 18-34 and its hotspot lies within bounds — catches future size/hotspot regressions.
+- **Verification**: VS MSBuild x64 (Core, Tests, App) clean; full suite 371 green.
+
+## Cursor Hand Geometry — replaced offensive shape with icons8 hand silhouette
+
+- **Feature/area**: `CursorGeometryLibrary.Hand` (Musio.Core/Processing).
+- **Problem**: The hand-authored hand glyph rendered as an offensive single-finger shape.
+- **Approaches considered**:
+  - **System cursor capture** (prototyped, then abandoned): `LoadImage(IDC_*)` + two-pass `DrawIconEx` (white & black bg) to derive alpha → real Windows cursor bitmaps. Verified accurate for all shapes incl. monochrome I-beam (premult color = black-bg pass, alpha = 255-(white-black)). Works, but the user chose to supply vector art instead, so the `SystemCursorCapture.cs` was removed to avoid dead code. (Keep this note: this technique is the fallback if pixel-exact OS cursors are ever wanted.)
+  - **Provided SVG (chosen)**: user supplied `icons8-hand-cursor-96.svg` (32-unit viewBox, two subpaths for line-art). Our renderer FILLS silhouettes (not stroke centerlines), so use only the OUTER figure (full hand silhouette with finger bumps), filled white + contrast outline = clean Windows-style hand. Hotspot at the index fingertip ~(12,2).
+- **Provenance/licensing**: hand path adapted from icons8 (free tier requires attribution). Flag to user to add icons8 attribution in app About/licenses if shipping the free asset.
+- **Verification**: rendered the silhouette to PNG and visually confirmed a proper pointing hand before shipping. Full suite green (12 cursor tests incl. build-all-shapes + size/hotspot band 18-34). Built+relaunched ARM64.
+- **Rule**: `CursorGeometryLibrary` paths must be CLOSED FILLED silhouettes; multi-subpath line-art SVGs render wrong (renderer fills, doesn-t do evenodd line-art). Use the outer silhouette figure only.
+
+## Cursor jitter/slow + hand polish (round 2)
+
+- **Jitter/slow root cause**: `CursorSmoother.GetSpringParams` springs were ALL underdamped (ζ≈0.65-0.70: b far below 2*sqrt(k*m)). Underdamping makes the smoothed cursor overshoot and ring on every stop/direction-change = visible jitter, and the ringing settle reads as "slow". The de-stutter pre-pass (more stop/rest transitions) amplified it → "jitter is back".
+  - **Fix**: critically damp every strength, b ≈ 2*sqrt(k*mass): Subtle 28→40, Medium 22→32, Smooth 16→25, UltraSmooth 12→18 (k unchanged so responsiveness/character preserved). Explicit-Euler stable (b*dt/m<2 at 30/60fps; max b=40 < 60).
+  - **Guard test**: `SmoothPath_SpringPhysics_StepInput_DoesNotOvershoot` feeds a step input and asserts the smoothed X never exceeds target+5 for all strengths. Catches any future underdamped re-tuning.
+  - NOTE: the cursor-shape feature does NOT change positions/timing (provably additive); the arrow renders identically to baseline (hotspot 0,0 → identity). So this jitter was pre-existing smoothing, surfaced by the de-stutter era — not the shape work.
+- **Hand polish**: replaced the icons8 outline-silhouette with a user-provided 23x26 SVG fill path (proper Windows hand with finger separations). `CursorGeometryLibrary` now supports a per-shape Scale (added to the Definitions tuple; Build applies `geometry.Transform(CreateScale)` + scales the hotspot). Hand uses Scale=1.5 (its native ~17px viewBox is smaller than the other ~26-30px cursors), hotspot natural (9.04,3.2) at the index fingertip. Verified by rendering to PNG.
+- **Verification**: VS MSBuild x64+ARM64 clean; full suite 372 green; rebuilt+relaunched ARM64.
+
+## Cursor preview "jitter" REAL root cause — shape-track flicker (not position)
+
+- **Symptom**: user reported persistent cursor jitter in preview/export that survived the spring critical-damping fix.
+- **Diagnosis via real recording** (`Videos\session_*\cursor.mcur`, MCUR v2): parsed 629 samples/10.4s. **Position track was CLEAN — 0 x-direction reversals.** The jitter was NOT positional. The SHAPE track flickered: 34 transitions across 6 shapes with many sub-100ms runs (e.g. IBeam n=1 8ms, Arrow n=2 16ms, Hand n=2 16ms). The 16ms shape poller faithfully captures transient OS-cursor flicker at element boundaries; AssignShapes reproduced it per-frame → the rendered cursor GLYPH pops between arrow/hand/ibeam/resize within 1-3 frames = perceived "jitter".
+- **Fix**: `CursorSmoother.StabilizeShapes` (called from `AssignShapes`) debounces the per-frame shape track — runs shorter than `MinShapeHoldSeconds` (0.12s → minHoldFrames) are forward-filled with the last stable shape; sustained changes preserved. Done at smoothing time so it fixes EXISTING recordings on preview/export. Verified on the real file: glyph transitions 32→13 at 60fps (flicker removed, genuine changes kept). Test: `SmoothPath_DebouncesShapeFlicker_KeepsSustainedChanges`.
+- **Lesson**: when debugging cursor "jitter", parse the actual `cursor.mcur` and separate POSITION jitter (direction reversals / jerk) from SHAPE-track flicker (short runs). They have completely different fixes. The shape feature can introduce visual jitter with zero position change.
+- **Note**: the spring critical-damping change from the prior round is still correct/kept; it just wasn't this bug.
+- **Verification**: VS MSBuild x64+ARM64 clean; full suite 373 green; rebuilt+relaunched ARM64.
+
+## Cursor offset (lag) — reverted critical-damping change
+
+- **Symptom**: after the spring critical-damping change, user reported the rendered cursor no longer matches the real on-screen interaction (an offset/lag), though speed/jitter were fine.
+- **Cause**: increasing spring damping b raises steady-state tracking lag (lag ≈ (b/k)·velocity). Measured on a real capture (session_20260621_204535, 730 samples): UltraSmooth mean lag 136.7px→185.1px (+35%), Smooth 95.3px→136.9px (+44%) just from the b increase. Since the actual jitter was shape-flicker (fixed separately by StabilizeShapes), the damping change was pure downside.
+- **Fix**: reverted `GetSpringParams` to the original committed values (Subtle 28, Medium 22, Smooth 16, UltraSmooth 12) and removed the no-overshoot test. The slight underdamped overshoot (~6%) is not perceived as jitter and keeps tracking tight.
+- **Method note**: to compare smoothing-lag tradeoffs, simulate the spring on a real `cursor.mcur` (linear-interp raw target + Euler spring at 60fps) and measure mean/max deviation from the raw position. Fast, decisive, no GUI.
+- **Lesson**: don't raise spring damping to chase "jitter" — it trades lag for overshoot. Diagnose first (position-jitter vs shape-flicker). Kept: shape debounce (real jitter fix). Reverted: damping.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor shape detection moved to click-time only (removed continuous polling)
+
+- **User directive**: "If the cursor change detection is causing this then let's do it on click time than all the time." User suspected the continuous 16ms shape poll was degrading recorded cursor movement.
+- **Change**: removed the background `System.Threading.Timer` shape poller from `MouseHookRecorder`. Cursor shape is now sampled via `CursorShapeResolver.Resolve()` ONLY on click-down events inside the hook (clicks are infrequent → no per-move overhead, no extra thread/threadpool activity during recording), plus one initial sample at StartRecording. `_currentShape` is held between clicks and stamped on every sample.
+- **Tradeoff (intended)**: hovering a link/text WITHOUT clicking no longer shows hand/I-beam until the next click; shape reflects the cursor at the most recent click. Accepted per user priority on movement quality over continuous shape accuracy.
+- **Kept**: `StabilizeShapes` debounce (now mostly a no-op since click-time shapes form long runs) and original spring damping (b=12 etc.).
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor "slow motion" on short moves — ROOT CAUSE: de-stutter + low-stiffness spring (pre-existing)
+
+- **Provenance**: Spring/UltraSmooth and de-stutter were committed BEFORE the cursor-shape work (git blame: EditorPage smoothing 2026-04-18/05-09/06-19; spring params (80,12) 2026-04-18; de-stutter 2026-06-19). The cursor-shape feature did NOT introduce them; fixing the shape-flicker just made the underlying slow-motion visible.
+- **Diagnosis (data-driven, real capture session_20260621_210141, raw peak 12693px/s)** via a temp Musio.Tests harness running the REAL CursorSmoother at 30fps:
+  - Spring/UltraSmooth + de-stutter ON (the editor default): peak speed **0.20x** real, meanLag 125px → severe slow motion, worst on short quick moves (fixed spring settle time spreads a small displacement over ~0.5s).
+  - de-stutter OFF roughly DOUBLES peak speed (0.20→0.47) and halves lag — de-stutter's ease-in/out arc-retiming is the biggest single culprit.
+  - **OneEuro/UltraSmooth, de-stutter OFF: peak 1.11x, meanLag 7.8px** — preserves real speed, near-zero lag, still smooths adaptively. Clear winner.
+- **Fix**: editor now uses `SmoothingAlgorithm.OneEuroFilter` (EditorPage 2 spots + `CompositionConfig` default) and `FrameCompositor` sets `DestutterEnabled = false` (covers preview AND export). De-stutter code/tests retained for possible future trackpad-specific use.
+- **Method**: to evaluate smoothing feel objectively, run the real `CursorSmoother` on an actual `cursor.mcur` and compare per-config peak-speed-ratio vs raw, mean positional lag, and short-burst time-stretch. Far better than eyeballing.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — final balance: Spring/Smooth, de-stutter OFF
+
+- **Context**: One Euro (prev fix) tracked raw too tightly → cursor felt "human", not cinematic. User wants cinematic smoothing but NOT the heavy slow-motion.
+- **Key data finding (real capture, raw peak 12693px/s)**: de-stutter ON crushes peak speed to ~0.17-0.21x **regardless of EaseStrength (0.6/0.3/0.15 all ≈0.17) and regardless of algorithm**. Its arc-length re-timing fundamentally flattens the velocity profile → that IS the slow-motion; it cannot be tuned out via easing. So de-stutter is incompatible with "keeps up with quick moves" as currently implemented.
+- **Sweet spot (de-stutter OFF)**: Spring/UltraSmooth 0.47x/55px, **Spring/Smooth 0.60x/36px (chosen)**, Spring/Medium 0.67x/26px, OneEuro 1.11x/8px.
+- **Chosen**: `SpringPhysics` + `Smooth` strength (k=150) with de-stutter OFF — cinematic spring momentum (~0.60x peak, ~36px trailing) without slow motion; the spring's low-pass also smooths trackpad micro-stalls. Set in EditorPage (2 spots) + `CompositionConfig` default; `FrameCompositor` keeps `DestutterEnabled=false`.
+- **Open follow-up**: if the user wants the trackpad stop-and-go fix back WITHOUT slow-mo, de-stutter needs a rewrite to a LOCAL micro-stall filler (fill only the brief low-speed gaps) instead of re-timing whole gestures to uniform arc speed. Current de-stutter (commit 182eb03) is a global velocity-flattener.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — tuned to "start late, arrive on time" (Spring/Subtle)
+
+- **User spec (refined over several rounds)**: smooth + good velocity to reach destination (no slow motion) + OK to START a move late, but MUST REACH the position on time (low lag at arrival/clicks/events).
+- **Method**: parameter sweep harness (temp Musio.Tests) running reimplemented One Euro + damped spring on the real capture, measuring peakRatio (velocity), **moveLag** (lag during fast frames — OK to be high) vs **restLag** (lag near rest/arrival — must be low), jerk, and stop-and-go count. This move/rest lag split directly encodes "start late, arrive on time."
+- **Finding**: stiffer spring at ζ≈0.7 hits the spec: k=350-400 → peakRatio 0.74-0.76, restLag ~3px (arrives on time), moveLag ~70px (cinematic momentum / starts late), stutter ~11. One Euro w/ beta gives full velocity + low restLag but high jerk (doesn't smooth stop-and-go); One Euro beta=0 and low-k springs smooth more but arrive late (high restLag) — both fail the spec.
+- **Chosen**: `SpringPhysics` + **Subtle** strength (k=400, b=28, ζ=0.70) — a STANDARD preset that lands on the sweet spot, no param retuning. De-stutter stays OFF (its arc re-timing flattens velocity = slow motion, confirmed un-tunable via EaseStrength). Set in EditorPage (2) + CompositionConfig default.
+- **Tradeoff acknowledged**: max smoothness (de-stutter's low jerk) and max velocity/on-time-arrival are opposed; Subtle prioritizes velocity + on-time arrival per the user's stated priority. If they want MORE stop-and-go removal without the velocity penalty, the remaining lever is a velocity-preserving de-stutter REWRITE (local micro-stall filler, not whole-gesture arc-retiming).
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — SOLVED with zero-phase (forward-backward) spring
+
+- **Breakthrough**: cursor smoothing is OFFLINE post-processing, so we can use FUTURE samples → a ZERO-PHASE filter smooths trackpad stop-and-go with NO time lag (unlike all causal filters spring/One Euro/Holt which must trail). This is the Screen-Studio-style result the user wanted (smooth, no stutter, no slow motion).
+- **New algorithm**: `SmoothingAlgorithm.ZeroPhaseSpring` in CursorSmoother — resample raw at target fps, run a critically-damped spring FORWARD then BACKWARD (forward-backward = zero net phase), substepped (8x) for stability/accuracy at high stiffness and any fps. Stiffness per Strength via GetZeroPhaseStiffness (Smooth=200). SnapToClickPositions + StabilizeShapes still apply.
+- **Measured (real capture, raw stutter 22, rawPeak 12693)**: ZeroPhaseSpring/Smooth(k=200) → stutter 3 (86% removed), jerk 64528 (smooth), meanLag 30px (mostly peak-rounding, NOT time lag). Causal springs had meanLag 36-125px (time lag = slow motion / late arrival). Zero-phase eliminates that.
+- **Key nuance**: with zero-phase, lower peakRatio (~0.36) is NOT slow motion — total displacement & timing preserved, just smoother/eased velocity with no time delay. The earlier "slow motion" was CAUSAL lag (cursor behind in time), now gone.
+- **Wired**: editor uses ZeroPhaseSpring/Smooth (EditorPage x2 + CompositionConfig default); de-stutter stays OFF. Test: `SmoothPath_ZeroPhaseSpring_SmoothsWithLowerLagThanCausalSpring` (smooths + stable + lower lag than causal spring).
+- **Tuning knob**: GetZeroPhaseStiffness — lower k = smoother/less stutter/less peak; higher k = snappier/more stutter. UltraSmooth=130, Smooth=200, Medium=300, Subtle=420.
+- **Method**: parameter-sweep harness reimplementing filters on a real cursor.mcur, measuring peakRatio, moveLag vs restLag (start-late-OK vs arrive-on-time), jerk, and stop-and-go count. Decisive for picking algorithms.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 373 green; relaunched ARM64.

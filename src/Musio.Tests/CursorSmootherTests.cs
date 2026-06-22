@@ -71,6 +71,54 @@ public sealed class CursorSmootherTests
 
     #endregion
 
+    #region Zero-Phase Spring
+
+    [TestMethod]
+    public void SmoothPath_ZeroPhaseSpring_SmoothsWithLowerLagThanCausalSpring()
+    {
+        // Jittery sine path.
+        var rng = new Random(7);
+        var recording = BuildRecording(600, 200, i =>
+        {
+            double t = i / 200.0;
+            double bx = 600 + 300 * Math.Sin(2 * Math.PI * 0.4 * t);
+            double by = 400 + 200 * Math.Cos(2 * Math.PI * 0.4 * t);
+            return (bx + rng.NextDouble() * 16 - 8, by + rng.NextDouble() * 16 - 8);
+        });
+
+        var zeroPhase = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+            Strength = SmoothingStrength.Smooth,
+            DestutterEnabled = false,
+        }.SmoothPath(recording, TargetFps);
+
+        var causal = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.SpringPhysics,
+            Strength = SmoothingStrength.Smooth,
+            DestutterEnabled = false,
+        }.SmoothPath(recording, TargetFps);
+
+        var raw = GetRawFrames(recording, TargetFps);
+
+        // 1) It actually smooths: jitter is lower than the raw path.
+        Assert.IsTrue(ComputeDerivativeStdDev(zeroPhase) < ComputeDerivativeStdDev(raw),
+            "Zero-phase spring should reduce jitter vs raw.");
+
+        // 2) It is numerically stable — no NaN/Infinity.
+        Assert.IsTrue(zeroPhase.TrueForAll(p =>
+            !double.IsNaN(p.X) && !double.IsNaN(p.Y) && !double.IsInfinity(p.X) && !double.IsInfinity(p.Y)),
+            "Zero-phase spring produced non-finite values.");
+
+        // 3) Its defining benefit: it tracks the real path with LESS lag than the causal
+        //    spring (no time delay because it filters forward AND backward).
+        Assert.IsTrue(MeanDeviation(zeroPhase, raw) < MeanDeviation(causal, raw),
+            "Zero-phase spring should have lower lag than the causal spring.");
+    }
+
+    #endregion
+
     #region Spring Physics
 
     [TestMethod]
@@ -449,6 +497,15 @@ public sealed class CursorSmootherTests
             Strength = SmoothingStrength.None,
         };
         return smoother.SmoothPath(recording, fps);
+    }
+
+    private static double MeanDeviation(List<SmoothedPosition> a, List<SmoothedPosition> b)
+    {
+        int n = Math.Min(a.Count, b.Count);
+        double sum = 0;
+        for (int i = 0; i < n; i++)
+            sum += Math.Sqrt((a[i].X - b[i].X) * (a[i].X - b[i].X) + (a[i].Y - b[i].Y) * (a[i].Y - b[i].Y));
+        return n > 0 ? sum / n : 0;
     }
 
     /// <summary>
