@@ -1326,7 +1326,9 @@ public class TrimSegmentEdgeOperation : IEditOperation
                 model.Segments[_index] = slide with { Duration = ClampDuration(_requestedDuration) };
                 break;
             default:
-                _previous.Duration = ClampDuration(_requestedDuration);
+                // Produce a new record rather than mutating _previous in place — _previous
+                // is the snapshot Undo restores, so writing through it would make undo a no-op.
+                model.Segments[_index] = _previous with { Duration = ClampDuration(_requestedDuration) };
                 break;
         }
 

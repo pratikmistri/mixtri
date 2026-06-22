@@ -977,3 +977,16 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
   2. **GPU geometry leak on device-loss mid-Build**: `CursorGeometryLibrary.Build` accumulated CanvasGeometry in a local dict; if a later shape threw (e.g. device lost during Transform), already-built native geometries leaked (LoadCursorAsync catch couldn't reach them since `_glyphs` wasn't assigned yet). Fix: wrap the Build loop in try/catch disposing `result.Values` on throw, plus inner try/catch around `geometry.Transform` (dispose pre-transform geometry). No double-dispose.
 - Confirmed safe (no change needed): SVG parser is hang-free (every iteration advances or throws; ReadNumber never returns without progress), MCUR v2 serialization is field-by-field (struct Pack change irrelevant) and v1-compatible, AssignShapes/StabilizeShapes bounds & termination, SpringPass fwd/bwd index math & full coverage, hook-thread shape sampling (click-only, try/catch, volatile), CursorShapeResolver uses shared non-owned cursor handles (no leak), and corrupt shape bytes fall back to Arrow via TryGetValue.
 - **Verification**: VS MSBuild x64 clean; suite 374 green.
+
+## Full-branch code review vs origin/master (feature/text-animations)
+
+Reviewed the entire branch (48 files, +10.8k/-2k) via parallel code-review agents across timeline core, export pipeline, rendering, and app/UI (cursor work already reviewed separately). Findings + fixes:
+
+- **HIGH (fixed)** — "Record More" data loss: `EditorPage.InitializePreviewAsync` re-runs on every page construction and rebuilt primary zoom keyframes destructively (`RemoveAll(SourceVideoFilePath is null)` + regenerate from ALL clicks). After Record More it wiped manual zoom segments and resurrected deleted auto-zooms. Fix: generate primary auto-zooms only when none exist yet (idempotent), and skip `SuppressedClickTicks` in generation.
+- **LOW (fixed)** — `VideoEncoder` GPU leak: `composedFrame` (CanvasRenderTarget) leaked if an exception hit between creation and handoff (crossfade/scaling widened the window); catch only disposed `outputSurface`. Fix: hoist `composedFrame` to method scope, null at handoff points, dispose in catch.
+- **LOW (fixed)** — `TrimSegmentEdgeOperation` default branch mutated the undo snapshot in place (latent; only reachable if a 3rd TimelineSegment subtype joins the primary track). Fix: `_previous with { Duration = ... }` instead of mutating `_previous`.
+- **MEDIUM (flagged, not fixed — needs decision)** — GIF export is segment-unaware: `EffectiveDuration`/`TotalOutputFrames` became segment-based but `ExportGifAsync` still maps frames via the legacy `GetSourceTimeForOutputFrame` and never renders text slides → with a text slide the GIF is length-inflated, slides missing, post-slide content desynced. Proper fix routes GIF through the MP4 segment-aware compose (VideoEncoder.ComposeAtAsync) — a larger change.
+- **Note (pre-existing)** — per-segment audio muxing doesn't tempo-compensate speed-adjusted VideoSegments; audio overlaps the next segment. Standing limitation, not a branch regression.
+- Clean (no issues): rendering pipeline (Win2D disposal, ConfigureAwait, bezier solver bounds), most timeline ops, threading/teardown in UI.
+
+Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.

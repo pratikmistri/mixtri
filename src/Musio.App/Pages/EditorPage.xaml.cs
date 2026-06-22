@@ -367,22 +367,33 @@ public sealed partial class EditorPage : Page
         int cropOffX = project.CropOffsetX;
         int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
-        // Clear only the PRIMARY recording's keyframes; appended recordings manage
-        // their own (keyed by SourceVideoFilePath) in LoadAppendedTrackVisualsAsync.
-        ViewModel.Model.ZoomKeyframes.RemoveAll(k => k.SourceVideoFilePath is null);
-        foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
+        // Only generate the PRIMARY recording's auto-zoom keyframes if none exist yet.
+        // InitializePreviewAsync re-runs whenever the editor page is reconstructed (e.g.
+        // after "Record More" navigates away and back). The TimelineModel is shared and
+        // already carries the user's edits, so regenerating would (a) wipe manual zoom
+        // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
+        // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
+        bool primaryKeyframesExist = ViewModel.Model.ZoomKeyframes.Any(k => k.SourceVideoFilePath is null);
+        if (!primaryKeyframesExist)
         {
-            double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
-                - mouseOffset;
-            if (clickTime < 0) continue; // skip pre-roll clicks before video started
-            ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+            foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
-                Timestamp = TimeSpan.FromSeconds(clickTime),
-                ZoomLevel = 2.0,
-                CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
-                CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
-                SourceClickTicks = click.TimestampTicks,
-            });
+                // Respect deletions: never re-add an auto-zoom the user removed.
+                if (ViewModel.Model.SuppressedClickTicks.Contains(click.TimestampTicks))
+                    continue;
+
+                double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
+                    - mouseOffset;
+                if (clickTime < 0) continue; // skip pre-roll clicks before video started
+                ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+                {
+                    Timestamp = TimeSpan.FromSeconds(clickTime),
+                    ZoomLevel = 2.0,
+                    CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
+                    CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
+                    SourceClickTicks = click.TimestampTicks,
+                });
+            }
         }
 
         Timeline.Refresh();

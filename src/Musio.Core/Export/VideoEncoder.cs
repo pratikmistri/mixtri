@@ -420,6 +420,7 @@ public class VideoEncoder : IDisposable
         Action<Exception, int>? onError = null)
     {
         CanvasRenderTarget? outputSurface = null;
+        CanvasRenderTarget? composedFrame = null;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -533,7 +534,7 @@ public class VideoEncoder : IDisposable
                 }
             }
 
-            CanvasRenderTarget composedFrame = await ComposeAtAsync(frameIndex);
+            composedFrame = await ComposeAtAsync(frameIndex);
 
             // Soft cut: dissolve a text slide into its neighbouring segment instead
             // of hard-cutting. Active only on the leading edge of a boundary that
@@ -576,10 +577,12 @@ public class VideoEncoder : IDisposable
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));
                 }
                 composedFrame.Dispose();
+                    composedFrame = null;
             }
             else
             {
-                outputSurface = composedFrame;
+                    outputSurface = composedFrame;
+                    composedFrame = null;
             }
 
             // Give the D3D11 surface directly to the encoder — bypasses all
@@ -620,6 +623,9 @@ public class VideoEncoder : IDisposable
             onError?.Invoke(ex, frameIndex);
             // Dispose GPU surface if it was created but never handed to the encoder
             outputSurface?.Dispose();
+            // Dispose the composed frame too if an exception hit before it was scaled
+            // into outputSurface or handed off (it is nulled at those handoff points).
+            composedFrame?.Dispose();
             request.Sample = null;
         }
         finally
