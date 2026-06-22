@@ -969,3 +969,11 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - **Tuning knob**: GetZeroPhaseStiffness — lower k = smoother/less stutter/less peak; higher k = snappier/more stutter. UltraSmooth=130, Smooth=200, Medium=300, Subtle=420.
 - **Method**: parameter-sweep harness reimplementing filters on a real cursor.mcur, measuring peakRatio, moveLag vs restLag (start-late-OK vs arrive-on-time), jerk, and stop-and-go count. Decisive for picking algorithms.
 - **Verification**: VS MSBuild x64+ARM64 clean; suite 373 green; relaunched ARM64.
+
+## Cursor work — code review hardening (2 rounds)
+
+- Ran 2 review rounds (parallel code-review agents + own pass) on the cursor commit, crash/hang/leak focus. Two genuine (Low-severity) issues found and fixed:
+  1. **NaN/Infinity at very low fps**: `CursorSmoother.SpringPass` used fixed `substeps=8`; explicit Euler diverges when h·sqrt(k) exceeds the stability limit (targetFps<=3 with stiff presets). Fix: adaptive `substeps = Max(8, ceil(2*dt*sqrt(k)))` keeps h·sqrt(k) <= 0.5 for any fps>=1 and all stiffness presets. Guard test: `SmoothPath_ZeroPhaseSpring_StableAtLowFps` (fps 1/2/5/120 finite).
+  2. **GPU geometry leak on device-loss mid-Build**: `CursorGeometryLibrary.Build` accumulated CanvasGeometry in a local dict; if a later shape threw (e.g. device lost during Transform), already-built native geometries leaked (LoadCursorAsync catch couldn't reach them since `_glyphs` wasn't assigned yet). Fix: wrap the Build loop in try/catch disposing `result.Values` on throw, plus inner try/catch around `geometry.Transform` (dispose pre-transform geometry). No double-dispose.
+- Confirmed safe (no change needed): SVG parser is hang-free (every iteration advances or throws; ReadNumber never returns without progress), MCUR v2 serialization is field-by-field (struct Pack change irrelevant) and v1-compatible, AssignShapes/StabilizeShapes bounds & termination, SpringPass fwd/bwd index math & full coverage, hook-thread shape sampling (click-only, try/catch, volatile), CursorShapeResolver uses shared non-owned cursor handles (no leak), and corrupt shape bytes fall back to Arrow via TryGetValue.
+- **Verification**: VS MSBuild x64 clean; suite 374 green.

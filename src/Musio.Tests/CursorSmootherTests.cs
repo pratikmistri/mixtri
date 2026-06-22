@@ -117,6 +117,32 @@ public sealed class CursorSmootherTests
             "Zero-phase spring should have lower lag than the causal spring.");
     }
 
+    [TestMethod]
+    public void SmoothPath_ZeroPhaseSpring_StableAtLowFps()
+    {
+        // A pathologically low frame rate makes a fixed-step explicit integrator diverge.
+        // The adaptive substepping must keep the output finite (no NaN/Infinity) at any fps.
+        var recording = BuildRecording(200, 200, i => (i * 5.0, (i % 7) * 9.0));
+
+        foreach (int fps in new[] { 1, 2, 5, 120 })
+        {
+            foreach (var strength in new[] { SmoothingStrength.UltraSmooth, SmoothingStrength.Subtle })
+            {
+                var result = new CursorSmoother
+                {
+                    Algorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                    Strength = strength,
+                    DestutterEnabled = false,
+                }.SmoothPath(recording, fps);
+
+                Assert.IsTrue(result.TrueForAll(p =>
+                    !double.IsNaN(p.X) && !double.IsNaN(p.Y) &&
+                    !double.IsInfinity(p.X) && !double.IsInfinity(p.Y)),
+                    $"Zero-phase spring diverged at fps={fps}, strength={strength}.");
+            }
+        }
+    }
+
     #endregion
 
     #region Spring Physics

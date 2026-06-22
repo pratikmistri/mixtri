@@ -87,18 +87,38 @@ public static class CursorGeometryLibrary
         ArgumentNullException.ThrowIfNull(creator);
 
         var result = new Dictionary<CursorShape, CursorGlyph>();
-        foreach (var (shape, def) in Definitions)
+        try
         {
-            var geometry = ParseSvgPath(creator, def.Path);
-            var hotspot = def.Hotspot;
-            if (def.Scale != 1f)
+            foreach (var (shape, def) in Definitions)
             {
-                var scaled = geometry.Transform(Matrix3x2.CreateScale(def.Scale));
-                geometry.Dispose();
-                geometry = scaled;
-                hotspot *= def.Scale;
+                var geometry = ParseSvgPath(creator, def.Path);
+                var hotspot = def.Hotspot;
+                if (def.Scale != 1f)
+                {
+                    CanvasGeometry scaled;
+                    try
+                    {
+                        scaled = geometry.Transform(Matrix3x2.CreateScale(def.Scale));
+                    }
+                    catch
+                    {
+                        geometry.Dispose();
+                        throw;
+                    }
+                    geometry.Dispose();
+                    geometry = scaled;
+                    hotspot *= def.Scale;
+                }
+                result[shape] = new CursorGlyph(geometry, hotspot);
             }
-            result[shape] = new CursorGlyph(geometry, hotspot);
+        }
+        catch
+        {
+            // Don't leak the native geometries already built if a later shape fails
+            // (e.g. GPU device lost mid-initialization).
+            foreach (var glyph in result.Values)
+                glyph.Geometry.Dispose();
+            throw;
         }
         return result;
     }

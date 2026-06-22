@@ -389,12 +389,15 @@ public class CursorSmoother
         return result;
     }
 
-    // One causal damped-spring pass over a position array (optionally reversed), using
-    // fixed substeps so the explicit integrator stays stable at high stiffness.
+    // One causal damped-spring pass over a position array (optionally reversed). The
+    // explicit integrator is advanced in fixed substeps small enough to stay stable for
+    // the given stiffness and frame time (h·√k kept well under the stability limit), so
+    // it cannot diverge to Infinity/NaN even at unusually low frame rates.
     private static (double[] x, double[] y) SpringPass(
         double[] inX, double[] inY, int count, double dt, double k, double b, bool forward)
     {
-        const int substeps = 8;
+        // Substeps chosen so h·sqrt(k) <= ~0.5 (explicit Euler is stable for h·sqrt(k) < 2).
+        int substeps = Math.Max(8, (int)Math.Ceiling(2.0 * dt * Math.Sqrt(k)));
         double h = dt / substeps;
 
         var outX = new double[count];
@@ -402,7 +405,6 @@ public class CursorSmoother
         if (count == 0) return (outX, outY);
 
         int first = forward ? 0 : count - 1;
-        int step = forward ? 1 : -1;
 
         double posX = inX[first], posY = inY[first], velX = 0, velY = 0;
         outX[first] = posX; outY[first] = posY;
