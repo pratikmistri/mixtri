@@ -345,6 +345,14 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Sets the webcam overlay opacity in <c>[0,1]</c> for the next render (fade in/out).
+    /// </summary>
+    public void SetWebcamOverlayOpacity(float opacity)
+    {
+        _webcamCompositor?.SetOverlayOpacity(opacity);
+    }
+
+    /// <summary>
     /// Replaces the zoom engine's manual keyframes with the provided list.
     /// Call this when the user adds or removes zoom keyframes in the editor.
     /// </summary>

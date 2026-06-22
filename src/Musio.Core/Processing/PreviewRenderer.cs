@@ -114,6 +114,14 @@ public class PreviewRenderer : IDisposable
         _compositor?.SetWebcamFullscreenFactor(factor);
     }
 
+    /// <summary>
+    /// Sets the webcam overlay opacity in <c>[0,1]</c> for the next render (fade in/out).
+    /// </summary>
+    public void SetWebcamOverlayOpacity(float opacity)
+    {
+        _compositor?.SetWebcamOverlayOpacity(opacity);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

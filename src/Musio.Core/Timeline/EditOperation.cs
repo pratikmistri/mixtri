@@ -1554,24 +1554,27 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
     private readonly string _segmentId;
     private readonly bool? _enabled;
     private readonly bool? _fullscreenEnabled;
+    private readonly CameraFullscreenMode? _fullscreenMode;
     private readonly WebcamOverlayStyle? _styleOverride;
     private readonly bool _setStyle;
 
     private bool _previousEnabled;
     private bool _previousFullscreenEnabled;
+    private CameraFullscreenMode _previousFullscreenMode;
     private WebcamOverlayStyle? _previousStyle;
 
     public string Description => "Update Camera Segment";
 
     public UpdateCameraSegmentPropertiesOperation(string segmentId, bool? enabled = null,
         WebcamOverlayStyle? styleOverride = null, bool setStyle = false,
-        bool? fullscreenEnabled = null)
+        bool? fullscreenEnabled = null, CameraFullscreenMode? fullscreenMode = null)
     {
         _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
         _enabled = enabled;
         _styleOverride = styleOverride;
         _setStyle = setStyle;
         _fullscreenEnabled = fullscreenEnabled;
+        _fullscreenMode = fullscreenMode;
     }
 
     public void Execute(TimelineModel model)
@@ -1581,10 +1584,12 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
 
         _previousEnabled = seg.Enabled;
         _previousFullscreenEnabled = seg.FullscreenEnabled;
+        _previousFullscreenMode = seg.FullscreenMode;
         _previousStyle = seg.StyleOverride;
 
         if (_enabled is bool en) seg.Enabled = en;
         if (_fullscreenEnabled is bool fs) seg.FullscreenEnabled = fs;
+        if (_fullscreenMode is CameraFullscreenMode fm) seg.FullscreenMode = fm;
         if (_setStyle) seg.StyleOverride = _styleOverride;
     }
 
@@ -1594,6 +1599,7 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
         if (seg is null) return;
         seg.Enabled = _previousEnabled;
         seg.FullscreenEnabled = _previousFullscreenEnabled;
+        seg.FullscreenMode = _previousFullscreenMode;
         seg.StyleOverride = _previousStyle;
     }
 }

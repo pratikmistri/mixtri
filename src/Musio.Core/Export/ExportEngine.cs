@@ -534,6 +534,7 @@ public class ExportEngine
         if (timeline is null || timeline.CameraSegments.Count == 0)
         {
             compositor.SetWebcamFullscreenFactor(0f);
+            compositor.SetWebcamOverlayOpacity(1f);
             return true;
         }
 
@@ -543,6 +544,7 @@ public class ExportEngine
 
         compositor.UpdateWebcamStyle(active.ResolveStyle(baseStyle));
         compositor.SetWebcamFullscreenFactor(active.ComputeFullscreenFactor(sourceTime));
+        compositor.SetWebcamOverlayOpacity(timeline.GetCameraOverlayOpacity(active, sourceTime));
         return true;
     }
 

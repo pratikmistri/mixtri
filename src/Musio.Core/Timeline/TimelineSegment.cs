@@ -155,17 +155,32 @@ public record CameraSegment : TimelineSegment
     public WebcamOverlayStyle? StyleOverride { get; set; }
 
     /// <summary>
-    /// When true, the camera overlay animates from its normal position/size up to
-    /// <b>cover the entire screen</b> at the start of the segment, holds fullscreen
-    /// for the body, then animates back to its original position/size at the end.
+    /// When true, the camera overlay animates between its normal position/size and
+    /// covering the entire screen during this segment. See <see cref="FullscreenMode"/>
+    /// for the specific animation.
     /// </summary>
     public bool FullscreenEnabled { get; set; }
+
+    /// <summary>How the fullscreen animation behaves while <see cref="FullscreenEnabled"/>.</summary>
+    public CameraFullscreenMode FullscreenMode { get; set; } = CameraFullscreenMode.Highlight;
 
     /// <summary>Eased ramp-up duration (in source time) from overlay to fullscreen.</summary>
     public static readonly TimeSpan FullscreenInDuration = TimeSpan.FromSeconds(0.5);
 
     /// <summary>Eased ramp-down duration (in source time) from fullscreen back to overlay.</summary>
     public static readonly TimeSpan FullscreenOutDuration = TimeSpan.FromSeconds(0.5);
+
+    /// <summary>
+    /// Duration (in source time) of the <see cref="CameraFullscreenMode.Reveal"/>
+    /// shrink from fullscreen down to the overlay at the end of the segment.
+    /// </summary>
+    public static readonly TimeSpan FullscreenRevealDuration = TimeSpan.FromSeconds(0.8);
+
+    /// <summary>
+    /// Duration (in source time) of the overlay fade-in at the segment start and
+    /// fade-out at the segment end, so the camera doesn't pop in/out abruptly.
+    /// </summary>
+    public static readonly TimeSpan AppearDuration = TimeSpan.FromSeconds(0.25);
 
     /// <summary>
     /// Resolves the effective overlay style for this segment, layering any
@@ -177,12 +192,16 @@ public record CameraSegment : TimelineSegment
     /// <summary>
     /// Computes the fullscreen interpolation factor in <c>[0,1]</c> for a given
     /// source-video time, where <c>0</c> = the normal overlay layout and <c>1</c> =
-    /// covering the whole screen. Ramps in over <see cref="FullscreenInDuration"/> at
-    /// the start, holds at <c>1</c>, then ramps out over <see cref="FullscreenOutDuration"/>
-    /// before the end, easing both ramps with <see cref="CubicBezierEasing.EaseInOutCinematic"/>.
-    /// When the segment is too short for both ramps they are scaled down proportionally
-    /// so they never overlap. Returns <c>0</c> when fullscreen is disabled or the time
-    /// is outside the segment.
+    /// covering the whole screen. The shape of the curve depends on
+    /// <see cref="FullscreenMode"/>:
+    /// <list type="bullet">
+    /// <item><see cref="CameraFullscreenMode.Highlight"/>: ramps overlay→fullscreen over
+    /// <see cref="FullscreenInDuration"/>, holds, then ramps back over
+    /// <see cref="FullscreenOutDuration"/> (both ramps scale down for short segments).</item>
+    /// <item><see cref="CameraFullscreenMode.Reveal"/>: holds fullscreen then eases down to
+    /// the overlay over <see cref="FullscreenRevealDuration"/> at the end, revealing the video.</item>
+    /// </list>
+    /// Returns <c>0</c> when fullscreen is disabled or the time is outside the segment.
     /// </summary>
     public float ComputeFullscreenFactor(TimeSpan sourceTime)
     {
@@ -192,8 +211,20 @@ public record CameraSegment : TimelineSegment
         if (dur <= 0) return 0f;
 
         double t = (sourceTime - Start).TotalSeconds;
-        if (t <= 0 || t >= dur) return 0f;
+        if (t < 0 || t >= dur) return 0f;
 
+        if (FullscreenMode == CameraFullscreenMode.Reveal)
+        {
+            double revealR = Math.Min(FullscreenRevealDuration.TotalSeconds, dur);
+            if (revealR <= 0) return 1f;
+            double revealStart = dur - revealR;
+            // Hold fullscreen for the body, then ease down to the overlay at the end,
+            // revealing the video underneath.
+            if (t <= revealStart) return 1f;
+            return CubicBezierEasing.EaseInOutCinematic((float)((dur - t) / revealR));
+        }
+
+        // Highlight: overlay -> fullscreen -> overlay.
         double inR = FullscreenInDuration.TotalSeconds;
         double outR = FullscreenOutDuration.TotalSeconds;
         double total = inR + outR;
@@ -212,6 +243,54 @@ public record CameraSegment : TimelineSegment
 
         return 1f;
     }
+
+    /// <summary>
+    /// Computes the overlay opacity in <c>[0,1]</c> for a given source-video time so
+    /// the camera fades in at the segment start and fades out at the end instead of
+    /// popping. The fades use <see cref="AppearDuration"/> (scaled down for very short
+    /// segments) and ease out for a snappy but smooth appearance. The
+    /// <paramref name="fadeIn"/>/<paramref name="fadeOut"/> flags let callers suppress a
+    /// fade at a boundary shared with an adjacent camera segment (to avoid a dip/flash)
+    /// or where the camera starts covering the whole screen (to avoid a fade from black).
+    /// Returns <c>0</c> outside the segment.
+    /// </summary>
+    public float ComputeAppearOpacity(TimeSpan sourceTime, bool fadeIn = true, bool fadeOut = true)
+    {
+        double dur = Duration.TotalSeconds;
+        if (dur <= 0) return 1f;
+
+        double t = (sourceTime - Start).TotalSeconds;
+        if (t < 0 || t >= dur) return 0f;
+
+        double a = AppearDuration.TotalSeconds;
+        if (a * 2 > dur) a = dur / 2.0;
+        if (a <= 0) return 1f;
+
+        if (fadeIn && t < a)
+            return CubicBezierEasing.EaseOut((float)(t / a));
+        if (fadeOut && t > dur - a)
+            return CubicBezierEasing.EaseOut((float)((dur - t) / a));
+
+        return 1f;
+    }
+
+    /// <summary>
+    /// True when this segment begins covering the whole screen, so a fade-in would
+    /// just read as a fade from black rather than an overlay appearing over the video.
+    /// </summary>
+    public bool StartsFullscreen => FullscreenEnabled && FullscreenMode == CameraFullscreenMode.Reveal;
+}
+
+/// <summary>
+/// The fullscreen animation styles for a <see cref="CameraSegment"/>.
+/// </summary>
+public enum CameraFullscreenMode
+{
+    /// <summary>Overlay grows to fullscreen, holds, then shrinks back to the overlay.</summary>
+    Highlight,
+
+    /// <summary>Holds fullscreen then shrinks to the overlay at the end, revealing the video underneath.</summary>
+    Reveal,
 }
 
 /// <summary>

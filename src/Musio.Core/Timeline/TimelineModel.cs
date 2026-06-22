@@ -45,6 +45,28 @@ public class TimelineModel
     }
 
     /// <summary>
+    /// Computes the camera overlay opacity for the <paramref name="active"/> segment at
+    /// <paramref name="sourceTime"/>, suppressing the start/end fade where it would cause
+    /// a visible artifact: no fade-in when another enabled camera segment covers the
+    /// instant just before this one (adjacent/overlapping → avoids a flash), no fade-out
+    /// when one continues right after, and no fade-in when the camera starts fullscreen
+    /// (→ avoids a fade from black).
+    /// </summary>
+    public float GetCameraOverlayOpacity(CameraSegment active, TimeSpan sourceTime)
+    {
+        ArgumentNullException.ThrowIfNull(active);
+
+        bool hasPredecessor = CameraSegments.Any(s => !ReferenceEquals(s, active) && s.Enabled
+            && s.Start < active.Start && s.End >= active.Start);
+        bool hasSuccessor = CameraSegments.Any(s => !ReferenceEquals(s, active) && s.Enabled
+            && s.End > active.End && s.Start <= active.End);
+
+        bool fadeIn = !hasPredecessor && !active.StartsFullscreen;
+        bool fadeOut = !hasSuccessor;
+        return active.ComputeAppearOpacity(sourceTime, fadeIn, fadeOut);
+    }
+
+    /// <summary>
     /// Path of the primary recording's video file. Used to identify which
     /// video segments carry the cursor/zoom data so source↔output time mapping
     /// only considers the primary recording's segments.

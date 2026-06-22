@@ -1376,7 +1376,17 @@
                                         x:Name="CameraFullscreenToggle"
                                         Header="Expand to full screen"
                                         Toggled="CameraFullscreenToggle_Toggled" />
+                                    <ComboBox
+                                        x:Name="CameraFullscreenModeCombo"
+                                        Header="Animation"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="Collapsed"
+                                        SelectionChanged="CameraFullscreenModeCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Zoom out and back" Tag="Highlight" />
+                                        <ComboBoxItem Content="Start full screen, reveal video" Tag="Reveal" />
+                                    </ComboBox>
                                     <TextBlock
+                                        x:Name="CameraFullscreenHint"
                                         Text="The selected camera segment grows to fill the screen, holds, then shrinks back."
                                         TextWrapping="Wrap"
                                         Opacity="0.7"

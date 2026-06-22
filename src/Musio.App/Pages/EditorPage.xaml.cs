@@ -990,6 +990,7 @@ public sealed partial class EditorPage : Page
         // segments, the legacy always-on global overlay behaviour is preserved.
         var model = ViewModel.Model;
         float fullscreenFactor = 0f;
+        float overlayOpacity = 1f;
         if (model.CameraSegments.Count > 0)
         {
             var active = model.GetCameraSegmentAtSourceTime(position);
@@ -1001,8 +1002,10 @@ public sealed partial class EditorPage : Page
             _previewRenderer.UpdateWebcamStyle(
                 active.ResolveStyle(ProjectService.Instance.CurrentComposition?.WebcamStyle));
             fullscreenFactor = active.ComputeFullscreenFactor(position);
+            overlayOpacity = model.GetCameraOverlayOpacity(active, position);
         }
         _previewRenderer.SetWebcamFullscreenFactor(fullscreenFactor);
+        _previewRenderer.SetWebcamOverlayOpacity(overlayOpacity);
 
         CanvasBitmap? webcamFrame = null;
         try
@@ -1526,8 +1529,31 @@ public sealed partial class EditorPage : Page
 
         _suppressWebcamEvents = true;
         CameraFullscreenToggle.IsOn = seg.FullscreenEnabled;
+        CameraFullscreenModeCombo.SelectedIndex = seg.FullscreenMode == CameraFullscreenMode.Reveal ? 1 : 0;
         _suppressWebcamEvents = false;
         CameraFullscreenPanel.Visibility = Visibility.Visible;
+        UpdateCameraFullscreenModeUI(seg.FullscreenEnabled, seg.FullscreenMode);
+    }
+
+    private void UpdateCameraFullscreenModeUI(bool fullscreenEnabled, CameraFullscreenMode mode)
+    {
+        if (CameraFullscreenModeCombo is null || CameraFullscreenHint is null) return;
+        CameraFullscreenModeCombo.Visibility = fullscreenEnabled ? Visibility.Visible : Visibility.Collapsed;
+        if (!fullscreenEnabled)
+        {
+            CameraFullscreenHint.Text =
+                "The camera fades in and out smoothly at the start and end of the segment.";
+        }
+        else if (mode == CameraFullscreenMode.Reveal)
+        {
+            CameraFullscreenHint.Text =
+                "The camera stays full screen, then shrinks to the overlay at the end, revealing the video underneath.";
+        }
+        else
+        {
+            CameraFullscreenHint.Text =
+                "The camera grows to fill the screen, holds, then shrinks back to the overlay.";
+        }
     }
 
     private void CameraFullscreenToggle_Toggled(object sender, RoutedEventArgs e)
@@ -1538,6 +1564,24 @@ public sealed partial class EditorPage : Page
         ViewModel.UndoRedoManager.Execute(new UpdateCameraSegmentPropertiesOperation(
             _selectedCameraSegmentId, fullscreenEnabled: CameraFullscreenToggle.IsOn));
 
+        var mode = CameraFullscreenModeCombo.SelectedIndex == 1
+            ? CameraFullscreenMode.Reveal : CameraFullscreenMode.Highlight;
+        UpdateCameraFullscreenModeUI(CameraFullscreenToggle.IsOn, mode);
+
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void CameraFullscreenModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+        if (_selectedCameraSegmentId is null) return;
+        if (CameraFullscreenModeCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        var mode = tag == "Reveal" ? CameraFullscreenMode.Reveal : CameraFullscreenMode.Highlight;
+        ViewModel.UndoRedoManager.Execute(new UpdateCameraSegmentPropertiesOperation(
+            _selectedCameraSegmentId, fullscreenMode: mode));
+
+        UpdateCameraFullscreenModeUI(CameraFullscreenToggle.IsOn, mode);
         _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
     }
 

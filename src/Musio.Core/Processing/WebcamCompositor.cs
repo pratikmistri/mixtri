@@ -49,6 +49,7 @@ public class WebcamCompositor : IDisposable
 
     private WebcamOverlayStyle _style;
     private float _fullscreenFactor;
+    private float _overlayOpacity = 1f;
     private bool _disposed;
 
     // Cached GPU resources — invalidated when style or canvas size changes
@@ -85,6 +86,16 @@ public class WebcamCompositor : IDisposable
     }
 
     /// <summary>
+    /// Sets the overlay opacity in <c>[0,1]</c> applied on the next render, used to fade
+    /// the camera in at the segment start and out at the end. Opacity is applied at draw
+    /// time and does not invalidate the geometry cache.
+    /// </summary>
+    public void SetOverlayOpacity(float opacity)
+    {
+        _overlayOpacity = Math.Clamp(opacity, 0f, 1f);
+    }
+
+    /// <summary>
     /// Renders a webcam frame onto the drawing session at the configured position,
     /// applying the current fullscreen-animation factor (see <see cref="SetFullscreenFactor"/>).
     /// </summary>
@@ -111,15 +122,19 @@ public class WebcamCompositor : IDisposable
             _cacheKey = key;
         }
 
+        // Fully faded out — nothing to draw.
+        if (_overlayOpacity <= 0f)
+            return;
+
         // Optional shadow behind the overlay (drawn from cache, faded out as it grows)
         if (layout.ShadowAlpha > 0f && _cachedShadow is not null)
         {
             session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY),
-                _cachedShadow.Bounds, layout.ShadowAlpha);
+                _cachedShadow.Bounds, layout.ShadowAlpha * _overlayOpacity);
         }
 
-        // Clip webcam frame to the configured shape
-        using (session.CreateLayer(1.0f, _cachedClipGeometry))
+        // Clip webcam frame to the configured shape (layer opacity fades the camera in/out)
+        using (session.CreateLayer(_overlayOpacity, _cachedClipGeometry))
         {
             if (_style.Mirrored)
             {
@@ -140,6 +155,7 @@ public class WebcamCompositor : IDisposable
         if (layout.BorderWidth > 0)
         {
             var borderColor = ColorHelper.ParseColor(_style.BorderColor);
+            borderColor.A = (byte)(borderColor.A * _overlayOpacity);
             DrawBorderStroke(session, destRect, layout.CornerRadius, layout.BorderWidth, borderColor);
         }
     }

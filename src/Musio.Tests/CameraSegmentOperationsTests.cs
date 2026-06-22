@@ -215,4 +215,107 @@ public sealed class CameraSegmentOperationsTests
         op.Undo(model);
         Assert.IsFalse(model.CameraSegments[0].FullscreenEnabled);
     }
+
+    [TestMethod]
+    public void Reveal_HoldsFullscreenThenRevealsAtEnd()
+    {
+        var seg = new CameraSegment
+        {
+            Start = S(0),
+            Duration = S(10),
+            FullscreenEnabled = true,
+            FullscreenMode = CameraFullscreenMode.Reveal,
+        };
+
+        // Fullscreen at the start and held through the body.
+        Assert.AreEqual(1f, seg.ComputeFullscreenFactor(S(0)), 0.001f);
+        Assert.AreEqual(1f, seg.ComputeFullscreenFactor(S(5)), 0.001f);
+        Assert.AreEqual(1f, seg.ComputeFullscreenFactor(S(9.2)), 0.001f); // start of the end reveal
+
+        // Eases down to the overlay during the final reveal window.
+        float revealing = seg.ComputeFullscreenFactor(S(9.6));
+        Assert.IsTrue(revealing > 0f && revealing < 1f, $"reveal factor was {revealing}");
+
+        // Overlay (0) by the segment end.
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(10)));
+    }
+
+    [TestMethod]
+    public void AppearOpacity_FadesInAtStartAndOutAtEnd()
+    {
+        var seg = new CameraSegment { Start = S(0), Duration = S(10) };
+
+        // Outside the segment the overlay is hidden.
+        Assert.AreEqual(0f, seg.ComputeAppearOpacity(S(-1)));
+        Assert.AreEqual(0f, seg.ComputeAppearOpacity(S(11)));
+
+        // Fades in from transparent at the start.
+        Assert.AreEqual(0f, seg.ComputeAppearOpacity(S(0)), 0.001f);
+        float fadingIn = seg.ComputeAppearOpacity(S(0.1));
+        Assert.IsTrue(fadingIn > 0f && fadingIn < 1f, $"fade-in opacity was {fadingIn}");
+
+        // Fully opaque through the body.
+        Assert.AreEqual(1f, seg.ComputeAppearOpacity(S(5)), 0.001f);
+
+        // Fades out near the end.
+        float fadingOut = seg.ComputeAppearOpacity(S(9.9));
+        Assert.IsTrue(fadingOut > 0f && fadingOut < 1f, $"fade-out opacity was {fadingOut}");
+    }
+
+    [TestMethod]
+    public void GetCameraOverlayOpacity_SuppressesFadeAtSharedBoundaries()
+    {
+        var model = new TimelineModel();
+        // Two back-to-back segments: A [0,5), B [5,10).
+        var a = new CameraSegment { Start = S(0), Duration = S(5) };
+        var b = new CameraSegment { Start = S(5), Duration = S(5) };
+        model.CameraSegments.Add(a);
+        model.CameraSegments.Add(b);
+
+        // A still fades IN at the very start (no predecessor) ...
+        Assert.AreEqual(0f, model.GetCameraOverlayOpacity(a, S(0)), 0.001f);
+        // ... but does NOT fade out near its end because B continues (no flash).
+        Assert.AreEqual(1f, model.GetCameraOverlayOpacity(a, S(4.95)), 0.001f);
+
+        // B does NOT fade in at its start because A precedes it ...
+        Assert.AreEqual(1f, model.GetCameraOverlayOpacity(b, S(5)), 0.001f);
+        // ... but fades out at the very end (no successor).
+        float bEnd = model.GetCameraOverlayOpacity(b, S(9.95));
+        Assert.IsTrue(bEnd < 1f, $"B end opacity was {bEnd}");
+    }
+
+    [TestMethod]
+    public void GetCameraOverlayOpacity_NoFadeInWhenStartingFullscreen()
+    {
+        var model = new TimelineModel();
+        var seg = new CameraSegment
+        {
+            Start = S(0),
+            Duration = S(10),
+            FullscreenEnabled = true,
+            FullscreenMode = CameraFullscreenMode.Reveal,
+        };
+        model.CameraSegments.Add(seg);
+
+        // Starts fullscreen → fully opaque immediately (no fade from black).
+        Assert.AreEqual(1f, model.GetCameraOverlayOpacity(seg, S(0)), 0.001f);
+        Assert.AreEqual(1f, model.GetCameraOverlayOpacity(seg, S(0.1)), 0.001f);
+    }
+
+    [TestMethod]
+    public void UpdateProperties_SetsFullscreenModeAndUndoRestores()
+    {
+        var model = new TimelineModel();
+        var add = new AddCameraSegmentOperation(S(0), S(4));
+        add.Execute(model);
+        Assert.AreEqual(CameraFullscreenMode.Highlight, model.CameraSegments[0].FullscreenMode);
+
+        var op = new UpdateCameraSegmentPropertiesOperation(
+            add.CreatedId, fullscreenMode: CameraFullscreenMode.Reveal);
+        op.Execute(model);
+        Assert.AreEqual(CameraFullscreenMode.Reveal, model.CameraSegments[0].FullscreenMode);
+
+        op.Undo(model);
+        Assert.AreEqual(CameraFullscreenMode.Highlight, model.CameraSegments[0].FullscreenMode);
+    }
 }
