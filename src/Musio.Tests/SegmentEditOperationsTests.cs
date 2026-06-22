@@ -84,6 +84,48 @@ public sealed class SegmentEditOperationsTests
             model.Segments.Select(s => s.Id).ToArray());
     }
 
+    [TestMethod]
+    public void Reorder_Undo_RestoresOriginalOrder()
+    {
+        var a = Video(0, 10);
+        var b = Video(10, 10);
+        var c = Video(20, 10);
+        var model = ModelWith(a, b, c);
+
+        var op = new ReorderSegmentOperation(0, 2);
+        op.Execute(model);
+        CollectionAssert.AreEqual(
+            new[] { b.Id, c.Id, a.Id },
+            model.Segments.Select(s => s.Id).ToArray());
+
+        op.Undo(model);
+        CollectionAssert.AreEqual(
+            new[] { a.Id, b.Id, c.Id },
+            model.Segments.Select(s => s.Id).ToArray());
+    }
+
+    [TestMethod]
+    public void Reorder_Undo_RestoresOrder_WhenTargetPastEnd()
+    {
+        // A target index past the end is clamped on Execute; Undo must still fully
+        // revert (regression: the old index-arithmetic Undo silently no-opped here).
+        var a = Video(0, 10);
+        var b = Video(10, 10);
+        var c = Video(20, 10);
+        var model = ModelWith(a, b, c);
+
+        var op = new ReorderSegmentOperation(0, 10);
+        op.Execute(model);
+        CollectionAssert.AreEqual(
+            new[] { b.Id, c.Id, a.Id },
+            model.Segments.Select(s => s.Id).ToArray());
+
+        op.Undo(model);
+        CollectionAssert.AreEqual(
+            new[] { a.Id, b.Id, c.Id },
+            model.Segments.Select(s => s.Id).ToArray());
+    }
+
     // ── Ripple trim ──
 
     [TestMethod]

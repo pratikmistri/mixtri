@@ -26,6 +26,12 @@ public class TextSlideRenderer : IDisposable
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
 
+    // Cached, slide-invariant base gradient. Only the per-frame displacement field
+    // depends on time, so the underlying gradient texture is built once per
+    // (size, colours, angle) and reused across every frame of the slide.
+    private CanvasRenderTarget? _gradientCache;
+    private (int W, int H, string Start, string End, double Angle) _gradientKey;
+
     // Entrance and exit run for a CONSTANT wall-clock duration (in seconds), so the
     // motion always feels the same regardless of how long the slide is held or how
     // much text it shows. The middle is a static hold that absorbs any extra time.
@@ -179,18 +185,30 @@ public class TextSlideRenderer : IDisposable
         float dy = diag * MathF.Sin((float)angleRad);
 
         // Render the gradient into an intermediate target so it can be fed through
-        // GPU effects for the wave distortion.
-        using var gradientRt = new CanvasRenderTarget(_device, width, height, 96);
-        using (var gds = gradientRt.CreateDrawingSession())
-        using (var brush = new CanvasLinearGradientBrush(
-            gds, ParseColor(slide.BackgroundColor), ParseColor(slide.GradientEndColor))
+        // GPU effects for the wave distortion. The base gradient is slide-invariant,
+        // so cache it and only rebuild when the size/colours/angle (or device) change
+        // instead of allocating a full-resolution texture every frame.
+        var key = (width, height, slide.BackgroundColor, slide.GradientEndColor, slide.GradientAngle);
+        if (_gradientCache is null || _gradientCache.Device != _device || _gradientKey != key)
         {
-            StartPoint = new Vector2(cx - dx, cy - dy),
-            EndPoint = new Vector2(cx + dx, cy + dy),
-        })
-        {
-            gds.FillRectangle(0, 0, width, height, brush);
+            // Allocate-then-swap so a failed allocation never leaves _gradientCache
+            // pointing at a disposed render target.
+            var next = new CanvasRenderTarget(_device, width, height, 96);
+            using (var gds = next.CreateDrawingSession())
+            using (var brush = new CanvasLinearGradientBrush(
+                gds, ParseColor(slide.BackgroundColor), ParseColor(slide.GradientEndColor))
+            {
+                StartPoint = new Vector2(cx - dx, cy - dy),
+                EndPoint = new Vector2(cx + dx, cy + dy),
+            })
+            {
+                gds.FillRectangle(0, 0, width, height, brush);
+            }
+            _gradientCache?.Dispose();
+            _gradientCache = next;
+            _gradientKey = key;
         }
+        var gradientRt = _gradientCache;
 
         // Clamp the gradient edges so displacement sampling outside the image keeps
         // the edge color instead of revealing transparent/black borders.
@@ -277,6 +295,9 @@ public class TextSlideRenderer : IDisposable
             _bgImagePath = null;
             try
             {
+                // Synchronous fallback. The UI/preview path pre-warms this cache via
+                // EnsureBackgroundLoadedAsync so this branch is only reached on the
+                // off-UI export thread (where blocking is acceptable).
                 _bgImage = CanvasBitmap.LoadAsync(ds.Device, slide.BackgroundImagePath)
                     .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
                 _bgImagePath = slide.BackgroundImagePath;
@@ -289,6 +310,41 @@ public class TextSlideRenderer : IDisposable
         }
 
         DrawKenBurns(ds, _bgImage!, slide, progress, width, height);
+    }
+
+    /// <summary>
+    /// Asynchronously pre-loads and caches the slide's background image so the
+    /// synchronous <see cref="RenderSlide"/> never has to block the calling thread
+    /// on file I/O + GPU decode. Call this from the UI/preview path before rendering
+    /// an image-backed slide. A no-op for non-image slides or when the image is
+    /// already cached. Failures are swallowed (the renderer falls back to the slide's
+    /// solid background colour).
+    /// </summary>
+    public async Task EnsureBackgroundLoadedAsync(TextSlideSegment slide)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (slide.BackgroundType != SlideBackgroundType.Image)
+            return;
+
+        var path = slide.BackgroundImagePath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            return;
+
+        if (_bgImage is not null && _bgImagePath == path && _bgImage.Device == _device)
+            return;
+
+        try
+        {
+            var loaded = await CanvasBitmap.LoadAsync(_device, path).AsTask().ConfigureAwait(false);
+            _bgImage?.Dispose();
+            _bgImage = loaded;
+            _bgImagePath = path;
+        }
+        catch
+        {
+            // Leave the cache empty; DrawImageBackground falls back to the solid colour.
+        }
     }
 
     /// <summary>
@@ -738,22 +794,36 @@ public class TextSlideRenderer : IDisposable
         return n1 * t * t + 0.984375;
     }
 
-    private static Color ParseColor(string hex)
+    private static Color ParseColor(string? hex)
     {
-        hex = hex.TrimStart('#');
-        return hex.Length switch
-        {
-            6 => Color.FromArgb(255,
-                byte.Parse(hex[..2], System.Globalization.NumberStyles.HexNumber),
-                byte.Parse(hex[2..4], System.Globalization.NumberStyles.HexNumber),
-                byte.Parse(hex[4..6], System.Globalization.NumberStyles.HexNumber)),
-            8 => Color.FromArgb(
-                byte.Parse(hex[..2], System.Globalization.NumberStyles.HexNumber),
-                byte.Parse(hex[2..4], System.Globalization.NumberStyles.HexNumber),
-                byte.Parse(hex[4..6], System.Globalization.NumberStyles.HexNumber),
-                byte.Parse(hex[6..8], System.Globalization.NumberStyles.HexNumber)),
-            _ => Color.FromArgb(255, 255, 255, 255),
-        };
+        if (string.IsNullOrWhiteSpace(hex))
+            return Color.FromArgb(255, 255, 255, 255);
+
+        hex = hex.Trim().TrimStart('#');
+
+        // Expand 3-digit (RGB) and 4-digit (ARGB) shorthand to full form.
+        if (hex.Length == 3)
+            hex = string.Concat(hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]);
+        else if (hex.Length == 4)
+            hex = string.Concat(hex[0], hex[0], hex[1], hex[1], hex[2], hex[2], hex[3], hex[3]);
+
+        const System.Globalization.NumberStyles Style = System.Globalization.NumberStyles.HexNumber;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+
+        if (hex.Length == 6 &&
+            byte.TryParse(hex.AsSpan(0, 2), Style, ci, out var r) &&
+            byte.TryParse(hex.AsSpan(2, 2), Style, ci, out var g) &&
+            byte.TryParse(hex.AsSpan(4, 2), Style, ci, out var b))
+            return Color.FromArgb(255, r, g, b);
+
+        if (hex.Length == 8 &&
+            byte.TryParse(hex.AsSpan(0, 2), Style, ci, out var a) &&
+            byte.TryParse(hex.AsSpan(2, 2), Style, ci, out var r2) &&
+            byte.TryParse(hex.AsSpan(4, 2), Style, ci, out var g2) &&
+            byte.TryParse(hex.AsSpan(6, 2), Style, ci, out var b2))
+            return Color.FromArgb(a, r2, g2, b2);
+
+        return Color.FromArgb(255, 255, 255, 255);
     }
 
     public void Dispose()
@@ -761,6 +831,7 @@ public class TextSlideRenderer : IDisposable
         if (_disposed) return;
         _disposed = true;
         _bgImage?.Dispose();
+        _gradientCache?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

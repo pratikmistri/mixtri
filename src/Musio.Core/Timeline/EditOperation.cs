@@ -988,6 +988,7 @@ public class ReorderSegmentOperation : IEditOperation
 {
     private readonly int _fromIndex;
     private readonly int _toIndex;
+    private List<TimelineSegment> _previousSegments = [];
 
     public string Description => "Reorder Segment";
 
@@ -1000,6 +1001,7 @@ public class ReorderSegmentOperation : IEditOperation
     public void Execute(TimelineModel model)
     {
         if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return;
+        _previousSegments = [.. model.Segments];
         var segment = model.Segments[_fromIndex];
         model.Segments.RemoveAt(_fromIndex);
         var insertAt = Math.Min(_toIndex, model.Segments.Count);
@@ -1009,11 +1011,11 @@ public class ReorderSegmentOperation : IEditOperation
 
     public void Undo(TimelineModel model)
     {
-        if (_toIndex < 0 || _toIndex >= model.Segments.Count) return;
-        var adjusted = _toIndex > _fromIndex ? _toIndex : Math.Min(_toIndex, model.Segments.Count - 1);
-        var segment = model.Segments[adjusted];
-        model.Segments.RemoveAt(adjusted);
-        model.Segments.Insert(_fromIndex, segment);
+        // Snapshot/restore so undo is always exact, even when Execute clamped an
+        // append-past-end target (where index arithmetic could not be reversed).
+        if (_previousSegments.Count == 0) return;
+        model.Segments.Clear();
+        model.Segments.AddRange(_previousSegments);
         model.RecalculateSegmentPositions();
     }
 }

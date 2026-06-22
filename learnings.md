@@ -2474,3 +2474,48 @@ Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Vide
 - **Approaches tried**: Image background was drawn statically via `DrawScaledToFill`. Added a continuous "Ken Burns" motion: overscale the cover-fit image (~1.14x) for headroom, then a breathing zoom (`1.14 + 0.05*sin(t*0.18)`) plus an elliptical slow pan (`sin/cos` of t, bounded to 70% of the available slack so edges never show). Driven by `progress` → elapsed seconds, same pattern as the gradient wave so it advances with the playhead and matches preview + export.
 - **What worked**: Computing dest Rect directly with scale+pan and bounding pan to the overscale slack guarantees the frame stays fully covered. Removed the now-unused `DrawScaledToFill`. Build verified with VS MSBuild x64 (Musio.Core, exit 0).
 - **What didn't work**: N/A — avoided rotation to prevent exposing image corners (would need more overscale); zoom+pan satisfies the "nothing feels static" goal robustly.
+
+---
+
+## [Review] feature/text-animations pre-PR production review (fleet of review agents)
+
+**Feature/area:** Text slide animations, FCP-style segment editing, slide crossfades, cursor de-stutter, export pipeline.
+
+**Approach:** Ran 5 parallel review agents (core rendering math, export/timeline model, UI/app layer, cross-cutting concurrency/leaks, security) over the diff vs merge-base 8482e29. Established baseline: VS MSBuild ARM64 Debug build succeeds (0 warn/err); all 344 unit tests pass via vstest.console.
+
+**What worked / confirmed real issues:**
+- HIGH: VideoEncoder.cs:535 slide crossfade uses Math.Round on (current.Start - 1 tick)*fps; rounds back to incoming segment frame when boundaries are frame-aligned (whole-second slides/splits), degrading dissolve to a hard cut. Fix: Math.Floor.
+- MED: TextSlideRenderer.cs:280 background image loaded via sync-over-async (LoadAsync...GetResult()) on UI thread in synchronous RenderSlide -> preview/scrub hang for image-backed slides. Pre-load/cache CanvasBitmap off-thread.
+- MED: TextSlideRenderer.cs:183 base gradient render target + ~10 Win2D effects re-allocated every export frame though slide-invariant; cache keyed by (w,h,colors,angle).
+- LOW: TextSlideRenderer.cs:741 ParseColor maps non-6/8-digit hex to white and throws FormatException on bad hex digits mid-render; use TryParse + 3-digit shorthand + default fallback.
+- LOW: EditOperation.cs:766 ReorderSegmentOperation.Undo no-ops for append-past-end target (only used in tests today; app uses MoveSegmentOperation).
+
+**Security:** Clean — no Process.Start/ffmpeg shell exec, no unsafe deserialization (no Project disk persistence exists), no path-traversal sinks, no temp-file/secret issues.
+
+**Build/test commands (verified):**
+- Build: "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe" src\Musio.Tests\Musio.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=ARM64
+- Test: vstest.console.exe on src\Musio.Tests\bin\ARM64\Debug\net9.0-windows10.0.26100.0\Musio.Tests.dll  (dotnet test fails: WinAppSDK PRI task needs VS MSBuild + explicit Platform, not AnyCPU).
+
+**Still requires MANUAL runtime verification (static review cannot confirm):** stop-recording crash (known recurring blocker), Record More appended track data, encoding-path divergence VideoWriter vs VideoEncoder, stop-toolbar light-theme white-on-white, loading old projects that had text-slide video backgrounds.
+
+---
+
+## [Fixes] feature/text-animations pre-PR fixes applied
+
+**Feature/area:** Slide crossfade frame selection, text slide rendering (gradient cache, async image load, color parsing), segment reorder undo.
+
+**Approaches tried / what worked:**
+- VideoEncoder.cs crossfade: changed Math.Round -> Math.Floor for outgoing frame index (start-1tick stays in outgoing segment). Worked.
+- TextSlideRenderer.cs: (a) cached slide-invariant gradient RenderTarget in _gradientCache keyed by (w,h,startColor,endColor,angle), disposed in Dispose; (b) added public async EnsureBackgroundLoadedAsync(slide) to pre-warm bg image off-thread, kept sync fallback for off-UI export path; (c) hardened ParseColor with TryParse + 3/4-digit shorthand + white fallback (no longer throws).
+- EditorPage.xaml.cs: renamed RenderTextSlidePreview -> async RenderTextSlidePreviewAsync, awaits EnsureBackgroundLoadedAsync before sync RenderSlide; ComposePreviewFrameAsync also pre-warms.
+- EditOperation.cs ReorderSegmentOperation: snapshot Segments in Execute, restore in Undo (replaces buggy index arithmetic that no-opped for append-past-end). Added 2 regression tests.
+
+**Verification:** ARM64 Debug build of Musio.App + Musio.Tests clean (only benign MVVMTK0045 warnings). Full suite 346/346 pass (added 2).
+
+**Already fixed on branch (no action):** stop-toolbar light-theme white-on-white — RecordingOverlayWindow.xaml.cs:49 pins RootGrid.RequestedTheme=Dark.
+
+**Verified non-issues (no action):**
+- Old-project compat for removed text-slide video background: no disk persistence of Project/TimelineModel exists; text slides are editor-only; DrawSlideBackground default case degrades to solid colour.
+- Encoding-path divergence: VideoWriter.cs NOT changed on this branch; VideoEncoder.cs changes are transition/crossfade/audio only — no codec/resolution/bitrate divergence introduced.
+
+**NOT fixed (cannot resolve headlessly):** stop-recording crash — requires an interactive capture+stop session to reproduce/verify; static review (UI agent) found the teardown/append flow clean. Needs manual runtime testing before deploy.

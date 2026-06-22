@@ -532,7 +532,12 @@ public class VideoEncoder : IDisposable
                 var crossfade = SlideTransitions.Resolve(timeline, outputTime);
                 if (crossfade.Active)
                 {
-                    int outgoingIndex = (int)Math.Round(crossfade.OutgoingTime.TotalSeconds * _settings.Fps);
+                    // Floor (not Round): the outgoing time is current.Start - 1 tick,
+                    // and rounding would snap back onto the incoming segment's frame
+                    // whenever the boundary is frame-aligned, blending the incoming
+                    // frame with itself. Flooring keeps the sample inside the outgoing
+                    // segment so the dissolve uses its true final frame.
+                    int outgoingIndex = (int)Math.Floor(crossfade.OutgoingTime.TotalSeconds * _settings.Fps);
                     outgoingIndex = Math.Clamp(outgoingIndex, 0, Math.Max(0, totalFrames - 1));
                     using var outgoing = await ComposeAtAsync(outgoingIndex);
                     _transitionRenderer ??= new TransitionRenderer(device);

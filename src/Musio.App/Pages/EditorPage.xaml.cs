@@ -566,7 +566,7 @@ public sealed partial class EditorPage : Page
 
             if (segment is TextSlideSegment slide)
             {
-                RenderTextSlidePreview(slide, localOffset);
+                await RenderTextSlidePreviewAsync(slide, localOffset);
                 return;
             }
 
@@ -618,6 +618,7 @@ public sealed partial class EditorPage : Page
         if (segment is TextSlideSegment slide)
         {
             _textSlideRenderer ??= new TextSlideRenderer();
+            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
             var project = ProjectService.Instance.CurrentProject;
             int w = project?.Width > 0 ? project.Width : 1920;
             int h = project?.Height > 0 ? project.Height : 1080;
@@ -705,9 +706,13 @@ public sealed partial class EditorPage : Page
     private Point _slideDragStart;
     private double _slideDragStartX, _slideDragStartY;
 
-    private void RenderTextSlidePreview(TextSlideSegment slide, TimeSpan localOffset)
+    private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
     {
         _textSlideRenderer ??= new TextSlideRenderer();
+
+        // Pre-load the (image) background off the UI thread so the synchronous
+        // RenderSlide call below never blocks on file I/O + GPU decode.
+        await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
 
         var project = ProjectService.Instance.CurrentProject;
         int width = project?.Width > 0 ? project.Width : 1920;
