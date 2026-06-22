@@ -155,11 +155,63 @@ public record CameraSegment : TimelineSegment
     public WebcamOverlayStyle? StyleOverride { get; set; }
 
     /// <summary>
+    /// When true, the camera overlay animates from its normal position/size up to
+    /// <b>cover the entire screen</b> at the start of the segment, holds fullscreen
+    /// for the body, then animates back to its original position/size at the end.
+    /// </summary>
+    public bool FullscreenEnabled { get; set; }
+
+    /// <summary>Eased ramp-up duration (in source time) from overlay to fullscreen.</summary>
+    public static readonly TimeSpan FullscreenInDuration = TimeSpan.FromSeconds(0.5);
+
+    /// <summary>Eased ramp-down duration (in source time) from fullscreen back to overlay.</summary>
+    public static readonly TimeSpan FullscreenOutDuration = TimeSpan.FromSeconds(0.5);
+
+    /// <summary>
     /// Resolves the effective overlay style for this segment, layering any
     /// <see cref="StyleOverride"/> on top of a base style.
     /// </summary>
     public WebcamOverlayStyle ResolveStyle(WebcamOverlayStyle? baseStyle)
         => StyleOverride ?? baseStyle ?? new WebcamOverlayStyle();
+
+    /// <summary>
+    /// Computes the fullscreen interpolation factor in <c>[0,1]</c> for a given
+    /// source-video time, where <c>0</c> = the normal overlay layout and <c>1</c> =
+    /// covering the whole screen. Ramps in over <see cref="FullscreenInDuration"/> at
+    /// the start, holds at <c>1</c>, then ramps out over <see cref="FullscreenOutDuration"/>
+    /// before the end, easing both ramps with <see cref="CubicBezierEasing.EaseInOutCinematic"/>.
+    /// When the segment is too short for both ramps they are scaled down proportionally
+    /// so they never overlap. Returns <c>0</c> when fullscreen is disabled or the time
+    /// is outside the segment.
+    /// </summary>
+    public float ComputeFullscreenFactor(TimeSpan sourceTime)
+    {
+        if (!FullscreenEnabled) return 0f;
+
+        double dur = Duration.TotalSeconds;
+        if (dur <= 0) return 0f;
+
+        double t = (sourceTime - Start).TotalSeconds;
+        if (t <= 0 || t >= dur) return 0f;
+
+        double inR = FullscreenInDuration.TotalSeconds;
+        double outR = FullscreenOutDuration.TotalSeconds;
+        double total = inR + outR;
+        if (total > dur && total > 0)
+        {
+            double scale = dur / total;
+            inR *= scale;
+            outR *= scale;
+        }
+
+        if (inR > 0 && t < inR)
+            return CubicBezierEasing.EaseInOutCinematic((float)(t / inR));
+
+        if (outR > 0 && t > dur - outR)
+            return CubicBezierEasing.EaseInOutCinematic((float)((dur - t) / outR));
+
+        return 1f;
+    }
 }
 
 /// <summary>

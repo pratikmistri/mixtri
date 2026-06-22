@@ -154,4 +154,65 @@ public sealed class CameraSegmentOperationsTests
         seg.StyleOverride = new WebcamOverlayStyle { Size = 150f };
         Assert.AreEqual(150f, seg.ResolveStyle(baseStyle).Size);
     }
+
+    // ── Fullscreen animation ──────────────────────────────────────────────
+
+    [TestMethod]
+    public void Fullscreen_Disabled_FactorAlwaysZero()
+    {
+        var seg = new CameraSegment { Start = S(0), Duration = S(10), FullscreenEnabled = false };
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(0)));
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(5)));
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(9.99)));
+    }
+
+    [TestMethod]
+    public void Fullscreen_RampsInHoldsAndRampsOut()
+    {
+        var seg = new CameraSegment { Start = S(0), Duration = S(10), FullscreenEnabled = true };
+
+        // Edges and outside are 0.
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(0)));
+        Assert.AreEqual(0f, seg.ComputeFullscreenFactor(S(10)));
+
+        // Mid-in-ramp is strictly between 0 and 1.
+        float inMid = seg.ComputeFullscreenFactor(S(0.25));
+        Assert.IsTrue(inMid > 0f && inMid < 1f, $"in-ramp factor was {inMid}");
+
+        // Body holds at fullscreen.
+        Assert.AreEqual(1f, seg.ComputeFullscreenFactor(S(5)));
+
+        // Mid-out-ramp is strictly between 0 and 1.
+        float outMid = seg.ComputeFullscreenFactor(S(9.75));
+        Assert.IsTrue(outMid > 0f && outMid < 1f, $"out-ramp factor was {outMid}");
+    }
+
+    [TestMethod]
+    public void Fullscreen_ShortSegment_RampsClampSoTheyDoNotOverlap()
+    {
+        // Duration 0.4s < in(0.5)+out(0.5); ramps scale to 0.2s each, no hold.
+        var seg = new CameraSegment { Start = S(0), Duration = S(0.4), FullscreenEnabled = true };
+
+        float start = seg.ComputeFullscreenFactor(S(0.1)); // inside scaled in-ramp
+        Assert.IsTrue(start > 0f && start <= 1f, $"start factor was {start}");
+
+        // The midpoint sits at the peak of the scaled ramps.
+        Assert.AreEqual(1f, seg.ComputeFullscreenFactor(S(0.2)));
+    }
+
+    [TestMethod]
+    public void UpdateProperties_SetsFullscreenAndUndoRestores()
+    {
+        var model = new TimelineModel();
+        var add = new AddCameraSegmentOperation(S(0), S(4));
+        add.Execute(model);
+        Assert.IsFalse(model.CameraSegments[0].FullscreenEnabled);
+
+        var op = new UpdateCameraSegmentPropertiesOperation(add.CreatedId, fullscreenEnabled: true);
+        op.Execute(model);
+        Assert.IsTrue(model.CameraSegments[0].FullscreenEnabled);
+
+        op.Undo(model);
+        Assert.IsFalse(model.CameraSegments[0].FullscreenEnabled);
+    }
 }

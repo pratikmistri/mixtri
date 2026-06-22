@@ -99,11 +99,19 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
-    /// Updates the webcam overlay position/size without rebuilding the compositor.
+    /// Updates the webcam overlay style (position, size) without rebuilding the compositor.
     /// </summary>
     public void UpdateWebcamStyle(WebcamOverlayStyle style)
     {
         _compositor?.UpdateWebcamStyle(style);
+    }
+
+    /// <summary>
+    /// Sets the webcam fullscreen-animation factor in <c>[0,1]</c> for the next render.
+    /// </summary>
+    public void SetWebcamFullscreenFactor(float factor)
+    {
+        _compositor?.SetWebcamFullscreenFactor(factor);
     }
 
     public void Dispose()

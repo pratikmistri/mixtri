@@ -202,18 +202,20 @@ public class VideoEncoder : IDisposable
 
                 // Extract at ~1.5x the overlay display size instead of full resolution.
                 // The webcam overlay is typically 300px but the source may be 1080p+.
+                // When a camera segment animates to fullscreen, extract at native
+                // resolution so the enlarged webcam stays sharp.
                 float displaySize = (compositionConfig.WebcamStyle?.Size ?? 300f) * 1.5f;
                 float minDim = Math.Min(webcamNativeW, webcamNativeH);
-                if (minDim > displaySize)
+                if (ExportEngine.TimelineHasFullscreenCamera(timeline) || minDim <= displaySize)
+                {
+                    webcamExtractW = webcamNativeW;
+                    webcamExtractH = webcamNativeH;
+                }
+                else
                 {
                     float scale = displaySize / minDim;
                     webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
                     webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
-                }
-                else
-                {
-                    webcamExtractW = webcamNativeW;
-                    webcamExtractH = webcamNativeH;
                 }
             }
             catch (Exception ex)
@@ -283,7 +285,8 @@ public class VideoEncoder : IDisposable
                     compositorWidth, compositorHeight,
                     webcamExtractW, webcamExtractH,
                     targetWidth, targetHeight,
-                    needsScaling, timelineMapper, timeline, progress, stopwatch, ct,
+                    needsScaling, timelineMapper, timeline, compositionConfig.WebcamStyle,
+                    progress, stopwatch, ct,
                     onError: (ex, frameIdx) =>
                     {
                         lock (frameErrorLock)
@@ -410,6 +413,7 @@ public class VideoEncoder : IDisposable
         bool needsScaling,
         TimelineMapper? timelineMapper,
         TimelineModel? timeline,
+        WebcamOverlayStyle? baseWebcamStyle,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
@@ -487,15 +491,24 @@ public class VideoEncoder : IDisposable
                 CanvasBitmap? webcamFrame = null;
                 if (webcamComp is not null)
                 {
-                    try
-                    {
-                        webcamFrame = await ExtractFrameFromCompositionAsync(
-                            device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
-                        compositor.SetWebcamFrame(webcamFrame);
-                    }
-                    catch
+                    bool showWebcam = ExportEngine.ApplyCameraSegmentState(
+                        compositor, timeline, baseWebcamStyle, timeSpan);
+                    if (!showWebcam)
                     {
                         compositor.SetWebcamFrame(null);
+                    }
+                    else
+                    {
+                        try
+                        {
+                            webcamFrame = await ExtractFrameFromCompositionAsync(
+                                device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
+                            compositor.SetWebcamFrame(webcamFrame);
+                        }
+                        catch
+                        {
+                            compositor.SetWebcamFrame(null);
+                        }
                     }
                 }
 

@@ -306,8 +306,10 @@
 
         <!-- Editor toolbar -->
         <Grid
+            x:Name="ToolbarGrid"
             Grid.Row="2"
             Padding="8,4"
+            SizeChanged="ToolbarGrid_SizeChanged"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0">
@@ -319,6 +321,7 @@
 
             <!-- Undo / Redo buttons -->
             <StackPanel
+                x:Name="LeftToolbarGroup"
                 Grid.Column="0"
                 Orientation="Horizontal"
                 Spacing="4">
@@ -405,6 +408,7 @@
 
             <!-- Speed controls -->
             <StackPanel
+                x:Name="RightToolbarGroup"
                 Grid.Column="2"
                 Orientation="Horizontal"
                 Spacing="8"
@@ -748,7 +752,7 @@
                     ToolTipService.ToolTip="Frame style (aspect ratio, background, padding)">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE790;" />
-                        <TextBlock Text="Frame style" />
+                        <TextBlock x:Name="FrameStyleLabel" Text="Frame style" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout x:Name="StyleFlyout" Placement="Top">
@@ -1153,7 +1157,7 @@
                     ToolTipService.ToolTip="Cursor settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE7C9;" />
-                        <TextBlock Text="Cursor" />
+                        <TextBlock x:Name="CursorLabel" Text="Cursor" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout x:Name="CursorFlyout" Placement="Top">
@@ -1324,7 +1328,6 @@
                 </Button>
 
                 <!-- Webcam overlay settings (visible when webcam overlay is active) -->
-                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
                 <Button
                     x:Name="WebcamShapeButton"
                     Padding="8,6"
@@ -1332,7 +1335,7 @@
                     ToolTipService.ToolTip="Webcam overlay settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE714;" />
-                        <TextBlock Text="Camera" />
+                        <TextBlock x:Name="CameraLabel" Text="Camera" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout Placement="Top">
@@ -1366,12 +1369,33 @@
                                     x:Name="WebcamMirrorToggle"
                                     Header="Mirror"
                                     Toggled="WebcamMirrorToggle_Toggled" />
+
+                                <!-- Per-segment fullscreen animation -->
+                                <StackPanel x:Name="CameraFullscreenPanel" Spacing="8" Visibility="Collapsed">
+                                    <ToggleSwitch
+                                        x:Name="CameraFullscreenToggle"
+                                        Header="Expand to full screen"
+                                        Toggled="CameraFullscreenToggle_Toggled" />
+                                    <TextBlock
+                                        Text="The selected camera segment grows to fill the screen, holds, then shrinks back."
+                                        TextWrapping="Wrap"
+                                        Opacity="0.7"
+                                        FontSize="12" />
+                                    <Button
+                                        x:Name="CameraDeleteButton"
+                                        HorizontalAlignment="Stretch"
+                                        Click="CameraDeleteButton_Click"
+                                        ToolTipService.ToolTip="Delete the selected camera segment (Del)">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                                            <TextBlock Text="Delete camera segment" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>
                 </Button>
-
-                <AppBarSeparator />
 
                 <Button
                     x:Name="ExportButton"

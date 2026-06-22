@@ -989,6 +989,7 @@ public sealed partial class EditorPage : Page
         // and the active segment's style override is applied. With no camera
         // segments, the legacy always-on global overlay behaviour is preserved.
         var model = ViewModel.Model;
+        float fullscreenFactor = 0f;
         if (model.CameraSegments.Count > 0)
         {
             var active = model.GetCameraSegmentAtSourceTime(position);
@@ -999,7 +1000,9 @@ public sealed partial class EditorPage : Page
             }
             _previewRenderer.UpdateWebcamStyle(
                 active.ResolveStyle(ProjectService.Instance.CurrentComposition?.WebcamStyle));
+            fullscreenFactor = active.ComputeFullscreenFactor(position);
         }
+        _previewRenderer.SetWebcamFullscreenFactor(fullscreenFactor);
 
         CanvasBitmap? webcamFrame = null;
         try
@@ -1010,7 +1013,14 @@ public sealed partial class EditorPage : Page
 
             // Cap extraction size for preview — full native resolution is
             // unnecessarily heavy for a ~300px overlay during editor scrubbing.
+            // When animating toward fullscreen, raise the cap so the enlarged
+            // webcam isn't blurry as it covers the screen.
             float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
+            if (fullscreenFactor > 0f)
+            {
+                float outMax = Math.Max(_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
+                previewCap = Math.Max(previewCap, fullscreenFactor * outMax);
+            }
             int extractW = _webcamWidth;
             int extractH = _webcamHeight;
             float minDim = Math.Min(_webcamWidth, _webcamHeight);
@@ -1491,9 +1501,44 @@ public sealed partial class EditorPage : Page
 
     // ── Camera track handlers ──
 
+    private string? _selectedCameraSegmentId;
+
     private void OnCameraSegmentSelected(object? sender, string? segmentId)
     {
         // Selection is tracked by the control; property editing is via the model/ops.
+        _selectedCameraSegmentId = segmentId;
+        SyncCameraSegmentUI(segmentId);
+    }
+
+    private void SyncCameraSegmentUI(string? segmentId)
+    {
+        if (CameraFullscreenPanel is null) return;
+
+        var seg = segmentId is null
+            ? null
+            : ViewModel.Model.CameraSegments.FirstOrDefault(s => s.Id == segmentId);
+
+        if (seg is null)
+        {
+            CameraFullscreenPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _suppressWebcamEvents = true;
+        CameraFullscreenToggle.IsOn = seg.FullscreenEnabled;
+        _suppressWebcamEvents = false;
+        CameraFullscreenPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CameraFullscreenToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+        if (_selectedCameraSegmentId is null) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateCameraSegmentPropertiesOperation(
+            _selectedCameraSegmentId, fullscreenEnabled: CameraFullscreenToggle.IsOn));
+
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
     }
 
     private void OnCameraSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
@@ -1502,6 +1547,8 @@ public sealed partial class EditorPage : Page
             e.Start, e.End - e.Start, ProjectService.Instance.CurrentProject?.WebcamFilePath);
         ViewModel.UndoRedoManager.Execute(operation);
         Timeline.SelectedCameraSegmentId = operation.CreatedId;
+        _selectedCameraSegmentId = operation.CreatedId;
+        SyncCameraSegmentUI(operation.CreatedId);
     }
 
     private void OnCameraSegmentMoved(object? sender, (string Id, TimeSpan NewStart) e)
@@ -1516,8 +1563,22 @@ public sealed partial class EditorPage : Page
 
     private void OnCameraSegmentRemoveRequested(object? sender, string segmentId)
     {
+        DeleteCameraSegment(segmentId);
+    }
+
+    private void DeleteCameraSegment(string segmentId)
+    {
         ViewModel.UndoRedoManager.Execute(new RemoveCameraSegmentOperation(segmentId));
         Timeline.ClearCameraSelection();
+        _selectedCameraSegmentId = null;
+        SyncCameraSegmentUI(null);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void CameraDeleteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCameraSegmentId is { } id)
+            DeleteCameraSegment(id);
     }
 
     private void UpdateSpeedPanelVisibility()
@@ -1568,6 +1629,14 @@ public sealed partial class EditorPage : Page
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        // If a camera segment is selected, remove it.
+        if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
+        {
+            DeleteCameraSegment(cameraSegId);
+            args.Handled = true;
+            return;
+        }
+
         // If a zoom segment is selected, remove it instead of deleting a clip segment
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {
@@ -2250,6 +2319,7 @@ public sealed partial class EditorPage : Page
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
+        RefreshToolbarResponsiveLayout();
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -2551,6 +2621,7 @@ public sealed partial class EditorPage : Page
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
         var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
         CursorButton.Visibility = vis;
+        RefreshToolbarResponsiveLayout();
 
         if (!hasCursor) return;
 
@@ -3416,14 +3487,68 @@ public sealed partial class EditorPage : Page
 
     // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
 
-    private void InitializeWebcamOverlay(CompositionConfig config)
+    private bool _toolbarLabelsCollapsed;
+
+    private void ToolbarGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
+        UpdateToolbarResponsiveLayout(e.NewSize.Width);
+    }
+
+    /// <summary>
+    /// Re-evaluates the responsive toolbar layout using the current toolbar width.
+    /// Call this after toggling the visibility of any right-group button (Cursor,
+    /// Camera, Text Slide, zoom controls) so the collapse decision stays correct even
+    /// though those changes don't resize the full-width toolbar.
+    /// </summary>
+    private void RefreshToolbarResponsiveLayout()
+    {
+        if (ToolbarGrid is null) return;
+        UpdateToolbarResponsiveLayout(ToolbarGrid.ActualWidth);
+    }
+
+    /// <summary>
+    /// Collapses the Frame style / Cursor / Camera button labels to icon-only when the
+    /// toolbar's two edge groups would otherwise overlap, and restores them when there
+    /// is room again. Toggling the labels never changes the full-width toolbar size, so
+    /// this cannot feed back into <see cref="ToolbarGrid_SizeChanged"/>.
+    /// </summary>
+    private void UpdateToolbarResponsiveLayout(double availableWidth)
+    {
+        if (LeftToolbarGroup is null || RightToolbarGroup is null) return;
+        if (availableWidth <= 0) return;
+
+        // Measure both Auto groups with labels expanded to learn how much room they need.
+        SetToolbarLabelsCollapsed(false);
+        var inf = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+        LeftToolbarGroup.Measure(inf);
+        RightToolbarGroup.Measure(inf);
+
+        const double toolbarPadding = 16; // Grid Padding 8 on each side
+        const double minGap = 16;         // keep a gap so the groups never touch
+        double needed = LeftToolbarGroup.DesiredSize.Width + RightToolbarGroup.DesiredSize.Width
+                        + toolbarPadding + minGap;
+
+        if (needed > availableWidth)
+            SetToolbarLabelsCollapsed(true);
+    }
+
+    private void SetToolbarLabelsCollapsed(bool collapsed)
+    {
+        if (_toolbarLabelsCollapsed == collapsed) return;
+        _toolbarLabelsCollapsed = collapsed;
+        var vis = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        if (FrameStyleLabel is not null) FrameStyleLabel.Visibility = vis;
+        if (CursorLabel is not null) CursorLabel.Visibility = vis;
+        if (CameraLabel is not null) CameraLabel.Visibility = vis;
+    }
+
+    private void InitializeWebcamOverlay(CompositionConfig config)
+    {        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
         if (!_hasWebcamOverlay)
         {
             WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
             WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            RefreshToolbarResponsiveLayout();
             return;
         }
 
@@ -3455,9 +3580,9 @@ public sealed partial class EditorPage : Page
 
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
-        WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         SyncWebcamOverlayUI(style);
         UpdateWebcamOverlayPosition();
+        RefreshToolbarResponsiveLayout();
     }
 
     private void UpdateWebcamOverlayPosition()
@@ -3913,6 +4038,7 @@ public sealed partial class EditorPage : Page
         TextSlideButton.Visibility = Visibility.Visible;
         if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
         if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
+        RefreshToolbarResponsiveLayout();
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -3982,6 +4108,7 @@ public sealed partial class EditorPage : Page
             TextSlideButton.Visibility = Visibility.Collapsed;
         if (ZoomHintText is not null)
             ZoomHintText.Visibility = Visibility.Visible;
+        RefreshToolbarResponsiveLayout();
     }
 
     private static void UpdateSlideColorSwatch(

@@ -48,12 +48,13 @@ public class WebcamCompositor : IDisposable
     private const float ShadowOffsetY = 4f;
 
     private WebcamOverlayStyle _style;
+    private float _fullscreenFactor;
     private bool _disposed;
 
     // Cached GPU resources — invalidated when style or canvas size changes
     private CanvasGeometry? _cachedClipGeometry;
     private CanvasRenderTarget? _cachedShadow;
-    private (float x, float y, float size, int canvasW, int canvasH) _cacheKey;
+    private (Rect dest, float radius, int canvasW, int canvasH, bool shadow) _cacheKey;
 
     public WebcamCompositor(WebcamOverlayStyle style)
     {
@@ -70,7 +71,22 @@ public class WebcamCompositor : IDisposable
     }
 
     /// <summary>
-    /// Renders a webcam frame onto the drawing session at the configured position.
+    /// Sets the fullscreen-animation factor in <c>[0,1]</c> applied on the next render:
+    /// <c>0</c> = the normal overlay, <c>1</c> = covering the entire canvas.
+    /// </summary>
+    public void SetFullscreenFactor(float factor)
+    {
+        factor = Math.Clamp(factor, 0f, 1f);
+        if (Math.Abs(factor - _fullscreenFactor) > float.Epsilon)
+        {
+            _fullscreenFactor = factor;
+            InvalidateCache();
+        }
+    }
+
+    /// <summary>
+    /// Renders a webcam frame onto the drawing session at the configured position,
+    /// applying the current fullscreen-animation factor (see <see cref="SetFullscreenFactor"/>).
     /// </summary>
     public void RenderWebcam(CanvasDrawingSession session, CanvasBitmap webcamFrame,
                              int canvasWidth, int canvasHeight)
@@ -78,35 +94,28 @@ public class WebcamCompositor : IDisposable
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(webcamFrame);
 
-        float size = _style.Size;
-        float margin = _style.Margin;
-
-        // Compute top-left origin of the overlay rectangle
-        var (x, y) = CalculatePosition(canvasWidth, canvasHeight, size, margin);
-
-        var destRect = new Rect(x, y, size, size);
-
-        // Center-crop source frame to square (avoid stretching 16:9 into a square)
         float srcW = (float)webcamFrame.SizeInPixels.Width;
         float srcH = (float)webcamFrame.SizeInPixels.Height;
-        float cropSize = Math.Min(srcW, srcH);
-        var sourceRect = new Rect(
-            (srcW - cropSize) / 2f,
-            (srcH - cropSize) / 2f,
-            cropSize, cropSize);
+
+        var layout = WebcamLayoutCalculator.ComputeAnimatedLayout(
+            _style, canvasWidth, canvasHeight, srcW, srcH, _fullscreenFactor);
+
+        var destRect = layout.Destination;
+        var sourceRect = layout.SourceCrop;
 
         // Ensure cached resources are valid for current layout
-        var key = (x, y, size, canvasWidth, canvasHeight);
+        var key = (destRect, layout.CornerRadius, canvasWidth, canvasHeight, layout.ShadowAlpha > 0f);
         if (_cachedClipGeometry is null || _cacheKey != key)
         {
-            RebuildCache(session.Device, x, y, size);
+            RebuildCache(session.Device, destRect, layout.CornerRadius, layout.ShadowAlpha > 0f);
             _cacheKey = key;
         }
 
-        // Optional shadow behind the overlay (drawn from cache)
-        if (_style.ShadowEnabled && _cachedShadow is not null)
+        // Optional shadow behind the overlay (drawn from cache, faded out as it grows)
+        if (layout.ShadowAlpha > 0f && _cachedShadow is not null)
         {
-            session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY));
+            session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY),
+                _cachedShadow.Bounds, layout.ShadowAlpha);
         }
 
         // Clip webcam frame to the configured shape
@@ -114,8 +123,10 @@ public class WebcamCompositor : IDisposable
         {
             if (_style.Mirrored)
             {
+                float cx = (float)(destRect.X + destRect.Width / 2.0);
+                float cy = (float)(destRect.Y + destRect.Height / 2.0);
                 var transform = session.Transform;
-                session.Transform = Matrix3x2.CreateScale(-1, 1, new Vector2(x + size / 2f, y + size / 2f));
+                session.Transform = Matrix3x2.CreateScale(-1, 1, new Vector2(cx, cy));
                 session.DrawImage(webcamFrame, destRect, sourceRect);
                 session.Transform = transform;
             }
@@ -125,59 +136,33 @@ public class WebcamCompositor : IDisposable
             }
         }
 
-        // Border stroke
-        if (_style.BorderWidth > 0)
+        // Border stroke (fades out as the overlay grows to fullscreen)
+        if (layout.BorderWidth > 0)
         {
             var borderColor = ColorHelper.ParseColor(_style.BorderColor);
-            DrawBorderStroke(session, x, y, size, borderColor);
+            DrawBorderStroke(session, destRect, layout.CornerRadius, layout.BorderWidth, borderColor);
         }
-    }
-
-    private (float x, float y) CalculatePosition(int canvasWidth, int canvasHeight, float size, float margin)
-    {
-        // Custom normalized position overrides the enum preset
-        if (_style.NormalizedX.HasValue && _style.NormalizedY.HasValue)
-        {
-            float x = _style.NormalizedX.Value * canvasWidth;
-            float y = _style.NormalizedY.Value * canvasHeight;
-            // Clamp to keep overlay within canvas
-            x = Math.Clamp(x, 0, Math.Max(0, canvasWidth - size));
-            y = Math.Clamp(y, 0, Math.Max(0, canvasHeight - size));
-            return (x, y);
-        }
-
-        return _style.Position switch
-        {
-            WebcamPosition.TopLeft => (margin, margin),
-            WebcamPosition.TopRight => (canvasWidth - size - margin, margin),
-            WebcamPosition.BottomLeft => (margin, canvasHeight - size - margin),
-            WebcamPosition.BottomRight => (canvasWidth - size - margin, canvasHeight - size - margin),
-            _ => (canvasWidth - size - margin, canvasHeight - size - margin),
-        };
     }
 
     /// <summary>
     /// Rebuilds cached clip geometry and shadow render target for the current layout.
     /// </summary>
-    private void RebuildCache(CanvasDevice device, float x, float y, float size)
+    private void RebuildCache(CanvasDevice device, Rect dest, float radius, bool shadowEnabled)
     {
         InvalidateCache();
-        _cachedClipGeometry = CreateClipGeometry(device, x, y, size);
+        _cachedClipGeometry = CreateClipGeometry(device, dest, radius);
 
-        if (_style.ShadowEnabled)
+        if (shadowEnabled)
         {
-            // Pad all edges so the shadow blur is never clipped when the
-            // overlay is near any canvas edge (left, top, right, or bottom).
+            // Pad all edges so the shadow blur is never clipped near a canvas edge.
             float pad = ShadowBlurAmount + 1;
-            float rtW = x + size + pad + Math.Max(pad, ShadowBlurAmount * 2);
-            float rtH = y + size + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
-            // Ensure the render target is at least large enough for the shape + padding on the
-            // left/top side (when x or y are smaller than the blur radius).
-            rtW = Math.Max(rtW, size + pad * 2);
-            rtH = Math.Max(rtH, size + pad * 2 + ShadowOffsetY);
+            float rtW = (float)dest.X + (float)dest.Width + pad + Math.Max(pad, ShadowBlurAmount * 2);
+            float rtH = (float)dest.Y + (float)dest.Height + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
+            rtW = Math.Max(rtW, (float)dest.Width + pad * 2);
+            rtH = Math.Max(rtH, (float)dest.Height + pad * 2 + ShadowOffsetY);
             _cachedShadow = new CanvasRenderTarget(device, rtW, rtH, 96);
 
-            using var clipGeometry = CreateClipGeometry(device, x, y, size);
+            using var clipGeometry = CreateClipGeometry(device, dest, radius);
             using var commandList = new CanvasCommandList(device);
             using (var maskSession = commandList.CreateDrawingSession())
             {
@@ -209,34 +194,30 @@ public class WebcamCompositor : IDisposable
         _cachedShadow = null;
     }
 
-    private CanvasGeometry CreateClipGeometry(CanvasDevice device, float x, float y, float size)
+    /// <summary>
+    /// Builds the clip geometry as a rounded rectangle. A square rectangle with a
+    /// corner radius equal to half its side is a circle, so this covers all shapes
+    /// and the morph from circle → fullscreen rectangle as the radius collapses to 0.
+    /// </summary>
+    private static CanvasGeometry CreateClipGeometry(CanvasDevice device, Rect dest, float radius)
     {
-        return _style.Shape switch
-        {
-            WebcamShape.Circle => CanvasGeometry.CreateCircle(device, x + size / 2f, y + size / 2f, size / 2f),
-            WebcamShape.RoundedRect => CanvasGeometry.CreateRoundedRectangle(device, x, y, size, size, size * 0.1f, size * 0.1f),
-            WebcamShape.Rectangle => CanvasGeometry.CreateRectangle(device, x, y, size, size),
-            _ => CanvasGeometry.CreateCircle(device, x + size / 2f, y + size / 2f, size / 2f),
-        };
+        float maxRadius = (float)Math.Min(dest.Width, dest.Height) / 2f;
+        radius = Math.Clamp(radius, 0f, maxRadius);
+        if (radius <= 0.01f)
+            return CanvasGeometry.CreateRectangle(device, dest);
+        return CanvasGeometry.CreateRoundedRectangle(
+            device, dest, radius, radius);
     }
 
-    private void DrawBorderStroke(CanvasDrawingSession session, float x, float y, float size, Windows.UI.Color color)
+    private static void DrawBorderStroke(CanvasDrawingSession session, Rect dest,
+                                         float radius, float borderWidth, Windows.UI.Color color)
     {
-        float borderWidth = _style.BorderWidth;
-
-        switch (_style.Shape)
-        {
-            case WebcamShape.Circle:
-                session.DrawCircle(x + size / 2f, y + size / 2f, size / 2f, color, borderWidth);
-                break;
-            case WebcamShape.RoundedRect:
-                float radius = size * 0.1f;
-                session.DrawRoundedRectangle(x, y, size, size, radius, radius, color, borderWidth);
-                break;
-            case WebcamShape.Rectangle:
-                session.DrawRectangle(x, y, size, size, color, borderWidth);
-                break;
-        }
+        float maxRadius = (float)Math.Min(dest.Width, dest.Height) / 2f;
+        radius = Math.Clamp(radius, 0f, maxRadius);
+        if (radius <= 0.01f)
+            session.DrawRectangle(dest, color, borderWidth);
+        else
+            session.DrawRoundedRectangle(dest, radius, radius, color, borderWidth);
     }
 
     public void Dispose()

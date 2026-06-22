@@ -207,19 +207,21 @@ public class ExportEngine
                 webcamComp = new MediaComposition();
                 webcamComp.Clips.Add(webcamClip);
 
-                // Extract at ~1.5x the overlay display size instead of full resolution
+                // Extract at ~1.5x the overlay display size instead of full resolution.
+                // When a camera segment animates to fullscreen, extract at native
+                // resolution so the enlarged webcam stays sharp.
                 float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
                 float minDim = Math.Min(webcamNativeW, webcamNativeH);
-                if (minDim > displaySize)
+                if (TimelineHasFullscreenCamera(timeline) || minDim <= displaySize)
+                {
+                    webcamExtractW = webcamNativeW;
+                    webcamExtractH = webcamNativeH;
+                }
+                else
                 {
                     float scale = displaySize / minDim;
                     webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
                     webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
-                }
-                else
-                {
-                    webcamExtractW = webcamNativeW;
-                    webcamExtractH = webcamNativeH;
                 }
             }
             catch (Exception ex)
@@ -252,16 +254,25 @@ public class ExportEngine
                     // Extract webcam frame and set on compositor
                     if (webcamComp is not null)
                     {
-                        try
-                        {
-                            var webcamFrame = await ExtractFrameFromCompositionAsync(
-                                device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
-                            compositor.SetWebcamFrame(webcamFrame);
-                            previousWebcamFrame = webcamFrame;
-                        }
-                        catch
+                        bool showWebcam = ApplyCameraSegmentState(
+                            compositor, timeline, composition.WebcamStyle, timeSpan);
+                        if (!showWebcam)
                         {
                             compositor.SetWebcamFrame(null);
+                        }
+                        else
+                        {
+                            try
+                            {
+                                var webcamFrame = await ExtractFrameFromCompositionAsync(
+                                    device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
+                                compositor.SetWebcamFrame(webcamFrame);
+                                previousWebcamFrame = webcamFrame;
+                            }
+                            catch
+                            {
+                                compositor.SetWebcamFrame(null);
+                            }
                         }
                     }
 
@@ -506,6 +517,42 @@ public class ExportEngine
         if (timeline.SuppressedClickTicks.Count > 0)
             compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
     }
+
+    /// <summary>
+    /// Applies independent-camera-track state to the compositor for a given source
+    /// time: gates webcam visibility, applies the active segment's style override, and
+    /// sets the fullscreen-animation factor. Returns <c>true</c> when the webcam overlay
+    /// should be shown for this frame. When the timeline has no camera segments the
+    /// legacy always-on overlay behaviour is preserved (factor reset to 0).
+    /// </summary>
+    public static bool ApplyCameraSegmentState(
+        FrameCompositor compositor, TimelineModel? timeline,
+        WebcamOverlayStyle? baseStyle, TimeSpan sourceTime)
+    {
+        ArgumentNullException.ThrowIfNull(compositor);
+
+        if (timeline is null || timeline.CameraSegments.Count == 0)
+        {
+            compositor.SetWebcamFullscreenFactor(0f);
+            return true;
+        }
+
+        var active = timeline.GetCameraSegmentAtSourceTime(sourceTime);
+        if (active is null)
+            return false;
+
+        compositor.UpdateWebcamStyle(active.ResolveStyle(baseStyle));
+        compositor.SetWebcamFullscreenFactor(active.ComputeFullscreenFactor(sourceTime));
+        return true;
+    }
+
+    /// <summary>
+    /// Whether any enabled camera segment uses the fullscreen animation, meaning the
+    /// webcam should be extracted at higher resolution so it stays sharp when enlarged.
+    /// </summary>
+    public static bool TimelineHasFullscreenCamera(TimelineModel? timeline)
+        => timeline is not null
+        && timeline.CameraSegments.Any(c => c.Enabled && c.FullscreenEnabled);
 
     /// <summary>
     /// Creates a <see cref="SegmentCompositor"/> for segment-based timelines.

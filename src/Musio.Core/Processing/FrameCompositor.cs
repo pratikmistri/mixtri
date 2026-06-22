@@ -337,6 +337,14 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Sets the webcam fullscreen-animation factor in <c>[0,1]</c> for the next render.
+    /// </summary>
+    public void SetWebcamFullscreenFactor(float factor)
+    {
+        _webcamCompositor?.SetFullscreenFactor(factor);
+    }
+
+    /// <summary>
     /// Replaces the zoom engine's manual keyframes with the provided list.
     /// Call this when the user adds or removes zoom keyframes in the editor.
     /// </summary>
