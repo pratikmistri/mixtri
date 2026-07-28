@@ -78,11 +78,34 @@ public sealed class CursorShapeResolver
     /// Returns the shape of the cursor currently displayed on screen. Unknown or
     /// custom cursors (and any failure) resolve to <see cref="CursorShape.Arrow"/>.
     /// </summary>
-    public CursorShape Resolve()
+    public CursorShape Resolve() => Resolve(out POINT _, out bool _);
+
+    /// <summary>
+    /// Same as <see cref="Resolve()"/> but also reports the cursor's screen position as
+    /// observed in the same <c>GetCursorInfo</c> call, so a caller that records a shape
+    /// change can stamp it with a matching position. On failure the position is (0,0)
+    /// and <paramref name="positionValid"/> is false.
+    /// </summary>
+    public CursorShape Resolve(out int screenX, out int screenY, out bool positionValid)
+    {
+        var shape = Resolve(out var point, out positionValid);
+        screenX = point.X;
+        screenY = point.Y;
+        return shape;
+    }
+
+    private CursorShape Resolve(out POINT position, out bool positionValid)
     {
         var info = new CURSORINFO { cbSize = CursorInfoSize };
         if (!GetCursorInfo(ref info) || (info.flags & CURSOR_SHOWING) == 0)
+        {
+            position = default;
+            positionValid = false;
             return CursorShape.Arrow;
+        }
+
+        position = info.ptScreenPos;
+        positionValid = true;
 
         return _handleToShape.TryGetValue(info.hCursor, out var shape)
             ? shape
