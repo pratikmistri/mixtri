@@ -18,7 +18,7 @@ public record CompositionConfig
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
     public int OutputFps { get; init; } = 30;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
-    public FitMode FitMode { get; init; } = FitMode.Cover;
+    public FitMode FitMode { get; init; } = FitMode.Contain;
     public double CropAnchorX { get; init; } = 0.5;
     public double CropAnchorY { get; init; } = 0.5;
     public ZoomScope ZoomScope { get; init; } = ZoomScope.Frame;

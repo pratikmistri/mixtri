@@ -7,10 +7,10 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="20">
+    <StackPanel Spacing="20" Margin="0,14,0,18">
 
         <!-- Shape -->
-        <ComboBox
+        <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="WebcamShapeCombo"
             x:FieldModifier="public"
             Header="Shape"
@@ -21,7 +21,7 @@
 
         <!-- Border width -->
         <StackPanel Spacing="6">
-            <TextBlock Text="Border Thickness" />
+            <TextBlock Text="Border Thickness" Style="{StaticResource PropertyLabelStyle}" />
             <Slider
                 x:Name="WebcamBorderSlider"
                 x:FieldModifier="public"
@@ -32,18 +32,18 @@
         </StackPanel>
 
         <!-- Mirror -->
-        <ToggleSwitch
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="WebcamMirrorToggle"
             x:FieldModifier="public"
             Header="Mirror" />
 
         <!-- Per-segment fullscreen animation -->
         <StackPanel x:Name="CameraFullscreenPanel" x:FieldModifier="public" Spacing="12" Visibility="Collapsed">
-            <ToggleSwitch
+            <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
                 x:Name="CameraFullscreenToggle"
                 x:FieldModifier="public"
                 Header="Expand to full screen" />
-            <ComboBox
+            <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
                 x:Name="CameraFullscreenModeCombo"
                 x:FieldModifier="public"
                 Header="Animation"
@@ -56,9 +56,7 @@
                 x:Name="CameraFullscreenHint"
                 x:FieldModifier="public"
                 Text="The selected camera segment grows to fill the screen, holds, then shrinks back."
-                TextWrapping="Wrap"
-                Opacity="0.7"
-                FontSize="12" />
+                Style="{StaticResource PropertyHintStyle}" />
             <Button
                 x:Name="CameraDeleteButton"
                 x:FieldModifier="public"

@@ -1,0 +1,56 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+        Shared typography for the editor property panes.
+
+        Controls in the panes label themselves two different ways: some sit under a
+        hand-written TextBlock, others use the built-in Header property of ComboBox /
+        Slider / ToggleSwitch. Left alone those disagree (the built-in headers default to
+        a larger, primary-coloured font), so every label here routes through the same
+        style and the header templates below reuse it.
+    -->
+
+    <!-- Label above an individual control. -->
+    <Style x:Key="PropertyLabelStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <!-- Heading that introduces a group of related controls. -->
+    <Style x:Key="PropertySectionHeaderStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+    </Style>
+
+    <!-- Secondary explanatory text under a control. -->
+    <Style x:Key="PropertyHintStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!-- Caption under a picker tile (aspect-ratio swatches). -->
+    <Style x:Key="PropertyTileCaptionStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+    </Style>
+
+    <!--
+        Applied via each control's HeaderTemplate so a built-in Header renders with exactly
+        the same typography as a standalone PropertyLabelStyle TextBlock.
+
+        Set HeaderTemplate directly on the control rather than through a wrapper Style: an
+        explicit Style that isn't BasedOn the control's default replaces that default
+        outright and the control loses its real template (a Slider, for example, drops its
+        round thumb for a plain pill).
+    -->
+    <DataTemplate x:Key="PropertyHeaderTemplate">
+        <TextBlock Text="{Binding}" Style="{StaticResource PropertyLabelStyle}" />
+    </DataTemplate>
+
+</ResourceDictionary>

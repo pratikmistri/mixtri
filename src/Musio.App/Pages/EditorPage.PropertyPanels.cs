@@ -133,6 +133,7 @@ public sealed partial class EditorPage
         GradEndColorPicker.ColorChanged += GradEndColorPicker_ColorChanged;
         GradAngleSlider.ValueChanged += StyleSlider_ValueChanged;
         WallpaperGrid.SelectionChanged += WallpaperGrid_SelectionChanged;
+        WallpaperGrid.SizeChanged += WallpaperGrid_SizeChanged;
         PaddingSlider.ValueChanged += StyleSlider_ValueChanged;
         CornerRadiusSlider.ValueChanged += StyleSlider_ValueChanged;
         ShadowToggle.Toggled += StyleToggle_Toggled;

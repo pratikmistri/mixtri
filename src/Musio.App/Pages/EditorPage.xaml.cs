@@ -2920,6 +2920,29 @@ public sealed partial class EditorPage : Page
     // Sentinel tag used to identify the "+" tile in the wallpaper grid.
     private const string AddWallpaperTileTag = "__add_wallpaper__";
 
+    // Wallpaper tiles are laid out in a fixed number of columns that stretch to fill the
+    // pane, rather than at a fixed pixel size that leaves a ragged gap on the right.
+    private const int WallpaperColumns = 3;
+    private const double WallpaperTileAspect = 2.0 / 3.0; // height / width
+
+    /// <summary>
+    /// Divides the grid's width into <see cref="WallpaperColumns"/> equal columns so the
+    /// tiles always span the full pane, re-running whenever the pane is resized.
+    /// </summary>
+    private void WallpaperGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (WallpaperGrid.ItemsPanelRoot is not ItemsWrapGrid panel) return;
+
+        double available = e.NewSize.Width;
+        if (available <= 0) return;
+
+        double itemWidth = Math.Floor(available / WallpaperColumns);
+        if (itemWidth <= 0) return;
+
+        panel.ItemWidth = itemWidth;
+        panel.ItemHeight = Math.Round(itemWidth * WallpaperTileAspect);
+    }
+
     private static Border BuildAddWallpaperTile()
     {
         var plus = new FontIcon
@@ -2931,8 +2954,6 @@ public sealed partial class EditorPage : Page
         };
         return new Border
         {
-            Width = 72,
-            Height = 48,
             CornerRadius = new CornerRadius(4),
             BorderThickness = new Thickness(1),
             BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
@@ -2954,8 +2975,6 @@ public sealed partial class EditorPage : Page
         };
         return new Border
         {
-            Width = 72,
-            Height = 48,
             CornerRadius = new CornerRadius(4),
             Child = img,
         };
@@ -3823,9 +3842,33 @@ public sealed partial class EditorPage : Page
     }
 
     private void SelectFitModeRadio(FitMode fit)
+        => SelectSegmentedByTag(FitModeSegmented, fit.ToString());
+
+    /// <summary>
+    /// Selects the segment carrying <paramref name="tag"/>. Matching on the tag rather
+    /// than a hard-coded index means the segments can be reordered in XAML without
+    /// silently remapping them to the wrong values.
+    /// </summary>
+    private static void SelectSegmentedByTag(CommunityToolkit.WinUI.Controls.Segmented segmented, string tag)
     {
-        FitModeSegmented.SelectedIndex = fit == FitMode.Contain ? 1 : 0;
+        for (int i = 0; i < segmented.Items.Count; i++)
+        {
+            if (segmented.Items[i] is CommunityToolkit.WinUI.Controls.SegmentedItem item
+                && item.Tag is string t && t == tag)
+            {
+                segmented.SelectedIndex = i;
+                return;
+            }
+        }
     }
+
+    /// <summary>The fit mode currently shown in the segmented control.</summary>
+    private FitMode CurrentFitModeSelection()
+        => FitModeSegmented.SelectedItem is CommunityToolkit.WinUI.Controls.SegmentedItem item
+           && item.Tag is string tag
+           && Enum.TryParse<FitMode>(tag, out var fit)
+            ? fit
+            : FitMode.Contain;
 
     private void SelectZoomScopeRadio(ZoomScope scope)
     {
@@ -3854,7 +3897,7 @@ public sealed partial class EditorPage : Page
     {
         bool ratioActive = ratio != AspectRatio.Auto;
         FitModePanel.Visibility = ratioActive ? Visibility.Visible : Visibility.Collapsed;
-        bool coverActive = ratioActive && FitModeSegmented.SelectedIndex == 0;
+        bool coverActive = ratioActive && CurrentFitModeSelection() == FitMode.Cover;
         CropAnchorPanel.Visibility = coverActive ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -3901,8 +3944,25 @@ public sealed partial class EditorPage : Page
         var config = ProjectService.Instance.CurrentComposition;
         if (project is null || config is null) return;
 
+        // Fit mode is ignored while the ratio is Auto, so whatever value was stored was
+        // never a deliberate choice. Default it to Contain the moment a real ratio makes
+        // the control meaningful, so switching ratio keeps the whole frame visible instead
+        // of silently cropping it; Cover stays available as the explicit alternative.
+        bool fitBecomesRelevant = project.AspectRatio == AspectRatio.Auto && ratio != AspectRatio.Auto;
+
         project.AspectRatio = ratio;
         config = config with { AspectRatio = ratio };
+
+        if (fitBecomesRelevant && project.FitMode != FitMode.Contain)
+        {
+            project.FitMode = FitMode.Contain;
+            config = config with { FitMode = FitMode.Contain };
+
+            _suppressAspectRatioEvents = true;
+            try { SelectFitModeRadio(FitMode.Contain); }
+            finally { _suppressAspectRatioEvents = false; }
+        }
+
         ProjectService.Instance.CurrentComposition = config;
 
         UpdateFitAndAnchorVisibility(ratio);

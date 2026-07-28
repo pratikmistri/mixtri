@@ -155,12 +155,11 @@
         </Style>
     </UserControl.Resources>
 
-    <StackPanel Spacing="20">
+    <StackPanel Spacing="20" Margin="0,14,0,18">
 
         <!-- Aspect ratio grid: tile radios showing a proportional preview + label -->
         <StackPanel Spacing="8">
-            <TextBlock Text="Aspect ratio" FontSize="12"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="Aspect ratio" Style="{StaticResource PropertyLabelStyle}" />
             <Grid ColumnSpacing="6" RowSpacing="6">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -187,7 +186,7 @@
                                        HorizontalAlignment="Center" VerticalAlignment="Center"
                                        Foreground="{Binding IsChecked, ElementName=RatioAuto, Converter={StaticResource CheckedToBrush}, ConverterParameter=Glyph}" />
                         </Grid>
-                        <TextBlock Text="Auto" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="Auto" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio16x9" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -202,7 +201,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="16:9" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="16:9" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio9x16" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -217,7 +216,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="9:16" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="9:16" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio1x1" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -232,7 +231,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="1:1" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="1:1" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio4x5" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -247,7 +246,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="4:5" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="4:5" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio4x3" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -262,7 +261,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="4:3" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="4:3" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio3x4" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -277,7 +276,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="3:4" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="3:4" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
                 <RadioButton x:Name="Ratio21x9" x:FieldModifier="public" GroupName="AspectRatioGrid"
@@ -292,7 +291,7 @@
                                     BorderThickness="1.5" CornerRadius="2"
                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
-                        <TextBlock Text="21:9" FontSize="11" HorizontalAlignment="Center" />
+                        <TextBlock Text="21:9" Style="{StaticResource PropertyTileCaptionStyle}" />
                     </StackPanel>
                 </RadioButton>
             </Grid>
@@ -300,21 +299,19 @@
 
         <!-- Fit mode: binary choice rendered as a segmented control -->
         <StackPanel x:Name="FitModePanel" x:FieldModifier="public" Spacing="8">
-            <TextBlock Text="Fit" FontSize="12"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="Fit" Style="{StaticResource PropertyLabelStyle}" />
             <ctk:Segmented x:Name="FitModeSegmented" x:FieldModifier="public"
                            HorizontalAlignment="Stretch">
-                <ctk:SegmentedItem Content="Cover" Tag="Cover"
-                                   ToolTipService.ToolTip="Fill the canvas; source is cropped to fit" />
                 <ctk:SegmentedItem Content="Contain" Tag="Contain"
                                    ToolTipService.ToolTip="Fit entire source; gap filled with background" />
+                <ctk:SegmentedItem Content="Cover" Tag="Cover"
+                                   ToolTipService.ToolTip="Fill the canvas; source is cropped to fit" />
             </ctk:Segmented>
         </StackPanel>
 
         <!-- Zoom scope: binary choice rendered as a segmented control -->
         <StackPanel x:Name="ZoomScopePanel" x:FieldModifier="public" Spacing="8">
-            <TextBlock Text="Zoom scope" FontSize="12"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="Zoom scope" Style="{StaticResource PropertyLabelStyle}" />
             <ctk:Segmented x:Name="ZoomScopeSegmented" x:FieldModifier="public"
                            HorizontalAlignment="Stretch">
                 <ctk:SegmentedItem Content="Whole frame" Tag="Frame"
@@ -327,8 +324,7 @@
         <!-- Crop position picker: single rectangle subdivided into 9 cells.
              The selected cell fills with the accent color. -->
         <StackPanel x:Name="CropAnchorPanel" x:FieldModifier="public" Spacing="8">
-            <TextBlock Text="Crop position" FontSize="12"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="Crop position" Style="{StaticResource PropertyLabelStyle}" />
             <Border HorizontalAlignment="Left"
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     BorderThickness="1"
@@ -416,17 +412,17 @@
         <Border Height="1" Margin="0,6"
                 Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-        <TextBlock Text="Background" FontWeight="SemiBold" FontSize="13" />
+        <TextBlock Text="Background" Style="{StaticResource PropertySectionHeaderStyle}" />
 
         <!-- Preset picker -->
-        <ComboBox
+        <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="PresetCombo"
             x:FieldModifier="public"
             Header="Preset"
             HorizontalAlignment="Stretch" />
 
         <!-- Background type -->
-        <ComboBox
+        <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="BgTypeCombo"
             x:FieldModifier="public"
             Header="Background"
@@ -439,7 +435,7 @@
 
         <!-- Primary color -->
         <StackPanel x:Name="ColorPanel" x:FieldModifier="public" Spacing="6">
-            <TextBlock Text="Color" FontSize="12" />
+            <TextBlock Text="Color" Style="{StaticResource PropertyLabelStyle}" />
             <DropDownButton x:Name="BgColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
@@ -465,7 +461,7 @@
 
         <!-- Gradient end color (only visible for Gradient type) -->
         <StackPanel x:Name="GradientPanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
-            <TextBlock Text="Gradient End Color" FontSize="12" />
+            <TextBlock Text="Gradient End Color" Style="{StaticResource PropertyLabelStyle}" />
             <DropDownButton x:Name="GradEndColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
@@ -488,7 +484,7 @@
                 </DropDownButton.Flyout>
             </DropDownButton>
 
-            <Slider
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
                 x:Name="GradAngleSlider"
                 x:FieldModifier="public"
                 Header="Gradient Angle"
@@ -498,10 +494,11 @@
 
         <!-- Wallpaper picker (only visible for Wallpaper/Image type) -->
         <StackPanel x:Name="WallpaperPanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
-            <TextBlock Text="Wallpaper" FontSize="12" />
+            <TextBlock Text="Wallpaper" Style="{StaticResource PropertyLabelStyle}" />
             <!-- Unbounded height with scrolling disabled: the grid grows to fit its tiles
                  and the panel's own ScrollViewer handles the overflow, so the user never
-                 gets a second scrollbar nested inside the pane. -->
+                 gets a second scrollbar nested inside the pane.
+                 Tiles are sized to the pane width in WallpaperGrid_SizeChanged. -->
             <GridView
                 x:Name="WallpaperGrid"
                 x:FieldModifier="public"
@@ -510,11 +507,28 @@
                 ScrollViewer.VerticalScrollBarVisibility="Disabled"
                 ScrollViewer.HorizontalScrollMode="Disabled"
                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                SelectionMode="Single" />
+                SelectionMode="Single">
+                <GridView.ItemContainerStyle>
+                    <!-- BasedOn keeps the stock selection/hover visuals; a bare Style would
+                         replace the default outright and drop them. -->
+                    <Style TargetType="GridViewItem" BasedOn="{StaticResource DefaultGridViewItemStyle}">
+                        <!-- The gutter lives on the container, not the tile inside it: the
+                             selection visual is drawn around the container, so insetting
+                             the tile instead would leave the selection box hanging into the
+                             gap and touching the neighbouring tile. -->
+                        <Setter Property="Margin" Value="0,0,6,6" />
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="MinWidth" Value="0" />
+                        <Setter Property="MinHeight" Value="0" />
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+                    </Style>
+                </GridView.ItemContainerStyle>
+            </GridView>
         </StackPanel>
 
         <!-- Padding -->
-        <Slider
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="PaddingSlider"
             x:FieldModifier="public"
             Header="Padding"
@@ -522,7 +536,7 @@
             StepFrequency="4" />
 
         <!-- Corner radius -->
-        <Slider
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="CornerRadiusSlider"
             x:FieldModifier="public"
             Header="Corner Radius"
@@ -530,13 +544,13 @@
             StepFrequency="2" />
 
         <!-- Shadow -->
-        <ToggleSwitch
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="ShadowToggle"
             x:FieldModifier="public"
             Header="Shadow" />
 
         <!-- Border -->
-        <ToggleSwitch
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="BorderToggle"
             x:FieldModifier="public"
             Header="Border" />

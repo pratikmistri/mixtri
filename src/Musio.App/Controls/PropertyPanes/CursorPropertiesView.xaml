@@ -42,11 +42,11 @@
         </Style>
     </UserControl.Resources>
 
-    <StackPanel Spacing="20">
+    <StackPanel Spacing="20" Margin="0,14,0,18">
 
         <!-- Cursor type: Mouse / Touch -->
         <StackPanel Spacing="6">
-            <TextBlock Text="Type" FontSize="12" />
+            <TextBlock Text="Type" Style="{StaticResource PropertyLabelStyle}" />
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <RadioButton
                     x:Name="CursorTypeMouse"
@@ -62,7 +62,7 @@
         </StackPanel>
 
         <!-- Size slider -->
-        <Slider
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="CursorSizeSlider"
             x:FieldModifier="public"
             Header="Size"
@@ -71,14 +71,14 @@
             StepFrequency="0.25" />
 
         <!-- Tilt toggle (mouse cursor only) -->
-        <ToggleSwitch
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
             x:Name="CursorTiltToggle"
             x:FieldModifier="public"
             Header="Tilt" />
 
         <!-- Color presets -->
         <StackPanel Spacing="6">
-            <TextBlock Text="Color" FontSize="12" />
+            <TextBlock Text="Color" Style="{StaticResource PropertyLabelStyle}" />
             <StackPanel x:Name="CursorColorPanel" x:FieldModifier="public" Orientation="Horizontal" Spacing="8">
                 <RadioButton GroupName="CursorColor" Tag="#FFFFFF" Background="White"
                              Style="{StaticResource CursorColorSwatchStyle}"
