@@ -7,7 +7,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="12">
+    <StackPanel Spacing="20">
 
         <!-- Shape -->
         <ComboBox
@@ -20,7 +20,7 @@
         </ComboBox>
 
         <!-- Border width -->
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Border Thickness" />
             <Slider
                 x:Name="WebcamBorderSlider"
@@ -38,7 +38,7 @@
             Header="Mirror" />
 
         <!-- Per-segment fullscreen animation -->
-        <StackPanel x:Name="CameraFullscreenPanel" x:FieldModifier="public" Spacing="8" Visibility="Collapsed">
+        <StackPanel x:Name="CameraFullscreenPanel" x:FieldModifier="public" Spacing="12" Visibility="Collapsed">
             <ToggleSwitch
                 x:Name="CameraFullscreenToggle"
                 x:FieldModifier="public"

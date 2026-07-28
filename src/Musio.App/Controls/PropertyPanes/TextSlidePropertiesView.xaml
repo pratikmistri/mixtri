@@ -8,9 +8,9 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="14">
+    <StackPanel Spacing="20">
 
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Text" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <TextBox
@@ -22,7 +22,7 @@
                 PlaceholderText="Slide text..." />
         </StackPanel>
 
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Animation" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ComboBox
@@ -49,7 +49,7 @@
             </ComboBox>
         </StackPanel>
 
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Font" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ComboBox
@@ -78,7 +78,7 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Spacing="4">
+            <StackPanel Grid.Column="0" Spacing="6">
                 <TextBlock Text="Duration (s)" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <NumberBox
@@ -89,7 +89,7 @@
                     SpinButtonPlacementMode="Inline"
                     SmallChange="0.5" />
             </StackPanel>
-            <StackPanel Grid.Column="1" Spacing="4">
+            <StackPanel Grid.Column="1" Spacing="6">
                 <TextBlock Text="Font Size" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <NumberBox
@@ -103,7 +103,7 @@
         </Grid>
 
         <!-- Text color -->
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Text Color" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <DropDownButton x:Name="SlideTextColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
@@ -130,7 +130,7 @@
         </StackPanel>
 
         <!-- Formatting: bold / italic / alignment -->
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Formatting" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <StackPanel Orientation="Horizontal" Spacing="6">
@@ -164,7 +164,7 @@
         </StackPanel>
 
         <!-- Background type -->
-        <StackPanel Spacing="4">
+        <StackPanel Spacing="6">
             <TextBlock Text="Background" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ComboBox
@@ -178,7 +178,7 @@
         </StackPanel>
 
         <!-- Solid color / gradient start color -->
-        <StackPanel x:Name="SlideColorPanel" x:FieldModifier="public" Spacing="4">
+        <StackPanel x:Name="SlideColorPanel" x:FieldModifier="public" Spacing="6">
             <TextBlock x:Name="SlideColorLabel" x:FieldModifier="public" Text="Color" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <DropDownButton x:Name="SlideBgColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
@@ -205,15 +205,21 @@
         </StackPanel>
 
         <!-- Gradient controls -->
-        <StackPanel x:Name="SlideGradientPanel" x:FieldModifier="public" Spacing="8" Visibility="Collapsed">
+        <StackPanel x:Name="SlideGradientPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
             <TextBlock Text="Presets" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <!-- Grows to fit its tiles; the panel's ScrollViewer owns the overflow so the
+                 user never gets a second scrollbar nested inside the pane. -->
             <GridView
                 x:Name="SlideGradientPresets"
                 x:FieldModifier="public"
-                MaxHeight="120"
+                Padding="0"
+                ScrollViewer.VerticalScrollMode="Disabled"
+                ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                ScrollViewer.HorizontalScrollMode="Disabled"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                 SelectionMode="Single" />
-            <StackPanel Spacing="4">
+            <StackPanel Spacing="6">
                 <TextBlock Text="End Color" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <DropDownButton x:Name="SlideGradEndColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
@@ -247,7 +253,7 @@
         </StackPanel>
 
         <!-- Image picker -->
-        <StackPanel x:Name="SlideImagePanel" x:FieldModifier="public" Spacing="4" Visibility="Collapsed">
+        <StackPanel x:Name="SlideImagePanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
             <Button x:Name="ChooseSlideImageButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xEB9F;" />

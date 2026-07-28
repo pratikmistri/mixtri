@@ -155,10 +155,10 @@
         </Style>
     </UserControl.Resources>
 
-    <StackPanel Spacing="14">
+    <StackPanel Spacing="20">
 
         <!-- Aspect ratio grid: tile radios showing a proportional preview + label -->
-        <StackPanel Spacing="6">
+        <StackPanel Spacing="8">
             <TextBlock Text="Aspect ratio" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <Grid ColumnSpacing="6" RowSpacing="6">
@@ -299,7 +299,7 @@
         </StackPanel>
 
         <!-- Fit mode: binary choice rendered as a segmented control -->
-        <StackPanel x:Name="FitModePanel" x:FieldModifier="public" Spacing="6">
+        <StackPanel x:Name="FitModePanel" x:FieldModifier="public" Spacing="8">
             <TextBlock Text="Fit" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ctk:Segmented x:Name="FitModeSegmented" x:FieldModifier="public"
@@ -312,7 +312,7 @@
         </StackPanel>
 
         <!-- Zoom scope: binary choice rendered as a segmented control -->
-        <StackPanel x:Name="ZoomScopePanel" x:FieldModifier="public" Spacing="6">
+        <StackPanel x:Name="ZoomScopePanel" x:FieldModifier="public" Spacing="8">
             <TextBlock Text="Zoom scope" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ctk:Segmented x:Name="ZoomScopeSegmented" x:FieldModifier="public"
@@ -326,7 +326,7 @@
 
         <!-- Crop position picker: single rectangle subdivided into 9 cells.
              The selected cell fills with the accent color. -->
-        <StackPanel x:Name="CropAnchorPanel" x:FieldModifier="public" Spacing="6">
+        <StackPanel x:Name="CropAnchorPanel" x:FieldModifier="public" Spacing="8">
             <TextBlock Text="Crop position" FontSize="12"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <Border HorizontalAlignment="Left"
@@ -411,7 +411,10 @@
             </Border>
         </StackPanel>
 
-        <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        <!-- Section break: extra margin gives the divider room to read as a real
+             separator rather than another row in the stack. -->
+        <Border Height="1" Margin="0,6"
+                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
         <TextBlock Text="Background" FontWeight="SemiBold" FontSize="13" />
 
@@ -435,7 +438,7 @@
         </ComboBox>
 
         <!-- Primary color -->
-        <StackPanel x:Name="ColorPanel" x:FieldModifier="public" Spacing="4">
+        <StackPanel x:Name="ColorPanel" x:FieldModifier="public" Spacing="6">
             <TextBlock Text="Color" FontSize="12" />
             <DropDownButton x:Name="BgColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -461,7 +464,7 @@
         </StackPanel>
 
         <!-- Gradient end color (only visible for Gradient type) -->
-        <StackPanel x:Name="GradientPanel" x:FieldModifier="public" Spacing="4" Visibility="Collapsed">
+        <StackPanel x:Name="GradientPanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
             <TextBlock Text="Gradient End Color" FontSize="12" />
             <DropDownButton x:Name="GradEndColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -494,12 +497,19 @@
         </StackPanel>
 
         <!-- Wallpaper picker (only visible for Wallpaper/Image type) -->
-        <StackPanel x:Name="WallpaperPanel" x:FieldModifier="public" Spacing="4" Visibility="Collapsed">
+        <StackPanel x:Name="WallpaperPanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
             <TextBlock Text="Wallpaper" FontSize="12" />
+            <!-- Unbounded height with scrolling disabled: the grid grows to fit its tiles
+                 and the panel's own ScrollViewer handles the overflow, so the user never
+                 gets a second scrollbar nested inside the pane. -->
             <GridView
                 x:Name="WallpaperGrid"
                 x:FieldModifier="public"
-                MaxHeight="180"
+                Padding="0"
+                ScrollViewer.VerticalScrollMode="Disabled"
+                ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                ScrollViewer.HorizontalScrollMode="Disabled"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                 SelectionMode="Single" />
         </StackPanel>
 
