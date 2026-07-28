@@ -14,8 +14,8 @@ public record CompositionConfig
     public BackgroundStyle Background { get; init; } = new();
     public CursorStyle Cursor { get; init; } = new();
     public AutoZoomConfig Zoom { get; init; } = new();
-    public SmoothingAlgorithm SmoothingAlgorithm { get; init; } = SmoothingAlgorithm.SpringPhysics;
-    public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.UltraSmooth;
+    public SmoothingAlgorithm SmoothingAlgorithm { get; init; } = SmoothingAlgorithm.ZeroPhaseSpring;
+    public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
     public int OutputFps { get; init; } = 30;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
     public FitMode FitMode { get; init; } = FitMode.Cover;
@@ -108,6 +108,12 @@ public class FrameCompositor : IDisposable
         {
             Algorithm = config.SmoothingAlgorithm,
             Strength = config.SmoothingStrength,
+            // De-stutter is disabled: its arc-length re-timing pre-pass flattens the
+            // cursor's velocity profile, dropping peak speed to ~17-20% of real speed
+            // (measured) regardless of ease strength — which makes short, quick moves play
+            // in slow motion. The Spring filter's low-pass already smooths trackpad
+            // micro-stalls without that speed penalty.
+            DestutterEnabled = false,
         };
 
         // Initialize optional overlay components from config
@@ -190,6 +196,7 @@ public class FrameCompositor : IDisposable
                 TimestampSeconds = p.TimestampSeconds - mouseToVideoOffsetSeconds,
                 VelocityX = p.VelocityX * coordScaleX,
                 VelocityY = p.VelocityY * coordScaleY,
+                Shape = p.Shape,
             };
         }
 
@@ -296,6 +303,7 @@ public class FrameCompositor : IDisposable
                     TimestampSeconds = i * dt,
                     VelocityX = 0,
                     VelocityY = 0,
+                    Shape = lastPos.Shape,
                 });
             }
         }
@@ -334,6 +342,22 @@ public class FrameCompositor : IDisposable
     {
         if (_webcamCompositor is not null)
             _webcamCompositor.UpdateStyle(style);
+    }
+
+    /// <summary>
+    /// Sets the webcam fullscreen-animation factor in <c>[0,1]</c> for the next render.
+    /// </summary>
+    public void SetWebcamFullscreenFactor(float factor)
+    {
+        _webcamCompositor?.SetFullscreenFactor(factor);
+    }
+
+    /// <summary>
+    /// Sets the webcam overlay opacity in <c>[0,1]</c> for the next render (fade in/out).
+    /// </summary>
+    public void SetWebcamOverlayOpacity(float opacity)
+    {
+        _webcamCompositor?.SetOverlayOpacity(opacity);
     }
 
     /// <summary>
@@ -832,6 +856,7 @@ public class FrameCompositor : IDisposable
             TimestampSeconds = cursorPos.TimestampSeconds,
             VelocityX = cursorPos.VelocityX * scaleX,
             VelocityY = cursorPos.VelocityY * scaleY,
+            Shape = cursorPos.Shape,
         };
 
         // Collect temporally-relevant clicks with transformed positions

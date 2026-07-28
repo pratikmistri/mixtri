@@ -5,6 +5,11 @@ namespace Musio.Core.Export;
 /// <summary>
 /// Maps output frame indices to source timestamps, accounting for timeline edits
 /// (trim, speed changes, and cut/deleted segments).
+///
+/// <para>This mapper serves the legacy (segment-free) pipeline and supplies the total
+/// output frame count. Segment-based timelines are mapped frame-by-frame by
+/// <see cref="SegmentFrameComposer"/>, which is the single composition path shared by
+/// the MP4 and GIF exporters.</para>
 /// </summary>
 public class TimelineMapper
 {
@@ -22,7 +27,9 @@ public class TimelineMapper
 
     /// <summary>Total output duration after all edits (trim, cuts, speed).</summary>
     public TimeSpan EffectiveDuration =>
-        TimeSpan.FromSeconds(_outputSegments.Sum(s => s.OutputDuration));
+        _timeline.Segments.Count > 0
+            ? _timeline.TotalSegmentsDuration
+            : TimeSpan.FromSeconds(_outputSegments.Sum(s => s.OutputDuration));
 
     public TimelineMapper(TimelineModel timeline, int fps)
     {
@@ -38,6 +45,7 @@ public class TimelineMapper
     /// <summary>
     /// Maps an output frame index to the corresponding source time in seconds.
     /// Returns the source time accounting for trim, speed changes, and cuts.
+    /// Used by the legacy (non-segment) pipeline.
     /// </summary>
     public double GetSourceTimeForOutputFrame(int outputFrame)
     {
@@ -206,6 +214,11 @@ public class TimelineMapper
 
     private int ComputeTotalOutputFrames()
     {
+        // Segment-based timelines (with text slides) define their own total
+        // duration that includes non-video segments.
+        if (_timeline.Segments.Count > 0)
+            return Math.Max(1, (int)(_timeline.TotalSegmentsDuration.TotalSeconds * _fps));
+
         double totalOutputSeconds = 0;
         foreach (var seg in _outputSegments)
             totalOutputSeconds += seg.OutputDuration;

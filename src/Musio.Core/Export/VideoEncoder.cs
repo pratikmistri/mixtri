@@ -51,9 +51,9 @@ public class VideoEncoder : IDisposable
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
     private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
 
-    // Serializes frame compositing so shared state (compositor, frameReader)
-    // is never accessed concurrently by overlapping SampleRequested callbacks
-    // from the MediaStreamSource pipeline.
+    // Serializes frame compositing so the shared SegmentFrameComposer (and the
+    // per-source compositors it owns) is never accessed concurrently by overlapping
+    // SampleRequested callbacks from the MediaStreamSource pipeline.
     private readonly SemaphoreSlim _frameSemaphore = new(1, 1);
 
     public VideoEncoder(ExportSettings settings)
@@ -98,50 +98,19 @@ public class VideoEncoder : IDisposable
         {
         ThrowIfDeviceLost();
 
-        // Open source video for dimensions and audio tracks.
-        // If the MP4 is missing or corrupt (FinalizeAsync failure during recording),
-        // fall back to project metadata — JPEG frames can still provide visuals.
-        MediaClip? sourceClip = null;
-        int sourceWidth = project.Width > 0 ? project.Width : 1920;
-        int sourceHeight = project.Height > 0 ? project.Height : 1080;
-
-        try
-        {
-            var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
-            sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
-            var sourceProps = sourceClip.GetVideoEncodingProperties();
-            sourceWidth = (int)sourceProps.Width;
-            sourceHeight = (int)sourceProps.Height;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine(
-                $"[VideoEncoder] Failed to open source video (will use JPEG frames): {ex.Message}");
-        }
-
-        // Initialize compositor (same pipeline as editor preview)
-        using var compositor = new FrameCompositor(compositionConfig);
-        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
-            project.MouseToVideoOffsetSeconds, project.CropOffsetX, project.CropOffsetY, project.DpiScale);
-
-        // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
-        if (timeline is not null)
-        {
-            var manualKeyframes = timeline.ZoomKeyframes
-                .Where(k => k.IsManual)
-                .ToList();
-            compositor.SyncManualZoomKeyframes(manualKeyframes);
-
-            if (timeline.SuppressedClickTicks.Count > 0)
-                compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
-        }
+        // Segment-aware frame composition, shared with the GIF exporter. It owns the
+        // per-source render contexts (frame reader + compositor + webcam) so appended
+        // recordings render from their own files, with their own cursor data, zoom
+        // keyframes, and per-segment frame/cursor style overrides.
+        using var composer = await SegmentFrameComposer.CreateAsync(
+            project, mouseData, compositionConfig, timeline, timelineMapper, _settings.Fps, ct);
 
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).
         int totalFrames = timelineMapper?.TotalOutputFrames
             ?? (int)(project.Duration.TotalSeconds * _settings.Fps);
-        int compositorWidth = compositor.OutputWidth;
-        int compositorHeight = compositor.OutputHeight;
+        int compositorWidth = composer.OutputWidth;
+        int compositorHeight = composer.OutputHeight;
 
         // Encode at the user-selected resolution while preserving the
         // compositor's aspect ratio (the compositor has already applied
@@ -154,83 +123,28 @@ public class VideoEncoder : IDisposable
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
         PreflightRenderTargetMemory(targetWidth, targetHeight, needsScaling);
 
-        // Load source frames from .frames/ JPEGs using the RECORDING FPS so
-        // frame indices map correctly to the on-disk frame numbering.
-        int sourceFps = project.Fps > 0 ? project.Fps : _settings.Fps;
-        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, sourceFps);
-
-        // Fallback: reuse single MediaComposition for seeking
-        MediaComposition? sourceComp = null;
-        if (frameReader is null && sourceClip is not null)
-        {
-            try
-            {
-                var fallbackFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
-                sourceComp = new MediaComposition();
-                sourceComp.Clips.Add(await MediaClip.CreateFromFileAsync(fallbackFile));
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[VideoEncoder] Fallback composition failed: {ex.Message}");
-            }
-        }
-
-        if (frameReader is null && sourceComp is null)
-            throw new InvalidOperationException(
-                "Cannot export: no JPEG frames or valid source video found.");
-
-        // Prepare webcam source (opened once, reused per frame)
-        MediaComposition? webcamComp = null;
-        int webcamExtractW = 0, webcamExtractH = 0;
-        if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
-        {
-            try
-            {
-                var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
-                var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
-                var webcamProps = webcamClip.GetVideoEncodingProperties();
-                int webcamNativeW = (int)webcamProps.Width;
-                int webcamNativeH = (int)webcamProps.Height;
-                webcamComp = new MediaComposition();
-                webcamComp.Clips.Add(webcamClip);
-
-                // Extract at ~1.5x the overlay display size instead of full resolution.
-                // The webcam overlay is typically 300px but the source may be 1080p+.
-                float displaySize = (compositionConfig.WebcamStyle?.Size ?? 300f) * 1.5f;
-                float minDim = Math.Min(webcamNativeW, webcamNativeH);
-                if (minDim > displaySize)
-                {
-                    float scale = displaySize / minDim;
-                    webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
-                    webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
-                }
-                else
-                {
-                    webcamExtractW = webcamNativeW;
-                    webcamExtractH = webcamNativeH;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[VideoEncoder] Failed to load webcam video: {ex.Message}");
-            }
-        }
-
-        // Determine if we need an audio mux pass
-        bool hasAudio = (sourceClip?.EmbeddedAudioTracks.Count > 0)
-            || (project.AudioFilePaths is { Count: > 0 });
+        // Resolve which audio sources the edited timeline actually needs, and where each
+        // belongs on the output. Placements whose media has no audio are dropped here so
+        // a silent recording never pays for the mux pass.
+        var audioPlacements = await ResolveAvailableAudioAsync(
+            ExportAudioPlan.Build(project, timeline, timelineMapper));
+        bool hasAudio = audioPlacements.Count > 0;
+        WarnAboutSpeedAdjustedAudio(audioPlacements);
 
         // Video-only output path (audio muxed in second pass if needed)
         string videoOnlyPath = hasAudio
             ? Path.Combine(Path.GetDirectoryName(outputPath)!, $".musio_video_{Guid.NewGuid():N}.mp4")
             : outputPath;
 
+        // Tracks in-flight frame tasks so the finally block can guarantee none is still
+        // using the composer when it is disposed (including on the failure path).
+        var pendingSamples = new List<Task>();
+        var pendingSamplesLock = new object();
+
         try
         {
             // ── Pass 1: Direct composited-frame encoding (no temp files) ──
             int currentFrame = 0;
-            var pendingSamples = new List<Task>();
-            var pendingSamplesLock = new object();
             // Captures the first exception thrown inside ProduceSampleAsync so the
             // export can fail loudly with a real error instead of silently producing
             // a truncated video (the MediaStreamSource treats Sample=null as EOS,
@@ -272,12 +186,11 @@ public class VideoEncoder : IDisposable
                 var deferral = args.Request.GetDeferral();
                 var task = ProduceSampleAsync(
                     args.Request, deferral, frame, totalFrames,
-                    compositor, frameReader, sourceComp, webcamComp,
-                    device, project.VideoFilePath, sourceWidth, sourceHeight,
+                    composer, device,
                     compositorWidth, compositorHeight,
-                    webcamExtractW, webcamExtractH,
                     targetWidth, targetHeight,
-                    needsScaling, timelineMapper, progress, stopwatch, ct,
+                    needsScaling,
+                    progress, stopwatch, ct,
                     onError: (ex, frameIdx) =>
                     {
                         lock (frameErrorLock)
@@ -355,17 +268,31 @@ public class VideoEncoder : IDisposable
                 progress?.Report(new ExportProgress(
                     totalFrames, totalFrames, 99, stopwatch.Elapsed, TimeSpan.FromSeconds(2)));
 
-                await MuxAudioAsync(videoOnlyPath, outputPath, sourceClip, project, timelineMapper, ct);
+                await MuxAudioAsync(videoOnlyPath, outputPath, audioPlacements, ct);
             }
         }
         finally
         {
-            frameReader?.Dispose();
-
-            // Release MediaComposition/MediaClip native resources to avoid
-            // holding video file handles and leaking memory.
-            sourceComp?.Clips.Clear();
-            webcamComp?.Clips.Clear();
+            // Never dispose the composer (owned by the enclosing `using`) while a sample
+            // task might still be compositing with it — including on the failure path,
+            // where the transcode threw before the drain above.
+            Task[] outstanding;
+            lock (pendingSamplesLock)
+            {
+                outstanding = pendingSamples.ToArray();
+            }
+            if (outstanding.Length > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(outstanding).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Frame failures are reported through firstFrameError; here we only
+                    // need the tasks to have stopped touching shared state.
+                }
+            }
 
             // Clean up temp video-only file
             if (hasAudio)
@@ -385,86 +312,43 @@ public class VideoEncoder : IDisposable
 
     /// <summary>
     /// Produces a single composited video sample for the <see cref="MediaStreamSource"/>.
-    /// Runs the same pipeline as the editor preview: load source JPEG → composite → pixel bytes.
+    /// Frame composition itself lives in <see cref="SegmentFrameComposer"/> (shared with
+    /// the GIF exporter); this method only scales and hands the surface to the encoder.
     /// </summary>
     private async Task ProduceSampleAsync(
         MediaStreamSourceSampleRequest request,
         MediaStreamSourceSampleRequestDeferral deferral,
         int frameIndex, int totalFrames,
-        FrameCompositor compositor,
-        VideoFrameReader? frameReader,
-        MediaComposition? sourceComp,
-        MediaComposition? webcamComp,
+        SegmentFrameComposer composer,
         CanvasDevice device,
-        string sourceVideoPath,
-        int sourceWidth, int sourceHeight,
         int compositorWidth, int compositorHeight,
-        int webcamExtractW, int webcamExtractH,
         int targetWidth, int targetHeight,
         bool needsScaling,
-        TimelineMapper? timelineMapper,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
         Action<Exception, int>? onError = null)
     {
         CanvasRenderTarget? outputSurface = null;
+        CanvasRenderTarget? composedFrame = null;
         try
         {
             ct.ThrowIfCancellationRequested();
             ThrowIfDeviceLost();
 
-            // Serialize frame production: shared compositor/frame-reader/webcam
-            // composition state is not thread-safe and can corrupt frames if
-            // accessed concurrently by overlapping SampleRequested callbacks.
+            // Serialize frame production: the composer's per-source compositors,
+            // frame readers, and webcam compositions are not thread-safe and can
+            // corrupt frames if accessed concurrently by overlapping SampleRequested
+            // callbacks.
             bool semaphoreAcquired = false;
             try
             {
             await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
             semaphoreAcquired = true;
 
-            double timeSeconds = timelineMapper is not null
-                ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                : (double)frameIndex / _settings.Fps;
-            var timeSpan = TimeSpan.FromSeconds(timeSeconds);
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
-            // Webcam overlay
-            CanvasBitmap? webcamFrame = null;
-            if (webcamComp is not null)
-            {
-                try
-                {
-                    webcamFrame = await ExtractFrameFromCompositionAsync(
-                        device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
-                    compositor.SetWebcamFrame(webcamFrame);
-                }
-                catch
-                {
-                    compositor.SetWebcamFrame(null);
-                }
-            }
-
-            CanvasRenderTarget composedFrame;
-            try
-            {
-                // Load source frame (same as editor preview)
-                using var sourceFrame = frameReader is not null
-                    ? await frameReader.LoadFrameAtTimeAsync(timeSpan)
-                        ?? await FallbackExtractFrameAsync(device, sourceVideoPath, sourceWidth, sourceHeight, timeSpan)
-                    : await ExtractFrameFromCompositionAsync(device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
-
-                // Composite using the exact source time so cursor, click, and zoom
-                // effects are precisely synchronized with the visual frame content.
-                composedFrame = compositor.ComposeFrame(sourceFrame, timeSeconds);
-            }
-            finally
-            {
-                // Always dispose webcam frame after composition — prevents GPU memory
-                // leaks if source loading or ComposeFrame throws.
-                compositor.SetWebcamFrame(null);
-                webcamFrame?.Dispose();
-            }
+            composedFrame = await composer.ComposeFrameAsync(frameIndex, ct);
 
             // Build the output surface. For scaling we need a separate render
             // target; otherwise the composed frame IS the output surface.
@@ -480,10 +364,12 @@ public class VideoEncoder : IDisposable
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));
                 }
                 composedFrame.Dispose();
+                composedFrame = null;
             }
             else
             {
                 outputSurface = composedFrame;
+                composedFrame = null;
             }
 
             // Give the D3D11 surface directly to the encoder — bypasses all
@@ -524,6 +410,9 @@ public class VideoEncoder : IDisposable
             onError?.Invoke(ex, frameIndex);
             // Dispose GPU surface if it was created but never handed to the encoder
             outputSurface?.Dispose();
+            // Dispose the composed frame too if an exception hit before it was scaled
+            // into outputSurface or handed off (it is nulled at those handoff points).
+            composedFrame?.Dispose();
             request.Sample = null;
         }
         finally
@@ -533,13 +422,109 @@ public class VideoEncoder : IDisposable
     }
 
     /// <summary>
-    /// Muxes audio from the source recording into the video-only MP4.
+    /// Applies a planned placement to a background audio track: where playback starts
+    /// inside the source, how much of it plays, and where it lands on the output.
+    /// </summary>
+    private static void ApplyPlacement(BackgroundAudioTrack track, AudioPlacement placement)
+    {
+        var originalDuration = track.OriginalDuration;
+
+        var trimStart = placement.TrimFromStart;
+        if (trimStart < TimeSpan.Zero) trimStart = TimeSpan.Zero;
+        if (trimStart > originalDuration) trimStart = originalDuration;
+        track.TrimTimeFromStart = trimStart;
+
+        if (placement.TakeDuration is { } take && take > TimeSpan.Zero)
+        {
+            var sourceEnd = trimStart + take;
+            if (sourceEnd < originalDuration)
+                track.TrimTimeFromEnd = originalDuration - sourceEnd;
+        }
+
+        // Place the audio at its segment's position on the output timeline so text
+        // slides (and deleted ranges) become silent gaps instead of shifting audio.
+        track.Delay = placement.Delay;
+    }
+
+    /// <summary>
+    /// Reports the one A/V-sync limitation this pipeline cannot fix: the Windows media
+    /// editing APIs used for muxing (<see cref="MediaComposition"/> /
+    /// <see cref="BackgroundAudioTrack"/>) expose no playback-rate or time-scale property,
+    /// so audio under a speed-adjusted segment plays at its native rate — in sync at the
+    /// segment start, drifting as it plays, and cut at the segment boundary so it cannot
+    /// overlap the next segment. Logged rather than swallowed so the behaviour is never
+    /// mistaken for full synchronization.
+    /// </summary>
+    private static void WarnAboutSpeedAdjustedAudio(IReadOnlyList<AudioPlacement> placements)
+    {
+        int affected = placements.Count(p => p.PlaysAtNativeRateOnSpeedAdjustedSegment);
+        if (affected == 0) return;
+
+        Debug.WriteLine(
+            $"[VideoEncoder] {affected} audio track(s) belong to speed-adjusted segments. " +
+            "Audio cannot be time-scaled by MediaComposition/BackgroundAudioTrack (no " +
+            "playback-rate API), so those tracks are muxed at their native rate and are " +
+            "trimmed at the segment boundary: they start in sync but drift within the segment.");
+    }
+
+    /// <summary>
+    /// Drops planned placements whose media does not exist or carries no audio, so a
+    /// silent recording never triggers the (expensive) mux pass.
+    /// </summary>
+    private static async Task<List<AudioPlacement>> ResolveAvailableAudioAsync(
+        IReadOnlyList<AudioPlacement> placements)
+    {
+        var available = new List<AudioPlacement>();
+        var embeddedAudioByPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var placement in placements)
+        {
+            if (placement.Kind == AudioSourceKind.AudioFile)
+            {
+                if (File.Exists(placement.SourcePath))
+                    available.Add(placement);
+                continue;
+            }
+
+            if (!embeddedAudioByPath.TryGetValue(placement.SourcePath, out bool hasEmbeddedAudio))
+            {
+                hasEmbeddedAudio = await HasEmbeddedAudioAsync(placement.SourcePath);
+                embeddedAudioByPath[placement.SourcePath] = hasEmbeddedAudio;
+            }
+
+            if (hasEmbeddedAudio)
+                available.Add(placement);
+        }
+
+        return available;
+    }
+
+    private static async Task<bool> HasEmbeddedAudioAsync(string videoPath)
+    {
+        if (string.IsNullOrWhiteSpace(videoPath) || !File.Exists(videoPath))
+            return false;
+
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoPath));
+            var clip = await MediaClip.CreateFromFileAsync(file);
+            return clip.EmbeddedAudioTracks.Count > 0;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"[VideoEncoder] Could not inspect audio tracks of '{videoPath}': {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Muxes the planned audio placements into the video-only MP4.
     /// Uses <see cref="MediaComposition"/> for reliable audio handling.
     /// </summary>
     private async Task MuxAudioAsync(
         string videoOnlyPath, string finalOutputPath,
-        MediaClip? sourceClip, Project project,
-        TimelineMapper? timelineMapper, CancellationToken ct)
+        IReadOnlyList<AudioPlacement> placements, CancellationToken ct)
     {
         var muxComp = new MediaComposition();
 
@@ -548,50 +533,47 @@ public class VideoEncoder : IDisposable
         var videoClip = await MediaClip.CreateFromFileAsync(videoFile);
         muxComp.Clips.Add(videoClip);
 
-        // Add embedded audio from the source recording
-        if (sourceClip is not null && sourceClip.EmbeddedAudioTracks.Count > 0)
+        // One clip per source file, reused by every placement cut from it.
+        var sourceClips = new Dictionary<string, MediaClip>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var placement in placements)
         {
-            var audioTrack = sourceClip.EmbeddedAudioTracks.First();
-            var bgAudioTrack = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(audioTrack);
+            ct.ThrowIfCancellationRequested();
 
-            if (timelineMapper is not null)
+            try
             {
-                bgAudioTrack.TrimTimeFromStart = timelineMapper.TrimStart;
-                var originalDuration = bgAudioTrack.OriginalDuration;
-                if (timelineMapper.TrimEnd < originalDuration)
-                    bgAudioTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
-            }
-
-            muxComp.BackgroundAudioTracks.Add(bgAudioTrack);
-        }
-
-        // Add separately recorded audio files
-        if (project.AudioFilePaths is { Count: > 0 })
-        {
-            foreach (var audioPath in project.AudioFilePaths)
-            {
-                if (string.IsNullOrWhiteSpace(audioPath) || !File.Exists(audioPath))
-                    continue;
-
-                try
+                BackgroundAudioTrack track;
+                if (placement.Kind == AudioSourceKind.EmbeddedVideoTrack)
                 {
-                    var audioFile = await StorageFile.GetFileFromPathAsync(audioPath);
-                    var bgTrack = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
-
-                    if (timelineMapper is not null)
+                    if (!sourceClips.TryGetValue(placement.SourcePath, out var clip))
                     {
-                        bgTrack.TrimTimeFromStart = timelineMapper.TrimStart;
-                        var originalDuration = bgTrack.OriginalDuration;
-                        if (timelineMapper.TrimEnd < originalDuration)
-                            bgTrack.TrimTimeFromEnd = originalDuration - timelineMapper.TrimEnd;
+                        var file = await StorageFile.GetFileFromPathAsync(
+                            Path.GetFullPath(placement.SourcePath));
+                        clip = await MediaClip.CreateFromFileAsync(file);
+                        sourceClips[placement.SourcePath] = clip;
                     }
 
-                    muxComp.BackgroundAudioTracks.Add(bgTrack);
+                    if (clip.EmbeddedAudioTracks.Count == 0)
+                        continue;
+
+                    track = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(clip.EmbeddedAudioTracks[0]);
                 }
-                catch (Exception ex)
+                else
                 {
-                    Debug.WriteLine($"[VideoEncoder] Failed to add audio track '{audioPath}': {ex.Message}");
+                    var audioFile = await StorageFile.GetFileFromPathAsync(
+                        Path.GetFullPath(placement.SourcePath));
+                    track = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
                 }
+
+                ApplyPlacement(track, placement);
+                muxComp.BackgroundAudioTracks.Add(track);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A single unreadable track must not discard an otherwise complete
+                // export; the remaining tracks still mux at their planned positions.
+                Debug.WriteLine(
+                    $"[VideoEncoder] Failed to add audio track '{placement.SourcePath}': {ex.Message}");
             }
         }
 
@@ -620,11 +602,19 @@ public class VideoEncoder : IDisposable
             renderOp.Cancel();
             throw new TimeoutException("Audio mux operation timed out after 5 minutes.");
         }
-        await tcs.Task; // propagate any exception
 
-        // Release MediaComposition native resources after mux completes
-        muxComp.Clips.Clear();
-        muxComp.BackgroundAudioTracks.Clear();
+        try
+        {
+            await tcs.Task; // propagate any exception
+        }
+        finally
+        {
+            // Release MediaComposition native resources (and the source file handles)
+            // whether or not the render succeeded.
+            muxComp.Clips.Clear();
+            muxComp.BackgroundAudioTracks.Clear();
+            sourceClips.Clear();
+        }
     }
 
     private async Task TranscodeWithTimeoutAsync(PrepareTranscodeResult prepResult, CancellationToken ct)
@@ -739,40 +729,6 @@ public class VideoEncoder : IDisposable
         double scale = Math.Max(1.0, actualPixels / baselinePixels);
 
         return (uint)(baseBitrate * scale);
-    }
-
-    private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
-        CanvasDevice device, MediaComposition composition, TimeSpan position,
-        int width, int height)
-    {
-        var clampedPosition = position;
-        if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
-            clampedPosition = composition.Duration;
-
-        using var thumbnail = await composition.GetThumbnailAsync(
-            clampedPosition, width, height, VideoFramePrecision.NearestFrame);
-
-        // ImageStream already implements IRandomAccessStream — pass directly
-        return await CanvasBitmap.LoadAsync(device, thumbnail);
-    }
-
-    private static async Task<CanvasBitmap> FallbackExtractFrameAsync(
-        CanvasDevice device, string videoPath, int width, int height, TimeSpan position)
-    {
-        var file = await StorageFile.GetFileFromPathAsync(videoPath);
-        var clip = await MediaClip.CreateFromFileAsync(file);
-        var comp = new MediaComposition();
-        comp.Clips.Add(clip);
-
-        using var thumbnail = await comp.GetThumbnailAsync(
-            position, width, height, VideoFramePrecision.NearestFrame);
-
-        // Release MediaComposition/MediaClip native resources immediately —
-        // this method is called per-frame, so without cleanup each invocation
-        // leaks a composition + clip holding a file handle to the video.
-        comp.Clips.Clear();
-
-        return await CanvasBitmap.LoadAsync(device, thumbnail);
     }
 
     private static async Task<StorageFile> CreateOutputFileAsync(string outputPath)

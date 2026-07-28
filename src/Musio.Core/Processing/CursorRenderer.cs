@@ -34,6 +34,7 @@ public class CursorRenderer : IDisposable
     private CursorStyle _style;
     private CanvasBitmap? _cursorBitmap;
     private CanvasGeometry? _defaultCursorGeometry;
+    private Dictionary<CursorShape, CursorGlyph>? _glyphs;
     private bool _disposed;
 
     /// <summary>Recording start timestamp in ticks (from MouseRecordingData.StartTimestampTicks).</summary>
@@ -65,6 +66,7 @@ public class CursorRenderer : IDisposable
         _cursorBitmap = null;
         _defaultCursorGeometry?.Dispose();
         _defaultCursorGeometry = null;
+        DisposeGlyphs();
 
         if (_style.Type == CursorType.Custom && !string.IsNullOrEmpty(_style.CustomImagePath))
         {
@@ -79,8 +81,31 @@ public class CursorRenderer : IDisposable
             }
         }
 
-        // Always create the default geometry as fallback
+        // Always create the default geometry first so it is available as a
+        // fallback even if per-shape glyph construction fails below.
         _defaultCursorGeometry = CreateDefaultCursorGeometry(device);
+
+        // Build the per-shape vector glyphs (hand, I-beam, resize, etc.). If this
+        // fails (e.g. device lost), degrade gracefully to the default arrow rather
+        // than crashing compositor initialization.
+        try
+        {
+            _glyphs = CursorGeometryLibrary.Build(device);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[CursorRenderer] Failed to build cursor glyphs, falling back to arrow: {ex.Message}");
+            DisposeGlyphs();
+        }
+    }
+
+    private void DisposeGlyphs()
+    {
+        if (_glyphs is null) return;
+        foreach (var glyph in _glyphs.Values)
+            glyph.Geometry.Dispose();
+        _glyphs = null;
     }
 
     /// <summary>
@@ -122,7 +147,7 @@ public class CursorRenderer : IDisposable
         float tiltAngle = _style.TiltEnabled ? ComputeTiltAngle(position) : 0f;
 
         // Main cursor
-        RenderCursor(session, x, y, finalScale, autoHideOpacity, tiltAngle);
+        RenderCursor(session, x, y, finalScale, autoHideOpacity, tiltAngle, position.Shape);
     }
 
     // Touch animation durations
@@ -377,7 +402,7 @@ public class CursorRenderer : IDisposable
             float gx = (float)position.X - nx * blurDistance * fraction;
             float gy = (float)position.Y - ny * blurDistance * fraction;
 
-            RenderCursor(session, gx, gy, scale, ghostOpacity);
+            RenderCursor(session, gx, gy, scale, ghostOpacity, 0f, position.Shape);
         }
     }
 
@@ -432,7 +457,7 @@ public class CursorRenderer : IDisposable
 
     #region Cursor Drawing
 
-    private void RenderCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f)
+    private void RenderCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f, CursorShape shape = CursorShape.Arrow)
     {
         if (opacity <= 0f) return;
 
@@ -442,7 +467,7 @@ public class CursorRenderer : IDisposable
         }
         else
         {
-            DrawDefaultCursor(session, x, y, scale, opacity, tiltAngle);
+            DrawDefaultCursor(session, x, y, scale, opacity, tiltAngle, shape);
         }
     }
 
@@ -505,19 +530,30 @@ public class CursorRenderer : IDisposable
     }
 
     /// <summary>
-    /// Draws a built-in default cursor as a colored arrow with contrasting outline (~32x32 logical pixels).
-    /// Applies velocity-based tilt rotation for a cinematic feel.
+    /// Draws the cursor for the given <paramref name="shape"/> as a colored vector glyph with
+    /// a contrasting outline, aligned so the glyph's hotspot lands on (<paramref name="x"/>,
+    /// <paramref name="y"/>). Falls back to the default arrow for unknown shapes. Applies
+    /// velocity-based tilt rotation for a cinematic feel.
     /// </summary>
-    public void DrawDefaultCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f)
+    public void DrawDefaultCursor(CanvasDrawingSession session, float x, float y, float scale, float opacity, float tiltAngle = 0f, CursorShape shape = CursorShape.Arrow)
     {
         if (opacity <= 0f) return;
 
         // Lazily create geometry if LoadCursorAsync wasn't called
         _defaultCursorGeometry ??= CreateDefaultCursorGeometry(session);
 
+        CanvasGeometry geometry = _defaultCursorGeometry;
+        Vector2 hotspot = Vector2.Zero;
+        if (_glyphs is not null && _glyphs.TryGetValue(shape, out var glyph))
+        {
+            geometry = glyph.Geometry;
+            hotspot = glyph.Hotspot;
+        }
+
         var savedTransform = session.Transform;
         session.Transform =
-            Matrix3x2.CreateScale(scale)
+            Matrix3x2.CreateTranslation(-hotspot)
+            * Matrix3x2.CreateScale(scale)
             * Matrix3x2.CreateRotation(tiltAngle)
             * Matrix3x2.CreateTranslation(x, y)
             * savedTransform;
@@ -525,8 +561,8 @@ public class CursorRenderer : IDisposable
         var fillColor = ParseCursorColor(opacity);
         var strokeColor = GetContrastOutlineColor(fillColor, opacity);
 
-        session.FillGeometry(_defaultCursorGeometry, fillColor);
-        session.DrawGeometry(_defaultCursorGeometry, strokeColor, 1.5f / scale);
+        session.FillGeometry(geometry, fillColor);
+        session.DrawGeometry(geometry, strokeColor, 1.5f / scale);
 
         session.Transform = savedTransform;
     }
@@ -589,5 +625,6 @@ public class CursorRenderer : IDisposable
         _cursorBitmap = null;
         _defaultCursorGeometry?.Dispose();
         _defaultCursorGeometry = null;
+        DisposeGlyphs();
     }
 }

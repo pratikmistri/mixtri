@@ -7,9 +7,9 @@ public record AutoZoomConfig
 {
     public bool Enabled { get; init; } = true;
     public float DefaultZoomLevel { get; init; } = 2.0f;
-    public float PreClickDuration { get; init; } = 0.345f;  // 300ms + 15%
-    public float HoldDuration { get; init; } = 0.575f;      // 500ms + 15%
-    public float EaseOutDuration { get; init; } = 0.575f;    // 500ms + 15%
+    public float PreClickDuration { get; init; } = 1.0f;    // graceful anticipatory zoom-in
+    public float HoldDuration { get; init; } = 1.333f;      // settled dwell on the focal point
+    public float EaseOutDuration { get; init; } = 1.556f;   // slow, elegant release back to full frame
     public float SpringConstant { get; init; } = 200f;
     public float SpringDamping { get; init; } = 20f;
     public bool ZoomOnScroll { get; init; } = false;
@@ -373,10 +373,11 @@ public class AutoZoomEngine
     }
 
     /// <summary>
-    /// Cubic bezier ease-in-out from <paramref name="from"/> to <paramref name="to"/>
+    /// Cinematic ease-in-out from <paramref name="from"/> to <paramref name="to"/>
     /// at normalized progress <paramref name="t"/> ∈ [0, 1].
-    /// Uses control points (0.25, 0.1, 0.25, 1.0) for a smooth, gradual ease
-    /// that feels natural and cinematic.
+    /// Uses <see cref="CubicBezierEasing.EaseInOutCinematic"/> — a symmetric curve
+    /// that eases from and to rest with zero velocity at both ends, so the zoom
+    /// enters and settles without any jolt at the start, the hold, or the release.
     /// </summary>
     private static float CubicBezierEase(float from, float to, float t)
     {
@@ -384,38 +385,8 @@ public class AutoZoomEngine
         if (t <= 0f) return from;
         if (t >= 1f) return to;
 
-        // Cubic bezier with control points (0.25, 0.1, 0.25, 1.0)
-        // Solve for the bezier parameter u given input t using Newton's method,
-        // then evaluate the Y curve for the eased value.
-        const float x1 = 0.25f, y1 = 0.1f, x2 = 0.25f, y2 = 1.0f;
-
-        // Find u such that BezierX(u) = t
-        float u = t; // initial guess
-        for (int i = 0; i < 8; i++)
-        {
-            float xU = BezierComponent(u, x1, x2) - t;
-            float dxU = BezierComponentDerivative(u, x1, x2);
-            if (MathF.Abs(dxU) < 1e-6f) break;
-            u -= xU / dxU;
-            u = Math.Clamp(u, 0f, 1f);
-        }
-
-        float eased = BezierComponent(u, y1, y2);
+        float eased = CubicBezierEasing.EaseInOutCinematic(t);
         return from + (to - from) * eased;
-    }
-
-    /// <summary>Evaluates a single cubic bezier component: B(t) for points (0, p1, p2, 1).</summary>
-    private static float BezierComponent(float t, float p1, float p2)
-    {
-        float mt = 1f - t;
-        return 3f * mt * mt * t * p1 + 3f * mt * t * t * p2 + t * t * t;
-    }
-
-    /// <summary>Derivative of BezierComponent with respect to t.</summary>
-    private static float BezierComponentDerivative(float t, float p1, float p2)
-    {
-        float mt = 1f - t;
-        return 3f * mt * mt * p1 + 6f * mt * t * (p2 - p1) + 3f * t * t * (1f - p2);
     }
 
     /// <summary>

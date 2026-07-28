@@ -71,6 +71,80 @@ public sealed class CursorSmootherTests
 
     #endregion
 
+    #region Zero-Phase Spring
+
+    [TestMethod]
+    public void SmoothPath_ZeroPhaseSpring_SmoothsWithLowerLagThanCausalSpring()
+    {
+        // Jittery sine path.
+        var rng = new Random(7);
+        var recording = BuildRecording(600, 200, i =>
+        {
+            double t = i / 200.0;
+            double bx = 600 + 300 * Math.Sin(2 * Math.PI * 0.4 * t);
+            double by = 400 + 200 * Math.Cos(2 * Math.PI * 0.4 * t);
+            return (bx + rng.NextDouble() * 16 - 8, by + rng.NextDouble() * 16 - 8);
+        });
+
+        var zeroPhase = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+            Strength = SmoothingStrength.Smooth,
+            DestutterEnabled = false,
+        }.SmoothPath(recording, TargetFps);
+
+        var causal = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.SpringPhysics,
+            Strength = SmoothingStrength.Smooth,
+            DestutterEnabled = false,
+        }.SmoothPath(recording, TargetFps);
+
+        var raw = GetRawFrames(recording, TargetFps);
+
+        // 1) It actually smooths: jitter is lower than the raw path.
+        Assert.IsTrue(ComputeDerivativeStdDev(zeroPhase) < ComputeDerivativeStdDev(raw),
+            "Zero-phase spring should reduce jitter vs raw.");
+
+        // 2) It is numerically stable — no NaN/Infinity.
+        Assert.IsTrue(zeroPhase.TrueForAll(p =>
+            !double.IsNaN(p.X) && !double.IsNaN(p.Y) && !double.IsInfinity(p.X) && !double.IsInfinity(p.Y)),
+            "Zero-phase spring produced non-finite values.");
+
+        // 3) Its defining benefit: it tracks the real path with LESS lag than the causal
+        //    spring (no time delay because it filters forward AND backward).
+        Assert.IsTrue(MeanDeviation(zeroPhase, raw) < MeanDeviation(causal, raw),
+            "Zero-phase spring should have lower lag than the causal spring.");
+    }
+
+    [TestMethod]
+    public void SmoothPath_ZeroPhaseSpring_StableAtLowFps()
+    {
+        // A pathologically low frame rate makes a fixed-step explicit integrator diverge.
+        // The adaptive substepping must keep the output finite (no NaN/Infinity) at any fps.
+        var recording = BuildRecording(200, 200, i => (i * 5.0, (i % 7) * 9.0));
+
+        foreach (int fps in new[] { 1, 2, 5, 120 })
+        {
+            foreach (var strength in new[] { SmoothingStrength.UltraSmooth, SmoothingStrength.Subtle })
+            {
+                var result = new CursorSmoother
+                {
+                    Algorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                    Strength = strength,
+                    DestutterEnabled = false,
+                }.SmoothPath(recording, fps);
+
+                Assert.IsTrue(result.TrueForAll(p =>
+                    !double.IsNaN(p.X) && !double.IsNaN(p.Y) &&
+                    !double.IsInfinity(p.X) && !double.IsInfinity(p.Y)),
+                    $"Zero-phase spring diverged at fps={fps}, strength={strength}.");
+            }
+        }
+    }
+
+    #endregion
+
     #region Spring Physics
 
     [TestMethod]
@@ -238,6 +312,204 @@ public sealed class CursorSmootherTests
 
     #endregion
 
+    #region De-stutter (stop-and-go)
+
+    /// <summary>
+    /// Builds a recording with explicit move samples plus optional click samples,
+    /// at the given sample rate. positionFunc returns (x, y) for each move sample.
+    /// </summary>
+    private static MouseRecordingData BuildStopAndGo(
+        double sampleRateHz,
+        IReadOnlyList<(double t, double x, double y)> movePoints,
+        IReadOnlyList<(double t, double x, double y)>? clickDowns = null)
+    {
+        var samples = new List<MouseSample>();
+        foreach (var (t, x, y) in movePoints)
+        {
+            samples.Add(new MouseSample
+            {
+                TimestampTicks = (long)(t * TickFrequency),
+                X = (int)Math.Round(x),
+                Y = (int)Math.Round(y),
+                EventKind = MouseEventKind.Move,
+                Button = MouseButton.None,
+            });
+        }
+
+        var clicks = new List<ClickEvent>();
+        if (clickDowns is not null)
+        {
+            foreach (var (t, x, y) in clickDowns)
+            {
+                long tick = (long)(t * TickFrequency);
+                samples.Add(new MouseSample
+                {
+                    TimestampTicks = tick,
+                    X = (int)Math.Round(x),
+                    Y = (int)Math.Round(y),
+                    EventKind = MouseEventKind.ButtonDown,
+                    Button = MouseButton.Left,
+                });
+                clicks.Add(new ClickEvent(tick, (int)Math.Round(x), (int)Math.Round(y), MouseButton.Left, true));
+            }
+            samples.Sort((p, q) => p.TimestampTicks.CompareTo(q.TimestampTicks));
+        }
+
+        return new MouseRecordingData
+        {
+            Samples = samples,
+            Clicks = clicks,
+            StartTimestampTicks = 0,
+            EndTimestampTicks = samples[^1].TimestampTicks,
+            TickFrequency = TickFrequency,
+        };
+    }
+
+    /// <summary>
+    /// Generates a path: move right, stall, move right again. The stall is a
+    /// flat hold at the midpoint. Optionally injects a click during the stall.
+    /// </summary>
+    private static MouseRecordingData BuildMoveStallMove(double stallSeconds, bool clickDuringStall)
+    {
+        const double rate = 200;
+        const double moveSeconds = 0.5;
+        var moves = new List<(double, double, double)>();
+
+        // Phase 1: move 100 -> 300 over moveSeconds
+        for (double t = 0; t < moveSeconds; t += 1.0 / rate)
+            moves.Add((t, 100 + 200 * (t / moveSeconds), 300));
+        // Phase 2: hold at 300 for stallSeconds
+        for (double t = 0; t <= stallSeconds; t += 1.0 / rate)
+            moves.Add((moveSeconds + t, 300, 300));
+        // Phase 3: move 300 -> 500 over moveSeconds
+        double p3 = moveSeconds + stallSeconds;
+        for (double t = 1.0 / rate; t <= moveSeconds; t += 1.0 / rate)
+            moves.Add((p3 + t, 300 + 200 * (t / moveSeconds), 300));
+
+        List<(double, double, double)>? clicks = clickDuringStall
+            ? [(moveSeconds + stallSeconds / 2, 300, 300)]
+            : null;
+
+        return BuildStopAndGo(rate, moves, clicks);
+    }
+
+    private static double DisplacementInWindow(List<SmoothedPosition> positions, double t0, double t1)
+    {
+        double sum = 0;
+        for (int i = 1; i < positions.Count; i++)
+        {
+            if (positions[i].TimestampSeconds < t0 || positions[i].TimestampSeconds > t1) continue;
+            double dx = positions[i].X - positions[i - 1].X;
+            double dy = positions[i].Y - positions[i - 1].Y;
+            sum += Math.Sqrt(dx * dx + dy * dy);
+        }
+        return sum;
+    }
+
+    [TestMethod]
+    public void Destutter_MicroStall_IsGlidedThrough()
+    {
+        var recording = BuildMoveStallMove(stallSeconds: 0.15, clickDuringStall: false);
+
+        var withOn = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.OneEuroFilter,
+            Strength = SmoothingStrength.Subtle,
+            DestutterEnabled = true,
+        }.SmoothPath(recording, TargetFps);
+
+        var withOff = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.OneEuroFilter,
+            Strength = SmoothingStrength.Subtle,
+            DestutterEnabled = false,
+        }.SmoothPath(recording, TargetFps);
+
+        // Stall window is [0.5, 0.65].
+        double onMove = DisplacementInWindow(withOn, 0.5, 0.65);
+        double offMove = DisplacementInWindow(withOff, 0.5, 0.65);
+
+        Assert.IsTrue(onMove > offMove + 20,
+            $"De-stuttered cursor should keep moving through the stall (on={onMove:F1}, off={offMove:F1})");
+    }
+
+    [TestMethod]
+    public void Destutter_ClickStall_IsPreserved()
+    {
+        var clicked = BuildMoveStallMove(stallSeconds: 0.15, clickDuringStall: true);
+        var notClicked = BuildMoveStallMove(stallSeconds: 0.15, clickDuringStall: false);
+
+        CursorSmoother MakeSmoother() => new()
+        {
+            Algorithm = SmoothingAlgorithm.OneEuroFilter,
+            Strength = SmoothingStrength.Subtle,
+            DestutterEnabled = true,
+        };
+
+        var clickedOut = MakeSmoother().SmoothPath(clicked, TargetFps);
+        var notClickedOut = MakeSmoother().SmoothPath(notClicked, TargetFps);
+
+        double clickedMove = DisplacementInWindow(clickedOut, 0.5, 0.65);
+        double notClickedMove = DisplacementInWindow(notClickedOut, 0.5, 0.65);
+
+        // With a click in the stall, the pause must be preserved -> the cursor
+        // stays near the click point and moves much less than the un-clicked case.
+        Assert.IsTrue(clickedMove < notClickedMove,
+            $"Click stall should be preserved (clicked={clickedMove:F1}, notClicked={notClickedMove:F1})");
+        Assert.IsTrue(clickedMove < 25,
+            $"Cursor should stay near the click during the stall (moved {clickedMove:F1}px)");
+    }
+
+    [TestMethod]
+    public void Destutter_LongDwell_IsPreserved()
+    {
+        // A 0.5s dwell exceeds GenuineDwellSeconds and must be preserved even
+        // without a click.
+        var recording = BuildMoveStallMove(stallSeconds: 0.5, clickDuringStall: false);
+
+        var smoothed = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.OneEuroFilter,
+            Strength = SmoothingStrength.Subtle,
+            DestutterEnabled = true,
+        }.SmoothPath(recording, TargetFps);
+
+        // Dwell window is [0.5, 1.0]; sample the steady middle to avoid the
+        // ease-in/out at the edges.
+        double dwellMove = DisplacementInWindow(smoothed, 0.65, 0.85);
+        Assert.IsTrue(dwellMove < 15,
+            $"Long genuine dwell should stay put (moved {dwellMove:F1}px)");
+    }
+
+    [TestMethod]
+    public void Destutter_SmoothPath_PreservesEndpointsAndMonotonicity()
+    {
+        // Continuous, stall-free diagonal motion: de-stutter must not introduce
+        // reversals and must keep the endpoints.
+        var recording = BuildRecording(300, 200, i =>
+        {
+            double t = i / 200.0;
+            return (100 + 300 * t, 200 + 100 * t);
+        });
+
+        var smoothed = new CursorSmoother
+        {
+            Algorithm = SmoothingAlgorithm.OneEuroFilter,
+            Strength = SmoothingStrength.Subtle,
+            DestutterEnabled = true,
+        }.SmoothPath(recording, TargetFps);
+
+        Assert.AreEqual(100, smoothed[0].X, 5.0, "Start X preserved");
+        Assert.AreEqual(200, smoothed[0].Y, 5.0, "Start Y preserved");
+
+        // X should be non-decreasing (allow tiny filter overshoot tolerance).
+        for (int i = 1; i < smoothed.Count; i++)
+            Assert.IsTrue(smoothed[i].X >= smoothed[i - 1].X - 2.0,
+                $"X should not reverse at frame {i}");
+    }
+
+    #endregion
+
     #region Helpers
 
     /// <summary>
@@ -251,6 +523,15 @@ public sealed class CursorSmootherTests
             Strength = SmoothingStrength.None,
         };
         return smoother.SmoothPath(recording, fps);
+    }
+
+    private static double MeanDeviation(List<SmoothedPosition> a, List<SmoothedPosition> b)
+    {
+        int n = Math.Min(a.Count, b.Count);
+        double sum = 0;
+        for (int i = 0; i < n; i++)
+            sum += Math.Sqrt((a[i].X - b[i].X) * (a[i].X - b[i].X) + (a[i].Y - b[i].Y) * (a[i].Y - b[i].Y));
+        return n > 0 ? sum / n : 0;
     }
 
     /// <summary>

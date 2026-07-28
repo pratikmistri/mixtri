@@ -41,17 +41,43 @@ public partial class App : Application
     {
         InitializeComponent();
         UnhandledException += OnUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            LogCrash("AppDomain", e.ExceptionObject as Exception);
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            LogCrash("UnobservedTask", e.Exception);
+            e.SetObserved();
+        };
+        // First-chance logging captures the ORIGINAL exception (incl. cross-thread
+        // UI_E_WRONG_THREAD, HRESULT 0x802B000A) before it becomes a stowed failfast
+        // that bypasses every managed handler. Filtered to COM/threading faults to
+        // keep noise down.
+        AppDomain.CurrentDomain.FirstChanceException += (_, e) =>
+        {
+            var hr = (uint)(e.Exception.HResult & 0xFFFFFFFF);
+            bool wrongThread = hr is 0x802B000A or 0x8001010E /* RPC_E_WRONG_THREAD */;
+            bool comFault = e.Exception is System.Runtime.InteropServices.COMException
+                or System.Runtime.InteropServices.InvalidComObjectException;
+            bool msgThread = e.Exception.Message?.Contains("thread", StringComparison.OrdinalIgnoreCase) == true;
+            if (wrongThread || comFault || msgThread)
+                LogCrash($"FirstChance HR=0x{hr:X8}", e.Exception);
+        };
     }
 
-    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    private static void LogCrash(string source, Exception? ex)
     {
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
             System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:O}] {e.Exception.GetType().Name}: {e.Exception.Message}\n{e.Exception.StackTrace}\n\n");
+                $"[{DateTime.Now:O}] ({source}) {ex?.GetType().Name}: {ex?.Message}\n{ex?.StackTrace}\n\n");
         }
         catch { }
+    }
+
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        LogCrash("XAML", e.Exception);
         e.Handled = true;
     }
 

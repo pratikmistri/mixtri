@@ -58,7 +58,11 @@ public sealed partial class WindowSelectorOverlay : UserControl
     /// </summary>
     public async Task<WindowInfo?> ShowAsync()
     {
-        _tcs = new TaskCompletionSource<WindowInfo?>();
+        // Escape can complete the picker from inside XAML keyboard dispatch.
+        // Do not run the awaiting teardown inline and close the host window
+        // while that event is still being processed.
+        _tcs = new TaskCompletionSource<WindowInfo?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         bool didMinimize = false;
         IntPtr mainHwnd = IntPtr.Zero;

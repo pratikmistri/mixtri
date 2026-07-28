@@ -4,6 +4,30 @@ using Musio.Core.Settings;
 namespace Musio.Core.Models;
 
 /// <summary>
+/// Represents a single recording's media files and metadata.
+/// Used when a project contains multiple recordings (appended recordings).
+/// </summary>
+public class RecordingSource
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string VideoFilePath { get; set; } = string.Empty;
+    public string CursorDataFilePath { get; set; } = string.Empty;
+    public string? WebcamFilePath { get; set; }
+    public string? KeyboardDataFilePath { get; set; }
+    public List<string> AudioFilePaths { get; set; } = [];
+    public TimeSpan Duration { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int Fps { get; set; } = 30;
+    public double MouseToVideoOffsetSeconds { get; set; }
+    public double AudioToVideoOffsetSeconds { get; set; }
+    public int CropOffsetX { get; set; }
+    public int CropOffsetY { get; set; }
+    public float DpiScale { get; set; }
+    public CaptureTargetType CaptureType { get; set; } = CaptureTargetType.Monitor;
+}
+
+/// <summary>
 /// Represents a single recording session and its associated files.
 /// </summary>
 public class Project
@@ -20,6 +44,12 @@ public class Project
     public int Width { get; set; }
     public int Height { get; set; }
     public int Fps { get; set; } = 30;
+
+    /// <summary>
+    /// Additional recordings appended to this project.
+    /// The primary recording is represented by the top-level properties.
+    /// </summary>
+    public List<RecordingSource> Sources { get; set; } = [];
 
     /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.

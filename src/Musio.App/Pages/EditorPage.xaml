@@ -274,12 +274,42 @@
                         Padding="12,4" />
                 </StackPanel>
             </Grid>
+
+            <!-- Text slide edit overlay (reposition + in-place editing) -->
+            <Canvas x:Name="SlideEditCanvas" Visibility="Collapsed">
+                <Border x:Name="SlideTextRegion"
+                        BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                        BorderThickness="1.5"
+                        CornerRadius="2"
+                        DoubleTapped="SlideTextRegion_DoubleTapped"
+                        PointerEntered="SlideTextRegion_PointerEntered"
+                        PointerExited="SlideTextRegion_PointerExited"
+                        PointerPressed="SlideTextRegion_PointerPressed"
+                        PointerMoved="SlideTextRegion_PointerMoved"
+                        PointerReleased="SlideTextRegion_PointerReleased">
+                    <Border.Background>
+                        <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
+                    </Border.Background>
+                </Border>
+                <TextBox x:Name="SlideEditBox"
+                         Visibility="Collapsed"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         TextChanged="SlideEditBox_TextChanged"
+                         KeyDown="SlideEditBox_KeyDown"
+                         LostFocus="SlideEditBox_LostFocus" />
+            </Canvas>
         </Grid>
 
         <!-- Editor toolbar -->
         <Grid
+            x:Name="ToolbarGrid"
             Grid.Row="2"
             Padding="8,4"
+            SizeChanged="ToolbarGrid_SizeChanged"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0">
@@ -291,6 +321,7 @@
 
             <!-- Undo / Redo buttons -->
             <StackPanel
+                x:Name="LeftToolbarGroup"
                 Grid.Column="0"
                 Orientation="Horizontal"
                 Spacing="4">
@@ -330,6 +361,35 @@
                     <FontIcon FontSize="16" Glyph="&#xE8C6;" />
                 </Button>
 
+                <AppBarSeparator />
+
+                <DropDownButton
+                    Padding="8,6"
+                    ToolTipService.ToolTip="Insert a segment into the timeline">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="14" Glyph="&#xE710;" />
+                        <TextBlock Text="Insert" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <MenuFlyout Placement="Top">
+                            <MenuFlyoutItem
+                                Text="Text Slide"
+                                Click="AddTextSlide_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D2;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Record More"
+                                Click="RecordMore_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xEA3A;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+
                 <ComboBox
                     x:Name="SpeedComboBox"
                     Width="100"
@@ -348,6 +408,7 @@
 
             <!-- Speed controls -->
             <StackPanel
+                x:Name="RightToolbarGroup"
                 Grid.Column="2"
                 Orientation="Horizontal"
                 Spacing="8"
@@ -364,6 +425,7 @@
                     <ComboBox
                         x:Name="ZoomLevelCombo"
                         Width="80"
+                        Height="40"
                         IsEditable="True"
                         SelectedIndex="2"
                         SelectionChanged="ZoomLevelCombo_SelectionChanged"
@@ -377,6 +439,7 @@
                         <ComboBoxItem Content="4x" Tag="4" />
                     </ComboBox>
                     <Button
+                        Height="40"
                         Padding="8,6"
                         Click="EditZoomRegion_Click"
                         ToolTipService.ToolTip="Position the zoom region visually">
@@ -386,6 +449,7 @@
                         </StackPanel>
                     </Button>
                     <Button
+                        Height="40"
                         Padding="8,6"
                         Click="RemoveZoomSegment_Click"
                         ToolTipService.ToolTip="Remove selected zoom segment">
@@ -393,7 +457,7 @@
                     </Button>
                 </StackPanel>
 
-                <!-- Default zoom controls (no segment selected) -->
+                <!-- Default zoom controls hint (no segment selected) -->
                 <TextBlock
                     x:Name="ZoomHintText"
                     VerticalAlignment="Center"
@@ -401,15 +465,296 @@
                     Text="Drag on zoom track to add segment"
                     FontStyle="Italic" />
 
+                <!-- Text slide properties (button + flyout, shown when a text slide is selected) -->
+                <Button
+                    x:Name="TextSlideButton"
+                    Height="40"
+                    Padding="8,6"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Text slide properties">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE8D2;" />
+                        <TextBlock Text="Text Slide" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="TextSlideFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="14" Padding="4">
+                                <TextBlock Text="Text Slide" FontWeight="SemiBold" FontSize="14" />
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Text" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBox
+                                        x:Name="SlideTextBox"
+                                        AcceptsReturn="True"
+                                        TextWrapping="Wrap"
+                                        MinHeight="60"
+                                        PlaceholderText="Slide text..."
+                                        TextChanged="SlideTextBox_TextChanged" />
+                                </StackPanel>
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Animation" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideAnimationCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SlideAnimationCombo_SelectionChanged">
+                                        <ComboBoxItem Content="None" Tag="None" />
+                                        <ComboBoxItem Content="Fade In" Tag="FadeIn" />
+                                        <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
+                                        <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
+                                        <ComboBoxItem Content="Slide Left" Tag="SlideLeft" />
+                                        <ComboBoxItem Content="Slide Right" Tag="SlideRight" />
+                                        <ComboBoxItem Content="Scale Pop" Tag="ScalePop" />
+                                        <ComboBoxItem Content="Zoom Blur In" Tag="ZoomBlurIn" />
+                                        <ComboBoxItem Content="Reveal (Wipe)" Tag="Reveal" />
+                                        <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
+                                        <ComboBoxItem Content="Typewriter + Caret" Tag="TypewriterCaret" />
+                                        <ComboBoxItem Content="Cascade Fade Up" Tag="CascadeFadeUp" />
+                                        <ComboBoxItem Content="Cascade Pop" Tag="CascadePop" />
+                                        <ComboBoxItem Content="Wave" Tag="Wave" />
+                                        <ComboBoxItem Content="Tracking In" Tag="TrackingIn" />
+                                        <ComboBoxItem Content="Rotate In" Tag="RotateIn" />
+                                        <ComboBoxItem Content="Bounce In" Tag="BounceIn" />
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Font" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideFontCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SlideFontCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Segoe UI" Tag="Segoe UI" FontFamily="Segoe UI" />
+                                        <ComboBoxItem Content="Segoe UI Variable" Tag="Segoe UI Variable" FontFamily="Segoe UI Variable" />
+                                        <ComboBoxItem Content="Arial" Tag="Arial" FontFamily="Arial" />
+                                        <ComboBoxItem Content="Calibri" Tag="Calibri" FontFamily="Calibri" />
+                                        <ComboBoxItem Content="Cambria" Tag="Cambria" FontFamily="Cambria" />
+                                        <ComboBoxItem Content="Georgia" Tag="Georgia" FontFamily="Georgia" />
+                                        <ComboBoxItem Content="Times New Roman" Tag="Times New Roman" FontFamily="Times New Roman" />
+                                        <ComboBoxItem Content="Verdana" Tag="Verdana" FontFamily="Verdana" />
+                                        <ComboBoxItem Content="Tahoma" Tag="Tahoma" FontFamily="Tahoma" />
+                                        <ComboBoxItem Content="Trebuchet MS" Tag="Trebuchet MS" FontFamily="Trebuchet MS" />
+                                        <ComboBoxItem Content="Consolas" Tag="Consolas" FontFamily="Consolas" />
+                                        <ComboBoxItem Content="Courier New" Tag="Courier New" FontFamily="Courier New" />
+                                        <ComboBoxItem Content="Comic Sans MS" Tag="Comic Sans MS" FontFamily="Comic Sans MS" />
+                                        <ComboBoxItem Content="Impact" Tag="Impact" FontFamily="Impact" />
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="4">
+                                        <TextBlock Text="Duration (s)" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <NumberBox
+                                            x:Name="SlideDurationBox"
+                                            Minimum="0.5"
+                                            Maximum="30"
+                                            SpinButtonPlacementMode="Inline"
+                                            SmallChange="0.5"
+                                            ValueChanged="SlideDurationBox_ValueChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="4">
+                                        <TextBlock Text="Font Size" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <NumberBox
+                                            x:Name="SlideFontSizeBox"
+                                            Minimum="12"
+                                            Maximum="200"
+                                            SpinButtonPlacementMode="Inline"
+                                            SmallChange="4"
+                                            ValueChanged="SlideFontSizeBox_ValueChanged" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <!-- Text color -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Text Color" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <DropDownButton x:Name="SlideTextColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="SlideTextColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="SlideTextColorText" Text="#FFFFFF" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="SlideTextColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="SlideTextColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Formatting: bold / italic / alignment -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Formatting" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <ToggleButton x:Name="SlideBoldToggle" Padding="8,6"
+                                                      ToolTipService.ToolTip="Bold"
+                                                      Click="SlideBold_Click">
+                                            <FontIcon FontSize="14" Glyph="&#xE8DD;" />
+                                        </ToggleButton>
+                                        <ToggleButton x:Name="SlideItalicToggle" Padding="8,6"
+                                                      ToolTipService.ToolTip="Italic"
+                                                      Click="SlideItalic_Click">
+                                            <FontIcon FontSize="14" Glyph="&#xE8DB;" />
+                                        </ToggleButton>
+                                        <ctk:Segmented x:Name="SlideAlignSegmented"
+                                                       VerticalAlignment="Stretch"
+                                                       SelectionChanged="SlideAlignSegmented_SelectionChanged">
+                                            <ctk:SegmentedItem Tag="Left" ToolTipService.ToolTip="Align left">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E4;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                            <ctk:SegmentedItem Tag="Center" ToolTipService.ToolTip="Align center">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E3;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                            <ctk:SegmentedItem Tag="Right" ToolTipService.ToolTip="Align right">
+                                                <ctk:SegmentedItem.Icon>
+                                                    <FontIcon FontSize="14" Glyph="&#xE8E2;" />
+                                                </ctk:SegmentedItem.Icon>
+                                            </ctk:SegmentedItem>
+                                        </ctk:Segmented>
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Background type -->
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Background" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <ComboBox
+                                        x:Name="SlideBgTypeCombo"
+                                        HorizontalAlignment="Stretch"
+                                        SelectionChanged="SlideBgTypeCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Solid" Tag="Solid" />
+                                        <ComboBoxItem Content="Gradient" Tag="Gradient" />
+                                        <ComboBoxItem Content="Image" Tag="Image" />
+                                    </ComboBox>
+                                </StackPanel>
+
+                                <!-- Solid color / gradient start color -->
+                                <StackPanel x:Name="SlideColorPanel" Spacing="4">
+                                    <TextBlock x:Name="SlideColorLabel" Text="Color" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <DropDownButton x:Name="SlideBgColorButton" HorizontalAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border
+                                                x:Name="SlideBgColorSwatch"
+                                                Width="20" Height="20"
+                                                CornerRadius="4"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1" />
+                                            <TextBlock x:Name="SlideBgColorText" Text="#1E1E1E" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <DropDownButton.Flyout>
+                                            <Flyout>
+                                                <ColorPicker
+                                                    x:Name="SlideBgColorPicker"
+                                                    IsAlphaEnabled="False"
+                                                    IsHexInputVisible="True"
+                                                    ColorChanged="SlideBgColorPicker_ColorChanged" />
+                                            </Flyout>
+                                        </DropDownButton.Flyout>
+                                    </DropDownButton>
+                                </StackPanel>
+
+                                <!-- Gradient controls -->
+                                <StackPanel x:Name="SlideGradientPanel" Spacing="8" Visibility="Collapsed">
+                                    <TextBlock Text="Presets" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <GridView
+                                        x:Name="SlideGradientPresets"
+                                        MaxHeight="120"
+                                        SelectionMode="Single"
+                                        SelectionChanged="SlideGradientPreset_SelectionChanged" />
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="End Color" FontSize="12"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <DropDownButton x:Name="SlideGradEndColorButton" HorizontalAlignment="Stretch">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Border
+                                                    x:Name="SlideGradEndColorSwatch"
+                                                    Width="20" Height="20"
+                                                    CornerRadius="4"
+                                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                    BorderThickness="1" />
+                                                <TextBlock x:Name="SlideGradEndColorText" Text="#16213E" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                            <DropDownButton.Flyout>
+                                                <Flyout>
+                                                    <ColorPicker
+                                                        x:Name="SlideGradEndColorPicker"
+                                                        IsAlphaEnabled="False"
+                                                        IsHexInputVisible="True"
+                                                        ColorChanged="SlideGradEndColorPicker_ColorChanged" />
+                                                </Flyout>
+                                            </DropDownButton.Flyout>
+                                        </DropDownButton>
+                                    </StackPanel>
+                                    <Slider
+                                        x:Name="SlideGradAngleSlider"
+                                        Header="Angle"
+                                        Minimum="0" Maximum="360"
+                                        StepFrequency="5"
+                                        ValueChanged="SlideGradAngleSlider_ValueChanged" />
+                                </StackPanel>
+
+                                <!-- Image picker -->
+                                <StackPanel x:Name="SlideImagePanel" Spacing="4" Visibility="Collapsed">
+                                    <Button HorizontalAlignment="Stretch" Click="ChooseSlideImage_Click">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon FontSize="14" Glyph="&#xEB9F;" />
+                                            <TextBlock Text="Choose Image…" />
+                                        </StackPanel>
+                                    </Button>
+                                    <TextBlock x:Name="SlideImagePathText" FontSize="11"
+                                               TextTrimming="CharacterEllipsis"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+
+
+                                <Button
+                                    HorizontalAlignment="Stretch"
+                                    Click="RemoveTextSlide_Click"
+                                    ToolTipService.ToolTip="Remove selected text slide">
+                                    <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                                        <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                                        <TextBlock Text="Remove Slide" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+
                 <!-- Background style controls -->
-                <AppBarSeparator x:Name="StyleSeparator" />
                 <Button
                     x:Name="StyleButton"
+                    Height="40"
                     Padding="8,6"
+                    Margin="4,0,0,0"
                     ToolTipService.ToolTip="Frame style (aspect ratio, background, padding)">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE790;" />
-                        <TextBlock Text="Frame style" />
+                        <TextBlock x:Name="FrameStyleLabel" Text="Frame style" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout x:Name="StyleFlyout" Placement="Top">
@@ -806,15 +1151,16 @@
                 </Button>
 
                 <!-- Cursor style controls -->
-                <AppBarSeparator x:Name="CursorSeparator" Visibility="Collapsed" />
                 <Button
                     x:Name="CursorButton"
+                    Height="40"
                     Padding="8,6"
+                    Margin="4,0,0,0"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Cursor settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE7C9;" />
-                        <TextBlock Text="Cursor" />
+                        <TextBlock x:Name="CursorLabel" Text="Cursor" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout x:Name="CursorFlyout" Placement="Top">
@@ -985,15 +1331,15 @@
                 </Button>
 
                 <!-- Webcam overlay settings (visible when webcam overlay is active) -->
-                <AppBarSeparator x:Name="WebcamShapeSeparator" Visibility="Collapsed" />
                 <Button
                     x:Name="WebcamShapeButton"
+                    Height="40"
                     Padding="8,6"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Webcam overlay settings">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE714;" />
-                        <TextBlock Text="Camera" />
+                        <TextBlock x:Name="CameraLabel" Text="Camera" />
                     </StackPanel>
                     <Button.Flyout>
                         <Flyout Placement="Top">
@@ -1027,15 +1373,47 @@
                                     x:Name="WebcamMirrorToggle"
                                     Header="Mirror"
                                     Toggled="WebcamMirrorToggle_Toggled" />
+
+                                <!-- Per-segment fullscreen animation -->
+                                <StackPanel x:Name="CameraFullscreenPanel" Spacing="8" Visibility="Collapsed">
+                                    <ToggleSwitch
+                                        x:Name="CameraFullscreenToggle"
+                                        Header="Expand to full screen"
+                                        Toggled="CameraFullscreenToggle_Toggled" />
+                                    <ComboBox
+                                        x:Name="CameraFullscreenModeCombo"
+                                        Header="Animation"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="Collapsed"
+                                        SelectionChanged="CameraFullscreenModeCombo_SelectionChanged">
+                                        <ComboBoxItem Content="Zoom out and back" Tag="Highlight" />
+                                        <ComboBoxItem Content="Start full screen, reveal video" Tag="Reveal" />
+                                    </ComboBox>
+                                    <TextBlock
+                                        x:Name="CameraFullscreenHint"
+                                        Text="The selected camera segment grows to fill the screen, holds, then shrinks back."
+                                        TextWrapping="Wrap"
+                                        Opacity="0.7"
+                                        FontSize="12" />
+                                    <Button
+                                        x:Name="CameraDeleteButton"
+                                        HorizontalAlignment="Stretch"
+                                        Click="CameraDeleteButton_Click"
+                                        ToolTipService.ToolTip="Delete the selected camera segment (Del)">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                                            <TextBlock Text="Delete camera segment" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>
                 </Button>
 
-                <AppBarSeparator />
-
                 <Button
                     x:Name="ExportButton"
+                    Height="40"
                     Padding="8,6"
                     Style="{ThemeResource AccentButtonStyle}"
                     ToolTipService.ToolTip="Export recording">

@@ -82,8 +82,18 @@ public partial class EditorViewModel : ObservableObject
     private void SplitAtPlayhead()
     {
         var position = _model.PlayheadPosition;
-        if (position <= TimeSpan.Zero || position >= _model.Duration) return;
 
+        // Segment-based timeline: split the segment under the playhead.
+        if (_model.Segments.Count > 0)
+        {
+            if (position <= TimeSpan.Zero || position >= _model.DisplayDuration) return;
+            var splitOp = new SplitSegmentAtTimeOperation(position);
+            _undoRedoManager.Execute(splitOp);
+            return;
+        }
+
+        // Legacy clip-based timeline.
+        if (position <= TimeSpan.Zero || position >= _model.Duration) return;
         var operation = new SplitOperation(position);
         _undoRedoManager.Execute(operation);
     }

@@ -188,7 +188,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
     {
         _initialRegion = initialRegion;
         WasCancelled = false;
-        _tcs = new TaskCompletionSource<CaptureRegion?>();
+        // Escape can complete the picker from inside XAML keyboard dispatch.
+        // Defer teardown so the host window is not closed during that event.
+        _tcs = new TaskCompletionSource<CaptureRegion?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Minimize Musio so it doesn't appear in the screenshot
         bool didMinimize = false;

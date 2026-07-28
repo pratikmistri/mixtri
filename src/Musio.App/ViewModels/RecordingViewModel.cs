@@ -32,6 +32,13 @@ public partial class RecordingViewModel : ObservableObject
     private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
 
     /// <summary>
+    /// When true, the finished recording is appended to the existing project
+    /// (the page calls <see cref="Services.ProjectService.AppendRecording"/>)
+    /// instead of replacing it, so the VM must NOT reset the project via SetProject.
+    /// </summary>
+    public bool IsAppendMode { get; set; }
+
+    /// <summary>
     /// Opens the capture gate so frames and audio begin recording.
     /// Call after the recording overlay is visible.
     /// </summary>
@@ -272,8 +279,11 @@ public partial class RecordingViewModel : ObservableObject
             await Task.Run(async () => await session.StopAsync());
 
             LastProject = _session.GetProject();
-            if (LastProject is not null)
+            if (LastProject is not null && !IsAppendMode)
             {
+                // Normal recording: replace the project/timeline. In append mode the
+                // page calls ProjectService.AppendRecording instead, so skip this to
+                // avoid duplicating the new recording as two segments.
                 ProjectService.Instance.SetProject(LastProject);
             }
             RecordingStatus = "Recording saved";

@@ -96,10 +96,18 @@ public sealed class MouseHookRecorder : IDisposable
 
     // Binary file format constants
     private static readonly byte[] MagicBytes = "MCUR"u8.ToArray();
-    private const int FileFormatVersion = 1;
+    private const int FileFormatVersion = 2;
 
     private nint _hookId;
     private LowLevelMouseProc? _hookProc; // prevent GC collection of the delegate
+    private readonly CursorShapeResolver _shapeResolver = new();
+
+    // The active cursor shape is sampled only at click time (button-down) — not on a
+    // continuous timer — and held between clicks. Clicks are the moments where the
+    // cursor's identity matters most (link, text, resize), and sampling only then keeps
+    // GetCursorInfo entirely off the high-rate mouse-move path. Written from the hook
+    // thread, read when building each sample.
+    private volatile int _currentShape = (int)CursorShape.Arrow;
 
     private readonly List<MouseSample> _samples = new(DefaultSampleCapacity);
     private readonly List<ClickEvent> _clicks   = new(DefaultClickCapacity);
@@ -140,6 +148,10 @@ public sealed class MouseHookRecorder : IDisposable
         _paused = false;
         _hookReady.Reset();
         _startTicks = Stopwatch.GetTimestamp();
+
+        // Sample the cursor shape once at the start; thereafter it is re-sampled only
+        // at click time (see HookCallback) and held between clicks.
+        _currentShape = (int)_shapeResolver.Resolve();
 
         _hookThread = new Thread(HookThreadProc)
         {
@@ -264,6 +276,16 @@ public sealed class MouseHookRecorder : IDisposable
                 ClassifyEvent(msg, hookData, ticks, out MouseEventKind kind, out MouseButton button,
                               out short scrollDelta, out bool isClick, out bool isDown);
 
+                // Re-sample the cursor shape on click transitions — both button-down and
+                // button-up — so a shape that appears on press (grab, resize, ...) reverts
+                // when the button is released. GetCursorInfo never runs on the high-rate
+                // move path, so it cannot add latency to cursor motion.
+                if (isClick)
+                {
+                    try { _currentShape = (int)_shapeResolver.Resolve(); }
+                    catch { /* keep last known shape on transient failure */ }
+                }
+
                 var sample = new MouseSample
                 {
                     TimestampTicks = ticks,
@@ -272,6 +294,7 @@ public sealed class MouseHookRecorder : IDisposable
                     EventKind      = kind,
                     Button         = button,
                     ScrollDelta    = scrollDelta,
+                    Shape          = (CursorShape)_currentShape,
                 };
 
                 lock (_lock)
@@ -375,6 +398,7 @@ public sealed class MouseHookRecorder : IDisposable
     /// Format: [MCUR][version:i32][sampleCount:i32][clickCount:i32]
     ///         [startTicks:i64][endTicks:i64][tickFreq:f64]
     ///         [MouseSample * sampleCount][ClickEvent * clickCount]
+    /// As of version 2 each MouseSample additionally stores a cursor-shape byte.
     /// </summary>
     /// <remarks>
     /// After saving, this method frees in-memory samples.
@@ -419,6 +443,7 @@ public sealed class MouseHookRecorder : IDisposable
             bw.Write((byte)s.EventKind);
             bw.Write((byte)s.Button);
             bw.Write(s.ScrollDelta);
+            bw.Write((byte)s.Shape);
         }
 
         // Clicks
@@ -443,8 +468,10 @@ public sealed class MouseHookRecorder : IDisposable
             throw new InvalidDataException("Not a valid MCUR file.");
 
         int version = br.ReadInt32();
-        if (version != FileFormatVersion)
+        if (version is not (1 or 2))
             throw new InvalidDataException($"Unsupported MCUR version {version}.");
+
+        bool hasShape = version >= 2;
 
         int sampleCount = br.ReadInt32();
         int clickCount  = br.ReadInt32();
@@ -464,6 +491,7 @@ public sealed class MouseHookRecorder : IDisposable
                 EventKind      = (MouseEventKind)br.ReadByte(),
                 Button         = (MouseButton)br.ReadByte(),
                 ScrollDelta    = br.ReadInt16(),
+                Shape          = hasShape ? (CursorShape)br.ReadByte() : CursorShape.Arrow,
             });
         }
 

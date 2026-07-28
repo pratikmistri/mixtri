@@ -2,1791 +2,1061 @@
 
 This file tracks approaches tried, what worked, and what didn't for each feature.
 
----
-
-## Recording Overlay â€” Acrylic Background & No Border
-
-**Approaches tried:**
-
-1. **`DwmSetWindowAttribute` with `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`** â€” Partially worked. Removed the DWM-drawn border color but a white border still appeared from the window frame styles.
-2. **Stripping `WS_BORDER` and `WS_DLGFRAME` via `GetWindowLongPtrW`/`SetWindowLongPtrW`** â€” Combined with the DWM approach, this fully eliminated the white border. âœ…
-3. **`AcrylicBrush` on Grid background** â€” Worked. Replaced solid `#E01E1E1E` with acrylic (TintColor `#1E1E1E`, TintOpacity 0.8, fallback color for non-composited desktops). âœ…
-
-**What worked:** All three combined â€” DWM color removal + window style stripping + AcrylicBrush.
+> **How to use this file:** Read **Settled Playbooks** below FIRST. These are definitive
+> rules distilled from areas that were re-worked many times (often with reversals). Do not
+> re-litigate them — follow them. The dated/feature sections further down are the historical
+> record showing *why* each rule exists. Only deviate from a playbook if you have new evidence,
+> and if you do, update the playbook in the same change.
 
 ---
 
-## Recording Overlay â€” Pill Shape
+# Settled Playbooks (definitive — read before starting)
 
-**Approaches tried:**
+These rules supersede any conflicting advice in the historical sections below. Each one
+caused repeated churn before it was settled; treat them as fixed conventions.
 
-1. **`CornerRadius="26"` on Grid + `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`** â€” Didn't fully work. The Grid content was rounded but the window background (black layer) was only slightly rounded by DWM (~8px), creating a visible two-layer effect.
-2. **`CreateRoundRectRgn` + `SetWindowRgn`** â€” Worked. Clips the actual window to a pill-shaped region using `CreateRoundRectRgn(0, 0, width+1, height+1, height, height)`, eliminating the black background peeking through. âœ…
+## Playbook: Build, Deploy & Test toolchain
 
-**What worked:** `SetWindowRgn` with a round rect region using the window height as the ellipse radius to create a true pill shape at the OS level.
+- **ALWAYS build with VS MSBuild, NEVER `dotnet build`** — this repo fails `dotnet build`
+  with a PriGen tooling error (MSB4062). Locate MSBuild via
+  `vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'`
+  (e.g. `C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`).
+- If direct `& MSBuild.exe` is blocked by shell permissions, invoke it through a
+  `[System.Diagnostics.Process]::Start()` wrapper with redirected stdout/stderr.
+- Standard build args: `Musio.App.csproj /restore /t:Build /p:Configuration=<Debug|Release> /p:Platform=<x64|ARM64>`.
+  Always include `/restore` — a bare `/t:Build` after deleting `bin/obj` fails NuGet restore.
+- **Clean rebuild = kill the running `Musio.App` process first, then delete `bin/obj`.**
+  Locked DLLs make MSBuild `/t:Clean` fail silently (look for the PID in MSB3061 warnings).
+- After any XAML element rename/restructure, delete `bin/obj` to drop stale `.g.cs`
+  (otherwise `COMException: Element not found` → blank page at runtime).
+- **Tests:** the host often lacks the .NET 9 runtime. Run `dotnet test` with
+  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. The current suite
+  size is in the 320s–330s range and must stay green.
+- **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
+- **Deploy/run locally:** `Remove-AppxPackage` the old registration BEFORE `Add-AppxPackage -Register <AppxManifest.xml>`
+  (re-registering over deleted clean-build files fails silently). Launch with
+  `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (NOT `explorer.exe`, which returns exit 1).
 
----
+## Playbook: DPI & capture coordinate transforms (region / window / monitor)
 
-## MSIX Packaging â€” Switching from Unpackaged to Packaged
+The single most-churned area. The process is **PerMonitorV2**, which is the key to every rule:
 
-**Approaches tried:**
+- **`WH_MOUSE_LL` hook coordinates are already PHYSICAL pixels.** NEVER multiply them by a
+  DPI scale. Use `coordScale = 1.0f` in every transform site (FrameCompositor, AutoZoomEngine,
+  EditorPage zoom-create). Multiplying by `Project.DpiScale` double-scales and was reverted.
+- **`Project.CropOffsetX/Y` = the screen-absolute PHYSICAL-pixel top-left of the captured frame**
+  (monitor origin + crop-within-monitor), not the crop-within-monitor offset alone. Subtract it
+  from every cursor/click/zoom-center coordinate. Compute per capture type:
+  - Monitor: `GetMonitorInfo(hMonitor).rcMonitor.Left/Top`.
+  - Window: `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` (falls back to `GetWindowRect`).
+  - Region: monitor origin + physical crop-rect position.
+- **Physical capture dimensions = logical × `GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI)`**,
+  then forced even (see encoding playbook). `Project.DpiScale` is stored at record time for
+  back-compat but is NOT used for hook-coordinate transforms.
+- **NEVER trust `GetSystemDpiScale()` / dimension-ratio heuristics for region captures** — they
+  return 1.0 because the cropped dimension is smaller than the monitor logical size. Store the
+  real DPI at record time instead.
+- Native overlay windows (`RegionBorderHighlight`, pickers) expect PHYSICAL coords: multiply
+  WinUI DIP region coords by the monitor DPI scale (resolved via the same `MonitorEnumerator`
+  matching used by `BuildCaptureTarget()`).
+- Known unsolved limitation: region/window pickers use `Stretch="Fill"` over a full virtual-desktop
+  screenshot, so multi-monitor coords can still be slightly off. Don't claim a multi-monitor DPI
+  fix is complete without testing on a secondary, differently-scaled monitor.
 
-1. **Changed `WindowsPackageType` from `None` to `MSIX`** in `.csproj` â€” Required for Store submission and packaged debugging. Deploy flags were already present in the `.sln`. âœ…
-2. **Fixed `graphicsCapture` capability namespace** â€” `graphicsCapture` is not a valid `uap:Capability`; it requires the `uap6` namespace (`xmlns:uap6="http://schemas.microsoft.com/appx/manifest/uap/windows10/6"`). Changed `uap:Capability` to `uap6:Capability`. âœ…
+## Playbook: H.264 encoding & MediaEncodingProfile
 
-**What worked:** Setting `WindowsPackageType=MSIX` + using `uap6:Capability` for `graphicsCapture` in `Package.appxmanifest`.
+- **Force encoder-safe dimensions in BOTH pipelines — but they use DIFFERENT alignment:**
+  - Recording (`VideoWriter.FinalizeAsync`): mod-2 via `(uint)(_width & ~1)` / `(_height & ~1)`.
+    H.264 silently rejects odd dimensions (`CanTranscode = false`, no message).
+  - Export (`VideoEncoder` → `AspectRatioHelper.ComputeExportDimensions`): floored to **mod-16**
+    `(fitW / 16) * 16` for H.264 macroblock alignment (with a `Math.Max(2, fitW - fitW % 2)` mod-2
+    fallback only when a side is < 16px). Do NOT add a separate `& ~1` in `VideoEncoder` — dimension
+    safety already lives in `ComputeExportDimensions`; change it there if alignment needs adjusting.
+  - The recurring trap is forgetting one pipeline entirely, not the specific modulus — confirm both
+    `VideoWriter` and the `ComputeExportDimensions` path whenever touching encode dimensions.
+- **Recording pipeline:** `VideoEncodingQuality.Auto` + explicitly set Width/Height/Bitrate/FPS/Subtype("H264").
+- **Export pipeline:** do **NOT** use `Auto` — it yields incomplete Video/Audio properties and the
+  audio-mux pass (`MediaComposition.RenderToFileAsync`) throws `MF_E_INVALIDMEDIATYPE (0xC00D36E6)`.
+  Instead start from `MediaEncodingProfile.CreateMp4(HD1080p)` as a well-formed template and OVERRIDE
+  Width/Height/Bitrate/FPS/Subtype. The encoder auto-selects the correct H.264 Level from the real
+  dimensions (presets like `HD1080p`/`HD720p` lock Level/DPB and corrupt frames above ~1920×1088,
+  visibly on AMD AMF; NVIDIA may silently auto-promote and mask the bug).
+- **Scale bitrate by pixel count:** `VideoEncoder.ComputeBitrate(width, height)` scales the base by
+  pixel ratio. A fixed bitrate starves ~3K+ output.
+- **Per-frame GPU surface allocation in `VideoEncoder` is INTENTIONAL, not a leak to "fix".** When
+  scaling, each frame gets its own `outputSurface` (`CreateRenderTarget`) so the encoder can read it
+  asynchronously after the producer releases the `SampleRequested` semaphore — a reused buffer would
+  be overwritten mid-read. (The old `_flipBuffer`/`_scaleTarget` reuse fields no longer exist.)
+  Memory safety comes from `PreflightRenderTargetMemory` (rejects > ~1.5 GB BGRA targets) and
+  disposing each surface after the encoder consumes it, NOT from buffer reuse. Long-lived helpers
+  that ARE cached: `_textSlideRenderer` and the webcam source (opened once, extracted per frame).
+- **For per-frame encoding prefer a streaming `MediaStreamSource` + `MediaTranscoder`**
+  (BGRA8 → H.264, CFR) — both pipelines do this; NOT `MediaClip` + `MediaComposition.RenderToFileAsync`
+  per frame (spawns 100k+ COM objects on long recordings). Set
+  `MediaTranscoder.HardwareAccelerationEnabled = false` in BOTH `VideoWriter` and `VideoEncoder` to
+  avoid AMD H.264 corruption / D3D-surface interop quirks. Wrap `TranscodeAsync` in a watchdog
+  timeout (`TranscodeWithTimeoutAsync`). NOTE: export still uses `MediaComposition.RenderToFileAsync`
+  for the *audio mux* second pass — which is exactly why its profile must be a well-formed `HD1080p`
+  template rather than `Auto`.
+- **Always guard `MediaClip.CreateFromFileAsync`** — `video.mp4` is often corrupt/empty because
+  `VideoWriter.FinalizeAsync` is intentionally non-fatal during recording. On failure
+  ("The parameter is incorrect"), fall back to `project.Width/Height` and the `.frames/` JPEGs.
 
-**What didn't work:** `uap:Capability Name="graphicsCapture"` â€” fails manifest validation (DEP0700) because `graphicsCapture` is not in the base `uap` schema enumeration.
+## Playbook: WinUI flyout/control initialization & XAML resource pitfalls
 
----
+- **NEVER set default values (`IsChecked`, `Value`, `SelectedIndex`, …) in XAML on flyout/option
+  controls.** They fire `Checked`/`ValueChanged`/`SelectionChanged` during `InitializeComponent()`
+  — before `_suppress*` flags are set and before `x:Name` fields are assigned — racing
+  `RebuildPreviewRendererAsync` against `InitializePreviewAsync` and hanging the app after recording.
+  Set defaults ONLY inside a `Sync<X>ControlsToConfig()` method, under the suppress flag.
+- Null-guard every handler that touches `x:Name` controls (they can fire before assignment).
+- **NEVER assign `{ThemeResource ...}` to a plain CLR / non-DependencyProperty** (e.g. a converter's
+  `TrueValue`/`FalseValue` placed in `Page.Resources`). It compiles but throws
+  `XAML_E_LAYOUT_CYCLE` (HRESULT 0x802B000A) when the page is navigated to. Look brushes up at
+  runtime from `Application.Current.Resources` (keyed by `ConverterParameter`) instead.
 
-## Zoom Track â€” Segment-Based Representation
+## Playbook: Frame-style / compositor coordinate model (settled after 10 rounds)
 
-**Feature/area:** Timeline zoom track (TimelineControl, EditorPage, EditOperation, TimelineModel)
+- **`BackgroundCompositor.CalculateOutputSize` is identity `(w, h)`** — padding insets WITHIN the
+  canvas and never grows it. The output canvas AR is driven only by the target aspect ratio.
+- **One background container only.** Don't fill letterbox/pillarbox bars inside the cropped buffer;
+  size the cropped buffer to the visible source-area dims and let the single background fill show
+  through. `_sourceAreaOffsetX/Y` already include the total gap (user padding + AR-fit gap) — there
+  is NO separate `+padding` term or "inner content area" coordinate space.
+- **Zoom uses the post-composite path whenever `ZoomLevel > 1.01`, UNLESS `ZoomScope == Source`**
+  (which keeps background/letterbox/padding fixed and zooms only the captured source).
+- Frame style + cursor are **per-segment** (`VideoSegment.FrameStyleOverride` / `CursorStyleOverride`);
+  aspect ratio, fit/cover mode, crop anchor, and zoom scope are **global** on `CompositionConfig`.
+  Global changes must call `InvalidateSegmentPreviews()` so appended segments rebuild.
 
-**Approaches tried:**
+## Playbook: Zoom-segment time mapping (multi-recording)
 
-1. **Added computed `Start`/`End` properties to existing `ZoomKeyframe` record** â€” Worked. `Start = Timestamp - PreDuration`, `End = Timestamp + HoldDuration + PostDuration`. Preserves backward compatibility with AutoZoomEngine while enabling segment rendering. âœ…
-2. **Replaced diamond markers with rounded rectangle segment bars** â€” Worked. Auto-generated segments render in lighter color (not draggable). Manual segments are fully interactive. âœ…
-3. **Fixed `CutOperation` to use full Start/End span** â€” Critical fix. Old code only checked `kf.Timestamp`, but a segment can span a cut even if its center is outside. New code handles all overlap cases (keep/trim/shift/remove). âœ…
+- Zoom keyframes are tagged by source file via `ZoomKeyframe.SourceVideoFilePath` (null = primary).
+  **Map BOTH edges of a keyframe through the SINGLE owning segment** (`OwningSegmentForKeyframe`:
+  file match + Timestamp containment), never per-edge first-match (which collapsed appended segments
+  to a thin line) and never the primary-only `XToSourceTime` mapping for appended keyframes.
+- On any edit (move/resize/property change), promote the keyframe to `IsManual = true` (save the
+  previous value for undo). `ZoomKeyframe.MinSegmentDuration = 200ms`. Cut/split overlap logic must
+  use the full `Start`/`End` span, not just `Timestamp`.
 
-**What worked:**
-- Extending `ZoomKeyframe` with computed properties + `FromRange()` factory method for creating segments from drag ranges.
-- New `DragMode` values for body/edge/create interactions with 5px threshold to distinguish click-to-scrub from drag-to-create.
-- Overlap-aware hit testing (edges only when selected, body always).
-- New edit operations: `AddZoomSegmentOperation`, `ResizeZoomSegmentOperation`, `UpdateZoomSegmentPropertiesOperation`.
-- Properties panel toggles visibility based on selection state.
+## Playbook: Crash / freeze hardening invariants
 
-**What didn't work:**
-- `CanvasGeometry.CreateRoundedRectangle(null, ...)` compiles but throws `COMException: Objects used together must be created from the same factory instance` at runtime. Must pass a valid `ICanvasResourceCreator` (e.g., `ds` from the Draw handler).
-- XAML `SelectionChanged`/`ValueChanged` events fire during `InitializeComponent()` before `x:Name` controls are assigned â€” null guard needed for controls referenced in those handlers.
-- After changing XAML element names/structure, stale `.g.cs` files cause `COMException: Element not found` at runtime â†’ blank page. Fix: delete `bin/obj` and clean rebuild.
-
-**Key design decisions:**
-- Auto-generated (non-manual) zoom segments from clicks are visible but not editable â€” they don't match AutoZoomEngine's merged segments exactly.
-- Left edge resize changes PreDuration+Timestamp; right edge changes HoldDuration.
-- `ZoomKeyframe.MinSegmentDuration` = 200ms prevents degenerate segments.
-- Build requires VS MSBuild (`dotnet build` fails due to PriGen tooling issue).
-
----
-
-## App Logo â€” Generating MSIX Assets from Source Logo
-
-**Feature/area:** App branding / Assets
-
-**Approaches tried:**
-
-1. **PowerShell + System.Drawing to resize source PNG (640x640) into all required MSIX assets** â€” Worked. Used `HighQualityBicubic` interpolation for clean downscaling. âœ…
-2. **Manual ICO generation with PNG-encoded entries** â€” Worked. Built multi-resolution ICO (16â€“256px) by writing the ICO binary header + PNG payloads directly via `BinaryWriter`. âœ…
-
-**What worked:** Using the largest source image (`Musio.png` 640x640) and resizing to all required targets: StoreLogo (50x50), Square44x44 (88x88, 24x24), Square150x150 (300x300), LockScreen (48x48), Wide310x150 (620x300 centered), SplashScreen (1240x600 centered), AppIcon.ico (multi-res). All existing references in Package.appxmanifest, MainWindow.xaml, csproj, and SystemTrayService.cs already pointed to the standard asset names â€” no code changes needed.
-
----
-
-## Region Capture â€” Crop Not Applied to Recording
-
-**Feature/area:** Recording pipeline (RecordingSession, VideoWriter, Project)
-
-**Approaches tried:**
-
-1. **Crop in `VideoWriter.WriteFrame` using Win2D `CanvasRenderTarget`** â€” Worked. Added optional `Rect? cropRect` to `VideoWriter` constructor. When set, each frame is cropped via `CanvasRenderTarget.DrawImage(source, destRect, sourceRect)` before saving as JPEG. Reuses a single `CanvasRenderTarget` across frames to avoid per-frame GPU allocation. âœ…
-2. **DPI-aware crop rect conversion in `RecordingSession.OnFrameCaptured`** â€” Worked. Used `GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI)` to get the monitor's DPI scale, then multiplied overlay coordinates (logical/DIP pixels) by the scale to get physical pixel coordinates for the capture texture. Clamped to frame bounds for safety. âœ…
-3. **Added `CropOffsetX/Y` to `Project` model** â€” Persists the crop origin in physical pixels so downstream cursor/zoom alignment can subtract the offset. âœ…
-
-**What worked:**
-- `VideoWriter` accepts a crop `Rect?` and applies it using `CanvasRenderTarget.DrawImage(bitmap, destRect, sourceRect)` with a reusable render target.
-- `RecordingSession` computes the DPI-scaled physical crop rect on first frame arrival, uses crop dimensions for `_captureWidth/_captureHeight` and passes the crop rect to `VideoWriter`.
-- `Project.CropOffsetX/Y` stores the origin for downstream use.
-
-**What didn't work / known limitations:**
-- Cursor and zoom alignment in the editor is not yet adjusted for region recordings â€” `FrameCompositor.GetSystemDpiScale` detects DPI by comparing captured dimensions vs monitor logical size, which fails for region captures (crop width < logical width â†’ returns 1.0). A future fix should pass the DPI scale through Project and subtract `CropOffsetX/Y` from mouse positions.
-- The region overlay uses `Stretch="Fill"` on a full virtual desktop screenshot in a single-monitor-maximized window, so region coordinates on multi-monitor setups may be inaccurate (pre-existing issue in the region selector UI, not the recording pipeline).
-
----
-
-## Zoom Track â€” Making Auto-Generated Segments Selectable & Editable
-
-**Feature/area:** Timeline zoom track (TimelineControl, EditOperation)
-
-**Approaches tried:**
-
-1. **Removed `IsManual` gate from hit testing + added `IsManual = true` promotion on edit** â€” Worked. Auto-generated (click-tracking) segments become selectable, draggable, and resizable. On any modification (move, resize, property change), the segment is promoted to `IsManual = true` so it gets sent to the compositor as a manual override. Undo restores the original `IsManual` state. âœ…
-
-**What worked:**
-- Removing `if (!kf.IsManual) continue;` from `HitTestZoomSegment` to allow selection.
-- Changing resize handle condition from `isSelected && isEditable` to `isSelected`.
-- Adding `IsManual = true` to all `with` expressions in `MoveZoomKeyframeOperation`, `ResizeZoomSegmentOperation`, and `UpdateZoomSegmentPropertiesOperation`.
-- Saving `_previousIsManual` in `MoveZoomKeyframeOperation` for proper undo (resize/update ops already save the full previous keyframe).
-
-**Key design decisions:**
-- Auto segments keep their lighter fill color (`ZoomSegmentAutoFill`) until modified, at which point promotion to `IsManual` gives them the standard fill.
-- Promotion to manual means the compositor receives the segment as a user override that takes priority over the auto-zoom engine's generated segments.
-
----
-
-## Region Capture â€” MediaEncodingProfile Invalid Width/Height
-
-**Feature/area:** Recording pipeline (RecordingSession, VideoWriter)
-
-**Approaches tried:**
-
-1. **Round capture dimensions to even numbers (`& ~1`) after DPI scaling** â€” Necessary fix. H.264 encoding requires width and height to be multiples of 2. After DPI-scaling the logical crop rect and truncating to int, dimensions could be odd (e.g., 150% DPI on a 746px logical region â†’ 1119px physical). Applied `& ~1` rounding on all capture dimension paths (region crop, monitor, window) in `RecordingSession.OnFrameCaptured`. Also added matching rounding in `VideoWriter.FinalizeAsync` profile dimensions. âœ…
-2. **Changed `MediaEncodingProfile.CreateMp4(HD1080p)` to `Auto` quality** â€” Done. Using `Auto` avoids the profile being constrained to a preset resolution when custom dimensions are applied. Set `Subtype = "H264"` explicitly. âœ…
-3. **Made `FinalizeAsync` failure non-fatal in `RecordingSession.StopAsync`** â€” Wrapped `FinalizeAsync()` in try/catch so the recording session still completes and the project is created even if MP4 encoding fails. The editor can work directly from the `.frames/` JPEG directory. âœ…
-
-**What worked:**
-- Even-dimension rounding with `& ~1` and minimum of 2 in both `RecordingSession` and `VideoWriter`.
-- Using `VideoEncodingQuality.Auto` instead of `HD1080p` for the recording MP4 profile, then explicitly setting all video properties.
-- Making `FinalizeAsync` failure non-fatal so region recordings always produce a usable project.
-
-**What didn't work / pitfalls:**
-- `Add-AppxPackage -Register` can silently fail if the previous registration's files were deleted (clean rebuild). Must `Remove-AppxPackage` first, then re-register.
-- Deleting `bin/obj` for clean rebuild requires NuGet restore (`/restore` flag or separate `msbuild /t:Restore`).
-- The `.frames/` JPEG directory confirmed the actual cropped dimensions (1119Ã—454 = odd width from 150% DPI on a 746px region). This was the smoking gun proving H.264 rejection of odd dimensions.
-
----
-
-## Compositor â€” Skip Background Fill for Non-Window Captures
-
-**Feature/area:** Compositor pipeline (FrameCompositor, BackgroundCompositor, EditorPage, Project)
-
-**Approaches tried:**
-
-1. **Added `CaptureTargetType CaptureType` to `Project`, override `BackgroundStyle` in editor** â€” Worked. In `EditorPage.xaml.cs`, when `project.CaptureType != CaptureTargetType.Window`, the background style is overridden to `Padding=0, ShadowEnabled=false, CornerRadius=0, BorderEnabled=false`. Updated config is stored back to `ProjectService.CurrentComposition` so export uses the same settings. âœ…
-
-**What worked:**
-- `Project.CaptureType` set from `_config.Target.Type` in `RecordingSession.StopAsync`.
-- `EditorPage` conditionally strips background styling for region/full-screen recordings.
-- `ProjectService.CurrentComposition` is updated so the export pipeline inherits the same config.
-
-**Key design decisions:**
-- Background fill (padding, shadow, rounded corners, border) only applies to window captures. Region and full-screen captures render raw content.
+- **On `CanvasDevice.DeviceLost`, surface a recoverable exception — NEVER recreate the device
+  mid-frame.** Let outer code restart cleanly. Check `D3D11CreateDevice` HRESULT and fall back to
+  WARP (`D3D_DRIVER_TYPE_WARP`).
+- VRAM/screenshot preflights: reject absurd allocations (`>1.5 GB` BGRA surface, `>16384px`, or
+  `w*h*4 > 1 GB`) with a clear exception / solid-overlay fallback, using checked `long` arithmetic.
+- Serialize crop+write under a single lock; frame-pool callbacks are free-threaded and race shared
+  render targets. Wrap `TryGetNextFrame()` in try/catch (device-lost / monitor hot-plug / shutdown).
+- Long-running encode/transcode/mux passes get a cancellation-based watchdog timeout.
+- Throttle pure `WM_MOUSEMOVE` samples (min 4ms interval); never throttle clicks/scrolls/buttons,
+  and don't change the binary serialization format.
 
 ---
 
-## Region Recording â€” Border Highlight Around Selected Region
+# Archive — consolidated entries (older than 15 days)
 
-**Feature/area:** Recording overlay (RecordingPage, RegionBorderHighlight)
+The detailed round-by-round write-ups below were condensed on 2026-06-21 to reduce
+file size. The durable rules they produced now live in **Settled Playbooks** above;
+each line here keeps the feature, the approach that worked, and any gotcha not already
+captured by a playbook. Entries newer than 15 days remain in full further down.
 
-**Approaches tried:**
+## Recording overlay (pill window, acrylic, stop UX)
+- White-border removal = DWM `DWMWA_BORDER_COLOR=COLOR_NONE` + strip `WS_BORDER`/`WS_DLGFRAME`; pill body via `AcrylicBrush` + `CreateRoundRectRgn`/`SetWindowRgn` (region radius = window height).
+- Final overlay uses `SystemBackdrop = DesktopAcrylicBackdrop()` (guard `IsSupported()`) + DWM `DWMWCP_ROUND`, NOT `SetWindowRgn` — `SetWindowRgn` clips contents but leaves the DWM drop-shadow rectangular.
+- "Stopping" state: hide RecordingPanel, show StoppingPanel ring + a `DispatcherTimer` (1.5s) cycling Star-Trek phrases; dispose timer in `CloseOverlay`.
+- Light-theme overlay fix and `Hide()`-before-`Show()` to avoid GDI leaks.
 
-1. **Four thin native Win32 popup windows (top, right, bottom, left edges)** â€” Worked. Each window is `WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED`, with `WDA_EXCLUDEFROMCAPTURE` so the border doesn't appear in the recording. Click-through via `WS_EX_TRANSPARENT`. âœ…
+## MSIX packaging, Store submission, versioning
+- `WindowsPackageType=MSIX`; `graphicsCapture` needs `uap6:Capability` (not `uap:`), else DEP0700.
+- Store manifest cleanup: drop `systemAIModels`, `mp:PhoneIdentity`, and `Windows.Universal` TDF (keep `Windows.Desktop`); `runFullTrust` needs Partner Center justification; Store signs MSIX itself.
+- App assets generated from `Musio.png` (640×640) via System.Drawing `HighQualityBicubic` + hand-written multi-res ICO.
+- Version bumped 1.0.4→1.1.0 (manifest + stale SettingsPage string); per-arch unsigned MSIX built x64 then ARM64 separately (clean bin/obj between).
 
-**What worked:**
-- `RegionBorderHighlight` class in `Musio.App\Services` creates 4 thin (3px) native windows with a red (#FF3030) background brush, positioned along the edges of the selected region.
-- Shown in `RecordingPage.ShowRecordingOverlay` when `CaptureMode.CustomRegion` is active.
-- Disposed in `CloseRecordingOverlay` when recording stops.
+## Build / test toolchain (all reinforce the Build playbook)
+- `dotnet build` fails (PriGen MSB4062 / missing `Microsoft.Build.Packaging.Pri.Tasks.dll`); use VS MSBuild, located via `vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'`. If `&` is blocked, wrap in `[System.Diagnostics.Process]::Start()`.
+- Kill running `Musio.App` before clean (DLL lock); `/restore` required after deleting bin/obj.
+- Tests: build with MSBuild then `dotnet test --no-build`; host lacks .NET 9 runtime so set `DOTNET_ROLL_FORWARD=Major`. CI uses `microsoft/setup-msbuild@v2`.
+- Launch app: `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (`explorer.exe` returns exit 1). PFN: `PratikMistri.Musio_9gph0n9984scy`.
+- Targeting `Musio.sln` alone may not rebuild `Musio.Tests` on test-only edits — target the test csproj.
 
-**Key design decisions:**
-- Used native Win32 windows instead of WinUI windows â€” avoids transparency/compositor complexity and is lightweight.
-- Click-through (`WS_EX_TRANSPARENT`) so the user can still interact with content under the border.
-- Excluded from capture so the border never appears in the recorded video.
+## Region / window / monitor capture + DPI (all reinforce the DPI playbook)
+- Crop applied in `VideoWriter.WriteFrame` via reusable `CanvasRenderTarget.DrawImage(dest,src)`; `RecordingSession` computes physical crop rect with `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`.
+- H.264 rejects odd dims silently → `& ~1` in BOTH `RecordingSession` and `VideoWriter.FinalizeAsync`; `FinalizeAsync` made non-fatal so projects still open from `.frames/`.
+- Region/full-screen captures skip background fill (only Window/Monitor get padding/shadow/corners — gate on explicit type).
+- Region border = 4 thin native Win32 popups (`WS_EX_TRANSPARENT|LAYERED|TOOLWINDOW`, `WDA_EXCLUDEFROMCAPTURE`); they need screen-absolute physical px = monitor-local DIP × DPI + monitor origin (`rcMonitor.Left/Top`).
+- MainWindow: removed `WDA_EXCLUDEFROMCAPTURE` (it hid window from ALL capture); rely on existing minimize/restore. Minimize moved to a pre-record click handler with 600ms delay so the animation isn't captured.
+- Mouse misalignment root causes: `GetSystemDpiScale()` returns 1.0 for region crops (crop < monitor) — store real `Project.DpiScale` at record time; and `WH_MOUSE_LL` coords are already PHYSICAL in PerMonitorV2 → use `coordScale=1.0f`, never ×DpiScale (double-scale bug, invisible at 100%). Subtract screen-absolute `CropOffsetX/Y` (monitor origin; window uses `DWMWA_EXTENDED_FRAME_BOUNDS`).
+- Window highlight overstated bounds by ~7px (`GetWindowRect` includes DWM frame) → use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` with `GetWindowRect` fallback.
+- UNRESOLVED: region capture off-by-1px at fractional DPI; the `PixelX/Y` + `CropIsPhysicalPixels` physical-crop attempt was reverted (did not fix). Cause likely in overlay stroke alignment / screenshot stretch, not the DPI multiply.
 
----
+## Multi-monitor region picker (high-churn; settled)
+- Picker host window must span the full virtual desktop via `AppWindow.MoveAndResize(SM_X/Y/CX/CYVIRTUALSCREEN)` — `presenter.Maximize()` only covers one monitor (caused squashed two-monitor view); once full-size, `Stretch="Fill"` becomes 1:1.
+- `ConfirmSelection` maps overlay DIPs → virtual-desktop physical px → monitor-local physical px (largest-intersection monitor, not corner `MonitorFromPoint`) → monitor-local DIPs via per-monitor `GetDpiForMonitor`. Store `IntPtr Handle` on `MonitorInfo` so DPI + origin lookups share one hMonitor.
+- Monitor match by exact `DisplayName==MonitorId` (or `StartsWith(MonitorId+' ')`) — `Contains` matched DISPLAY1 vs DISPLAY10.
+- Stale saved region (disconnected monitor): clear selection + surface status, don't silently fall back to primary.
+- Escape-to-cancel needs a Win32 `WH_KEYBOARD_LL` hook (store delegate as field) — XAML focus isn't established on a borderless maximized overlay, so `KeyboardAccelerator`/`KeyDown` fail.
+- Picker UX: pre-seed last region in `OnLoaded` (no blank canvas); `WasCancelled` flag + InfoBar to disambiguate Escape no-op from first-open.
 
-## Microsoft Store Submission â€” Manifest Cleanup
+## Recording state, audio capture, hotkeys
+- Recording selection lost on navigation → shared singleton `RecordingViewModel.Shared`; subscribe in `OnNavigatedTo` / tear down in `OnNavigatedFrom` to avoid leaking page refs.
+- `AudioCaptureEngine.StopRecording` deadlock: WASAPI `RecordingStopped` callback contended `_lock` held across Dispose → lock only to null fields, then stop/dispose lock-free.
+- Mic/system/camera toggles = `ToggleButton` two-way bound to `[ObservableProperty]` fields, persisted via `partial OnXChanged` → `AppSettings`. Settings audio toggles were previously decorative (never bound).
+- Single-toolbar recording layout with inline sub-options; `SetForegroundWindow(handle)` before window capture; stop-trigger click trimmed via `NotifyStopRequested()` + `TrimStopClick` (last LButtonDown within 200ms of stop).
+- PLM/HANG_QUIESCE: handle `WM_QUERYENDSESSION` (return 1) AND `WM_ENDSESSION` — the earlier handler used wrong constant `0x0026` (correct `0x0016`) so it was dead code. `BeginQuiesce` sets `_isExiting`, disposes tray/hotkey/extended-exec, posts `Window.Close()`, hard 1.5s `Threading.Timer` → `Environment.Exit(0)`; use `Application.Exit()` not `Environment.Exit` inside handlers. Request `ExtendedExecutionSession` when hiding to tray; pause editor playback on `VisibilityChanged`.
 
-**Feature/area:** Package.appxmanifest / Store readiness
+## Timeline editing (clips, speed, split/cut)
+- Clips are KEPT regions (mapper had inverted semantics). Added `SpeedFactor`/`SourceStart` to `TimelineClip` (back-compat defaults); keep positions in output time with source mapping for the mapper.
+- Cut (Ctrl+X) = `RippleDeleteOperation` at playhead (old CutOp used full TrimStart/End → deleted everything); Split auto-creates a `[0,Duration]` clip when empty; full state snapshots for reliable undo.
+- Timeline container height was clipping tracks (5 rows = 230px, was 170).
+- Filmstrip: pre-scaled thumbnails (~track height) cached as `CanvasBitmap[]`, tiled with source-time mapping; `_thumbnailGenerationId` guards stale results; 4px orange (`#E87C06`) stroke.
 
-**Approaches tried:**
+## Zoom track / AutoZoomEngine (high-churn; settled)
+- Segment model: computed `Start`/`End` on `ZoomKeyframe` (`FromRange` factory); auto segments selectable, promoted to `IsManual=true` on any edit (save prior for undo); `MinSegmentDuration=200ms`; overlap logic uses full Start/End span.
+- Suppress click-driven auto-zoom by raw `long` `SourceClickTicks` into `TimelineModel.SuppressedClickTicks` (TimeSpan keys are fragile); sync to preview AND export (`VideoEncoder` needed `TimelineModel?`).
+- Overlapping segments: evaluate ALL active, max-zoom-wins for LEVEL but blend CENTER by activation weight `max(0,zoom-1)` (max-zoom center alone snapped the focal point). Regression tests assert no jump.
+- Draggable zoom-region overlay on raw frame (skip compositor in edit mode) via `ZoomState.IsManualOverride`; corner-resize anchors opposite corner, `newZoom=startZoom/scale` clamped [1.5,4.0]; center-snap to 0.5 (Shift bypass); cosmetic handles + manual hit-test (hit-visible handles steal pointer capture).
+- `CanvasGeometry.CreateRoundedRectangle(null,...)` throws at runtime — pass a real `ICanvasResourceCreator`.
 
-1. **Removed `systemAIModels` capability** â€” Was declared but never used in code. Restricted capabilities require justification and delay certification. âœ…
-2. **Removed `mp:PhoneIdentity` element and `mp` namespace** â€” Boilerplate for phone apps, not applicable to desktop WinUI 3. âœ…
-3. **Removed `Windows.Universal` TargetDeviceFamily** â€” WinUI 3 with `runFullTrust` is desktop-only; keeping `Windows.Universal` can cause Store validation issues. Kept only `Windows.Desktop`. âœ…
+## Compositor / frame style / aspect ratio (10+ rounds; settled in playbook)
+- `BackgroundCompositor.CalculateOutputSize` is identity `(w,h)` — padding insets within canvas, never grows it (growing changed AR with the slider). ONE background container: size cropped buffer to visible source dims, leave letterbox transparent so the single wallpaper shows through (drawing bars in-buffer caused "wallpaper repeat"). `_sourceAreaOffsetX/Y` already include padding + AR gap (no separate `+padding`).
+- Zoom uses post-composite path when `ZoomLevel>1.01` UNLESS `ZoomScope==Source`; only activate post-composite when actually zoomed (doing it for every padded frame doubled render cost / slow export). `ZoomScope` (Frame|Source) on Project/Config, surfaced in flyout, propagated by ExportEngine.
+- Wallpaper image cached in `BackgroundCompositor` (`_cachedBackgroundImage`/path) + `IDisposable` — was `LoadAsync` per frame (choppy/slow).
+- `CropSourceFrame` adaptive interpolation: Linear when |scale-1|<0.05 else HighQualityCubic.
+- Editor style flyout: `RebuildPreviewRendererAsync` (only recreates renderer/compositor, preserves reader/audio/zoom/playhead) with 200ms debounce + `_suppressStyleEvents`; Monitor background defaults applied in `ProjectService.SetProject` (not every `InitializePreviewAsync`, which clobbered edits); style menu visible for Monitor too.
+- Background presets: 8 bold two-stop gradients (Nebula…Sunset); avoid brand-name labels. Wallpaper picker "+" sentinel tile (`Tag="__add_wallpaper__"`, grid index = path index + 1) opens `FileOpenPicker`. `FindMatchingPresetIndex` must compare end-color/angle/shadow/border/image path. Known: packaged-app `CanvasBitmap.LoadAsync` on arbitrary picked paths not guaranteed across sessions (use LocalFolder copy or FutureAccessList).
 
-**What worked:** All three changes applied cleanly. Build succeeded with no new errors.
+## Export pipeline (H.264, sync, robustness)
+- Scrambled frames root cause: NON-mod-16 output dims misalign HW H.264 macroblocks → banding/ghosting. Floor export dims to mod-16; use `MediaStreamSample.CreateFromDirect3D11Surface` (no pixel extraction); `HardwareAccelerationEnabled=false` (AMD AMF stricter; NVIDIA masks by auto-promoting Level). BGRA8 is TOP-DOWN — the bottom-up row-flip was wrong. `MF_MT_DEFAULT_STRIDE`/`CopyToBuffer` did NOT help.
+- Recording uses `VideoEncodingQuality.Auto`; export must NOT (`Auto` yields incomplete props → mux `MF_E_INVALIDMEDIATYPE 0xC00D36E6`) — start from `CreateMp4(HD1080p)` template and OVERRIDE Width/Height/Bitrate/FPS/Subtype so the encoder picks the right Level. Bitrate scales with pixel count; reuse flip/scale buffers (~44MB/frame saved).
+- Truncated-to-~1s bug: `ProduceSampleAsync` swallowed errors and set `Sample=null` (= EOS) → surface first error via `onError` callback and rethrow with frame index. Pause preview before export (shared Win2D device contention corrupts/crashes).
+- Corrupt/missing source MP4 (FinalizeAsync non-fatal): make `sourceClip` nullable, fall back to `project.Width/Height`, guard "no frame source".
+- Re-export dropped style edits: `ExportFlyout_Opened` short-circuited on stale `ExportSucceeded`; reset via `ExportFlyout.Closed` → `PrepareForExport`.
+- PR-review export fixes: semaphore over-release on cancel (acquired flag), GPU surface leak on exception (catch-block dispose), 5-min mux watchdog, null-out `MediaClip` (no `IDisposable`).
 
-**Key notes for Store submission (non-code):**
-- Must associate app with Store in VS (right-click â†’ Publish â†’ Associate App with the Store) to update Identity Name/Publisher.
-- Privacy policy URL required (app uses webcam, microphone, screen capture).
-- `runFullTrust` requires justification in Partner Center (screen capture needs full trust).
-- Store signs MSIX packages automatically on submission â€” no `.pfx` needed for Store builds.
+## Webcam overlay
+- Never activated: VM set `IsWebcamEnabled` but not `WebcamDeviceId` (session required both). Wired all 6 layers (settings→UI→VM→session auto-select→export style→preview). Keep extracted `CanvasBitmap` alive as field (`_lastWebcamFrame`) — `using var` disposed it before `ComposeFrame`/render (same bug in `VideoEncoder` and GIF path). Extract at overlay size ×1.5 not native; `WebcamCompositor` caches shadow/clip geometry + `IDisposable`. Editor drag/resize uses normalized 0–1 coords via `PreviewCanvas.FrameLayoutRect`.
 
----
+## Audio sync / waveform
+- Use `Project.AudioToVideoOffsetSeconds` directly (positive pre-roll: audio pos = T + offset), NOT a `videoDuration-maxAudio+0.5` heuristic. Waveform load placed BEFORE the cursor-data early return (else no audio track when no cursor data); `Task.Run` off-thread; guard `startSeconds >= reader.Length`.
+- Scrub: `ScrubTo()` Stop→Seek→Play under `_transportLock`, 80ms debounce, `WaveOutEvent.DesiredLatency=100ms` (default 300 too high).
 
-## Main Window â€” Minimize Instead of Hide from Capture
+## Cursor rendering
+- Cursor options flyout: added `Touch` to `CursorType`, `Color` to `CursorStyle`; `DrawTouchCursor` filled circle at hotspot; contrast outline via BT.601 luminance; color presets = templated `RadioButton`s. NEVER set XAML defaults on flyout controls (fire during `InitializeComponent`, race `RebuildPreviewRendererAsync` → post-record hang) — set in `Sync*ControlsToConfig` under suppress flag.
+- Touch-click dedup: group click-downs whose gap < 1.41s into chains (float-in → tap each → slide between → fade); widen active-click window to ±1.5s; "latest pre-roll wins" rejected (suppressed earlier taps).
+- Mouse move throttle: 4ms min interval on pure `WM_MOUSEMOVE` only; clicks/scrolls/buttons unthrottled; serialization format unchanged.
 
-**Feature/area:** MainWindow capture behavior during recording
+## Theming / accessibility / colors
+- High-contrast: `Themes/AppColors.xaml` with Default + HighContrast `ThemeDictionaries`; Win2D needs Colors not Brushes (extract `.Color`, resolve in `ResolveThemeColors` on `ActualThemeChanged`); can't put `{ThemeResource}` directly in a `Color` — wrap in `SolidColorBrush`. Later migrated most timeline brushes to standard WinUI system brushes via `Application.Current.Resources`.
+- NEVER assign `{ThemeResource}` to a plain CLR/non-DependencyProperty (e.g. converter `TrueValue`/`FalseValue` in `Page.Resources`): compiles but throws `XAML_E_LAYOUT_CYCLE` (0x802B000A) on navigate — look brushes up at runtime keyed by `ConverterParameter` (`CheckedToBrushConverter`).
+- Frame Style flyout UI: CommunityToolkit `Segmented` for binary toggles; 3×3 crop grid = single bordered Grid + 9 cell-fill RadioButtons; aspect-ratio tiles size a preview Border to the actual ratio; accent fill bound to `IsChecked` via `BoolToObjectConverter` (Content elements unreachable from style VSM). Accessibility audit (47 issues): custom controls lack AutomationPeers, status areas lack live regions.
+- Brand presets cinematic refresh later superseded by bold gradients (static identifiers were renamed — the earlier "identifiers preserved" note is stale).
+- Editor spacebar play/pause: page `KeyboardAccelerator` Key="Space", skip when TextBox/RichEditBox/etc. focused (`FocusManager.GetFocusedElement`).
 
-**Approaches tried:**
-
-1. **Removed `WDA_EXCLUDEFROMCAPTURE` from MainWindow** â€” The main window was permanently hidden from all screen capture (screenshots, recordings, etc.). Removed `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` and the unused `WDA_EXCLUDEFROMCAPTURE` constant / `SetWindowDisplayAffinity` P/Invoke from `MainWindow.xaml.cs`. The minimize-on-record and restore-on-stop behavior already existed in `RecordingPage.xaml.cs`. âœ…
-
-**What worked:** Simply removing the capture exclusion from `MainWindow`. The existing minimize/restore logic in `RecordingPage.ShowRecordingOverlay` / `CloseRecordingOverlay` already handles keeping the window out of the way during recording. The recording overlay and region border highlight retain their `WDA_EXCLUDEFROMCAPTURE` since they are recording-specific UI.
-
----
-
-## Editor Audio Sync â€” Plan Review
-
-**Feature/area:** Editor audio/video sync and scrub-audio design review
-
-**Approaches tried:**
-
-1. **Reviewed existing editor mapping against recorded `Project.AudioToVideoOffsetSeconds` semantics** â€” Worked. Confirmed the current heuristic in `EditorPage.LoadAudioWaveformAsync()` conflicts with the persisted capture-time offset and inverts playback alignment. âœ…
-2. **Reviewed scrub proposal against current `AudioPlaybackEngine` implementation** â€” Identified a risk: repeated `Stop()` calls can leave `WaveOutEvent` in a stopped state where `Play()` may not resume reliably without re-init or different pause semantics.
-
-**What worked:** Using the recorded positive pre-roll offset consistently for waveform trimming and `video -> audio` mapping matches the `Project` contract and the recording pipeline comments.
-
-**What didn't work:** Assuming `Stop -> Seek -> Play` on every scrub event is harmless. The existing engine already uses `Stop()` for pause/seek, so adding more stop/play churn may reinforce the current "plays once then stops working" failure mode instead of fixing it.
-
----
-
-## Recording â€” Minimize Before Capture Starts
-
-**Feature/area:** Recording startup sequence (RecordingPage)
-
-**Approaches tried:**
-
-1. **Moved minimize logic from `ShowRecordingOverlay` to a new `StartRecordButton_Click` handler with a 600ms delay** â€” Worked. Changed the Start Recording button from `Command="{x:Bind ViewModel.StartRecordingCommand}"` to `Click="StartRecordButton_Click"`. The click handler minimizes the main window first, waits 600ms for the animation to complete, then calls `ViewModel.StartRecordingCommand.Execute(null)`. This ensures the minimize animation is never captured in the recording. âœ…
-
-**What worked:** Decoupling minimize from the `ShowRecordingOverlay` method (which fires after recording starts) and moving it to a pre-recording click handler with an animation delay. The `ShowRecordingOverlay` now only handles the overlay and region border.
-
----
-
-## Timeline Editor â€” Video Clip Selection, Speed Width, Split/Cut Fixes
-
-**Feature/area:** Timeline editor (TimelineControl, EditorPage, EditorViewModel, EditOperation, TimelineMapper)
-
-**Approaches tried:**
-
-1. **Video clip selection via hit-testing in `VideoTrack_PointerPressed`** â€” Worked. Added `SelectedClipIndex` property and `VideoClipSelected` event to `TimelineControl`. Clips are hit-tested by converting click X to time and checking against clip `Start/End` ranges. Selected clip is highlighted with a brighter fill and white border. âœ…
-2. **Speed panel conditional visibility** â€” Worked. Wrapped speed controls in a `SpeedPanel` StackPanel (initially `Collapsed`). `UpdateSpeedPanelVisibility()` toggles based on `SelectedClipIndex`. Speed ComboBox updates to match selected clip's current SpeedFactor. âœ…
-3. **Speed changes clip width via `ApplyClipSpeedOperation`** â€” Worked. New operation adjusts clip `End` based on speed, shifts subsequent clips/zoom keyframes/speed segments, and updates `Duration`. Full state snapshot for undo. Added `SpeedFactor` and `SourceStart` properties to `TimelineClip` record for source-time mapping. âœ…
-4. **Split fix: create default clip if `Clips` is empty** â€” Worked. `SplitOperation.Execute` now creates a `[0, Duration]` default clip when `model.Clips.Count == 0` before splitting. Undo removes the default clip if it was created. âœ…
-5. **Cut fix: `RippleDeleteOperation` at playhead** â€” Worked. Changed `CutSelection()` to find the clip at the playhead position and remove it with `RippleDeleteOperation`, which also shifts subsequent clips to close the gap. âœ…
-6. **TimelineMapper: clips as kept regions** â€” Worked. When `Clips` exist, `BuildFromClips()` creates output segments directly from clip data (using `EffectiveSourceStart` and `SpeedFactor`). When no clips exist, falls back to original trim-range logic. Fixed `IsDeleted()` to check if source time is outside any clip's source range. âœ…
-
-**What worked:**
-- Adding `SpeedFactor` (default 1.0) and `SourceStart` (nullable, defaults to `Start`) to `TimelineClip` preserves backward compatibility â€” all existing `new TimelineClip(start, end, label)` calls continue to work.
-- Full state snapshot (Clips, ZoomKeyframes, SpeedSegments, Duration, TrimEnd, PlayheadPosition) in both `ApplyClipSpeedOperation` and `RippleDeleteOperation` makes undo reliable.
-- Scaling zoom keyframes within sped-up clips + shifting those after maintains zoom timing consistency.
-- The mapper's two-mode approach (clips-based vs trim-range) avoids breaking the no-clips case while fixing the clips-as-kept-regions semantics.
-
-**What didn't work / pitfalls:**
-- Original `CutOperation` used `TrimStart`/`TrimEnd` as the cut range, which defaulted to the full timeline â€” cutting everything instead of just a segment.
-- Original `SplitOperation` silently did nothing when `Clips` was empty (no error, just no-op).
-- `TimelineMapper` originally treated Clips as *deleted* regions (inverted semantics) â€” any content inside a clip was skipped in output. This contradicted the editor's visual representation where clips are drawn as *kept* content.
-- Mixing source-time and output-time in the same model fields is dangerous. The solution keeps positions in output time after speed changes, with `SourceStart`/`SpeedFactor` providing the mapping back to source time for the mapper.
-
-**Key design decisions:**
-- Speed controls only appear when a video clip is selected (split first, then apply speed).
-- Cut (Ctrl+X) = ripple delete (removes clip + closes gap). Delete = simple removal.
-- `CutSelection` auto-creates a default clip if none exist, so Ctrl+X always works.
+## Stability / memory / crash hardening (reinforces Crash playbook)
+- Memory: `composition.Clips.Clear()` in finally (releases MediaClip COM, avoids linear OOM); VM `Cleanup()` unsubscribes `ProjectService.ProjectChanged` (singleton GC root); `using var` on Win2D geometries/streams; dispose renderers/readers/audio on page Unloaded; `CursorRenderer`/`WebcamCompositor`/`BackgroundCompositor` `IDisposable`.
+- Layer crash/hang passes (Core/Processing/App/Export/Capture): div-by-zero/NaN guards, per-file try/catch in loaders, path-traversal sanitization, timeouts (SpeechToText 10min, mux 5min, transcode 2h watchdog), `Thread.SpinWait(10)`, lock-then-detach dispose. `SpeechToText` `using var _recognizer` shadowed the instance field (broke cancel) → assign to field.
+- High-DPI/high-res 13-fix pass: streaming `MediaStreamSource`+`MediaTranscoder` finalize (no 100k COM objects, HW accel off); `StopAcceptingFrames`/`WaitForQuiescenceAsync` drain; serialized crop under `_writeLock`; `TryGetNextFrame` in try/catch; D3D HRESULT + WARP fallback + `DeviceLost` → recoverable exception (never recreate mid-frame); screenshot/VRAM preflights (>1GB / >16384px / >1.5GB reject, checked `long`); `GraphicsCaptureItem.Closed` handling; `IAsyncDisposable` on `RecordingSession` (30s graceful stop).
+- Session disk cleanup: after export, write `exported.marker` then delete `.frames/`; startup background cleanup of marked sessions (preserve mp4/cursor/audio); all deletes try/catch.
 
 ---
 
-## Zoom Region â€” Draggable Visual Positioning
+## Text Slides, Transitions & Append Recording — Foundation
 
-**Feature/area:** Zoom region editor (EditorPage, AutoZoomEngine, FrameCompositor)
-
-**Approaches tried:**
-
-1. **X/Y Sliders in toolbar** â€” Original approach. Two problems: (a) every slider ValueChanged fired UndoRedoManager.Execute, which triggered StateChanged â†’ ClearZoomSelection, dismissing the controls; (b) FrameCompositor always overrode manual zoom center with cursor position, so changes were invisible in preview. âœ—
-2. **Draggable zoom region overlay on PreviewCanvas** â€” Worked. Shows raw source frame (no compositor) with a XAML rectangle overlay representing the zoom viewport. 4 dim rectangles surround the viewport for contrast. User drags to reposition, clicks Apply to commit via single `UpdateZoomSegmentPropertiesOperation`. âœ…
-
-**What worked:**
-- `ZoomState.IsManualOverride` flag set in `AutoZoomEngine.GetZoomState()` when manual keyframe is active. `FrameCompositor.ComposeFrame` skips cursor-position override when flag is true.
-- `_zoomRegionEditMode` flag in EditorPage skips compositor in `UpdatePreviewFrameAsync` to show raw frame during positioning.
-- Zoom region rectangle accounts for output aspect ratio via `ComputeEffectiveViewport` logic (duplicated as `GetAspectRatioValue` helper).
-- Viewport coordinates are clamped during drag so the rectangle stays within source bounds.
-- `OnUndoRedoStateChanged` now only clears zoom selection if the selected keyframe no longer exists in the model (was previously clearing unconditionally).
-- Auto-enters edit mode on segment creation; existing segments use "Edit Region" button.
-
-**What didn't work / pitfalls:**
-- Auto-entering edit mode on every segment selection is too disruptive (pauses playback, seeks playhead). Better to use explicit "Edit Region" button for existing segments and only auto-enter on creation.
-- `AspectRatio` enum lives in `Musio.Core.Settings` namespace â€” must add `using Musio.Core.Settings;` when referencing it from the App layer.
-- Canvas dim rectangles must use `IsHitTestVisible="False"` so pointer events pass through to the viewport rectangle.
-
----
-
-## Auto-Zoom Segment Deletion â€” Suppressing Click-Driven Auto-Zoom
-
-**Feature/area:** AutoZoomEngine, EditOperations, FrameCompositor, PreviewRenderer, ExportEngine, VideoEncoder
-
-**Approaches tried:**
-
-1. **Track suppressed source click ticks** â€” Auto-generated ZoomKeyframes now carry `SourceClickTicks` (the raw `ClickEvent.TimestampTicks`). When deleted or converted to manual via edit operations, the source tick is added to `TimelineModel.SuppressedClickTicks`. `AutoZoomEngine.BuildZoomTimeline()` caches build parameters and `SetSuppressedClickTicks()` rebuilds auto segments, filtering out suppressed clicks before merging. This is robust because `long` ticks are exact â€” no floating-point tolerance needed. âœ…
-
-**What worked:** Storing source click identity on auto-generated keyframes and suppressing at the click level before segment merging. The fix covers preview (via `InvalidatePreview` syncing), export (both `ExportEngine` GIF path and `VideoEncoder` MP4 path), and undo/redo (operations add/remove from suppressed set symmetrically).
-
-**What didn't work / pitfalls:**
-- Using `TimeSpan`-based timestamps as suppression keys is fragile â€” round-trip through `TimeSpan.FromSeconds()` introduces 100ns-tick quantization, and timeline edits (cut/speed) shift display timestamps without affecting source clicks. Use `TimestampTicks` (raw `long`) instead.
-- The export path (`VideoEncoder.ExportAsync`) previously didn't sync any zoom state at all â€” needed `TimelineModel?` parameter added.
-- Edit operations that set `IsManual = true` (Move, Resize, UpdateProperties) must also suppress the original auto click, otherwise both the manual keyframe and the auto segment fire.
-
----
-
-## Export â€” H.264 Odd Dimensions Failure
-
-**Feature/area:** VideoEncoder (export pipeline)
-
-**Approaches tried:**
-
-1. **Enforce even dimensions with `& ~1` at the target dimension assignment** â€” Worked. Applied the same fix pattern already used in `VideoWriter.FinalizeAsync` (recording pipeline) to `VideoEncoder.ExportAsync`. Reuses the existing scaling path (`needsScaling`) to downscale compositor frames when oddâ†’even adjustment changes dimensions. âœ…
-
-**What worked:** Rounding `targetWidth` and `targetHeight` down to even with `& ~1` right where they're assigned from compositor output (lines 118-121 of VideoEncoder.cs). The existing `needsScaling` branch already handles the dimension mismatch, so no new rendering code was needed.
-
-**What didn't work / pitfalls:**
-- The recording pipeline (`VideoWriter.FinalizeAsync`) had this fix but the export pipeline (`VideoEncoder`) did not â€” the fix must be applied in BOTH places.
-- Region captures at fractional DPI (125%, 150%, 175%) produce physical pixel dimensions that are often odd. Aspect ratio cropping via `Math.Round()` in `ComputeContentDimensions` can also produce odd content dimensions.
-- H.264 silently rejects odd dimensions â€” the `MediaTranscoder.PrepareMediaStreamSourceTranscodeAsync` returns `CanTranscode = false` with no descriptive message, making root cause hard to diagnose.
-
----
-
-## Export â€” Handle Corrupt/Missing Source MP4
-
-**Feature/area:** VideoEncoder, ExportEngine (export pipeline)
-
-**Approaches tried:**
-
-1. **Wrap `MediaClip.CreateFromFileAsync` in try-catch, fall back to project metadata** â€” Worked. When the source `video.mp4` is corrupt or empty (because `VideoWriter.FinalizeAsync` failed during recording), `CreateFromFileAsync` throws "The parameter is incorrect." The fix catches this and uses `project.Width`/`project.Height` for dimensions instead. JPEG frames from `.frames/` still provide visuals. âœ…
-
-**What worked:**
-- Made `sourceClip` nullable in both `VideoEncoder.ExportAsync` and `ExportEngine.ExportGifAsync`.
-- Fall back to `project.Width`/`project.Height` when the video can't be opened.
-- Skip embedded audio from sourceClip when null; separately recorded audio files still work.
-- Guard `frameReader is null && sourceComp is null` to give a clear error when no frame source is available at all.
-
-**What didn't work / pitfalls:**
-- `RecordingSession.StopAsync` makes `FinalizeAsync` non-fatal, so a corrupt `video.mp4` is expected. But the export pipeline assumed it was always valid â€” every `CreateFromFileAsync` call was unguarded.
-- The error "The parameter is incorrect" from `MediaClip.CreateFromFileAsync` is unhelpful â€” wrapping it gives a better user experience.
-
----
-
-## MSIX Store Packaging â€” Building Unsigned Packages
-
-**Feature/area:** MSIX packaging for Microsoft Store submission
-
-**Approaches tried:**
-
-1. **MSBuild with `GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`** â€” Worked. Produces unsigned `.msix` files per architecture (x64, ARM64) suitable for Store submission (Store signs packages automatically). âœ…
-
-**What worked:**
-- Must use VS MSBuild (not `dotnet build`) due to PriGen tooling issue.
-- Kill any running Musio.App process before cleaning â€” locked DLLs prevent `bin/obj` deletion.
-- Delete `bin/obj` folders for a truly clean build (MSBuild `/t:Clean` alone may leave stale artifacts).
-- Build command: `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=x64 /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`
-- Output location: `bin\{Platform}\Release\net9.0-windows10.0.26100.0\win-{rid}\AppPackages\Musio.App_{version}_{arch}_Test\Musio.App_{version}_{arch}.msix`
-
-**What didn't work / pitfalls:**
-- If Musio.App is running (check by PID in MSB3061 warnings), files are locked and clean fails silently with warnings.
-- `dotnet build` fails for this project due to PriGen tooling â€” always use VS MSBuild.
-
----
-
-## Accessibility Audit â€” Full App Pass
-
-**Feature/area:** Accessibility across all UI (XAML pages, custom controls, code-behind, ViewModels, services)
-
-**Approaches tried:**
-
-1. **Parallel audit of all UI layers** â€” Used 4 parallel agents to audit XAML pages, custom controls, code-behind, and ViewModels/services independently. Compiled into `ACCESSIBILITY_ISSUES.md`. âœ…
-
-**What worked:** Systematic category-based audit covering WCAG 2.1 Level AA criteria (keyboard access, screen reader support, color contrast, live regions, semantic structure, focus management). Found 47 issues (7 Critical, 18 Major, 22 Minor).
-
----
-
-## Audio Waveform â€” Missing Track in Editor
-
-**Feature/area:** Audio waveform visualization in timeline editor (EditorPage, AudioWaveformGenerator, TimelineModel)
-
-**Approaches tried:**
-
-1. **Wired up existing AudioWaveformGenerator in EditorPage.InitializePreviewAsync()** â€” The generator, timeline model property, and rendering code all existed but were never connected. Added `LoadAudioWaveformAsync()` that reads WAV files from `Project.AudioFilePaths`, generates waveform peaks off-thread, merges multiple sources (system + mic) by max-peak, and assigns to `TimelineModel.AudioWaveformSamples`. âœ…
-
----
-
-## Audio-Video Sync â€” Precise Offset & Scrub Audio
-
-**Feature/area:** Audio playback sync + scrub (AudioPlaybackEngine, EditorPage, AudioWaveformGenerator)
-
-**Approaches tried:**
-
-1. **Duration-based heuristic offset** (`videoDuration - maxAudioDuration + 0.5`) â€” Didn't work. The 0.5s fudge factor was arbitrary. `Max(0, ...)` clipped negative results. When audio was longer than video (the common case since audio pre-roll starts before video), the offset was always just 0.5 regardless of actual timing. âœ—
-2. **Used `Project.AudioToVideoOffsetSeconds` directly** â€” Worked. This is the precise offset measured during recording from `(videoOriginTicks - audioOriginTicks) / Stopwatch.Frequency`. Audio pre-roll is positive: at video time T, audio file position = T + offset. Waveform uses `startSeconds` + `maxDurationSeconds` params of `AudioWaveformGenerator.GenerateWaveform()` to skip pre-roll and cap to video duration. âœ…
-3. **Added `ScrubTo()` for FCP-style scrub audio** â€” Worked. Stopâ†’Seekâ†’Play with 80ms debounce auto-stop. Serialized with a lock to prevent races between UI thread and timer callback. Reduced `WaveOutEvent.DesiredLatency` to 100ms for lower latency. âœ…
-
-**What worked:**
-- `_audioOffsetSeconds = project.AudioToVideoOffsetSeconds` (positive) instead of `= -videoLead` (negative heuristic).
-- `AudioWaveformGenerator.GenerateWaveform(path, samples, startSeconds: offset, maxDurationSeconds: videoDuration)` â€” trims pre-roll and caps duration.
-- `AudioPlaybackEngine.ScrubTo()` with `_transportLock` serializing all Stop/Seek/Play calls.
-
-**What didn't work / pitfalls:**
-- Duration-based heuristic completely ignores `AudioToVideoOffsetSeconds` which is already recorded precisely.
-- `AudioWaveformGenerator` had a bug: when `startSeconds` exceeded file length, it silently fell back to position 0 instead of returning empty â€” fixed with `>= reader.Length` guard.
-- `WaveOutEvent` default `DesiredLatency` of 300ms is too high for scrub audio â€” 100ms is responsive enough.
-
-**What worked:** Placing the audio waveform load **before** the cursor-data early return ensures audio tracks appear even when no cursor data exists. Using `Task.Run` keeps the UI responsive during waveform generation.
-
-**What didn't work (avoided):** Loading waveform after the `mouseData is null` early return â€” would have skipped audio loading for projects without cursor data.
-
-**Key insight:** The build must use VS MSBuild (`C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe`) with `/p:Platform=x64` or `/p:Platform=ARM64` â€” `dotnet build` fails with a missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the .NET 10 SDK.
-
----
-
-## Timeline Clipping & Audio Settings Not Wired
-
-**Feature/area:** EditorPage timeline layout, SettingsPage audio toggles, RecordingViewModel defaults
-
-**Approaches tried:**
-
-1. **Increased timeline Height from 170 to 230** â€” The 5 track rows total 230px (30+60+40+50+50) but the container was only 170px, clipping zoom and audio tracks. âœ…
-2. **Bound SettingsPage audio toggles to AppSettings** â€” The System Audio and Microphone toggles were static XAML with no bindings. Added `x:Name`, `Toggled` handlers, and `Loaded` handler to read/write `AppSettings.IsSystemAudioEnabled` and `AppSettings.IsMicEnabled`. âœ…
-3. **RecordingViewModel reads from AppSettings** â€” Changed field initializers from hardcoded `true`/`false` to `AppSettings.Instance.IsSystemAudioEnabled`/`IsMicEnabled` so saved preferences are respected. âœ…
-
-**What worked:** All three changes together â€” layout fix + settings binding + VM init from AppSettings.
-
-**Key insight:** SettingsPage controls were purely decorative â€” `AppSettings` had the properties but the XAML never bound to them. The RecordingViewModel also ignored AppSettings entirely.
-
----
-
-## AudioCaptureEngine â€” Stop Deadlock
-
-**Feature/area:** Audio capture stop/dispose flow (AudioCaptureEngine)
-
-**Approaches tried:**
-
-1. **Moved capture stop/dispose outside the lock** â€” `StopRecording()` was holding `_lock` while calling `capture.Dispose()`, but WASAPI's `RecordingStopped` callback also tried to acquire `_lock`, causing a deadlock. Fix: grab references under lock, null out fields immediately (data handlers become no-ops via null checks), then stop/dispose outside the lock. âœ…
-
-**What worked:** Lock-then-detach pattern â€” acquire lock only to swap fields to null, release lock, then do the blocking stop/dispose work lock-free.
-
-**What didn't work (root cause):** Holding `_lock` across `StopRecording()` â†’ `Thread.Sleep(200)` â†’ `Dispose()` while `RecordingStopped` and `DataAvailable` callbacks also contended for the same lock.
-
----
-
-## Video Export â€” Scrambled Frames & Trailing Cursor
-
-**Feature/area:** Export pipeline (VideoEncoder, ExportEngine)
-
-**Approaches tried:**
-
-1. **Fix concurrency (SemaphoreSlim serialization)** â€” Original code used fire-and-forget `_ = ProduceSampleAsync(...)` in `SampleRequested`, allowing overlapping callbacks to corrupt shared state (`compositor`, `_scaleTarget`). Fixed with `SemaphoreSlim(1,1)` and `Interlocked.Increment` for atomic frame reservation. Still broken (stride issue remained). âŒ
-2. **Remove incorrect row flip** â€” Code had a bottom-up row flip with a wrong comment claiming "MediaStreamSource with Bgra8 expects bottom-up". Both Win2D and MF default to top-down for `CreateUncompressed(Bgra8)`. Removed the flip. Still broken. âŒ
-3. **Set MF_MT_DEFAULT_STRIDE on VideoEncodingProperties** â€” Set aligned stride (256-byte aligned) on the media type properties. MediaTranscoder ignores this for `MediaStreamSource`-sourced data. Still broken. âŒ
-4. **SoftwareBitmap.CopyToBuffer() for stride-aligned pixels** â€” `CopyToBuffer()` actually produces compact data (width*4 stride), not aligned. Setting `MF_MT_DEFAULT_STRIDE` to aligned stride caused worse drift. Still broken. âŒ
-5. **MediaStreamSample.CreateFromDirect3D11Surface() + mod-16 dimensions + software encoding** â€” Bypasses all pixel extraction. Round output dimensions to mod-16 for H.264 macroblock alignment. Disable hardware acceleration to avoid hardware encoder surface interop quirks. âœ…
-
-**What worked:**
-- **Root cause**: Non-mod-16 output dimensions (e.g. 2878Ã—1540) caused the hardware H.264 encoder to misalign macroblock boundaries, producing horizontal banding. The preview pipeline doesn't use H.264 so was unaffected.
-- Round output dimensions to mod-16: `(compositorWidth / 16) * 16`
-- Use `MediaStreamSample.CreateFromDirect3D11Surface()` instead of extracting pixel bytes â€” avoids all stride alignment concerns
-- Set `MediaTranscoder.HardwareAccelerationEnabled = false` to use the software encoder, which handles D3D surface interop more reliably
-- Each frame gets its own `CanvasRenderTarget` disposed via `sample.Processed` event
-- Keep `SemaphoreSlim` serialization for thread-safe compositor access
-- Must uninstall Store version before `Add-AppxPackage -Register` for debug builds to take effect
-
-**What didn't work:**
-- `GetPixelBytes()` compact stride + no MF_MT_DEFAULT_STRIDE â€” encoder expects something other than compact stride (horizontal banding).
-- `SoftwareBitmap.CopyToBuffer()` â€” produces compact data despite SoftwareBitmap having aligned internal stride; misleading API.
-- Setting `MF_MT_DEFAULT_STRIDE` / `MF_MT_SAMPLE_SIZE` on `VideoEncodingProperties.Properties` â€” ignored by MediaTranscoder pipeline.
-
----
-
-## Video Export â€” PR Review Fixes (Semaphore & Surface Leak)
-
-**Feature/area:** Export pipeline (VideoEncoder)
-
-**Issues found during code review of PR #1:**
-
-1. **Semaphore over-release on cancellation** â€” `_frameSemaphore.WaitAsync(ct)` can throw `OperationCanceledException` before acquiring, but the `finally` block unconditionally called `Release()`, corrupting the semaphore count. Fixed with a `bool semaphoreAcquired` flag.
-2. **GPU surface leak on exception** â€” `outputSurface` (CanvasRenderTarget) was only disposed via `sample.Processed` event. If an exception occurred after surface creation but before the handler was attached, the surface leaked. Fixed by moving declaration to outer scope and adding `outputSurface?.Dispose()` in the catch block.
-
-**What worked:** Both fixes are straightforward guard patterns (acquisition flag, catch-block cleanup).
-- Row flipping â€” completely wrong for `CreateUncompressed(Bgra8)` which uses top-down row order.
-- Fire-and-forget async in `SampleRequested` â€” causes frame corruption due to concurrent access to shared state.
-
----
-
-1. **SemaphoreSlim(1,1) to serialize frame compositing** â€” Partially helped. The `SampleRequested` handler used fire-and-forget (`_ = ProduceSampleAsync(...)`) allowing concurrent access to shared state (`FrameCompositor`, `_flipBuffer`, `_scaleTarget`). Added `SemaphoreSlim` serialization, `Interlocked.Increment` for atomic frame reservation, and pending-task draining before disposal. Fixed the concurrency issue but didn't fix the visual corruption. âœ…
-2. **Removed incorrect bottom-up row flip** â€” Fixed the scrambled frames. The code had a comment claiming "MediaStreamSource with Bgra8 expects bottom-up" which is wrong. Both Win2D `GetPixelBytes()` and `VideoEncodingProperties.CreateUncompressed(Bgra8)` use top-down row order (positive stride). The row flip was converting correct top-down data to bottom-up, causing the H.264 encoder to produce corrupted output. Removed the flip and passed pixel bytes directly. âœ…
-
-**What worked:** Both fixes combined â€” serialized compositing via SemaphoreSlim + removed the incorrect row flip.
-
-**What didn't work:** The row flip comment was misleading â€” BGRA8 in MediaStreamSource uses top-down (positive stride), not bottom-up like legacy GDI/BMP conventions.
-
-**Key findings:**
-- Biggest gaps: custom-drawn controls (TimelineControl, RegionSelectorOverlay, PreviewCanvas) have no AutomationPeers and are pointer-only.
-- All dynamic status areas (recording timer, export progress, playback time) lack live-region support.
-- Many icon-only buttons lack `AutomationProperties.Name`.
-- Hard-coded colors in timeline and controls won't adapt to High Contrast mode.
-- System tray is not keyboard-accessible.
-
----
-
-## Hard-Coded Colors â€” Theme Resource Migration
-
-**Feature/area:** Accessibility â€” High Contrast support (TimelineControl, PreviewCanvas, RegionSelectorOverlay, RecordingOverlayWindow, EditorPage)
-
-**Approaches tried:**
-
-1. **Created `Themes/AppColors.xaml` resource dictionary with `ThemeDictionaries`** â€” Defined ~44 `SolidColorBrush` (and one `AcrylicBrush`) resources in Default and HighContrast theme dictionaries. Default theme preserves the exact original hard-coded color values. HighContrast maps to system colors (`SystemColorWindowColor`, `SystemColorWindowTextColor`, `SystemColorHighlightColor`, `SystemColorHotlightColor`, `SystemColorHighlightTextColor`, `SystemColorGrayTextColor`, `SystemColorButtonFaceColor`, `SystemColorButtonTextColor`). âœ…
-2. **XAML files: replaced inline colors with `{ThemeResource}`** â€” All 5 affected XAML files (TimelineControl, PreviewCanvas, RegionSelectorOverlay, RecordingOverlayWindow, EditorPage) now use `{ThemeResource ResourceName}` which auto-resolves on theme/HC change. âœ…
-3. **Code-behind (Win2D): resolved colors from theme resources** â€” Changed 29 `static readonly Color` fields in `TimelineControl.xaml.cs` to instance fields resolved via `GetBrushColor(key, fallback)` from XAML resources. Added `ResolveThemeColors()` called in constructor and on `ActualThemeChanged`. Same pattern for `PreviewCanvas.xaml.cs` clear color. âœ…
-
-**What worked:**
-- `SolidColorBrush` resources work for both XAML `{ThemeResource}` binding and code-behind `.Color` extraction.
-- In HighContrast theme dictionaries, `Color="{StaticResource SystemColorXxxColor}"` correctly references system HC colors.
-- `AcrylicBrush` in Default / `SolidColorBrush` in HighContrast for the same key works because both derive from `Brush`.
-- `ActualThemeChanged` fires for both Lightâ†”Dark and High Contrast toggles; `InvalidateAllCanvases()` redraws Win2D surfaces with new colors.
-
----
-
-## Memory Leak & Management Stability Pass
-
-**Feature/area:** Cross-cutting memory/resource management across capture, export, processing, and UI layers.
-
-**Approaches tried:**
-1. Full-codebase rubber-duck review focused on memory leaks, resource management, and disposal patterns.
-2. Applied fixes to 12 Critical + High severity issues, then ran a verification rubber-duck pass to catch gaps.
-
-**What worked:**
-- `composition.Clips.Clear()` in `try/finally` releases MediaClip COM objects in VideoWriter.FinalizeAsync â€” prevents linear OOM growth proportional to frame count.
-- `Cleanup()` methods on EditorViewModel/ExportViewModel that unsubscribe from `ProjectService.Instance.ProjectChanged` â€” severs the singleton root that prevented GC of old VMs after page navigation.
-- Expanded EditorPage.Unloaded to dispose `_frameReader`, `_previewRenderer`, `_audioPlayer` and call VM Cleanup.
-- `using var` on `CanvasGeometry` and `CanvasPathBuilder` in TimelineControl draw callbacks â€” prevents Win2D native resource accumulation during 30fps redraws.
-- `using var` on thumbnail streams in VideoEncoder/ExportEngine `ExtractFrameFromCompositionAsync` â€” prevents per-frame stream handle leaks during export.
-- `CursorRenderer : IDisposable` with `_cursorBitmap`/`_defaultCursorGeometry` disposal, called from `FrameCompositor.Dispose()`.
-- `MouseHookRecorder.SaveToFile()` clears + trims in-memory lists after persisting to disk.
-- `try/finally` around GDI handle cleanup + `using var` for `SoftwareBitmap` in RegionSelectorOverlay.
-- `RemoveAll(t => t.IsCompleted)` on VideoEncoder `pendingSamples` to prevent unbounded task graph growth.
-- Disposing old `_recognizer` before creating new one in SpeechToText, plus `try/finally` for stream.
-- ExportEngine GIF `finally` block clears `sourceComp?.Clips` and `webcamComp?.Clips`.
-
-**What didn't work / known limitations:**
-- EditorPage constructor uses many anonymous lambda event handlers (Preview.PlaybackTick, etc.) which can't be individually unsubscribed. Since they form intra-page references, fixing the singleton VM subscription root is sufficient for GC.
-- `MouseHookRecorder.SaveToFile()` now invalidates in-memory data after saving. Callers needing data post-save must use `GetRecordedData()` first or `LoadFromFile()` after.
-- GIF export webcam frame lifetime issue (using var disposes before ComposeFrame reads it) was identified but not fixed â€” user confirmed GIF+webcam is not a supported path currently.
-- Merged dictionary via `<ResourceDictionary Source="Themes/AppColors.xaml" />` in App.xaml keeps the main file clean.
-
-**What didn't work / pitfalls:**
-- `using Microsoft.UI;` (for `Colors` class) is no longer needed after removing `Colors.White` references â€” remove to avoid unused-using warnings.
-- Can't use `{ThemeResource}` inside a `Color` value directly in resource dictionaries; must wrap in `SolidColorBrush` and extract `.Color` in code-behind.
-
----
-
-## Recording Overlay â€” Stop Button Feedback (Rolling Star Trek Phrases)
-
-**Feature/area:** RecordingOverlayWindow (stop button UX)
-
-**Approaches tried:**
-
-1. **Swap overlay to "stopping" state with rolling 2-word Star Trek phrases** â€” Worked. On Stop_Click, hide RecordingPanel + StopButton, show StoppingPanel with a ProgressRing and a TextBlock cycling through phrases ("Engagingâ€¦", "Standbyâ€¦", "Energizingâ€¦", etc.) every 1.5s via DispatcherTimer. Timer cleaned up in CloseOverlay. âœ…
-
-**What worked:**
-- Split XAML into named `RecordingPanel` (dot + elapsed) and `StoppingPanel` (ring + phrase), toggling visibility on stop.
-- `DispatcherTimer` at 1.5s interval cycles through 8 Star Trek-themed phrases.
-- Timer disposed in `CloseOverlay()` before window closes.
-
----
-
-## Editor Preview â€” Stutter Fix (Render Coalescing + Buffer Reuse)
-
-**Feature/area:** Preview playback pipeline (EditorPage, PreviewCanvas, FrameCompositor, PreviewRenderer)
-
-**Approaches tried:**
-
-1. **Render coalescing gate in EditorPage** â€” Worked. Added `_isRendering` flag with `_pendingRenderPosition`/`_pendingRenderForce` fields. `UpdatePreviewFrameAsync` skips if a render is already in-flight and stores the latest position. A drain-loop in the active render picks up the pending position when done. Preserves `force` flag via `|=` merge. âœ…
-2. **Reusable cropped buffer in FrameCompositor** â€” Worked. Added `_croppedBuffer` field to `CropSourceFrame` that's reused when dimensions match. Removed `using` from the call site in `ComposeFrame`. Buffer is compositor-owned and disposed in `Dispose()`. Halves per-frame GPU allocations. âœ…
-3. **Binary search in GetActiveClicks** â€” Worked. Sorted clicks by `TimestampTicks` during `InitializeAsync`. Replaced `foreach` over all clicks with binary search to find the Â±1s window start, then iterate only matching clicks. O(log n + k) instead of O(n). âœ…
-4. **Preview FPS matching project capture FPS** â€” Worked. `PreviewCanvas.PreviewFps` setter now updates `_playbackTimer.Interval` immediately. `EditorPage.InitializePreviewAsync` sets it from project FPS (capped at 30). Removed redundant 30fps cap from `PreviewRenderer`. âœ…
-
-**What worked:**
-- Drain-loop pattern (not recursive fire-and-forget) for render coalescing â€” ensures at most one render is in-flight, the latest position is always rendered next, and no renders pile up.
-- `_croppedBuffer` field-level reuse with dimension check â€” safe because `CropSourceFrame` is only called within `ComposeFrame` scope.
-
----
-
-## Timeline System Brushes & Video Filmstrip
-
-**Feature/area:** Timeline track colors (TimelineControl, AppColors.xaml, EditorPage)
-
-**Approaches tried:**
-
-1. **Replaced custom hard-coded hex color brushes in AppColors.xaml with WinUI 3 standard system brush resolution** â€” Worked. Removed ~30 custom timeline brushes from Default and HighContrast theme dictionaries. ResolveThemeColors() now resolves from `Application.Current.Resources` using standard keys like `AccentFillColorDefaultBrush`, `CardBackgroundFillColorDefaultBrush`, `TextFillColorSecondaryBrush`, etc. Kept semantic status colors (playhead `#FFDDFF00` in Default and `#FFE87C06` in Light, cut line yellow, speed overlays, cursor click) in AppColors.xaml. âœ…
-2. **XAML border backgrounds switched from custom brushes to {ThemeResource} system brushes** â€” Worked. Track label borders use `CardBackgroundFillColorDefaultBrush`, `CardBackgroundFillColorSecondaryBrush`, `SolidBackgroundFillColorBaseBrush`, `TextFillColorSecondaryBrush` directly. âœ…
-3. **FCP-style filmstrip thumbnails in video track** â€” Worked. Pre-scaled thumbnails generated from VideoFrameReader at ~0.5-2s intervals, cached as CanvasBitmap[] on TimelineControl. DrawFilmstrip tiles them across clip bounds with source-time mapping (respects SpeedFactor/EffectiveSourceStart). Backplate uses CardBackgroundFillColorSecondary, stroke uses ControlStrokeColorDefault. Falls back to accent-colored rectangle when no thumbnails available. âœ…
-4. **Thumbnail generation versioning** â€” Worked. `_thumbnailGenerationId` counter in EditorPage prevents stale thumbnail results from overwriting current project's thumbnails when projects change rapidly. âœ…
-
-**What worked:** Resolving system colors via `Application.Current.Resources` (not control-local Resources) for WinUI system brushes; keeping a `GetBrushColor` fallback for semantic brushes still defined in AppColors.xaml; TimelineControl owning thumbnail lifecycle via SetThumbnails/ClearThumbnails.
-
-**What didn't work / watch out for:**
-- Cannot use `{ThemeResource}` inside own theme dictionaries to reference system resources directly â€” must resolve at runtime in C#.
-- Win2D needs Color values, not Brushes â€” always extract `.Color` from resolved SolidColorBrush.
-- Thumbnail generation should pre-scale to track height (~52px) at load time, never during Draw handler.
-- Sorting clicks once at init time guarantees binary search correctness without relying on recorder ordering.
-
-**What didn't work / considerations:**
-- The output `CanvasRenderTarget` from `ComposeFrame` is still allocated fresh each frame because `SetFrame` takes ownership and disposes the previous frame. Reusing would require a buffer pool or API contract change â€” not worth the complexity with the render gate limiting throughput to one at a time.
-- 60fps preview needs architectural changes: `CompositionTarget.Rendering` (DispatcherTimer can't sustain 16.67ms), frame read-ahead cache (zero caching on JPEG decode currently), and off-thread composition.
-- The rubber-duck review flagged that `PreviewFps` setter didn't update an existing timer â€” fixed by updating `_playbackTimer.Interval` in the setter.
-
----
-
-## Region Border Highlight â€” DPI Scaling Mismatch
-
----
-
-## Window Picker Overlay & Auto-Trigger Selection Modes
-
-**Feature/area:** RecordingPage, WindowSelectorOverlay, RegionSelectorOverlay
-
-**Approaches tried:**
-
-1. **Created `WindowSelectorOverlay` control modeled after `RegionSelectorOverlay`** â€” Worked. Full-screen overlay with desktop screenshot background, 4 dim mask rectangles, and highlight border. Uses `EnumWindows` for Z-order-aware window enumeration, filters out cloaked/minimized/tool/same-process windows. Coordinate mapping from canvas DIPs to screen physical pixels via virtual desktop bounds ratio. âœ…
-2. **Auto-trigger pickers on capture mode selection** â€” Worked. `CaptureModeSelector_SelectionChanged` launches `WindowSelectorOverlay` or `RegionSelectorOverlay` automatically. `_isPageLoading` flag prevents trigger during page initialization; `_isPickerOpen` reentrancy guard prevents concurrent overlays. âœ…
-3. **Replaced Window ComboBox with visual picker button + info text** â€” Worked. Consistent with Region panel pattern (button + label). Visual picker provides better UX than dropdown list. âœ…
-
-**What worked:**
-- `WindowSelectorOverlay.ShowAsync()`: minimize Musio â†’ enumerate windows â†’ capture screenshot â†’ show maximized borderless overlay â†’ return WindowInfo on click or null on Escape â†’ restore Musio (in try/finally for exception safety).
-- Z-order-aware hit testing: `EnumWindows` returns windows in Z-order (topmost first), so first rect containing the cursor point = correct window.
-- Window validation on click: `IsWindow()` + `IsWindowVisible()` confirm the window still exists before returning.
-- Coordinate mapping: `canvasX * (vdWidth / canvasWidth) + vdLeft` for canvasâ†’screen, reverse for screenâ†’canvas.
-
-**What didn't work / known limitations:**
-- Same multi-monitor limitation as `RegionSelectorOverlay`: screenshot covers full virtual desktop but overlay is maximized on one monitor, so coordinates on secondary monitors may be slightly off due to Stretch="Fill" scaling.
-- `GetWindowRect` includes invisible DWM extended frame borders; highlight may extend slightly beyond visible window edges. Could use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for more precise visual highlights.
-
-
-**Feature/area:** Region recording border overlay (RecordingPage, RegionBorderHighlight)
-
-**Approaches tried:**
-
-1. **Scale region DIP coordinates to physical pixels using monitor DPI** â€” Worked. `RegionSelectorOverlay` produces coordinates in WinUI DIP (logical pixels), but `RegionBorderHighlight.Show()` creates native Win32 popup windows via `CreateWindowEx`, which expects physical screen coordinates in a per-monitor DPI-aware v2 process. Added `GetRegionMonitorDpiScale()` in `RecordingPage` that resolves the monitor handle via `MonitorEnumerator` (same as `BuildCaptureTarget()`) and calls `GetDpiForMonitor` to get the scale. Multiplied region X/Y/Width/Height by the DPI scale before passing to `Show()`. âœ…
-
-**What worked:**
-- Using the same monitor-matching logic as `RecordingViewModel.BuildCaptureTarget()` to find the correct monitor handle, then `GetDpiForMonitor` for the scale.
-- This matches the DPI conversion already done in `RecordingSession.OnFrameCaptured` for the capture crop rect.
-
-**What didn't work / known limitations:**
-- On multi-monitor setups with `Stretch="Fill"`, the region selector coordinates are already distorted (pre-existing issue documented above). The DPI fix only helps single-monitor or same-DPI multi-monitor setups.
-
----
-
-## Session Folder Disk Cleanup
-
-**Feature/area:** Recording session storage (SessionCleanupService, ExportViewModel, App.xaml.cs)
-
-**Approaches tried:**
-
-1. **`SessionCleanupService` that deletes `.frames/` directories from exported sessions** â€” Worked. Each session folder's `.frames/` dir (thousands of JPEG files) is the dominant space consumer. After successful export, the service writes an `exported.marker` file, then deletes `.frames/` and `finalize_debug.log`. On app startup, a background `Task.Run` cleans all sessions with the marker. âœ…
-
-**What worked:**
-- `exported.marker` file distinguishes exported sessions from freshly-recorded ones (avoids cleaning sessions that haven't been exported yet).
-- `HasValidVideo()` checks video.mp4 exists and is non-zero before deleting frames.
-- Post-export cleanup in `ExportViewModel.ExportAsync()` runs via `Task.Run` after export succeeds.
-- Startup cleanup in `App.OnLaunched()` runs fire-and-forget for all marked sessions.
-- All deletion is wrapped in try-catch so failures are non-fatal.
-
-**Key design decisions:**
-- Only sessions with `exported.marker` are cleaned (not just any session with video.mp4, since MP4 is created during recording before any export).
-- `.frames/` deletion means the editor can't re-open that recording for editing. Acceptable tradeoff â€” the user has their export.
-- `video.mp4`, cursor, keyboard, and audio files are preserved for future capture history feature.
-
----
-
-## Export â€” H.264 Corruption on High-DPI Displays (2.8K+)
-
-**Feature/area:** VideoEncoder (export pipeline)
-
-**Approaches tried:**
-
-1. **Replaced `MediaEncodingProfile.CreateMp4(GetProfileQuality())` with `VideoEncodingQuality.Auto`** â€” Worked. The previous code used quality presets (`HD1080p`, `HD720p`, etc.) that constrain H.264 Level/DPB to the preset resolution. On high-DPI displays (2.8K â†’ ~2976Ã—1896 compositor output), the Level 4.0 macroblock limit (8,192) was exceeded by 2.7Ã— (22,134 actual), causing the AMD AMF encoder to produce corrupted reference frames â†’ ghosting/trailing artifacts. Using `Auto` lets the encoder auto-determine the correct Level (5.1+). âœ…
-
----
-
-## Cursor Options Flyout
-
-**Feature/area:** Cursor customization (CursorRenderer, CursorStyle, EditorPage)
-
-**Approaches tried:**
-
-1. **Added `Touch` to `CursorType` enum and `Color` property to `CursorStyle` record** â€” Worked. Extended the existing record without renaming/removing existing enum values to preserve backward compatibility. âœ…
-2. **Added `DrawTouchCursor()` method to `CursorRenderer`** â€” Worked. Draws a filled circle centered on the cursor position using `FillCircle`/`DrawCircle`. Centering on `(x, y)` aligns the touch indicator with the actual pointer hotspot. âœ…
-3. **Used contrast-aware outline color** â€” Worked. `GetContrastOutlineColor()` uses ITU-R BT.601 perceived luminance to choose black outline for light fills and white outline for dark fills, ensuring cursor visibility on any background. âœ…
-4. **Added Cursor flyout to EditorPage toolbar (same pattern as Style flyout)** â€” Worked. RadioButtons for Mouse/Touch type, Slider for size, 6 preset color circles as templated RadioButtons with selection ring. Debounce timer for slider, immediate apply for discrete choices. âœ…
-5. **Color preset circles as templated RadioButtons** â€” Worked. Each color circle is a `RadioButton` with a custom `ControlTemplate` containing an `Ellipse` for the color fill and a `SelectionRing` ellipse toggled via `VisualState`. Accessible and keyboard-navigable. âœ…
-
-**What worked:** Following the existing Style flyout pattern (suppress events, debounce, `RebuildPreviewRendererAsync`) and extending `CursorStyle`/`CursorRenderer` minimally.
-
-**What didn't work:** Setting XAML default values (`IsChecked="True"`, `Value="2"`) on cursor flyout controls â€” these fire event handlers during `InitializeComponent()` before `_suppressCursorEvents` is set, causing `ApplyCursorStyleFromControls` â†’ `RebuildPreviewRendererAsync` to race with `InitializePreviewAsync`, hanging the app after recording. Fix: remove all XAML defaults from flyout controls and set them only in `SyncCursorControlsToConfig()` under the suppress flag, matching the Style flyout pattern.
-
----
-
-## Export â€” H.264 Corruption on AMD GPUs at High Resolutions
-
-**Feature/area:** Export pipeline (VideoEncoder)
-
-**Approaches tried:**
-
-1. **Switched `VideoEncodingQuality` from `HD1080p` to `Auto`** â€” Partially worked for recording pipeline but NOT for export (see below).
-2. **Scaled bitrate proportionally to pixel count** â€” The fixed 20 Mbps bitrate was tight for ~3K output. New `ComputeBitrate(width, height)` scales the base bitrate by `actualPixels / (1920Ã—1080)`, so high-res exports get adequate bitrate. âœ…
-3. **Reused flip buffer and scale render target across frames** â€” Per-frame allocation of `byte[~22MB]` and `CanvasRenderTarget` at ~3K caused excessive GC pressure and memory throughput on integrated GPUs with shared memory. Added `_flipBuffer` and `_scaleTarget` fields, allocated once and reused. âœ…
-
-**What worked:**
-- `VideoEncodingQuality.Auto` + explicit Width/Height/Bitrate/FPS/Subtype â€” same pattern already used in `VideoWriter.FinalizeAsync` (recording pipeline).
-- Bitrate scaling ensures high-res exports don't get starved. Formula: `baseBitrate * max(1.0, actualPixels / baselinePixels)`.
-- Buffer reuse eliminates ~44MB/frame of allocation (flip buffer + scale target), significant at 30fps on integrated GPU.
-
-**What didn't work / pitfalls:**
-- The recording pipeline (`VideoWriter.FinalizeAsync`) already fixed this by using `Auto`, but the fix was never propagated to the export pipeline (`VideoEncoder`). Both pipelines must use the same approach.
-- The issue is resolution-dependent, not GPU-vendor-specific: any display exceeding ~1920Ã—1088 can exceed Level 4.0 limits. NVIDIA may auto-promote the Level silently, masking the bug; AMD AMF is stricter.
-- `VideoEncodingQuality.Auto` cannot be used in the export pipeline because it produces incomplete Video/Audio properties â€” `MediaComposition.RenderToFileAsync` in the audio mux pass throws `MF_E_INVALIDMEDIATYPE (0xC00D36E6)`. Instead, use `HD1080p` as a well-formed template and override Width/Height/Bitrate/FPS/Subtype. The encoder auto-selects the correct Level from actual dimensions.
-- `MediaEncodingProfile.CreateMp4(HD1080p)` sets internal H.264 parameters (Level, profile, DPB) that overriding Width/Height alone does NOT update.
-
----
-
-## Region Recording â€” Mouse Click Misalignment Fix
-
-**Feature/area:** Compositor pipeline (FrameCompositor, AutoZoomEngine, PreviewRenderer, EditorPage, ExportEngine, VideoEncoder, Project)
-
-**Approaches tried:**
-
-1. **Store DPI scale in Project + subtract CropOffsetX/Y from all mouse coordinate transforms** â€” Worked. Two root causes: (a) `GetSystemDpiScale()` compared cropped region size to full monitor logical size, always returning 1.0 for region captures; (b) `CropOffsetX/Y` (physical pixel origin of the crop region) were stored but never subtracted from mouse coordinates. âœ…
-
----
-
-## Core Models/Timeline/Settings/AI/Audio/Services â€” Crash/Hang/Vulnerability Fixes
-
-**Feature/area:** Musio.Core layer â€” CursorData, TimelineModel, RegionMemory, PresetManager, SubtitleBurner, AudioWaveformGenerator, SpeechToText, GlobalHotkeyService, FrameRateLimiter, AppSettings.
-
-**Approaches tried:**
-
-1. **Surgical safeguards across 10 files** â€” Applied minimal guards without refactoring surrounding code. âœ…
-
-**What worked:**
-- **CursorData**: Zero-check on `TickFrequency` before division in `Duration` property.
-- **TimelineModel**: NaN/Infinity/overflow clamp on `SourceDuration` computed property.
-- **RegionMemory**: try/catch around composite value casts in `LoadRegion`.
-- **PresetManager**: Per-file try/catch in `LoadPresets` + path traversal/reserved name sanitization in `GetPresetPath`.
-- **SubtitleBurner**: try/catch around `Convert.ToByte` hex parsing in `ParseColor`.
-- **AudioWaveformGenerator**: Added `bitsPerSample <= 0 || bitsPerSample % 8 != 0` guard.
-- **SpeechToText**: 10-minute timeout via `Task.WhenAny` + `Task.Delay` to prevent infinite hang.
-- **GlobalHotkeyService**: try/catch in `Initialize` and `HotkeyWndProc` event invocation.
-- **FrameRateLimiter**: `Thread.SpinWait(10)` instead of `SpinWait(1)` to reduce CPU pressure.
-- **AppSettings**: try/catch in `Set<T>` around `_settings.Values[key] = value`.
-
-**What didn't work:** N/A â€” all fixes applied cleanly.
-
-**What worked:**
-- Added `Project.DpiScale` (float) â€” set from `GetMonitorDpiScale(hMonitor)` during recording. Zero = auto-detect fallback for backward compatibility with old projects.
-- `FrameCompositor.InitializeAsync` accepts `cropOffsetX`, `cropOffsetY`, `dpiScale` parameters. When `dpiScale > 0`, uses it directly instead of the broken `GetSystemDpiScale()` heuristic.
-- Smoothed cursor positions: `X = logical * dpiScale - cropOffsetX` (applied once during init).
-- Click positions in `GetActiveClicks`: `cx = (click.X * coordScale - cropOffset - viewport.X) * scaleX + padding`.
-- `AutoZoomEngine.BuildZoomTimeline` accepts crop offsets; subtracts them from zoom center positions.
-- `EditorPage` zoom keyframe creation: `CenterX = (click.X * dpiScale - cropOffX) / sourceW`.
-- All callers (PreviewRenderer, ExportEngine, VideoEncoder, EditorPage) pass `project.CropOffsetX/Y` and `project.DpiScale`.
-
-**What didn't work / known limitations:**
-- `GetSystemDpiScale(capturedDimension)` compares dimension to `GetSystemMetrics(SM_CXSCREEN)`. For region captures, the cropped dimension is always smaller than the monitor logical size, so the comparison `capturedDimension > logicalSize` fails and returns 1.0. This heuristic only works for full-monitor captures.
-- Old region-capture projects without `DpiScale` stored will still use the broken auto-detect path (acceptable as legacy behavior).
-- Window captures may have a similar class of bug (no origin offset stored), but are out of scope for this fix.
-
----
-
-## ARM64 Build & Deploy â€” CLI Workflow
-
-**Feature/area:** Build pipeline (MSBuild, MSIX deployment)
-
-**Approaches tried:**
-
-1. **VS MSBuild via `[System.Diagnostics.Process]::Start()` wrapper** â€” Worked. Direct `&` invocation of MSBuild was blocked by shell permissions, but wrapping in `ProcessStartInfo` with redirected stdout/stderr succeeded. âœ…
-
-**What worked:**
-- MSBuild location: `C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`
-- Build command (via Process API): `MSBuild.exe Musio.App.csproj /restore /t:Build /p:Configuration=Debug /p:Platform=ARM64`
-- Registration: `Add-AppxPackage -Register <AppxManifest.xml path>` (run via `powershell.exe -Command` subprocess).
-- Launch: `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (via subprocess).
-- Package family name: `PratikMistri.Musio_9gph0n9984scy`
-
-**What didn't work / pitfalls:**
-- Direct `& MSBuild.exe` calls and `dotnet build` both blocked by Copilot CLI shell permissions â€” must use `[System.Diagnostics.Process]::Start()` wrapper.
-- `explorer.exe shell:AppsFolder\...` returns exit code 1; use `Start-Process` in a powershell subprocess instead.
-
----
-
-## Mouse Position Mismatch in Region Recordings â€” DPI Double-Scaling
-
-**Feature/area:** Compositor pipeline (FrameCompositor, AutoZoomEngine, EditorPage)
-
-**Approaches tried:**
-
-1. **Remove DPI scaling from mouse coordinate transforms** â€” Worked. In a PerMonitorV2 process, `WH_MOUSE_LL` hook reports physical screen coordinates (not logical DIP). The previous fix multiplied hook coordinates by `project.DpiScale` (e.g., 1.5Ã—) before subtracting the physical crop offset, effectively double-scaling them. Set `coordScaleX/Y = 1.0f` in all transform sites. âœ…
-
-**What worked:**
-- `FrameCompositor.InitializeAsync`: Set `coordScaleX = 1.0f; coordScaleY = 1.0f` instead of using `dpiScale` or `GetSystemDpiScale()`.
-- Same `1.0f` scale flows into `AutoZoomEngine.BuildZoomTimeline` for zoom center calculations.
-- `EditorPage.xaml.cs`: Two call sites (zoom keyframe creation and drag-to-create zoom segment) updated to use `1.0f` instead of `project.DpiScale`.
-- `CropOffsetX/Y` remains in physical pixels (correctly computed as `logicalCrop * dpiScale` in RecordingSession).
-- `Project.DpiScale` is still stored for backward compatibility but no longer used for hook coordinate transforms.
-
-**What didn't work / root cause:**
-- The previous fix (storing `DpiScale` from `GetMonitorDpiScale`) correctly identified the DPI value but used it incorrectly â€” it assumed `WH_MOUSE_LL` coordinates were logical, when they're actually physical in PerMonitorV2.
-- The fallback `GetSystemDpiScale()` heuristic happened to return 1.0 (coincidentally correct) because `GetSystemMetrics(SM_CXSCREEN)` in PerMonitorV2 returns physical dimensions, making `capturedDim / logicalSize = 1.0`.
-- Bug was invisible at 100% DPI (scale=1.0, multiplication has no effect) but manifested at 125%/150%/200% DPI.
-
----
-
-## Cursor Coordinates â€” Window & Multi-Monitor Offset Fix
-
-**Feature/area:** Recording pipeline (RecordingSession, Project, FrameCompositor)
-
-**Approaches tried:**
-
-1. **Compute screen-absolute cursor offset for all capture types** â€” Used. `Project.CropOffsetX/Y` must represent the screen-absolute physical pixel position of the captured frame's top-left corner (not just the crop-rect-within-monitor offset). Added `ComputeCursorOffset()` in `RecordingSession` that handles all three capture types. âœ…
-
-**What worked:**
-- **Monitor capture**: Use `GetMonitorInfo(hMonitor).rcMonitor.Left/Top` as cursor offset. Fixes cursor on non-primary monitors.
-- **Window capture**: Use `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` to get the window's actual rendered bounds (excludes DWM shadow). Falls back to `GetWindowRect`. Fixes cursor for all window captures.
-- **Region capture**: Monitor origin + physical crop rect position. Fixes cursor on non-primary monitor regions.
-- Separate `_cursorOffsetX/_cursorOffsetY` fields from `_physicalCropRect` (which is only for VideoWriter frame cropping).
-- No changes needed in FrameCompositor â€” it already applies `cursor.X - cropOffsetX` correctly.
-
-**What didn't work / known limitations:**
-- Window position is captured once at first frame. If the window moves during recording, cursor alignment drifts (acceptable for v1).
-- `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` may differ slightly from Graphics Capture bounds for some window types.
-
----
-
-## Editor Background Style Settings
-
-**Feature/area:** Editor toolbar â€” background style editing for Window/Region captures
-
-**Approaches tried:**
-1. Considered adding a side panel for background settings â€” rejected as too heavy for MVP.
-2. Implemented a flyout from a "Style" button in the editor toolbar with preset picker + individual controls.
-
-**What worked:**
-- Flyout approach with `DispatcherTimer` debounce (200ms) for slider/toggle changes to avoid thrashing the PreviewRenderer.
-- Dedicated `RebuildPreviewRendererAsync` that recreates only the PreviewRenderer/FrameCompositor while preserving frame reader, audio, zoom keyframes, and playhead position. Full `InitializePreviewAsync` was too heavy (disposes everything, reloads waveform/cursor data, resets to TimeSpan.Zero).
-- `_suppressStyleEvents` flag to prevent feedback loops when programmatically updating controls (e.g., syncing controls to a preset selection).
-- Explicit `CaptureTargetType.Monitor` check (instead of `!= Window`) to gate which captures get background styling â€” allows both Window and Region to have backgrounds.
-- Building with VS MSBuild (`MSBuild.exe /p:Platform=x64`) works; `dotnet build` fails with MSB4062 due to missing WinAppSDK PRI task in dotnet CLI.
-
-**What didn't work / known limitations:**
-- `FrameCompositor` is immutable after init â€” no incremental background updates possible without full re-init. Long-term, an `UpdateBackgroundStyle()` API on FrameCompositor could avoid re-smoothing cursor data for non-padding changes.
-- Image background type not exposed in UI (kept to SolidColor/Gradient/Blur for simplicity).
-- Shadow/border detail controls (blur amount, opacity, width, color) not exposed â€” uses sensible defaults.
-
----
-
-## Overlapping Zoom Segments Fix
-
-**Feature/area:** AutoZoomEngine â€” overlapping zoom transition handling
-
-**Approaches tried:**
-1. Investigated MergeSegments logic â€” it correctly merges auto segments but doesn't apply to manual keyframes.
-2. Fixed EvaluateManualKeyframes and EvaluateAutoSegments to use max-zoom-wins strategy.
-
-**What worked:**
-- Both `EvaluateManualKeyframes` and `EvaluateAutoSegments` now evaluate ALL active segments at a given time and return the one with the highest zoom level. This creates smooth crossovers: when keyframe B zooms in while A zooms out, B naturally takes over once its zoom exceeds A's decaying value.
-- Added regression test `GetZoomState_OverlappingManualKeyframes_NoJump` that samples the overlap zone and asserts no sudden zoom drops (>0.3 in 10ms).
-
-**What didn't work / known limitations:**
-- The original first-match strategy returned the earliest active segment, which meant A's zoom-out always won over B's zoom-in during overlaps, causing a snap when A ended.
-- Tests run with `dotnet test --no-build -c Debug /p:Platform=x64` after building with VS MSBuild.
-
----
-
-## Zoom + Padding â€” Post-Composite Zoom
-
-**Feature/area:** FrameCompositor zoom behavior when background padding is applied.
-
-**Approaches tried:**
-
-1. **Post-composite zoom (Approach A)** â€” Compose the frame at 1x (full source + background + cursor) into an intermediate buffer, then crop+scale the buffer according to the zoom state. This makes zoom operate on the entire framed output (content + padding), so padding scales proportionally. âœ…
-2. **Pre-compute adjusted geometry (Approach B, not implemented)** â€” Would compute effective padding and source viewport mathematically for each zoom level. Better source quality but significantly more complex math, asymmetric padding, and harder to maintain.
-
-**What worked:**
-- When `padding > 0`, `ComposeFrame` now delegates to `ComposeFramePostCompositeZoom` which renders at 1x into a reusable `_compositeBuffer`, then applies the zoom as a final crop+scale. Zoom center is converted from sourceâ†’composite space: `(centerX - viewport1x.X) * contentW / viewport1x.Width + padding`.
-- When `padding == 0`, the original `ComposeFrameDirect` path is used (no extra buffer overhead).
-- Always using post-composite path when padding > 0 (even at zoom=1) avoids a visual pop at the zoom threshold â€” at zoom=1, crop rect = full output, so it's effectively a no-op.
-- Webcam, keyboard, and subtitle overlays are rendered AFTER the zoom so they stay fixed on screen. Cursor is composited before zoom so it scales with content.
-
-**What didn't work / known limitations:**
-- Slight quality softness at high zoom levels (>3x) because the source is rasterized at 1x then upscaled. Acceptable for typical zoom ranges (1.5â€“3x).
-- Initially used post-composite path for ALL frames when padding > 0 (even zoom=1). This doubled render cost for every frame and made export extremely slow. Fixed by only activating post-composite path when `zoomLevel > 1.01`.
-
----
-
-## Wallpaper Background â€” Per-Frame Image Load Fix
-
-**Feature/area:** BackgroundCompositor wallpaper/image background rendering.
-
-**Approaches tried:**
-
-1. **Cache the loaded `CanvasBitmap` in `BackgroundCompositor`** â€” `DrawImageBackground` was loading the wallpaper from disk via `CanvasBitmap.LoadAsync` on EVERY frame. Added `_cachedBackgroundImage` and `_cachedBackgroundPath` fields; only reload when the path changes. Made `BackgroundCompositor` implement `IDisposable` to clean up the cached bitmap. âœ…
-
-**What worked:**
-- Instance-level caching of the wallpaper bitmap with path-change detection. Image loads from disk once, reused for all subsequent frames.
-- `BackgroundCompositor` now implements `IDisposable`; disposed by `FrameCompositor.Dispose()`.
-
-**What didn't work:**
-- The original code loaded the image synchronously from disk every frame (`CanvasBitmap.LoadAsync(...).GetAwaiter().GetResult()`), causing choppy preview playback and extremely slow export with wallpaper backgrounds.
-
----
-
-## Memory Leak Review
-
-**Feature/area:** Resource-lifetime review for recording/export/editor cleanup paths.
-
-**Approaches tried:**
-1. Reviewed diffs and current implementations for `VideoWriter`, `EditorPage`, `MouseHookRecorder`, `EditorViewModel`, `ExportViewModel`, `VideoEncoder`, `ExportEngine`, `CursorRenderer`, `FrameCompositor`, `SpeechToText`, `TimelineControl`, and `RegionSelectorOverlay`.
-2. Built the solution with VS MSBuild (`Musio.sln /restore /t:Build /p:Configuration=Debug /p:Platform=x64`) to verify the reviewed changes compile cleanly.
-
-**What worked:**
-- The new deterministic cleanup patterns compile cleanly and most of the targeted fixes are sound: disposing thumbnail/stream objects, clearing `MediaComposition.Clips` after render, disposing cursor resources, and releasing GDI handles in `finally`.
-
-**What didn't work / known limitations:**
-- `ExportEngine.ExportGifAsync` still passes a `using var` webcam bitmap into `FrameCompositor.SetWebcamFrame()`, but `GifEncoder` composes after the callback returns, so the compositor can read a disposed bitmap.
-- `TimelineControl` still allocates `CanvasPathBuilder` objects without disposing them.
-- `SpeechToText` keeps the last recognizer alive after `TranscribeAsync`, so its event handlers retain captured transcription state until the next call or `Dispose()`.
-
----
-
-## Webcam Overlay â€” End-to-End Pipeline Fix
-
-**Feature/area:** Webcam overlay (AppSettings, SettingsPage, RecordingViewModel, RecordingSession, ExportEngine, PreviewRenderer, EditorPage)
-
-**Approaches tried:**
-
-1. **Traced why webcam never activated despite toggle** â€” Root cause: `RecordingViewModel.StartRecordingAsync` set `IsWebcamEnabled` in config but never set `WebcamDeviceId`. `RecordingSession` required both to be set (`IsWebcamEnabled && !string.IsNullOrWhiteSpace(WebcamDeviceId)`), so the webcam engine was never created. âœ…
-2. **Wired full pipeline** â€” Added `WebcamDeviceId` to `AppSettings`, wired `SettingsPage` toggle/combo with device enumeration, initialized VM from settings, passed device ID through config, added auto-select fallback in `RecordingSession`, auto-set `WebcamOverlayStyle` in export enrichment, and added webcam frame extraction to editor preview. âœ…
-
-**What worked:** Fixing all 6 layers of the pipeline (settings persistence â†’ UI wiring â†’ VM init â†’ session auto-select â†’ export style enrichment â†’ editor preview plumbing).
-
-**What didn't work / known limitations:**
-- Webcam-to-video timing offset is not tracked; webcam frames are sampled at raw video time 1:1 which may cause slight desync.
-- GIF export still has a potential use-after-dispose issue with webcam frames (pre-existing).
-- Editor preview initially used `using var webcamFrame` which disposed the `CanvasBitmap` before `RenderPreviewFrame` could read it. Fixed by keeping the frame alive as a field (`_lastWebcamFrame`), disposing only when replaced or on page unload.
-- WinRT `ImageStream` from `GetThumbnailAsync` throws `ObjectDisposedException` during `using var` cleanup (FlushAsync). Fixed by manually disposing intermediate streams with error suppression instead of `using var`.
-- Editor webcam drag/resize uses normalized (0â€“1) coordinates via `NormalizedX`/`NormalizedY` on `WebcamOverlayStyle`, mapped between screen and output space using `PreviewCanvas.FrameLayoutRect`.
-- Export `VideoEncoder.ProduceSampleAsync` had same `using var webcamFrame` bug â€” frame disposed before `ComposeFrame`. Also extracted webcam at compositor dimensions instead of webcam video dimensions. Fixed both + GIF export path.
-
-## 2026-05-04 - Editor preview canvas exploration
-- **Feature/area**: Editor preview canvas, webcam overlay compositor, zoom-region editing.
-- **Approaches tried**: Inspected PreviewCanvas, EditorPage preview host, FrameCompositor/WebcamCompositor, and RegionSelectorOverlay/TimelineControl for interaction patterns.
-- **What worked**: PreviewCanvas uses a CanvasControl (`PreviewSurface`) and `SetFrame(CanvasRenderTarget?)` swaps the cached render target; zoom-region editing already uses a Canvas overlay with pointer press/move/release and resize handles.
-- **What didn't work**: No existing pointer interaction was found on the preview canvas itself for drag/resize overlays; webcam placement in compositor is enum-based only.
-
----
-
-## 2026-05-04 - Webcam export performance optimization
-
-- **Feature/area**: Export pipeline (VideoEncoder, ExportEngine, WebcamCompositor, FrameCompositor)
+- **Feature/area**: Multi-segment timeline, text slides, transitions, append recording (TimelineSegment, TimelineModel, TimelineMapper, ProjectService, EditorPage, TimelineControl, ExportEngine)
 - **Approaches tried**:
-  1. **Reduced webcam extraction resolution** â€” GetThumbnailAsync was decoding at full webcam resolution (e.g., 1920Ã—1080) even though the overlay displays at ~300px. Now extracts at 1.5Ã— the overlay size, reducing decode work by ~80%. âœ…
-  2. **Eliminated double stream wrapping** â€” ExtractFrameFromCompositionAsync was converting ImageStreamâ†’.NET Streamâ†’RandomAccessStreamâ†’CanvasBitmap. ImageStream already implements IRandomAccessStream, so pass it directly. âœ…
-  3. **Cached shadow and clip geometry in WebcamCompositor** â€” Shadow (CanvasCommandList + ShadowEffect) and clip geometry were recreated every frame despite being constant (only depend on position/shape). Now cached and invalidated on UpdateStyle(). Made WebcamCompositor IDisposable. âœ…
-  4. **Fixed GIF export webcam frame leak** â€” ExportEngine's GIF path set webcam frame on compositor but never disposed it after composition consumed it, leaking one CanvasBitmap per frame during long GIF exports. âœ…
-  5. **Wired WebcamCompositor disposal into FrameCompositor.Dispose()** â€” Prevents GPU resource leaks from cached shadow/geometry. âœ…
-- **What worked**: All five optimizations combined. Build and all 93 tests pass.
-- **What didn't work**: N/A â€” all approaches succeeded without regression.
+  1. **Polymorphic `TimelineSegment` base record** with `VideoSegment` and `TextSlideSegment` subtypes — Worked. Added to `Musio.Core/Timeline/TimelineSegment.cs`. Includes `TransitionConfig`, `TextOverlay`, and animation enums. ✅
+  2. **`SegmentCompositor` wrapper** instead of deeply modifying `FrameCompositor` — Worked. Created a higher-level orchestrator (`Musio.Core/Processing/SegmentCompositor.cs`) that routes frames to `TextSlideRenderer` or video compositor + `TransitionRenderer` for blending. Safer than rewriting FrameCompositor internals. ✅
+  3. **`TimelineMapper.GetSegmentFrameRef()`** — Extended TimelineMapper with segment-aware mapping that returns `SegmentFrameRef` (segment, source time, progress, transition state). Backward-compatible: falls back to legacy `GetSourceTimeForOutputFrame()` when no segments exist. ✅
+  4. **`ProjectService.AppendRecording()`** — Creates a `RecordingSource` and `VideoSegment` from the new recording's `Project`, appends to the timeline. RecordingPage handles "append" navigation parameter. ✅
+  5. **Win2D `FontWeights`** — `Windows.UI.Text.FontWeights.Bold` doesn't exist in Musio.Core (WinUISDKReferences=false). Fixed by using `new FontWeight { Weight = 700 }` directly. ✅
+- **What worked**: All approaches. Key design decision was creating `SegmentCompositor` as a new orchestration layer rather than modifying the complex `FrameCompositor` — this keeps the existing single-video pipeline untouched and adds multi-source/text-slide support cleanly.
+- **What didn't work**: `TimelineControl.InvalidateAllCanvases()` was private — had to make it public for EditorPage to trigger redraws after segment edits.
+- **Key files created**: `TimelineSegment.cs`, `TextSlideRenderer.cs`, `TransitionRenderer.cs`, `SegmentCompositor.cs`
+- **Key files modified**: `TimelineModel.cs`, `Project.cs`, `TimelineMapper.cs`, `EditOperation.cs`, `ExportEngine.cs`, `ProjectService.cs`, `EditorPage.xaml/.cs`, `RecordingPage.xaml.cs`, `TimelineControl.xaml.cs`
 
 ---
 
-## 2026-05-04 - Copilot Code Review Fixes (7 issues)
+## Text Slides — Timeline Integration Fixes
 
-- **Feature/area**: RecordingSession, WebcamCompositor, ExportEngine, SpeechToText, EditorPage, VideoEncoder
+- **Feature/area**: Text slide rendering on timeline, playhead access, video splitting (TimelineControl, EditorPage, EditOperation, TimelineModel)
 - **Approaches tried**:
-  1. **Stale webcam device ID** (RecordingSession.cs) â€” Saved device ID was used without validation; stale/unplugged camera caused StartAsync() to throw. Fix: enumerate devices upfront and fall back to first available if saved ID not found. âœ…
-  2. **Shadow clipping at top/left edges** (WebcamCompositor.cs) â€” Shadow render target only padded right/bottom; shadow was clipped when webcam was near left/top. Fix: ensure render target has padding on all sides via min-size floor. âœ…
-  3. **GIF webcam error handling** (ExportEngine.cs) â€” GIF path opened webcam clip without try/catch, failing entire export on corrupt files. Fix: wrapped in try/catch to skip webcam overlay gracefully. âœ…
-  4. **Recognizer field shadowing** (SpeechToText.cs) â€” `using var _recognizer` created a local that shadowed the instance field, preventing external Dispose()/TranscribeAsync() from cancelling in-flight recognition. Fix: assign to instance field directly. âœ…
-  5. **Full-resolution webcam preview** (EditorPage.xaml.cs) â€” Preview requested thumbnails at native resolution (1080p/4K) for ~300px overlay. Fix: cap extraction to 1.5Ã— display size, matching export path. âœ…
-  6. **Stale webcam state on project reload** (EditorPage.xaml.cs) â€” LoadWebcamCompositionAsync didn't clear previous _webcamComposition/_lastWebcamFrame. Fix: clear old state at method start. âœ…
-  7. **Webcam bitmap leak on error** (VideoEncoder.cs) â€” webcamFrame only disposed on success path; ComposeFrame() throw leaked GPU memory. Fix: moved cleanup to try/finally. âœ…
-- **What worked**: All 7 fixes applied. Musio.Core and Musio.Tests build clean, all 93 tests pass.
-- **What didn't work**: Musio.App build failed due to running app locking the DLL (not a code issue).
+  1. **`DisplayDuration` property on TimelineModel** — `TimeToX`/`XToTime` used `model.Duration` (source video duration), so segments beyond the video end were off-screen and unreachable by playhead. Added `DisplayDuration` which returns `TotalSegmentsDuration` when segments exist, else `Duration`. Updated `TimeToX`, `XToTime`, and `TimeRulerCanvas_Draw` to use it. ✅
+  2. **Full-height segment rendering** — Segments were drawn as a 10px thin bar at top of video track. Changed `DrawSegmentTrack` to render `TextSlideSegment` blocks at full track height (`h - pad*2`) with rounded corners, centered text labels, and selection highlighting. Video segments already drawn by the filmstrip renderer. ✅
+  3. **`SplitAndInsertTextSlideOperation`** — When inserting a text slide at playhead, the `VideoSegment` under the playhead is split into two halves with correct `SourceStart`/`SourceDuration` so audio stays in sync. Falls back to positional insert if playhead is not on a video segment. ✅
+  4. **Segment hit-testing + selection** — Added `_selectedSegmentId`, `SelectSegment()`, `SegmentSelected` event to TimelineControl. VideoTrack_PointerPressed hit-tests text slides and fires selection event. EditorPage wires `OnSegmentSelected` to show/hide the properties panel. ✅
+- **What worked**: All four together. The key insight was that `TimeToX`/`XToTime` using `model.Duration` was the root cause of segments being invisible and playhead being unreachable — they were drawn off-screen because the coordinate system ended at the source video duration.
+- **What didn't work**: Simple `AddTextSlideOperation` with `insertIndex` — it appended after the current segment but didn't split the video, so audio would go out of sync. `SplitAndInsertTextSlideOperation` was needed.
 
 ---
 
-## Recording Page â€” Mic / System Audio / Camera Toggle Buttons
+## Text Slides — Segment-Based Video Track & Preview Rendering
 
-- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingViewModel.cs)
+- **Feature/area**: Unified segment rendering on video track + text slide preview (TimelineControl, EditorPage)
+- **Problem**: After inserting a text slide, the video filmstrip stayed continuous and got compressed (looked like the video was "shortened"), and the text slide block overlaid on top. Preview canvas didn't render text slides at all.
+- **Root cause**: `VideoTrackCanvas_Draw` always drew `model.Clips` (or full duration) as one continuous filmstrip across `DisplayDuration`. Since segments grew `DisplayDuration` but clips were still drawn end-to-end, the video compressed and text overlaid. Preview's `RenderFrameAtAsync` only ever loaded video frames via the legacy mapper.
 - **Approaches tried**:
-  1. **ToggleButton with FontIcon** â€” Added 3 `ToggleButton` controls (Mic &#xE720;, Speaker &#xE767;, Camera &#xE714;) bound two-way to existing ViewModel properties (`IsMicEnabled`, `IsSystemAudioEnabled`, `IsWebcamEnabled`). Placed between hero buttons and capture mode selector. âœ…
-  2. **Persisting toggle state** â€” Added `partial void On*Changed` methods in ViewModel to write back to `AppSettings.Instance` on each toggle. âœ…
-- **What worked**: ToggleButtons with two-way `x:Bind` to existing `[ObservableProperty]` fields + partial change handlers for persistence. Controls disabled during recording via shared `IsHitTestVisible`/`Opacity` binding pattern already used by capture mode section.
-- **What didn't work**: N/A â€” straightforward addition.
+  1. **`DrawVideoTrackFromSegments`** — When `model.Segments.Count > 0`, render the video track ENTIRELY from segments and `return` early (skip `model.Clips` rendering, trim handles, speed overlays). Each `VideoSegment` draws a filmstrip via new `DrawFilmstripForSegment` (maps timeline X → segment source time using `SourceStart` + offset×`SpeedFactor`); each `TextSlideSegment` draws a full-height colored block with its text. ✅
+  2. **Segment-aware preview** — Split `RenderFrameAtAsync` into a segment check: if playhead is over a `TextSlideSegment`, render via `TextSlideRenderer.RenderSlide()` at project resolution and show in `Preview.SetFrame()`; if over a `VideoSegment`, map to that segment's source time before loading the frame. Extracted `RenderVideoFrameAsync` for the video path. ✅
+  3. **Property-change preview refresh** — Slide text/animation/font/duration handlers now force `UpdatePreviewFrameAsync(..., force:true)` (and `InvalidatePreview()` for duration changes) so edits show immediately. ✅
+- **What worked**: All three. The key fix was making the video track render from segments instead of clips when segments exist — this gives each video segment and text slide its own real timeline space.
+- **What didn't work**: Drawing segments as an overlay ON TOP of the existing clip filmstrip (the original approach) — the two representations conflicted. Must render exclusively from one or the other.
+- **Key files modified**: `TimelineControl.xaml.cs` (DrawVideoTrackFromSegments, DrawFilmstripForSegment), `EditorPage.xaml.cs` (RenderFrameAtAsync split, RenderTextSlidePreview, RenderVideoFrameAsync, _textSlideRenderer field)
 
 ---
 
-## Recording Page â€” Single Toolbar Layout with Inline Expansion
+## Text Slides — Zoom & Cursor Track Alignment
 
-- **Feature/area**: RecordingPage UI (RecordingPage.xaml, RecordingPage.xaml.cs)
+- **Feature/area**: Source↔output time mapping so zoom segments and cursor path follow the video when text slides shift content (TimelineModel, TimelineControl, ProjectService)
+- **Problem**: Zoom keyframes and cursor data are stored in SOURCE-video time and rendered via `TimeToX` (linear over `DisplayDuration`). After inserting a text slide, the second video half shifts right but the zoom/cursor stayed at their original linear positions → misaligned with the video.
 - **Approaches tried**:
-  1. **Single horizontal toolbar** â€” Replaced the vertical 3-layer layout (hero button â†’ toggles â†’ capture mode) with a single centered toolbar: `[Capture Mode] | [inline sub-options] | [ðŸŽ¤ ðŸ”Š ðŸ“·] | [âº]`. Used a `Border` with card styling (CornerRadius="12") and `AppBarSeparator` dividers between sections. âœ…
-  2. **Inline expansion for sub-options** â€” Window picker (ComboBox + refresh button) and Region selector (button + info text) expand inline in the toolbar when their mode is selected, separated by an AppBarSeparator. âœ…
-  3. **Split options vs action sections** â€” Options (capture mode, toggles) wrapped in a StackPanel with `IsHitTestVisible`/`Opacity` bindings for recording-disabled state, while record/stop button stays outside so it remains interactive. Added `InvertBoolToVisibility` helper for showing/hiding start vs stop button. âœ…
-- **What worked**: Single toolbar with inline expansion, split disabled/interactive sections, removed VisualStateManager (no longer needed without text labels on buttons).
-- **What didn't work**: N/A.
+  1. **`SourceToOutputTime` / `OutputToSourceTime` on TimelineModel** — Maps a source-video time to its output-timeline position (and inverse) by walking the primary recording's video segments. A source time in the first half maps to itself; a source time in the second half maps to `segment.Start + (sourceTime - segment.SourceStart)/SpeedFactor`, i.e. shifted right by the text-slide duration. ✅
+  2. **`PrimaryVideoFilePath` on TimelineModel** — Set in `ProjectService.SetProject`. Mapping only considers video segments whose `VideoFilePath` matches the primary recording, so appended recordings (different source files) don't interfere with the primary cursor/zoom data. ✅
+  3. **`SourceTimeToX` / `XToSourceTime` helpers in TimelineControl** — Wrap `TimeToX(model.SourceToOutputTime(t))` and `model.OutputToSourceTime(XToTime(x))`. Applied to ALL zoom rendering, hit-testing, create-preview, drag/resize commits, and cursor path + click-dot rendering. Playhead scrubbing stays in output time via `XToTime`. ✅
+- **What worked**: Consistent rule — anywhere a keyframe/cursor SOURCE time → X, use `SourceTimeToX`; anywhere X → keyframe SOURCE time, use `XToSourceTime`. Playhead is output time (`XToTime`). Identity mapping when no segments exist keeps legacy behavior intact.
+- **Note**: Audio waveform track is still one continuous strip (not split per-segment) — would need separate work; user only requested zoom + cursor.
 
 ---
 
-## Timeline Track Colors â€” Light Theme Bright Palette
+## Text Slides — UI: Insert Menu + Properties Flyout
 
-- **Feature/area**: TimelineControl light-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
+- **Feature/area**: Editor toolbar reorg (EditorPage.xaml/.cs)
+- **Changes**:
+  1. **Insert dropdown** — Replaced the separate "Text Slide" and "Record More" toolbar buttons with a single `DropDownButton` named "Insert" (glyph E710) whose `MenuFlyout` has "Text Slide" (AddTextSlide_Click) and "Record More" (RecordMore_Click) items. ✅
+  2. **Text slide properties flyout** — Replaced the inline `TextSlidePanel` StackPanel with a `TextSlideButton` + `Flyout` (matching the Style/Cursor flyout pattern: 280px-wide StackPanel). Contains text, animation, duration, font size, and Text/Background color pickers (`ColorPicker` in `DropDownButton` with swatch + hex, same pattern as `BgColorPicker`). Button is `Visibility=Collapsed` and shown via `ShowTextSlidePanel` when a slide is selected; the flyout auto-opens (deferred via `DispatcherQueue.TryEnqueue` to avoid conflicting with the closing Insert menu). ✅
+- **Gotcha**: `ParseHexColor`/`ColorToHex` already existed in EditorPage — reused them instead of redefining (caused CS0111 duplicate-member errors). The existing `ParseHexColor` only handles 6-digit hex, which is fine since slide colors are 6-digit and pickers use `IsAlphaEnabled=False`.
+- **Gotcha**: `_suppressSlideEvents` flag guards the ColorPicker `ColorChanged` handlers so loading a slide's values into the pickers doesn't fire spurious model updates.
+
+---
+
+## Text Slides — Export (MP4) Integration
+
+- **Feature/area**: Segment-aware MP4 export incl. audio sync (VideoEncoder.cs, TimelineMapper.cs)
+- **Problem**: Text slides showed in the editor preview but NOT in the exported MP4 — the export pipeline (`VideoEncoder.ProduceSampleAsync`) only ever loaded video frames via `timelineMapper.GetSourceTimeForOutputFrame` (legacy clips/trim) and never consulted `timeline.Segments`. The frame count was also too short (didn't include slide durations).
 - **Approaches tried**:
-  1. **Replaced dark/muted "rich" light-theme colors with bright vivid ones** â€” Previous light-theme colors were low-brightness muted tones (e.g., zoom `180,145,30`, audio `20,160,130`, mic `135,75,180`, cursor `40,120,210`). Changed to high-saturation bright colors with a slight white lift: zoom `255,200,50`, audio `40,215,180`, mic `170,95,245`, cursor `60,150,255`. Updated zoom selected border/handle colors to match. âœ…
-- **What worked**: Bright vivid colors with high hue saturation and a touch of white â€” visible and distinct on light backgrounds without being neon.
-- **What didn't work**: N/A.
+  1. **Frame count** — `TimelineMapper.ComputeTotalOutputFrames` now returns `TotalSegmentsDuration * fps` when segments exist, so the encoder emits enough frames to cover text slides. ✅
+  2. **Frame routing** — `ProduceSampleAsync` now takes `TimelineModel? timeline`. When segments exist it calls `timeline.GetSegmentAtTime(outputTime)`: a `TextSlideSegment` is rendered via a lazily-created `TextSlideRenderer` at `compositorWidth × compositorHeight`; a `VideoSegment` maps to `SourceStart + localOffset*SpeedFactor` before loading+compositing. Legacy path unchanged when no segments. ✅
+  3. **Audio sync** — `MuxAudioAsync` now takes `timeline`. When text slides exist, audio is split into per-`VideoSegment` `BackgroundAudioTrack`s via `ApplySegmentAudioTrim`: `TrimTimeFromStart=SourceStart`, `TrimTimeFromEnd=origDur-(SourceStart+SourceDuration)`, and `Delay=segment.Start` (so slide durations become silent gaps). Only applied to primary-recording segments (`VideoFilePath == project.VideoFilePath`). ✅
+- **What worked**: Routing per-frame at the `ProduceSampleAsync` level (rather than swapping in `SegmentCompositor`) kept the existing webcam/scaling/encoder plumbing intact. `BackgroundAudioTrack.Delay` + per-segment trim cleanly inserts the silent gaps for slides.
+- **Known limitation**: The GIF export path (`ExportEngine.ExportGifAsync`) is NOT yet segment-aware — it would show video frames during slide periods. MP4 (the primary path) is fixed. Appended-recording audio (different source files) isn't muxed yet — only the primary recording's segments get per-segment audio.
 
 ---
 
-## Timeline Track Colors â€” Dark Theme High Saturation
+## Text Slides — Cinematic Animation Engine
 
-- **Feature/area**: TimelineControl dark-theme track colors (`TimelineControl.xaml.cs` `InitializeThemeColors`)
-- **Approaches tried**:
-  1. **Boosted dark-theme colors to high saturation** â€” Previous dark-theme colors were already fairly vivid but not max saturation (zoom `230,200,60`, audio `50,210,180`, mic `180,120,230`, cursor `100,170,250`). Pushed to higher saturation with a touch of white: zoom `255,210,50`, audio `40,230,190`, mic `190,100,255`, cursor `80,170,255`. âœ…
-- **What worked**: Near-max saturation colors pop well on dark backgrounds while the slight white tint prevents them from looking harsh/neon.
-- **What didn't work**: Just boosting brightness of the same hues (gold, teal, lavender) didn't feel inspiring â€” needed completely different neon hue choices.
-
----
-
-## Timeline Track Colors â€” Neon Hue Overhaul
-
-- **Feature/area**: TimelineControl track colors for both themes (`TimelineControl.xaml.cs` `InitializeThemeColors`)
-- **Approaches tried**:
-  1. **Complete hue shift to neon palette** â€” Replaced all track hues: zoom goldâ†’neon green (`50,255,100`), audio tealâ†’neon cyan (`0,240,220`), mic lavenderâ†’neon magenta (`255,50,200`), cursor pale blueâ†’electric blue (`60,140,255`). Light theme uses slightly deeper versions for contrast on lighter backgrounds. âœ…
-- **What worked**: Completely changing hues to neon-style colors rather than boosting brightness of existing hues. The neon green/cyan/magenta/blue palette feels modern and inspiring.
-- **What didn't work**: Boosting brightness/saturation of the same gold/teal/lavender hues â€” still felt muted and uninspiring.
+- **Feature/area**: Rich text animations (TextSlideRenderer.cs, TimelineSegment.cs enum, EditorPage.xaml combo)
+- **Added 12 new animations** to `TextSlideAnimation` (now 19 total): SlideLeft, SlideRight, ScalePop, ZoomBlurIn, Reveal, TypewriterCaret, CascadeFadeUp, CascadePop, Wave, TrackingIn, RotateIn, BounceIn.
+- **Architecture**: `TextSlideRenderer` now has two paths:
+  1. **Whole-text** (transform + opacity + optional blur/clip): computed via `ComputeWholeOpacity` + `ComputeWholeTransform` returning (scale, tx, ty, blur). Applied through `ds.Transform`. `Reveal` uses `ds.CreateLayer` with a clip rect (L→R wipe). `ZoomBlurIn` renders text to a `CanvasRenderTarget` then draws it through a `GaussianBlurEffect` (Microsoft.Graphics.Canvas.Effects) with an easing blur 28→0.
+  2. **Per-character kinetic typography**: `DrawPerCharacter` builds a `CanvasTextLayout`, uses `layout.GetCharacterRegions(i,1)` to get each glyph's `LayoutBounds`, then draws each char with its own `Matrix3x2` (rotate+scale around glyph center + translate) and per-char opacity. Stagger formula: `cp = clamp((pIntro - frac*spread)/(1-spread),0,1)` so char 0 starts at progress 0 and the last finishes by ~progress 1. `Wave` is continuous (sine), not intro-staggered.
+- **Easing helpers**: EaseOutCubic, EaseInOutCubic, EaseOutBack (overshoot), EaseOutBounce.
+- **Gotcha**: per-char drawing uses a Left/Top-aligned `charFormat` and draws at the glyph region's absolute position (`rect.X + region.X`), while the measuring layout uses center alignment — the region bounds are absolute within the layout box so they line up. Whitespace chars are skipped (not drawn, but still advance the visible-index stagger only for non-whitespace).
+- Both slides and overlays share the same `DrawAnimatedText` engine, so overlays get all animations too.
 
 ---
 
-## Timeline Track Colors â€” User-Chosen Neon Palette + 4px Filmstrip Stroke
+## Text Slides — Symmetric IN/OUT Animations
 
-- **Feature/area**: TimelineControl track colors and filmstrip stroke (`TimelineControl.xaml.cs`)
-- **Approaches tried**:
-  1. **Applied exact user palette (#0DFF89, #0C2EE8, #FF00AA, #DDFF00, #E87C06)** â€” Mapped: orange `#E87C06` â†’ video clip + filmstrip stroke, neon yellow `#DDFF00` â†’ zoom, neon green `#0DFF89` â†’ audio, hot pink `#FF00AA` â†’ mic, electric blue `#0C2EE8` â†’ cursor. Light theme uses slightly deeper variants. âœ…
-  2. **4px filmstrip stroke** â€” Changed filmstrip stroke from 1px (unselected) / 2px (selected) to 4px in all states. Stroke color changed from translucent white to orange `#E87C06`. âœ…
-- **What worked**: Using the exact user-provided palette with appropriate dark/light theme adjustments. Orange filmstrip stroke at 4px gives the video track a bold, distinct frame.
-- **What didn't work**: Previous neon palette (green/cyan/magenta/blue chosen by AI) didn't match user's vision â€” always ask for or use user-provided color references.
-
----
-
-## Window Capture â€” Bring Window to Front on Record
-
-- **Feature/area**: RecordingViewModel â€” Window capture mode (`RecordingViewModel.cs`)
-- **Approaches tried**:
-  1. **Added `SetForegroundWindow` P/Invoke call in `StartRecordingAsync`** â€” After `BuildCaptureTarget()` succeeds and before creating the `RecordingSession`, call `SetForegroundWindow(SelectedWindow.Handle)` when in `CaptureMode.Window`. âœ…
-- **What worked**: Simple `SetForegroundWindow` call right after target validation brings the selected window to the top of the z-order before capture begins.
+- **Feature/area**: Exit animations for all text slide animations (TextSlideRenderer.cs)
+- **Problem**: Only the Fade variants animated out; every other animation snapped off abruptly at the slide's end.
+- **Solution**: Each animation now has an entrance (first `InDur=0.25`) and an exit (last `OutDur=0.25`) with a static hold between. Implemented by combining an `inP` and `outP` phase:
+  - **Whole-text** — `ComputeWholeState` returns (scale, tx, ty, blur, opacity) summing an entrance offset (eased by `inP`) and an exit offset (eased by `outP`). Slides continue their motion on exit (e.g. SlideUp enters from below, exits upward); ScalePop shrinks out; ZoomBlurIn zooms+blurs back out; opacity fades both ends via `EaseOutCubic(inP) * (1 - EaseInCubic(outP))`.
+  - **Reveal** — wipes in from the left then wipes back out (`min(inFrac, 1-outFrac)`).
+  - **Typewriter/Caret** — types in over first ~45%, then erases over the last ~30%.
+  - **Per-character** — `ComputeCharParams` now computes both a staggered `inCp` (first 50%) and staggered `outCp` (last 40%); opacity = `inCp * (1 - outCp)`, offsets sum entrance + exit. Wave fades in AND out at the ends.
+- **Added easing**: `EaseInCubic` (t³) for accelerating exits.
+- **Note**: `None` stays static (no animation). `FadeOut` is visible from the start and only fades at the end (unchanged semantics).
 
 ---
 
-## PLM Suspension Hang Fix (HANG_QUIESCE)
+## Text Slides — Background Types (Solid / Gradient / Image / Video)
 
-- **Feature/area**: App lifecycle â€” PLM suspension handling (`App.xaml.cs`, `MainWindow.xaml.cs`, `EditorPage.xaml.cs`)
-- **Approaches tried**:
-  1. **WM_ENDSESSION handling in MainWindow WndProc** â€” Detects system shutdown/logoff and sets `_isExiting = true` via `App.HandleSystemShutdown()` so `OnWindowClosing` doesn't cancel the close. âœ…
-  2. **ExtendedExecutionSession when hiding to tray** â€” Requests `ExtendedExecutionReason.Unspecified` when the window becomes hidden to prevent PLM from suspending the app while it runs in the tray. Released when the window is shown again. âœ…
-  3. **Pause editor playback on window hide** â€” `Window.VisibilityChanged` event pauses `EditorPage.Preview` (and audio via its `IsPlayingChanged` handler) when the window becomes invisible. âœ…
-- **What worked**: Three-pronged approach â€” WM_ENDSESSION for system shutdown, ExtendedExecutionSession for PLM prevention, and VisibilityChanged for playback pause.
-
----
-
-## Comprehensive Automated Test Suite & CI Pipeline
-
-- **Feature/area**: Test infrastructure â€” Musio.Tests project, GitHub Actions CI workflow
-- **Approaches tried**:
-  1. **`dotnet build` for test project** â€” Failed with MSB4062 because Musio.Core references WinAppSDK which requires the PRI task DLL only available in VS MSBuild.
-  2. **VS MSBuild.exe for build + `dotnet test --no-build` for execution** â€” Worked. MSBuild builds the Core and Tests projects successfully, then `dotnet test --no-build` runs all tests. âœ…
-  3. **GitHub Actions workflow with `microsoft/setup-msbuild@v2`** â€” Uses `setup-msbuild` action to get MSBuild on CI runner, then `dotnet test --no-build` to execute. âœ…
-- **What worked**: Build with VS MSBuild (`msbuild /p:Configuration=Release /p:Platform=AnyCPU`), test with `dotnet test --no-build`. CI uses `microsoft/setup-msbuild@v2` action.
-- **What didn't work**: `dotnet build` fails for any project that transitively references WinAppSDK due to missing `Microsoft.Build.Packaging.Pri.Tasks.dll` in the dotnet SDK.
-- **Test files created**: AspectRatioHelperTests, CubicBezierEasingTests, TimelineMapperTests, PerformanceMonitorTests, SubtitleGeneratorTests, AudioWaveformGeneratorTests, ProjectModelTests, EditOperationsExtendedTests, SessionCleanupServiceTests, KeyboardRecorderTests, ExportResolutionTests, ZoomKeyframeExtendedTests (254 total tests, all passing).
+- **Feature/area**: Rich slide backgrounds matching the Frame Style flyout (TextSlideSegment, TextSlideRenderer, EditorPage)
+- **Model**: `TextSlideSegment` gained `BackgroundType` (`SlideBackgroundType` enum: Solid/Gradient/Image/Video), `GradientEndColor`, `GradientAngle`, `BackgroundImagePath`, `BackgroundVideoPath`. `BackgroundColor` now doubles as the solid color and gradient START color (back-compat preserved).
+- **Rendering** (`TextSlideRenderer.DrawSlideBackground`):
+  - Solid → `ds.Clear`
+  - Gradient → `CanvasLinearGradientBrush` (same angle math as `BackgroundCompositor`)
+  - Image → cached `CanvasBitmap` loaded via blocking `LoadAsync(...).GetAwaiter().GetResult()` (mirrors `BackgroundCompositor.DrawImageBackground`), scale-to-fill
+  - Video → cached `MediaComposition`; frames pulled with `GetThumbnailAsync` at `progress*duration` (looped), cached at ~10fps granularity, scale-to-fill; falls back to solid on any failure
+  - Cached bitmaps/composition disposed in `Dispose()`.
+- **Export**: works automatically — `VideoEncoder.ProduceSampleAsync` already calls `RenderSlide`, so gradient/image/video backgrounds appear in exported MP4 with no extra changes.
+- **UI**: Text-slide flyout now has a Background `ComboBox` (Solid/Gradient/Image/Video) that toggles panels: solid/gradient share the color picker (label switches to "Start Color" for gradient); gradient panel adds a **presets GridView** (built from `DefaultBrandPresets.All` — Nebula, Lagoon, Prism, etc. as `LinearGradientBrush` tiles), an End Color picker, and an Angle slider; Image/Video panels use `FileOpenPicker` buttons.
+- **Reused**: `DefaultBrandPresets` (Core/Settings) for gradient presets; the wallpaper picker's `FileOpenPicker` + `InitializeWithWindow` pattern.
 
 ---
 
-## Touch Cursor Dedup â€” Overlapping Click Animations
+## Text Slides — In-Preview Editing, Reposition, Alignment & Formatting
 
-**Feature/area:** Compositor pipeline (CursorRenderer, FrameCompositor)
+- **Feature/area**: Direct manipulation of text slides on the preview (TextSlideSegment, TextSlideRenderer, EditorPage preview overlay)
+- **Model**: `TextSlideSegment` gained `TextAlignment` (`SlideTextAlignment` Left/Center/Right) and normalized `TextX`/`TextY` (default 0.5,0.5) for the text block center.
+- **Renderer**: `RenderSlide` now takes `drawText` (skip text while editing in-place), uses `ToCanvasAlignment(slide.TextAlignment)`, and positions the text box via `ComputeTextRect` (public static — also used by the overlay for coordinate mapping) centered at (TextX,TextY).
+- **In-place editing overlay** (EditorPage, in the preview Grid):
+  - A `Canvas` (`SlideEditCanvas`) with a draggable dashed `Border` (`SlideTextRegion`) + a transparent `TextBox` (`SlideEditBox`).
+  - Shown only when the **playhead is on a text slide** and not playing (driven from `RenderTextSlidePreview`; hidden in the video/legacy branches and on play via `IsPlayingChanged`).
+  - **Drag** the region → updates `TextX`/`TextY` (mapped through `Preview.FrameLayoutRect`, same pattern as the webcam overlay).
+  - **Double-tap** → edit mode: sets `_editingSlideId`, renders **background-only** so the rendered text doesn't double up, shows a WYSIWYG `TextBox` (font/size/weight/style/color/alignment matched, scaled by `FrameLayoutRect.Height/outputHeight`). Enter commits (Shift+Enter = newline), Esc commits, blur commits. Text syncs back to the flyout TextBox.
+  - Repositions on `Preview.FrameLayoutChanged`.
+- **Formatting in flyout**: Bold/Italic `ToggleButton`s + Left/Center/Right alignment `RadioButton`s.
+- **Gotcha**: `ComputeTextRect` made `public static` so the overlay can map output-space text rect → canvas px. `ProtectedCursor` (UIElement) used for the move cursor on hover.
+
+---
+
+## Crash Fix — Cross-Thread XAML Access from Preview Render (after recording)
+
+- **Symptom**: App froze and crashed right after stopping a recording (transition into the editor).
+- **Diagnosis**: WER showed exception `0xc000027b` (stowed) with HRESULT `0x802b000a` = **`UI_E_WRONG_THREAD`** in `combase`/`CoreMessagingXP`. No `crash.log` was written (native failfast bypasses the managed `UnhandledException` handler). The crash dump (`%LOCALAPPDATA%\CrashDumps\Musio.App.exe.*.dmp`, analyzed with `dotnet-dump`) showed the **UI thread idle at `Program.Main`** — so the offending XAML access came from a **worker thread**.
+- **Root cause**: The in-preview text-slide edit overlay (added this session) called `HideSlideEditOverlay()` / `UpdateSlideEditOverlay()` directly from the async preview render path (`RenderFrameAtAsync` / `RenderTextSlidePreview`). That path can resume on a threadpool thread after an `await`, and those methods **mutate XAML** (`SlideEditCanvas.Visibility`, `Canvas.SetLeft`, read `Preview.IsPlaying`/`FrameLayoutRect`). The pre-existing render code only ever called `CanvasControl.Invalidate()` (thread-safe in Win2D), which is why it never crashed — direct XAML mutation is NOT thread-safe.
+- **Fix**: `UpdateSlideEditOverlay` and `HideSlideEditOverlay` now guard with `DispatcherQueue.HasThreadAccess` and re-enqueue via `DispatcherQueue.TryEnqueue` when off-thread.
+- **Rule learned**: Any XAML/DependencyProperty access reachable from the async preview render path MUST be marshaled to the UI thread. `CanvasControl.Invalidate()` is the only thread-safe Win2D UI call used there.
+- **Bonus**: Added `AppDomain.CurrentDomain.UnhandledException` + `TaskScheduler.UnobservedTaskException` logging to `App.xaml.cs` (writes to `%LOCALAPPDATA%\Musio\crash.log`) to catch future worker-thread managed exceptions.
+- **Debugging tip**: `dotnet tool install --global dotnet-dump`, then `dotnet-dump analyze <dump>` with `clrstack -all`. Cross-thread failfasts produce NO managed exception object (`pe` / `dumpheap -type Exception` are empty) — a strong signal it's a native thread-affinity violation.
+
+---
+
+## Recording Overlay — Theme Fix (white-on-white in light theme)
+
+- **Feature/area**: `RecordingOverlayWindow.xaml.cs`
+- **Problem**: The recording mini-toolbar's text + spinner were white-on-white after the user switched the app to Light theme.
+- **Cause**: The overlay uses a `DesktopAcrylicBackdrop` that follows the window theme; in Light theme the acrylic pill went light, but the foreground was meant for a dark pill.
+- **Fix**: `RootGrid.RequestedTheme = ElementTheme.Dark` in the constructor — pins the overlay to a dark pill with light text/spinner regardless of the app theme.
+
+## Crash After Stop Recording — Investigation (UNRESOLVED, native failfast)
+
+- **Symptom**: App crashes when stopping a recording. WER bucket constant; signature: stowed exception `0xc000027b`, HRESULT `0x802b000a` (`UI_E_WRONG_THREAD`), faulting module `combase.dll` / `CoreMessagingXP.dll`.
+- **Dump analysis (dotnet-dump + custom ClrMD tool)**: Faulting thread is the **UI thread** (`Program.Main` → `Application.Start`), idle at the message pump — the exception is a stowed/deferred native failfast re-surfaced at the pump. **No managed Exception object exists on the GC heap** → it's a pure native COM thread-affinity violation, NOT a managed exception. Therefore `crash.log` / `FirstChanceException` cannot capture it, and the original throw site is not in the dump (only WinDbg `!analyze`/`!pde` stowed-exception support could retrieve it, which isn't installed).
+- **Ruled out** (all verified UI-thread-correct): preview render path (only `CanvasControl.Invalidate()` is thread-safe; overlay methods now `DispatcherQueue`-guarded), recording-stop VM path (`OnOverlayStopRequested` marshals via dispatcher; `StopRecordingAsync` resumes on UI after `await Task.Run`), capture teardown (`Direct3D11CaptureFramePool.CreateFreeThreaded` — no affinity), overlay animation/close path, theme-change handler.
+- **Key evidence the in-preview overlay is NOT the cause**: the crash persists AFTER the thread-marshaling fix (commit c9003ff) that guarded the only new XAML-in-async-path code. If the overlay were the cause, those guards would have fixed it.
+- **Leading hypothesis**: a thread-affine NATIVE object (likely `Windows.Graphics.Capture` D3D/DWM or the overlay's `DesktopAcrylicBackdrop`/SystemBackdrop lifecycle) created on one thread and torn down/accessed on another during the stop→editor transition. Possibly environment-specific (ARM64) or triggered by the recent theme change. Needs a live repro with WinDbg, or bisection by selectively disabling capture/backdrop, to confirm.
+
+### RESOLVED — it was NOT a threading issue
+- **Actual root cause (captured by the FirstChanceException logging added above)**: a `XamlParseException` — `Cannot find a Resource with the Name/Key AccentFillColorDefaultColor [Line 291]` — thrown from `EditorPage.InitializeComponent()`. The in-preview text-overlay XAML (commit 51d91ab) set `SlideTextRegion.Background` to `<SolidColorBrush Color="{ThemeResource AccentFillColorDefaultColor}" .../>`. **`AccentFillColorDefaultColor` is not a reliably-defined framework resource** — it resolved in the **Dark** theme dictionary but NOT **Light**, so after the user switched to Light theme, constructing `EditorPage` threw at XAML-parse time. Since stopping a recording navigates to `EditorPage`, the crash always reproduced "on stop" (and would also reproduce opening the editor any other way in Light theme).
+- **Fix**: use `{ThemeResource SystemAccentColor}` (theme-independent, always available).
+- **Correction to earlier notes**: HRESULT `0x802B000A` is the XAML **resource-lookup-failed** code, NOT `UI_E_WRONG_THREAD`. The whole thread-affinity investigation was a red herring caused by mislabeling that HRESULT. The earlier `DispatcherQueue` marshaling guards on the overlay methods are harmless/correct defensively but were not the fix.
+- **Lesson**: When adding `{ThemeResource X}` keys, verify the key exists in BOTH Light and Dark theme dictionaries (test in both themes). Prefer well-known keys (`SystemAccentColor`, `CardStrokeColorDefaultBrush`, `ControlFillColorDefaultBrush`). A bad ThemeResource only fails when that theme is active, so it can hide until a theme switch. The FirstChanceException → `crash.log` logging is what finally captured it (XAML parse failfasts bypass `UnhandledException`).
+
+---
+
+## Append Recording — Multi-Source Playback
+
+- **Feature/area**: Playing appended ("Record More") recordings from their own source files (EditorPage preview; export still TODO)
+- **Problem**: Appended recordings added a `VideoSegment` with a different `VideoFilePath`, but both the editor preview AND export only ever read from the **primary** recording's `_frameReader`/`_previewRenderer` (built from `project.VideoFilePath`). So an appended segment replayed the first recording's frames ("repeat").
+- **Preview fix (done)**: Added a per-segment `SegmentPreview` context (`VideoFrameReader` + `PreviewRenderer` + webcam `MediaComposition`), cached in `_segmentPreviews` keyed by `VideoSegment.Id`, built lazily from the segment's own `VideoFilePath`/`CursorDataFilePath`/`WebcamFilePath`/dims/offsets. `RenderSegmentVideoAsync` routes primary-recording segments (matching `project.VideoFilePath`) to the existing reader/compositor and appended segments to their own context. `_lastRenderedSegmentId` forces a redraw across segment boundaries. Contexts disposed on reload/unload. Result: appended frames + cursor/clicks + camera play correctly in the editor.
+- **Remaining TODO (not yet done)**:
+  - **Export**: `VideoEncoder.ProduceSampleAsync` still uses the primary `frameReader`/`compositor` for all video segments → appended segments repeat in the exported MP4. Needs per-source frame readers + `FrameCompositor`s (keyed by `VideoFilePath`), routed per frame, scaling each source's composited output to the common encode size (sources may differ in dimensions). Risky to change without end-to-end export testing.
+  - **Preview audio** for appended segments (currently the primary audio plays under appended video).
+  - **Export audio**: `MuxAudioAsync` only muxes the primary recording's audio (filtered by `VideoFilePath == project.VideoFilePath`); appended segments' `AudioFilePaths` need muxing at their `segment.Start` with their source trim.
+
+- **Bug fixed — append double-add**: "Record More" produced **2 duplicate segments of the new recording (original lost)**. Cause: `RecordingViewModel.StopRecordingAsync` unconditionally called `ProjectService.SetProject(LastProject)` (which REPLACES the timeline), then `RecordingPage` (append mode) called `AppendRecording(newRecording)` adding it again. Fix: added `RecordingViewModel.IsAppendMode` (set from `RecordingPage.OnNavigatedTo` based on the `"append"` nav parameter); `StopRecordingAsync` now skips `SetProject` when `IsAppendMode`, so append mode only runs `AppendRecording`, preserving the original project and adding the new recording as a distinct trailing segment.
+## FCP-style Timeline Segment Editing (select / move / trim / sync)
+
+**Feature/area:** Primary-track (video + text slide) interactive editing in the timeline — selection, drag-to-move/reorder, ripple-trim either edge, delete-ripple, snapping; sync of linked zoom/click/cursor and per-segment audio/camera.
 
 **Approaches tried:**
+1. **Reorder-safe source<->output mapping first (foundation)** — Worked. Reworked `TimelineModel.SourceToOutputTime`/`PrimaryVideoSegments` to follow the *actual* `Segments` order instead of `OrderBy(SourceStart)`, and added `TrySourceToOutputTime(out)` so trimmed-out source times report "no output position" (callers can cull). This is what keeps zoom/click/cursor in sync after reorder/trim. `TimelineMapper.GetSegmentFrameRef` already walked timeline order, so export/video frame sync was already correct — only the UI-facing model mapping needed fixing. ✅
+2. **New core ops `MoveSegmentOperation` + `TrimSegmentEdgeOperation`** — Worked. Both snapshot/clone for undo, call `RecalculateSegmentPositions()` for the magnetic re-flow. Trim adjusts `SourceStart`/`SourceDuration`/`Duration` together for video (clamped to source head and `MinDuration=100ms`), duration-only for text slides. 18 unit tests pass (`TimelineSyncMappingTests`, `SegmentEditOperationsTests`). ✅
+3. **UI in `TimelineControl.xaml.cs`** — Worked. Added DragModes `SegmentBody/LeftEdge/RightEdge`, hit-testing, drag-to-move with drop-indicator, edge ripple-trim with live preview, and snapping (`SnapX` to playhead + segment edges; Alt bypasses via `InputKeyboardSource.GetKeyStateForCurrentThread`). Control raises `SegmentMoveRequested`/`SegmentTrimRequested`; `EditorPage` executes the ops on `UndoRedoManager` (mirrors the existing zoom-segment event pattern). Delete-ripple wired in `DeleteAccelerator_Invoked` via `RemoveSegmentOperation` on the selected segment.
 
-1. **Chain-based dedup in RenderTouchClicks** â€” Worked. Consecutive click-down events whose gap < TouchTotalDuration (1.41s) are grouped into "chains." Each chain renders a single touch cursor that floats in â†’ taps at each click position â†’ slides between click positions â†’ fades out after the last tap. âœ…
+**What worked:** Layering — fix sync mapping (tested) -> add tested core ops -> wire UI to the existing event/undo pattern. Added `Timeline.Refresh()` to `OnUndoRedoStateChanged` so undo/redo of segment ops redraws all tracks.
+
+**What didn't work / not done:**
+- **Automated interaction screenshots:** The editor is only reachable via a live recording (no project file load path in `ProjectService`), so screenshotting select/move/trim requires a FlaUI/SendInput harness that drives Record->Stop->editor. Not built this pass — app was verified to compile (ARM64) and launch to the recording page (`files/verify-01-launch.png`).
+- **Phase 7 camera track (independent `CameraSegment` + track + flyout + compositor updates):** not started.
+
+**Build/test (verified):** Build with VS MSBuild `amd64\MSBuild.exe ...csproj /restore /t:Build /p:Configuration=Debug /p:Platform=x64` (tests) or `/p:Platform=ARM64` (app). Run tests: `$env:DOTNET_ROLL_FORWARD="Major"; dotnet test ...Musio.Tests.csproj --no-build -c Debug -p:Platform=x64`. `dotnet build` fails (PriGen MSB4062).
+
+## Phase 7 — Independent Camera (Webcam) Track
+
+**Feature/area:** A separate camera track in the timeline letting users clip when the webcam overlay is visible and (via model/ops) change its style per segment, independent of video cuts.
+
+**Approach (worked, tested):**
+- **Model:** `CameraSegment : TimelineSegment` (Timeline namespace, `using Musio.Core.Processing` for `WebcamOverlayStyle`/`WebcamShape`). Its `Start`/`Duration` are reused as a **source-video time range** (like zoom keyframes) so segments stay aligned with the recording and survive video reorder/trim via the existing source<->output mapping. `TimelineModel.CameraSegments` + `GetCameraSegmentAtSourceTime(sourceTime)`. `CameraSegment.Enabled` + `StyleOverride` + `ResolveStyle(baseStyle)`.
+- **Ops:** `Add/Move/Trim/Remove/UpdateCameraSegmentPropertiesOperation` — operate only on `CameraSegments` (never call `RecalculateSegmentPositions`), keep the list sorted by Start, fully undoable. 11 tests in `CameraSegmentOperationsTests` (315 total pass).
+- **Render hook (backward-compatible):** `EditorPage.SetWebcamFrameForPreviewAsync(position)` — when `CameraSegments.Count > 0`, hides the webcam (`SetWebcamFrame(null)`) outside any enabled segment and applies the active segment's `ResolveStyle(...)` via `UpdateWebcamStyle`. With no camera segments, the legacy always-on global overlay is unchanged.
+- **Timeline UI:** Added a "Camera" row to `TimelineControl.xaml` (new RowDefinition; bumped audio Row 4->5, mic 5->6; canvases + labels updated). `CameraTrackCanvas_Draw` + `HitTestCameraSegment` + `CameraTrack_PointerPressed/Moved/Released/RightTapped` mirror the zoom track: drag-create, select, body-move, edge-trim, right-tap remove. Source-time positioning via `SourceTimeToX`/`GetCameraSegment{Start,End}X`. Control raises `CameraSegment{Selected,Created,Moved,Resized,RemoveRequested}`; `EditorPage` executes the ops on `UndoRedoManager`. Added `CameraTrackCanvas` to `InvalidateAll`/`InvalidateAllCanvases`.
+
+**What didn't / remaining:**
+- **Per-segment style flyout UI** (position/size/shape/mirror) not built — the ops + `StyleOverride` support it; right-tap currently removes. Enable/disable is in the model but has no dedicated gesture yet.
+- **Visual verification** of the camera row in the editor needs a live recording (editor unreachable otherwise); app compiles (ARM64) + launches clean (`files/verify-02-camera-track-build.png`).
+
+**Camera export parity (follow-up):** The preview honors camera segments (visibility + per-segment style); the GIF/MP4 export pipeline (ExportEngine.cs + VideoEncoder.cs) still composites the single global webcam overlay and does not yet consult TimelineModel.CameraSegments. Primary video/audio/zoom/cursor/click export sync is correct (TimelineMapper maps by actual segment order). Wiring camera segments into export requires passing the TimelineModel/active-segment lookup into the export frame loop and gating compositor.SetWebcamFrame + style per output frame.
+
+## Feature — Camera segment "expand to fullscreen" animation (+ camera export parity)
+
+**Feature/area:** A per-`CameraSegment` toggle that animates the webcam overlay from its normal position/size up to **cover** the whole screen at the segment start, holds fullscreen, then animates back at the end. Renders in preview AND export.
+
+**Approach (worked, tested — 354 tests pass, ARM64 build clean):**
+- **Model:** `CameraSegment.FullscreenEnabled` + fixed `FullscreenInDuration`/`FullscreenOutDuration` (0.5s each) + pure `ComputeFullscreenFactor(sourceTime)` returning eased [0,1] via `CubicBezierEasing.EaseInOutCinematic`. Ramps are computed in **source time**; for short segments both ramps scale down proportionally so they never overlap (no hold).
+- **Pure layout helper (testable, GPU-free):** `Processing/WebcamLayout.cs` — `WebcamLayoutCalculator.ComputeAnimatedLayout(style, canvasW, canvasH, frameW, frameH, factor)` → dest rect, source **cover** crop, corner radius, border width, shadow alpha. Factor 0 reproduces the legacy square overlay exactly; factor 1 covers the canvas. Key trick: always draw a **rounded rectangle** whose radius collapses to 0 — a square with radius = half-side IS a circle, so Circle morphs smoothly to a fullscreen rectangle. Cover crop interpolates aspect via the current dest aspect (square→canvas).
+- **Compositor:** `WebcamCompositor.SetFullscreenFactor` + rewrote `RenderWebcam` to consume the layout. GPU cache key changed to `(dest, radius, canvasW, canvasH, hasShadow)`. Shadow faded via the `DrawImage(bitmap, offset, sourceRect, opacity)` overload.
+- **Preview:** `PreviewRenderer.SetWebcamFullscreenFactor` → `FrameCompositor.SetWebcamFullscreenFactor`. `EditorPage.SetWebcamFrameForPreviewAsync` computes the factor from the active segment and raises webcam **extraction resolution** when factor>0 (the ~1.5×overlay cap is too small for fullscreen).
+- **Export parity (the previously-missing Phase-7 gap, now DONE):** shared helper `ExportEngine.ApplyCameraSegmentState(compositor, timeline, baseStyle, sourceTime)` gates visibility, applies `ResolveStyle`, and sets the factor; returns false outside enabled segments. Wired into BOTH the GIF loop (`ExportEngine.RenderGif/ExportGifAsync`) and the MP4 loop (`VideoEncoder.ProduceSampleAsync` — needed a new `baseWebcamStyle` param since it's a separate method, not a closure). `ExportEngine.TimelineHasFullscreenCamera(timeline)` bumps webcam extraction to native resolution in both pipelines when any fullscreen camera segment exists.
+- **Ops/UI:** extended `UpdateCameraSegmentPropertiesOperation` with `fullscreenEnabled` (undoable). Added an "Expand to full screen" `ToggleSwitch` in the existing Camera Overlay flyout (`CameraFullscreenPanel`, collapsed unless a camera segment is selected); `EditorPage` tracks `_selectedCameraSegmentId`, syncs the toggle on select/create/remove, and routes the toggle through the op on `UndoRedoManager`.
+
+**Gotchas / notes:**
+- `dotnet test` FAILS here too (same WindowsAppSDK PriGen MSB4062 as `dotnet build`). Build the test project with **VS MSBuild** (`/restore /t:Build /p:Platform=ARM64`), then run `dotnet vstest <Musio.Tests.dll> /Platform:ARM64` (with `DOTNET_ROLL_FORWARD=Major`). 354 tests pass.
+- Ramp timing is in source seconds, so a segment's `SpeedFactor` changes the on-screen ramp duration. Acceptable for v1; revisit if it feels off.
+- Backward compatibility: factor 0 is byte-for-byte the old overlay, and timelines without camera segments keep the legacy always-on overlay.
+
+**Follow-up — camera segment deletion (added):** Camera segments could only be removed by right-tap on the Camera track. Added two more ways: (1) the **Delete** key — `EditorPage.DeleteAccelerator_Invoked` now checks `Timeline.SelectedCameraSegmentId` FIRST (before zoom/primary-segment branches) and calls a new shared `DeleteCameraSegment(id)`; (2) a **"Delete camera segment"** button in the Camera Overlay flyout's `CameraFullscreenPanel` (visible only when a camera segment is selected). All three paths route through `RemoveCameraSegmentOperation` on `UndoRedoManager` (undoable) and clear selection + sync UI + refresh the preview.
+
+**Follow-up — overlay fade-in/out + Reveal fullscreen mode:** Two refinements. (1) **Anti-flash fade:** the camera overlay used to pop in/out at segment boundaries. `CameraSegment.ComputeAppearOpacity(sourceTime)` returns an eased (`EaseOut`) opacity that fades in over `AppearDuration` (0.25s) at the start and out at the end (clamped for short segments). Plumbed via `WebcamCompositor.SetOverlayOpacity` (applied at draw time on the frame layer + shadow + border alpha; NOT cached) → `FrameCompositor`/`PreviewRenderer.SetWebcamOverlayOpacity` → set in `EditorPage.SetWebcamFrameForPreviewAsync` and `ExportEngine.ApplyCameraSegmentState`. (2) **`CameraFullscreenMode` enum {Highlight, Reveal}:** Highlight = original overlay→full→overlay; **Reveal** = holds fullscreen for the body of the segment, then eases down to the overlay over `FullscreenRevealDuration` (0.8s) **at the END**, revealing the video underneath (for fullscreen-camera intros that drop into the recording). `ComputeFullscreenFactor` branches on the mode (note: changed the start guard from `t<=0` to `t<0` so the held-fullscreen value is returned at t=0).
+
+**Fix — neighbor-aware overlay fade (no boundary flash / no fade-from-black):** The naive appear fade caused a dip/flash where two camera segments are adjacent/overlapping (A fades out while B fades in) and a "fade from black" when a segment starts fullscreen. `ComputeAppearOpacity` now takes `fadeIn`/`fadeOut` flags, and `TimelineModel.GetCameraOverlayOpacity(active, sourceTime)` decides them: suppress fade-in when another enabled segment covers the instant just before `active.Start` (`s.Start < active.Start && s.End >= active.Start`), suppress fade-out when one continues past `active.End`, and suppress fade-in when `active.StartsFullscreen` (Reveal). Both preview (`EditorPage.SetWebcamFrameForPreviewAsync`) and export (`ExportEngine.ApplyCameraSegmentState`) call `GetCameraOverlayOpacity` instead of the raw per-segment fade. UI: a "Animation" ComboBox under the fullscreen toggle in `CameraFullscreenPanel` (shown only when fullscreen is on); op `UpdateCameraSegmentPropertiesOperation` gained `fullscreenMode`. 357 tests pass. Removed the `AppBarSeparator`s between the right-group toolbar buttons (the `Spacing="8"` on the group panel is the only divider now; also deleted the `WebcamShapeSeparator` and its code-behind visibility toggles). Added responsive collapse: the editor toolbar `Grid` (`ToolbarGrid`, 3 columns: Auto / * / Auto) overlaps when the window is narrow because both edge groups are Auto. `ToolbarGrid_SizeChanged` → `UpdateToolbarResponsiveLayout(width)` measures `LeftToolbarGroup` + `RightToolbarGroup` with labels expanded; if `left+right + padding(16) + gap(16) > availableWidth` it collapses the `FrameStyleLabel`/`CursorLabel`/`CameraLabel` TextBlocks to icon-only (tooltips already exist for discoverability). KEY: toggling the labels never changes the full-width toolbar size, so there is NO feedback loop from SizeChanged. Dynamic right-group buttons (Cursor/Camera/Text Slide/zoom panels) don't fire the toolbar SizeChanged, so each site that toggles their visibility also calls `RefreshToolbarResponsiveLayout()` (which re-runs with `ToolbarGrid.ActualWidth`).
+
+
+## Bugfix — Appended-recording filmstrip showed wrong (primary) frames
+
+**Symptom:** After "Record More" appended a new recording, the appended VideoSegment's filmstrip showed the PRIMARY recording's frames, although the editor preview rendered the correct appended output.
+
+**Root cause:** Filmstrip thumbnails were a single flat `CanvasBitmap[] _thumbnails` generated only from the primary `_frameReader` and indexed by source-seconds. `DrawFilmstripForSegment` indexed that one array using each segment's own source time. An appended `VideoSegment` has a *different* `VideoFilePath` with its own source coordinate space (SourceStart=0), so it indexed into the primary's thumbnails. Preview was correct because it uses per-segment `SegmentPreview` frame readers keyed by `VideoSegment.Id`.
+
+**Fix:** Thumbnails are now keyed by source video file.
+- `TimelineControl`: added `Dictionary<string,ThumbnailSet> _thumbnailsByFile` (+ `_primaryThumbnailFilePath`). `SetThumbnails(..., filePath)` registers the primary set; new `SetThumbnailsForFile(path,...)` registers appended sets; `ResolveThumbnailSet(filePath)` picks the right set (falls back to primary only when the path matches primary, else returns null → backplate, never another file's frames). `DrawFilmstripForSegment` takes the resolved `ThumbnailSet`; the filmstrip-vs-solid gate is now per-segment. `ClearThumbnails` dedups by reference to avoid double-disposing the primary array shared with the dict.
+- `EditorPage`: `GenerateTimelineThumbnailsAsync(reader, filePath, isPrimary)`; new `GenerateAllTimelineThumbnailsAsync` (primary then appended, sequential so the shared `_thumbnailGenerationId` cancel-check doesn't false-cancel) + `GenerateAppendedThumbnailsAsync` which opens a temp `VideoFrameReader` per distinct non-primary `VideoSegment.VideoFilePath` and registers via `SetThumbnailsForFile`. Appending re-runs `InitializePreviewAsync` (via `ProjectChanged`→`ModelReloaded`), so appended thumbnails regenerate automatically.
+
+**Verified:** App builds (ARM64) + launches clean. While an appended file's thumbnails are still generating, its segment shows a solid backplate (not wrong frames).
+
+## Bugfix — Split at playhead did nothing on segment timelines
+
+**Symptom:** 'Split at playhead' (toolbar + keyboard) had no effect once the timeline used Segments (video/text-slide).
+
+**Root cause:** EditorViewModel.SplitAtPlayhead always used SplitOperation, which edits the legacy Clips list (not rendered when Segments exist), and its bounds guard used _model.Duration (source duration) instead of DisplayDuration. So it operated on the wrong collection and could also be rejected by the guard.
+
+**Fix:** Added SplitSegmentAtTimeOperation (Musio.Core/Timeline/EditOperation.cs) splitting the segment under the output time into two contiguous halves — VideoSegment splits SourceStart/SourceDuration/Duration (speed-aware, like SplitAndInsertTextSlideOperation); TextSlideSegment splits Duration. MinHalf=50ms guard; DidSplit flag; undoable via snapshot. EditorViewModel.SplitAtPlayhead now routes to it when Segments.Count>0 using DisplayDuration bounds; legacy Clips path unchanged. Total timeline duration is preserved so zoom/cursor/click stay in sync. 8 tests in SplitSegmentOperationTests (323 total pass).
+
+## Feature/Fix — Appended recordings now show their own cursor/audio/camera on tracks (per-segment)
+
+**Symptom:** After Insert ▸ Record More, the appended segment's mouse/click, audio, and camera markers didn't appear on the tracks, and didn't move when the segment was moved — though the preview rendered the appended recording correctly.
+
+**Root cause:** All source-time tracks (cursor, system/mic audio, camera) rendered only the PRIMARY recording's model-level data (`model.CursorData`, `model.SystemAudioWaveformSamples`, etc.) and mapped source→output via `SourceToOutputTime`, which only maps primary-file segments. Appended `VideoSegment`s carry their own `CursorDataFilePath`/`AudioFilePaths`/`WebcamFilePath` but those were never visualized. (Same class of bug as the filmstrip-per-file fix.)
+
+**Fix — per-source-file track data + per-segment rendering:**
+- `TimelineControl`: added `SegmentTrackVisual` (cursor + sys/mic waveform + waveform-duration + HasCamera) cached in `_trackVisualsByFile` keyed by `VideoSegment.VideoFilePath`; `SetSegmentTrackVisual`/`ClearSegmentTrackVisuals`. New helper `SegmentVideoTimeToX(seg, fileVideoSeconds)` maps a sample's file-video-time into the segment's output range (NaN outside kept range). `ResolveTrackVisual(seg)` returns the per-file entry, or a model-backed visual for the primary file.
+- Rewrote cursor, audio, and mic track draws: when `Segments` exist, iterate `Segments.OfType<VideoSegment>()` and draw each segment's OWN cursor path/clicks and waveform within `[seg.Start, seg.End]` (waveform sampled by source time so it survives move/trim/split). Legacy single-recording path preserved when no segments. Camera track now also draws a per-segment "Camera" presence bar for any VideoSegment with a webcam.
+- `EditorPage`: `LoadAppendedTrackVisualsAsync()` loads each distinct non-primary segment's cursor file (MouseHookRecorder.LoadFromFile) + generates sys/mic waveforms (`GenerateFileWaveformsAsync` via AudioWaveformGenerator/NAudio) and registers via `SetSegmentTrackVisual`. Called from `InitializePreviewAsync` (re-runs on append via ModelReloaded); visuals cleared alongside thumbnails. Because rendering is relative to `seg.Start`, the markers move with the segment automatically.
+
+Note: `TimelineControl.SegmentTrackVisual` must be referenced fully-qualified from `Musio_App.Pages` (`Musio_App.Controls.TimelineControl.SegmentTrackVisual`).
+
+**Verified:** builds (ARM64) + launches clean; 323 Core tests still pass (Core unchanged).
+
+## Feature — Per-segment Frame Style & Cursor; global Aspect/Cover/Zoom-scope
+
+**Symptom:** Frame style (and cursor) only applied to the first (primary) video segment; appended segments kept stale/default style because `RebuildPreviewRendererAsync` rebuilt only the primary `_previewRenderer` while appended `_segmentPreviews` were cached with their build-time config.
+
+**Design:** Frame style + cursor are now PER-SEGMENT; aspect ratio, fit/cover mode, crop anchor, and zoom scope remain GLOBAL (on `CompositionConfig`, applied to every segment).
+
+**Implementation:**
+- Model (`VideoSegment`): added `BackgroundStyle? FrameStyleOverride` and `CursorStyle? CursorStyleOverride` (Musio.Core.Processing types; TimelineSegment.cs already `using`s it). Records `with` preserves them through split/trim/move (tested).
+- `EditorPage.BuildSegmentConfig(global, seg, previewFps)` merges per-segment overrides on top of global; global props always inherited. Appended `GetOrBuildSegmentPreviewAsync` now uses it.
+- Primary renderer: `RebuildPreviewRendererAsync` applies the ACTIVE primary segment's override (via `ActivePrimaryVideoSegment()`), tracking `_primaryRenderBackground/_primaryRenderCursor/_primaryRendererSegmentId`. `EnsurePrimaryRendererForSegmentAsync(seg)` rebuilds when the playhead crosses into a primary split with a different override.
+- Flyout routing: `ApplyBackgroundStyle` / `ApplyCursorStyleFromControls` write to the selected `VideoSegment`'s override (and rebuild just that segment via `RebuildForSegmentStyleChangeAsync`) when a video segment is selected; otherwise update global + `InvalidateSegmentPreviews()` + rebuild. `OnSegmentSelected` syncs the flyout controls to the selected segment's effective style (`SyncStyleControlsToConfig`/`SyncCursorControlsToConfig`, which suppress events).
+- Global handlers (`ApplyAspectRatio/ApplyFitMode/ApplyCropAnchor/ApplyZoomScope`) now call `InvalidateSegmentPreviews()` so appended segments rebuild and pick up the global change.
+
+**Note (follow-up):** Export (`ExportEngine`) still uses one global `CompositionConfig`; per-segment frame style/cursor is preview-only until the export frame loop consults each segment's override (same pattern needed as camera-segment export parity).
+
+**Verified:** builds (ARM64) + launches clean; 328 Core tests pass (5 new in `SegmentStyleOverrideTests` proving overrides survive split/trim/move).
+
+## Fix — Per-recording zoom segments (appended recordings get auto-zoom; create works on any clip)
+
+**Symptoms:** (1) zoom segments couldn't be added after the first / on appended clips; (2) appended recordings showed no auto-zoom segments.
+
+**Root cause:** Zoom keyframes lived in one `model.ZoomKeyframes` list in PRIMARY source time and were mapped via `SourceToOutputTime` (primary-only). Creating a zoom over an appended region produced a primary source time that clamped to the primary clip's end (so it "couldn't be added"), and appended clicks never generated keyframes.
+
+**Fix — tag zoom keyframes by source file + per-segment mapping:**
+- Model: added `ZoomKeyframe.SourceVideoFilePath` (null = primary). Independent per-file subsets in the same list.
+- Control (`TimelineControl`): `ZoomKeyframeTimeToX(kf, time)` routes a keyframe through the VideoSegment that owns it (`SourceVideoFilePath`), via `SegmentVideoTimeToX`; returns NaN when outside any kept range (skipped). Zoom draw + `HitTestZoomSegment` now use it. Zoom CREATE determines the segment under the cursor (`XToSegmentVideoTime(x, out file)`), tags `_zoomCreateFile`, maps the create-preview via `ZoomCreateTimeToX`, and fires `ZoomSegmentCreated(start, end, filePath)`.
+- EditorPage: `OnZoomSegmentCreated` tags the new keyframe with the file (`FromRange(...) with { SourceVideoFilePath = e.FilePath }`); zoom region edit mode only for the primary. `GenerateAppendedZoomKeyframes(seg, cursor)` (called from `LoadAppendedTrackVisualsAsync`) builds tagged auto-zoom keyframes from each appended recording's clicks. Primary keyframe clear now targets only `SourceVideoFilePath is null` (appended keyframes are independent → no clear-race). Primary renderer `UpdateZoomKeyframes` filtered to primary-only keyframes so appended keyframes don't apply in primary time (appended previews already auto-zoom internally).
+
+**Limitation (noted):** Manual zoom segments created on an APPENDED clip render on the track but don't yet drive that clip's preview zoom (the appended renderer uses internal auto-zoom; it isn't fed model keyframes). Export per-segment zoom parity is also a follow-up.
+
+**Verified:** builds (ARM64) + launches; 333 Core tests pass (5 new in `ZoomKeyframeSourceFileTests`).
+
+## Fix — Appended zoom segments rendered as a thin line and couldn't be resized
+
+**Symptoms:** A zoom segment on an appended (2nd) recording rendered as a thin vertical line and couldn't be resized; primary zooms were fine.
+
+**Two root causes:**
+1. **Resize/move used the primary-only mapping.** `ZoomTrack_PointerReleased` mapped the dragged edge via `XToSourceTime` (primary source space). For an appended keyframe this produced a clamped/wrong time, collapsing the keyframe → thin line + broken resize.
+2. **Each keyframe edge could map through a different segment.** The earlier `ZoomKeyframeTimeToX` independently found the first non-NaN segment per edge, so a keyframe slightly overflowing its clip (or with duplicate appended segments) could map Start/End through different segments → near-zero width.
+
+**Fix (TimelineControl):**
+- `OwningSegmentForKeyframe(kf)` picks ONE segment (file match + Timestamp containment, else first file match). `ZoomKeyframeTimeToX` now maps BOTH edges through that single owning segment (clamping-free), so the segment renders at true width even if an edge overflows the clip. Hit-test and draw use it.
+- Added `XToKeyframeFileTime(x, filePath)` (inverse, segment-aware) and `SelectedZoomKeyframeFile`; the zoom move/resize releases now map through the selected keyframe's owning file instead of `XToSourceTime`, so appended zooms move/resize within their own recording's time.
+- `ZoomCreateTimeToX` passes `_zoomCreateStart` as the representative timestamp so the create preview resolves the correct owning segment.
+
+**Verified:** builds (ARM64) + launches; 333 Core tests pass.
+
+## Meta — Distilled high-churn areas into "Settled Playbooks" (top of file)
+
+**Feature/area:** `learnings.md` structure.
+
+**What worked:** Audited all section headers and identified the clusters that were re-worked
+repeatedly (often with reversals): DPI/capture coordinate transforms (~8 revisits incl. a full
+multiply-by-DpiScale → 1.0 reversal), H.264/MediaEncodingProfile (Auto vs HD1080p flip-flop across
+recording vs export pipelines), build/deploy/test toolchain, WinUI flyout init races + ThemeResource
+layout-cycle crashes, the frame-style compositor coordinate model (10 rounds), zoom-segment
+time-mapping, and crash/freeze hardening invariants. Added a definitive **Settled Playbooks** section
+at the top that turns each open-ended "approaches tried" thread into fixed ALWAYS/NEVER rules, so
+future tasks follow the settled convention instead of rediscovering it. Historical sections retained
+as the rationale record.
+
+**What didn't work:** N/A — documentation-only change.
+
+## Meta — Verified Settled Playbooks against actual code (refined 2 claims)
+
+**Feature/area:** `learnings.md` Settled Playbooks accuracy.
+
+**Verified accurate against source:** recording uses `VideoEncodingQuality.Auto` + `& ~1`
+(`VideoWriter.cs:276,351`); export uses `HD1080p` template + `ComputeBitrate`
+(`VideoEncoder.cs:309,815`); both set `MediaTranscoder.HardwareAccelerationEnabled = false`;
+`FrameCompositor` hardcodes `coordScale = 1.0f` and subtracts physical `CropOffset`
+(`FrameCompositor.cs:162-167,188-189`); `RecordingSession.ComputeCursorOffset` uses monitor
+`rcMonitor` / `DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` / monitor+crop per capture type
+(`RecordingSession.cs:701-734`); `BackgroundCompositor.CalculateOutputSize` is identity
+(`BackgroundCompositor.cs:46-50`); `ZoomKeyframe.MinSegmentDuration = 200ms` + `SourceVideoFilePath`
+(`TimelineModel.cs:274,307`); `MouseHookRecorder.MinMoveIntervalMs = 4.0`
+(`MouseHookRecorder.cs:95`); WARP fallback + `RecoverableDeviceLostException`
+(`Direct3DDeviceHelper.cs:28`, `FrameCompositor.cs:599-607`); package identity `PratikMistri.Musio`.
+
+**Refined (were inaccurate):**
+1. Even-dim alignment is NOT uniform `& ~1` across pipelines. Recording is mod-2 (`VideoWriter`);
+   export is **mod-16** via `AspectRatioHelper.ComputeExportDimensions` (`AspectRatioHelper.cs:171-172`).
+   Removed the "add `& ~1` in both" instruction.
+2. The `_flipBuffer`/`_scaleTarget` buffer-reuse claim was stale — those fields don't exist.
+   `VideoEncoder` intentionally allocates a fresh per-frame `outputSurface` (`VideoEncoder.cs:520-524`)
+   so the encoder can read it after the `SampleRequested` semaphore is released; memory is bounded by
+   `PreflightRenderTargetMemory` (~1.5 GB cap), not reuse. Corrected the playbook accordingly.
+
+
+## Fix (root cause) — Appended zoom segment rendered as a thin line
+
+**Root cause:** In TimelineControl, GetZoomSegmentEndX still returned SourceTimeToX(kf.End) (the primary-only mapping) while GetZoomSegmentStartX used the new per-segment ZoomKeyframeTimeToX. For an appended keyframe, the START edge mapped correctly into the appended clip (e.g. output 5.5s) but the END edge (kf.End in the appended file's time, e.g. 2.5s) was mapped through the PRIMARY space to ~2.5s output — LEFT of the start — so x2 < x1 and segW = Max(2, x2-x1) collapsed to a 2px line. This also blocked resize (nothing to grab).
+
+Diagnosis method: a headless MSTest loaded the actual appended cursor.mcur (Videos\session_*) and confirmed the generated keyframes were a normal 1.5s wide and mapped to 1.5s-wide output ranges — proving the data was fine and the bug was a stale mapping call on the END edge only.
+
+**Fix:** GetZoomSegmentEndX final return changed to ZoomKeyframeTimeToX(kf, kf.End) so both edges map through the keyframe's owning segment. Verified: builds (ARM64), 333 Core tests pass.
+
+---
+
+## Text Slide Video Background — Not Showing in Preview/Export (deadlock fix)
+
+- **Feature/area**: `TextSlideRenderer.ExtractVideoFrameAsync` (Musio.Core/Processing)
+- **Problem**: A video set as a text-slide background never appeared — not in the live preview and not in the exported MP4. The slide fell back to its solid `BackgroundColor`.
+- **Root cause**: `TextSlideRenderer.RenderSlide` is synchronous and blocks on the async video-frame extraction via `ExtractVideoFrameAsync(...).GetAwaiter().GetResult()`. The inner awaits (`MediaComposition.GetThumbnailAsync`, `CanvasBitmap.LoadAsync`) did NOT use `ConfigureAwait(false)`, so their continuations marshaled back to the captured SynchronizationContext (UI thread in preview / encoder thread in export) while that thread was blocked in `GetResult()` → deadlock; the frame never loaded. The outer `.ConfigureAwait(false)` on the `ExtractVideoFrameAsync` call does NOT propagate to the method's inner awaits.
+- **Why image worked but video didn't**: `DrawImageBackground` applies `.AsTask().ConfigureAwait(false)` directly on its single `CanvasBitmap.LoadAsync` await, so it never deadlocks. `EnsureVideoComposition` was also already correct (each `GetFileFromPathAsync`/`CreateFromFileAsync` uses `.ConfigureAwait(false).GetAwaiter().GetResult()`).
+- **What worked**: Added `.AsTask().ConfigureAwait(false)` to both inner awaits in `ExtractVideoFrameAsync`. Builds clean (VS MSBuild, x64); all 333 Core tests pass.
+- **What didn't work**: Building Musio.Core with `dotnet build` fails with `MSB4062 ExpandPriContent` (dotnet SDK 10.0.301 missing AppxPackage PRI task DLL). Use Visual Studio's MSBuild (`...\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64` instead.
+- **Rule**: All `await`s in Musio.Core (library code) must use `ConfigureAwait(false)`, especially any awaited inside a method that a synchronous caller blocks on via `GetAwaiter().GetResult()`.
+
+---
+
+## Text Slide Video Background — REMOVED (MediaClip rejects fragmented MP4s)
+
+- **Feature/area**: Text-slide background types (`SlideBackgroundType`, `TextSlideSegment`, `TextSlideRenderer`, `EditorPage` flyout).
+- **Problem**: Video background never rendered in preview or export — slide fell back to solid color.
+- **Investigation (via temp file logging in DrawVideoBackground/EnsureVideoComposition)**:
+  - Not a deadlock/ConfigureAwait issue (earlier guess) — the app never froze; an exception was silently swallowed by the catch.
+  - Not file access: `StorageFile.OpenReadAsync` succeeded (content readable).
+  - Not threading: failed identically when built on a threadpool (MTA) thread via `Task.Run`.
+  - Not codec/resolution: file was `avc1` H.264; a 1080p file also failed.
+  - Root cause: `MediaClip.CreateFromFileAsync` throws `ArgumentException "The parameter is incorrect" / "Error creating clip from file"` for the user's stock videos. They are **fragmented MP4** (`moof` box) with an **edit list** (`elst`) and **no audio track** — `Windows.Media.Editing`'s composition pipeline rejects these. Proven by: `MediaClip` succeeded on an app-recorded MP4 (`Recording ....mp4`) in the same runtime, but failed on every Pexels stock file (and on an app-owned temp copy of one).
+- **Decision (user)**: "If video isn't working as background for text slide - we should remove that option entirely and simplify."
+- **What was removed**: `SlideBackgroundType.Video` enum member; `TextSlideSegment.BackgroundVideoPath`; `TextSlideRenderer` video cache fields + `DrawVideoBackground`/`ExtractVideoFrameAsync`/`EnsureVideoComposition` (+ `Windows.Media.Editing`/`Windows.Storage` usings); EditorPage `Video` ComboBoxItem, `SlideVideoPanel`, `SlideVideoPathText`, `ChooseSlideVideo_Click`. `DrawSlideBackground` no longer takes `progress`.
+- **Result**: Builds clean (VS MSBuild ARM64); all 333 tests pass. Text slides now support Solid/Gradient/Image only.
+- **Note**: `MediaClip.CreateFromFileAsync` is only reliable here for app-recorded H.264 MP4s. Do NOT reintroduce arbitrary user-video features on top of `Windows.Media.Editing`; if needed, use the `MediaPlayer` frame-server pipeline (far more tolerant) instead.
+
+## Text Slide — Ambient animated wave gradient
+
+- **Feature/area**: `TextSlideRenderer.DrawGradientBackground` (Musio.Core/Processing).
+- **Goal**: Make gradient text-slide backgrounds animate subtly (ambient, non-monotonous) with a wave look rather than a static linear gradient.
+- **Approaches tried**:
+  1. **Win2D GPU effects (worked ✅)**: Render the linear gradient into an intermediate `CanvasRenderTarget`, wrap in a `BorderEffect` (Clamp) so displacement sampling outside bounds keeps edge color, then `DisplacementMapEffect` using a scrolling `TurbulenceEffect` (FractalSum Perlin noise) moved over time via `Transform2DEffect`. Also sway the gradient angle (±5°) and drift its center sinusoidally. Amount ≈4% of short edge keeps it subtle.
+  2. **Custom HLSL via PixelShaderEffect (not attempted)**: rejected — needs the Win2D shader compiler/bytecode tooling which is fragile in this build env. Built-in Win2D effects are already D2D pixel shaders under the hood, so they satisfy the "shader/wave" request without authoring HLSL.
+- **Continuous time source**: `RenderSlide`'s `progress` (0..1 over slide duration) × `slide.Duration.TotalSeconds` = elapsed seconds. `DrawSlideBackground`/`DrawGradientBackground` now take `progress`.
+- **Wiring**: Automatic in BOTH preview (SegmentCompositor/EditorPage) and export (VideoEncoder) because both call `RenderSlide` — no separate export wiring needed.
+- **Gotcha**: The noise enum is `TurbulenceEffectNoise.FractalSum` (NOT `Fractal`) — `Fractal` fails to compile (CS0117).
+- **Verified**: VS MSBuild x64 builds clean; all 333 tests pass.
+
+## Text Slide — gradient wave: turbulent (not linear) revision
+
+- **Feedback**: First pass animated but felt like a *linear pan*, and the user does NOT want motion on a static/paused playhead (it should behave like a video frame — move only while playing). Static-playhead repaint loop was explicitly rejected; keep motion driven by `progress` (frozen when paused).
+- **Root cause of "linear" feel**: a single noise field scrolled in one constant direction (`Transform2D translate (sin x, t*12 y)`) plus a global gradient angle/center drift — all read as uniform translation.
+- **Fix (worked ✅)**: Remove all global gradient drift (stationary base gradient). Drive motion ONLY via displacement using TWO `TurbulenceEffect` fields (different Frequency + Seed), each drifted along an OPPOSING circular path (`sin/cos`, different rates), averaged with `ArithmeticCompositeEffect` (Source1Amount=Source2Amount=0.5, MultiplyAmount=0, Offset=0), then `DisplacementMapEffect` at ~6% of the short edge. Interference of two circular-drifting fields makes the displacement swirl/boil in place instead of panning.
+- **Keep**: progress→seconds time base (`clamp(progress)*Duration`); gradient rendered to intermediate RT then `BorderEffect` Clamp before displacement. No EditorPage/VideoEncoder changes needed — motion advances with the playhead in both preview and export automatically.
+- **Verified**: Core + App build clean (ARM64 Debug, VS MSBuild), redeployed + launched.
+
+## Text Slide — stronger turbulence + auto crossfade at slide boundaries
+
+- **Turbulence tweak**: bumped displacement Amount 0.06→0.075 of the short edge and circular drift radii 90/75→110/95 so the wave reads a touch stronger (still ambient). Confirmed it is NOT a linear pan — two opposing circular-drifting noise fields interfere/churn.
+- **Transition (no more hard cut)**: Added `Musio.Core/Timeline/SlideTransitions.cs` — a PURE, unit-tested helper (`Resolve(timeline, outputTime[, maxDuration])`) that returns a crossfade Result (Active/Progress/OutgoingTime) only on the LEADING edge of a boundary that touches a `TextSlideSegment`. Default 0.5s, clamped to half of each neighbour. 7 tests in `SlideTransitionsTests` (340 total pass).
+- **Export wiring** (`VideoEncoder.ProduceSampleAsync`): refactored the per-frame composition body into a local `ComposeAtAsync(int fIndex)` so the OUTGOING neighbour can be re-rendered (held at its final instant) and blended via a new lazily-created `TransitionRenderer` (`_transitionRenderer`, disposed in Dispose). `TransitionRenderer.Render(outgoing, incoming, CrossFade, progress, w, h)` does the dissolve.
+- **Preview wiring** (`EditorPage.RenderFrameAtAsync`): at the top of the segments branch, if `SlideTransitions.Resolve` is active, compose both sides via new `ComposePreviewFrameAsync(outputPos)` (slides at project res; video frames at source res — TransitionRenderer scales) and blend. FULLY guarded by try/catch → any failure falls back to the normal render, so it can only affect the ~0.5s dissolve window. Forces a redraw (`_lastRenderedFrameIndex=-1`, `_lastRenderedSegmentId=null`) when the dissolve ends.
+- **Key insight**: the real export path is `ExportEngine → VideoEncoder` (NOT the `SegmentCompositor`/`TransitionRenderer` path, which only `ExportEngine.CreateSegmentCompositor` uses and isn't on the slide path). Preview and export remain separate code paths and BOTH had to be wired explicitly.
+- **Verified**: Core+Tests x64 build, 340 tests pass; App ARM64 build clean, redeployed + launched.
+
+## Text Slide flyout — segmented alignment + font dropdown
+
+- **Feature/area**: Text Slide properties flyout (`EditorPage.xaml` + `.xaml.cs`).
+- **Alignment**: Replaced the three `RadioButton`s (GroupName="SlideAlign", which rendered ugly radio bullets) with a `ctk:Segmented` (`SlideAlignSegmented`) of three icon `SegmentedItem`s (Left/Center/Right, Tags). Handler `SlideAlignSegmented_SelectionChanged` reads `SegmentedItem.Tag`; population sets `SelectedIndex` (0/1/2) from `slide.TextAlignment`. `CommunityToolkit.WinUI.Controls.Segmented` is already referenced and used elsewhere (FitModeSegmented, ZoomScopeSegmented); xmlns `ctk` already declared.
+- **Font**: Added a `Font` `ComboBox` (`SlideFontCombo`) with a curated list of common Windows fonts; each item sets its own `FontFamily` for an in-place preview. `SlideFontCombo_SelectionChanged` sets `slide.FontFamily`; helper `SetSlideFontSelection` selects the matching item and inserts a custom item at top if the slide's font isn't in the list (so it isn't silently changed). The slide model already had `FontFamily` (string); in-place editor + renderer already honor it.
+- **Gotcha**: removing the radios means removing the old `SlideAlign_Checked` handler and the `SlideAlignLeft/Center/Right.IsChecked` population lines, else they fail to compile (named elements gone).
+- **Verified**: App ARM64 build clean (VS MSBuild), redeployed + launched.
+
+## Zoom Segment — Cinematic Easing & Timing Refresh
+
+- **Feature/area**: Auto-zoom and manual zoom-keyframe animation (`AutoZoomEngine.cs`, `CubicBezierEasing.cs`, `TimelineModel.ZoomKeyframe`).
+- **Approaches tried**:
+  1. Replaced the asymmetric private cubic-bezier (control points 0.25,0.1,0.25,1.0 — non-zero start velocity, jolt at zoom-in start and at leaving the hold) with a symmetric cinematic ease-in-out.
+  2. Added `CubicBezierEasing.EaseInOutCinematic` = cubic-bezier(0.76, 0, 0.24, 1) (easeInOutQuart) and routed `AutoZoomEngine.CubicBezierEase(from,to,t)` through it, deleting the duplicate Newton-solver + `BezierComponent`/`BezierComponentDerivative` helpers.
+  3. Lengthened/rebalanced default durations for a deliberate, graceful feel — `AutoZoomConfig`: Pre 0.345->0.45s, Hold 0.575->0.6s, EaseOut 0.575->0.7s; `ZoomKeyframe`: Pre 345->450ms, Hold 575->600ms, Post 575->700ms; `ZoomKeyframe.FromRange` caps bumped to 450/700ms. Kept zoom-in faster than zoom-out (snap-to-focus, slow release).
+- **What worked**: Both auto segments and manual keyframes share `CubicBezierEase`, so one curve change covers both. Zero-slope at both ends removes junction jolts. All 340 tests pass; tolerant assertions (monotonicity, no-snap, endpoints) unaffected. Updated the one pinned-default test (`TimelineModelTests.ZoomKeyframe_DefaultValues_AreCorrect`) to 450/600/700.
+- **What didn't work**: N/A — no perceptual/log-space zoom interpolation added (kept change focused; easing curve is the main cinematic lever).
+
+## Dev Build Missing App Icon — Loose-Layout Asset Copy
+
+- **Feature/area**: `src/Musio.App/Musio.App.csproj` packaging / local dev register-and-run flow.
+- **Symptom**: The CLI dev build (VS MSBuild `/t:Build` + `Add-AppxPackage -Register win-<arch>\AppxManifest.xml`) showed the default Windows icon, not the app icon. `AppWindow.SetIcon("Assets/AppIcon.ico")`, `TitleBar.IconSource`, and `SystemTrayService` all silently failed.
+- **Root cause**: The `<Content Include="Assets\...">` items (AppIcon.ico + tile/taskbar logo PNGs) are only emitted into the MSIX package during the packaging target (GenerateAppxPackageOnBuild/deploy). A plain `/t:Build` does NOT copy them into the loose `bin\<Plat>\Debug\net9.0-...\win-<arch>` layout, which is exactly what the dev flow registers — so the install location had no `Assets` folder at all.
+- **What worked**: Added `<Content Update="Assets\**"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>` to the csproj. After rebuild, `win-arm64\Assets\AppIcon.ico` (and all logos) are present in the registered package's InstallLocation, so the icon loads. Verified present after Build + Register.
+- **What didn't work / notes**: Don't expect the loose layout to contain Content assets without CopyToOutputDirectory; packaging-time inclusion alone is insufficient for the register-loose-manifest dev workflow.
+
+## Text Slide Animations — Constant-Time (Length-Independent) Motion
+
+- **Feature/area**: `src/Musio.Core/Processing/TextSlideRenderer.cs` entrance/exit + continuous text animations.
+- **Symptom**: Animation speed scaled with the slide's total duration (and thus felt dependent on text amount). Entrance/exit were fixed *fractions* of the slide (`InDur=0.25`, `OutDur=0.25`; per-char `pIn=progress/0.5`, `pOut=(progress-0.6)/0.4`), so a longer slide made the in/out motion drag and feel boring.
+- **Fix**: Drive entrance/exit by CONSTANT wall-clock seconds. Added `EntranceSeconds=0.6`, `ExitSeconds=0.6`, and a `ComputeInOutProgress(progress, durationSeconds)` helper returning independent `(inP, outP)` over fixed-time windows (each capped at `dur*0.45` so short slides still fit, with the middle hold absorbing extra time). Threaded `durationSeconds` (from `slide.Duration` / `overlay.Duration`) through `DrawAnimatedText` → `ComputeWholeState(anim, inP, outP, ...)`, `DrawPerCharacter`/`ComputeCharParams(anim, inP, outP, elapsedSeconds, ...)`, `TypewriterText(text, elapsedSeconds, durationSeconds)` (constant chars/sec), and Reveal. Wave now bobs at a constant `WaveHz` using elapsed seconds with a quick `WaveFadeSeconds` fade.
+- **What worked**: All 340 tests pass; Core (x64) + App (ARM64) build clean; redeployed + launched. The renderer already computed `elapsed = progress * Duration` for the gradient wave, so duration was straightforward to thread through.
+- **Note**: Per-character cascade still staggers via `frac*spread` but now within the constant-time in/out windows, so denser text just packs more chars into the same fixed motion duration.
+
+## Timeline — Text Slide Segments Use Video Segment Color
+
+- **Feature/area**: `src/Musio.App/Controls/TimelineControl.xaml.cs` `DrawVideoTrackFromSegments`.
+- **Request**: Make text-slide timeline segments use the same color as video segments (the segment swatch color in the timeline, NOT the rendered slide background in preview/export).
+- **Change**: Text slides were filled with a hardcoded CornflowerBlue (`textSlideColor`/`textSlideSelectedColor`/`textSlideBorder`). Now they use the shared `VideoClipColor` / `VideoClipSelectedColor` / `VideoClipSelectedBorder` like thumbnail-less video segments. Removed the three now-unused locals.
+- **Note**: Video segments WITH thumbnails draw a filmstrip; text slides have no thumbnails so they fall back to the solid `VideoClipColor` fill — matching the no-thumbnail video clip appearance. White centered text label still drawn on top.
+- **Verified**: App (ARM64) builds clean, redeployed + launched.
+
+## Text Slide — Inline Preview Edit Box Hugs Height + Stuck-Drag Fix
+
+**Feature/area:** Text slide in-place preview editing (TextSlideRenderer.ComputeTextRect, EditorPage SlideTextRegion/SlideEditBox)
+
+**Problems:** (1) The editable text region in the preview filled the whole slide (84% W x 80% H box), so the selection/edit box didn't hug the text. (2) After finishing an edit the box followed the mouse without a button press.
 
 **What worked:**
-- `CursorRenderer.RenderTouchClicks` groups overlapping click-downs into chains and delegates to `RenderTouchChain`.
-- `RenderTouchChain` walks the chain timeline: pre-roll float-in for first click, tap-down/tap-up at each click, EaseInOut slide between consecutive clicks, fade-out after last tap.
-- `FrameCompositor.GetActiveClicks` window widened from Â±1.0s to Â±1.5s to ensure upcoming chained clicks are visible during transitions.
-- Every click's tap animation is preserved (no taps are suppressed).
-- Isolated clicks (gap â‰¥ 1.41s) behave identically to the original code.
+1. `ComputeTextRect` now measures the wrapped text via a `CanvasTextLayout` (`MeasureTextHeight`, using `CanvasDevice.GetSharedDevice()`) and returns a height that hugs the text, clamped to [~1 line, 80% of slide], still centered at (TextX,TextY). Width stays 84% as the wrapping width. Renderer uses `CanvasVerticalAlignment.Center`, so shrinking the box symmetrically keeps the rendered text in the same place — overlay box and rendered text now match and hug content.
+2. Stuck-drag: the double-tap that opens the editor first fires `SlideTextRegion_PointerPressed`, which set `_slideRegionDragging=true` and captured the pointer; `EnterSlideTextEdit` then collapses the region so no `PointerReleased` arrives, leaving the flag stuck. Fix: `EnterSlideTextEdit` now resets `_slideRegionDragging=false`, calls `SlideTextRegion.ReleasePointerCaptures()`, and clears `ProtectedCursor`.
 
-**What didn't work / design rejected:**
-- "Latest pre-roll wins" approach (only render the click with the most recently started animation) â€” rejected because it suppresses earlier click taps when a later click's 1s pre-roll begins before the earlier click actually taps.
-- Expanding the window was necessary: a Â±1s window can miss the next chained click during the transition phase (max future distance = 1.25s).
+**Verified:** Musio.Core + Musio.App build clean (x64, VS MSBuild).
+
+## Text Slide — Edit Box Auto-Resizes Height While Typing
+
+**Feature/area:** Text slide in-place preview editing (EditorPage.SlideEditBox_TextChanged)
+
+**Problem:** While editing the slide text in the preview, the `SlideEditBox` kept the height it had when editing began. Wrapping to new lines didn''t grow the box; the user had to click out and back in (which re-ran `PositionSlideEditControls`) to refresh.
+
+**What worked:** `SlideEditBox_TextChanged` now calls `PositionSlideEditControls(slide)` after updating `slide.Text`, so the box re-measures via `ComputeTextRect`/`MeasureTextHeight` and resizes live to hug the wrapped text (centered at TextY). No TextChanged recursion since `PositionSlideEditControls` doesn''t set `.Text`.
+
+**Verified:** Musio.App ARM64 Debug builds clean; redeployed + launched.
+
+## Zoom Easing — Tuned Cinematic Curve + Visualizer Play Preview
+
+**Feature/area:** Zoom motion curve (CubicBezierEasing.EaseInOutCinematic) + session visualizer tool (files/zoom-curve.html)
+
+**Change:** `EaseInOutCinematic` retuned from `cubic-bezier(0.76, 0, 0.24, 1)` to `cubic-bezier(0.165, 0.003, 0, 0.999)` (slow, near-zero-velocity start with a fast glide and soft settle). Updated the XML doc comment to match. This single curve drives both zoom-in and zoom-out via `AutoZoomEngine.CubicBezierEase`.
+
+**Visualizer:** `files/zoom-curve.html` is an interactive tuner — draggable Bézier handles (position + velocity plots), presets, "Copy C# line" button, a zoom-level-over-time profile, AND a live Play preview that animates the full in→hold→out profile on a mock app scene with a clickable focal point and playback-speed slider. JS `bezier()` mirrors CubicBezierEasing.cs Newton+bisection.
+
+**Verified:** Musio.App ARM64 Debug builds clean; redeployed + launched.
+
+## Zoom Timing — Slowed ~2.22x (0.45x playback feel) + Duration Slider in Visualizer
+
+**Feature/area:** Zoom animation durations (AutoZoomConfig, ZoomKeyframe defaults, FromRange) + visualizer (files/zoom-curve.html)
+
+**Change:** User found 0.45x playback speed felt right → durations multiplied by 1/0.45 ≈ 2.22x.
+- `AutoZoomConfig`: PreClickDuration 0.45→1.0f, HoldDuration 0.6→1.333f, EaseOutDuration 0.7→1.556f (AutoZoomEngine.cs:10-12).
+- `ZoomKeyframe` defaults: PreDuration 450→1000ms, HoldDuration 600→1333ms, PostDuration 700→1556ms (TimelineModel.cs:283-285); `FromRange` caps 450→1000, 700→1556.
+- Updated test `TimelineModelTests.ZoomKeyframe_DefaultValues_AreCorrect` to new defaults.
+
+**Test gotcha:** `AutoZoomEngineTests.GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` encoded the OLD durations (it asserts B's center dominates at t=3.0). With longer hold, both keyframes sit at full zoom at t=3.0 → center averages to 960px, failing. Fix: pin explicit old durations (450/600/700) on that test's keyframes so the smoothing regression test is independent of default tuning. All 77 zoom/timeline tests pass.
+
+**Visualizer:** added a master "Duration ×" multiplier slider that scales tin/hold/tout live, plus a "Copy AutoZoomConfig durations" readout. Base slider defaults updated to the new 1.0/1.333/1.556.
+
+**Verified:** Musio.App ARM64 Debug builds clean; tests pass; redeployed + launched.
 
 ---
 
-## Processing Layer â€” Crash/Hang/Vulnerability Fixes
-
-**Feature/area**: `CursorRenderer`, `BackgroundCompositor`, `AutoZoomEngine`, `VideoFrameReader` in `Musio.Core.Processing`.
+**Feature/area:** Cursor smoothing — `CursorSmoother` de-stutter pre-pass (trackpad stop-and-go removal). Files: `src/Musio.Core/Processing/CursorSmoother.cs`, tests `src/Musio.Tests/CursorSmootherTests.cs`, visualizer `files/cursor-destutter.html`.
 
 **Approaches tried:**
+1. **Time-preserving arc-length re-timing pre-pass (`ApplyDestutter`)** — ✅ Worked. Runs before the spring/One-Euro/Catmull filter (only when smoothing is active so the None passthrough stays exact). Detects low-speed "stall" runs via a windowed speed estimate; classifies a run as a protected REST if it overlaps a click guard window OR is longer than `GenuineDwellSeconds`. Motion gestures between anchors are re-timed by redistributing interior sample positions along the gesture's arc length with a `RemapEase` blend (constant-speed↔smootherstep). Endpoints/anchors and protected rests are left untouched.
+2. **Global time-warp / stall compression** — ❌ Rejected. Compressing stall time would desync the cursor track from the underlying screen video (cursor must be at the right place at the right absolute time). De-stutter MUST preserve every sample timestamp; only positions are redistributed.
 
-1. Surgical safeguards added to four files without refactoring surrounding code.
+**What worked / key facts:**
+- De-stutter is exposed via `CursorSmoother.DestutterEnabled` (default true) + `DestutterOptions` (tunable: StallSpeedPxPerSec, SpeedWindowSeconds, MinStallSeconds, GenuineDwellSeconds, ClickPre/PostGuardSeconds, EaseStrength). `FrameCompositor` gets it for free — no caller changes.
+- Click stalls (even short ones) are preserved via proximity to `rawData.Clicks`, not duration. `SnapToClickPositions` still guarantees exact click position downstream.
+- No-op on continuous stall-free motion (one gesture, endpoints preserved) — existing 6 smoothing tests still pass.
+- `files/cursor-destutter.html` is a self-contained visualizer mirroring the C# algorithm (path + speed-over-time plots, scenario presets, all params live, playback). Note: visualizer JS reimplements the algorithm; keep it in sync with `CursorSmoother.cs`.
 
-**What worked:**
-
-- **CursorRenderer**: Wrapped `CanvasBitmap.LoadAsync` in try/catch so corrupt/missing custom cursor images don't crash init. Added disposal of previous `_cursorBitmap`/`_defaultCursorGeometry` before reloading to prevent GPU resource leaks. âœ…
-- **BackgroundCompositor**: Changed sync-over-async `.GetAwaiter().GetResult()` to `.AsTask().ConfigureAwait(false).GetAwaiter().GetResult()` to prevent SynchronizationContext deadlocks. âœ…
-- **AutoZoomEngine**: Added null check on `suppressedTicks` parameter in `SetSuppressedClickTicks` to prevent NRE. âœ…
-- **VideoFrameReader**: Wrapped `OpenSession` body in try/catch for `IOException`/`UnauthorizedAccessException`/`ArgumentException` to handle inaccessible session folders gracefully. âœ…
-
-**What didn't work:** N/A â€” all fixes were straightforward safeguards.
-
-**Note:** Build has a pre-existing error in `ExportEngine.cs(297)` unrelated to these changes.
+**Build/test:** `dotnet test`/`build` FAILS on Musio.Core (WinAppSDK `ExpandPriContent` task). Use VS MSBuild `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe` to build, then run tests via `dotnet vstest <Tests.dll> --TestCaseFilter:...` with `DOTNET_ROLL_FORWARD=LatestMajor`. All 10 CursorSmootherTests pass.
 
 ---
 
-## App Layer â€” Crash/Hang/Vulnerability Safeguards
+## Text slide animation default & fade option cleanup
 
-**Feature/area**: Musio.App â€” MainWindow, RecordingPage, PreviewCanvas, RecordingOverlayWindow, RegionBorderHighlight
-
-**Approaches tried:**
-- Direct surgical fixes: replace throw with debug log, add try/catch to async void handlers, clamp FPS to â‰¥1, stop existing timer before creating new one, call Hide() before Show() to prevent GDI resource leak.
-
-**What worked:**
-- All five fixes applied as minimal safeguards without refactoring surrounding code. No new dependencies added. Build succeeds for Musio.App (pre-existing Musio.Core error is unrelated).
-
-**What didn't work:**
-- N/A â€” first approach succeeded for all five issues.
+- **Feature/area**: Text slide animations (TextSlideRenderer, TextSlideSegment/TextOverlay enum, EditorPage animation ComboBox).
+- **Approaches tried**: Changed default `TextSlideAnimation` from `FadeIn` to `ZoomBlurIn` (the "blur" animation) on both `TextSlideSegment` and `TextOverlay`; removed `FadeOut` and `FadeInOut` enum members, their renderer switch cases, and their ComboBox items; updated `SlideAnimationCombo` SelectedIndex from 1 to 7 (now points at Zoom Blur In).
+- **What worked**: `FadeInOut` was identical to `FadeIn` (shared the default fade-in+fade-out opacity), so removing it lost no behavior. ComboBox is matched by Tag, so removing items needed only a SelectedIndex fix. Build verified with VS MSBuild x64 for Musio.Core and Musio.App (both exit 0).
+- **What didn't work**: `dotnet build` still fails with MSB4062 PriGen error (pre-existing env issue) — must use VS MSBuild at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe`.
 
 ---
 
-### Export Layer â€“ Crash/Hang/Vulnerability Fixes (Round 2)
+## Ken Burns motion on image-backed text slides
 
-- **Feature/area**: VideoEncoder.cs, ExportEngine.cs, HardwareEncoderDetector.cs in Musio.Core/Export.
-- **Approaches tried**:
-  1. Added 5-minute timeout to MuxAudioAsync TCS await to prevent infinite hang.
-  2. Captured outputSurface in a local variable before nulling to prevent double-dispose race in sample.Processed callback.
-  3. Added sourceClip = null cleanup in ExportGifAsync finally block (MediaClip is not IDisposable).
-  4. Wrapped GetStringAttribute/GetGuidAttribute COM vtable access in try/catch returning E_FAIL.
-- **What worked**: All four fixes applied cleanly. MediaClip doesn't implement IDisposable, so used null-out instead of Dispose.
-- **What didn't work**: Tried sourceClip?.Dispose() but MediaClip (WinRT) has no Dispose method â€” switched to nulling the reference after Clips.Clear().
+- **Feature/area**: `TextSlideRenderer.DrawImageBackground` / new `DrawKenBurns` helper.
+- **Approaches tried**: Image background was drawn statically via `DrawScaledToFill`. Added a continuous "Ken Burns" motion: overscale the cover-fit image (~1.14x) for headroom, then a breathing zoom (`1.14 + 0.05*sin(t*0.18)`) plus an elliptical slow pan (`sin/cos` of t, bounded to 70% of the available slack so edges never show). Driven by `progress` → elapsed seconds, same pattern as the gradient wave so it advances with the playhead and matches preview + export.
+- **What worked**: Computing dest Rect directly with scale+pan and bounding pan to the overscale slack guarantees the frame stays fully covered. Removed the now-unused `DrawScaledToFill`. Build verified with VS MSBuild x64 (Musio.Core, exit 0).
+- **What didn't work**: N/A — avoided rotation to prevent exposing image corners (would need more overscale); zoom+pan satisfies the "nothing feels static" goal robustly.
 
 ---
 
-## Capture Layer - Crash/Hang/Vulnerability Fixes
+## [Review] feature/text-animations pre-PR production review (fleet of review agents)
 
-**Feature/area:** AudioCaptureEngine, MouseHookRecorder, KeyboardHookRecorder, ScreenCaptureEngine, VideoWriter, WebcamCaptureEngine
+**Feature/area:** Text slide animations, FCP-style segment editing, slide crossfades, cursor de-stutter, export pipeline.
 
-**Approaches tried:**
+**Approach:** Ran 5 parallel review agents (core rendering math, export/timeline model, UI/app layer, cross-cutting concurrency/leaks, security) over the diff vs merge-base 8482e29. Established baseline: VS MSBuild ARM64 Debug build succeeds (0 warn/err); all 344 unit tests pass via vstest.console.
 
-1. Surgical try/catch guards on callback threads - Wrapped audio Write calls and hook Marshal.PtrToStructure in try/catch. Worked.
-2. Timeout on ManualResetEventSlim.Wait() - 5s timeout with InvalidOperationException. Worked.
-3. Resource cleanup on partial init failure - cleanup already-started resources on throw. Worked.
-4. Input validation - fps > 0 and null-check on GetDirectoryName. Worked.
-5. Dispose deadlock prevention - Task.Wait(3s) instead of GetAwaiter().GetResult(). Worked.
+**What worked / confirmed real issues:**
+- HIGH: VideoEncoder.cs:535 slide crossfade uses Math.Round on (current.Start - 1 tick)*fps; rounds back to incoming segment frame when boundaries are frame-aligned (whole-second slides/splits), degrading dissolve to a hard cut. Fix: Math.Floor.
+- MED: TextSlideRenderer.cs:280 background image loaded via sync-over-async (LoadAsync...GetResult()) on UI thread in synchronous RenderSlide -> preview/scrub hang for image-backed slides. Pre-load/cache CanvasBitmap off-thread.
+- MED: TextSlideRenderer.cs:183 base gradient render target + ~10 Win2D effects re-allocated every export frame though slide-invariant; cache keyed by (w,h,colors,angle).
+- LOW: TextSlideRenderer.cs:741 ParseColor maps non-6/8-digit hex to white and throws FormatException on bad hex digits mid-render; use TryParse + 3-digit shorthand + default fallback.
+- LOW: EditOperation.cs:766 ReorderSegmentOperation.Undo no-ops for append-past-end target (only used in tests today; app uses MoveSegmentOperation).
 
-**What worked:** All five - minimal surgical fixes.
+**Security:** Clean — no Process.Start/ffmpeg shell exec, no unsafe deserialization (no Project disk persistence exists), no path-traversal sinks, no temp-file/secret issues.
 
-**What didn't work:** dotnet CLI build fails due to missing WinAppSDK PriGen task in .NET 10 SDK; must use VS MSBuild to build.
+**Build/test commands (verified):**
+- Build: "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe" src\Musio.Tests\Musio.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=ARM64
+- Test: vstest.console.exe on src\Musio.Tests\bin\ARM64\Debug\net9.0-windows10.0.26100.0\Musio.Tests.dll  (dotnet test fails: WinAppSDK PRI task needs VS MSBuild + explicit Platform, not AnyCPU).
 
----
-
-## Window/Region Selector â€” Escape Key Not Working
-
-**Feature/area:** WindowSelectorOverlay + RegionSelectorOverlay (Escape to cancel selection)
-
-**Approaches tried:**
-
-1. **`Activated` event handler + `KeyDown` fallback** â€” Did not fix the issue. XAML `Focus(FocusState.Programmatic)` and `KeyboardAccelerator`/`KeyDown` all depend on XAML keyboard focus, which is not reliably established on a borderless maximized overlay window before the user clicks. âŒ
-2. **Win32 low-level keyboard hook (`WH_KEYBOARD_LL`)** â€” Worked. Installs a `SetWindowsHookEx` hook in `ShowAsync` that intercepts `VK_ESCAPE` at the OS level, completely bypassing XAML focus. Hook is cleaned up in the `finally` block. Applied to both overlays. âœ…
-
-**What worked:** `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` with a managed callback that dispatches `CancelSelection` / `TrySetResult(null)` via `DispatcherQueue.TryEnqueue`. The delegate is stored as a field to prevent GC.
-
-**What didn't work:** Any approach relying on XAML keyboard focus (`Focus(FocusState.Programmatic)`, `KeyboardAccelerator`, `KeyDown` event) â€” XAML focus is not established on a borderless maximized overlay until the user clicks on a focusable element.
-
+**Still requires MANUAL runtime verification (static review cannot confirm):** stop-recording crash (known recurring blocker), Record More appended track data, encoding-path divergence VideoWriter vs VideoEncoder, stop-toolbar light-theme white-on-white, loading old projects that had text-slide video backgrounds.
 
 ---
 
-## Perf â€” FrameCompositor.CropSourceFrame Interpolation
+## [Fixes] feature/text-animations pre-PR fixes applied
 
-**Approaches tried:**
+**Feature/area:** Slide crossfade frame selection, text slide rendering (gradient cache, async image load, color parsing), segment reorder undo.
 
-1. **Adaptive interpolation: Linear when sourceâ†’content scale is within Â±5% of 1:1, otherwise HighQualityCubic** â€” Avoids running a 4-tap bicubic filter for every pixel on every frame in the common case (AspectRatio.Auto with no zoom, where viewport == content size, scale = exactly 1.0). Mirrors the same adaptive choice already present in ComposeFramePostCompositeZoom. âœ…
+**Approaches tried / what worked:**
+- VideoEncoder.cs crossfade: changed Math.Round -> Math.Floor for outgoing frame index (start-1tick stays in outgoing segment). Worked.
+- TextSlideRenderer.cs: (a) cached slide-invariant gradient RenderTarget in _gradientCache keyed by (w,h,startColor,endColor,angle), disposed in Dispose; (b) added public async EnsureBackgroundLoadedAsync(slide) to pre-warm bg image off-thread, kept sync fallback for off-UI export path; (c) hardened ParseColor with TryParse + 3/4-digit shorthand + white fallback (no longer throws).
+- EditorPage.xaml.cs: renamed RenderTextSlidePreview -> async RenderTextSlidePreviewAsync, awaits EnsureBackgroundLoadedAsync before sync RenderSlide; ComposePreviewFrameAsync also pre-warms.
+- EditOperation.cs ReorderSegmentOperation: snapshot Segments in Execute, restore in Undo (replaces buggy index arithmetic that no-opped for append-past-end). Added 2 regression tests.
 
-**What worked:** A small Math.Abs(scale - 1.0) < 0.05 guard around the interpolation choice. Hits every frame in both preview and export pipelines, and is visually equivalent to cubic at 1:1.
+**Verification:** ARM64 Debug build of Musio.App + Musio.Tests clean (only benign MVVMTK0045 warnings). Full suite 346/346 pass (added 2).
 
-**What didn't work:** N/A (single-pass change).
+**Already fixed on branch (no action):** stop-toolbar light-theme white-on-white — RecordingOverlayWindow.xaml.cs:49 pins RootGrid.RequestedTheme=Dark.
 
----
----
+**Verified non-issues (no action):**
+- Old-project compat for removed text-slide video background: no disk persistence of Project/TimelineModel exists; text slides are editor-only; DrawSlideBackground default case degrades to solid colour.
+- Encoding-path divergence: VideoWriter.cs NOT changed on this branch; VideoEncoder.cs changes are transition/crossfade/audio only — no codec/resolution/bitrate divergence introduced.
 
-## Multi-Monitor Region Selection — Compression & Wrong Coords
+**NOT fixed (cannot resolve headlessly):** stop-recording crash — requires an interactive capture+stop session to reproduce/verify; static review (UI agent) found the teardown/append flow clean. Needs manual runtime testing before deploy.
 
-**Feature/area:** `RegionSelectorOverlay` (region capture flow).
+## Real Cursor Shapes — Capture & Render (arrow/hand/ibeam/resize)
 
-**Symptom:** On multi-monitor setups, choosing "Region" displayed both monitors' contents squashed into a single display, and the resulting selection rectangle landed in the wrong place.
-
-**Root cause:**
-1. `CaptureDesktopScreenshotAsync` captured the entire virtual desktop (`SM_X/CXVIRTUALSCREEN`) in physical pixels.
-2. The host `Window` was sized via `OverlappedPresenter.Maximize()`, which only covers a single monitor. The second monitor was never under the overlay.
-3. `ScreenshotImage` used `Stretch="Fill"` so the multi-monitor screenshot was compressed into the single-monitor window.
-4. `ConfirmSelection` stored raw overlay DIPs as `CaptureRegion.X/Y/W/H`, but `RecordingSession` expects monitor-local DIPs (it multiplies by the monitor's DPI scale to recover physical pixels).
-
-**What worked:**
-- Replaced `presenter.Maximize()` with `AppWindow.MoveAndResize` to the full virtual desktop rect (`SM_X/Y/CX/CYVIRTUALSCREEN`). The window now spans every monitor in physical pixels, matching the screenshot 1:1.
-- Set `IsResizable/IsMaximizable/IsMinimizable=false` on the presenter.
-- `ConfirmSelection` now: overlay DIPs -> virtual-desktop physical pixels (`_screenshotWidth/ActualWidth` ratio + virtual screen origin) -> monitor-local physical pixels (clamped to host monitor) -> monitor-local DIPs via `GetDpiForMonitor` (`MonitorFromPoint` at selection center). This handles mixed-DPI multi-monitor correctly because each monitor's DPI is queried independently.
-
-**What didn't work / rejected approaches:**
-- Per-window DPI Unaware context: would require coordinate juggling between unaware logical pixels and the PMv2-captured physical-pixel screenshot. Rejected as more complex and fragile.
-- Keeping `Stretch="Fill"` after Maximize fix: irrelevant once window equals virtual desktop size — Fill becomes 1:1.
-
-
----
-
-## Region Border Highlight — Wrong Position on Non-Primary Monitor
-
-**Feature/area:** `RegionBorderHighlight` placement in `RecordingPage.ShowRecordingOverlay`.
-
-**Symptom:** After the region selection fix stored `CaptureRegion` in monitor-local DIPs, the red border indicator drawn around the recording region during capture was always placed on the wrong monitor / at the wrong location.
-
-**Root cause:** `ShowRecordingOverlay` multiplied `region.X/Y` (monitor-local DIPs) by the monitor's DPI scale, producing monitor-local **physical** pixels. The Win32 `CreateWindowEx` used by `RegionBorderHighlight` requires **screen-absolute** physical pixel coordinates (PMv2 process), so without the monitor's screen origin the border was anchored at (0,0) of the virtual desktop instead of the correct monitor.
-
-**What worked:** Added `GetRegionMonitorOrigin` (`GetMonitorInfo` on the resolved monitor handle) and offset the computed px/py by `info.rcMonitor.Left/Top` before calling `RegionBorderHighlight.Show`. Border now lands exactly on the captured region across all monitors and DPI scales.
-
-
-## Multi-Monitor Region Selection — Rubber-Duck Adoptions
-
-- **Feature/area**: Region selection overlay + recording border highlight (multi-monitor).
+- **Feature/area**: cursor shape pipeline — `MouseHookRecorder`, `CursorShapeResolver` (new), `CursorData`, `CursorSmoother`, `CursorGeometryLibrary` (new), `CursorRenderer`, `FrameCompositor` (all Musio.Core).
+- **Goal**: record which system cursor shape was active and render the matching geometry instead of always drawing one arrow. Touch cursor path left untouched.
 - **What worked**:
-  - Pick host monitor for the selected rect by **largest intersection area** in virtual-desktop physical pixels (replaces `MonitorFromPoint` on a single corner, which can disagree across monitor boundaries).
-  - Cancel selection when the rect has zero intersection with any monitor (instead of clamping to a phantom 1x1 region via `Math.Max(1, …)`).
-  - Add `IntPtr Handle` to `MonitorInfo` so DPI lookups (`GetDpiForMonitor`) and origin lookups (`GetMonitorInfo`) use the same hMonitor used for selection, eliminating point-lookup drift.
-  - Match monitor by exact `DisplayName == MonitorId` (or `StartsWith(MonitorId + ' ')` to cover `"\\.\DISPLAY1 (Primary)"`). `Contains` matched `\\.\DISPLAY1` against `\\.\DISPLAY10`.
-  - Round border px/py with `Math.Round` and floor pw/ph to even numbers (`& ~1`) to match the H.264 crop math in `RecordingSession` (avoids 1-2 px drift between highlight and actual captured frame).
-- **What didn't work**:
-  - `presenter.Maximize()` to cover the virtual desktop - only covers the monitor that owns the window. Use `AppWindow.MoveAndResize` with `SM_X/Y/CX/CYVIRTUALSCREEN`.
-  - `DisplayName.Contains(MonitorId)` for monitor lookup - unsafe substring match across DISPLAY1/DISPLAY10.
+  - Detection via new `CursorShapeResolver` (`GetCursorInfo` + cached `LoadCursor(IDC_*)` handles); sampled per mouse-move in `MouseHookRecorder.HookCallback`. Unknown/custom cursors map to `Arrow`.
+  - Persisted by bumping MCUR file format v1->v2 with a per-sample shape byte; `LoadFromFile` accepts versions 1 and 2 (v1 -> `CursorShape.Arrow`). New `CursorShape` byte field added to `MouseSample` (Pack=1 struct).
+  - Shape propagated to output frames by a single nearest-neighbour post-pass `AssignShapes` in `CursorSmoother.SmoothPath` (added `Shape` to `SmoothedPosition`); all `SmoothedPosition` copies in `FrameCompositor` must carry `Shape`.
+  - Shapes authored as SVG path-data + per-shape hotspot in `CursorGeometryLibrary`, parsed into `CanvasGeometry` via a minimal SVG parser (M/L/H/V/C/Q/Z, abs+rel). `DrawDefaultCursor` selects glyph by shape and prepends `Matrix3x2.CreateTranslation(-hotspot)` so the hotspot lands on the pointer point; keeps existing fill/outline/tilt/scale.
+- **Testing note**: `dotnet test` fails with the same `MSB4062 ExpandPriContent` PriGen error as `dotnet build`. Working approach: build `Musio.Tests.csproj` with **VS MSBuild** (`/p:Platform=x64`), then run `vstest.console.exe` (under `...\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`) against `bin\x64\Debug\...\Musio.Tests.dll` with `/Platform:x64`. Full suite = 364 tests green.
+- **Win2D in tests**: `new CanvasDevice(forceSoftwareRenderer: true)` works in this test host, so geometry/`ComputeBounds` tests run; guarded with `Assert.Inconclusive` fallback if a device can't be created.
+
+## Cursor Shapes — Follow-ups: input-lag regression + Windows-consistent geometries
+
+- **Feature/area**: `MouseHookRecorder`, `CursorShapeResolver`, `CursorGeometryLibrary` (Musio.Core).
+- **Problem 1 (freeze/slow)**: Sampling the cursor shape via `GetCursorInfo` *inside* the WH_MOUSE_LL hook callback on every event added latency to the system input queue, making the live (and therefore recorded) cursor feel laggy/slow in preview/export.
+  - **Fix**: Sample the shape on a ~60Hz background `System.Threading.Timer` that writes a `volatile int _currentShape`; the hook only reads the cached value. Timer started in `StartRecording`, disposed in `StopRecording`/`Dispose`. Never call `GetCursorInfo` (or any syscall) from the low-level hook hot path.
+- **Problem 2 (geometries out of place)**: Hand-authored cursor glyphs had inconsistent sizes (e.g. resize ~10px tall vs arrow ~27px), so switching shapes made the cursor visibly shrink/grow, and looked unlike Windows.
+  - **Fix**: Rewrote `CursorGeometryLibrary` paths as closed filled silhouettes (white body + contrast outline = the Windows look) normalized to a consistent ~26-30px main dimension, with correct hotspots (arrow tip 0,0; resize/I-beam centered; hand at the index fingertip). Licensing: app is MIT, so cursor art must be CC0/self-authored — do NOT pull GPL sets (Bibata/Adwaita). Note `CursorRenderer` fills geometry, so stroke-only SVG paths don't render; author closed outlines.
+- **Test guard**: `CursorGeometryLibrary_ShapesAreConsistentlySized_WithHotspotsInBounds` asserts every glyph's max dimension is 18-34 and its hotspot lies within bounds — catches future size/hotspot regressions.
+- **Verification**: VS MSBuild x64 (Core, Tests, App) clean; full suite 371 green.
+
+## Cursor Hand Geometry — replaced offensive shape with icons8 hand silhouette
+
+- **Feature/area**: `CursorGeometryLibrary.Hand` (Musio.Core/Processing).
+- **Problem**: The hand-authored hand glyph rendered as an offensive single-finger shape.
+- **Approaches considered**:
+  - **System cursor capture** (prototyped, then abandoned): `LoadImage(IDC_*)` + two-pass `DrawIconEx` (white & black bg) to derive alpha → real Windows cursor bitmaps. Verified accurate for all shapes incl. monochrome I-beam (premult color = black-bg pass, alpha = 255-(white-black)). Works, but the user chose to supply vector art instead, so the `SystemCursorCapture.cs` was removed to avoid dead code. (Keep this note: this technique is the fallback if pixel-exact OS cursors are ever wanted.)
+  - **Provided SVG (chosen)**: user supplied `icons8-hand-cursor-96.svg` (32-unit viewBox, two subpaths for line-art). Our renderer FILLS silhouettes (not stroke centerlines), so use only the OUTER figure (full hand silhouette with finger bumps), filled white + contrast outline = clean Windows-style hand. Hotspot at the index fingertip ~(12,2).
+- **Provenance/licensing**: hand path adapted from icons8 (free tier requires attribution). Flag to user to add icons8 attribution in app About/licenses if shipping the free asset.
+- **Verification**: rendered the silhouette to PNG and visually confirmed a proper pointing hand before shipping. Full suite green (12 cursor tests incl. build-all-shapes + size/hotspot band 18-34). Built+relaunched ARM64.
+- **Rule**: `CursorGeometryLibrary` paths must be CLOSED FILLED silhouettes; multi-subpath line-art SVGs render wrong (renderer fills, doesn-t do evenodd line-art). Use the outer silhouette figure only.
+
+## Cursor jitter/slow + hand polish (round 2)
+
+- **Jitter/slow root cause**: `CursorSmoother.GetSpringParams` springs were ALL underdamped (ζ≈0.65-0.70: b far below 2*sqrt(k*m)). Underdamping makes the smoothed cursor overshoot and ring on every stop/direction-change = visible jitter, and the ringing settle reads as "slow". The de-stutter pre-pass (more stop/rest transitions) amplified it → "jitter is back".
+  - **Fix**: critically damp every strength, b ≈ 2*sqrt(k*mass): Subtle 28→40, Medium 22→32, Smooth 16→25, UltraSmooth 12→18 (k unchanged so responsiveness/character preserved). Explicit-Euler stable (b*dt/m<2 at 30/60fps; max b=40 < 60).
+  - **Guard test**: `SmoothPath_SpringPhysics_StepInput_DoesNotOvershoot` feeds a step input and asserts the smoothed X never exceeds target+5 for all strengths. Catches any future underdamped re-tuning.
+  - NOTE: the cursor-shape feature does NOT change positions/timing (provably additive); the arrow renders identically to baseline (hotspot 0,0 → identity). So this jitter was pre-existing smoothing, surfaced by the de-stutter era — not the shape work.
+- **Hand polish**: replaced the icons8 outline-silhouette with a user-provided 23x26 SVG fill path (proper Windows hand with finger separations). `CursorGeometryLibrary` now supports a per-shape Scale (added to the Definitions tuple; Build applies `geometry.Transform(CreateScale)` + scales the hotspot). Hand uses Scale=1.5 (its native ~17px viewBox is smaller than the other ~26-30px cursors), hotspot natural (9.04,3.2) at the index fingertip. Verified by rendering to PNG.
+- **Verification**: VS MSBuild x64+ARM64 clean; full suite 372 green; rebuilt+relaunched ARM64.
+
+## Cursor preview "jitter" REAL root cause — shape-track flicker (not position)
+
+- **Symptom**: user reported persistent cursor jitter in preview/export that survived the spring critical-damping fix.
+- **Diagnosis via real recording** (`Videos\session_*\cursor.mcur`, MCUR v2): parsed 629 samples/10.4s. **Position track was CLEAN — 0 x-direction reversals.** The jitter was NOT positional. The SHAPE track flickered: 34 transitions across 6 shapes with many sub-100ms runs (e.g. IBeam n=1 8ms, Arrow n=2 16ms, Hand n=2 16ms). The 16ms shape poller faithfully captures transient OS-cursor flicker at element boundaries; AssignShapes reproduced it per-frame → the rendered cursor GLYPH pops between arrow/hand/ibeam/resize within 1-3 frames = perceived "jitter".
+- **Fix**: `CursorSmoother.StabilizeShapes` (called from `AssignShapes`) debounces the per-frame shape track — runs shorter than `MinShapeHoldSeconds` (0.12s → minHoldFrames) are forward-filled with the last stable shape; sustained changes preserved. Done at smoothing time so it fixes EXISTING recordings on preview/export. Verified on the real file: glyph transitions 32→13 at 60fps (flicker removed, genuine changes kept). Test: `SmoothPath_DebouncesShapeFlicker_KeepsSustainedChanges`.
+- **Lesson**: when debugging cursor "jitter", parse the actual `cursor.mcur` and separate POSITION jitter (direction reversals / jerk) from SHAPE-track flicker (short runs). They have completely different fixes. The shape feature can introduce visual jitter with zero position change.
+- **Note**: the spring critical-damping change from the prior round is still correct/kept; it just wasn't this bug.
+- **Verification**: VS MSBuild x64+ARM64 clean; full suite 373 green; rebuilt+relaunched ARM64.
+
+## Cursor offset (lag) — reverted critical-damping change
+
+- **Symptom**: after the spring critical-damping change, user reported the rendered cursor no longer matches the real on-screen interaction (an offset/lag), though speed/jitter were fine.
+- **Cause**: increasing spring damping b raises steady-state tracking lag (lag ≈ (b/k)·velocity). Measured on a real capture (session_20260621_204535, 730 samples): UltraSmooth mean lag 136.7px→185.1px (+35%), Smooth 95.3px→136.9px (+44%) just from the b increase. Since the actual jitter was shape-flicker (fixed separately by StabilizeShapes), the damping change was pure downside.
+- **Fix**: reverted `GetSpringParams` to the original committed values (Subtle 28, Medium 22, Smooth 16, UltraSmooth 12) and removed the no-overshoot test. The slight underdamped overshoot (~6%) is not perceived as jitter and keeps tracking tight.
+- **Method note**: to compare smoothing-lag tradeoffs, simulate the spring on a real `cursor.mcur` (linear-interp raw target + Euler spring at 60fps) and measure mean/max deviation from the raw position. Fast, decisive, no GUI.
+- **Lesson**: don't raise spring damping to chase "jitter" — it trades lag for overshoot. Diagnose first (position-jitter vs shape-flicker). Kept: shape debounce (real jitter fix). Reverted: damping.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor shape detection moved to click-time only (removed continuous polling)
+
+- **User directive**: "If the cursor change detection is causing this then let's do it on click time than all the time." User suspected the continuous 16ms shape poll was degrading recorded cursor movement.
+- **Change**: removed the background `System.Threading.Timer` shape poller from `MouseHookRecorder`. Cursor shape is now sampled via `CursorShapeResolver.Resolve()` ONLY on click-down events inside the hook (clicks are infrequent → no per-move overhead, no extra thread/threadpool activity during recording), plus one initial sample at StartRecording. `_currentShape` is held between clicks and stamped on every sample.
+- **Tradeoff (intended)**: hovering a link/text WITHOUT clicking no longer shows hand/I-beam until the next click; shape reflects the cursor at the most recent click. Accepted per user priority on movement quality over continuous shape accuracy.
+- **Kept**: `StabilizeShapes` debounce (now mostly a no-op since click-time shapes form long runs) and original spring damping (b=12 etc.).
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor "slow motion" on short moves — ROOT CAUSE: de-stutter + low-stiffness spring (pre-existing)
+
+- **Provenance**: Spring/UltraSmooth and de-stutter were committed BEFORE the cursor-shape work (git blame: EditorPage smoothing 2026-04-18/05-09/06-19; spring params (80,12) 2026-04-18; de-stutter 2026-06-19). The cursor-shape feature did NOT introduce them; fixing the shape-flicker just made the underlying slow-motion visible.
+- **Diagnosis (data-driven, real capture session_20260621_210141, raw peak 12693px/s)** via a temp Musio.Tests harness running the REAL CursorSmoother at 30fps:
+  - Spring/UltraSmooth + de-stutter ON (the editor default): peak speed **0.20x** real, meanLag 125px → severe slow motion, worst on short quick moves (fixed spring settle time spreads a small displacement over ~0.5s).
+  - de-stutter OFF roughly DOUBLES peak speed (0.20→0.47) and halves lag — de-stutter's ease-in/out arc-retiming is the biggest single culprit.
+  - **OneEuro/UltraSmooth, de-stutter OFF: peak 1.11x, meanLag 7.8px** — preserves real speed, near-zero lag, still smooths adaptively. Clear winner.
+- **Fix**: editor now uses `SmoothingAlgorithm.OneEuroFilter` (EditorPage 2 spots + `CompositionConfig` default) and `FrameCompositor` sets `DestutterEnabled = false` (covers preview AND export). De-stutter code/tests retained for possible future trackpad-specific use.
+- **Method**: to evaluate smoothing feel objectively, run the real `CursorSmoother` on an actual `cursor.mcur` and compare per-config peak-speed-ratio vs raw, mean positional lag, and short-burst time-stretch. Far better than eyeballing.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — final balance: Spring/Smooth, de-stutter OFF
+
+- **Context**: One Euro (prev fix) tracked raw too tightly → cursor felt "human", not cinematic. User wants cinematic smoothing but NOT the heavy slow-motion.
+- **Key data finding (real capture, raw peak 12693px/s)**: de-stutter ON crushes peak speed to ~0.17-0.21x **regardless of EaseStrength (0.6/0.3/0.15 all ≈0.17) and regardless of algorithm**. Its arc-length re-timing fundamentally flattens the velocity profile → that IS the slow-motion; it cannot be tuned out via easing. So de-stutter is incompatible with "keeps up with quick moves" as currently implemented.
+- **Sweet spot (de-stutter OFF)**: Spring/UltraSmooth 0.47x/55px, **Spring/Smooth 0.60x/36px (chosen)**, Spring/Medium 0.67x/26px, OneEuro 1.11x/8px.
+- **Chosen**: `SpringPhysics` + `Smooth` strength (k=150) with de-stutter OFF — cinematic spring momentum (~0.60x peak, ~36px trailing) without slow motion; the spring's low-pass also smooths trackpad micro-stalls. Set in EditorPage (2 spots) + `CompositionConfig` default; `FrameCompositor` keeps `DestutterEnabled=false`.
+- **Open follow-up**: if the user wants the trackpad stop-and-go fix back WITHOUT slow-mo, de-stutter needs a rewrite to a LOCAL micro-stall filler (fill only the brief low-speed gaps) instead of re-timing whole gestures to uniform arc speed. Current de-stutter (commit 182eb03) is a global velocity-flattener.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — tuned to "start late, arrive on time" (Spring/Subtle)
+
+- **User spec (refined over several rounds)**: smooth + good velocity to reach destination (no slow motion) + OK to START a move late, but MUST REACH the position on time (low lag at arrival/clicks/events).
+- **Method**: parameter sweep harness (temp Musio.Tests) running reimplemented One Euro + damped spring on the real capture, measuring peakRatio (velocity), **moveLag** (lag during fast frames — OK to be high) vs **restLag** (lag near rest/arrival — must be low), jerk, and stop-and-go count. This move/rest lag split directly encodes "start late, arrive on time."
+- **Finding**: stiffer spring at ζ≈0.7 hits the spec: k=350-400 → peakRatio 0.74-0.76, restLag ~3px (arrives on time), moveLag ~70px (cinematic momentum / starts late), stutter ~11. One Euro w/ beta gives full velocity + low restLag but high jerk (doesn't smooth stop-and-go); One Euro beta=0 and low-k springs smooth more but arrive late (high restLag) — both fail the spec.
+- **Chosen**: `SpringPhysics` + **Subtle** strength (k=400, b=28, ζ=0.70) — a STANDARD preset that lands on the sweet spot, no param retuning. De-stutter stays OFF (its arc re-timing flattens velocity = slow motion, confirmed un-tunable via EaseStrength). Set in EditorPage (2) + CompositionConfig default.
+- **Tradeoff acknowledged**: max smoothness (de-stutter's low jerk) and max velocity/on-time-arrival are opposed; Subtle prioritizes velocity + on-time arrival per the user's stated priority. If they want MORE stop-and-go removal without the velocity penalty, the remaining lever is a velocity-preserving de-stutter REWRITE (local micro-stall filler, not whole-gesture arc-retiming).
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 372 green; relaunched ARM64.
+
+## Cursor smoothing — SOLVED with zero-phase (forward-backward) spring
+
+- **Breakthrough**: cursor smoothing is OFFLINE post-processing, so we can use FUTURE samples → a ZERO-PHASE filter smooths trackpad stop-and-go with NO time lag (unlike all causal filters spring/One Euro/Holt which must trail). This is the Screen-Studio-style result the user wanted (smooth, no stutter, no slow motion).
+- **New algorithm**: `SmoothingAlgorithm.ZeroPhaseSpring` in CursorSmoother — resample raw at target fps, run a critically-damped spring FORWARD then BACKWARD (forward-backward = zero net phase), substepped (8x) for stability/accuracy at high stiffness and any fps. Stiffness per Strength via GetZeroPhaseStiffness (Smooth=200). SnapToClickPositions + StabilizeShapes still apply.
+- **Measured (real capture, raw stutter 22, rawPeak 12693)**: ZeroPhaseSpring/Smooth(k=200) → stutter 3 (86% removed), jerk 64528 (smooth), meanLag 30px (mostly peak-rounding, NOT time lag). Causal springs had meanLag 36-125px (time lag = slow motion / late arrival). Zero-phase eliminates that.
+- **Key nuance**: with zero-phase, lower peakRatio (~0.36) is NOT slow motion — total displacement & timing preserved, just smoother/eased velocity with no time delay. The earlier "slow motion" was CAUSAL lag (cursor behind in time), now gone.
+- **Wired**: editor uses ZeroPhaseSpring/Smooth (EditorPage x2 + CompositionConfig default); de-stutter stays OFF. Test: `SmoothPath_ZeroPhaseSpring_SmoothsWithLowerLagThanCausalSpring` (smooths + stable + lower lag than causal spring).
+- **Tuning knob**: GetZeroPhaseStiffness — lower k = smoother/less stutter/less peak; higher k = snappier/more stutter. UltraSmooth=130, Smooth=200, Medium=300, Subtle=420.
+- **Method**: parameter-sweep harness reimplementing filters on a real cursor.mcur, measuring peakRatio, moveLag vs restLag (start-late-OK vs arrive-on-time), jerk, and stop-and-go count. Decisive for picking algorithms.
+- **Verification**: VS MSBuild x64+ARM64 clean; suite 373 green; relaunched ARM64.
 
-## Stale Saved Region - Disconnected Monitor
+## Cursor work — code review hardening (2 rounds)
 
-- **Feature/area**: `RecordingViewModel.GetCaptureTarget` (CustomRegion mode).
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected - please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` - the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
-## Region Picker - "blank on open / silent on cancel" confusion
+- Ran 2 review rounds (parallel code-review agents + own pass) on the cursor commit, crash/hang/leak focus. Two genuine (Low-severity) issues found and fixed:
+  1. **NaN/Infinity at very low fps**: `CursorSmoother.SpringPass` used fixed `substeps=8`; explicit Euler diverges when h·sqrt(k) exceeds the stability limit (targetFps<=3 with stiff presets). Fix: adaptive `substeps = Max(8, ceil(2*dt*sqrt(k)))` keeps h·sqrt(k) <= 0.5 for any fps>=1 and all stiffness presets. Guard test: `SmoothPath_ZeroPhaseSpring_StableAtLowFps` (fps 1/2/5/120 finite).
+  2. **GPU geometry leak on device-loss mid-Build**: `CursorGeometryLibrary.Build` accumulated CanvasGeometry in a local dict; if a later shape threw (e.g. device lost during Transform), already-built native geometries leaked (LoadCursorAsync catch couldn't reach them since `_glyphs` wasn't assigned yet). Fix: wrap the Build loop in try/catch disposing `result.Values` on throw, plus inner try/catch around `geometry.Transform` (dispose pre-transform geometry). No double-dispose.
+- Confirmed safe (no change needed): SVG parser is hang-free (every iteration advances or throws; ReadNumber never returns without progress), MCUR v2 serialization is field-by-field (struct Pack change irrelevant) and v1-compatible, AssignShapes/StabilizeShapes bounds & termination, SpringPass fwd/bwd index math & full coverage, hook-thread shape sampling (click-only, try/catch, volatile), CursorShapeResolver uses shared non-owned cursor handles (no leak), and corrupt shape bytes fall back to Arrow via TryGetValue.
+- **Verification**: VS MSBuild x64 clean; suite 374 green.
 
-**Approaches tried:**
+## Full-branch code review vs origin/master (feature/text-animations)
 
-1. **Pre-render initial region in `RegionSelectorOverlay.OnLoaded`** - Worked. Added `ShowAsync(CaptureRegion? initialRegion)` overload; `OnLoaded` now seeds `_selX/_selY/_selW/_selH` and `_hasSelection = true` from the caller-supplied region (or persisted last region as fallback), then calls `UpdateOverlay()`. User now opens onto their existing rectangle with handles instead of a blank dark canvas. ?
-2. **Track cancel vs confirm via `WasCancelled` property on the overlay** - Worked. `CancelSelection` sets `WasCancelled = true` before resolving the TCS with null. `RecordingPage.LaunchRegionPickerAsync` reads it after `ShowAsync` returns null to distinguish "user pressed Escape ? no-op" from "first-time open with no prior selection". On Escape with an existing selection, page shows an InfoBar: *"Region selection cancelled - kept previous region."* - eliminates the pixel-identical confusion. ?
+Reviewed the entire branch (48 files, +10.8k/-2k) via parallel code-review agents across timeline core, export pipeline, rendering, and app/UI (cursor work already reviewed separately). Findings + fixes:
 
-**What worked:** Both fixes together. Pre-render eliminates the blank-screen surprise; InfoBar makes Escape's no-op explicit.
+- **HIGH (fixed)** — "Record More" data loss: `EditorPage.InitializePreviewAsync` re-runs on every page construction and rebuilt primary zoom keyframes destructively (`RemoveAll(SourceVideoFilePath is null)` + regenerate from ALL clicks). After Record More it wiped manual zoom segments and resurrected deleted auto-zooms. Fix: generate primary auto-zooms only when none exist yet (idempotent), and skip `SuppressedClickTicks` in generation.
+- **LOW (fixed)** — `VideoEncoder` GPU leak: `composedFrame` (CanvasRenderTarget) leaked if an exception hit between creation and handoff (crossfade/scaling widened the window); catch only disposed `outputSurface`. Fix: hoist `composedFrame` to method scope, null at handoff points, dispose in catch.
+- **LOW (fixed)** — `TrimSegmentEdgeOperation` default branch mutated the undo snapshot in place (latent; only reachable if a 3rd TimelineSegment subtype joins the primary track). Fix: `_previous with { Duration = ... }` instead of mutating `_previous`.
+- **MEDIUM (flagged, not fixed — needs decision)** — GIF export is segment-unaware: `EffectiveDuration`/`TotalOutputFrames` became segment-based but `ExportGifAsync` still maps frames via the legacy `GetSourceTimeForOutputFrame` and never renders text slides → with a text slide the GIF is length-inflated, slides missing, post-slide content desynced. Proper fix routes GIF through the MP4 segment-aware compose (VideoEncoder.ComposeAtAsync) — a larger change.
+- **Note (pre-existing)** — per-segment audio muxing doesn't tempo-compensate speed-adjusted VideoSegments; audio overlaps the next segment. Standing limitation, not a branch regression.
+- Clean (no issues): rendering pipeline (Win2D disposal, ConfigureAwait, bezier solver bounds), most timeline ops, threading/teardown in UI.
 
-**What didn't work / not chosen:**
+Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 
-- Returning a richer result type (e.g. `RegionPickerResult { Region, WasCancelled }`) - would be cleaner but required more surface area changes; `WasCancelled` as a property on the overlay (already a stateful UserControl) was the smaller diff.
+## Local build and launch — ARM64 host without Visual Studio
 
----
+- **Feature/area**: Build and local app launch.
+- **Approaches tried**: `dotnet build` normally and with PRI generation disabled; unattended Visual Studio Build Tools install; loose MSIX registration; unsigned MSIX install; direct executable launch.
+- **What worked**: The existing self-contained ARM64 output launches directly from `src\Musio.App\bin\ARM64\Debug\net9.0-windows10.0.26100.0\win-arm64\Musio.App.exe`.
+- **What didn't work**: `dotnet build` lacks Visual Studio AppX/PRI tasks; Build Tools install was canceled with exit 1602; loose registration requires Developer Mode; the test MSIX is unsigned.
 
-## Recording state lost on page navigation
+## Full-branch stability review — remaining findings
 
-**Approaches tried:**
+- **Feature/area**: `feature/text-animations` stability and export correctness.
+- **Approaches tried**: Reviewed `origin/master...HEAD` for crashes, leaks, races, data loss, timeline mapping, and preview/export divergence.
+- **What worked**: Resource ownership, transition/text rendering, cursor processing, undo/redo snapshots, thumbnail disposal, and Record More project switching were clean.
+- **What didn't work**: Segment audio is used only when a text slide exists; appended zoom regeneration destroys manual/deleted zoom edits; GIF export ignores segments; export applies appended zooms to primary video; track drags mix output/source time over slides.
 
-1. **Per-page `RecordingViewModel` (original)** - Didn't work. `RecordingPage` declared `public RecordingViewModel ViewModel { get; } = new();` so every navigation back to the page constructed a fresh VM, losing `CaptureMode`, `SelectedWindow`, `SelectedRegion`, `HasSelectedRegion`, and audio toggles. Region survived only because it was persisted to `ApplicationData.LocalSettings` via `RegionMemory`.
-2. **Shared singleton `RecordingViewModel.Shared`** - Worked. Page now uses `ViewModel { get; } = RecordingViewModel.Shared;` so all selection state survives Editor ? Record navigation. ?
-3. **Per-navigation event subscription** - Required companion fix. Constructor-based `ViewModel.PropertyChanged += -` on a shared VM would leak page references (the VM holds the lambda which captures `this`). Moved subscription to `OnNavigatedTo` and added matching tear-down in `OnNavigatedFrom` so prior page instances can be GC'd. ?
+## Branch stability fixes — unified segment export and safe timeline editing
 
-**What worked:** Shared VM + navigation-scoped event lifecycle.
+- **Feature/area**: MP4/GIF export, appended recordings, audio placement, zoom regeneration, and camera/zoom timeline gestures.
+- **Approaches tried**: Parallel workstreams with exclusive file ownership, direct integration review, targeted follow-ups for cross-source zoom creation and audio interval math, compile-only MSBuild validation, full MSTest run, and a final adversarial review.
+- **What worked**: `SegmentFrameComposer` is now the single MP4/GIF frame path, with per-source readers/compositors, appended media, text slides/transitions, source-specific zooms, and segment style overrides. `ExportAudioPlan` maps every edited video segment's embedded/separate audio through trims, deletes, reorder, slides, and appended sources. Appended zoom generation is idempotent and honors suppressed clicks. Timeline gestures clamp within the correct source domain. Core/test sources compile and 414 tests pass.
+- **What didn't work**: Windows `BackgroundAudioTrack` has no playback-rate/time-scale API, so speed-adjusted segment audio cannot be tempo-matched without a separate decode/time-stretch/re-encode feature. It now starts aligned, is bounded to the segment, and is explicitly flagged/logged as native-rate.
 
-**What didn't work / not chosen:**
+## ARM64 build environment restored
 
-- Re-hydrating only `SelectedRegion` from `LoadLastRegion()` in `UpdateRegionInfoDisplay` (already existed) - insufficient because `CaptureMode` and `SelectedWindow` were not persisted, and on fresh-install `LocalSettings` is empty.
-- `NavigationCacheMode=Required` on the page - would also work but caches the entire visual tree; singleton VM is a smaller, more explicit contract.
-- **What worked**: When the saved `CaptureRegion.MonitorId` no longer matches any connected monitor, clear `SelectedRegion`/`HasSelectedRegion`, surface `RecordingStatus` ('Saved region's monitor is no longer connected - please select a new region'), and return null. This forces the user to reselect on the current display topology.
-- **What didn't work**: Silently falling back to `allMonitors.FirstOrDefault()` - the region's monitor-local DIPs got applied to the wrong (primary) monitor, producing a clamped/off-screen capture and a misplaced red border.
+- **Feature/area**: Local build and launch toolchain.
+- **Approaches tried**: Installed Visual Studio Build Tools 2022 with managed desktop and Universal Windows build workloads, then used ARM64 VS MSBuild for a clean Debug build.
+- **What worked**: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\arm64\MSBuild.exe` builds the app with `/restore /t:Build /p:Configuration=Debug /p:Platform=ARM64`; the fresh self-contained executable launches directly.
+- **What didn't work**: The .NET SDK-only build remains unsuitable because it lacks the Visual Studio AppX/PRI tasks.
 
----
+## Editor toolbar control height
 
----
+- **Feature/area**: Editor right-side toolbar.
+- **Approaches tried**: Compared the text-bearing and icon-only controls in `RightToolbarGroup` and normalized their explicit dimensions.
+- **What worked**: Setting the top-level buttons and zoom dropdown to `Height="40"` keeps text, icon-only, accent, and combo controls aligned.
+- **What didn't work**: Relying on each WinUI control's intrinsic/default height produced visibly different heights as labels were shown or hidden.
 
-## Stop-Trigger Click Removal from Recording Data
+## Recording toolbar vertical alignment
 
-**Feature/area:** MouseHookRecorder, RecordingOverlayWindow, recording stop flow
+- **Feature/area**: Recording capture-mode toolbar container.
+- **Approaches tried**: Kept the toolbar's overall height and horizontal inset while compensating for the segmented control's visually high rendered bounds.
+- **What worked**: Rebalancing the border padding from `6` to `6,8,6,4` shifts the complete control row down two pixels and visually centers it.
+- **What didn't work**: Symmetric numeric padding looked bottom-heavy because the toolkit segmented-control rendering is not optically symmetric.
 
-**Approaches tried:**
+## Recording segmented-item alignment correction
 
-1. **Timestamp-based trim with `NotifyStopRequested()`** - Worked. Added a `NotifyStopRequested()` method to `MouseHookRecorder` that records the current `Stopwatch.GetTimestamp()` and sets `_paused = true` to stop collecting new events. A static `TrimStopClick()` method on `MouseRecordingData` finds the last left-button-down click within 200ms before the stop-requested timestamp and removes it, its corresponding up event, and button samples. Move/scroll samples are preserved. ?
+- **Feature/area**: Capture-mode `Segmented` item presenter.
+- **Approaches tried**: Reverted the outer-toolbar padding adjustment and isolated the offset to the segmented control's internal item presenter.
+- **What worked**: `CaptureModeSelector Padding="0,1,0,-1"` shifts only the three capture-mode items down one pixel while leaving the control background and neighboring buttons centered.
+- **What didn't work**: Moving the entire toolbar row did not change the uneven spacing inside the segmented control.
 
-**What worked:** Signaling the mouse recorder from the overlay's `Stop_Click` and `OnOverlayClosing` handlers (earliest possible point in the stop flow), then trimming the stop-trigger click in `GetRecordedData()`. The 200ms threshold is generous enough for UI dispatch delay (~3-10ms typical) while avoiding false positives.
+## Capture picker Escape teardown
 
-**What didn't work:** N/A - first approach worked.
+- **Feature/area**: Window and region selector overlay cancellation.
+- **Approaches tried**: Correlated the blank picker window with the XAML `ArgumentException` in `crash.log` and traced synchronous `TaskCompletionSource` continuation execution from the Escape handlers.
+- **What worked**: Creating picker completion sources with `TaskCreationOptions.RunContinuationsAsynchronously` defers host-window teardown until keyboard event dispatch has returned.
+- **What didn't work**: Closing the picker inline from the Escape keyboard event caused WinUI to throw `ArgumentException: The parameter is incorrect` and leave a blank host window.
 
-**Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
+## Capture picker fix local launch
 
+- **Feature/area**: ARM64 Debug validation of capture picker cancellation.
+- **Approaches tried**: Stopped the existing executable by PID, rebuilt with ARM64 VS MSBuild, and launched the self-contained build output directly.
+- **What worked**: The rebuilt `win-arm64\Musio.App.exe` remained running after startup.
+- **What didn't work**: No launch failure occurred.
 
----
+## PR #54 review fixes — XAML defaults and path comparison
 
-## Zoom Region Editor Styling, Resize & Center Snapping
-
-**Feature/area:** `EditorPage` zoom region edit overlay (`ZoomRegionRect` + handlers in `EditorPage.xaml.cs`).
-
-**Approaches tried:**
-1. **1px dashed stroke** ? reduced `StrokeThickness` from 2 to 1 on `ZoomRegionRect`.
-2. **Corner-handle resize, aspect-preserving** ? Added 4 corner `Rectangle` handles in XAML (visual only, `IsHitTestVisible=False`); hit-testing performed in code against the rect corners with a 10px radius. On drag, the opposite corner is anchored, scale = `max(|dx|/W0, |dy|/H0)`, `newZoom = startZoom / scale` clamped to `[1.5, 4.0]` (the UI's exposed range). vp width/height are derived from zoom (and output aspect override is uniform in zoom), so the rect aspect is preserved automatically.
-3. **Center snapping with Shift override** ? On translation, snap normalized center to `0.5` when within `CenterSnapThreshold` (0.02) per axis, unless `e.KeyModifiers` includes `VirtualKeyModifiers.Shift`. Blue dashed guide lines visualize active snap.
-
-**What worked:** Reading `PointerRoutedEventArgs.KeyModifiers` directly (no separate keyboard hook). Computing the anchor corner in display coords at `PointerPressed` and re-projecting the new center display position back to normalized coords keeps the opposite corner fixed across resize. Clamping zoom first, then deriving effective scale, avoids the rect drifting outside `[1.5, 4.0]`.
-
-**What didn't work / rejected:** Letting the corner handle `Rectangle` elements be hit-test-visible ? would steal pointer capture from the `Canvas` and break the existing drag handlers. Solution: keep handles purely cosmetic and do manual hit testing.
-
----
-
-## Region Selector Overlay & Recording Page - PR Review Fixes
-
-**Approaches tried:**
-
-1. **TryApplyPresetRegion coordinate space bug** - Was assigning CaptureRegion.X/Y/Width/Height (monitor-local DIPs) directly into overlay selection coords (virtual-desktop overlay DIPs). On multi-monitor / mixed-DPI this seeded the wrong place/size. Fixed by converting monitor-local DIPs ? physical pixels (using saved monitor's origin + GetMonitorDpiScale) ? overlay DIPs (subtract virtual-desktop origin from SM_X/YVIRTUALSCREEN, divide by _screenshotWidth/ActualWidth). ?
-2. **UpdateOverlay degenerate-selection state leak** - When sw/sh clamped to <=0, the blank overlay rendered but _hasSelection and ButtonPanel.Visibility were left set. Now clears _hasSelection/_sel* and hides ButtonPanel in the degenerate branch. ?
-3. **RecordingPage._infoBarTimer navigation leak** - Timer was created on the page's DispatcherQueue and retained OnInfoBarTimerTick, keeping the page alive after navigation. Now Stop() + detach Tick handler + close InfoBar in OnNavigatedFrom. ?
-
-**What worked:** All three above.
-
-
----
-
-## Editor - Spacebar Play/Pause Shortcut
-
-**Feature/area:** EditorPage keyboard accelerators / Preview playback.
-
-**Approaches tried:**
-
-1. **Page-level `KeyboardAccelerator` with `Key="Space"` invoking `Preview.Play()`/`Preview.Pause()` based on `Preview.IsPlaying`** - Worked. ?
-2. **Skip handler when a text input has focus** - Used `FocusManager.GetFocusedElement(XamlRoot)` and bailed for `TextBox`/`PasswordBox`/`RichEditBox`/`AutoSuggestBox` so typing a space in editable fields isn't hijacked. ?
-
-**What worked:** XAML accelerator + focus-check guard in the handler.
-
-
-
----
-
-## Overlapping Zoom Segments - Center Snap Fix
-
-**Feature/area:** AutoZoomEngine - focal-point continuity across overlapping zoom segments
-
-**Approaches tried:**
-1. Earlier fix used max-zoom-wins for both zoom level and center (cx/cy). Zoom level stayed continuous, but the *center* snapped at the instant B's zoom first exceeded A's, since the winning keyframe's center was used wholesale. Editing a segment moved where this snap occurred, making the visual jump obvious.
-2. Blend centers by per-keyframe "activation weight" (max(0, zoom - 1)) while still using max-zoom for the zoom level. ?
-
-**What worked:**
-- In `EvaluateManualKeyframes` and `EvaluateAutoSegments`: compute `w = max(0, zoom - 1)` per active segment, accumulate `weighted sum of cx/cy`, return `weightSum > eps ? sum/weight : maxZoomSegmentCenter`.
-- This guarantees: at A-only the center = cA; at the crossover it's a smooth weighted blend; at B-only the center = cB. No focal-point snap regardless of how segments are edited.
-- Regression test `GetZoomState_OverlappingManualKeyframes_CenterDoesNotSnap` steps through the overlap and asserts per-step center delta stays well under the would-be snap magnitude.
-
-**What didn't work:**
-- Returning the max-zoom segment's center as-is - produces a discontinuous jump at the crossover when overlapping segments have different centers.
-
----
-
-## Style Menu For Full-Screen Capture
-
-**Feature/area:** EditorPage style flyout, ProjectService composition defaults.
-
-**Approaches tried:**
-
-1. **Make StyleButton/StyleSeparator visible unconditionally in InitializeStyleControls** - Worked. Previously gated on Window/Region only; now exposed for Monitor too. ✅
-2. **Move the Monitor background-defaults override (Padding=0, CornerRadius=0, ShadowEnabled=false, BorderEnabled=false) from `EditorPage.InitializePreviewAsync` into `ProjectService.SetProject`** - Worked. Defaults apply at project-load time so user edits via the now-visible style menu survive editor re-navigation. ✅
-
-**What worked:** Combination - unconditional style-menu visibility + applying Monitor defaults in `ProjectService.SetProject` (instead of every `InitializePreviewAsync`).
-
-**What didn't work:** Leaving the Monitor override unconditional in `InitializePreviewAsync` - would clobber user edits every time the EditorPage was re-constructed.
-
----
-
-## Export Resolution & Quality - Exposed in Settings
-
-**Feature/area:** AppSettings, SettingsPage, ExportViewModel, VideoEncoder, AspectRatioHelper
-
-**Approaches tried:**
-
-1. **Added DefaultExportResolution / DefaultExportQuality to AppSettings** stored as enum names (strings), mirroring the existing Theme/DefaultCaptureMode pattern. New GetEnum<T> helper does Enum.TryParse with Enum.IsDefined fallback.
-2. **VideoEncoder now consumes _settings.Resolution** via new AspectRatioHelper.ComputeExportDimensions(compW, compH, resolution). The helper fits the compositor's already-aspect-corrected output within the resolution bounds, caps at compositor native (no upscale), then mod-16 floors.
-3. **SettingsPage XAML/code-behind** got an Export Defaults section with Resolution + Quality ComboBoxes. Uses _suppressExportDefaultEvents during initial SelectComboBoxByTag to avoid persisting accidental defaults during page load.
-
-**What worked:**
-- Aspect ratio is preserved because the compositor has already locked in the chosen AspectRatio + padding before encoding. The resolution selector only caps the bounding box.
-- No-upscale clamp: min(resolutionBound, compositorNative) keeps 720p recordings from being uselessly upscaled to 4K.
-- mod-16 floor produces a tiny aspect drift (e.g. 1080->1072, ~0.7%) which is imperceptible and preserves the existing learnings about H.264 macroblock alignment.
-
-**What didn't work / decisions deferred:**
-- ComputeBitrate's Math.Max(1.0, pixels/baseline) still gives 720p exports the same bitrate as 1080p. Left as-is to keep scope tight.
-- Did not add an option to allow upscaling; if users want it later add an opt-in toggle rather than removing the clamp.
-
-## Export resolution/quality settings - rubber-duck refinements
-
-**Feature/area**: AppSettings export defaults + AspectRatioHelper.ComputeExportDimensions
-
-**Approaches tried**:
-- Default DefaultExportResolution to HD1080 (matches ExportPreset default).
-- Use `Math.Max(16, (fitW/16)*16)` to enforce mod-16 floor.
-
-**What worked**:
-- Defaulting to UHD4K preserves prior behavior (encoder previously ignored the
-  field, so output was effectively native source resolution). HD1080 would have
-  silently downscaled existing >1080p users on upgrade.
-- For compositor dims < 16px on a side, branch to even-rounded source size
-  (`Math.Max(2, w - w%2)`) instead of padding to 16. Preserves the
-  no-upscale invariant.
-- DataTestMethod invariant tests (bounds, no-upscale, even, <3% aspect drift)
-  across 8 (compositor, resolution) pairs caught the small-input regression
-  before merge.
-
-**What didn't work**:
-- Padding sub-16 compositor dims up to 16 via `Math.Max(16,...)` violated
-  the no-upscale invariant for tiny degenerate inputs.
-
-## 2026-05 - Aspect Ratio Flyout (Cursor-style)
-- **Feature**: Project-level aspect-ratio + fit-mode picker with always-visible toolbar flyout (EditorPage).
-- **What worked**:
-  - Project-level state on Project (AspectRatio, FitMode, CropAnchorX/Y); ExportEngine reads from project, not ExportSettings.
-  - Generalized AspectRatioHelper.CalculateCropRect with anchorX/anchorY (0..1) for 9-point snap. Added CalculateContainCanvas for Contain mode.
-  - FrameCompositor: introduced _sourceArea*+offset fields decoupled from contentWidth/Height. Cursor/click/zoom-center math all use sourceArea.
-  - Contain mode: ComputeEffectiveViewport returns unmodified viewport (preserves source AR); CropSourceFrame fills letterbox bars via BackgroundCompositor.FillBackgroundRect (new public helper using session.Transform translate to reuse private gradient/image/blur helpers), then draws source into the centered sub-rect.
-  - Post-composite zoom GATED OFF for Contain (letterbox stays constant when zooming - else bars would scale with content).
-  - Inline Button.Flyout in EditorPage.xaml row-2 toolbar (next to styles/cursor) with RadioButton grids; _suppressAspectRatioEvents flag prevents init re-entrancy.
-- **What didn't work / pitfalls**:
-  - dotnet 9 SDK absent on this machine (only 8 + 10). Workaround: vstest.console.exe with DOTNET_ROLL_FORWARD=Major env var; do NOT use `dotnet test`.
-  - MSBuild on Musio.sln alone doesn't always rebuild Musio.Tests when only test files change - target Musio.Tests.csproj directly to force rebuild.
-  - Must kill Musio.App.exe before any build (DLL lock).
-  - When updating AspectRatio enum, also bump SettingsTests.AspectRatio_AllValues_AreDefined length assertion.
-- **Deferred to v2**: free-drag crop anchor with shift-bypass; timeline thumbnail display-time transform.
-
-## Frame style: padding & aspect ratio isolation (round 3)
-
-### Feature/area
-FrameCompositor + BackgroundCompositor - decoupling padding from output aspect ratio, and unifying letterbox/padding fill so the wallpaper is one continuous container.
-
-### What didn't work
-- Previous model had `BackgroundCompositor.CalculateOutputSize` return `(source + 2*padding, source + 2*padding)`. This made the output canvas grow with padding, so dragging the padding slider visibly changed the canvas aspect ratio.
-- Drawing letterbox/pillarbox bars by calling `FillBackgroundRect` inside the cropped buffer caused the wallpaper to be rendered separately in the letterbox bars vs the outer padding margin - visible "wallpaper repeat" with two independent containers.
-
-### What worked
-- `BackgroundCompositor.CalculateOutputSize` is now identity `(w, h)`: padding insets within the canvas, never extends it.
-- `FrameCompositor.ComputeContentDimensions` now computes:
-  - `_contentWidth/_contentHeight` = output canvas at target AR (fit to source bounds), independent of padding.
-  - `_innerContentWidth/_innerContentHeight` = canvas - 2*padding (the inner content rect, where source is drawn).
-  - `_sourceAreaWidth/Height/OffsetX/Y` describe the source placement WITHIN the inner content area. Cover fills inner; Contain preserves source AR inside inner with letterbox/pillarbox.
-- `CropSourceFrame` sizes `_croppedBuffer` to inner dims and clears to transparent; letterbox bars are no longer filled in the buffer.
-- `BackgroundCompositor.CompositeFrame` already draws the chosen background across the entire output canvas (w - h) before drawing the (now possibly transparent) content into the inset rect. Because the cropped buffer has transparent letterbox regions, the outer wallpaper shows through them as one continuous fill - padding margin + letterbox bars = single container.
-- Cursor and click coord math (`(cursor - viewport)*scale + padding + sourceAreaOffset`) is unchanged: scale uses `_sourceAreaWidth/viewport.Width`, offsets are in inner-buffer space, and `+padding` shifts to outer canvas coords (content is drawn at `(padding, padding)` by BgCompositor).
-
-### Test impact
-- Updated 4 `BackgroundCompositorTests.CalculateOutputSize_*` tests to expect identity (canvas unchanged), no longer adding padding.
-- All 268 tests pass.
-
-
-## Frame style: collapse letterbox + padding into one container (round 4)
-
-### Feature/area
-FrameCompositor + BackgroundCompositor - eliminating the separate "inner content area" / "letterbox bars" concept so there is exactly one background container around the source frame.
-
-### What worked
-- Removed `_innerContentWidth/_innerContentHeight` fields entirely.
-- `_sourceAreaWidth/_sourceAreaHeight` now describe the actual visible source frame size in output canvas coords.
-- `_sourceAreaOffsetX/_sourceAreaOffsetY` now represent the source frame's position from the canvas origin (= user-padding + any AR-fit gap on that side). There is no separate "inner" coordinate space.
-- `ComputeContentDimensions`: compute canvas (target AR, padding-independent), then a max content box (canvas - 2*userPadding), then fit source into it per FitMode, finally CENTER the source within the canvas (so leftover gap is simply more background).
-- `CropSourceFrame`: buffer is sized exactly to the source-area dims (no internal letterbox padding). Drawing 1:1.
-- `BackgroundCompositor.CompositeFrame` simplified signature: takes srcX/srcY/srcWidth/srcHeight directly (no padding/inner concept). Background fills the entire canvas; shadow / rounded-corner clip / border all use the source rect.
-- Cursor/click/post-composite-zoom coord math: removed the separate `+padding` term - `_sourceAreaOffset*` now already includes total background gap.
-
-### Outcome
-- Shadow and rounded corners wrap the actual visible captured frame, not the larger "inner content" container.
-- One unified background container fills everything around the source.
-- All 268 tests still pass.
-
-
-## Zoom in Contain mode operates on full canvas (round 5)
-
-### Feature/area
-FrameCompositor.ComposeFrame zoom-path selection.
-
-### Problem
-Previously, in FitMode.Contain (non-Auto AR), zoom went through the direct path so only the source viewport zoomed while letterbox bars stayed constant. The user wants zoom to treat the entire composed canvas (background + source frame + letterbox area) as one unit so the zoom region can span the whole visible frame.
-
-### What worked
-Removed the `useContainDirect` carve-out: post-composite zoom is now always used whenever ZoomLevel > 1.01, regardless of FitMode. The composite buffer (which already contains the background fill across the whole canvas) is zoom-cropped and scaled to the output, so the visible frame zooms as a single unified unit.
-
-### Outcome
-- Zoom now spans the entire visible frame including letterbox area in Contain mode.
-- Cursor also scales with zoom in Contain mode (previously it did not).
-- All 268 tests pass.
-
-
-## ZoomScope: user choice between whole-frame and source-only zoom (round 6)
-
-### Feature/area
-Added a user-selectable `ZoomScope` (Frame | Source) on the Project / FrameCompositorConfig, surfaced in the Frame Style flyout as a "Zoom scope" radio pair ("Whole frame" / "Source only").
-
-### Wiring
-- `Musio.Core.Settings.ZoomScope` enum (Frame=default, Source).
-- `Project.ZoomScope` (default Frame).
-- `FrameCompositorConfig.ZoomScope`.
-- `ExportEngine` propagates `project.ZoomScope` to the composition used for export.
-- `FrameCompositor.ComposeFrame`: post-composite zoom path used only when `ZoomScope == Frame`; otherwise direct path so background/letterbox/padding stay fixed.
-- EditorPage XAML adds a `ZoomScopePanel` under FitModePanel inside the Frame Style flyout; always visible.
-- Code-behind: `SelectZoomScopeRadio`, `ZoomScopeOption_Checked`, `ApplyZoomScope` mirror the FitMode pattern (project + composition update + RebuildPreviewRendererAsync).
-
-### Outcome
-Users can choose whether zoom treats the entire visible frame as one unit (Frame) or constrains zoom to the captured source while keeping background fixed (Source). All 268 tests pass.
-
-
-## Round 7: Custom visual controls for Frame Style flyout
-
-- **Feature/area**: EditorPage Frame Style flyout UI controls.
-- **Approaches tried**:
-  1. Custom TileRadioStyle with iconic visuals for every option (radios with rich content).
-  2. Hybrid: default RadioButtons for aspect ratio, ctk:Segmented for binary choices (Fit, Zoom scope), single 5x5 Grid with CropCellRadioStyle for 3x3 crop position.
-- **What worked**: Approach 2. CommunityToolkit.WinUI.Controls.Segmented (already referenced) gives a clean binary toggle. For the 3x3 crop grid, a single bordered Grid with 3 content cols/rows + 2 1px divider lanes and 9 RadioButtons styled with a cell-fill template (background fills on CheckedNormal via CombinedStates VSM) produces a unified rectangle that fills the chosen segment.
-- **What didn't work**: TileRadioStyle was visually busy and inconsistent with WinUI design language for binary/segmented choices.
-
-## Round 8: Aspect-ratio tile selector
-
-- **Feature/area**: EditorPage Frame Style flyout - Aspect ratio selector.
-- **Approaches tried**: Tile-style RadioButton with proportional preview rectangle (sized to the actual aspect ratio, fitted inside a 36x26 bounding box) plus a label below; Auto tile shows a rounded outline rectangle with an 'A' glyph inside.
-- **What worked**: New `AspectRatioTileStyle` (bordered Border template with CombinedStates VSM; accent 2px border + subtle fill on CheckedNormal). Eight tiles with per-ratio Border dimensions communicate the shape at a glance and are visually consistent with the rest of the redesigned flyout.
-- **What didn't work**: Plain default RadioButtons with text content - lacked visual cues for the actual ratio so users couldn't preview at a glance.
-
-## Round 9: Accent-fill preview rectangle on aspect-ratio tiles
-
-- **Feature/area**: EditorPage Frame Style flyout - Aspect ratio tile selection signal.
-- **Approaches tried**: (1) Use VSM in AspectRatioTileStyle template to swap inner preview brush - blocked because the preview Border lives in Content, not the template, so VSM cannot retarget it. (2) Add a small `BoolToObjectConverter` (in Musio_App.Converters) and bind each preview Border's Background/BorderBrush (and the Auto glyph Foreground) to the parent tile's IsChecked via `ElementName` binding.
-- **What worked**: Approach 2. Three shared converter instances declared in Page.Resources (PreviewBgBrush, PreviewBorderBrush, PreviewGlyphBrush) keep XAML compact. When a tile is checked, its inner rectangle fills with AccentFillColorDefaultBrush and its outline switches to accent; Auto's 'A' glyph switches to TextOnAccentFillColorPrimaryBrush for contrast. Tile-level accent border was removed in favor of a SubtleFillColorSecondaryBrush background so the accent rectangle is the focal point.
-- **What didn't work**: Template-VSM approach (Content elements unreachable from style VSM).
-
-## Round 10: Crash fix - ThemeResource on converter CLR properties causes XAML layout cycle
-
-- **Feature/area**: EditorPage Frame Style flyout - aspect-ratio tile bindings, App crash post-capture (HRESULT 0x802B000A in combase.dll, XAML layout cycle).
-- **Approaches tried**: (1) Originally used three BoolToObjectConverter instances in Page.Resources whose `TrueValue`/`FalseValue` CLR properties were assigned via `{ThemeResource AccentFillColorDefaultBrush}` etc. This compiled fine but, when EditorPage was navigated to post-capture, crashed the process inside combase with XAML_E_LAYOUT_CYCLE. (2) Replaced with a single `CheckedToBrushConverter` that looks up theme brushes from `Application.Current.Resources` at runtime, keyed by `ConverterParameter` (`Bg`/`Border`/`Glyph`).
-- **What worked**: Approach 2. No ThemeResource is assigned to a non-DependencyProperty, so the XAML parser doesn't get into a resource-resolution cycle.
-- **What didn't work**: `{ThemeResource X}` markup on plain CLR properties of objects placed in `Page.Resources`. Even though XAML compilation succeeds, runtime activation of a Page that references those resources can throw XAML_E_LAYOUT_CYCLE. Avoid this pattern - use static brushes, hard-coded colors, or look up brushes in code at runtime.
-
----
-
-## Export Bugs: Truncated to ~1s and Crash During Preview Playback
-
-**Symptoms:**
-1. Export produced a ~1-second video instead of the full recording duration.
-2. Exporting while the editor preview was playing caused frame corruption or a crash.
-
-**Root cause(s):**
-1. `VideoEncoder.ProduceSampleAsync` swallowed exceptions thrown during per-frame compositing and set `request.Sample = null` on error. `MediaStreamSource` treats `Sample = null` as end-of-stream, so the very first frame error silently truncates the output to whatever frames were already enqueued (roughly 1 second).
-2. The export pipeline composites frames on the same shared Win2D device (`CanvasDevice.GetSharedDevice()`) and reads the same source `.frames/` JPEGs as the editor preview. Running both at once causes GPU device contention and shared-buffer races -> visible corruption or a hard crash.
-
-**What worked:**
-- Capture the first per-frame error in `VideoEncoder.ExportAsync` via a new `onError` callback, drain pending sample tasks, then re-throw as an `InvalidOperationException` that includes the frame index and inner exception. This turns silent ~1s truncation into a loud, debuggable failure with the real root cause surfaced in the editor's error panel.
-- In `EditorPage.ExportFlyout_Opened`, call `Preview.Pause()` (and best-effort `_audioPlayer.Pause()`) before kicking off the export so the export pipeline owns the shared Win2D device and source frame reader.
-- Verified all 268 MSTest cases still pass.
-
-**What didn't work / not tried:**
-- Giving the encoder its own `CanvasDevice` (instead of the shared one) would also help but was not needed once the preview is paused before export. Worth revisiting if the corruption recurs.
-
-
----
-
-## Round 13: Style changes silently dropped on re-export
-
-### Feature/area
-Export flyout state lifecycle (`src/Musio.App/Pages/EditorPage.xaml.cs`).
-
-### Symptom
-User exports ? applies shadow/rounded-corner ? exports again ? 2nd MP4 still
-has no shadow/corner even though the preview shows them correctly.
-
-### Root cause
-`ExportFlyout_Opened` short-circuits if `ExportVM.ExportSucceeded` is true.
-The flag is only reset by the explicit "Close" button (`CloseFlyout_Click`).
-Dismissing the flyout by clicking outside leaves the flag set, so the next
-"open" just re-shows the cached `ExportedFilePath` from the previous run -
-no fresh `PrepareForExport` is called and no new export runs. The user
-believes they triggered a 2nd export and inspects the 1st (pre-style) file.
-
-### Fix
-Hook `ExportFlyout.Closed` to call `PrepareForExport` whenever the flyout
-dismisses in a terminal state (Succeeded/Failed) and is not actively exporting.
-This guarantees the next `Opened` falls through to the export path and reads
-the latest `ProjectService.Instance.CurrentComposition`.
-
-### What didn't work
-Initially considered moving the reset into `ExportFlyout_Opened` itself, but
-that would re-export even when the user re-opens the flyout just to re-read
-the success message. Resetting on close is cleaner and matches user intent.
-
----
-
-## Brand Presets - Cinematic Refresh
-
-**Feature/area:** DefaultBrandPresets (src/Musio.Core/Settings/DefaultBrandPresets.cs)
-
-**Approaches tried:**
-
-1. Renamed and re-toned all 8 presets to soothing, low-saturation cinematic palettes. Display Names: Midnight, Mist, Dusk, Porcelain, Twilight, Pine, Aurora, Linen. C# property names (DarkMinimal, OceanGradient, ...) kept unchanged so existing tests and references continue to work. Increased shadow blur and softened gradient angles (155-165 deg) for cinematic depth. Replaced saturated hot pinks/greens/magentas with muted plums, sages, dusty terracottas, steel blues.
-
-**What worked:** The cohesive visual refresh itself. (Note: a later pass replaced this preset set with the current bold-gradient lineup and renamed the static property identifiers — see the "Background presets - bold gradients" entry below. The "preserving identifiers" claim in this earlier pass no longer reflects the current code.)
-
-**What didn't work:** N/A on this pass.
-
-## Wallpaper picker "+" tile (EditorPage background style)
-
-**Approach that worked:**
-- Prepend a non-data "+" tile to `WallpaperGrid.Items` (sentinel `Tag = "__add_wallpaper__"`), keeping `_wallpaperPaths` as the source of truth for actual wallpapers.
-- All grid<->path index conversions shift by 1 (`gridIndex = pathIndex + 1`).
-- In `WallpaperGrid_SelectionChanged`, detect the sentinel tag and open `Windows.Storage.Pickers.FileOpenPicker` (init with main window HWND via `App.Current.MainAppWindow`). On success, insert the new path at index 0 of `_wallpaperPaths` and a freshly built tile at index 1 of the grid, then select it. On cancel, restore previous selection (or clear).
-- Wrap programmatic `SelectedIndex` mutations in `_suppressStyleEvents` to avoid recursive style updates.
-
-**Caveats:**
-- `CanvasBitmap.LoadAsync` reads via Win32 file IO from the absolute path; for packaged builds, file access beyond the picker token is not guaranteed across sessions. Picking again works.
-
----
-
-## Background presets - bold gradients
-
-**Approach that worked:**
-- Replaced the 8 muted `DefaultBrandPresets` entries with 8 bold two-stop gradients suitable as backdrops for screen recordings: `Nebula` (indigo->magenta), `Lagoon` (purple->teal), `Prism` (sky->coral), `Emerald` (vivid green->near-black), `Coral` (coral->magenta), `Ember` (midnight->amber), `Tide` (iris->cyan), `Sunset` (orange->violet). All gradients angled ~135-160 degrees with consistent padding/radius/shadow defaults.
-- Updated `SettingsTests` named-preset assertions to match the new static property names. Count-based assertion (`ReturnsEightPresets`) retained.
-
-**What didn't work / pitfalls:**
-- Initial pass used literal brand names (Apple Vision, Google Gemini, etc.); avoid mentioning brand names in user-facing preset labels even when colors are inspired by them.
-
----
-
-## Rubber-duck feedback on custom backgrounds branch
-
-**Adopted (fixes pushed):**
-- `LoadSystemWallpapersAsync` now takes an `initialCustomPath`, preserves any custom (non-system-wallpaper-dir) entries already in `_wallpaperPaths`, and re-applies the wallpaper grid selection after the async load completes (the synchronous `SyncStyleControlsToConfig` runs before items exist, so the prior code never highlighted the active wallpaper on reopen).
-- `BuildBackgroundStyleFromControls` falls back to `ProjectService.CurrentComposition?.Background.BackgroundImagePath` when image mode is active but grid selection is empty - prevents losing the project's image when other controls (slider/toggle) fire `ScheduleStyleUpdate` before wallpapers finish loading.
-- `FindMatchingPresetIndex` now also compares `GradientEndColor`, `GradientAngle` (0.5 degree tolerance), `ShadowEnabled`, `BorderEnabled`, and `BackgroundImagePath`; previously edits to those fields left a built-in preset selected which mislabeled the configuration as a brand preset.
-
-**Deferred (documented as known limitations):**
-- Packaged-app file access for `CanvasBitmap.LoadAsync` on arbitrary picker results: future fix should either copy into `ApplicationData.LocalFolder/CustomWallpapers` or persist a `FutureAccessList` token. Current behavior works in unpackaged dev runs and for files in user-readable locations.
-- Reentrancy guard on the "+" tile: `FileOpenPicker` is modal, so concurrent picks are unlikely. Could revisit if we ever see UI thread re-entry issues.
-- Swatch endpoint math vs compositor parity: the swatch clips at the unit-square edge while `BackgroundCompositor` uses half-diagonal endpoints. The preview direction is correct; saturation differs slightly at non-orthogonal angles. Acceptable for a small swatch.
-
----
-
----
-
-## Recording Overlay - System Backdrop Acrylic & Matching Shadow
-
-**Feature/area:** `RecordingOverlayWindow`
-
-**Approaches tried:**
-
-1. **`AcrylicBrush` on Grid + `SetWindowRgn` pill clip** - Worked for the body, but DWM's drop shadow still followed the rectangular window bounds, so the shadow appeared square around a rounded body.
-2. **Switched to `SystemBackdrop = new DesktopAcrylicBackdrop()` and removed `SetWindowRgn` + Grid `CornerRadius`** - Worked. The window itself is acrylic, DWM rounds the corners via `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND` (~8px), and the DWM shadow now follows those rounded corners. Grid background is `Transparent`. Guarded with `DesktopAcrylicController.IsSupported()`.
-
-**What worked:** `DesktopAcrylicBackdrop` (Microsoft.UI.Xaml.Media) as the window backdrop with default DWM corner rounding; removed the GDI region clip that decoupled the body from the shadow.
-
-**What didn't work:** `SetWindowRgn` for a full pill shape - it clips only the window contents, not the DWM shadow, so the shadow stayed rectangular.
-
----
-
-## Mouse Move Sample Throttling at 250Hz
-
-**Feature/area:** MouseHookRecorder move-event recording.
-
-**Approaches tried:**
-1. **Stopwatch-based pure `WM_MOUSEMOVE` gate in `HookCallback()`** — Worked. Added a 4ms minimum interval between persisted move samples while leaving button and scroll samples unthrottled.
-
-**What worked:** Tracking the last persisted move timestamp and resetting it in `StartRecording()` caps high-frequency move samples without changing the binary serialization format.
-
-**What didn't work:** Earlier validation was blocked by pre-existing App/Core build issues, but those repo-level blockers have since been resolved by adding `FindMonitorBoundsForOverlayPoint` / `ClampPointToRect` and qualifying `Windows.Storage.Streams.Buffer` usage.
-
----
-
-## Crash/freeze hardening - D3D, Win2D, VRAM, export watchdog
-
-**Feature/area:** `Direct3DDeviceHelper`, `FrameCompositor`, `VideoEncoder`
-
-**Approaches tried:**
-- Checked `D3D11CreateDevice` HRESULT and retried hardware failures with WARP (`D3D_DRIVER_TYPE_WARP = 5`).
-- Subscribed shared `CanvasDevice.DeviceLost` handlers and converted later use into recoverable exceptions instead of recreating devices mid-frame.
-- Added BGRA render-target memory preflights plus OOM/COM allocation wrapping for full-frame `CanvasRenderTarget` allocations.
-- Wrapped first-pass `TranscodeAsync` with a 2-hour watchdog using cancellation, mirroring the audio mux timeout pattern.
-
-**What worked:** Fail-fast validation and recoverable exception paths keep exports from crashing/freezing while preserving quality and normal <=4K behavior.
-
-**What didn't work:** `MSBuild.exe` was not available via `Get-Command MSBuild.exe`, so validation was limited to re-reading modified files and `git diff --check`; do not use `dotnet build` for this repo.
-
----
-
-## Crash/Freeze Hardening Pass - High-DPI / High-Res Stability (13 fixes)
-
-**Feature/area:** Capture pipeline, compositor, export, picker overlays, mouse hook.
-
-**Context:** Reports of freezes/crashes on high-DPI and high-resolution devices. Rubber-duck reviewed the codebase; 13 hardening items implemented in parallel by 5 sub-agents across non-overlapping file groups. No functionality or export-quality change.
-
-**What worked:**
-
-1. **Streaming MP4 finalize** in `VideoWriter.FinalizeAsync` - replaced per-frame `MediaClip` + `MediaComposition.RenderToFileAsync` with a streaming `MediaStreamSource` + `MediaTranscoder` (BGRA8 -> H.264, 20 Mbps, mod-2 dims, CFR). Eliminates 100k+ COM objects on long recordings. Same encoding settings -> identical output quality. `MediaTranscoder.HardwareAccelerationEnabled = false` to avoid AMD H.264 corruption.
-2. **In-flight write drain** - `VideoWriter.StopAcceptingFrames()` + `WaitForQuiescenceAsync()` replace the fixed 500ms sleep in `RecordingSession.StopAsync`.
-3. **Serialized crop+write** - entire `WriteFrame` body now runs under `_writeLock`; shared `_cropTarget` no longer races on free-threaded frame-pool callbacks.
-4. **`TryGetNextFrame()` inside try/catch** - `ObjectDisposedException`/`COMException` during shutdown/device-lost/monitor hot-plug no longer crash the process.
-5. **D3D HRESULT + WARP fallback + `CanvasDevice.DeviceLost`** - `Direct3DDeviceHelper` checks `D3D11CreateDevice` HRESULT and falls back to WARP. `FrameCompositor` / `VideoEncoder` subscribe `DeviceLost` and throw a recoverable exception (no mid-frame recreate).
-6. **Virtual-desktop screenshot guards** - `RegionSelectorOverlay` / `WindowSelectorOverlay` reject `width*height*4 > 1 GB` or `>16384px`, with checked `long` arithmetic and GDI return-value validation. Fall back to solid overlay.
-7. **VRAM preflight** - `FrameCompositor` / `VideoEncoder` estimate BGRA surface bytes; throw a clear `InvalidOperationException` above 1.5 GB. Wraps `CanvasRenderTarget` allocations in OOM/COM try/catch with cache release + context rethrow. Normal <=4K exports unaffected.
-8. **`GraphicsCaptureItem.Closed`** - `ScreenCaptureEngine` subscribes/unsubscribes; on close, one-shot guard calls `StopCapture()` so `CaptureStopped` fires.
-9. **`IAsyncDisposable` on `RecordingSession`** - sync `Dispose()` is non-blocking best-effort (no MP4 finalize). `DisposeAsync()` does graceful stop with 30s timeout. Finalize accepts `CancellationToken`.
-10. **Transcode watchdog** - 2-hour timeout around first-pass `VideoEncoder.ExportAsync` `TranscodeAsync` (mirrors mux pattern; uses `ct.Register` directly).
-11. **Mouse move throttle at 250 Hz** - `MouseHookRecorder` skips pure `WM_MOUSEMOVE` samples within 4ms of the last; clicks/scrolls/buttons always preserved. Serialization format unchanged.
-12. **Window picker covers virtual desktop** - `WindowSelectorOverlay` replaces `presenter.Maximize()` with `AppWindow.MoveAndResize` over the full virtual desktop (mirrors region picker).
-13. **Region drag clamped to active monitor (Option A)** - drag rectangle visually sticks at monitor edges of the monitor containing the drag origin; saved region equals what is drawn. No popup/error.
-
-**Validation:**
-- All three projects build clean via VS Enterprise MSBuild (`vswhere -latest -find 'MSBuild\**\Bin\MSBuild.exe'` -> `Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`) with `/p:Platform=x64 /p:Configuration=Debug /restore`.
-- All 286 MSTest tests pass. The host has .NET 8 and .NET 10 SDKs/runtimes but no .NET 9 runtime, so tests were executed with `DOTNET_ROLL_FORWARD=Major` to roll forward to the .NET 10 runtime.
-
-**What didn't work / things to remember:**
-- `dotnet build` still fails for this repo (PriGen MSB4062). Use VS MSBuild.
-- `Get-Command MSBuild.exe` returns nothing; use `vswhere -latest -find` to locate it.
-- Without a .NET 9 runtime installed, `dotnet test` aborts the test host; set `DOTNET_ROLL_FORWARD=Major` to run against the installed .NET 10 runtime.
-- For #1, the cleanest BGRA->H.264 path is `BitmapDecoder` -> `SoftwareBitmap` (BGRA8) -> `MediaStreamSample.CreateFromBuffer`. Avoid `MediaComposition` for any per-frame encoding.
-- For #5, do NOT recreate the device mid-frame on `DeviceLost` - surface a recoverable exception and let outer code restart cleanly.
-
-## Window selection highlight rect overstating bounds (2026-05-24)
-
-**Feature/area**: WindowSelectorOverlay / RegionSelector
-
-**Problem**: Highlight rect during window-picker hover extended ~7px beyond the visible window edges, creating confusion about whether the recording would include the extra region.
-
-**Root cause**: GetWindowRect on Windows 10/11 includes the invisible DWM resize/shadow border for thick-framed windows. GraphicsCaptureItem.CreateForWindow captures roughly the visible bounds, so the highlight overstated the recorded area.
-
-**Fix that worked**: Replaced GetWindowRect with DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) (with GetWindowRect fallback for non-DWM/classic-themed cases). Applied in WindowSelectorOverlay.EnumerateWindows() and RegionSelector.BuildWindowInfo(). Added a DwmGetWindowAttributeRect P/Invoke overload returning a RECT struct.
-
-## Region capture off-by-1px at fractional DPI — DID NOT WORK (2026-05-24)
-
-**Feature/area**: RegionSelectorOverlay / CaptureRegion / RecordingSession
-
-**Problem**: Precisely-selected region captures included an extra 1px on the left/top edge.
-
-**Approach tried (reverted)**: Hypothesized the cause was DIP<->physical-pixel round-trip rounding at fractional DPI. Extended `CaptureRegion` with optional `PixelX/Y/Width/Height`, threaded a `CropIsPhysicalPixels` flag through `CaptureTarget`, and skipped the DPI multiply in `RecordingSession`. **User confirmed this did not fix the 1px offset**, so the changes were reverted. The actual cause lies elsewhere (possibly in selection overlay rendering, stroke alignment, screenshot/Image stretch mapping, or the captured frame origin itself). Investigate before re-attempting.
-
----
-
-## Version Bump 1.0.4 -> 1.1.0 & Store MSIX Packages
-
-**Feature/area:** Version metadata + MSIX packaging
-
-**What was done:**
-- Incremented Package.appxmanifest Version from 1.0.4.0 to 1.1.0.0.
-- Updated SettingsPage.xaml "Version 0.1.0" -> "Version 1.1.0" (stale string was out of sync with manifest).
-- Built unsigned Store MSIX for x64 and ARM64 via VS MSBuild with /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never, copied both to %USERPROFILE%\Downloads.
-
-**What worked:**
-- Cleaning bin/obj before each platform build avoids stale artifacts.
-- Building x64 and ARM64 separately (Platform=x64 then Platform=ARM64) produces per-arch .msix in bin\{Platform}\Release\net9.0-windows10.0.26100.0\win-{rid}\AppPackages\.
-
----
-
-## HANG_QUIESCE Comprehensive Fix (44% of crash bucket)
-
-- **Feature/area**: App lifecycle / OS quiesce handling (`App.xaml.cs`, `MainWindow.xaml.cs`)
-- **Approaches tried**:
-  1. **Catch WM_QUERYENDSESSION and treat it as quiesce signal** — previous code only handled WM_ENDSESSION, and even that used wrong constant (`0x0026` instead of `0x0016`) so it never fired. Now WndProc returns 1 to WM_QUERYENDSESSION and routes both messages to `BeginQuiesce`. ✅
-  2. **`BeginQuiesce` with hard 1.5 s safety timer** — sets `_isExiting`, disposes tray/hotkey/extended-execution, posts `Window.Close()` via dispatcher, and starts a `Threading.Timer` that calls `Environment.Exit(0)` so we never exceed the OS quiesce budget. ✅
-  3. **Guarded `OnWindowClosing`** — only cancels close when `_trayService` is actually alive AND not exiting; lets OS-initiated/Task-Manager closes proceed. ✅
-  4. **Replaced `Environment.Exit(0)` in event handlers with `Application.Exit()` + safety timer** — prevents the dispatcher from being killed mid-pump (itself a HANG_QUIESCE source) while still guaranteeing process termination. ✅
-- **What worked**: All four together. The wrong WM_ENDSESSION constant (0x0026 vs 0x0016) was the root reason the earlier fix didn't help — the handler was dead code.
-- **Bugs found in pre-existing code**: WM_ENDSESSION constant was 0x0026; correct value is 0x0016. Previous `HandleSystemShutdown` disposed services but never closed the window or posted WM_QUIT, so the pump kept running after WM_ENDSESSION even if it had fired.
+- **Feature/area**: Text slide properties flyout (`EditorPage.xaml`) and timeline source/output mapping (`TimelineModel`).
+- **Approaches tried**: Reviewed both Copilot review threads, traced the flyout sync method and the `PrimaryVideoSegments` filter, then aligned them with existing repo conventions.
+- **What worked**: Removed `SelectedIndex="7"`/`Value="3"`/`Value="72"` from `SlideAnimationCombo`, `SlideDurationBox`, and `SlideFontSizeBox`; `ShowTextSlidePanel` already seeds all three under `_suppressSlideEvents`, and the model already defaults to `ZoomBlurIn`/`FontSize` 72. Added the missing `_suppressSlideEvents` guard to the three handlers. Switched both `PrimaryVideoFilePath` comparisons in `TimelineModel` to `StringComparison.OrdinalIgnoreCase`, matching `ExportAudioPlan`, `SegmentFrameComposer`, and `TimelineControl`.
+- **What didn't work**: `dotnet test` still cannot build the test project (missing Visual Studio PRI/AppX tasks). Build the test project with ARM64 VS MSBuild, then run `dotnet vstest ... /Platform:ARM64` — 414 tests pass.

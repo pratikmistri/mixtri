@@ -29,6 +29,35 @@ public sealed partial class EditorPage : Page
     private AudioPlaybackEngine? _audioPlayer;
     private bool _compositorReady;
 
+    // Text slide rendering for segment-based preview
+    private TextSlideRenderer? _textSlideRenderer;
+
+    // Blends slide↔neighbour crossfades in the preview (lazily created).
+    private TransitionRenderer? _transitionRenderer;
+
+    // Per-appended-recording preview contexts (frame reader + compositor + webcam),
+    // keyed by VideoSegment.Id. The primary recording uses _frameReader/_previewRenderer.
+    private readonly Dictionary<string, SegmentPreview> _segmentPreviews = new();
+    private string? _lastRenderedSegmentId;
+
+    private sealed class SegmentPreview : IDisposable
+    {
+        public VideoFrameReader? Reader;
+        public PreviewRenderer? Renderer;
+        public bool Ready;
+        public Windows.Media.Editing.MediaComposition? Webcam;
+        public int WebcamW, WebcamH;
+        public CanvasBitmap? LastWebcamFrame;
+
+        public void Dispose()
+        {
+            Reader?.Dispose();
+            Renderer?.Dispose();
+            Webcam?.Clips.Clear();
+            LastWebcamFrame?.Dispose();
+        }
+    }
+
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
 
@@ -78,6 +107,16 @@ public sealed partial class EditorPage : Page
         {
             if (_hasWebcamOverlay)
                 UpdateWebcamOverlayPosition();
+
+            // Keep the text-slide edit overlay aligned with the preview frame
+            if (SlideEditCanvas.Visibility == Visibility.Visible && PreviewSlide() is { } s)
+                PositionSlideEditControls(s);
+        };
+
+        // Hide the in-place text editor while playing
+        Preview.IsPlayingChanged += (_, playing) =>
+        {
+            if (playing) HideSlideEditOverlay();
         };
 
         // Sync playhead: when timeline scrubs, update preview + audio
@@ -193,6 +232,20 @@ public sealed partial class EditorPage : Page
         // Video clip selection events
         Timeline.VideoClipSelected += OnVideoClipSelected;
 
+        // Segment selection events (text slides)
+        Timeline.SegmentSelected += OnSegmentSelected;
+
+        // Primary-track segment move / ripple-trim events
+        Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
+        Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+
+        // Camera track events
+        Timeline.CameraSegmentSelected += OnCameraSegmentSelected;
+        Timeline.CameraSegmentCreated += OnCameraSegmentCreated;
+        Timeline.CameraSegmentMoved += OnCameraSegmentMoved;
+        Timeline.CameraSegmentResized += OnCameraSegmentResized;
+        Timeline.CameraSegmentRemoveRequested += OnCameraSegmentRemoveRequested;
+
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportFlyout.Closed += ExportFlyout_Closed;
@@ -214,6 +267,12 @@ public sealed partial class EditorPage : Page
             _frameReader = null;
             _previewRenderer?.Dispose();
             _previewRenderer = null;
+            _textSlideRenderer?.Dispose();
+            _textSlideRenderer = null;
+            _transitionRenderer?.Dispose();
+            _transitionRenderer = null;
+            foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+            _segmentPreviews.Clear();
             _audioPlayer?.Dispose();
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
@@ -247,8 +306,12 @@ public sealed partial class EditorPage : Page
         _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+        _segmentPreviews.Clear();
         _thumbnailGenerationId++; // cancel any in-flight generation
         Timeline.ClearThumbnails();
+        Timeline.ClearSegmentTrackVisuals();
 
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
@@ -262,8 +325,13 @@ public sealed partial class EditorPage : Page
         if (_frameReader is null)
             return;
 
-        // Generate filmstrip thumbnails for timeline video track
-        _ = GenerateTimelineThumbnailsAsync(_frameReader);
+        // Generate filmstrip thumbnails for the timeline video track (primary +
+        // any appended recordings, each from their own source file).
+        _ = GenerateAllTimelineThumbnailsAsync(_frameReader, project.VideoFilePath);
+
+        // Load per-file cursor + audio track data for appended recordings so their
+        // mouse/click and audio markers show on the tracks and move with the segment.
+        _ = LoadAppendedTrackVisualsAsync();
 
         // Load audio waveform data for timeline visualization
         await LoadAudioWaveformAsync(project);
@@ -299,20 +367,33 @@ public sealed partial class EditorPage : Page
         int cropOffX = project.CropOffsetX;
         int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
-        ViewModel.Model.ZoomKeyframes.Clear();
-        foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
+        // Only generate the PRIMARY recording's auto-zoom keyframes if none exist yet.
+        // InitializePreviewAsync re-runs whenever the editor page is reconstructed (e.g.
+        // after "Record More" navigates away and back). The TimelineModel is shared and
+        // already carries the user's edits, so regenerating would (a) wipe manual zoom
+        // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
+        // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
+        // (Appended recordings mirror this exact guard — see GenerateAppendedZoomKeyframes.)
+        if (!ZoomKeyframesExistForSource(null))
         {
-            double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
-                - mouseOffset;
-            if (clickTime < 0) continue; // skip pre-roll clicks before video started
-            ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+            foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
-                Timestamp = TimeSpan.FromSeconds(clickTime),
-                ZoomLevel = 2.0,
-                CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
-                CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
-                SourceClickTicks = click.TimestampTicks,
-            });
+                // Respect deletions: never re-add an auto-zoom the user removed.
+                if (ViewModel.Model.SuppressedClickTicks.Contains(click.TimestampTicks))
+                    continue;
+
+                double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
+                    - mouseOffset;
+                if (clickTime < 0) continue; // skip pre-roll clicks before video started
+                ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+                {
+                    Timestamp = TimeSpan.FromSeconds(clickTime),
+                    ZoomLevel = 2.0,
+                    CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
+                    CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
+                    SourceClickTicks = click.TimestampTicks,
+                });
+            }
         }
 
         Timeline.Refresh();
@@ -325,8 +406,11 @@ public sealed partial class EditorPage : Page
         config = config with
         {
             OutputFps = previewFps,
-            SmoothingAlgorithm = SmoothingAlgorithm.SpringPhysics,
-            SmoothingStrength = SmoothingStrength.UltraSmooth,
+            // Zero-phase (forward-backward) spring: smooths trackpad stop-and-go like
+            // Screen Studio with NO time lag (offline filtering uses future samples), so
+            // the cursor stays smooth yet lands on target on time. De-stutter stays off.
+            SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+            SmoothingStrength = SmoothingStrength.Smooth,
             AspectRatio = project.AspectRatio,
             FitMode = project.FitMode,
             CropAnchorX = project.CropAnchorX,
@@ -446,8 +530,236 @@ public sealed partial class EditorPage : Page
     {
         if (_frameReader is null) return;
 
-        // Map output (playhead) time to source time, accounting for speed/cut/trim edits
+        // Segment-aware rendering: when the timeline uses segments, check which
+        // segment the playhead is over and render text slides directly.
+        var model = ViewModel.Model;
+        if (model.Segments.Count > 0)
+        {
+            // Soft cut: when the playhead is within the dissolve window on the
+            // leading edge of a boundary that touches a text slide, cross-dissolve
+            // the outgoing neighbour into the incoming segment instead of hard
+            // cutting. Fully guarded — any failure falls back to the normal render.
+            var crossfade = Musio.Core.Timeline.SlideTransitions.Resolve(model, position);
+            if (crossfade.Active)
+            {
+                CanvasRenderTarget? incoming = null, outgoing = null;
+                try
+                {
+                    incoming = await ComposePreviewFrameAsync(position);
+                    outgoing = await ComposePreviewFrameAsync(crossfade.OutgoingTime);
+                    if (incoming is not null && outgoing is not null)
+                    {
+                        var project = ProjectService.Instance.CurrentProject;
+                        int w = project?.Width > 0 ? project.Width : 1920;
+                        int h = project?.Height > 0 ? project.Height : 1080;
+                        _transitionRenderer ??= new TransitionRenderer();
+                        var blended = _transitionRenderer.Render(
+                            outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
+                        HideSlideEditOverlay();
+                        // Force the normal path to fully redraw once the dissolve ends.
+                        _lastRenderedFrameIndex = -1;
+                        _lastRenderedSegmentId = null;
+                        Preview.SetFrame(blended);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[EditorPage] Slide crossfade preview error: {ex.Message}");
+                }
+                finally
+                {
+                    incoming?.Dispose();
+                    outgoing?.Dispose();
+                }
+                // Fall through to the normal render on any miss/failure.
+            }
+
+            var (segment, localOffset) = model.GetSegmentAtTime(position);
+
+            if (segment is TextSlideSegment slide)
+            {
+                await RenderTextSlidePreviewAsync(slide, localOffset);
+                return;
+            }
+
+            if (segment is VideoSegment videoSeg)
+            {
+                HideSlideEditOverlay();
+                // Map the playhead within this video segment to its source time
+                var sourceInSeg = videoSeg.SourceStart +
+                    TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
+
+                // Force a redraw when crossing a segment boundary (the frame-index
+                // cache is shared across sources).
+                if (_lastRenderedSegmentId != videoSeg.Id)
+                {
+                    _lastRenderedFrameIndex = -1;
+                    _lastRenderedSegmentId = videoSeg.Id;
+                    force = true;
+                }
+
+                // If this primary-file segment carries a frame style / cursor override
+                // that differs from what the primary renderer was last built with,
+                // rebuild it so per-segment styles apply across primary splits.
+                await EnsurePrimaryRendererForSegmentAsync(videoSeg);
+
+                await RenderSegmentVideoAsync(videoSeg, sourceInSeg, force);
+                return;
+            }
+        }
+
+        HideSlideEditOverlay();
+        // Legacy path: map output (playhead) time to source time
         TimeSpan sourcePosition = MapToSourceTime(position);
+        await RenderVideoFrameAsync(sourcePosition, force);
+    }
+
+    /// <summary>
+    /// Renders a standalone preview frame for an arbitrary output position WITHOUT
+    /// presenting it or touching the frame cache. Used to obtain both sides of a
+    /// slide↔neighbour crossfade so they can be blended. Returns null on failure
+    /// (the caller falls back to the normal render path). Text slides render at
+    /// project resolution; video frames render at their source resolution and the
+    /// transition renderer scales both to the output rect when blending.
+    /// </summary>
+    private async Task<CanvasRenderTarget?> ComposePreviewFrameAsync(TimeSpan outputPos)
+    {
+        var model = ViewModel.Model;
+        var (segment, localOffset) = model.GetSegmentAtTime(outputPos);
+
+        if (segment is TextSlideSegment slide)
+        {
+            _textSlideRenderer ??= new TextSlideRenderer();
+            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+            var project = ProjectService.Instance.CurrentProject;
+            int w = project?.Width > 0 ? project.Width : 1920;
+            int h = project?.Height > 0 ? project.Height : 1080;
+            double progress = slide.Duration.TotalSeconds > 0
+                ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+                : 0;
+            return _textSlideRenderer.RenderSlide(slide, progress, w, h);
+        }
+
+        if (segment is not VideoSegment seg)
+            return null;
+
+        var sourceTime = seg.SourceStart +
+            TimeSpan.FromTicks((long)(localOffset.Ticks * seg.SpeedFactor));
+
+        // Primary-recording segment → main reader/compositor.
+        if (string.Equals(seg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (_frameReader is null) return null;
+            await EnsurePrimaryRendererForSegmentAsync(seg);
+            var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourceTime);
+            if (bitmap is null) return null;
+
+            if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
+            {
+                await SetWebcamFrameForPreviewAsync(sourceTime);
+                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourceTime);
+                bitmap.Dispose();
+                if (composed is not null) return composed;
+            }
+            else
+            {
+                var device = CanvasDevice.GetSharedDevice();
+                var rt = new CanvasRenderTarget(device,
+                    bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+                using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+                bitmap.Dispose();
+                return rt;
+            }
+            return null;
+        }
+
+        // Appended-recording segment → its own per-segment context.
+        var ctx = await GetOrBuildSegmentPreviewAsync(seg);
+        if (ctx?.Reader is null) return null;
+        var segBitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+        if (segBitmap is null) return null;
+
+        if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+        {
+            if (ctx.Webcam is not null)
+            {
+                try
+                {
+                    var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                    if (wf is not null)
+                    {
+                        ctx.LastWebcamFrame?.Dispose();
+                        ctx.LastWebcamFrame = wf;
+                        ctx.Renderer.SetWebcamFrame(wf);
+                    }
+                }
+                catch { }
+            }
+            var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
+            segBitmap.Dispose();
+            if (composed is not null) return composed;
+            return null;
+        }
+
+        var dev = CanvasDevice.GetSharedDevice();
+        var fallback = new CanvasRenderTarget(dev,
+            segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96);
+        using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
+        segBitmap.Dispose();
+        return fallback;
+    }
+
+    // Text slide in-place editing state
+    private string? _previewSlideId;
+    private int _previewSlideW = 1920;
+    private int _previewSlideH = 1080;
+    private string? _editingSlideId;
+    private bool _slideRegionDragging;
+    private Point _slideDragStart;
+    private double _slideDragStartX, _slideDragStartY;
+
+    private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
+    {
+        _textSlideRenderer ??= new TextSlideRenderer();
+
+        // Pre-load the (image) background off the UI thread so the synchronous
+        // RenderSlide call below never blocks on file I/O + GPU decode.
+        await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+
+        var project = ProjectService.Instance.CurrentProject;
+        int width = project?.Width > 0 ? project.Width : 1920;
+        int height = project?.Height > 0 ? project.Height : 1080;
+
+        _previewSlideId = slide.Id;
+        _previewSlideW = width;
+        _previewSlideH = height;
+
+        double progress = slide.Duration.TotalSeconds > 0
+            ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
+            : 0;
+
+        try
+        {
+            // While editing, render background only — the editable TextBox shows the text.
+            bool drawText = _editingSlideId != slide.Id;
+            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height, drawText);
+            _lastRenderedFrameIndex = -1; // force redraw next time
+            Preview.SetFrame(frame);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Text slide preview error: {ex.Message}");
+        }
+
+        UpdateSlideEditOverlay(slide);
+    }
+
+    private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
+    {
+        if (_frameReader is null) return;
 
         int frameIndex = _frameReader.GetFrameIndex(sourcePosition);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
@@ -488,9 +800,169 @@ public sealed partial class EditorPage : Page
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
-                $"[EditorPage] Preview frame error at {position}: {ex.Message}");
+                $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             bitmap.Dispose();
         }
+    }
+
+    private string? PrimaryVideoPath => ProjectService.Instance.CurrentProject?.VideoFilePath;
+
+    /// <summary>
+    /// Renders a video-segment frame. Segments from the primary recording use the
+    /// main frame reader/compositor; appended recordings use their own per-segment
+    /// context so their frames, cursor, and webcam play correctly.
+    /// </summary>
+    private async Task RenderSegmentVideoAsync(VideoSegment seg, TimeSpan sourceTime, bool force)
+    {
+        if (string.Equals(seg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            await RenderVideoFrameAsync(sourceTime, force);
+            return;
+        }
+
+        var ctx = await GetOrBuildSegmentPreviewAsync(seg);
+        if (ctx?.Reader is null) return;
+
+        int frameIndex = ctx.Reader.GetFrameIndex(sourceTime);
+        if (!force && frameIndex == _lastRenderedFrameIndex) return;
+
+        var bitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+        if (bitmap is null) return;
+
+        try
+        {
+            if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+            {
+                if (ctx.Webcam is not null)
+                {
+                    try
+                    {
+                        var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                        if (wf is not null)
+                        {
+                            ctx.LastWebcamFrame?.Dispose();
+                            ctx.LastWebcamFrame = wf;
+                            ctx.Renderer.SetWebcamFrame(wf);
+                        }
+                    }
+                    catch { }
+                }
+
+                var composed = ctx.Renderer.RenderPreviewFrame(bitmap, sourceTime);
+                bitmap.Dispose();
+                if (composed is not null)
+                {
+                    _lastRenderedFrameIndex = frameIndex;
+                    Preview.SetFrame(composed);
+                    return;
+                }
+            }
+
+            // Fallback: raw frame
+            var device = CanvasDevice.GetSharedDevice();
+            var rt = new CanvasRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+            using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+            bitmap.Dispose();
+            _lastRenderedFrameIndex = frameIndex;
+            Preview.SetFrame(rt);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
+            bitmap.Dispose();
+        }
+    }
+
+    private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
+    {
+        if (_segmentPreviews.TryGetValue(seg.Id, out var existing))
+            return existing;
+
+        var ctx = new SegmentPreview();
+        _segmentPreviews[seg.Id] = ctx; // insert early to avoid duplicate builds
+
+        try
+        {
+            int fps = seg.Fps > 0 ? seg.Fps : 30;
+            ctx.Reader = VideoFrameReader.OpenFromVideoPath(seg.VideoFilePath, fps);
+            if (ctx.Reader is null) return ctx;
+
+            MouseRecordingData? mouseData = null;
+            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath))
+            {
+                try { mouseData = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath); }
+                catch { }
+            }
+
+            int w = seg.SourceWidth > 0 ? seg.SourceWidth : 1920;
+            int h = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
+            int previewFps = Math.Min(fps, 30);
+
+            var global = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+            var config = BuildSegmentConfig(global, seg, previewFps) with
+            {
+                SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                SmoothingStrength = SmoothingStrength.Smooth,
+                Zoom = new AutoZoomConfig { Enabled = true },
+            };
+
+            if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
+                config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
+
+            if (mouseData is not null)
+            {
+                try
+                {
+                    ctx.Renderer = new PreviewRenderer();
+                    await ctx.Renderer.InitializeAsync(
+                        mouseData, config, w, h, seg.SourceDuration,
+                        seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
+                    ctx.Ready = true;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[EditorPage] Segment compositor init failed: {ex.Message}");
+                    ctx.Renderer?.Dispose();
+                    ctx.Renderer = null;
+                    ctx.Ready = false;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
+            {
+                try
+                {
+                    var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(seg.WebcamFilePath);
+                    var clip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(file);
+                    var props = clip.GetVideoEncodingProperties();
+                    ctx.WebcamW = (int)props.Width;
+                    ctx.WebcamH = (int)props.Height;
+                    ctx.Webcam = new Windows.Media.Editing.MediaComposition();
+                    ctx.Webcam.Clips.Add(clip);
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] GetOrBuildSegmentPreview failed: {ex.Message}");
+        }
+
+        return ctx;
+    }
+
+    private static async Task<CanvasBitmap?> ExtractWebcamFrameAsync(
+        Windows.Media.Editing.MediaComposition comp, TimeSpan position, int width, int height)
+    {
+        if (width <= 0 || height <= 0) return null;
+        var clamped = comp.Duration > TimeSpan.Zero && position > comp.Duration ? comp.Duration : position;
+        using var thumb = await comp.GetThumbnailAsync(
+            clamped, width, height, Windows.Media.Editing.VideoFramePrecision.NearestFrame);
+        var device = CanvasDevice.GetSharedDevice();
+        using var stream = thumb.AsStream();
+        var ras = stream.AsRandomAccessStream();
+        try { return await CanvasBitmap.LoadAsync(device, ras); }
+        finally { try { ras.Dispose(); } catch { } }
     }
 
     private async Task LoadWebcamCompositionAsync(Project project)
@@ -526,6 +998,29 @@ public sealed partial class EditorPage : Page
     {
         if (_webcamComposition is null || _previewRenderer is null) return;
 
+        // Independent camera track: when camera segments exist, the webcam overlay
+        // is only shown while the (source) playhead is inside an enabled segment,
+        // and the active segment's style override is applied. With no camera
+        // segments, the legacy always-on global overlay behaviour is preserved.
+        var model = ViewModel.Model;
+        float fullscreenFactor = 0f;
+        float overlayOpacity = 1f;
+        if (model.CameraSegments.Count > 0)
+        {
+            var active = model.GetCameraSegmentAtSourceTime(position);
+            if (active is null)
+            {
+                _previewRenderer.SetWebcamFrame(null);
+                return;
+            }
+            _previewRenderer.UpdateWebcamStyle(
+                active.ResolveStyle(ProjectService.Instance.CurrentComposition?.WebcamStyle));
+            fullscreenFactor = active.ComputeFullscreenFactor(position);
+            overlayOpacity = model.GetCameraOverlayOpacity(active, position);
+        }
+        _previewRenderer.SetWebcamFullscreenFactor(fullscreenFactor);
+        _previewRenderer.SetWebcamOverlayOpacity(overlayOpacity);
+
         CanvasBitmap? webcamFrame = null;
         try
         {
@@ -535,7 +1030,14 @@ public sealed partial class EditorPage : Page
 
             // Cap extraction size for preview — full native resolution is
             // unnecessarily heavy for a ~300px overlay during editor scrubbing.
+            // When animating toward fullscreen, raise the cap so the enlarged
+            // webcam isn't blurry as it covers the screen.
             float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
+            if (fullscreenFactor > 0f)
+            {
+                float outMax = Math.Max(_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
+                previewCap = Math.Max(previewCap, fullscreenFactor * outMax);
+            }
             int extractW = _webcamWidth;
             int extractH = _webcamHeight;
             float minDim = Math.Min(_webcamWidth, _webcamHeight);
@@ -590,6 +1092,208 @@ public sealed partial class EditorPage : Page
     /// Uses versioning to cancel stale generation when the project changes.
     /// </summary>
     private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        await GenerateTimelineThumbnailsAsync(reader, project?.VideoFilePath, isPrimary: true);
+    }
+
+    /// <summary>
+    /// Loads per-file cursor data and audio waveforms for every appended (non-primary)
+    /// video segment, and registers them with the timeline so each segment renders its
+    /// OWN cursor/click/audio markers (positioned relative to the segment, so they move
+    /// with it). The primary recording uses the model-level data directly.
+    /// </summary>
+    private async Task LoadAppendedTrackVisualsAsync()
+    {
+        var model = ViewModel.Model;
+        var primary = PrimaryVideoPath;
+
+        var segs = model.Segments.OfType<VideoSegment>()
+            .Where(v => !string.IsNullOrEmpty(v.VideoFilePath) &&
+                        !string.Equals(v.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(v => v.VideoFilePath!, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+
+        foreach (var seg in segs)
+        {
+            var visual = new Musio_App.Controls.TimelineControl.SegmentTrackVisual
+            {
+                MouseToVideoOffsetSeconds = seg.MouseToVideoOffsetSeconds,
+                HasCamera = !string.IsNullOrEmpty(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath!),
+            };
+
+            // Cursor + click data
+            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath!))
+            {
+                try { visual.Cursor = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath!); }
+                catch { /* no cursor data for this recording */ }
+            }
+
+            // Auto-zoom keyframes from this recording's clicks, tagged with its file so
+            // they render on its segment and are available like the primary's.
+            GenerateAppendedZoomKeyframes(seg, visual.Cursor);
+
+            // Audio waveforms (system + mic), spanning the file's audio duration
+            var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+            visual.SystemWaveform = sys;
+            visual.MicWaveform = mic;
+            visual.WaveformDurationSeconds = durSec > 0
+                ? durSec
+                : (seg.SourceDuration.TotalSeconds > 0 ? seg.SourceDuration.TotalSeconds : seg.Duration.TotalSeconds);
+
+            Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
+        }
+        Timeline.Refresh();
+    }
+
+    /// <summary>
+    /// True when the model already has at least one zoom keyframe tagged with
+    /// <paramref name="sourceVideoFilePath"/> (null means the primary recording).
+    /// Shared by the primary and appended auto-zoom generation so both apply the
+    /// same "generate once, then preserve" rule (see remarks on the primary call site
+    /// in <see cref="InitializePreviewAsync"/> and on <see cref="GenerateAppendedZoomKeyframes"/>).
+    /// </summary>
+    private bool ZoomKeyframesExistForSource(string? sourceVideoFilePath) =>
+        ViewModel.Model.ZoomKeyframes.Any(k =>
+            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Generates auto-zoom keyframes for an appended video segment from its click
+    /// events, tagged with the segment's source file so they map into its output range.
+    /// Mirrors the primary recording's idempotent generation (see
+    /// <see cref="InitializePreviewAsync"/>): <see cref="LoadAppendedTrackVisualsAsync"/>
+    /// re-runs this on every editor page (re)construction — including additional
+    /// "Record More" cycles and duplicate-path reloads — so this must NOT
+    /// unconditionally replace existing keyframes for the file. Doing so previously wiped
+    /// manual edits and resurrected auto-zooms the user deleted. Generate only when this
+    /// source has no keyframes yet, and skip any click tracked in SuppressedClickTicks.
+    /// </summary>
+    private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
+    {
+        if (ZoomKeyframesExistForSource(seg.VideoFilePath))
+            return; // already generated (or user-edited) for this source — preserve as-is
+
+        if (mouse is null || mouse.Clicks.Count == 0 || mouse.TickFrequency <= 0) return;
+
+        int sw = seg.SourceWidth > 0 ? seg.SourceWidth : 1920;
+        int sh = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
+        int cox = seg.CropOffsetX;
+        int coy = seg.CropOffsetY;
+        double offset = seg.MouseToVideoOffsetSeconds;
+        double maxSrc = seg.SourceDuration.TotalSeconds;
+        var keyframes = ViewModel.Model.ZoomKeyframes;
+
+        foreach (var click in mouse.Clicks.Where(c => c.IsDown))
+        {
+            // Respect deletions: never re-add an auto-zoom the user removed.
+            if (ViewModel.Model.SuppressedClickTicks.Contains(click.TimestampTicks))
+                continue;
+
+            double t = (click.TimestampTicks - mouse.StartTimestampTicks) / mouse.TickFrequency - offset;
+            if (t < 0) continue;
+            if (maxSrc > 0 && t > maxSrc) continue;
+            keyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(t),
+                ZoomLevel = 2.0,
+                CenterX = Math.Clamp((click.X - cox) / (double)sw, 0, 1),
+                CenterY = Math.Clamp((click.Y - coy) / (double)sh, 0, 1),
+                SourceClickTicks = click.TimestampTicks,
+                SourceVideoFilePath = seg.VideoFilePath,
+            });
+        }
+    }
+
+    /// <summary>
+    /// Generates system + mic waveform peak arrays for a recording's audio files,
+    /// each spanning the full audio file, plus the (max) audio duration in seconds.
+    /// </summary>
+    private static async Task<(float[]? Sys, float[]? Mic, double DurationSec)> GenerateFileWaveformsAsync(
+        IReadOnlyList<string> audioFilePaths)
+    {
+        const int peaks = 1000;
+        return await Task.Run(() =>
+        {
+            float[]? sys = null, mic = null;
+            double dur = 0;
+
+            var valid = audioFilePaths.Where(File.Exists).ToList();
+            if (valid.Count == 0) return (sys, mic, dur);
+
+            var systemPath = valid.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
+            var micPath = valid.FirstOrDefault(p =>
+                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+
+            if (systemPath is not null)
+            {
+                try { using var r = new NAudio.Wave.AudioFileReader(systemPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
+                try { sys = AudioWaveformGenerator.GenerateWaveform(systemPath, peaks); } catch { }
+            }
+            if (micPath is not null)
+            {
+                try { using var r = new NAudio.Wave.AudioFileReader(micPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
+                try { mic = AudioWaveformGenerator.GenerateWaveform(micPath, peaks); } catch { }
+            }
+
+            return (sys, mic, dur);
+        });
+    }
+
+    /// <summary>
+    /// Generates filmstrip thumbnails for the primary recording and then for each
+    /// distinct appended recording's source file, so every video segment shows its
+    /// own frames. Runs sequentially so the shared generation id never cancels an
+    /// earlier still-running pass.
+    /// </summary>
+    private async Task GenerateAllTimelineThumbnailsAsync(VideoFrameReader primaryReader, string? primaryPath)
+    {
+        await GenerateTimelineThumbnailsAsync(primaryReader, primaryPath, isPrimary: true);
+        await GenerateAppendedThumbnailsAsync(primaryPath);
+    }
+
+    /// <summary>
+    /// Generates per-file thumbnails for every appended (non-primary) video segment
+    /// file referenced by the timeline.
+    /// </summary>
+    private async Task GenerateAppendedThumbnailsAsync(string? primaryPath)
+    {
+        var model = ViewModel.Model;
+        var files = model.Segments.OfType<VideoSegment>()
+            .Select(v => v.VideoFilePath)
+            .Where(p => !string.IsNullOrEmpty(p) &&
+                        !string.Equals(p, primaryPath, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var file in files)
+        {
+            if (!File.Exists(file)) continue;
+
+            int segFps = model.Segments.OfType<VideoSegment>()
+                .FirstOrDefault(v => string.Equals(v.VideoFilePath, file, StringComparison.OrdinalIgnoreCase))?.Fps ?? 30;
+            if (segFps <= 0) segFps = 30;
+
+            VideoFrameReader? reader = null;
+            try
+            {
+                reader = VideoFrameReader.OpenFromVideoPath(file, segFps);
+                if (reader is null) continue;
+                await GenerateTimelineThumbnailsAsync(reader, file, isPrimary: false);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
+            }
+            finally
+            {
+                reader?.Dispose();
+            }
+        }
+    }
+
+    private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader, string? filePath, bool isPrimary)
     {
         var generationId = ++_thumbnailGenerationId;
 
@@ -669,8 +1373,13 @@ public sealed partial class EditorPage : Page
             return;
         }
 
-        // TimelineControl takes ownership of the bitmaps
-        Timeline.SetThumbnails(thumbnails, interval, aspectRatio);
+        // TimelineControl takes ownership of the bitmaps.
+        if (isPrimary)
+            Timeline.SetThumbnails(thumbnails, interval, aspectRatio, filePath);
+        else if (!string.IsNullOrEmpty(filePath))
+            Timeline.SetThumbnailsForFile(filePath, thumbnails, interval, aspectRatio);
+        else
+            foreach (var t in thumbnails) t?.Dispose();
     }
 
     private TimelineMapper? EnsureTimelineMapper()
@@ -707,8 +1416,10 @@ public sealed partial class EditorPage : Page
         // Sync user-added zoom keyframes to the compositor
         if (_compositorReady && _previewRenderer is not null)
         {
+            // Only the PRIMARY recording's manual keyframes drive the primary renderer;
+            // appended recordings' keyframes belong to their own segment/source space.
             var manualKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.IsManual)
+                .Where(k => k.IsManual && k.SourceVideoFilePath is null)
                 .ToList();
             _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
             _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
@@ -735,6 +1446,7 @@ public sealed partial class EditorPage : Page
             Timeline.ClearClipSelection();
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
+            Timeline.Refresh();
             InvalidatePreview();
         });
     }
@@ -745,6 +1457,13 @@ public sealed partial class EditorPage : Page
     {
         ViewModel.SelectedClipIndex = clipIndex;
         UpdateSpeedPanelVisibility();
+
+        // Hide text slide panel when a video clip is selected
+        if (clipIndex is not null)
+        {
+            _selectedTextSlideId = null;
+            HideTextSlidePanel();
+        }
 
         // Sync combo to match selected clip's current speed
         if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
@@ -770,6 +1489,175 @@ public sealed partial class EditorPage : Page
             SpeedComboBox.SelectedIndex = 2;
             _suppressSpeedApply = false;
         }
+    }
+
+    private void OnSegmentSelected(object? sender, string? segmentId)
+    {
+        _selectedPrimarySegmentId = segmentId;
+
+        // Show the text slide panel only when a text slide is selected; for a
+        // video (or no) selection, treat the slide id as cleared.
+        var slide = segmentId is null
+            ? null
+            : ViewModel.Model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == segmentId);
+
+        _selectedTextSlideId = slide?.Id;
+        if (slide is not null)
+            ShowTextSlidePanel(slide);
+        else
+            HideTextSlidePanel();
+
+        // Reflect the selected video segment's effective frame style + cursor in the
+        // flyout controls, so editing per-segment style starts from its current state.
+        if (SelectedVideoSegment is { } vseg)
+        {
+            var global = ProjectService.Instance.CurrentComposition;
+            if (global is not null)
+            {
+                SyncStyleControlsToConfig(vseg.FrameStyleOverride ?? global.Background);
+                SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
+            }
+        }
+    }
+
+    /// <summary>Id of the currently selected primary-track segment (video or text slide).</summary>
+    private string? _selectedPrimarySegmentId;
+
+    private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e)
+    {
+        var operation = new MoveSegmentOperation(e.Id, e.TargetIndex);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectSegment(e.Id);
+    }
+
+    private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e)
+    {
+        var operation = new TrimSegmentEdgeOperation(e.Id, e.FromStart, e.NewDuration);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectSegment(e.Id);
+    }
+
+    // ── Camera track handlers ──
+
+    private string? _selectedCameraSegmentId;
+
+    private void OnCameraSegmentSelected(object? sender, string? segmentId)
+    {
+        // Selection is tracked by the control; property editing is via the model/ops.
+        _selectedCameraSegmentId = segmentId;
+        SyncCameraSegmentUI(segmentId);
+    }
+
+    private void SyncCameraSegmentUI(string? segmentId)
+    {
+        if (CameraFullscreenPanel is null) return;
+
+        var seg = segmentId is null
+            ? null
+            : ViewModel.Model.CameraSegments.FirstOrDefault(s => s.Id == segmentId);
+
+        if (seg is null)
+        {
+            CameraFullscreenPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _suppressWebcamEvents = true;
+        CameraFullscreenToggle.IsOn = seg.FullscreenEnabled;
+        CameraFullscreenModeCombo.SelectedIndex = seg.FullscreenMode == CameraFullscreenMode.Reveal ? 1 : 0;
+        _suppressWebcamEvents = false;
+        CameraFullscreenPanel.Visibility = Visibility.Visible;
+        UpdateCameraFullscreenModeUI(seg.FullscreenEnabled, seg.FullscreenMode);
+    }
+
+    private void UpdateCameraFullscreenModeUI(bool fullscreenEnabled, CameraFullscreenMode mode)
+    {
+        if (CameraFullscreenModeCombo is null || CameraFullscreenHint is null) return;
+        CameraFullscreenModeCombo.Visibility = fullscreenEnabled ? Visibility.Visible : Visibility.Collapsed;
+        if (!fullscreenEnabled)
+        {
+            CameraFullscreenHint.Text =
+                "The camera fades in and out smoothly at the start and end of the segment.";
+        }
+        else if (mode == CameraFullscreenMode.Reveal)
+        {
+            CameraFullscreenHint.Text =
+                "The camera stays full screen, then shrinks to the overlay at the end, revealing the video underneath.";
+        }
+        else
+        {
+            CameraFullscreenHint.Text =
+                "The camera grows to fill the screen, holds, then shrinks back to the overlay.";
+        }
+    }
+
+    private void CameraFullscreenToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+        if (_selectedCameraSegmentId is null) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateCameraSegmentPropertiesOperation(
+            _selectedCameraSegmentId, fullscreenEnabled: CameraFullscreenToggle.IsOn));
+
+        var mode = CameraFullscreenModeCombo.SelectedIndex == 1
+            ? CameraFullscreenMode.Reveal : CameraFullscreenMode.Highlight;
+        UpdateCameraFullscreenModeUI(CameraFullscreenToggle.IsOn, mode);
+
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void CameraFullscreenModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressWebcamEvents) return;
+        if (_selectedCameraSegmentId is null) return;
+        if (CameraFullscreenModeCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+
+        var mode = tag == "Reveal" ? CameraFullscreenMode.Reveal : CameraFullscreenMode.Highlight;
+        ViewModel.UndoRedoManager.Execute(new UpdateCameraSegmentPropertiesOperation(
+            _selectedCameraSegmentId, fullscreenMode: mode));
+
+        UpdateCameraFullscreenModeUI(CameraFullscreenToggle.IsOn, mode);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void OnCameraSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    {
+        var operation = new AddCameraSegmentOperation(
+            e.Start, e.End - e.Start, ProjectService.Instance.CurrentProject?.WebcamFilePath);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectedCameraSegmentId = operation.CreatedId;
+        _selectedCameraSegmentId = operation.CreatedId;
+        SyncCameraSegmentUI(operation.CreatedId);
+    }
+
+    private void OnCameraSegmentMoved(object? sender, (string Id, TimeSpan NewStart) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new MoveCameraSegmentOperation(e.Id, e.NewStart));
+    }
+
+    private void OnCameraSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new TrimCameraSegmentOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
+    }
+
+    private void OnCameraSegmentRemoveRequested(object? sender, string segmentId)
+    {
+        DeleteCameraSegment(segmentId);
+    }
+
+    private void DeleteCameraSegment(string segmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new RemoveCameraSegmentOperation(segmentId));
+        Timeline.ClearCameraSelection();
+        _selectedCameraSegmentId = null;
+        SyncCameraSegmentUI(null);
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    private void CameraDeleteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedCameraSegmentId is { } id)
+            DeleteCameraSegment(id);
     }
 
     private void UpdateSpeedPanelVisibility()
@@ -820,6 +1708,14 @@ public sealed partial class EditorPage : Page
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        // If a camera segment is selected, remove it.
+        if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
+        {
+            DeleteCameraSegment(cameraSegId);
+            args.Handled = true;
+            return;
+        }
+
         // If a zoom segment is selected, remove it instead of deleting a clip segment
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {
@@ -827,6 +1723,19 @@ public sealed partial class EditorPage : Page
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
             UpdateZoomPanelVisibility();
+            args.Handled = true;
+            return;
+        }
+
+        // If a primary-track segment is selected, ripple-delete it.
+        if (_selectedPrimarySegmentId is { } segId &&
+            ViewModel.Model.Segments.Any(s => s.Id == segId))
+        {
+            var operation = new RemoveSegmentOperation(segId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            _selectedPrimarySegmentId = null;
+            Timeline.SelectSegment(null);
+            HideTextSlidePanel();
             args.Handled = true;
             return;
         }
@@ -938,17 +1847,18 @@ public sealed partial class EditorPage : Page
         ViewModel.UndoRedoManager.Execute(operation);
     }
 
-    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
     {
         double zoomLevel = 2.0;
         if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
             double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
             zoomLevel = z;
 
-        // Use cursor position at segment midpoint as zoom center
+        // Use cursor position at segment midpoint as zoom center (primary recording
+        // only; appended recordings default to centered).
         double cx = 0.5, cy = 0.5;
         var midpoint = e.Start + (e.End - e.Start) / 2;
-        if (ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
+        if (e.FilePath is null && ViewModel.Model.CursorData is { } cursorData && cursorData.Samples.Count > 0)
         {
             var project = ProjectService.Instance.CurrentProject;
             int sourceW = project?.Width > 0 ? project.Width : 1920;
@@ -975,8 +1885,14 @@ public sealed partial class EditorPage : Page
             cy = (closest.Y * dpiY - cropOffY) / sourceH;
         }
 
-        var operation = new AddZoomSegmentOperation(e.Start, e.End, zoomLevel,
-            Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1));
+        // Build the keyframe tagged with the owning source file so it renders on the
+        // correct clip and (for the primary) drives the zoom engine.
+        var keyframe = Musio.Core.Timeline.ZoomKeyframe.FromRange(e.Start, e.End, zoomLevel,
+            Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1)) with
+        {
+            SourceVideoFilePath = e.FilePath,
+        };
+        var operation = new AddZoomSegmentOperation(keyframe);
         ViewModel.UndoRedoManager.Execute(operation);
 
         // Select the newly created segment and enter zoom region edit mode
@@ -984,7 +1900,7 @@ public sealed partial class EditorPage : Page
         OnZoomSegmentSelected(this, operation.CreatedId);
 
         var createdKf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == operation.CreatedId);
-        if (createdKf is not null)
+        if (createdKf is not null && e.FilePath is null)
             EnterZoomRegionEditMode(operation.CreatedId, createdKf);
     }
 
@@ -1482,6 +2398,7 @@ public sealed partial class EditorPage : Page
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
+        RefreshToolbarResponsiveLayout();
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -1783,7 +2700,7 @@ public sealed partial class EditorPage : Page
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
         var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
         CursorButton.Visibility = vis;
-        CursorSeparator.Visibility = vis;
+        RefreshToolbarResponsiveLayout();
 
         if (!hasCursor) return;
 
@@ -1895,9 +2812,18 @@ public sealed partial class EditorPage : Page
             TiltEnabled = CursorTiltToggle.IsOn,
         };
 
+        // Cursor style is per-segment: store on the selected segment when one is
+        // selected, otherwise update the global config.
+        if (SelectedVideoSegment is { } seg)
+        {
+            seg.CursorStyleOverride = newCursor;
+            _ = RebuildForSegmentStyleChangeAsync(seg);
+            return;
+        }
+
         config = config with { Cursor = newCursor };
         ProjectService.Instance.CurrentComposition = config;
-
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1909,7 +2835,6 @@ public sealed partial class EditorPage : Page
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
         StyleButton.Visibility = Visibility.Visible;
-        StyleSeparator.Visibility = Visibility.Visible;
 
         // Populate preset combo with built-in presets — each item is a small
         // swatch + label so users can identify gradients at a glance.
@@ -2427,18 +3352,128 @@ public sealed partial class EditorPage : Page
 
     }
 
+    /// <summary>
+    /// Builds the effective composition config for a specific video segment by
+    /// layering its per-segment style overrides (frame style + cursor) on top of the
+    /// global config. Global properties (aspect ratio, fit/cover mode, crop anchor,
+    /// zoom scope) always come from the global config so they apply to every segment.
+    /// </summary>
+    private static CompositionConfig BuildSegmentConfig(CompositionConfig global, VideoSegment? seg, int previewFps)
+    {
+        var cfg = global with { OutputFps = previewFps };
+        if (seg?.FrameStyleOverride is { } bg) cfg = cfg with { Background = bg };
+        if (seg?.CursorStyleOverride is { } cur) cfg = cfg with { Cursor = cur };
+        return cfg;
+    }
+
+    /// <summary>The currently selected primary-track video segment, if any.</summary>
+    private VideoSegment? SelectedVideoSegment =>
+        _selectedPrimarySegmentId is { } id
+            ? ViewModel.Model.Segments.OfType<VideoSegment>().FirstOrDefault(v => v.Id == id)
+            : null;
+
+    /// <summary>
+    /// Returns the primary-file video segment under the playhead (for choosing the
+    /// per-segment frame style/cursor the primary renderer should use), or the first
+    /// primary segment as a fallback.
+    /// </summary>
+    private VideoSegment? ActivePrimaryVideoSegment()
+    {
+        var model = ViewModel.Model;
+        if (model.Segments.Count == 0) return null;
+        var primary = PrimaryVideoPath;
+
+        bool IsPrimary(VideoSegment v) =>
+            primary is null || string.Equals(v.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+
+        var (seg, _) = model.GetSegmentAtTime(Timeline.PlayheadPosition);
+        if (seg is VideoSegment under && IsPrimary(under)) return under;
+        return model.Segments.OfType<VideoSegment>().FirstOrDefault(IsPrimary);
+    }
+
+    /// <summary>Disposes and clears cached appended-segment preview contexts so they
+    /// rebuild with fresh (global or per-segment) config on next render.</summary>
+    private void InvalidateSegmentPreviews()
+    {
+        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
+        _segmentPreviews.Clear();
+        _lastRenderedSegmentId = null;
+    }
+
+    /// <summary>
+    /// Ensures the primary renderer was built with the given primary-file segment's
+    /// per-segment frame style / cursor override. Rebuilds it when the override
+    /// differs (e.g. the playhead crossed into a differently-styled primary split).
+    /// No-op for appended segments (they use their own renderers).
+    /// </summary>
+    private async Task EnsurePrimaryRendererForSegmentAsync(VideoSegment seg)
+    {
+        var primary = PrimaryVideoPath;
+        bool isPrimary = primary is null ||
+            string.Equals(seg.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+        if (!isPrimary) return;
+
+        var global = ProjectService.Instance.CurrentComposition;
+        var wantBg = seg.FrameStyleOverride ?? global.Background;
+        var wantCursor = seg.CursorStyleOverride ?? global.Cursor;
+
+        if (Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
+            return;
+
+        await RebuildPreviewRendererAsync(global);
+    }
+
     private void ApplyBackgroundStyle(BackgroundStyle bg)
     {
-        var config = ProjectService.Instance.CurrentComposition;
-        config = config with { Background = bg };
-        ProjectService.Instance.CurrentComposition = config;
-
         // Mark preset as Custom if it no longer matches
         _suppressStyleEvents = true;
         PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
         _suppressStyleEvents = false;
 
+        // Frame style is per-segment: when a video segment is selected, store the
+        // override on it and rebuild only that segment's renderer. Otherwise update
+        // the global config so segments without an override follow it.
+        if (SelectedVideoSegment is { } seg)
+        {
+            seg.FrameStyleOverride = bg;
+            _ = RebuildForSegmentStyleChangeAsync(seg);
+            return;
+        }
+
+        var config = ProjectService.Instance.CurrentComposition with { Background = bg };
+        ProjectService.Instance.CurrentComposition = config;
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
+    }
+
+    /// <summary>
+    /// Rebuilds the preview after a per-segment style override change. If the edited
+    /// segment is an appended recording, its cached preview is dropped so it rebuilds
+    /// with the new override; if it is the primary recording (and currently active),
+    /// the primary renderer is rebuilt.
+    /// </summary>
+    private async Task RebuildForSegmentStyleChangeAsync(VideoSegment seg)
+    {
+        var primary = PrimaryVideoPath;
+        bool isPrimary = primary is null ||
+            string.Equals(seg.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);
+
+        if (isPrimary)
+        {
+            _primaryRenderBackground = null; // force primary rebuild to pick up the override
+            await RebuildPreviewRendererAsync(ProjectService.Instance.CurrentComposition);
+        }
+        else
+        {
+            if (_segmentPreviews.TryGetValue(seg.Id, out var ctx))
+            {
+                ctx.Dispose();
+                _segmentPreviews.Remove(seg.Id);
+            }
+            _lastRenderedSegmentId = null;
+            _lastRenderedFrameIndex = -1;
+            await UpdatePreviewFrameAsync(Timeline.PlayheadPosition, force: true);
+        }
     }
 
     /// <summary>
@@ -2449,6 +3484,16 @@ public sealed partial class EditorPage : Page
     {
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
+
+        // Apply the active primary segment's per-segment frame style / cursor override
+        // on top of the global config so the primary recording honors its own style.
+        var activePrimary = ActivePrimaryVideoSegment();
+        var effective = config;
+        if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
+        if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
+        _primaryRenderBackground = effective.Background;
+        _primaryRenderCursor = effective.Cursor;
+        _primaryRendererSegmentId = activePrimary?.Id;
 
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -2466,7 +3511,7 @@ public sealed partial class EditorPage : Page
         {
             _previewRenderer = new PreviewRenderer();
             await _previewRenderer.InitializeAsync(
-                mouseData, config,
+                mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
                 project.Duration,
@@ -2475,9 +3520,13 @@ public sealed partial class EditorPage : Page
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom keyframes from the model
-            if (ViewModel.Model.ZoomKeyframes.Count > 0)
-                _previewRenderer.UpdateZoomKeyframes(ViewModel.Model.ZoomKeyframes);
+            // Re-sync zoom keyframes from the model (primary recording only — appended
+            // recordings' keyframes are mapped in their own segment's source space).
+            var primaryKeyframes = ViewModel.Model.ZoomKeyframes
+                .Where(k => k.SourceVideoFilePath is null)
+                .ToList();
+            if (primaryKeyframes.Count > 0)
+                _previewRenderer.UpdateZoomKeyframes(primaryKeyframes);
 
             _compositorReady = true;
         }
@@ -2492,6 +3541,13 @@ public sealed partial class EditorPage : Page
         var position = Timeline.PlayheadPosition;
         await UpdatePreviewFrameAsync(position, force: true);
     }
+
+    // Tracks the per-segment style the primary renderer was last built with, so it
+    // can be rebuilt when the playhead crosses into a primary segment with a
+    // different frame style / cursor override.
+    private string? _primaryRendererSegmentId;
+    private BackgroundStyle? _primaryRenderBackground;
+    private CursorStyle? _primaryRenderCursor;
 
     private static Color ParseHexColor(string hex)
     {
@@ -2510,14 +3566,68 @@ public sealed partial class EditorPage : Page
 
     // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
 
-    private void InitializeWebcamOverlay(CompositionConfig config)
+    private bool _toolbarLabelsCollapsed;
+
+    private void ToolbarGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
+        UpdateToolbarResponsiveLayout(e.NewSize.Width);
+    }
+
+    /// <summary>
+    /// Re-evaluates the responsive toolbar layout using the current toolbar width.
+    /// Call this after toggling the visibility of any right-group button (Cursor,
+    /// Camera, Text Slide, zoom controls) so the collapse decision stays correct even
+    /// though those changes don't resize the full-width toolbar.
+    /// </summary>
+    private void RefreshToolbarResponsiveLayout()
+    {
+        if (ToolbarGrid is null) return;
+        UpdateToolbarResponsiveLayout(ToolbarGrid.ActualWidth);
+    }
+
+    /// <summary>
+    /// Collapses the Frame style / Cursor / Camera button labels to icon-only when the
+    /// toolbar's two edge groups would otherwise overlap, and restores them when there
+    /// is room again. Toggling the labels never changes the full-width toolbar size, so
+    /// this cannot feed back into <see cref="ToolbarGrid_SizeChanged"/>.
+    /// </summary>
+    private void UpdateToolbarResponsiveLayout(double availableWidth)
+    {
+        if (LeftToolbarGroup is null || RightToolbarGroup is null) return;
+        if (availableWidth <= 0) return;
+
+        // Measure both Auto groups with labels expanded to learn how much room they need.
+        SetToolbarLabelsCollapsed(false);
+        var inf = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
+        LeftToolbarGroup.Measure(inf);
+        RightToolbarGroup.Measure(inf);
+
+        const double toolbarPadding = 16; // Grid Padding 8 on each side
+        const double minGap = 16;         // keep a gap so the groups never touch
+        double needed = LeftToolbarGroup.DesiredSize.Width + RightToolbarGroup.DesiredSize.Width
+                        + toolbarPadding + minGap;
+
+        if (needed > availableWidth)
+            SetToolbarLabelsCollapsed(true);
+    }
+
+    private void SetToolbarLabelsCollapsed(bool collapsed)
+    {
+        if (_toolbarLabelsCollapsed == collapsed) return;
+        _toolbarLabelsCollapsed = collapsed;
+        var vis = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        if (FrameStyleLabel is not null) FrameStyleLabel.Visibility = vis;
+        if (CursorLabel is not null) CursorLabel.Visibility = vis;
+        if (CameraLabel is not null) CameraLabel.Visibility = vis;
+    }
+
+    private void InitializeWebcamOverlay(CompositionConfig config)
+    {        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
         if (!_hasWebcamOverlay)
         {
             WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
             WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+            RefreshToolbarResponsiveLayout();
             return;
         }
 
@@ -2549,9 +3659,9 @@ public sealed partial class EditorPage : Page
 
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
-        WebcamShapeSeparator.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
         SyncWebcamOverlayUI(style);
         UpdateWebcamOverlayPosition();
+        RefreshToolbarResponsiveLayout();
     }
 
     private void UpdateWebcamOverlayPosition()
@@ -2852,6 +3962,7 @@ public sealed partial class EditorPage : Page
 
         UpdateFitAndAnchorVisibility(ratio);
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -2867,6 +3978,7 @@ public sealed partial class EditorPage : Page
 
         UpdateFitAndAnchorVisibility(project.AspectRatio);
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -2881,6 +3993,7 @@ public sealed partial class EditorPage : Page
         config = config with { CropAnchorX = anchorX, CropAnchorY = anchorY };
         ProjectService.Instance.CurrentComposition = config;
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -2894,6 +4007,651 @@ public sealed partial class EditorPage : Page
         config = config with { ZoomScope = scope };
         ProjectService.Instance.CurrentComposition = config;
 
+        InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
+    }
+
+    // ─── Text Slide & Append Recording handlers ─────────────────────────
+
+    private string? _selectedTextSlideId;
+
+    private void AddTextSlide_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = new TextSlideSegment
+        {
+            Text = "Title",
+            Duration = TimeSpan.FromSeconds(3),
+        };
+
+        var playhead = ViewModel.Model.PlayheadPosition;
+
+        // Use the split-and-insert operation which splits the video segment
+        // at the playhead, keeping audio in sync
+        var operation = new SplitAndInsertTextSlideOperation(playhead, slide);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        // Select the new slide and show properties
+        _selectedTextSlideId = slide.Id;
+        Timeline.SelectSegment(slide.Id);
+        ShowTextSlidePanel(slide);
+
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void RecordMore_Click(object sender, RoutedEventArgs e)
+    {
+        // Navigate to RecordingPage in append mode
+        Preview?.Pause();
+        _audioPlayer?.Stop();
+        Frame.Navigate(typeof(RecordingPage), "append");
+    }
+
+    private void RemoveTextSlide_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedTextSlideId is null) return;
+        var operation = new RemoveSegmentOperation(_selectedTextSlideId);
+        ViewModel.UndoRedoManager.Execute(operation);
+        _selectedTextSlideId = null;
+        HideTextSlidePanel();
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void SlideTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+        slide.Text = SlideTextBox.Text;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null ||
+            SlideAnimationCombo.SelectedItem is not ComboBoxItem item) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        if (Enum.TryParse<TextSlideAnimation>(item.Tag?.ToString(), out var anim))
+            slide.Animation = anim;
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideDurationBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.Duration = TimeSpan.FromSeconds(args.NewValue);
+        ViewModel.Model.RecalculateSegmentPositions();
+        Timeline.InvalidateAllCanvases();
+        InvalidatePreview();
+    }
+
+    private void SlideFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+        slide.FontSize = args.NewValue;
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private bool _suppressSlideEvents;
+
+    private void ShowTextSlidePanel(TextSlideSegment slide)
+    {
+        if (TextSlideButton is null) return;
+
+        _suppressSlideEvents = true;
+
+        TextSlideButton.Visibility = Visibility.Visible;
+        if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
+        if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
+        RefreshToolbarResponsiveLayout();
+
+        SlideTextBox.Text = slide.Text;
+        SlideDurationBox.Value = slide.Duration.TotalSeconds;
+        SlideFontSizeBox.Value = slide.FontSize;
+
+        // Formatting toggles
+        SlideBoldToggle.IsChecked = slide.IsBold;
+        SlideItalicToggle.IsChecked = slide.IsItalic;
+        SlideAlignSegmented.SelectedIndex = slide.TextAlignment switch
+        {
+            SlideTextAlignment.Left => 0,
+            SlideTextAlignment.Right => 2,
+            _ => 1,
+        };
+
+        // Font dropdown
+        SetSlideFontSelection(slide.FontFamily);
+
+        // Set animation combo
+        var animName = slide.Animation.ToString();
+        for (int i = 0; i < SlideAnimationCombo.Items.Count; i++)
+        {
+            if (SlideAnimationCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == animName)
+            {
+                SlideAnimationCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        // Color swatches + pickers
+        UpdateSlideColorSwatch(SlideTextColorSwatch, SlideTextColorText, SlideTextColorPicker, slide.TextColor);
+        UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
+        UpdateSlideColorSwatch(SlideGradEndColorSwatch, SlideGradEndColorText, SlideGradEndColorPicker, slide.GradientEndColor);
+        SlideGradAngleSlider.Value = slide.GradientAngle;
+
+        // Background type combo
+        var bgTypeName = slide.BackgroundType.ToString();
+        for (int i = 0; i < SlideBgTypeCombo.Items.Count; i++)
+        {
+            if (SlideBgTypeCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == bgTypeName)
+            {
+                SlideBgTypeCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        SlideImagePathText.Text = string.IsNullOrEmpty(slide.BackgroundImagePath)
+            ? "No image selected" : System.IO.Path.GetFileName(slide.BackgroundImagePath);
+
+        BuildGradientPresetsIfNeeded();
+        UpdateSlideBgPanels(slide.BackgroundType);
+
+        _suppressSlideEvents = false;
+
+        // Open the flyout so properties are immediately editable on selection.
+        // Deferred so it doesn't conflict with a closing menu/flyout.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (TextSlideButton.Visibility == Visibility.Visible)
+                TextSlideFlyout?.ShowAt(TextSlideButton);
+        });
+    }
+
+    private void HideTextSlidePanel()
+    {
+        if (TextSlideButton is not null)
+            TextSlideButton.Visibility = Visibility.Collapsed;
+        if (ZoomHintText is not null)
+            ZoomHintText.Visibility = Visibility.Visible;
+        RefreshToolbarResponsiveLayout();
+    }
+
+    private static void UpdateSlideColorSwatch(
+        Border swatch, TextBlock text, ColorPicker picker, string hex)
+    {
+        var color = ParseHexColor(hex);
+        swatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(color);
+        text.Text = hex;
+        picker.Color = color;
+    }
+
+    private void SlideTextColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.TextColor = ColorToHex(args.NewColor);
+        SlideTextColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideTextColorText.Text = slide.TextColor;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void SlideBgColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+        if (slide is null) return;
+
+        slide.BackgroundColor = ColorToHex(args.NewColor);
+        SlideBgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideBgColorText.Text = slide.BackgroundColor;
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private TextSlideSegment? SelectedSlide() =>
+        _selectedTextSlideId is null ? null : ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _selectedTextSlideId);
+
+    private void SlideBold_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        slide.IsBold = SlideBoldToggle.IsChecked == true;
+        RefreshSlidePreview();
+    }
+
+    private void SlideItalic_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        slide.IsItalic = SlideItalicToggle.IsChecked == true;
+        RefreshSlidePreview();
+    }
+
+    private void SlideAlignSegmented_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        if (SlideAlignSegmented.SelectedItem is CommunityToolkit.WinUI.Controls.SegmentedItem item
+            && Enum.TryParse<SlideTextAlignment>(item.Tag?.ToString(), out var align))
+        {
+            slide.TextAlignment = align;
+            RefreshSlidePreview();
+        }
+    }
+
+    private void SlideFontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+        if (SlideFontCombo.SelectedItem is ComboBoxItem item && item.Tag is string font
+            && !string.IsNullOrWhiteSpace(font))
+        {
+            slide.FontFamily = font;
+            RefreshSlidePreview();
+        }
+    }
+
+    /// <summary>
+    /// Selects the combo item matching <paramref name="fontFamily"/>; if the slide
+    /// uses a font that isn't in the curated list, it is inserted at the top so the
+    /// actual font is represented (and not silently changed).
+    /// </summary>
+    private void SetSlideFontSelection(string fontFamily)
+    {
+        for (int i = 0; i < SlideFontCombo.Items.Count; i++)
+        {
+            if (SlideFontCombo.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag?.ToString(), fontFamily, StringComparison.OrdinalIgnoreCase))
+            {
+                SlideFontCombo.SelectedIndex = i;
+                return;
+            }
+        }
+
+        var custom = new ComboBoxItem { Content = fontFamily, Tag = fontFamily };
+        try { custom.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily); }
+        catch { /* unknown family — fall back to default rendering */ }
+        SlideFontCombo.Items.Insert(0, custom);
+        SlideFontCombo.SelectedIndex = 0;
+    }
+
+    private void RefreshSlidePreview()
+    {
+        Timeline.InvalidateAllCanvases();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    private void UpdateSlideBgPanels(SlideBackgroundType type)
+    {
+        SlideColorPanel.Visibility = type is SlideBackgroundType.Solid or SlideBackgroundType.Gradient
+            ? Visibility.Visible : Visibility.Collapsed;
+        SlideColorLabel.Text = type == SlideBackgroundType.Gradient ? "Start Color" : "Color";
+        SlideGradientPanel.Visibility = type == SlideBackgroundType.Gradient ? Visibility.Visible : Visibility.Collapsed;
+        SlideImagePanel.Visibility = type == SlideBackgroundType.Image ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SlideBgTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents || SlideBgTypeCombo.SelectedItem is not ComboBoxItem item) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        if (Enum.TryParse<SlideBackgroundType>(item.Tag?.ToString(), out var type))
+        {
+            slide.BackgroundType = type;
+            UpdateSlideBgPanels(type);
+            RefreshSlidePreview();
+        }
+    }
+
+    private void SlideGradEndColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        slide.GradientEndColor = ColorToHex(args.NewColor);
+        SlideGradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        SlideGradEndColorText.Text = slide.GradientEndColor;
+        RefreshSlidePreview();
+    }
+
+    private void SlideGradAngleSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        slide.GradientAngle = e.NewValue;
+        RefreshSlidePreview();
+    }
+
+    private bool _slideGradientPresetsBuilt;
+
+    private void BuildGradientPresetsIfNeeded()
+    {
+        if (_slideGradientPresetsBuilt) return;
+        _slideGradientPresetsBuilt = true;
+
+        foreach (var preset in Musio.Core.Settings.DefaultBrandPresets.All)
+        {
+            var brush = new Microsoft.UI.Xaml.Media.LinearGradientBrush
+            {
+                StartPoint = new Windows.Foundation.Point(0, 0),
+                EndPoint = new Windows.Foundation.Point(1, 1),
+            };
+            brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
+            { Color = ParseHexColor(preset.BackgroundColor), Offset = 0 });
+            brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
+            { Color = ParseHexColor(preset.GradientEndColor), Offset = 1 });
+
+            var tile = new Border
+            {
+                Width = 56,
+                Height = 40,
+                CornerRadius = new CornerRadius(6),
+                Background = brush,
+                Tag = preset,
+                BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+                BorderThickness = new Thickness(1),
+            };
+            ToolTipService.SetToolTip(tile, preset.Name);
+            SlideGradientPresets.Items.Add(tile);
+        }
+    }
+
+    private void SlideGradientPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents) return;
+        if (SlideGradientPresets.SelectedItem is not Border { Tag: Musio.Core.Settings.BrandPreset preset }) return;
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        _suppressSlideEvents = true;
+        slide.BackgroundColor = preset.BackgroundColor;
+        slide.GradientEndColor = preset.GradientEndColor;
+        slide.GradientAngle = preset.GradientAngle;
+
+        UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
+        UpdateSlideColorSwatch(SlideGradEndColorSwatch, SlideGradEndColorText, SlideGradEndColorPicker, slide.GradientEndColor);
+        SlideGradAngleSlider.Value = slide.GradientAngle;
+        _suppressSlideEvents = false;
+
+        RefreshSlidePreview();
+    }
+
+    private async void ChooseSlideImage_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        picker.FileTypeFilter.Add(".jpg");
+        picker.FileTypeFilter.Add(".jpeg");
+        picker.FileTypeFilter.Add(".png");
+        picker.FileTypeFilter.Add(".bmp");
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); } catch { }
+        if (file is null) return;
+
+        slide.BackgroundImagePath = file.Path;
+        SlideImagePathText.Text = System.IO.Path.GetFileName(file.Path);
+        RefreshSlidePreview();
+    }
+
+    private static void InitializePicker(Windows.Storage.Pickers.FileOpenPicker picker)
+    {
+        var window = App.Current.MainAppWindow;
+        if (window is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        }
+    }
+
+    // ─── In-preview text editing & repositioning ────────────────────────
+
+    private TextSlideSegment? PreviewSlide() =>
+        _previewSlideId is null ? null : ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _previewSlideId);
+
+    /// <summary>
+    /// Shows and positions the text-edit overlay over the slide's text region.
+    /// Hidden during playback. Safe to call from any thread.
+    /// </summary>
+    private void UpdateSlideEditOverlay(TextSlideSegment slide)
+    {
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(() => UpdateSlideEditOverlay(slide));
+            return;
+        }
+
+        if (Preview.IsPlaying || _zoomRegionEditMode)
+        {
+            HideSlideEditOverlay();
+            return;
+        }
+
+        SlideEditCanvas.Visibility = Visibility.Visible;
+        PositionSlideEditControls(slide);
+    }
+
+    private void HideSlideEditOverlay()
+    {
+        if (SlideEditCanvas is null) return;
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(HideSlideEditOverlay);
+            return;
+        }
+        if (_editingSlideId is not null)
+            CommitSlideTextEdit();
+        SlideEditCanvas.Visibility = Visibility.Collapsed;
+    }
+
+    private void PositionSlideEditControls(TextSlideSegment slide)
+    {
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || _previewSlideW <= 0) return;
+
+        double scaleX = layout.Width / _previewSlideW;
+        double scaleY = layout.Height / _previewSlideH;
+
+        var textRect = TextSlideRenderer.ComputeTextRect(slide, _previewSlideW, _previewSlideH);
+        double left = layout.X + textRect.X * scaleX;
+        double top = layout.Y + textRect.Y * scaleY;
+        double w = textRect.Width * scaleX;
+        double h = textRect.Height * scaleY;
+
+        Canvas.SetLeft(SlideTextRegion, left);
+        Canvas.SetTop(SlideTextRegion, top);
+        SlideTextRegion.Width = w;
+        SlideTextRegion.Height = h;
+
+        Canvas.SetLeft(SlideEditBox, left);
+        Canvas.SetTop(SlideEditBox, top);
+        SlideEditBox.Width = w;
+        SlideEditBox.Height = h;
+
+        // Match the slide's text styling so editing looks WYSIWYG.
+        SlideEditBox.FontSize = Math.Max(8, slide.FontSize * scaleY);
+        SlideEditBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(slide.FontFamily);
+        SlideEditBox.FontWeight = slide.IsBold
+            ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal;
+        SlideEditBox.FontStyle = slide.IsItalic
+            ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal;
+        SlideEditBox.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(ParseHexColor(slide.TextColor));
+        SlideEditBox.TextAlignment = slide.TextAlignment switch
+        {
+            SlideTextAlignment.Left => TextAlignment.Left,
+            SlideTextAlignment.Right => TextAlignment.Right,
+            _ => TextAlignment.Center,
+        };
+    }
+
+    private void SlideTextRegion_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingSlideId is null)
+            ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeAll);
+    }
+
+    private void SlideTextRegion_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging)
+            ProtectedCursor = null;
+    }
+
+    private void SlideTextRegion_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingSlideId is not null) return; // editing — let the textbox handle it
+        var slide = PreviewSlide();
+        if (slide is null) return;
+
+        _slideRegionDragging = true;
+        _slideDragStart = e.GetCurrentPoint(SlideEditCanvas).Position;
+        _slideDragStartX = slide.TextX;
+        _slideDragStartY = slide.TextY;
+        SlideTextRegion.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging) return;
+        var slide = PreviewSlide();
+        var layout = Preview.FrameLayoutRect;
+        if (slide is null || layout.Width <= 0) return;
+
+        var pos = e.GetCurrentPoint(SlideEditCanvas).Position;
+        double dx = (pos.X - _slideDragStart.X) / layout.Width;
+        double dy = (pos.Y - _slideDragStart.Y) / layout.Height;
+
+        slide.TextX = Math.Clamp(_slideDragStartX + dx, 0.0, 1.0);
+        slide.TextY = Math.Clamp(_slideDragStartY + dy, 0.0, 1.0);
+
+        PositionSlideEditControls(slide);
+        RefreshSlidePreview();
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_slideRegionDragging) return;
+        _slideRegionDragging = false;
+        SlideTextRegion.ReleasePointerCapture(e.Pointer);
+        ProtectedCursor = null;
+        e.Handled = true;
+    }
+
+    private void SlideTextRegion_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    {
+        EnterSlideTextEdit();
+        e.Handled = true;
+    }
+
+    private void EnterSlideTextEdit()
+    {
+        var slide = PreviewSlide();
+        if (slide is null) return;
+
+        // The taps that opened the editor may have started a region drag (and
+        // captured the pointer) without a matching PointerReleased, because the
+        // region gets collapsed below. Clear that state so the box doesn't follow
+        // the mouse after editing finishes.
+        _slideRegionDragging = false;
+        SlideTextRegion.ReleasePointerCaptures();
+        ProtectedCursor = null;
+
+        _editingSlideId = slide.Id;
+        SlideTextRegion.Visibility = Visibility.Collapsed;
+        SlideEditBox.Visibility = Visibility.Visible;
+        SlideEditBox.Text = slide.Text;
+        SlideEditBox.Focus(FocusState.Programmatic);
+        SlideEditBox.SelectAll();
+
+        // Re-render background-only so the rendered text doesn't double up.
+        RefreshSlidePreview();
+    }
+
+    private void CommitSlideTextEdit()
+    {
+        if (_editingSlideId is null) return;
+        _editingSlideId = null;
+        SlideEditBox.Visibility = Visibility.Collapsed;
+        SlideTextRegion.Visibility = Visibility.Visible;
+        RefreshSlidePreview();
+    }
+
+    private void SlideEditBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_editingSlideId is null) return;
+        var slide = ViewModel.Model.Segments.OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == _editingSlideId);
+        if (slide is null) return;
+
+        slide.Text = SlideEditBox.Text;
+        if (SlideTextBox is not null && SlideTextBox.Text != slide.Text)
+            SlideTextBox.Text = slide.Text; // keep flyout in sync
+
+        // Re-measure so the edit box grows/shrinks to hug the wrapped text live
+        // instead of staying at the height it had when editing started.
+        PositionSlideEditControls(slide);
+        Timeline.InvalidateAllCanvases();
+    }
+
+    private void SlideEditBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        // Enter commits (Shift+Enter inserts a newline); Esc commits too.
+        var shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
+            Windows.System.VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down)
+            == Windows.UI.Core.CoreVirtualKeyStates.Down;
+
+        if ((e.Key == Windows.System.VirtualKey.Enter && !shift)
+            || e.Key == Windows.System.VirtualKey.Escape)
+        {
+            CommitSlideTextEdit();
+            e.Handled = true;
+        }
+    }
+
+    private void SlideEditBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        CommitSlideTextEdit();
     }
 }
