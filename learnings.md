@@ -1080,3 +1080,13 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Tests**: `CursorShapePollingTests` (interval default/clamp, monotonic clamp on out-of-order append, resolver position). Suite 418 green (ARM64 vstest.console).
 - **Gotcha**: rebuilding the App fails with MSB3027 (Musio.Core.dll locked) if a previously launched `Musio.App.exe` is still running — stop the process first.
 - **Verified**: VS MSBuild ARM64 Debug clean for Tests + App; 418/418 tests pass; app relaunched and responsive.
+
+
+---
+
+## README screenshot placeholder replaced with real editor capture
+
+- **Feature/area**: `README.md` hero image + `docs/screenshot.png`.
+- **Approaches tried**: (1) Reused old session screenshots — rejected, wrong page/stale UI. (2) Built + launched the app and scripted screen capture with Win32 `BitBlt` (`Graphics.CopyFromScreen`) plus UI Automation to drive the Frame Style flyout (gradient/wallpaper preset, padding, corner radius sliders). (3) User supplied the final image directly, which was copied to `docs/screenshot.png`.
+- **What worked**: `SetProcessDpiAwarenessContext(-4)` in the capture script is REQUIRED — without it `GetWindowRect`/`CopyFromScreen` mix logical and physical pixels on this 150%-DPI machine and the capture is offset/cropped. Raising the WinUI window reliably needs topmost + `AttachThreadInput` before `SetForegroundWindow`; a plain `SetForegroundWindow` loses to the terminal. UIA `RangeValuePattern` on the `Padding`/`Corner Radius` sliders and `ExpandCollapsePattern` + `SelectionItemPattern` on the `Preset` combo work well; presence of a `Padding`/`Aspect ratio` element is a good "flyout is open" probe. Esc closes the Frame Style flyout; clicking the button again does not.
+- **What didn't work**: `PrintWindow` on the WinUI 3 window (returns black, consistent with earlier notes). The Frame Style flyout is NOT a separate top-level window — enumerating `RootElement` children finds nothing; its controls are descendants of the main window's UIA tree. Preset ComboBox `ListItem` names come back empty, so items can't be picked by name (index only). Narrowing the window below ~1900px collapses the `Frame style`/`Cursor` command-bar labels to icons, so use a maximized/large window for screenshots.
