@@ -1418,17 +1418,36 @@ public sealed partial class EditorPage : Page
         // Sync user-added zoom keyframes to the compositor
         if (_compositorReady && _previewRenderer is not null)
         {
-            // Only the PRIMARY recording's manual keyframes drive the primary renderer;
-            // appended recordings' keyframes belong to their own segment/source space.
-            var manualKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.IsManual && k.SourceVideoFilePath is null)
-                .ToList();
-            _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
-            _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+            SyncZoomStateToRenderer();
         }
 
         Timeline.Refresh();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    /// <summary>
+    /// Pushes the model's zoom state — manual keyframes plus the suppressed auto-zoom click
+    /// ticks — onto the primary preview renderer.
+    /// </summary>
+    /// <remarks>
+    /// This must run after every renderer rebuild as well as on every model change. A rebuilt
+    /// <see cref="FrameCompositor"/> regenerates auto-zoom from the raw mouse recording, so
+    /// skipping the suppressed ticks brings back auto-zoom segments the user deleted, and
+    /// skipping the manual list (in particular when it is empty) leaves the previous zooms in
+    /// place. Both show up as zoom happening in the preview with no matching timeline segment.
+    /// </remarks>
+    private void SyncZoomStateToRenderer()
+    {
+        if (_previewRenderer is null) return;
+
+        // Only the PRIMARY recording's manual keyframes drive the primary renderer;
+        // appended recordings' keyframes belong to their own segment/source space.
+        var manualKeyframes = ViewModel.Model.ZoomKeyframes
+            .Where(k => k.IsManual && k.SourceVideoFilePath is null)
+            .ToList();
+
+        _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
+        _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
@@ -3541,13 +3560,10 @@ public sealed partial class EditorPage : Page
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom keyframes from the model (primary recording only — appended
-            // recordings' keyframes are mapped in their own segment's source space).
-            var primaryKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.SourceVideoFilePath is null)
-                .ToList();
-            if (primaryKeyframes.Count > 0)
-                _previewRenderer.UpdateZoomKeyframes(primaryKeyframes);
+            // Re-sync zoom state from the model. The new compositor has just regenerated
+            // auto-zoom from the raw mouse data, so this has to run unconditionally —
+            // an empty keyframe list and an empty suppression set are both meaningful.
+            SyncZoomStateToRenderer();
 
             _compositorReady = true;
         }
