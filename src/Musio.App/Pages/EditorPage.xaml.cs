@@ -11,6 +11,7 @@ using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
+using Musio_App.Controls;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -96,6 +97,7 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         ExportVM = new ExportViewModel();
         InitializeComponent();
+        WirePropertyPanels();
 
         Preview.Duration = GetMappedDuration();
 
@@ -1568,6 +1570,9 @@ public sealed partial class EditorPage : Page
         _suppressWebcamEvents = false;
         CameraFullscreenPanel.Visibility = Visibility.Visible;
         UpdateCameraFullscreenModeUI(seg.FullscreenEnabled, seg.FullscreenMode);
+
+        // Surface the video panel so the segment's settings are immediately editable.
+        PropertiesPanel.ShowPane(PropertyPaneKind.Video);
     }
 
     private void UpdateCameraFullscreenModeUI(bool fullscreenEnabled, CameraFullscreenMode mode)
@@ -2398,7 +2403,6 @@ public sealed partial class EditorPage : Page
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
-        RefreshToolbarResponsiveLayout();
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -2698,9 +2702,7 @@ public sealed partial class EditorPage : Page
     private void InitializeCursorControls(Project project, CompositionConfig config)
     {
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
-        var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
-        CursorButton.Visibility = vis;
-        RefreshToolbarResponsiveLayout();
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Cursor, hasCursor);
 
         if (!hasCursor) return;
 
@@ -2831,10 +2833,10 @@ public sealed partial class EditorPage : Page
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
-        // Style menu is available for all capture types. Monitor (full-screen)
+        // Style panel is available for all capture types. Monitor (full-screen)
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
-        StyleButton.Visibility = Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Scene, true);
 
         // Populate preset combo with built-in presets — each item is a small
         // swatch + label so users can identify gradients at a glance.
@@ -3566,68 +3568,12 @@ public sealed partial class EditorPage : Page
 
     // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
 
-    private bool _toolbarLabelsCollapsed;
-
-    private void ToolbarGrid_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        UpdateToolbarResponsiveLayout(e.NewSize.Width);
-    }
-
-    /// <summary>
-    /// Re-evaluates the responsive toolbar layout using the current toolbar width.
-    /// Call this after toggling the visibility of any right-group button (Cursor,
-    /// Camera, Text Slide, zoom controls) so the collapse decision stays correct even
-    /// though those changes don't resize the full-width toolbar.
-    /// </summary>
-    private void RefreshToolbarResponsiveLayout()
-    {
-        if (ToolbarGrid is null) return;
-        UpdateToolbarResponsiveLayout(ToolbarGrid.ActualWidth);
-    }
-
-    /// <summary>
-    /// Collapses the Frame style / Cursor / Camera button labels to icon-only when the
-    /// toolbar's two edge groups would otherwise overlap, and restores them when there
-    /// is room again. Toggling the labels never changes the full-width toolbar size, so
-    /// this cannot feed back into <see cref="ToolbarGrid_SizeChanged"/>.
-    /// </summary>
-    private void UpdateToolbarResponsiveLayout(double availableWidth)
-    {
-        if (LeftToolbarGroup is null || RightToolbarGroup is null) return;
-        if (availableWidth <= 0) return;
-
-        // Measure both Auto groups with labels expanded to learn how much room they need.
-        SetToolbarLabelsCollapsed(false);
-        var inf = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
-        LeftToolbarGroup.Measure(inf);
-        RightToolbarGroup.Measure(inf);
-
-        const double toolbarPadding = 16; // Grid Padding 8 on each side
-        const double minGap = 16;         // keep a gap so the groups never touch
-        double needed = LeftToolbarGroup.DesiredSize.Width + RightToolbarGroup.DesiredSize.Width
-                        + toolbarPadding + minGap;
-
-        if (needed > availableWidth)
-            SetToolbarLabelsCollapsed(true);
-    }
-
-    private void SetToolbarLabelsCollapsed(bool collapsed)
-    {
-        if (_toolbarLabelsCollapsed == collapsed) return;
-        _toolbarLabelsCollapsed = collapsed;
-        var vis = collapsed ? Visibility.Collapsed : Visibility.Visible;
-        if (FrameStyleLabel is not null) FrameStyleLabel.Visibility = vis;
-        if (CursorLabel is not null) CursorLabel.Visibility = vis;
-        if (CameraLabel is not null) CameraLabel.Visibility = vis;
-    }
-
     private void InitializeWebcamOverlay(CompositionConfig config)
     {        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
         if (!_hasWebcamOverlay)
         {
             WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            RefreshToolbarResponsiveLayout();
+            PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, false);
             return;
         }
 
@@ -3658,10 +3604,9 @@ public sealed partial class EditorPage : Page
         }
 
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
-        WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, true);
         SyncWebcamOverlayUI(style);
         UpdateWebcamOverlayPosition();
-        RefreshToolbarResponsiveLayout();
     }
 
     private void UpdateWebcamOverlayPosition()
@@ -4111,14 +4056,13 @@ public sealed partial class EditorPage : Page
 
     private void ShowTextSlidePanel(TextSlideSegment slide)
     {
-        if (TextSlideButton is null) return;
+        if (PropertiesPanel is null) return;
 
         _suppressSlideEvents = true;
 
-        TextSlideButton.Visibility = Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
         if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
         if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
-        RefreshToolbarResponsiveLayout();
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -4173,22 +4117,15 @@ public sealed partial class EditorPage : Page
 
         _suppressSlideEvents = false;
 
-        // Open the flyout so properties are immediately editable on selection.
-        // Deferred so it doesn't conflict with a closing menu/flyout.
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (TextSlideButton.Visibility == Visibility.Visible)
-                TextSlideFlyout?.ShowAt(TextSlideButton);
-        });
+        // Reveal the text slide panel so properties are immediately editable on selection.
+        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
     }
 
     private void HideTextSlidePanel()
     {
-        if (TextSlideButton is not null)
-            TextSlideButton.Visibility = Visibility.Collapsed;
+        PropertiesPanel?.SetPaneAvailable(PropertyPaneKind.TextSlide, false);
         if (ZoomHintText is not null)
             ZoomHintText.Visibility = Visibility.Visible;
-        RefreshToolbarResponsiveLayout();
     }
 
     private static void UpdateSlideColorSwatch(

@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Musio_App.Controls.PropertiesPane"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:panes="using:Musio_App.Controls.PropertyPanes"
+    mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <!-- Adobe-style vertical rail tab: an upright icon above an all-caps label rotated
+             to read top-to-bottom, with an accent bar on the docked (inner) edge when its
+             panel is the active one. -->
+        <Style x:Key="PaneTabStyle" TargetType="ToggleButton">
+            <Setter Property="Width" Value="36" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Grid x:Name="TabRoot" Background="{TemplateBinding Background}" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            <Border x:Name="ActiveBar"
+                                    Width="2"
+                                    Margin="0,4"
+                                    HorizontalAlignment="Left"
+                                    CornerRadius="1"
+                                    Background="{ThemeResource AccentFillColorDefaultBrush}"
+                                    Visibility="Collapsed" />
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Disabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Opacity" Value="0.4" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Checked">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                            <Setter Target="ActiveBar.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                            <Setter Target="ActiveBar.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                            <Setter Target="ActiveBar.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="TabRoot.Opacity" Value="0.4" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Indeterminate" />
+                                    <VisualState x:Name="IndeterminatePointerOver" />
+                                    <VisualState x:Name="IndeterminatePressed" />
+                                    <VisualState x:Name="IndeterminateDisabled" />
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Rail tab label: rotated a quarter turn so it reads top-to-bottom down the rail.
+             A RenderTransform is invisible to layout, so each label sits in a Canvas "slot"
+             that hands it an unconstrained measure; PaneTabLabel_SizeChanged then swaps the
+             label's width/height onto the slot so the tab reserves the right space. -->
+        <Style x:Key="PaneTabLabelStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="CharacterSpacing" Value="80" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+            <Setter Property="RenderTransform">
+                <Setter.Value>
+                    <RotateTransform Angle="90" />
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PaneTabIconStyle" TargetType="FontIcon">
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="PaneTabContentStyle" TargetType="StackPanel">
+            <Setter Property="Orientation" Value="Vertical" />
+            <Setter Property="Spacing" Value="8" />
+            <Setter Property="Margin" Value="0,10" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid x:Name="PaneRoot" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Panel body (collapsible) -->
+        <Grid x:Name="PaneBody"
+              Grid.Column="0"
+              Width="300"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="1,0,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Header: active panel title + collapse affordance -->
+            <Grid Grid.Row="0"
+                  Padding="12,8,4,8"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="0,0,0,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="PaneTitle"
+                           Grid.Column="0"
+                           VerticalAlignment="Center"
+                           FontWeight="SemiBold"
+                           FontSize="14"
+                           Text="Properties" />
+                <Button x:Name="CollapseButton"
+                        Grid.Column="1"
+                        Padding="6"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="CollapseButton_Click"
+                        ToolTipService.ToolTip="Collapse panel">
+                    <FontIcon FontSize="12" Glyph="&#xE76C;" />
+                </Button>
+            </Grid>
+
+            <Grid Grid.Row="1">
+                <ScrollViewer x:Name="PaneScroller"
+                              Padding="12,0"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollMode="Disabled"
+                              ViewChanged="PaneScroller_ViewChanged">
+                    <Grid x:Name="PaneContent" SizeChanged="PaneContent_SizeChanged">
+                        <panes:ScenePropertiesView x:Name="SceneView" x:FieldModifier="public" />
+                        <panes:TextSlidePropertiesView x:Name="TextSlideView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:CursorPropertiesView x:Name="CursorView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" Visibility="Collapsed" />
+                    </Grid>
+                </ScrollViewer>
+
+                <!-- Soft edges so scrolled content doesn't hard-cut at the panel bounds.
+                     The gradients are rebuilt from the panel background in code so they
+                     stay correct across themes. -->
+                <Border x:Name="TopFade"
+                        VerticalAlignment="Top"
+                        Height="20"
+                        Opacity="0"
+                        IsHitTestVisible="False" />
+                <Border x:Name="BottomFade"
+                        VerticalAlignment="Bottom"
+                        Height="24"
+                        Opacity="0"
+                        IsHitTestVisible="False" />
+            </Grid>
+        </Grid>
+
+        <!-- Vertical icon rail -->
+        <Border Grid.Column="1"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1,0,0,0">
+            <StackPanel Padding="4,8" Spacing="2">
+                <ToggleButton x:Name="SceneTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              ToolTipService.ToolTip="Scene"
+                              AutomationProperties.Name="Scene properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE790;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="SCENE"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="TextSlideTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Text slide"
+                              AutomationProperties.Name="Text slide properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE8D2;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="TEXT SLIDE"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="CursorTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Mouse"
+                              AutomationProperties.Name="Mouse properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE7C9;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="MOUSE"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="VideoTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Video"
+                              AutomationProperties.Name="Video properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE714;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="VIDEO"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>
