@@ -4070,7 +4070,8 @@ public sealed partial class EditorPage : Page
 
     private void SlideAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_selectedTextSlideId is null || SlideAnimationCombo.SelectedItem is not ComboBoxItem item) return;
+        if (_suppressSlideEvents || _selectedTextSlideId is null ||
+            SlideAnimationCombo.SelectedItem is not ComboBoxItem item) return;
         var slide = ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
@@ -4083,7 +4084,7 @@ public sealed partial class EditorPage : Page
 
     private void SlideDurationBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
-        if (_selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         var slide = ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
@@ -4097,7 +4098,7 @@ public sealed partial class EditorPage : Page
 
     private void SlideFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
-        if (_selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         var slide = ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);

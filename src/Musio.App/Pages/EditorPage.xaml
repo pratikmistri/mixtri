@@ -499,7 +499,6 @@
                                     <ComboBox
                                         x:Name="SlideAnimationCombo"
                                         HorizontalAlignment="Stretch"
-                                        SelectedIndex="7"
                                         SelectionChanged="SlideAnimationCombo_SelectionChanged">
                                         <ComboBoxItem Content="None" Tag="None" />
                                         <ComboBoxItem Content="Fade In" Tag="FadeIn" />
@@ -557,7 +556,6 @@
                                             x:Name="SlideDurationBox"
                                             Minimum="0.5"
                                             Maximum="30"
-                                            Value="3"
                                             SpinButtonPlacementMode="Inline"
                                             SmallChange="0.5"
                                             ValueChanged="SlideDurationBox_ValueChanged" />
@@ -569,7 +567,6 @@
                                             x:Name="SlideFontSizeBox"
                                             Minimum="12"
                                             Maximum="200"
-                                            Value="72"
                                             SpinButtonPlacementMode="Inline"
                                             SmallChange="4"
                                             ValueChanged="SlideFontSizeBox_ValueChanged" />

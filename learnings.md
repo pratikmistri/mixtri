@@ -1053,3 +1053,10 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Approaches tried**: Stopped the existing executable by PID, rebuilt with ARM64 VS MSBuild, and launched the self-contained build output directly.
 - **What worked**: The rebuilt `win-arm64\Musio.App.exe` remained running after startup.
 - **What didn't work**: No launch failure occurred.
+
+## PR #54 review fixes — XAML defaults and path comparison
+
+- **Feature/area**: Text slide properties flyout (`EditorPage.xaml`) and timeline source/output mapping (`TimelineModel`).
+- **Approaches tried**: Reviewed both Copilot review threads, traced the flyout sync method and the `PrimaryVideoSegments` filter, then aligned them with existing repo conventions.
+- **What worked**: Removed `SelectedIndex="7"`/`Value="3"`/`Value="72"` from `SlideAnimationCombo`, `SlideDurationBox`, and `SlideFontSizeBox`; `ShowTextSlidePanel` already seeds all three under `_suppressSlideEvents`, and the model already defaults to `ZoomBlurIn`/`FontSize` 72. Added the missing `_suppressSlideEvents` guard to the three handlers. Switched both `PrimaryVideoFilePath` comparisons in `TimelineModel` to `StringComparison.OrdinalIgnoreCase`, matching `ExportAudioPlan`, `SegmentFrameComposer`, and `TimelineControl`.
+- **What didn't work**: `dotnet test` still cannot build the test project (missing Visual Studio PRI/AppX tasks). Build the test project with ARM64 VS MSBuild, then run `dotnet vstest ... /Platform:ARM64` — 414 tests pass.

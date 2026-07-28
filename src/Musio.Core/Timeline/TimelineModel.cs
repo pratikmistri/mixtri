@@ -158,7 +158,8 @@ public class TimelineModel
     /// </summary>
     private IEnumerable<VideoSegment> PrimaryVideoSegments =>
         Segments.OfType<VideoSegment>()
-            .Where(v => PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath);
+            .Where(v => PrimaryVideoFilePath is null ||
+                        string.Equals(v.VideoFilePath, PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Maps a source-video time (e.g. a zoom keyframe or cursor timestamp) to its
@@ -249,7 +250,8 @@ public class TimelineModel
             if (outputTime >= segment.Start && outputTime < segment.End)
             {
                 if (segment is VideoSegment v &&
-                    (PrimaryVideoFilePath is null || v.VideoFilePath == PrimaryVideoFilePath))
+                    (PrimaryVideoFilePath is null ||
+                     string.Equals(v.VideoFilePath, PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase)))
                 {
                     var localOut = outputTime - segment.Start;
                     return v.SourceStart + TimeSpan.FromTicks((long)(localOut.Ticks * v.SpeedFactor));
