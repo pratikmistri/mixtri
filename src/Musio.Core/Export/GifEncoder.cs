@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
-using Musio.Core.Processing;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
@@ -84,27 +83,19 @@ public class GifEncoder
     }
 
     /// <summary>
-    /// Exports directly from a compositor, composing each frame on the fly.
-    /// More memory-efficient than pre-rendering all frames.
+    /// Encodes an animated GIF from frames composed on demand, one at a time.
+    /// The composer produces each output frame (segments, text slides, transitions and
+    /// all), and this method takes ownership of — and disposes — every frame it receives.
     /// </summary>
-    /// <param name="getSourceTime">
-    /// Optional function that maps an output frame index to the source time
-    /// in seconds (video-relative). When provided, the compositor uses the
-    /// exact source time for cursor, click, and zoom synchronization.
-    /// When null, time is derived as <c>frameIndex / fps</c>.
-    /// </param>
-    public async Task ExportGifAsync(
-        FrameCompositor compositor,
-        Func<int, Task<CanvasBitmap>> getSourceFrame,
-        Func<int, double>? getSourceTime,
+    public async Task EncodeComposedFramesAsync(
+        Func<int, Task<CanvasRenderTarget>> composeFrame,
         int totalFrames,
         int fps,
         string outputPath,
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(compositor);
-        ArgumentNullException.ThrowIfNull(getSourceFrame);
+        ArgumentNullException.ThrowIfNull(composeFrame);
         if (totalFrames <= 0)
             throw new ArgumentOutOfRangeException(nameof(totalFrames));
         if (fps <= 0)
@@ -129,9 +120,7 @@ public class GifEncoder
         {
             ct.ThrowIfCancellationRequested();
 
-            using var sourceFrame = await getSourceFrame(i);
-            double sourceTime = getSourceTime?.Invoke(i) ?? (double)i / fps;
-            using var composedFrame = compositor.ComposeFrame(sourceFrame, sourceTime);
+            using var composedFrame = await composeFrame(i);
 
             var pixelBytes = composedFrame.GetPixelBytes();
             uint width = (uint)composedFrame.SizeInPixels.Width;

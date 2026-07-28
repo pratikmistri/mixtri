@@ -990,3 +990,66 @@ Reviewed the entire branch (48 files, +10.8k/-2k) via parallel code-review agent
 - Clean (no issues): rendering pipeline (Win2D disposal, ConfigureAwait, bezier solver bounds), most timeline ops, threading/teardown in UI.
 
 Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
+
+## Local build and launch — ARM64 host without Visual Studio
+
+- **Feature/area**: Build and local app launch.
+- **Approaches tried**: `dotnet build` normally and with PRI generation disabled; unattended Visual Studio Build Tools install; loose MSIX registration; unsigned MSIX install; direct executable launch.
+- **What worked**: The existing self-contained ARM64 output launches directly from `src\Musio.App\bin\ARM64\Debug\net9.0-windows10.0.26100.0\win-arm64\Musio.App.exe`.
+- **What didn't work**: `dotnet build` lacks Visual Studio AppX/PRI tasks; Build Tools install was canceled with exit 1602; loose registration requires Developer Mode; the test MSIX is unsigned.
+
+## Full-branch stability review — remaining findings
+
+- **Feature/area**: `feature/text-animations` stability and export correctness.
+- **Approaches tried**: Reviewed `origin/master...HEAD` for crashes, leaks, races, data loss, timeline mapping, and preview/export divergence.
+- **What worked**: Resource ownership, transition/text rendering, cursor processing, undo/redo snapshots, thumbnail disposal, and Record More project switching were clean.
+- **What didn't work**: Segment audio is used only when a text slide exists; appended zoom regeneration destroys manual/deleted zoom edits; GIF export ignores segments; export applies appended zooms to primary video; track drags mix output/source time over slides.
+
+## Branch stability fixes — unified segment export and safe timeline editing
+
+- **Feature/area**: MP4/GIF export, appended recordings, audio placement, zoom regeneration, and camera/zoom timeline gestures.
+- **Approaches tried**: Parallel workstreams with exclusive file ownership, direct integration review, targeted follow-ups for cross-source zoom creation and audio interval math, compile-only MSBuild validation, full MSTest run, and a final adversarial review.
+- **What worked**: `SegmentFrameComposer` is now the single MP4/GIF frame path, with per-source readers/compositors, appended media, text slides/transitions, source-specific zooms, and segment style overrides. `ExportAudioPlan` maps every edited video segment's embedded/separate audio through trims, deletes, reorder, slides, and appended sources. Appended zoom generation is idempotent and honors suppressed clicks. Timeline gestures clamp within the correct source domain. Core/test sources compile and 414 tests pass.
+- **What didn't work**: Windows `BackgroundAudioTrack` has no playback-rate/time-scale API, so speed-adjusted segment audio cannot be tempo-matched without a separate decode/time-stretch/re-encode feature. It now starts aligned, is bounded to the segment, and is explicitly flagged/logged as native-rate.
+
+## ARM64 build environment restored
+
+- **Feature/area**: Local build and launch toolchain.
+- **Approaches tried**: Installed Visual Studio Build Tools 2022 with managed desktop and Universal Windows build workloads, then used ARM64 VS MSBuild for a clean Debug build.
+- **What worked**: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\arm64\MSBuild.exe` builds the app with `/restore /t:Build /p:Configuration=Debug /p:Platform=ARM64`; the fresh self-contained executable launches directly.
+- **What didn't work**: The .NET SDK-only build remains unsuitable because it lacks the Visual Studio AppX/PRI tasks.
+
+## Editor toolbar control height
+
+- **Feature/area**: Editor right-side toolbar.
+- **Approaches tried**: Compared the text-bearing and icon-only controls in `RightToolbarGroup` and normalized their explicit dimensions.
+- **What worked**: Setting the top-level buttons and zoom dropdown to `Height="40"` keeps text, icon-only, accent, and combo controls aligned.
+- **What didn't work**: Relying on each WinUI control's intrinsic/default height produced visibly different heights as labels were shown or hidden.
+
+## Recording toolbar vertical alignment
+
+- **Feature/area**: Recording capture-mode toolbar container.
+- **Approaches tried**: Kept the toolbar's overall height and horizontal inset while compensating for the segmented control's visually high rendered bounds.
+- **What worked**: Rebalancing the border padding from `6` to `6,8,6,4` shifts the complete control row down two pixels and visually centers it.
+- **What didn't work**: Symmetric numeric padding looked bottom-heavy because the toolkit segmented-control rendering is not optically symmetric.
+
+## Recording segmented-item alignment correction
+
+- **Feature/area**: Capture-mode `Segmented` item presenter.
+- **Approaches tried**: Reverted the outer-toolbar padding adjustment and isolated the offset to the segmented control's internal item presenter.
+- **What worked**: `CaptureModeSelector Padding="0,1,0,-1"` shifts only the three capture-mode items down one pixel while leaving the control background and neighboring buttons centered.
+- **What didn't work**: Moving the entire toolbar row did not change the uneven spacing inside the segmented control.
+
+## Capture picker Escape teardown
+
+- **Feature/area**: Window and region selector overlay cancellation.
+- **Approaches tried**: Correlated the blank picker window with the XAML `ArgumentException` in `crash.log` and traced synchronous `TaskCompletionSource` continuation execution from the Escape handlers.
+- **What worked**: Creating picker completion sources with `TaskCreationOptions.RunContinuationsAsynchronously` defers host-window teardown until keyboard event dispatch has returned.
+- **What didn't work**: Closing the picker inline from the Escape keyboard event caused WinUI to throw `ArgumentException: The parameter is incorrect` and leave a blank host window.
+
+## Capture picker fix local launch
+
+- **Feature/area**: ARM64 Debug validation of capture picker cancellation.
+- **Approaches tried**: Stopped the existing executable by PID, rebuilt with ARM64 VS MSBuild, and launched the self-contained build output directly.
+- **What worked**: The rebuilt `win-arm64\Musio.App.exe` remained running after startup.
+- **What didn't work**: No launch failure occurred.

@@ -259,6 +259,43 @@ public class TimelineModel
         }
         return null;
     }
+
+    /// <summary>
+    /// Finds the video segment among <paramref name="candidates"/> whose start or end
+    /// (on the output timeline) is closest to <paramref name="outputTime"/>, and reports
+    /// whether the nearer edge is the segment's start. Used by timeline-gesture code
+    /// (camera/zoom create, move, resize) to clamp a pointer gesture onto a valid
+    /// boundary when the output time under the pointer is unmappable for the relevant
+    /// source/track (e.g. it lands on a text slide, or a video segment for a different
+    /// recording) — instead of falling back to raw output time, which would mix output
+    /// time into a source-time domain. Returns <c>(null, false)</c> when
+    /// <paramref name="candidates"/> is empty.
+    /// </summary>
+    public static (VideoSegment? Segment, bool AtStart) NearestVideoSegmentEdge(
+        IEnumerable<VideoSegment> candidates, TimeSpan outputTime)
+    {
+        VideoSegment? nearest = null;
+        bool atStart = false;
+        double bestDist = double.MaxValue;
+        foreach (var seg in candidates)
+        {
+            double distToStart = Math.Abs((outputTime - seg.Start).TotalSeconds);
+            if (distToStart < bestDist)
+            {
+                bestDist = distToStart;
+                nearest = seg;
+                atStart = true;
+            }
+            double distToEnd = Math.Abs((outputTime - seg.End).TotalSeconds);
+            if (distToEnd < bestDist)
+            {
+                bestDist = distToEnd;
+                nearest = seg;
+                atStart = false;
+            }
+        }
+        return (nearest, atStart);
+    }
 }
 
 public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)

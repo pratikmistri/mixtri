@@ -425,6 +425,7 @@
                     <ComboBox
                         x:Name="ZoomLevelCombo"
                         Width="80"
+                        Height="40"
                         IsEditable="True"
                         SelectedIndex="2"
                         SelectionChanged="ZoomLevelCombo_SelectionChanged"
@@ -438,6 +439,7 @@
                         <ComboBoxItem Content="4x" Tag="4" />
                     </ComboBox>
                     <Button
+                        Height="40"
                         Padding="8,6"
                         Click="EditZoomRegion_Click"
                         ToolTipService.ToolTip="Position the zoom region visually">
@@ -447,6 +449,7 @@
                         </StackPanel>
                     </Button>
                     <Button
+                        Height="40"
                         Padding="8,6"
                         Click="RemoveZoomSegment_Click"
                         ToolTipService.ToolTip="Remove selected zoom segment">
@@ -465,6 +468,7 @@
                 <!-- Text slide properties (button + flyout, shown when a text slide is selected) -->
                 <Button
                     x:Name="TextSlideButton"
+                    Height="40"
                     Padding="8,6"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Text slide properties">
@@ -747,6 +751,7 @@
                 <!-- Background style controls -->
                 <Button
                     x:Name="StyleButton"
+                    Height="40"
                     Padding="8,6"
                     Margin="4,0,0,0"
                     ToolTipService.ToolTip="Frame style (aspect ratio, background, padding)">
@@ -1151,6 +1156,7 @@
                 <!-- Cursor style controls -->
                 <Button
                     x:Name="CursorButton"
+                    Height="40"
                     Padding="8,6"
                     Margin="4,0,0,0"
                     Visibility="Collapsed"
@@ -1330,6 +1336,7 @@
                 <!-- Webcam overlay settings (visible when webcam overlay is active) -->
                 <Button
                     x:Name="WebcamShapeButton"
+                    Height="40"
                     Padding="8,6"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Webcam overlay settings">
@@ -1409,6 +1416,7 @@
 
                 <Button
                     x:Name="ExportButton"
+                    Height="40"
                     Padding="8,6"
                     Style="{ThemeResource AccentButtonStyle}"
                     ToolTipService.ToolTip="Export recording">

@@ -558,17 +558,32 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Converts an X coordinate to a source-video time, the inverse of
-    /// <see cref="SourceTimeToX"/>. Falls back to plain output time when the X
-    /// lands on a text slide.
+    /// Converts an X coordinate to a source-video time in the PRIMARY recording's time
+    /// domain, for camera-track gestures (<see cref="CameraSegment"/> ranges are always
+    /// expressed in primary source time). When the X lands on a text slide or a
+    /// non-primary video segment — where <see cref="TimelineModel.OutputToSourceTime"/>
+    /// has no primary source time to return — this clamps to the nearest primary video
+    /// segment boundary (by output-time distance) instead of mixing raw output time into
+    /// the primary source-time domain. Returns <c>null</c> only when the timeline has no
+    /// primary video segment at all to clamp against.
     /// </summary>
-    private TimeSpan XToSourceTime(double x)
+    private TimeSpan? XToPrimarySourceTime(double x)
     {
         var model = Model;
         var outputTime = XToTime(x);
         if (model is null || model.Segments.Count == 0)
             return outputTime;
-        return model.OutputToSourceTime(outputTime) ?? outputTime;
+
+        var mapped = model.OutputToSourceTime(outputTime);
+        if (mapped is not null)
+            return mapped.Value;
+
+        var primarySegments = model.Segments.OfType<VideoSegment>()
+            .Where(v => model.PrimaryVideoFilePath is null ||
+                string.Equals(v.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase));
+        var (nearest, atStart) = TimelineModel.NearestVideoSegmentEdge(primarySegments, outputTime);
+        if (nearest is null) return null;
+        return atStart ? nearest.SourceStart : nearest.SourceStart + nearest.SourceDuration;
     }
 
     private void InvalidateAll()
@@ -1318,27 +1333,42 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Maps an output X to the video-time within the segment under it, and reports the
     /// owning source file (null = primary). Used when creating a zoom segment so the
-    /// keyframe is tagged with and positioned relative to the correct recording.
+    /// keyframe is tagged with and positioned relative to the correct recording. When X
+    /// lands on a text slide (no video segment underneath), clamps to the boundary of the
+    /// nearest video segment (by output-time distance) instead of stamping the created
+    /// keyframe with a raw output-time value in a source-time field. Returns <c>null</c>
+    /// only when the timeline has no video segment at all to clamp against.
     /// </summary>
-    private TimeSpan XToSegmentVideoTime(double x, out string? filePath)
+    private TimeSpan? XToSegmentVideoTime(double x, out string? filePath)
     {
         filePath = null;
         var model = Model;
         var outputTime = XToTime(x);
         if (model is null || model.Segments.Count == 0) return outputTime;
 
-        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        var videoSegments = model.Segments.OfType<VideoSegment>().ToList();
+        var containing = videoSegments.FirstOrDefault(seg => outputTime >= seg.Start && outputTime < seg.End);
+
+        VideoSegment target;
+        TimeSpan mappingOutputTime;
+        if (containing is not null)
         {
-            if (outputTime >= seg.Start && outputTime < seg.End)
-            {
-                bool isPrimary = model.PrimaryVideoFilePath is not null &&
-                    string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase);
-                filePath = isPrimary ? null : seg.VideoFilePath;
-                var local = outputTime - seg.Start;
-                return seg.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * seg.SpeedFactor));
-            }
+            target = containing;
+            mappingOutputTime = outputTime;
         }
-        return outputTime;
+        else
+        {
+            var (nearest, atStart) = TimelineModel.NearestVideoSegmentEdge(videoSegments, outputTime);
+            if (nearest is null) return null;
+            target = nearest;
+            mappingOutputTime = atStart ? nearest.Start : nearest.End;
+        }
+
+        bool isPrimary = model.PrimaryVideoFilePath is null ||
+            string.Equals(target.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase);
+        filePath = isPrimary ? null : target.VideoFilePath;
+        var local = mappingOutputTime - target.Start;
+        return target.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * target.SpeedFactor));
     }
 
     /// <summary>Maps a create-time (in <see cref="_zoomCreateFile"/>'s source space) to X.</summary>
@@ -1352,29 +1382,37 @@ public sealed partial class TimelineControl : UserControl
     /// in the file space of the segment that owns a keyframe with the given
     /// <paramref name="filePath"/> (null = primary). Used so moving/resizing a zoom
     /// segment on an appended recording stays in that recording's time, not the
-    /// primary's. Falls back to the primary mapping when no segment matches.
+    /// primary's. When X lands outside every segment for this file (e.g. over a text
+    /// slide, or a segment belonging to a different recording), clamps to the nearest
+    /// boundary of a video segment matching <paramref name="filePath"/> — never through
+    /// <see cref="TimelineModel.OutputToSourceTime"/>, which always maps via the PRIMARY
+    /// recording and would silently mix an unrelated source file's timestamp into this
+    /// keyframe. Returns <c>null</c> only when no segment for this file exists at all
+    /// (so the caller should reject the gesture rather than move the keyframe).
     /// </summary>
-    private TimeSpan XToKeyframeFileTime(double x, string? filePath)
+    private TimeSpan? XToKeyframeFileTime(double x, string? filePath)
     {
         var model = Model;
         var outputTime = XToTime(x);
         if (model is null || model.Segments.Count == 0) return outputTime;
 
-        foreach (var seg in model.Segments.OfType<VideoSegment>())
-        {
-            bool match = filePath is null
+        var matching = model.Segments.OfType<VideoSegment>()
+            .Where(seg => filePath is null
                 ? (model.PrimaryVideoFilePath is null ||
                    string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase))
-                : string.Equals(seg.VideoFilePath, filePath, StringComparison.OrdinalIgnoreCase);
-            if (!match) continue;
+                : string.Equals(seg.VideoFilePath, filePath, StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
-            if (outputTime >= seg.Start && outputTime < seg.End)
-            {
-                var local = outputTime - seg.Start;
-                return seg.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * seg.SpeedFactor));
-            }
+        var containing = matching.FirstOrDefault(seg => outputTime >= seg.Start && outputTime < seg.End);
+        if (containing is not null)
+        {
+            var local = outputTime - containing.Start;
+            return containing.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * containing.SpeedFactor));
         }
-        return model.OutputToSourceTime(outputTime) ?? outputTime;
+
+        var (nearest, atStart) = TimelineModel.NearestVideoSegmentEdge(matching, outputTime);
+        if (nearest is null) return null;
+        return atStart ? nearest.SourceStart : nearest.SourceStart + nearest.SourceDuration;
     }
 
     private string? SelectedZoomKeyframeFile =>
@@ -1433,9 +1471,22 @@ public sealed partial class TimelineControl : UserControl
             _zoomDragStartX = pos.X;
             _zoomDragCurrentX = pos.X;
             _zoomCreateActive = false;
-            _zoomCreateStart = XToSegmentVideoTime(pos.X, out _zoomCreateFile);
-            _dragMode = DragMode.ZoomSegmentCreate;
             PlayheadPosition = XToTime(pos.X);
+
+            var start = XToSegmentVideoTime(pos.X, out _zoomCreateFile);
+            if (start is null)
+            {
+                // No video segment anywhere to attach a zoom keyframe to — reject the
+                // gesture rather than stamping an output-time value into a source-time
+                // field, and leave no transient drag state behind.
+                _zoomCreateFile = null;
+                _dragMode = DragMode.None;
+                _zoomDragStartX = double.NaN;
+                _zoomDragCurrentX = double.NaN;
+                return;
+            }
+            _zoomCreateStart = start.Value;
+            _dragMode = DragMode.ZoomSegmentCreate;
             canvas.CapturePointer(e.Pointer);
         }
     }
@@ -1464,9 +1515,21 @@ public sealed partial class TimelineControl : UserControl
                 double dragDistance = Math.Abs(pos.X - _zoomDragStartX);
                 if (dragDistance >= ZoomCreateDragThreshold)
                 {
-                    _zoomCreateActive = true;
-                    _zoomCreateEnd = XToSegmentVideoTime(pos.X, out _);
-                    InvalidateAll();
+                    // Stay anchored to _zoomCreateFile's source domain (set once at
+                    // press-time) rather than re-resolving whatever segment/file is
+                    // under the pointer now — otherwise dragging across a slide or a
+                    // different recording's segment would mix that other source's
+                    // timestamp into this (still A-tagged) keyframe.
+                    var end = XToKeyframeFileTime(pos.X, _zoomCreateFile);
+                    if (end is not null)
+                    {
+                        _zoomCreateActive = true;
+                        _zoomCreateEnd = end.Value;
+                        InvalidateAll();
+                    }
+                    // else: pointer is outside every segment for _zoomCreateFile with
+                    // none to clamp to — keep the previous _zoomCreateEnd rather than
+                    // adopting a mismatched-domain value.
                 }
                 else
                 {
@@ -1502,15 +1565,19 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.ZoomSegmentBody when _selectedZoomKeyframeId is not null:
             {
                 double deltaX = _zoomDragCurrentX - _zoomDragStartX;
-                var file = SelectedZoomKeyframeFile;
-                var deltaTime = XToKeyframeFileTime(_zoomDragStartX + deltaX, file)
-                    - XToKeyframeFileTime(_zoomDragStartX, file);
-                var newTimestamp = _zoomDragOriginalTimestamp + deltaTime;
-
                 // Only fire move event if the segment actually moved
                 if (Math.Abs(deltaX) > 1)
                 {
-                    ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                    var file = SelectedZoomKeyframeFile;
+                    var startTime = XToKeyframeFileTime(_zoomDragStartX, file);
+                    var movedTime = XToKeyframeFileTime(_zoomDragStartX + deltaX, file);
+                    if (startTime is not null && movedTime is not null)
+                    {
+                        var newTimestamp = _zoomDragOriginalTimestamp + (movedTime.Value - startTime.Value);
+                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                    }
+                    // else: unmappable in this file's time domain — reject the move,
+                    // leaving the keyframe at its original position.
                 }
                 break;
             }
@@ -1518,9 +1585,9 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.ZoomSegmentLeftEdge when _selectedZoomKeyframeId is not null:
             {
                 var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
-                if (newEdgeTime != _zoomDragOriginalStart)
+                if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalStart)
                 {
-                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime));
+                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime.Value));
                 }
                 break;
             }
@@ -1528,9 +1595,9 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.ZoomSegmentRightEdge when _selectedZoomKeyframeId is not null:
             {
                 var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
-                if (newEdgeTime != _zoomDragOriginalEnd)
+                if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalEnd)
                 {
-                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime));
+                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime.Value));
                 }
                 break;
             }
@@ -2644,12 +2711,22 @@ public sealed partial class TimelineControl : UserControl
                 SelectedCameraSegmentId = null;
                 CameraSegmentSelected?.Invoke(this, null);
             }
+            PlayheadPosition = XToTime(pos.X);
+
+            var start = XToPrimarySourceTime(pos.X);
+            if (start is null)
+            {
+                // No primary video on the timeline — nothing to attach a camera
+                // segment to. Reject the gesture, leaving no transient drag state.
+                _dragMode = DragMode.None;
+                return;
+            }
+
             _cameraDragStartX = pos.X;
             _cameraDragCurrentX = pos.X;
             _cameraCreateActive = false;
-            _cameraCreateStart = XToSourceTime(pos.X);
+            _cameraCreateStart = start.Value;
             _dragMode = DragMode.CameraSegmentCreate;
-            PlayheadPosition = XToTime(pos.X);
             canvas.CapturePointer(e.Pointer);
         }
     }
@@ -2675,9 +2752,13 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.CameraSegmentCreate:
                 if (Math.Abs(pos.X - _cameraDragStartX) >= ZoomCreateDragThreshold)
                 {
-                    _cameraCreateActive = true;
-                    _cameraCreateEnd = XToSourceTime(pos.X);
-                    InvalidateAll();
+                    var end = XToPrimarySourceTime(pos.X);
+                    if (end is not null)
+                    {
+                        _cameraCreateActive = true;
+                        _cameraCreateEnd = end.Value;
+                        InvalidateAll();
+                    }
                 }
                 else
                 {
@@ -2707,25 +2788,30 @@ public sealed partial class TimelineControl : UserControl
                 double deltaX = _cameraDragCurrentX - _cameraDragStartX;
                 if (Math.Abs(deltaX) > 1)
                 {
-                    var newStart = _cameraDragOriginalStart
-                        + (XToSourceTime(_cameraDragStartX + deltaX) - XToSourceTime(_cameraDragStartX));
-                    if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
-                    CameraSegmentMoved?.Invoke(this, (_selectedCameraSegmentId, newStart));
+                    var startTime = XToPrimarySourceTime(_cameraDragStartX);
+                    var movedTime = XToPrimarySourceTime(_cameraDragStartX + deltaX);
+                    if (startTime is not null && movedTime is not null)
+                    {
+                        var newStart = _cameraDragOriginalStart + (movedTime.Value - startTime.Value);
+                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                        CameraSegmentMoved?.Invoke(this, (_selectedCameraSegmentId, newStart));
+                    }
+                    // else: unmappable — reject the move, leave the segment in place.
                 }
                 break;
             }
             case DragMode.CameraSegmentLeftEdge when _selectedCameraSegmentId is not null:
             {
-                var newEdge = XToSourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge != _cameraDragOriginalStart)
-                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, true, newEdge));
+                var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge is not null && newEdge.Value != _cameraDragOriginalStart)
+                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, true, newEdge.Value));
                 break;
             }
             case DragMode.CameraSegmentRightEdge when _selectedCameraSegmentId is not null:
             {
-                var newEdge = XToSourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge != _cameraDragOriginalEnd)
-                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, false, newEdge));
+                var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge is not null && newEdge.Value != _cameraDragOriginalEnd)
+                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, false, newEdge.Value));
                 break;
             }
             case DragMode.CameraSegmentCreate when _cameraCreateActive:

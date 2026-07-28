@@ -373,8 +373,8 @@ public sealed partial class EditorPage : Page
         // already carries the user's edits, so regenerating would (a) wipe manual zoom
         // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
         // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
-        bool primaryKeyframesExist = ViewModel.Model.ZoomKeyframes.Any(k => k.SourceVideoFilePath is null);
-        if (!primaryKeyframesExist)
+        // (Appended recordings mirror this exact guard — see GenerateAppendedZoomKeyframes.)
+        if (!ZoomKeyframesExistForSource(null))
         {
             foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
@@ -1148,15 +1148,31 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// (Re)generates auto-zoom keyframes for an appended video segment from its click
+    /// True when the model already has at least one zoom keyframe tagged with
+    /// <paramref name="sourceVideoFilePath"/> (null means the primary recording).
+    /// Shared by the primary and appended auto-zoom generation so both apply the
+    /// same "generate once, then preserve" rule (see remarks on the primary call site
+    /// in <see cref="InitializePreviewAsync"/> and on <see cref="GenerateAppendedZoomKeyframes"/>).
+    /// </summary>
+    private bool ZoomKeyframesExistForSource(string? sourceVideoFilePath) =>
+        ViewModel.Model.ZoomKeyframes.Any(k =>
+            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Generates auto-zoom keyframes for an appended video segment from its click
     /// events, tagged with the segment's source file so they map into its output range.
-    /// Replaces any existing keyframes for that file to stay idempotent across reloads.
+    /// Mirrors the primary recording's idempotent generation (see
+    /// <see cref="InitializePreviewAsync"/>): <see cref="LoadAppendedTrackVisualsAsync"/>
+    /// re-runs this on every editor page (re)construction — including additional
+    /// "Record More" cycles and duplicate-path reloads — so this must NOT
+    /// unconditionally replace existing keyframes for the file. Doing so previously wiped
+    /// manual edits and resurrected auto-zooms the user deleted. Generate only when this
+    /// source has no keyframes yet, and skip any click tracked in SuppressedClickTicks.
     /// </summary>
     private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
     {
-        var keyframes = ViewModel.Model.ZoomKeyframes;
-        keyframes.RemoveAll(k =>
-            string.Equals(k.SourceVideoFilePath, seg.VideoFilePath, StringComparison.OrdinalIgnoreCase));
+        if (ZoomKeyframesExistForSource(seg.VideoFilePath))
+            return; // already generated (or user-edited) for this source — preserve as-is
 
         if (mouse is null || mouse.Clicks.Count == 0 || mouse.TickFrequency <= 0) return;
 
@@ -1166,9 +1182,14 @@ public sealed partial class EditorPage : Page
         int coy = seg.CropOffsetY;
         double offset = seg.MouseToVideoOffsetSeconds;
         double maxSrc = seg.SourceDuration.TotalSeconds;
+        var keyframes = ViewModel.Model.ZoomKeyframes;
 
         foreach (var click in mouse.Clicks.Where(c => c.IsDown))
         {
+            // Respect deletions: never re-add an auto-zoom the user removed.
+            if (ViewModel.Model.SuppressedClickTicks.Contains(click.TimestampTicks))
+                continue;
+
             double t = (click.TimestampTicks - mouse.StartTimestampTicks) / mouse.TickFrequency - offset;
             if (t < 0) continue;
             if (maxSrc > 0 && t > maxSrc) continue;

@@ -1,13 +1,10 @@
 using System.Diagnostics;
-using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Media.Core;
-using Windows.Media.Editing;
 using Windows.Storage;
 
 namespace Musio.Core.Export;
@@ -132,6 +129,11 @@ public class ExportEngine
         return outputPath;
     }
 
+    /// <summary>
+    /// Exports an animated GIF. Frames come from the same segment-aware composer the
+    /// MP4 exporter uses, so the GIF honours segment order, source selection, trims,
+    /// speed, text slides, slide crossfades, and appended recordings identically.
+    /// </summary>
     private async Task ExportGifAsync(
         Project project,
         MouseRecordingData mouseData,
@@ -143,213 +145,19 @@ public class ExportEngine
         IProgress<ExportProgress>? progress,
         CancellationToken ct)
     {
-        var device = CanvasDevice.GetSharedDevice();
-        using var compositor = new FrameCompositor(composition);
+        using var composer = await SegmentFrameComposer.CreateAsync(
+            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct);
 
-        // Open source video for dimensions. If the MP4 is missing or corrupt,
-        // fall back to project metadata — JPEG frames can still provide visuals.
-        MediaClip? sourceClip = null;
-        int sourceWidth = project.Width > 0 ? project.Width : 1920;
-        int sourceHeight = project.Height > 0 ? project.Height : 1080;
+        int totalFrames = timelineMapper?.TotalOutputFrames ?? composer.TotalFrames;
 
-        try
-        {
-            var sourceFile = await StorageFile.GetFileFromPathAsync(project.VideoFilePath);
-            sourceClip = await MediaClip.CreateFromFileAsync(sourceFile);
-            var sourceProps = sourceClip.GetVideoEncodingProperties();
-            sourceWidth = (int)sourceProps.Width;
-            sourceHeight = (int)sourceProps.Height;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine(
-                $"[ExportEngine] Failed to open source video (will use JPEG frames): {ex.Message}");
-        }
-
-        await compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, project.Duration,
-            project.MouseToVideoOffsetSeconds, project.CropOffsetX, project.CropOffsetY, project.DpiScale);
-
-        // Sync timeline zoom state (manual keyframes + suppressed auto clicks)
-        SyncTimelineZoomState(compositor, timeline);
-
-        int totalFrames = timelineMapper?.TotalOutputFrames ?? compositor.TotalFrames;
-        int fps = settings.Fps;
-
-        // Fast path: read JPEG frames from .frames/ directory.
-        // Use the RECORDING FPS for correct frame-index mapping to on-disk JPEGs.
-        int sourceFps = project.Fps > 0 ? project.Fps : fps;
-        var frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, sourceFps);
-
-        // Slow path fallback: reuse a single MediaComposition for seeking
-        MediaComposition? sourceComp = null;
-        if (frameReader is null && sourceClip is not null)
-        {
-            sourceComp = new MediaComposition();
-            sourceComp.Clips.Add(sourceClip);
-        }
-
-        if (frameReader is null && sourceComp is null)
-            throw new InvalidOperationException(
-                "Cannot export GIF: no JPEG frames or valid source video found.");
-
-        // Webcam source for overlay (opened once, reused per frame)
-        MediaComposition? webcamComp = null;
-        int webcamExtractW = 0, webcamExtractH = 0;
-        if (!string.IsNullOrWhiteSpace(project.WebcamFilePath) && File.Exists(project.WebcamFilePath))
-        {
-            try
-            {
-                var webcamFile = await StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
-                var webcamClip = await MediaClip.CreateFromFileAsync(webcamFile);
-                var webcamProps = webcamClip.GetVideoEncodingProperties();
-                int webcamNativeW = (int)webcamProps.Width;
-                int webcamNativeH = (int)webcamProps.Height;
-                webcamComp = new MediaComposition();
-                webcamComp.Clips.Add(webcamClip);
-
-                // Extract at ~1.5x the overlay display size instead of full resolution.
-                // When a camera segment animates to fullscreen, extract at native
-                // resolution so the enlarged webcam stays sharp.
-                float displaySize = (composition.WebcamStyle?.Size ?? 300f) * 1.5f;
-                float minDim = Math.Min(webcamNativeW, webcamNativeH);
-                if (TimelineHasFullscreenCamera(timeline) || minDim <= displaySize)
-                {
-                    webcamExtractW = webcamNativeW;
-                    webcamExtractH = webcamNativeH;
-                }
-                else
-                {
-                    float scale = displaySize / minDim;
-                    webcamExtractW = Math.Max((int)Math.Ceiling(webcamNativeW * scale), 1);
-                    webcamExtractH = Math.Max((int)Math.Ceiling(webcamNativeH * scale), 1);
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[ExportEngine] Failed to load webcam for GIF overlay: {ex.Message}");
-                // Continue GIF export without webcam overlay
-            }
-        }
-
-        // Track the previous webcam frame so it can be disposed after composition consumes it
-        CanvasBitmap? previousWebcamFrame = null;
-
-        try
-        {
-            var gifEncoder = new GifEncoder();
-            await gifEncoder.ExportGifAsync(
-                compositor,
-                async frameIndex =>
-                {
-                    double timeSeconds = timelineMapper is not null
-                        ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                        : (double)frameIndex / fps;
-                    var timeSpan = TimeSpan.FromSeconds(timeSeconds);
-
-                    // Dispose the previous iteration's webcam frame (composition has consumed it)
-                    previousWebcamFrame?.Dispose();
-                    previousWebcamFrame = null;
-
-                    // Extract webcam frame and set on compositor
-                    if (webcamComp is not null)
-                    {
-                        bool showWebcam = ApplyCameraSegmentState(
-                            compositor, timeline, composition.WebcamStyle, timeSpan);
-                        if (!showWebcam)
-                        {
-                            compositor.SetWebcamFrame(null);
-                        }
-                        else
-                        {
-                            try
-                            {
-                                var webcamFrame = await ExtractFrameFromCompositionAsync(
-                                    device, webcamComp, timeSpan, webcamExtractW, webcamExtractH);
-                                compositor.SetWebcamFrame(webcamFrame);
-                                previousWebcamFrame = webcamFrame;
-                            }
-                            catch
-                            {
-                                compositor.SetWebcamFrame(null);
-                            }
-                        }
-                    }
-
-                    // Fast path: JPEG frames; slow path: reusable composition
-                    CanvasBitmap result;
-                    if (frameReader is not null)
-                    {
-                        result = await frameReader.LoadFrameAtTimeAsync(timeSpan)
-                            ?? await FallbackExtractFrameAsync(device, project.VideoFilePath, timeSpan, sourceWidth, sourceHeight);
-                    }
-                    else
-                    {
-                        result = await ExtractFrameFromCompositionAsync(
-                            device, sourceComp!, timeSpan, sourceWidth, sourceHeight);
-                    }
-
-                    return result;
-                },
-                frameIndex => timelineMapper is not null
-                    ? timelineMapper.GetSourceTimeForOutputFrame(frameIndex)
-                    : (double)frameIndex / fps,
-                totalFrames,
-                fps,
-                outputPath,
-                progress,
-                ct);
-        }
-        finally
-        {
-            // Dispose the last webcam frame
-            compositor.SetWebcamFrame(null);
-            previousWebcamFrame?.Dispose();
-
-            frameReader?.Dispose();
-            sourceComp?.Clips.Clear();
-            webcamComp?.Clips.Clear();
-            sourceClip = null;
-        }
-    }
-
-    /// <summary>
-    /// Extracts a frame from a pre-built <see cref="MediaComposition"/> at the given position.
-    /// Reusing the same composition avoids re-opening the source file on every frame.
-    /// </summary>
-    private static async Task<CanvasBitmap> ExtractFrameFromCompositionAsync(
-        CanvasDevice device, MediaComposition composition, TimeSpan position,
-        int width, int height)
-    {
-        var clampedPosition = position;
-        if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
-            clampedPosition = composition.Duration;
-
-        using var thumbnail = await composition.GetThumbnailAsync(
-            clampedPosition, width, height, VideoFramePrecision.NearestFrame);
-
-        // ImageStream already implements IRandomAccessStream — pass directly
-        return await CanvasBitmap.LoadAsync(device, thumbnail);
-    }
-
-    /// <summary>
-    /// Last-resort fallback: opens the video file from scratch to extract a single frame.
-    /// </summary>
-    private static async Task<CanvasBitmap> FallbackExtractFrameAsync(
-        CanvasDevice device, string videoPath, TimeSpan position,
-        int width, int height)
-    {
-        var file = await StorageFile.GetFileFromPathAsync(videoPath);
-        var clip = await MediaClip.CreateFromFileAsync(file);
-        var comp = new MediaComposition();
-        comp.Clips.Add(clip);
-
-        using var thumbnail = await comp.GetThumbnailAsync(
-            position, width, height, VideoFramePrecision.NearestFrame);
-
-        comp.Clips.Clear();
-
-        return await CanvasBitmap.LoadAsync(device, thumbnail);
+        var gifEncoder = new GifEncoder();
+        await gifEncoder.EncodeComposedFramesAsync(
+            frameIndex => composer.ComposeFrameAsync(frameIndex, ct),
+            totalFrames,
+            settings.Fps,
+            outputPath,
+            progress,
+            ct);
     }
 
     /// <summary>
@@ -502,23 +310,6 @@ public class ExportEngine
     }
 
     /// <summary>
-    /// Syncs manual zoom keyframes and suppressed auto-zoom clicks from the
-    /// timeline model into the compositor so exports match the editor preview.
-    /// </summary>
-    private static void SyncTimelineZoomState(FrameCompositor compositor, TimelineModel? timeline)
-    {
-        if (timeline is null) return;
-
-        var manualKeyframes = timeline.ZoomKeyframes
-            .Where(k => k.IsManual)
-            .ToList();
-        compositor.SyncManualZoomKeyframes(manualKeyframes);
-
-        if (timeline.SuppressedClickTicks.Count > 0)
-            compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
-    }
-
-    /// <summary>
     /// Applies independent-camera-track state to the compositor for a given source
     /// time: gates webcam visibility, applies the active segment's style override, and
     /// sets the fullscreen-animation factor. Returns <c>true</c> when the webcam overlay
@@ -555,21 +346,4 @@ public class ExportEngine
     public static bool TimelineHasFullscreenCamera(TimelineModel? timeline)
         => timeline is not null
         && timeline.CameraSegments.Any(c => c.Enabled && c.FullscreenEnabled);
-
-    /// <summary>
-    /// Creates a <see cref="SegmentCompositor"/> for segment-based timelines.
-    /// Returns null if the timeline has no segments (legacy pipeline should be used).
-    /// </summary>
-    public static SegmentCompositor? CreateSegmentCompositor(
-        TimelineModel timeline,
-        int fps,
-        int outputWidth,
-        int outputHeight)
-    {
-        if (timeline.Segments.Count == 0)
-            return null;
-
-        var mapper = new TimelineMapper(timeline, fps);
-        return new SegmentCompositor(timeline, mapper, outputWidth, outputHeight);
-    }
 }

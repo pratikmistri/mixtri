@@ -57,6 +57,7 @@
                     <ctk:Segmented
                         x:Name="CaptureModeSelector"
                         Height="36"
+                        Padding="0,1,0,-1"
                         SelectionChanged="CaptureModeSelector_SelectionChanged">
                         <ctk:Segmented.Resources>
                             <ResourceDictionary>
