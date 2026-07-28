@@ -1060,3 +1060,23 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Approaches tried**: Reviewed both Copilot review threads, traced the flyout sync method and the `PrimaryVideoSegments` filter, then aligned them with existing repo conventions.
 - **What worked**: Removed `SelectedIndex="7"`/`Value="3"`/`Value="72"` from `SlideAnimationCombo`, `SlideDurationBox`, and `SlideFontSizeBox`; `ShowTextSlidePanel` already seeds all three under `_suppressSlideEvents`, and the model already defaults to `ZoomBlurIn`/`FontSize` 72. Added the missing `_suppressSlideEvents` guard to the three handlers. Switched both `PrimaryVideoFilePath` comparisons in `TimelineModel` to `StringComparison.OrdinalIgnoreCase`, matching `ExportAudioPlan`, `SegmentFrameComposer`, and `TimelineControl`.
 - **What didn't work**: `dotnet test` still cannot build the test project (missing Visual Studio PRI/AppX tasks). Build the test project with ARM64 VS MSBuild, then run `dotnet vstest ... /Platform:ARM64` — 414 tests pass.
+
+## Build and launch (routine)
+
+- **Feature/area**: Local build + launch of Musio.App.
+- **Approaches tried**: ARM64 VS BuildTools MSBuild `/restore /t:Build /p:Configuration=Debug /p:Platform=ARM64`, then direct launch of the self-contained exe.
+- **What worked**: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\arm64\MSBuild.exe src\Musio.App\Musio.App.csproj /restore /t:Build /p:Configuration=Debug /p:Platform=ARM64` (clean, only MVVMTK0045 warnings); launched `src\Musio.App\bin\ARM64\Debug\net9.0-windows10.0.26100.0\win-arm64\Musio.App.exe` -> window "Musio" responding.
+- **What didn't work**: Nothing new; `dotnet build` still avoided per prior PriGen MSB4062 findings.
+
+## Cursor shape detection — continuous polling restored (off the hook hot path)
+
+- **Feature/area**: `MouseHookRecorder`, `CursorShapeResolver` (Musio.Core/Capture). Branch `feature/cursor-shape-continuous-detection`.
+- **User directive**: cursor shape was only detected at click/mouse-up; wanted more frequent detection so it feels accurate.
+- **Approach (worked)**: dedicated `MouseShapePoller` background thread (NOT a ThreadPool `System.Threading.Timer`, which was the previous implementation) waiting on a `ManualResetEventSlim` at `ShapeSampleIntervalMs` (default 20ms / 50Hz, clamped 8-1000, settable before StartRecording). It calls `CursorShapeResolver.Resolve` and writes `volatile _currentShape`; the WH_MOUSE_LL callback still only READS the cached value, so no syscall is ever added to the input path (that was the original lag regression).
+- **New**: on a detected shape change the poller appends a synthetic `MouseEventKind.Move` sample at the cursor position returned by the same `GetCursorInfo` call (`Resolve(out x, out y, out positionValid)`), so hover-driven shape changes are recorded even when the mouse is stationary. Click-time re-confirm kept for exact-at-click accuracy.
+- **Ordering**: two threads now append samples, so `AddSampleLocked` clamps any out-of-order timestamp to the previous one — `CursorSmoother.AssignShapes` assumes non-decreasing timestamps.
+- **Flicker guard**: `CursorSmoother.StabilizeShapes` (MinShapeHoldSeconds 0.12) remains the defense against the shape-track flicker that continuous polling can reintroduce; do not remove it while polling is on.
+- **Lifecycle**: poller starts only after the hook installs, stops in `StopRecording`/`Dispose`; loop wrapped in try/catch(ObjectDisposedException) in case a join times out.
+- **Tests**: `CursorShapePollingTests` (interval default/clamp, monotonic clamp on out-of-order append, resolver position). Suite 418 green (ARM64 vstest.console).
+- **Gotcha**: rebuilding the App fails with MSB3027 (Musio.Core.dll locked) if a previously launched `Musio.App.exe` is still running — stop the process first.
+- **Verified**: VS MSBuild ARM64 Debug clean for Tests + App; 418/418 tests pass; app relaunched and responsive.

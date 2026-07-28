@@ -94,6 +94,13 @@ public sealed class MouseHookRecorder : IDisposable
     private const int DefaultClickCapacity  = 1_000;
     private const double MinMoveIntervalMs = 4.0; // 250Hz cap
 
+    /// <summary>Default cursor-shape polling interval (~50Hz).</summary>
+    public const int DefaultShapeSampleIntervalMs = 20;
+
+    /// <summary>Bounds for <see cref="ShapeSampleIntervalMs"/>.</summary>
+    public const int MinShapeSampleIntervalMs = 8;
+    public const int MaxShapeSampleIntervalMs = 1000;
+
     // Binary file format constants
     private static readonly byte[] MagicBytes = "MCUR"u8.ToArray();
     private const int FileFormatVersion = 2;
@@ -102,27 +109,44 @@ public sealed class MouseHookRecorder : IDisposable
     private LowLevelMouseProc? _hookProc; // prevent GC collection of the delegate
     private readonly CursorShapeResolver _shapeResolver = new();
 
-    // The active cursor shape is sampled only at click time (button-down) — not on a
-    // continuous timer — and held between clicks. Clicks are the moments where the
-    // cursor's identity matters most (link, text, resize), and sampling only then keeps
-    // GetCursorInfo entirely off the high-rate mouse-move path. Written from the hook
-    // thread, read when building each sample.
+    // The active cursor shape is tracked by a dedicated polling thread (see
+    // ShapeThreadProc) and re-confirmed on click transitions. GetCursorInfo is NEVER
+    // called from the low-level hook callback: doing so puts a syscall on the system
+    // input path and adds latency to live cursor motion (see learnings.md). The hook
+    // only reads this cached value. Written from the poll/hook threads.
     private volatile int _currentShape = (int)CursorShape.Arrow;
 
     private readonly List<MouseSample> _samples = new(DefaultSampleCapacity);
     private readonly List<ClickEvent> _clicks   = new(DefaultClickCapacity);
     private readonly object _lock = new();
+    private long _lastSampleTicks;
 
     private long _startTicks;
     private long _endTicks;
     private long _stopRequestedTicks;
     private long _lastMoveTicks;
-    private bool _paused;
+    private volatile bool _paused;
     private bool _disposed;
 
     private Thread? _hookThread;
     private uint _hookThreadId;
     private readonly ManualResetEventSlim _hookReady = new(false);
+
+    private Thread? _shapeThread;
+    private readonly ManualResetEventSlim _shapeStop = new(false);
+    private int _shapeSampleIntervalMs = DefaultShapeSampleIntervalMs;
+
+    /// <summary>
+    /// How often the active cursor shape is sampled while recording, in milliseconds.
+    /// Lower values track hover-driven shape changes (link, text, resize) more closely.
+    /// Must be set before <see cref="StartRecording"/>; clamped to
+    /// [<see cref="MinShapeSampleIntervalMs"/>, <see cref="MaxShapeSampleIntervalMs"/>].
+    /// </summary>
+    public int ShapeSampleIntervalMs
+    {
+        get => _shapeSampleIntervalMs;
+        set => _shapeSampleIntervalMs = Math.Clamp(value, MinShapeSampleIntervalMs, MaxShapeSampleIntervalMs);
+    }
 
     public bool IsRecording { get; private set; }
     public long SampleCount { get { lock (_lock) { return _samples.Count; } } }
@@ -142,15 +166,16 @@ public sealed class MouseHookRecorder : IDisposable
         {
             _samples.Clear();
             _clicks.Clear();
+            _lastSampleTicks = 0;
         }
 
         _lastMoveTicks = 0;
         _paused = false;
         _hookReady.Reset();
+        _shapeStop.Reset();
         _startTicks = Stopwatch.GetTimestamp();
 
-        // Sample the cursor shape once at the start; thereafter it is re-sampled only
-        // at click time (see HookCallback) and held between clicks.
+        // Seed the shape; the poller thread keeps it current from here on.
         _currentShape = (int)_shapeResolver.Resolve();
 
         _hookThread = new Thread(HookThreadProc)
@@ -168,6 +193,15 @@ public sealed class MouseHookRecorder : IDisposable
             throw new InvalidOperationException(
                 $"Failed to install mouse hook. Win32 error: {Marshal.GetLastWin32Error()}");
 
+        // Start the shape poller only once the hook is live, so it never outlives a
+        // failed start.
+        _shapeThread = new Thread(ShapeThreadProc)
+        {
+            Name = "MouseShapePoller",
+            IsBackground = true,
+        };
+        _shapeThread.Start();
+
         IsRecording = true;
     }
 
@@ -178,10 +212,19 @@ public sealed class MouseHookRecorder : IDisposable
         _endTicks = _stopRequestedTicks > 0 ? _stopRequestedTicks : Stopwatch.GetTimestamp();
         IsRecording = false;
 
+        StopShapeThread();
+
         // Tell the hook thread's message loop to exit.
         PostThreadMessage(_hookThreadId, WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
+    }
+
+    private void StopShapeThread()
+    {
+        _shapeStop.Set();
+        _shapeThread?.Join(timeout: TimeSpan.FromSeconds(2));
+        _shapeThread = null;
     }
 
     /// <summary>
@@ -260,6 +303,84 @@ public sealed class MouseHookRecorder : IDisposable
     }
 
     // ────────────────────────────────────────────────────────────────
+    // Shape poller thread — samples the live cursor shape off the hook path
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Polls the active cursor shape on its own thread at <see cref="ShapeSampleIntervalMs"/>.
+    /// The hook callback only reads the cached result, so cursor motion is never delayed
+    /// by a <c>GetCursorInfo</c> syscall. When the shape changes, a synthetic move sample
+    /// is appended so hover-driven changes are recorded even while the mouse is stationary.
+    /// </summary>
+    private void ShapeThreadProc()
+    {
+        int interval = _shapeSampleIntervalMs;
+
+        try
+        {
+            while (!_shapeStop.Wait(interval))
+            {
+                if (_paused || !IsRecording)
+                    continue;
+
+                try
+                {
+                    var shape = _shapeResolver.Resolve(out int x, out int y, out bool positionValid);
+                    if ((int)shape == _currentShape)
+                        continue;
+
+                    _currentShape = (int)shape;
+
+                    if (!positionValid)
+                        continue;
+
+                    long ticks = Stopwatch.GetTimestamp();
+                    lock (_lock)
+                    {
+                        if (!IsRecording || _paused)
+                            continue;
+
+                        AddSampleLocked(new MouseSample
+                        {
+                            TimestampTicks = ticks,
+                            X              = x,
+                            Y              = y,
+                            EventKind      = MouseEventKind.Move,
+                            Button         = MouseButton.None,
+                            ScrollDelta    = 0,
+                            Shape          = shape,
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[MouseHookRecorder] Shape poll error: {ex.Message}");
+                }
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // The recorder was disposed while this thread was waiting — just exit.
+        }
+    }
+
+    /// <summary>
+    /// Appends a sample, keeping the sample list non-decreasing in time. Two threads
+    /// (the hook and the shape poller) append concurrently, so a sample can arrive with
+    /// a slightly older timestamp than the previous one; downstream consumers
+    /// (<c>CursorSmoother.AssignShapes</c>) assume ordered timestamps.
+    /// Caller must hold <see cref="_lock"/>.
+    /// </summary>
+    private void AddSampleLocked(MouseSample sample)
+    {
+        if (sample.TimestampTicks < _lastSampleTicks)
+            sample.TimestampTicks = _lastSampleTicks;
+
+        _samples.Add(sample);
+        _lastSampleTicks = sample.TimestampTicks;
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // Hook callback — must be as fast as possible
     // ────────────────────────────────────────────────────────────────
 
@@ -276,10 +397,10 @@ public sealed class MouseHookRecorder : IDisposable
                 ClassifyEvent(msg, hookData, ticks, out MouseEventKind kind, out MouseButton button,
                               out short scrollDelta, out bool isClick, out bool isDown);
 
-                // Re-sample the cursor shape on click transitions — both button-down and
-                // button-up — so a shape that appears on press (grab, resize, ...) reverts
-                // when the button is released. GetCursorInfo never runs on the high-rate
-                // move path, so it cannot add latency to cursor motion.
+                // Re-confirm the cursor shape on click transitions so a press/release
+                // shape change (grab, resize, ...) is stamped exactly at the click rather
+                // than up to one poll interval later. Clicks are rare, so this syscall
+                // never runs on the high-rate move path.
                 if (isClick)
                 {
                     try { _currentShape = (int)_shapeResolver.Resolve(); }
@@ -306,7 +427,7 @@ public sealed class MouseHookRecorder : IDisposable
 
                     if (shouldRecordSample)
                     {
-                        _samples.Add(sample);
+                        AddSampleLocked(sample);
 
                         if (isPureMove)
                             _lastMoveTicks = ticks;
@@ -417,6 +538,7 @@ public sealed class MouseHookRecorder : IDisposable
             _samples.TrimExcess();
             _clicks.Clear();
             _clicks.TrimExcess();
+            _lastSampleTicks = 0;
         }
     }
 
@@ -528,7 +650,10 @@ public sealed class MouseHookRecorder : IDisposable
 
         if (IsRecording)
             StopRecording();
+        else
+            StopShapeThread();
 
         _hookReady.Dispose();
+        _shapeStop.Dispose();
     }
 }
