@@ -4,7 +4,7 @@
 
 Musio is a screen recorder and editor optimized to run natively on Windows. Record your screen, add beautiful effects, and export polished videos — all from a native Windows app.
 
-![Musio Screenshot](docs/screenshot-placeholder.png)
+![Musio Screenshot](docs/screenshot.png)
 
 ## Features
 
