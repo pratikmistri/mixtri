@@ -33,13 +33,17 @@
             <Rectangle x:Name="LeftMask" Fill="{ThemeResource RegionMaskBrush}" />
             <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
 
-            <!-- Selection rectangle outline -->
+            <!-- Selection rectangle outline. 2px dashed with a 4px radius, matching
+                 the persistent selection border exactly — that border converts the
+                 same DIP values to physical pixels for the monitor it lands on. -->
             <Rectangle
                 x:Name="SelectionRect"
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="1"
-                StrokeDashArray="4,4"
+                StrokeThickness="2"
+                StrokeDashArray="3.5,2.5"
+                RadiusX="4"
+                RadiusY="4"
                 Visibility="Collapsed" />
 
             <!-- Resize handles (corners + edges) -->

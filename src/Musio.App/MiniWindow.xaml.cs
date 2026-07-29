@@ -243,12 +243,21 @@ public sealed partial class MiniWindow : Window
         finally { _programmaticChangeDepth--; }
     }
 
+    /// <summary>
+    /// Whether the pill is currently on screen. Tracked explicitly rather than read
+    /// from <see cref="Window.Visible"/> because show/hide goes through
+    /// <c>ShowWindow</c> P/Invoke, which the framework property doesn't always
+    /// reflect immediately.
+    /// </summary>
+    public bool IsVisible { get; private set; }
+
     /// <summary>Shows the pill, re-syncing the toolbar with the shared view model first.</summary>
     public void ShowMini()
     {
         Toolbar.SyncFromViewModel();
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ShowWindow(hwnd, SW_SHOW);
+        IsVisible = true;
         ResizeToContent();
         Activate();
         SetForegroundWindow(hwnd);
@@ -262,6 +271,7 @@ public sealed partial class MiniWindow : Window
         // A position the user chose is deliberately kept.
         _widestSeenDips = 0;
 
+        IsVisible = false;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ShowWindow(hwnd, SW_HIDE);
     }

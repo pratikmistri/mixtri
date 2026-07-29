@@ -35,7 +35,8 @@ public sealed class ShellCoordinator : IDisposable
     private MainWindow? _mainWindow;
     private MiniWindow? _miniWindow;
     private RecordingOverlayWindow? _overlay;
-    private RegionBorderHighlight? _regionBorder;
+    private SelectionHighlight? _highlight;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _windowTracker;
 
     private bool _isDisposed;
 
@@ -61,9 +62,14 @@ public sealed class ShellCoordinator : IDisposable
     public void Start()
     {
         if (_stateMachine.CurrentState == AppShellState.Mini)
+        {
+            // Refreshes the preview itself.
             ShowMiniSurface();
+        }
         else
+        {
             ShowFullSurface();
+        }
     }
 
     #region Transitions
@@ -107,6 +113,7 @@ public sealed class ShellCoordinator : IDisposable
 
         _miniWindow?.HideMini();
         HideMainWindow();
+        UpdateSelectionPreview();
     }
 
     /// <summary>
@@ -123,6 +130,11 @@ public sealed class ShellCoordinator : IDisposable
     {
         if (_isPickerHiding) return;
         _isPickerHiding = true;
+
+        // The preview border would otherwise sit on top of the picker's
+        // full-screen screenshot and get baked into the next one it takes.
+        StopWindowTracking();
+        _highlight?.Hide();
 
         if (_stateMachine.CurrentState == AppShellState.Mini)
             _miniWindow?.HideMini();
@@ -181,17 +193,21 @@ public sealed class ShellCoordinator : IDisposable
         {
             case AppShellState.Mini:
                 HideMainWindow();
+                // ShowMiniSurface refreshes the preview itself.
                 ShowMiniSurface();
                 break;
 
             case AppShellState.Full:
                 _miniWindow?.HideMini();
                 ShowFullSurface();
+                // The preview belongs to the Mini surface, so take it away here.
+                UpdateSelectionPreview();
                 break;
 
             case AppShellState.Recording:
                 _miniWindow?.HideMini();
                 MinimizeMainWindow();
+                // OnRecordingBegan puts up the recording highlight instead.
                 break;
         }
     }
@@ -204,6 +220,11 @@ public sealed class ShellCoordinator : IDisposable
     {
         _miniWindow ??= CreateMiniWindow();
         _miniWindow.ShowMini();
+
+        // Refreshed here rather than at each call site so the preview comes back no
+        // matter how the pill was summoned — collapse from the full window, the tray
+        // icon, launch, or a picker unwinding.
+        UpdateSelectionPreview();
     }
 
     private MiniWindow CreateMiniWindow()
@@ -270,25 +291,44 @@ public sealed class ShellCoordinator : IDisposable
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(RecordingViewModel.IsRecording)) return;
         if (_mainWindow is null) return;
 
-        _mainWindow.DispatcherQueue.TryEnqueue(() =>
+        switch (e.PropertyName)
         {
-            if (_viewModel.IsRecording)
-                OnRecordingBegan();
-            else
-                OnRecordingEnded();
-        });
+            case nameof(RecordingViewModel.IsRecording):
+                _mainWindow.DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (_viewModel.IsRecording)
+                        OnRecordingBegan();
+                    else
+                        OnRecordingEnded();
+                });
+                break;
+
+            // The selection preview reflects these, and they can change from the
+            // Mini pill, the Record page, or a picker.
+            case nameof(RecordingViewModel.CaptureMode):
+            case nameof(RecordingViewModel.SelectedRegion):
+            case nameof(RecordingViewModel.SelectedWindow):
+            case nameof(RecordingViewModel.HasSelectedRegion):
+                _mainWindow.DispatcherQueue.TryEnqueue(UpdateSelectionPreview);
+                break;
+        }
     }
 
     private void OnRecordingBegan()
     {
-        ShowRegionBorder();
+        // The highlight looks the same while recording; it just stops following the
+        // target, since the capture is locked to wherever it was when Record ran.
+        StopWindowTracking();
+        ShowHighlight();
 
         _overlay = new RecordingOverlayWindow(_viewModel);
         _overlay.StopRequested += OnOverlayStopRequested;
         _overlay.Activate();
+
+        // The overlay sits outside the selection, so lift it clear of the smoke.
+        _highlight?.KeepAbove(WinRT.Interop.WindowNative.GetWindowHandle(_overlay));
 
         // Everything captured before this point is discarded, so opening the gate
         // only once the overlay is up removes the startup delta.
@@ -337,8 +377,8 @@ public sealed class ShellCoordinator : IDisposable
             _overlay = null;
         }
 
-        _regionBorder?.Dispose();
-        _regionBorder = null;
+        StopWindowTracking();
+        _highlight?.Hide();
     }
 
     private void OnViewModelErrorRaised(object? sender, string message)
@@ -369,32 +409,127 @@ public sealed class ShellCoordinator : IDisposable
     }
 
     /// <summary>
-    /// Draws a border around the captured region so the user can see the area.
-    /// Region coordinates are monitor-local DIPs from the selector overlay, so
-    /// they are scaled to physical pixels and offset by the monitor's origin.
+    /// Draws a border around whatever is about to be captured, so the user can see
+    /// their selection without opening a picker. Region coordinates are monitor-local
+    /// DIPs from the selector overlay, so they are scaled to physical pixels and
+    /// offset by the monitor's origin; window bounds are already physical pixels.
     /// </summary>
-    private void ShowRegionBorder()
+    private bool ShowHighlight()
     {
-        if (_viewModel.CaptureMode != CaptureMode.CustomRegion) return;
-        if (_viewModel.SelectedRegion is not { } region) return;
-        if (region.Width <= 0 || region.Height <= 0) return;
+        switch (_viewModel.CaptureMode)
+        {
+            case CaptureMode.CustomRegion:
+            {
+                if (_viewModel.SelectedRegion is not { } region) return false;
+                if (region.Width <= 0 || region.Height <= 0) return false;
 
-        _regionBorder = new RegionBorderHighlight();
+                // No falling back to the primary monitor: the region's coordinates
+                // are monitor-local, so if its display is gone they would place the
+                // highlight on the wrong screen, over content that will never be
+                // captured. RecordingViewModel.BuildCaptureTarget refuses the same
+                // case at record time; showing nothing here matches that.
+                if (!TryResolveRegionMonitor(region, out int monLeft, out int monTop, out float dpiScale))
+                    return false;
 
-        float dpiScale = GetRegionMonitorDpiScale(region);
-        var (monLeft, monTop) = GetRegionMonitorOrigin(region);
+                // Math.Round on the origin and even-flooring on the size mirror the
+                // crop rect computed by RecordingSession (H.264 needs even
+                // dimensions), so the border matches the recorded frame exactly.
+                int px = monLeft + (int)Math.Round(region.X * dpiScale);
+                int py = monTop + (int)Math.Round(region.Y * dpiScale);
+                int pw = ((int)(region.Width * dpiScale)) & ~1;
+                int ph = ((int)(region.Height * dpiScale)) & ~1;
+                if (pw < 2) pw = 2;
+                if (ph < 2) ph = 2;
 
-        // Math.Round on the origin and even-flooring on the size mirror the crop
-        // rect computed by RecordingSession (H.264 needs even dimensions), so the
-        // border matches the recorded frame exactly.
-        int px = monLeft + (int)Math.Round(region.X * dpiScale);
-        int py = monTop + (int)Math.Round(region.Y * dpiScale);
-        int pw = ((int)(region.Width * dpiScale)) & ~1;
-        int ph = ((int)(region.Height * dpiScale)) & ~1;
-        if (pw < 2) pw = 2;
-        if (ph < 2) ph = 2;
+                _highlight ??= new SelectionHighlight();
+                _highlight.ShowRect(px, py, pw, ph);
+                return true;
+            }
 
-        _regionBorder.Show(px, py, pw, ph);
+            case CaptureMode.Window:
+            {
+                if (_viewModel.SelectedWindow is not { } window) return false;
+
+                _highlight ??= new SelectionHighlight();
+                _highlight.ShowWindow(window.Handle);
+                return _highlight.IsShown;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Shows the accent-coloured preview border when the Mini pill is the visible
+    /// surface and something is selected, and takes it away otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Mini deliberately shows no selection text, so this border is the only thing
+    /// telling the user what Record is about to capture. Scoped to Mini because the
+    /// full Record page prints the selection underneath its toolbar instead.
+    /// </remarks>
+    private void UpdateSelectionPreview()
+    {
+        if (_isDisposed) return;
+
+        bool wanted = _stateMachine.CurrentState == AppShellState.Mini
+                      && !_viewModel.IsRecording
+                      && !_isPickerHiding
+                      && _miniWindow is { IsVisible: true };
+
+        if (!wanted)
+        {
+            StopWindowTracking();
+            _highlight?.Hide();
+            return;
+        }
+
+        if (!ShowHighlight())
+        {
+            StopWindowTracking();
+            _highlight?.Hide();
+            return;
+        }
+
+        // The smoke would otherwise dim the pill along with the rest of the desktop.
+        if (_miniWindow is not null)
+            _highlight?.KeepAbove(WinRT.Interop.WindowNative.GetWindowHandle(_miniWindow));
+
+        // A window can be moved or resized while the pill is up, so follow it.
+        if (_highlight?.TrackedWindow != IntPtr.Zero)
+            StartWindowTracking();
+        else
+            StopWindowTracking();
+    }
+
+    private void StartWindowTracking()
+    {
+        if (_mainWindow is null) return;
+
+        _windowTracker ??= _mainWindow.DispatcherQueue.CreateTimer();
+        if (_windowTracker.IsRunning) return;
+
+        _windowTracker.Interval = TimeSpan.FromMilliseconds(WindowTrackIntervalMs);
+        _windowTracker.IsRepeating = true;
+        _windowTracker.Tick -= OnWindowTrackerTick;
+        _windowTracker.Tick += OnWindowTrackerTick;
+        _windowTracker.Start();
+    }
+
+    private void StopWindowTracking()
+    {
+        if (_windowTracker is null) return;
+        _windowTracker.Stop();
+        _windowTracker.Tick -= OnWindowTrackerTick;
+    }
+
+    private void OnWindowTrackerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        // Returns false once the target window is closed, hidden or minimised —
+        // the highlight hides itself, so just stop polling.
+        if (_highlight is null || !_highlight.RefreshTrackedWindow())
+            StopWindowTracking();
     }
 
     #endregion
@@ -408,6 +543,10 @@ public sealed class ShellCoordinator : IDisposable
         _viewModel.ErrorRaised -= OnViewModelErrorRaised;
 
         TearDownRecordingChrome();
+        StopWindowTracking();
+        _windowTracker = null;
+        _highlight?.Dispose();
+        _highlight = null;
 
         try { _miniWindow?.CloseMini(); } catch { }
         _miniWindow = null;
@@ -422,6 +561,9 @@ public sealed class ShellCoordinator : IDisposable
     /// </summary>
     private const int WindowHideSettleMs = 600;
 
+    /// <summary>How often the preview border re-reads a tracked window's bounds.</summary>
+    private const int WindowTrackIntervalMs = 150;
+
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
     private const int SW_MINIMIZE = 6;
@@ -430,45 +572,43 @@ public sealed class ShellCoordinator : IDisposable
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 
-    private static CaptureTarget? FindMonitorForRegion(CaptureRegion region)
+    /// <summary>
+    /// Resolves the origin and DPI scale of the monitor that owns
+    /// <paramref name="region"/>, returning false when that display is no longer
+    /// connected.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately has no primary-monitor fallback — see the call site.
+    /// </remarks>
+    private static bool TryResolveRegionMonitor(
+        CaptureRegion region, out int left, out int top, out float dpiScale)
     {
-        var monitors = MonitorEnumerator.GetAllMonitors();
+        left = 0;
+        top = 0;
+        dpiScale = 1.0f;
+
         // Exact match against the raw device name. DisplayName is either
         // "\\.\DISPLAY1" or "\\.\DISPLAY1 (Primary)", so Contains would wrongly
         // match "\\.\DISPLAY1" against "\\.\DISPLAY10".
-        return monitors.FirstOrDefault(m =>
-                m.DisplayName == region.MonitorId
-                || m.DisplayName.StartsWith(region.MonitorId + " "))
-            ?? monitors.FirstOrDefault();
+        var monitor = MonitorEnumerator.GetAllMonitors().FirstOrDefault(m =>
+            m.DisplayName == region.MonitorId
+            || m.DisplayName.StartsWith(region.MonitorId + " "));
+
+        if (monitor is null || monitor.Handle == IntPtr.Zero) return false;
+
+        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(monitor.Handle, ref info)) return false;
+
+        left = info.rcMonitor.Left;
+        top = info.rcMonitor.Top;
+
+        if (GetDpiForMonitor(monitor.Handle, MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0 && dpiX > 0)
+            dpiScale = dpiX / 96.0f;
+
+        return true;
     }
 
-    private static float GetRegionMonitorDpiScale(CaptureRegion region)
-    {
-        var monitor = FindMonitorForRegion(region);
-
-        if (monitor is not null && monitor.Handle != IntPtr.Zero)
-        {
-            int hr = GetDpiForMonitor(monitor.Handle, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
-            if (hr == 0 && dpiX > 0)
-                return dpiX / 96.0f;
-        }
-
-        return 1.0f;
-    }
-
-    private static (int Left, int Top) GetRegionMonitorOrigin(CaptureRegion region)
-    {
-        var monitor = FindMonitorForRegion(region);
-
-        if (monitor is not null && monitor.Handle != IntPtr.Zero)
-        {
-            var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-            if (GetMonitorInfo(monitor.Handle, ref info))
-                return (info.rcMonitor.Left, info.rcMonitor.Top);
-        }
-
-        return (0, 0);
-    }
+    private const int MDT_EFFECTIVE_DPI = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
