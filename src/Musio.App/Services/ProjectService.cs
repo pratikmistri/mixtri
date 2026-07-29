@@ -1,6 +1,7 @@
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Projects;
 using Musio.Core.Timeline;
 
 namespace Musio_App.Services;
@@ -18,11 +19,70 @@ public class ProjectService
     public CompositionConfig CurrentComposition { get; set; } = new();
     public TimelineModel? CurrentTimeline { get; set; }
 
+    /// <summary>
+    /// Path of the <c>.musio</c> file this project was opened from or last saved to,
+    /// or null when it has never been saved.
+    /// </summary>
+    public string? CurrentPackagePath { get; private set; }
+
     public event EventHandler? ProjectChanged;
+
+    /// <summary>
+    /// Folder that <c>.musio</c> packages unpack their media into.
+    /// </summary>
+    /// <remarks>
+    /// Lives under LocalAppData rather than beside the package so opening a project from
+    /// a read-only location (a network share, a downloads folder) still works.
+    /// </remarks>
+    public static string PackageCacheRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Musio", "OpenProjects");
+
+    /// <summary>
+    /// Saves the current project, composition and timeline into a single
+    /// <c>.musio</c> package.
+    /// </summary>
+    public async Task SavePackageAsync(
+        string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        if (CurrentProject is null)
+            throw new InvalidOperationException("There is no project to save.");
+
+        await MusioPackageService.SaveAsync(
+            packagePath, CurrentProject, CurrentComposition, CurrentTimeline, progress, ct);
+
+        CurrentPackagePath = packagePath;
+    }
+
+    /// <summary>
+    /// Opens a <c>.musio</c> package and makes it the current project.
+    /// </summary>
+    public async Task OpenPackageAsync(
+        string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        var result = await MusioPackageService.OpenAsync(
+            packagePath, PackageCacheRoot, progress, ct);
+
+        CurrentProject = result.Project;
+        CurrentComposition = result.Composition;
+        CurrentTimeline = result.Timeline;
+        CurrentPackagePath = packagePath;
+
+        // A saved package carries its own timeline, so the primary segment must not be
+        // synthesized the way SetProject does for a fresh recording.
+        if (CurrentTimeline.Segments.Count == 0)
+        {
+            CurrentTimeline.Segments.Add(CreateVideoSegmentFromProject(result.Project));
+            CurrentTimeline.RecalculateSegmentPositions();
+        }
+
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     public void SetProject(Project project)
     {
         CurrentProject = project;
+        CurrentPackagePath = null;
         CurrentTimeline = new TimelineModel
         {
             Duration = project.Duration,

@@ -156,17 +156,29 @@ public sealed class SessionCleanupServiceTests
     #region CleanupExportedSessions
 
     [TestMethod]
-    public void CleanupExportedSessions_CleansMarkedSessions()
+    public void CleanupExportedSessions_CleansEverySessionWithAFinalizedVideo()
     {
         CreateSessionFolder("session_a", withVideo: true, withFrames: true, withMarker: true);
         CreateSessionFolder("session_b", withVideo: true, withFrames: true, withMarker: false);
 
         long reclaimed = SessionCleanupService.CleanupExportedSessions(_testRoot);
 
-        Assert.IsTrue(reclaimed > 0, "Should reclaim from session_a");
+        Assert.IsTrue(reclaimed > 0, "Should reclaim from both sessions");
         Assert.IsFalse(Directory.Exists(Path.Combine(_testRoot, "session_a", ".frames")));
-        Assert.IsTrue(Directory.Exists(Path.Combine(_testRoot, "session_b", ".frames")),
-            "session_b should not be cleaned (no marker)");
+        Assert.IsFalse(Directory.Exists(Path.Combine(_testRoot, "session_b", ".frames")),
+            "Export is no longer a precondition — a finalized MP4 keeps the project editable");
+    }
+
+    [TestMethod]
+    public void CleanupExportedSessions_PreservesFramesWhenVideoIsMissing()
+    {
+        CreateSessionFolder("session_unfinalized", withVideo: false, withFrames: true, withMarker: true);
+
+        long reclaimed = SessionCleanupService.CleanupExportedSessions(_testRoot);
+
+        Assert.AreEqual(0, reclaimed);
+        Assert.IsTrue(Directory.Exists(Path.Combine(_testRoot, "session_unfinalized", ".frames")),
+            "Frames are the only copy of a recording whose MP4 never finalized");
     }
 
     [TestMethod]
@@ -191,9 +203,19 @@ public sealed class SessionCleanupServiceTests
     }
 
     [TestMethod]
-    public void GetReclaimableSpace_NoMarker_ReturnsZero()
+    public void GetReclaimableSpace_NoMarker_StillCountsFinalizedSession()
     {
         CreateSessionFolder("session_nomarker", withVideo: true, withFrames: true, withMarker: false);
+
+        long space = SessionCleanupService.GetReclaimableSpace(_testRoot);
+
+        Assert.IsTrue(space > 0, "A finalized MP4 is what makes frames reclaimable, not an export");
+    }
+
+    [TestMethod]
+    public void GetReclaimableSpace_NoVideo_ReturnsZero()
+    {
+        CreateSessionFolder("session_novideo", withVideo: false, withFrames: true, withMarker: true);
 
         long space = SessionCleanupService.GetReclaimableSpace(_testRoot);
 

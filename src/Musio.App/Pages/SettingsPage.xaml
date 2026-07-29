@@ -99,6 +99,16 @@
                         <ComboBoxItem Content="Window" />
                         <ComboBoxItem Content="Custom Region" />
                     </ComboBox>
+                    <ComboBox
+                        x:Name="CaptureQualityCombo"
+                        Header="Capture quality"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="CaptureQualityCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Quality of the recording kept on disk for future edits. Higher settings preserve more detail through repeated exports, at the cost of disk space.">
+                        <ComboBoxItem Content="Balanced (12 Mbps base)" Tag="Balanced" />
+                        <ComboBoxItem Content="High fidelity (30 Mbps base)" Tag="HighFidelity" />
+                        <ComboBoxItem Content="Master (60 Mbps base)" Tag="Master" />
+                    </ComboBox>
                 </StackPanel>
             </Border>
 

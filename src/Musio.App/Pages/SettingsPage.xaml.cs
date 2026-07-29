@@ -11,6 +11,7 @@ public sealed partial class SettingsPage : Page
     private bool _suppressWebcamEvents;
     private bool _suppressExportDefaultEvents;
     private bool _suppressStartupModeEvents;
+    private bool _suppressCaptureQualityEvents;
 
     public SettingsPage()
     {
@@ -44,6 +45,17 @@ public sealed partial class SettingsPage : Page
         finally
         {
             _suppressExportDefaultEvents = false;
+        }
+
+        _suppressCaptureQualityEvents = true;
+        try
+        {
+            SelectComboBoxByTag(CaptureQualityCombo,
+                AppSettings.Instance.CaptureQuality.ToString());
+        }
+        finally
+        {
+            _suppressCaptureQualityEvents = false;
         }
 
         _suppressWebcamEvents = true;
@@ -102,6 +114,16 @@ public sealed partial class SettingsPage : Page
             && Enum.TryParse<VideoQuality>(item.Tag?.ToString(), out var quality))
         {
             AppSettings.Instance.DefaultExportQuality = quality;
+        }
+    }
+
+    private void CaptureQualityCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressCaptureQualityEvents) return;
+        if (CaptureQualityCombo.SelectedItem is ComboBoxItem item
+            && Enum.TryParse<CaptureQuality>(item.Tag?.ToString(), out var quality))
+        {
+            AppSettings.Instance.CaptureQuality = quality;
         }
     }
 

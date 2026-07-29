@@ -1,7 +1,14 @@
+using System.Text.Json.Serialization;
 using Musio.Core.Models;
 
 namespace Musio.Core.Timeline;
 
+/// <summary>
+/// The editable state of a project's timeline. Serialized verbatim into a
+/// <c>.musio</c> package, so its collection properties are populated in place on
+/// deserialization rather than replaced.
+/// </summary>
+[JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
 public class TimelineModel
 {
     public TimeSpan Duration { get; set; }
@@ -77,6 +84,7 @@ public class TimelineModel
     /// Total output duration computed from segments.
     /// Falls back to <see cref="EffectiveDuration"/> when no segments exist.
     /// </summary>
+    [JsonIgnore]
     public TimeSpan TotalSegmentsDuration =>
         Segments.Count > 0
             ? Segments.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration)
@@ -86,7 +94,9 @@ public class TimelineModel
     public TimeSpan TrimStart { get; set; }
     public TimeSpan TrimEnd { get; set; } // default = Duration
 
-    // Cursor recording data for cursor-path visualization track
+    // Cursor recording data for cursor-path visualization track.
+    // Reloaded from the recording's .mcur file, so it is never persisted.
+    [JsonIgnore]
     public MouseRecordingData? CursorData { get; set; }
 
     /// <summary>
@@ -102,8 +112,12 @@ public class TimelineModel
     /// </summary>
     public double MouseToVideoOffsetSeconds { get; set; }
 
-    // Audio waveform peak samples (normalized 0..1) for waveform rendering
+    // Audio waveform peak samples (normalized 0..1) for waveform rendering.
+    // A regenerable render cache — recomputed from the WAV files on load rather than
+    // bloating the project file with thousands of floats.
+    [JsonIgnore]
     public float[]? SystemAudioWaveformSamples { get; set; }
+    [JsonIgnore]
     public float[]? MicAudioWaveformSamples { get; set; }
 
     // Audio track mute state
@@ -111,12 +125,14 @@ public class TimelineModel
     public bool IsMicAudioMuted { get; set; }
 
     // Get the effective (trimmed) duration
+    [JsonIgnore]
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
 
     /// <summary>
     /// The total display duration for the timeline ruler and coordinate system.
     /// Uses segment duration when segments exist, otherwise falls back to source Duration.
     /// </summary>
+    [JsonIgnore]
     public TimeSpan DisplayDuration =>
         Segments.Count > 0 ? TotalSegmentsDuration : Duration;
 
@@ -313,9 +329,11 @@ public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)
     public TimeSpan? SourceStart { get; init; }
 
     /// <summary>The effective source start position.</summary>
+    [JsonIgnore]
     public TimeSpan EffectiveSourceStart => SourceStart ?? Start;
 
     /// <summary>Source duration (how much source content this clip represents).</summary>
+    [JsonIgnore]
     public TimeSpan SourceDuration
     {
         get
@@ -368,12 +386,15 @@ public record ZoomKeyframe
     public string? SourceVideoFilePath { get; init; }
 
     /// <summary>When the zoom-in animation begins.</summary>
+    [JsonIgnore]
     public TimeSpan Start => Timestamp - PreDuration;
 
     /// <summary>When the zoom-out animation completes.</summary>
+    [JsonIgnore]
     public TimeSpan End => Timestamp + HoldDuration + PostDuration;
 
     /// <summary>Total segment duration from Start to End.</summary>
+    [JsonIgnore]
     public TimeSpan TotalDuration => PreDuration + HoldDuration + PostDuration;
 
     /// <summary>

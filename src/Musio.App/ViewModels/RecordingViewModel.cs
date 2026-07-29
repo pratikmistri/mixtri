@@ -248,6 +248,7 @@ public partial class RecordingViewModel : ObservableObject
                 IsWebcamEnabled = IsWebcamEnabled,
                 WebcamDeviceId = GetWebcamDeviceId(),
                 OutputFolder = outputFolder,
+                CaptureQuality = AppSettings.Instance.CaptureQuality,
             };
 
             _session = new RecordingSession(config);

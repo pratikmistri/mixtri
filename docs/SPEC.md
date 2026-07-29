@@ -300,7 +300,11 @@ Musio/
 
 4. **Hardware encoding**: Real-time capture uses HW encoder for temp file. Export also uses HW encoder with higher quality settings. Auto-detect: NVENC (NVIDIA) → QSV (Intel) → AMF (AMD) → CPU fallback.
 
-5. **Project file format**: Each recording session creates a project folder containing: raw video (MP4), cursor data (binary), audio tracks, project metadata (JSON). This allows non-destructive editing.
+5. **Project file format**: A recording session produces a working folder (raw video MP4, cursor/keyboard data, audio tracks). Saving bundles that state into a single `.musio` file — a ZIP with a `manifest.json` plus stored media entries — so a project is one item in Explorer, portable, and re-openable for non-destructive editing. Compression is per entry: already-compressed media is stored verbatim, PCM audio and event logs are deflated.
+
+6. **Captured frames are a scratch buffer, not an archive**: `VideoWriter` writes one JPEG per frame during capture as a write-ahead buffer, then encodes `video.mp4` and deletes them as soon as finalization succeeds (and only then — if it fails they are the sole copy). The editor and exporter read frames through `VideoFrameReader`, which prefers those JPEGs when present and otherwise decodes the MP4 via `MediaPlayer` frame-server mode. The MP4 is the durable master, which is what keeps a project editable long after its frames are gone. Its bitrate is set by the **Capture quality** setting (12/30/60 Mbps base at 1080p, scaled by pixel count), encoded with a ~1s GOP so scrubbing never rewinds far.
+
+7. **Audio stays uncompressed**: Capture converts the WASAPI mix format down to 16-bit PCM, but no further. A/V alignment is derived from the first captured sample, and compressed codecs prepend encoder priming samples that would silently shift it; size is recovered by deflating the WAV inside the `.musio` package instead.
 
 ---
 

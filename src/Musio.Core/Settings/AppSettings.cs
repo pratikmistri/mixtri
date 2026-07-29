@@ -88,6 +88,17 @@ public sealed class AppSettings
         set => Set(nameof(DefaultExportQuality), value.ToString());
     }
 
+    /// <summary>
+    /// Bitrate of the intermediate MP4 written while recording. That file is the durable
+    /// master a project stays editable from, so this trades disk against how much quality
+    /// survives into later re-edits and exports.
+    /// </summary>
+    public CaptureQuality CaptureQuality
+    {
+        get => GetEnum(nameof(CaptureQuality), CaptureQuality.HighFidelity);
+        set => Set(nameof(CaptureQuality), value.ToString());
+    }
+
     private T GetEnum<T>(string key, T defaultValue) where T : struct, Enum
     {
         var raw = Get(key, defaultValue.ToString());

@@ -9,6 +9,7 @@ using Musio.Core.Capture;
 using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
@@ -323,7 +324,7 @@ public sealed partial class EditorPage : Page
         int previewFps = Math.Min(fps, 30);
         Preview.PreviewFps = previewFps;
 
-        _frameReader = VideoFrameReader.OpenFromVideoPath(project.VideoFilePath, fps);
+        _frameReader = await VideoFrameReader.OpenFromVideoPathAsync(project.VideoFilePath, fps);
         if (_frameReader is null)
             return;
 
@@ -891,7 +892,7 @@ public sealed partial class EditorPage : Page
         try
         {
             int fps = seg.Fps > 0 ? seg.Fps : 30;
-            ctx.Reader = VideoFrameReader.OpenFromVideoPath(seg.VideoFilePath, fps);
+            ctx.Reader = await VideoFrameReader.OpenFromVideoPathAsync(seg.VideoFilePath, fps);
             if (ctx.Reader is null) return ctx;
 
             MouseRecordingData? mouseData = null;
@@ -1291,7 +1292,7 @@ public sealed partial class EditorPage : Page
             VideoFrameReader? reader = null;
             try
             {
-                reader = VideoFrameReader.OpenFromVideoPath(file, segFps);
+                reader = await VideoFrameReader.OpenFromVideoPathAsync(file, segFps);
                 if (reader is null) continue;
                 await GenerateTimelineThumbnailsAsync(reader, file, isPrimary: false);
             }
@@ -4477,6 +4478,123 @@ public sealed partial class EditorPage : Page
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
         }
+    }
+
+    // ─── Project package (.musio) save / open ───────────────────────────
+
+    private async void SaveProject_Click(object sender, RoutedEventArgs e)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null)
+        {
+            await ShowProjectDialogAsync("Nothing to save", "Record or open a project first.");
+            return;
+        }
+
+        var picker = new Windows.Storage.Pickers.FileSavePicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+            SuggestedFileName = SanitizeFileName(project.Name),
+        };
+        picker.FileTypeChoices.Add("Musio project", [MusioPackage.FileExtension]);
+
+        var window = App.Current.MainAppWindow;
+        if (window is not null)
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        }
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSaveFileAsync(); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Save picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        SaveProjectButton.IsEnabled = false;
+        try
+        {
+            await ProjectService.Instance.SavePackageAsync(file.Path);
+            await ShowProjectDialogAsync(
+                "Project saved",
+                $"Saved to {file.Path}.\n\nThe recording is bundled inside the file, so you can " +
+                "move it anywhere and keep editing.");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Project save failed: {ex}");
+            await ShowProjectDialogAsync("Could not save project", ex.Message);
+        }
+        finally
+        {
+            SaveProjectButton.IsEnabled = true;
+        }
+    }
+
+    private async void OpenProject_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+        };
+        picker.FileTypeFilter.Add(MusioPackage.FileExtension);
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Open picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        OpenProjectButton.IsEnabled = false;
+        try
+        {
+            Preview.Pause();
+            await ProjectService.Instance.OpenPackageAsync(file.Path);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Project open failed: {ex}");
+            await ShowProjectDialogAsync("Could not open project", ex.Message);
+        }
+        finally
+        {
+            OpenProjectButton.IsEnabled = true;
+        }
+    }
+
+    private async Task ShowProjectDialogAsync(string title, string message)
+    {
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                Title = title,
+                Content = message,
+                CloseButtonText = "OK",
+                XamlRoot = XamlRoot,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[EditorPage] Dialog failed: {ex.Message}");
+        }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "Musio project";
+
+        foreach (var invalid in System.IO.Path.GetInvalidFileNameChars())
+            name = name.Replace(invalid, '-');
+
+        return name;
     }
 
     // ─── In-preview text editing & repositioning ────────────────────────

@@ -327,6 +327,30 @@
                     FontStyle="Italic" />
 
                 <Button
+                    x:Name="OpenProjectButton"
+                    Height="40"
+                    Padding="8,6"
+                    Click="OpenProject_Click"
+                    ToolTipService.ToolTip="Open a saved .musio project">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE8E5;" />
+                        <TextBlock Text="Open" />
+                    </StackPanel>
+                </Button>
+
+                <Button
+                    x:Name="SaveProjectButton"
+                    Height="40"
+                    Padding="8,6"
+                    Click="SaveProject_Click"
+                    ToolTipService.ToolTip="Save this project as a single .musio file you can reopen and keep editing">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE74E;" />
+                        <TextBlock Text="Save" />
+                    </StackPanel>
+                </Button>
+
+                <Button
                     x:Name="ExportButton"
                     Height="40"
                     Padding="8,6"
