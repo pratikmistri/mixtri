@@ -42,7 +42,7 @@
             x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Left"
-            OpenPaneLength="64"
+            OpenPaneLength="72"
             CompactPaneLength="0"
             IsPaneOpen="True"
             IsBackButtonVisible="Collapsed"
@@ -51,19 +51,19 @@
             SelectionChanged="NavView_SelectionChanged">
             <NavigationView.Resources>
                 <DataTemplate x:Key="RecordItemTemplate">
-                    <StackPanel Spacing="4" Padding="0,6">
+                    <StackPanel Spacing="6" Padding="0,10">
                         <FontIcon FontSize="18" Glyph="&#xE7C8;" HorizontalAlignment="Center" />
                         <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
                     </StackPanel>
                 </DataTemplate>
                 <DataTemplate x:Key="EditorItemTemplate">
-                    <StackPanel Spacing="4" Padding="0,6">
+                    <StackPanel Spacing="6" Padding="0,10">
                         <FontIcon FontSize="18" Glyph="&#xE78A;" HorizontalAlignment="Center" />
                         <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
                     </StackPanel>
                 </DataTemplate>
                 <DataTemplate x:Key="SettingsItemTemplate">
-                    <StackPanel Spacing="4" Padding="0,6">
+                    <StackPanel Spacing="6" Padding="0,10">
                         <FontIcon FontSize="18" Glyph="&#xE713;" HorizontalAlignment="Center" />
                         <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
                     </StackPanel>

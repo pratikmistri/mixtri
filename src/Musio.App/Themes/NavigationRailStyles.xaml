@@ -19,10 +19,11 @@
     -->
     <Style TargetType="NavigationViewItem">
         <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="VerticalAlignment" Value="Stretch" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="MinWidth" Value="0" />
-        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="MinHeight" Value="64" />
         <Setter Property="Padding" Value="0" />
         <Setter Property="Margin" Value="4,2" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
@@ -30,13 +31,19 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="NavigationViewItem">
-                    <Grid x:Name="LayoutRoot" Background="Transparent">
+                    <!-- Stretch vertically: if the root only sized to its content the item
+                         would centre that content in a taller slot, leaving the selection
+                         indicator sitting above the true centre. -->
+                    <Grid x:Name="LayoutRoot"
+                          Background="Transparent"
+                          VerticalAlignment="Stretch"
+                          MinHeight="{TemplateBinding MinHeight}">
                         <Border x:Name="ItemBackground"
                                 Background="Transparent"
                                 CornerRadius="4" />
                         <Border x:Name="SelectionIndicator"
                                 Width="3"
-                                Height="18"
+                                Height="20"
                                 HorizontalAlignment="Left"
                                 VerticalAlignment="Center"
                                 CornerRadius="2"
