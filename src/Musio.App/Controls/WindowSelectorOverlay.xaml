@@ -25,17 +25,21 @@
 
         <!-- Visual overlay layer -->
         <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
-            <!-- Four dark mask rectangles forming the dim overlay around the highlighted window -->
-            <Rectangle x:Name="TopMask" Fill="#99000000" />
-            <Rectangle x:Name="BottomMask" Fill="#99000000" />
-            <Rectangle x:Name="LeftMask" Fill="#99000000" />
-            <Rectangle x:Name="RightMask" Fill="#99000000" />
+            <!-- Four dark mask rectangles forming the dim overlay around the highlighted
+                 window. Uses the same brush as the region selector so both pickers dim
+                 the desktop by the same amount and both follow High Contrast. -->
+            <Rectangle x:Name="TopMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="BottomMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="LeftMask" Fill="{ThemeResource RegionMaskBrush}" />
+            <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
 
-            <!-- Highlight border around hovered window -->
+            <!-- Highlight border around hovered window. Shares the region selector's
+                 accent stroke so "this is what gets captured" reads the same in both
+                 pickers and matches the persistent selection border. -->
             <Rectangle
                 x:Name="HighlightRect"
                 Fill="Transparent"
-                Stroke="{ThemeResource OverlayForegroundBrush}"
+                Stroke="{ThemeResource RegionSelectionStrokeBrush}"
                 StrokeThickness="1"
                 RadiusX="8"
                 RadiusY="8"
