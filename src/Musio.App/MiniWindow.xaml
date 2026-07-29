@@ -76,7 +76,9 @@
                 </Button>
             </StackPanel>
 
-            <!-- Selection summary / transient messages, only takes space when used -->
+            <!-- Errors and transient messages only. Selection details (window name,
+                 region coordinates) are deliberately not surfaced here — Mini mode
+                 stays compact and the full Record page shows them instead. -->
             <TextBlock
                 x:Name="StatusText"
                 Visibility="Collapsed"

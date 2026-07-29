@@ -43,7 +43,6 @@ public sealed partial class MiniWindow : Window
         Toolbar.UseTransparentChrome();
         Toolbar.RecordRequested += (_, _) => RecordRequested?.Invoke(this, EventArgs.Empty);
         Toolbar.ExpandRequested += (_, _) => ExpandRequested?.Invoke(this, EventArgs.Empty);
-        Toolbar.SelectionMetadataChanged += OnSelectionMetadataChanged;
         Toolbar.InfoMessage += OnInfoMessage;
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -198,6 +197,10 @@ public sealed partial class MiniWindow : Window
     }
 
     /// <summary>Surfaces a message under the toolbar; errors stay until replaced.</summary>
+    /// <remarks>
+    /// Reserved for failures and transient hints. Selection summaries are not shown
+    /// in Mini mode, so the pill stays a single compact row in normal use.
+    /// </remarks>
     public void ShowStatus(string message, bool isTransient = true)
     {
         if (StatusText is null) return;
@@ -220,26 +223,16 @@ public sealed partial class MiniWindow : Window
     private void OnStatusTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
         sender.Stop();
-        // A selection summary is the resting state, so fall back to it rather
-        // than leaving the row empty after a transient message expires.
-        Toolbar.SyncFromViewModel();
+        HideStatus();
     }
 
-    private void OnSelectionMetadataChanged(object? sender, string? metadata)
+    /// <summary>Clears the status row and shrinks the pill back around the toolbar.</summary>
+    private void HideStatus()
     {
         if (StatusText is null) return;
 
-        if (string.IsNullOrWhiteSpace(metadata))
-        {
-            StatusText.Visibility = Visibility.Collapsed;
-            StatusText.Text = string.Empty;
-        }
-        else
-        {
-            StatusText.Text = metadata;
-            StatusText.Visibility = Visibility.Visible;
-        }
-
+        StatusText.Text = string.Empty;
+        StatusText.Visibility = Visibility.Collapsed;
         ResizeToContent();
     }
 
