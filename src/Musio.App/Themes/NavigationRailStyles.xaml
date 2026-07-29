@@ -32,8 +32,7 @@
         <Setter Property="Padding" Value="0" />
         <Setter Property="Margin" Value="4,2" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
-        <!-- Unselected items sit back so the selected one carries the emphasis. -->
-        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="NavigationViewItem">
@@ -71,11 +70,21 @@
                                     Spacing="6"
                                     Padding="0,10"
                                     HorizontalAlignment="Stretch"
-                                    VerticalAlignment="Center">
+                                    VerticalAlignment="Center"
+                                    Opacity="0.6">
                             <ContentPresenter x:Name="IconHost"
                                               Content="{TemplateBinding Icon}"
                                               Foreground="{TemplateBinding Foreground}"
-                                              HorizontalAlignment="Center" />
+                                              HorizontalAlignment="Center"
+                                              RenderTransformOrigin="0.5,0.5">
+                                <ContentPresenter.RenderTransform>
+                                    <TranslateTransform x:Name="IconTranslate" />
+                                </ContentPresenter.RenderTransform>
+                            </ContentPresenter>
+                            <!-- The label keeps its layout space when selected and only fades
+                                 out, while the icon is translated down over it. Collapsing the
+                                 label instead would be unanimatable (Visibility is not) and
+                                 would make the item's height jump on every selection. -->
                             <TextBlock x:Name="LabelHost"
                                        Text="{TemplateBinding Content}"
                                        Foreground="{TemplateBinding Foreground}"
@@ -100,16 +109,32 @@
                                                 <CubicEase EasingMode="EaseIn" />
                                             </DoubleAnimation.EasingFunction>
                                         </DoubleAnimation>
+                                        <!-- Deselecting has to reverse the label fade and icon
+                                             glide, otherwise an item keeps its icon shifted
+                                             down over an invisible label after losing selection. -->
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="LabelHost"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.18" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="IconTranslate"
+                                            Storyboard.TargetProperty="Y"
+                                            To="0" Duration="0:0:0.22">
+                                            <DoubleAnimation.EasingFunction>
+                                                <CubicEase EasingMode="EaseOut" />
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="ContentStack"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="0.6" Duration="0:0:0.18" />
                                     </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PointerOver">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
-                                        <Setter Target="IconHost.Foreground"
-                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
-                                        <Setter Target="LabelHost.Foreground"
-                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                        <Setter Target="ContentStack.Opacity" Value="1" />
                                     </VisualState.Setters>
                                 </VisualState>
                                 <VisualState x:Name="Pressed">
@@ -126,9 +151,9 @@
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
-                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <!-- Accent tint marks the active destination. -->
                                         <Setter Target="IconHost.Foreground"
-                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                                Value="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
                                     <Storyboard>
                                         <DoubleAnimation
@@ -143,15 +168,31 @@
                                                 <BackEase EasingMode="EaseOut" Amplitude="0.4" />
                                             </DoubleAnimation.EasingFunction>
                                         </DoubleAnimation>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="LabelHost"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="0" Duration="0:0:0.15" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="IconTranslate"
+                                            Storyboard.TargetProperty="Y"
+                                            To="11" Duration="0:0:0.22">
+                                            <DoubleAnimation.EasingFunction>
+                                                <CubicEase EasingMode="EaseOut" />
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="ContentStack"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.15" />
                                     </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PointerOverSelected">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <!-- Accent tint marks the active destination. -->
                                         <Setter Target="IconHost.Foreground"
-                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                                Value="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
                                     <Storyboard>
                                         <DoubleAnimation
@@ -162,15 +203,28 @@
                                             Storyboard.TargetName="RailSelectionBarScale"
                                             Storyboard.TargetProperty="ScaleY"
                                             To="1" Duration="0:0:0.12" />
+                                    
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="LabelHost"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="0" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="IconTranslate"
+                                            Storyboard.TargetProperty="Y"
+                                            To="11" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="ContentStack"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.15" />
                                     </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PressedSelected">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <!-- Accent tint marks the active destination. -->
                                         <Setter Target="IconHost.Foreground"
-                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                                Value="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
                                     <Storyboard>
                                         <DoubleAnimation
@@ -181,6 +235,19 @@
                                             Storyboard.TargetName="RailSelectionBarScale"
                                             Storyboard.TargetProperty="ScaleY"
                                             To="1" Duration="0:0:0.12" />
+                                    
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="LabelHost"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="0" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="IconTranslate"
+                                            Storyboard.TargetProperty="Y"
+                                            To="11" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="ContentStack"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.15" />
                                     </Storyboard>
                                 </VisualState>
 
