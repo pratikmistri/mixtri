@@ -354,6 +354,11 @@ public sealed partial class TimelineControl : UserControl
     /// registered per-file so appended recordings show their own frames; this path
     /// is treated as the primary set used by the legacy clip filmstrip.
     /// </param>
+    /// <param name="filePath">
+    /// Source video file these thumbnails belong to. When provided, the set is also
+    /// registered per-file so appended recordings show their own frames; this path
+    /// is treated as the primary set used by the legacy clip filmstrip.
+    /// </param>
     public void SetThumbnails(CanvasBitmap[]? thumbnails, double intervalSeconds, double aspectRatio,
         string? filePath = null)
     {
@@ -431,8 +436,20 @@ public sealed partial class TimelineControl : UserControl
                 AspectRatio = _videoAspectRatio,
             };
         }
+
+        // Logged once per distinct key: this runs on every redraw, and a miss here is
+        // exactly what paints a video segment as a flat colour block.
+        if (!string.Equals(_lastUnresolvedThumbnailPath, filePath, StringComparison.Ordinal))
+        {
+            _lastUnresolvedThumbnailPath = filePath;
+            Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                $"no thumbnails for segment '{filePath}' (primary '{_primaryThumbnailFilePath}')");
+        }
+
         return null;
     }
+
+    private string? _lastUnresolvedThumbnailPath;
 
     /// <summary>Clears and disposes all cached thumbnails (primary and per-file).</summary>
     public void ClearThumbnails()
@@ -989,12 +1006,19 @@ public sealed partial class TimelineControl : UserControl
             float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
             float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
 
-            ds.DrawImage(thumb,
-                new Rect(drawX, y, drawW, thumbH),
-                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            try
+            {
+                ds.DrawImage(thumb,
+                    new Rect(drawX, y, drawW, thumbH),
+                    new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            }
+            catch (ObjectDisposedException)
+            {
+                // A single stale tile must not abort the draw - letting it propagate
+                // leaves the whole remainder of the track unpainted.
+            }
         }
     }
-
     /// <summary>Currently selected segment ID for text slide highlighting.</summary>
     private string? _selectedSegmentId;
 
@@ -1090,9 +1114,17 @@ public sealed partial class TimelineControl : UserControl
             float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
             float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
 
-            ds.DrawImage(thumb,
-                new Rect(drawX, y, drawW, thumbH),
-                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            try
+            {
+                ds.DrawImage(thumb,
+                    new Rect(drawX, y, drawW, thumbH),
+                    new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            }
+            catch (ObjectDisposedException)
+            {
+                // A single stale tile must not abort the draw - letting it propagate
+                // leaves the whole remainder of the track unpainted.
+            }
         }
     }
 

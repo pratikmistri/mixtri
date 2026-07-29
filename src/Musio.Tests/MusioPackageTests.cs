@@ -269,6 +269,79 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task SaveThenOpen_PreservesEveryEditableSetting()
+    {
+        // Guards the whole "reopening loses my work" class of bug: text slides, cursor,
+        // camera and scene settings must all survive a round trip.
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        var composition = new CompositionConfig
+        {
+            Background = new BackgroundStyle { Padding = 42, CornerRadius = 17, ShadowEnabled = false },
+            Cursor = new CursorStyle { Scale = 1.75f, ClickAnimationEnabled = false, AutoHideEnabled = false },
+            Zoom = new AutoZoomConfig { Enabled = false },
+            SmoothingAlgorithm = SmoothingAlgorithm.None,
+            SmoothingStrength = SmoothingStrength.Subtle,
+            WebcamStyle = new WebcamOverlayStyle { Size = 275f },
+        };
+
+        var slide = (TextSlideSegment)timeline.Segments[1];
+        slide.Text = "Chapter Two";
+        slide.FontFamily = "Consolas";
+        slide.FontSize = 96;
+        slide.IsBold = true;
+        slide.TextColor = "#FF00AA";
+        slide.BackgroundType = SlideBackgroundType.Gradient;
+        slide.GradientAngle = 42;
+        slide.Animation = TextSlideAnimation.FadeIn;
+
+        timeline.CameraSegments[0].Enabled = false;
+        timeline.CameraSegments[0].FullscreenEnabled = true;
+        timeline.IsMicAudioMuted = true;
+        timeline.SuppressedClickTicks.Add(123456789L);
+
+        await MusioPackageService.SaveAsync(packagePath, project, composition, timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        // Scene / frame style
+        Assert.AreEqual(42, opened.Composition.Background.Padding);
+        Assert.AreEqual(17, opened.Composition.Background.CornerRadius);
+        Assert.IsFalse(opened.Composition.Background.ShadowEnabled);
+
+        // Cursor
+        Assert.AreEqual(1.75f, opened.Composition.Cursor.Scale);
+        Assert.IsFalse(opened.Composition.Cursor.ClickAnimationEnabled);
+        Assert.IsFalse(opened.Composition.Cursor.AutoHideEnabled);
+        Assert.AreEqual(SmoothingAlgorithm.None, opened.Composition.SmoothingAlgorithm);
+        Assert.AreEqual(SmoothingStrength.Subtle, opened.Composition.SmoothingStrength);
+
+        // Zoom
+        Assert.IsFalse(opened.Composition.Zoom.Enabled);
+        Assert.AreEqual(1, opened.Timeline.ZoomKeyframes.Count);
+
+        // Camera
+        Assert.AreEqual(275f, opened.Composition.WebcamStyle!.Size);
+        Assert.IsFalse(opened.Timeline.CameraSegments[0].Enabled);
+        Assert.IsTrue(opened.Timeline.CameraSegments[0].FullscreenEnabled);
+
+        // Text slide
+        var restoredSlide = opened.Timeline.Segments.OfType<TextSlideSegment>().Single();
+        Assert.AreEqual("Chapter Two", restoredSlide.Text);
+        Assert.AreEqual("Consolas", restoredSlide.FontFamily);
+        Assert.AreEqual(96, restoredSlide.FontSize);
+        Assert.IsTrue(restoredSlide.IsBold);
+        Assert.AreEqual("#FF00AA", restoredSlide.TextColor);
+        Assert.AreEqual(SlideBackgroundType.Gradient, restoredSlide.BackgroundType);
+        Assert.AreEqual(42, restoredSlide.GradientAngle);
+        Assert.AreEqual(TextSlideAnimation.FadeIn, restoredSlide.Animation);
+
+        // Track state
+        Assert.IsTrue(opened.Timeline.IsMicAudioMuted);
+        CollectionAssert.Contains(opened.Timeline.SuppressedClickTicks.ToList(), 123456789L);
+    }
+
+    [TestMethod]
     public async Task Save_DoesNotMutateTheLiveComposition()
     {
         var (project, timeline) = BuildProject();

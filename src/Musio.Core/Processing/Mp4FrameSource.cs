@@ -31,7 +31,33 @@ namespace Musio.Core.Processing;
 public sealed class Mp4FrameSource : IFrameSource
 {
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan FrameTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long to wait for one seek attempt before re-issuing it. Sequential decodes
+    /// land in ~20 ms and a cold seek across a GOP in a few hundred, so a stall past this
+    /// means the seek produced no frame at all rather than a slow one.
+    /// </summary>
+    private static readonly TimeSpan AttemptTimeout = TimeSpan.FromMilliseconds(600);
+
+    /// <summary>Number of times a frame request is re-issued before giving up.</summary>
+    private const int SeekAttempts = 3;
+
+    /// <summary>
+    /// How long to wait for a single frame step. Steps are the cheap path (a few
+    /// milliseconds); anything past this is a stall, not slow decoding.
+    /// </summary>
+    private static readonly TimeSpan StepTimeout = TimeSpan.FromMilliseconds(400);
+
+    /// <summary>
+    /// Largest forward gap walked with steps rather than a seek. Sized for the editor
+    /// dropping a few frames under load; beyond this a seek genuinely is cheaper.
+    /// </summary>
+    private const int MaxStepAhead = 8;
+
+    /// <summary>
+    /// How long a frame is given to arrive after the decoder reports the seek finished.
+    /// </summary>
+    private static readonly TimeSpan PostSeekGrace = TimeSpan.FromMilliseconds(120);
 
     /// <summary>
     /// How long to let an abandoned frame arrive before issuing the next request after a
@@ -174,12 +200,16 @@ public sealed class Mp4FrameSource : IFrameSource
         }
     }
 
-    private TimeSpan TimeForFrame(int frameIndex)
+    private TimeSpan TimeForFrame(int frameIndex, int attempt)
     {
-        // Aim at the middle of the frame's display interval. Landing exactly on a boundary
-        // lets rounding inside the decoder resolve to the neighbouring frame.
-        double seconds = (frameIndex + 0.5) / _fps;
-        return TimeSpan.FromSeconds(seconds);
+        // Land inside the frame's display interval rather than on its boundary, where
+        // rounding inside the decoder can resolve to the neighbouring frame. Successive
+        // attempts pick a different instant in the same interval so that re-assigning
+        // Position is a real seek and not an ignored no-op, while still decoding the
+        // frame that was asked for.
+        double[] offsets = [0.5, 0.35, 0.65, 0.2];
+        double offset = offsets[attempt % offsets.Length];
+        return TimeSpan.FromSeconds((frameIndex + offset) / _fps);
     }
 
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
@@ -213,32 +243,8 @@ public sealed class Mp4FrameSource : IFrameSource
                     return null;
             }
 
-            var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _framePending = pending;
-
-            var session = _player.PlaybackSession;
-
-            // Stepping is not just an optimization. Assigning Position flushes the decoder
-            // and restarts from the enclosing keyframe, so a sequential walk over a 1s GOP
-            // would re-decode up to `fps` frames per frame — quadratic over an export.
-            if (frameIndex == _lastDeliveredIndex + 1 && _lastDeliveredIndex >= 0)
-                _player.StepForwardOneFrame();
-            else
-                session.Position = TimeForFrame(frameIndex);
-
-            if (await Task.WhenAny(pending.Task, Task.Delay(FrameTimeout)).ConfigureAwait(false) != pending.Task)
-            {
-                Debug.WriteLine($"[Mp4FrameSource] Timed out waiting for frame {frameIndex}.");
-                _lastDeliveredIndex = -1;
-                _needsDrain = true;
+            if (!await PositionAtAsync(frameIndex).ConfigureAwait(false))
                 return null;
-            }
-
-            if (!await pending.Task.ConfigureAwait(false))
-            {
-                _lastDeliveredIndex = -1;
-                return null;
-            }
 
             _lastDeliveredIndex = frameIndex;
 
@@ -262,6 +268,133 @@ public sealed class Mp4FrameSource : IFrameSource
             Interlocked.Exchange(ref _framePending, null);
             try { _gate.Release(); } catch (ObjectDisposedException) { }
         }
+    }
+
+    /// <summary>
+    /// Advances the decoder so <c>_surface</c> holds <paramref name="frameIndex"/>.
+    /// </summary>
+    /// <remarks>
+    /// Stepping and seeking are not interchangeable. Assigning <c>Position</c> flushes the
+    /// decoder and restarts from the enclosing keyframe, costing 10–100× a step, and on a
+    /// paused player it sometimes raises no frame at all. So any small forward gap is
+    /// walked with steps instead.
+    /// <para>
+    /// Small forward gaps are the norm, not the exception: the editor coalesces render
+    /// requests it could not keep up with, so falling one frame behind turns the next
+    /// request into <c>last + 2</c>. Treating that as a seek made playback progressively
+    /// worse the further behind it got — the stutter fed itself.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> PositionAtAsync(int frameIndex)
+    {
+        int gap = frameIndex - _lastDeliveredIndex;
+
+        if (_lastDeliveredIndex >= 0 && gap > 0 && gap <= MaxStepAhead)
+        {
+            for (int i = 0; i < gap; i++)
+            {
+                if (!await IssueAndWaitAsync(() => _player.StepForwardOneFrame(), StepTimeout)
+                        .ConfigureAwait(false))
+                {
+                    // Stepping stalled — fall back to an explicit seek for the target.
+                    _lastDeliveredIndex = -1;
+                    return await SeekToAsync(frameIndex).ConfigureAwait(false);
+                }
+            }
+            return true;
+        }
+
+        return await SeekToAsync(frameIndex).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Seeks to <paramref name="frameIndex"/>, re-issuing the seek a few times because a
+    /// paused player intermittently completes a seek without rendering anything.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="MediaPlaybackSession.SeekCompleted"/> is what makes this bounded. Without
+    /// it there is no way to tell a slow seek from one that finished and silently produced
+    /// no frame, so every failure had to burn a full fixed timeout. Watching for it means a
+    /// dead seek is re-issued as soon as it is known to be dead.
+    /// </remarks>
+    private async Task<bool> SeekToAsync(int frameIndex)
+    {
+        var session = _player.PlaybackSession;
+
+        for (int attempt = 0; attempt < SeekAttempts; attempt++)
+        {
+            var seekDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnSeekCompleted(MediaPlaybackSession s, object a) => seekDone.TrySetResult(true);
+            session.SeekCompleted += OnSeekCompleted;
+
+            try
+            {
+                var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Interlocked.Exchange(ref _framePending, pending);
+
+                // Each attempt targets a different instant *within the same frame's display
+                // interval*: re-assigning an identical Position is a no-op that would never
+                // wake the decoder, while every one of these offsets still resolves to
+                // `frameIndex`.
+                session.Position = TimeForFrame(frameIndex, attempt);
+
+                // The frame usually arrives with, or shortly after, seek completion.
+                var settled = await Task.WhenAny(
+                    pending.Task,
+                    Task.WhenAll(seekDone.Task, Task.Delay(PostSeekGrace)),
+                    Task.Delay(AttemptTimeout)).ConfigureAwait(false);
+
+                if (settled == pending.Task && await pending.Task.ConfigureAwait(false))
+                    return true;
+
+                // Seek finished (or timed out) without producing a frame; give the frame a
+                // last short chance before re-issuing.
+                if (await Task.WhenAny(pending.Task, Task.Delay(PostSeekGrace)).ConfigureAwait(false)
+                        == pending.Task
+                    && await pending.Task.ConfigureAwait(false))
+                {
+                    return true;
+                }
+
+                Interlocked.Exchange(ref _framePending, null);
+                _needsDrain = true;
+
+                if (_disposed)
+                    return false;
+            }
+            finally
+            {
+                session.SeekCompleted -= OnSeekCompleted;
+            }
+        }
+
+        Debug.WriteLine(
+            $"[Mp4FrameSource] Gave up seeking to frame {frameIndex} after {SeekAttempts} attempts.");
+        _lastDeliveredIndex = -1;
+        _needsDrain = true;
+        return false;
+    }
+
+    /// <summary>
+    /// Issues one decoder command and waits for the resulting frame to land in
+    /// <c>_surface</c>.
+    /// </summary>
+    private async Task<bool> IssueAndWaitAsync(Action issue, TimeSpan timeout)
+    {
+        var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Interlocked.Exchange(ref _framePending, pending);
+
+        issue();
+
+        if (await Task.WhenAny(pending.Task, Task.Delay(timeout)).ConfigureAwait(false) != pending.Task)
+        {
+            // Abandon this request so a late frame cannot satisfy the next one.
+            Interlocked.Exchange(ref _framePending, null);
+            _needsDrain = true;
+            return false;
+        }
+
+        return await pending.Task.ConfigureAwait(false);
     }
 
     private void OnVideoFrameAvailable(MediaPlayer sender, object args)

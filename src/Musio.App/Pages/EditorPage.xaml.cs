@@ -63,6 +63,18 @@ public sealed partial class EditorPage : Page
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
 
+    /// <summary>
+    /// Source video path whose filmstrip is fully generated, so a re-entrant
+    /// <see cref="InitializePreviewAsync"/> does not tear down and restart a finished strip.
+    /// </summary>
+    private string? _thumbnailsCompletedForPath;
+
+    /// <summary>
+    /// Source video path whose filmstrip is currently being generated, so overlapping
+    /// initialisations join the running pass instead of cancelling and restarting it.
+    /// </summary>
+    private string? _thumbnailsInFlightForPath;
+
     // Webcam overlay for editor preview
     private Windows.Media.Editing.MediaComposition? _webcamComposition;
     private int _webcamWidth;
@@ -214,6 +226,9 @@ public sealed partial class EditorPage : Page
         {
             DispatcherQueue.TryEnqueue(() =>
             {
+                // Assigned explicitly as well as bound: the timeline must never keep
+                // rendering a model the project has moved on from.
+                Timeline.Model = ViewModel.Model;
                 _timelineMapper = null;
                 Timeline.ClearZoomSelection();
                 Timeline.ClearClipSelection();
@@ -285,6 +300,8 @@ public sealed partial class EditorPage : Page
             _compositorReady = false;
             _thumbnailGenerationId++; // cancel any in-flight thumbnail generation
             Timeline.ClearThumbnails();
+            _thumbnailsCompletedForPath = null;
+            _thumbnailsInFlightForPath = null;
 
             // Unsubscribe VMs from singleton event sources
             ViewModel.Cleanup();
@@ -300,6 +317,21 @@ public sealed partial class EditorPage : Page
 
     private async Task InitializePreviewAsync()
     {
+        // Started fire-and-forget from ModelReloaded, so anything thrown here would be
+        // swallowed and simply leave the cursor/zoom/camera/audio tracks blank with no
+        // indication why.
+        try
+        {
+            await InitializePreviewCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"InitializePreview FAILED: {ex}");
+        }
+    }
+
+    private async Task InitializePreviewCoreAsync()
+    {
         _frameReader?.Dispose();
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
@@ -312,25 +344,52 @@ public sealed partial class EditorPage : Page
         _lastRenderedSegmentId = null;
         foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
         _segmentPreviews.Clear();
-        _thumbnailGenerationId++; // cancel any in-flight generation
-        Timeline.ClearThumbnails();
         Timeline.ClearSegmentTrackVisuals();
 
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
+        {
+            _thumbnailGenerationId++;
+            Timeline.ClearThumbnails();
+            _thumbnailsCompletedForPath = null;
             return;
+        }
+
+        // This method re-runs on every ModelReloaded — which fires on project change AND
+        // on every editor page reconstruction. Two overlapping runs used to cancel each
+        // other's filmstrip pass, and because generation sat *after* the preview reader
+        // opened, a run whose reader failed to open returned early and started no pass at
+        // all — leaving the track a flat colour with nothing ever retrying. Thumbnails
+        // depend only on the source file, so track them per path: generate once, never
+        // restart a pass already running for that file, and never gate it on the preview.
+        string videoPath = project.VideoFilePath;
+        bool haveStrip = string.Equals(
+            _thumbnailsCompletedForPath, videoPath, StringComparison.OrdinalIgnoreCase);
+        bool alreadyGenerating = string.Equals(
+            _thumbnailsInFlightForPath, videoPath, StringComparison.OrdinalIgnoreCase);
 
         int fps = project.Fps > 0 ? project.Fps : 30;
         int previewFps = Math.Min(fps, 30);
         Preview.PreviewFps = previewFps;
 
-        _frameReader = await VideoFrameReader.OpenFromVideoPathAsync(project.VideoFilePath, fps);
-        if (_frameReader is null)
-            return;
+        if (!haveStrip && !alreadyGenerating)
+        {
+            _thumbnailGenerationId++; // cancel any pass for a different source
+            Timeline.ClearThumbnails();
+            _thumbnailsCompletedForPath = null;
 
-        // Generate filmstrip thumbnails for the timeline video track (primary +
-        // any appended recordings, each from their own source file).
-        _ = GenerateAllTimelineThumbnailsAsync(_frameReader, project.VideoFilePath);
+            // Deliberately started before, and independently of, the preview reader:
+            // the filmstrip must not depend on the preview decoder opening successfully.
+            _ = GenerateAllTimelineThumbnailsAsync(videoPath, fps);
+        }
+
+        _frameReader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
+        if (_frameReader is null)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"no decodable video at '{videoPath}'; preview unavailable");
+            return;
+        }
 
         // Load per-file cursor + audio track data for appended recordings so their
         // mouse/click and audio markers show on the tracks and move with the segment.
@@ -344,7 +403,11 @@ public sealed partial class EditorPage : Page
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
         {
             try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
-            catch { /* no cursor data — still show raw frames */ }
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                    $"cursor load FAILED '{project.CursorDataFilePath}': {ex.Message}");
+            }
         }
 
         if (mouseData is null)
@@ -377,7 +440,9 @@ public sealed partial class EditorPage : Page
         // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
         // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
         // (Appended recordings mirror this exact guard — see GenerateAppendedZoomKeyframes.)
-        if (!ZoomKeyframesExistForSource(null))
+        // A project restored from a package is never regenerated: an empty zoom track is a
+        // saved choice there, not a not-yet-populated one.
+        if (!ProjectService.Instance.IsRestoredFromPackage && !ZoomKeyframesExistForSource(null))
         {
             foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
@@ -411,28 +476,40 @@ public sealed partial class EditorPage : Page
         // CompositionConfig so the preview renderer matches both the editor UI and
         // the export pipeline (which sources these from Project).
         var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
+        bool restored = ProjectService.Instance.IsRestoredFromPackage;
+
         config = config with
         {
             OutputFps = previewFps,
-            // Zero-phase (forward-backward) spring: smooths trackpad stop-and-go like
-            // Screen Studio with NO time lag (offline filtering uses future samples), so
-            // the cursor stays smooth yet lands on target on time. De-stutter stays off.
-            SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
-            SmoothingStrength = SmoothingStrength.Smooth,
             AspectRatio = project.AspectRatio,
             FitMode = project.FitMode,
             CropAnchorX = project.CropAnchorX,
             CropAnchorY = project.CropAnchorY,
             ZoomScope = project.ZoomScope,
-            Cursor = new CursorStyle
-            {
-                Scale = 3.0f,
-                ClickAnimationEnabled = true,
-                AutoHideEnabled = true,
-                AutoHideDelaySeconds = 3.0f,
-            },
-            Zoom = new AutoZoomConfig { Enabled = true },
         };
+
+        if (!restored)
+        {
+            // First-open defaults for a freshly captured recording. These are deliberately
+            // NOT applied to a restored project — they would overwrite the cursor, zoom and
+            // smoothing choices the user saved with it.
+            config = config with
+            {
+                // Zero-phase (forward-backward) spring: smooths trackpad stop-and-go like
+                // Screen Studio with NO time lag (offline filtering uses future samples), so
+                // the cursor stays smooth yet lands on target on time. De-stutter stays off.
+                SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                SmoothingStrength = SmoothingStrength.Smooth,
+                Cursor = new CursorStyle
+                {
+                    Scale = 3.0f,
+                    ClickAnimationEnabled = true,
+                    AutoHideEnabled = true,
+                    AutoHideDelaySeconds = 3.0f,
+                },
+                Zoom = new AutoZoomConfig { Enabled = true },
+            };
+        }
 
         // Capture-type-specific style defaults (e.g. zeroed padding/shadow
         // for full-screen Monitor captures) are applied once at project load
@@ -465,7 +542,7 @@ public sealed partial class EditorPage : Page
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[EditorPage] PreviewRenderer init failed: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"PreviewRenderer init failed: {ex}");
             // Compositor init failed — fall back to raw frames
             _previewRenderer?.Dispose();
             _previewRenderer = null;
@@ -907,12 +984,19 @@ public sealed partial class EditorPage : Page
             int previewFps = Math.Min(fps, 30);
 
             var global = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
-            var config = BuildSegmentConfig(global, seg, previewFps) with
+            var config = BuildSegmentConfig(global, seg, previewFps);
+
+            if (!ProjectService.Instance.IsRestoredFromPackage)
             {
-                SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
-                SmoothingStrength = SmoothingStrength.Smooth,
-                Zoom = new AutoZoomConfig { Enabled = true },
-            };
+                // Same rule as the primary preview: these are first-open defaults, and a
+                // restored project already carries the user's saved smoothing and zoom.
+                config = config with
+                {
+                    SmoothingAlgorithm = SmoothingAlgorithm.ZeroPhaseSpring,
+                    SmoothingStrength = SmoothingStrength.Smooth,
+                    Zoom = new AutoZoomConfig { Enabled = true },
+                };
+            }
 
             if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
                 config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
@@ -1102,16 +1186,6 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Generates pre-scaled thumbnails for the timeline video track filmstrip.
-    /// Uses versioning to cancel stale generation when the project changes.
-    /// </summary>
-    private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader)
-    {
-        var project = ProjectService.Instance.CurrentProject;
-        await GenerateTimelineThumbnailsAsync(reader, project?.VideoFilePath, isPrimary: true);
-    }
-
-    /// <summary>
     /// Loads per-file cursor data and audio waveforms for every appended (non-primary)
     /// video segment, and registers them with the timeline so each segment renders its
     /// OWN cursor/click/audio markers (positioned relative to the segment, so they move
@@ -1185,6 +1259,10 @@ public sealed partial class EditorPage : Page
     /// </summary>
     private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
     {
+        // A restored project's zoom track is exactly what the user saved, including empty.
+        if (ProjectService.Instance.IsRestoredFromPackage)
+            return;
+
         if (ZoomKeyframesExistForSource(seg.VideoFilePath))
             return; // already generated (or user-edited) for this source — preserve as-is
 
@@ -1261,10 +1339,36 @@ public sealed partial class EditorPage : Page
     /// own frames. Runs sequentially so the shared generation id never cancels an
     /// earlier still-running pass.
     /// </summary>
-    private async Task GenerateAllTimelineThumbnailsAsync(VideoFrameReader primaryReader, string? primaryPath)
+    private async Task GenerateAllTimelineThumbnailsAsync(string? primaryPath, int fps)
     {
-        await GenerateTimelineThumbnailsAsync(primaryReader, primaryPath, isPrimary: true);
-        await GenerateAppendedThumbnailsAsync(primaryPath);
+        // Fire-and-forget, so anything thrown here would vanish and leave the track blank
+        // with no indication why.
+        try
+        {
+            if (!string.IsNullOrEmpty(primaryPath))
+            {
+                _thumbnailsInFlightForPath = primaryPath;
+                try
+                {
+                    await GenerateTimelineThumbnailsAsync(primaryPath, isPrimary: true);
+                }
+                finally
+                {
+                    if (string.Equals(_thumbnailsInFlightForPath, primaryPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        _thumbnailsInFlightForPath = null;
+                    }
+                }
+            }
+
+            await GenerateAppendedThumbnailsAsync(primaryPath);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[EditorPage] Filmstrip generation failed for '{primaryPath}': {ex}");
+        }
     }
 
     /// <summary>
@@ -1285,115 +1389,76 @@ public sealed partial class EditorPage : Page
         {
             if (!File.Exists(file)) continue;
 
-            int segFps = model.Segments.OfType<VideoSegment>()
-                .FirstOrDefault(v => string.Equals(v.VideoFilePath, file, StringComparison.OrdinalIgnoreCase))?.Fps ?? 30;
-            if (segFps <= 0) segFps = 30;
-
-            VideoFrameReader? reader = null;
             try
             {
-                reader = await VideoFrameReader.OpenFromVideoPathAsync(file, segFps);
-                if (reader is null) continue;
-                await GenerateTimelineThumbnailsAsync(reader, file, isPrimary: false);
+                await GenerateTimelineThumbnailsAsync(file, isPrimary: false);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
-            }
-            finally
-            {
-                reader?.Dispose();
+                System.Diagnostics.Debug.WriteLine(
+                    $"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
             }
         }
     }
 
-    private async Task GenerateTimelineThumbnailsAsync(VideoFrameReader reader, string? filePath, bool isPrimary)
+    /// <summary>
+    /// Builds the filmstrip for one source video.
+    /// </summary>
+    /// <remarks>
+    /// Thumbnails come from <see cref="VideoThumbnailExtractor"/> rather than the preview's
+    /// frame reader. Sparse thumbnail access is the worst case for a single-position
+    /// decoder — a seek per tile, measured around 334 ms each with roughly a quarter
+    /// yielding no frame, while also competing with the preview for the same file. The
+    /// batch extractor measured ~15 ms per tile with none missing.
+    /// </remarks>
+    private async Task GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary)
     {
         var generationId = ++_thumbnailGenerationId;
 
-        // Load first frame to determine aspect ratio
-        var firstFrame = await reader.LoadFrameAsync(0);
-        if (firstFrame is null || generationId != _thumbnailGenerationId)
-        {
-            firstFrame?.Dispose();
-            return;
-        }
-
-        double aspectRatio = (double)firstFrame.SizeInPixels.Width / firstFrame.SizeInPixels.Height;
-        double totalSeconds = reader.Duration.TotalSeconds;
-        if (totalSeconds <= 0)
-        {
-            firstFrame.Dispose();
-            return;
-        }
-
         // Thumbnail size: match video track height (60px row minus padding)
         const int thumbH = 52;
-        int thumbW = Math.Max(1, (int)(thumbH * aspectRatio));
-
-        // Determine interval: aim for a reasonable density, cap total count
-        double interval = Math.Max(0.5, totalSeconds / 200);
-        int count = Math.Min(300, (int)(totalSeconds / interval) + 1);
 
         var device = CanvasDevice.GetSharedDevice();
-        var thumbnails = new CanvasBitmap[count];
+        var strip = await VideoThumbnailExtractor.ExtractAsync(filePath, thumbH, device);
 
-        for (int i = 0; i < count; i++)
+        if (strip is null || generationId != _thumbnailGenerationId)
         {
-            if (generationId != _thumbnailGenerationId)
-            {
-                // Generation cancelled — clean up
-                foreach (var t in thumbnails) t?.Dispose();
-                firstFrame.Dispose();
-                return;
-            }
-
-            CanvasBitmap? frame;
-            if (i == 0)
-            {
-                frame = firstFrame;
-            }
-            else
-            {
-                double time = i * interval;
-                frame = await reader.LoadFrameAtTimeAsync(TimeSpan.FromSeconds(time));
-            }
-
-            if (frame is null) continue;
-
-            try
-            {
-                // Scale down to thumbnail size
-                var renderTarget = new CanvasRenderTarget(device, thumbW, thumbH, 96);
-                using (var session = renderTarget.CreateDrawingSession())
-                {
-                    session.DrawImage(frame,
-                        new Rect(0, 0, thumbW, thumbH),
-                        new Rect(0, 0, frame.SizeInPixels.Width, frame.SizeInPixels.Height));
-                }
-                thumbnails[i] = renderTarget;
-            }
-            finally
-            {
-                if (i > 0) frame.Dispose();
-            }
-        }
-
-        firstFrame.Dispose();
-
-        if (generationId != _thumbnailGenerationId)
-        {
-            foreach (var t in thumbnails) t?.Dispose();
+            if (strip is not null)
+                foreach (var t in strip.Thumbnails) t?.Dispose();
             return;
         }
+
+        // A tile that could not be decoded would leave a hole in the strip. Repeat the
+        // nearest earlier tile instead — slightly stale footage reads as continuous, an
+        // empty slot reads as a broken timeline.
+        var thumbnails = strip.Thumbnails;
+        int thumbW = Math.Max(1, (int)(thumbH * strip.AspectRatio));
+        for (int i = 0; i < thumbnails.Length; i++)
+        {
+            if (thumbnails[i] is not null || i == 0) continue;
+            if (thumbnails[i - 1] is not { } previous) continue;
+
+            var repeat = new CanvasRenderTarget(device, thumbW, thumbH, 96);
+            using (var session = repeat.CreateDrawingSession())
+                session.DrawImage(previous, new Rect(0, 0, thumbW, thumbH));
+            thumbnails[i] = repeat;
+        }
+
+        var owned = new CanvasBitmap[thumbnails.Length];
+        for (int i = 0; i < thumbnails.Length; i++) owned[i] = thumbnails[i]!;
 
         // TimelineControl takes ownership of the bitmaps.
         if (isPrimary)
-            Timeline.SetThumbnails(thumbnails, interval, aspectRatio, filePath);
-        else if (!string.IsNullOrEmpty(filePath))
-            Timeline.SetThumbnailsForFile(filePath, thumbnails, interval, aspectRatio);
+        {
+            Timeline.SetThumbnails(owned, strip.IntervalSeconds, strip.AspectRatio, filePath);
+            // Only a pass that ran to completion may mark the strip done; a cancelled one
+            // would otherwise pin a half-filled filmstrip permanently.
+            _thumbnailsCompletedForPath = filePath;
+        }
         else
-            foreach (var t in thumbnails) t?.Dispose();
+        {
+            Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
+        }
     }
 
     private TimelineMapper? EnsureTimelineMapper()

@@ -25,6 +25,17 @@ public class ProjectService
     /// </summary>
     public string? CurrentPackagePath { get; private set; }
 
+    /// <summary>
+    /// True when the current project's composition and timeline were restored from a
+    /// saved package rather than produced by a fresh recording.
+    /// </summary>
+    /// <remarks>
+    /// The editor applies opinionated defaults (cursor style, auto-zoom, smoothing) when
+    /// it first opens a recording. Those defaults must not run against a restored project
+    /// or they overwrite exactly the choices the user saved.
+    /// </remarks>
+    public bool IsRestoredFromPackage { get; private set; }
+
     public event EventHandler? ProjectChanged;
 
     /// <summary>
@@ -67,6 +78,7 @@ public class ProjectService
         CurrentComposition = result.Composition;
         CurrentTimeline = result.Timeline;
         CurrentPackagePath = packagePath;
+        IsRestoredFromPackage = true;
 
         // A saved package carries its own timeline, so the primary segment must not be
         // synthesized the way SetProject does for a fresh recording.
@@ -83,6 +95,7 @@ public class ProjectService
     {
         CurrentProject = project;
         CurrentPackagePath = null;
+        IsRestoredFromPackage = false;
         CurrentTimeline = new TimelineModel
         {
             Duration = project.Duration,

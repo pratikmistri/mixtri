@@ -455,12 +455,16 @@
         </Grid>
 
         <!-- Timeline editor control -->
+        <!-- OneWay is required: x:Bind defaults to OneTime, which left the control bound
+             to whichever TimelineModel existed when the page was built. Opening a project
+             into an already-constructed editor swaps the model, and a OneTime bind kept
+             rendering the previous one - blank cursor/zoom/camera tracks. -->
         <controls:TimelineControl
             x:Name="Timeline"
             Grid.Row="3"
             Height="280"
             Margin="0,4,0,0"
-            Model="{x:Bind ViewModel.Model}" />
+            Model="{x:Bind ViewModel.Model, Mode=OneWay}" />
 
         <!-- TeachingTip for first-run editor hints -->
         <TeachingTip

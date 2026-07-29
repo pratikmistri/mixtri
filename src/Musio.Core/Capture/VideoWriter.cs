@@ -563,6 +563,15 @@ public sealed class VideoWriter : IDisposable
                 ScaledWidth = (uint)width,
                 ScaledHeight = (uint)height,
                 InterpolationMode = BitmapInterpolationMode.Fant,
+
+                // Media Foundation treats an uncompressed RGB media type with a positive
+                // stride as BOTTOM-UP, and `MediaStreamSample.CreateFromBuffer` hands it a
+                // raw buffer with no orientation metadata. The captured JPEGs are top-down,
+                // so without this the encoded MP4 comes out vertically mirrored.
+                // The export pipeline sidesteps the whole issue by passing a D3D surface
+                // (`MediaStreamSample.CreateFromDirect3D11Surface` in VideoEncoder), which
+                // carries its own orientation — this path cannot, so it flips explicitly.
+                Flip = BitmapFlip.Vertical,
             };
 
             using var bitmap = await decoder.GetSoftwareBitmapAsync(
