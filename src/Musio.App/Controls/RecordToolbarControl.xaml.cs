@@ -41,6 +41,13 @@ public sealed partial class RecordToolbarControl : UserControl
     /// <summary>Raised with a transient message the host should surface to the user.</summary>
     public event EventHandler<string>? InfoMessage;
 
+    /// <summary>
+    /// Raised when the toolbar's natural width changes, i.e. the Window/Region
+    /// picker button appeared or disappeared. Hosts that size themselves around
+    /// the toolbar re-measure on this.
+    /// </summary>
+    public event EventHandler? LayoutChanged;
+
     public RecordToolbarControl()
     {
         InitializeComponent();
@@ -95,9 +102,19 @@ public sealed partial class RecordToolbarControl : UserControl
     {
         ToolbarBorder.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
         ToolbarBorder.BorderThickness = new Thickness(0);
+        // Fill the pill so the Segmented control's column has slack to absorb
+        // when the Window/Region picker button isn't showing.
+        ToolbarBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
         // The Mini window's drag grip supplies the gap on the left edge, so the
         // toolbar adds nothing of its own there.
         ToolbarBorder.Padding = new Thickness(0, 6, 10, 6);
+
+        // Star-size only for Mini. A "*" column claims all the width offered to it,
+        // so leaving these starred in the Record page (where the toolbar is
+        // content-sized and centred) stretched the Segmented across the whole page.
+        var star = new GridLength(1, GridUnitType.Star);
+        OptionsColumn.Width = star;
+        SegmentedColumn.Width = star;
     }
 
     /// <summary>
@@ -167,6 +184,10 @@ public sealed partial class RecordToolbarControl : UserControl
                 SelectionMetadataChanged?.Invoke(this, null);
                 break;
         }
+
+        // Showing or hiding a picker button changes how wide the toolbar wants to
+        // be; the Mini window sizes itself around this.
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void UpdateRegionMetadata()

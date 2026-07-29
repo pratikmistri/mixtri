@@ -27,6 +27,13 @@ public sealed partial class MiniWindow : Window
     private bool _isClosingProgrammatically;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
 
+    /// <summary>
+    /// Widest the pill has been while visible, in physical pixels. The window grows
+    /// to fit but never shrinks, so the toolbar stretches into freed space instead
+    /// of the pill snapping narrower. Reset in <see cref="HideMini"/>.
+    /// </summary>
+    private int _widestSeenPx;
+
     /// <summary>Raised when the user presses Record.</summary>
     public event EventHandler? RecordRequested;
 
@@ -44,6 +51,7 @@ public sealed partial class MiniWindow : Window
         Toolbar.RecordRequested += (_, _) => RecordRequested?.Invoke(this, EventArgs.Empty);
         Toolbar.ExpandRequested += (_, _) => ExpandRequested?.Invoke(this, EventArgs.Empty);
         Toolbar.InfoMessage += OnInfoMessage;
+        Toolbar.LayoutChanged += OnToolbarLayoutChanged;
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
@@ -127,6 +135,13 @@ public sealed partial class MiniWindow : Window
             int width = (int)Math.Ceiling(desired.Width * scale);
             int height = (int)Math.Ceiling(desired.Height * scale);
 
+            // Grow to fit, but never shrink: switching from Window/Region back to
+            // Full Screen removes the picker button, and rather than snapping the
+            // pill narrower we hold the width and let the Segmented control's "*"
+            // column stretch into the freed space.
+            _widestSeenPx = Math.Max(_widestSeenPx, width);
+            width = _widestSeenPx;
+
             AppWindow.Resize(new SizeInt32(width, height));
             DockBottomCenter();
         }
@@ -182,6 +197,10 @@ public sealed partial class MiniWindow : Window
     /// <summary>Hides the pill without destroying it, so state and position survive.</summary>
     public void HideMini()
     {
+        // Drop the width high-water mark so a re-summoned pill fits itself tightly
+        // again instead of inheriting the widest layout from a previous session.
+        _widestSeenPx = 0;
+
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ShowWindow(hwnd, SW_HIDE);
     }
@@ -237,6 +256,13 @@ public sealed partial class MiniWindow : Window
     }
 
     private void OnInfoMessage(object? sender, string message) => ShowStatus(message);
+
+    private void OnToolbarLayoutChanged(object? sender, EventArgs e)
+    {
+        // Deferred so the picker button's visibility change is through layout
+        // before we measure the toolbar's new natural width.
+        DispatcherQueue.TryEnqueue(ResizeToContent);
+    }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {

@@ -21,14 +21,22 @@
             </Style>
         </Grid.Resources>
 
-        <StackPanel Spacing="0" HorizontalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Spacing="0" VerticalAlignment="Center">
+        <StackPanel Spacing="0" HorizontalAlignment="Stretch">
+            <!-- Grid so the toolbar column can stretch across the pill's full width;
+                 a horizontal StackPanel would leave it at its natural size. -->
+            <Grid VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <!-- Drag handle: the window is frameless, so this is the only region
                      handed to SetTitleBar for moving it around. Drawn as a 2x3 dot
                      grid rather than a glyph so it reads as a tall vertical grabber
                      and takes only the width the dots actually need. -->
                 <Border
                     x:Name="DragGrip"
+                    Grid.Column="0"
                     Width="14"
                     Height="36"
                     Margin="0,0,8,0"
@@ -58,12 +66,15 @@
 
                 <controls:RecordToolbarControl
                     x:Name="Toolbar"
+                    Grid.Column="1"
+                    HorizontalAlignment="Stretch"
                     ShowInlineRecordButton="True"
                     ShowExpandButton="True"
                     VerticalAlignment="Center" />
 
                 <Button
                     x:Name="HideButton"
+                    Grid.Column="2"
                     Click="HideButton_Click"
                     Width="32" Height="32" Padding="0"
                     Margin="0,0,6,0"
@@ -74,7 +85,7 @@
                     AutomationProperties.Name="Hide to system tray">
                     <FontIcon Glyph="&#xE711;" FontSize="12" />
                 </Button>
-            </StackPanel>
+            </Grid>
 
             <!-- Errors and transient messages only. Selection details (window name,
                  region coordinates) are deliberately not surfaced here — Mini mode
