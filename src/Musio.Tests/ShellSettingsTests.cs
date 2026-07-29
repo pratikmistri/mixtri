@@ -3,7 +3,14 @@ using Musio.Core.Shell;
 
 namespace Musio.Tests;
 
+/// <remarks>
+/// Not parallelised: these write through <see cref="ShellSettings.Instance"/> into
+/// the process-wide <see cref="AppSettings"/> store, which falls back to a plain
+/// (non-thread-safe) dictionary when running without package identity. The
+/// assembly opts into method-level parallelism in MSTestSettings.cs.
+/// </remarks>
 [TestClass]
+[DoNotParallelize]
 public class ShellSettingsTests
 {
     [TestMethod]

@@ -41,9 +41,10 @@ public sealed partial class RecordToolbarControl : UserControl
     /// <summary>
     /// Whether a capture picker is on screen, shared by every instance. The Record
     /// page and the Mini window each own a toolbar, and both are alive at once, so a
-    /// per-instance flag let them open two pickers. That double-counted
-    /// <see cref="Services.ShellCoordinator.HideForPicker"/>, whose reference count
-    /// is process-wide, and a single restore then left every window hidden.
+    /// per-instance flag let them open two overlapping pickers. The first one to
+    /// close would then release
+    /// <see cref="Services.ShellCoordinator.HideForPicker"/> — which is a
+    /// process-wide latch — restoring the shell while the other picker was still up.
     /// </summary>
     private static bool _isPickerOpen;
 

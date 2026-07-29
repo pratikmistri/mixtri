@@ -284,7 +284,8 @@ public partial class App : Application
         {
             case GlobalHotkeyService.StartStopRecording:
                 // TODO: wire to recording start/stop
-                break;            case GlobalHotkeyService.PauseResumeRecording:
+                break;
+            case GlobalHotkeyService.PauseResumeRecording:
                 // TODO: wire to pause/resume
                 break;
             case GlobalHotkeyService.TakeScreenshot:

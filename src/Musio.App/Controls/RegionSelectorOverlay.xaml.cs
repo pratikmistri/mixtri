@@ -277,10 +277,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
         }
         finally
         {
-            // Must run even if the screenshot or host window fails: the shell's
-            // hide is reference counted, so leaking it here would leave every
-            // later picker unable to bring a surface back — and the Mini pill
-            // isn't in Alt-Tab, so the user would have only the tray icon left.
+            // Must run even if the screenshot or host window fails: the shell hide
+            // is a latch that only this call releases, so skipping it would leave
+            // the Mini pill (or the minimised main window) hidden for good — and the
+            // pill isn't in Alt-Tab, so the user would have only the tray icon left.
             if (_keyboardHook != IntPtr.Zero)
             {
                 UnhookWindowsHookEx(_keyboardHook);
