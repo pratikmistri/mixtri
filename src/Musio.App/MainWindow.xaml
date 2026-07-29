@@ -27,6 +27,28 @@
             <TitleBar.IconSource>
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>
+            <TitleBar.RightHeader>
+                <!-- Swaps this window for the compact Mini pill. Lives in the title
+                     bar so it is reachable from every page. -->
+                <!-- The TitleBar template parks RightHeader 132px further left than
+                     the caption buttons and ignores HorizontalAlignment, so this
+                     negative margin pulls the button back out to sit flush against
+                     them — i.e. its right edge 144px from the client right edge,
+                     which is exactly the width of the caption-button cluster. -->
+                <Button
+                    x:Name="CollapseToMiniButton"
+                    Click="CollapseToMiniButton_Click"
+                    Width="40" Height="32" Padding="0"
+                    HorizontalAlignment="Right"
+                    Margin="0,0,-132,0"
+                    VerticalAlignment="Center"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    ToolTipService.ToolTip="Collapse to Mini mode"
+                    AutomationProperties.Name="Collapse to Mini mode">
+                    <FontIcon Glyph="&#xEE47;" FontSize="14" />
+                </Button>
+            </TitleBar.RightHeader>
         </TitleBar>
 
         <!-- Store-style rail: a fixed-width pane that is always open but never expandable,
@@ -36,6 +58,7 @@
              layout, the dimming of unselected items and the selected item's label drop all
              live in the NavigationViewItem template in Themes/NavigationRailStyles.xaml. -->
         <NavigationView
+            x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Left"
             OpenPaneLength="72"
@@ -47,6 +70,7 @@
             SelectionChanged="NavView_SelectionChanged">
             <NavigationView.MenuItems>
                 <NavigationViewItem
+                    x:Name="RecordNavItem"
                     Tag="record"
                     Content="Record"
                     IsSelected="True"
@@ -56,6 +80,7 @@
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem
+                    x:Name="EditorNavItem"
                     Tag="editor"
                     Content="Editor"
                     ToolTipService.ToolTip="Edit your recorded clips">
@@ -76,7 +101,23 @@
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.FooterMenuItems>
-            <Frame x:Name="NavFrame" />
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Shell-level failure surface. The coordinator routes recording
+                     errors here when the full window is the visible surface. -->
+                <InfoBar
+                    x:Name="ShellInfoBar"
+                    Grid.Row="0"
+                    IsOpen="False"
+                    IsClosable="True"
+                    Severity="Error" />
+
+                <Frame x:Name="NavFrame" Grid.Row="1" />
+            </Grid>
         </NavigationView>
     </Grid>
 </Window>

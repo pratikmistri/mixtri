@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Musio_App.Controls.RecordToolbarControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    AutomationProperties.Name="Recording options"
+    mc:Ignorable="d">
+
+    <Border
+        x:Name="ToolbarBorder"
+        HorizontalAlignment="Center"
+        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        BorderThickness="1"
+        CornerRadius="12"
+        Padding="6">
+        <Border.Transitions>
+            <TransitionCollection>
+                <EntranceThemeTransition FromVerticalOffset="30" />
+            </TransitionCollection>
+        </Border.Transitions>
+
+        <!-- Grid rather than StackPanel so the Segmented control can take a "*"
+             column and absorb any slack. Spacing is done with per-child right
+             margins instead of ColumnSpacing, because ColumnSpacing would still
+             reserve gaps around the collapsed Window/Region columns. -->
+        <Grid ColumnSpacing="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="OptionsColumn" Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Options section (dimmed and inert during recording) -->
+            <Grid
+                Grid.Column="0"
+                ColumnSpacing="0"
+                IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
+                Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="SegmentedColumn" Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Capture Mode -->
+                <ctk:Segmented
+                    x:Name="CaptureModeSelector"
+                    Grid.Column="0"
+                    Height="36"
+                    Margin="0,0,6,0"
+                    HorizontalAlignment="Stretch"
+                    Padding="0,1,0,-1"
+                    AutomationProperties.Name="Capture mode"
+                    SelectionChanged="CaptureModeSelector_SelectionChanged">
+                    <ctk:Segmented.Resources>
+                        <ResourceDictionary>
+                            <ResourceDictionary.ThemeDictionaries>
+                                <ResourceDictionary x:Key="Default">
+                                    <SolidColorBrush x:Key="SegmentedPillBackground" Color="Transparent" />
+                                    <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="Transparent" />
+                                </ResourceDictionary>
+                                <ResourceDictionary x:Key="HighContrast">
+                                    <SolidColorBrush x:Key="SegmentedPillBackground" Color="{StaticResource SystemColorHighlightColor}" />
+                                    <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="{StaticResource SystemColorHighlightColor}" />
+                                    <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="{StaticResource SystemColorHighlightColor}" />
+                                </ResourceDictionary>
+                            </ResourceDictionary.ThemeDictionaries>
+                        </ResourceDictionary>
+                    </ctk:Segmented.Resources>
+                    <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon Glyph="&#xE740;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Content="Window" Tag="Window">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon Glyph="&#xE737;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon Glyph="&#xE7A8;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                </ctk:Segmented>
+
+                <!-- Inline: Window picker (expands when Window mode selected) -->
+                <StackPanel x:Name="WindowPanel" Grid.Column="1" Orientation="Horizontal" Spacing="4" Margin="0,0,6,0" Visibility="Collapsed">
+                    <AppBarSeparator />
+                    <Button
+                        x:Name="SelectWindowButton"
+                        VerticalAlignment="Center"
+                        Click="SelectWindowButton_Click"
+                        Content="Select Window"
+                        ToolTipService.ToolTip="Click to visually select a window" />
+                </StackPanel>
+
+                <!-- Inline: Region selector (expands when Region mode selected) -->
+                <StackPanel x:Name="RegionPanel" Grid.Column="2" Orientation="Horizontal" Spacing="4" Margin="0,0,6,0" Visibility="Collapsed">
+                    <AppBarSeparator />
+                    <Button
+                        x:Name="SelectRegionButton"
+                        VerticalAlignment="Center"
+                        Click="SelectRegionButton_Click"
+                        Content="Select Region"
+                        ToolTipService.ToolTip="Click to select a custom screen region" />
+                </StackPanel>
+
+                <AppBarSeparator Grid.Column="3" Margin="0,0,6,0" />
+
+                <!-- Audio & Camera toggles -->
+                <ToggleButton
+                    Grid.Column="4"
+                    Margin="0,0,6,0"
+                    IsChecked="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
+                    ToolTipService.ToolTip="Microphone"
+                    AutomationProperties.Name="Microphone"
+                    VerticalAlignment="Center"
+                    Width="36" Height="36" Padding="0">
+                    <FontIcon Glyph="&#xE720;" FontSize="14" />
+                </ToggleButton>
+                <ToggleButton
+                    Grid.Column="5"
+                    Margin="0,0,6,0"
+                    IsChecked="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
+                    ToolTipService.ToolTip="System Audio"
+                    AutomationProperties.Name="System audio"
+                    VerticalAlignment="Center"
+                    Width="36" Height="36" Padding="0">
+                    <FontIcon Glyph="&#xE767;" FontSize="14" />
+                </ToggleButton>
+                <ToggleButton
+                    Grid.Column="6"
+                    IsChecked="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
+                    ToolTipService.ToolTip="Camera"
+                    AutomationProperties.Name="Camera"
+                    VerticalAlignment="Center"
+                    Width="36" Height="36" Padding="0">
+                    <FontIcon Glyph="&#xE714;" FontSize="14" />
+                </ToggleButton>
+            </Grid>
+
+            <!-- Compact inline Record button. Only the Mini window turns this on;
+                 the full Record page renders its own hero-sized button below the
+                 toolbar instead. -->
+            <AppBarSeparator Grid.Column="1" Margin="6,0,6,0" Visibility="{x:Bind BoolToVisibility(ShowInlineRecordButton), Mode=OneWay}" />
+
+            <Button
+                x:Name="InlineRecordButton"
+                Grid.Column="2"
+                Click="InlineRecordButton_Click"
+                Height="36"
+                Padding="14,0"
+                CornerRadius="18"
+                Style="{StaticResource AccentButtonStyle}"
+                VerticalAlignment="Center"
+                Visibility="{x:Bind InlineRecordVisibility(ShowInlineRecordButton, ViewModel.IsRecording), Mode=OneWay}"
+                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)"
+                AutomationProperties.Name="Record">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon FontSize="14" Glyph="&#xE7C8;" />
+                    <TextBlock Text="Record" VerticalAlignment="Center" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+
+            <!-- Compact inline Stop + elapsed time, mirroring the inline Record button -->
+            <StackPanel
+                Grid.Column="3"
+                Orientation="Horizontal"
+                Spacing="8"
+                VerticalAlignment="Center"
+                Visibility="{x:Bind InlineStopVisibility(ShowInlineRecordButton, ViewModel.IsRecording), Mode=OneWay}">
+                <Button
+                    Height="36"
+                    Width="36"
+                    Padding="0"
+                    CornerRadius="18"
+                    Command="{x:Bind ViewModel.StopRecordingCommand}"
+                    ToolTipService.ToolTip="Stop recording"
+                    AutomationProperties.Name="Stop recording">
+                    <FontIcon FontSize="14" Foreground="Red" Glyph="&#xE71A;" />
+                </Button>
+                <TextBlock
+                    VerticalAlignment="Center"
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="Red"
+                    Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}" />
+            </StackPanel>
+
+            <!-- Expand-to-full-app affordance, shown only by the Mini window -->
+            <Button
+                x:Name="ExpandButton"
+                Grid.Column="4"
+                Margin="6,0,0,0"
+                Click="ExpandButton_Click"
+                Width="36" Height="36" Padding="0"
+                VerticalAlignment="Center"
+                Background="Transparent"
+                BorderThickness="0"
+                Visibility="{x:Bind BoolToVisibility(ShowExpandButton), Mode=OneWay}"
+                ToolTipService.ToolTip="Open the full Musio app"
+                AutomationProperties.Name="Expand to full app">
+                <FontIcon Glyph="&#xEE49;" FontSize="14" />
+            </Button>
+        </Grid>
+    </Border>
+</UserControl>

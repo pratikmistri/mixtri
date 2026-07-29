@@ -135,4 +135,33 @@ public sealed partial class MainWindow : Window
             }
         }
     }
+
+    private void CollapseToMiniButton_Click(object sender, RoutedEventArgs e)
+        => Services.ShellCoordinator.Instance?.CollapseToMini();
+
+    /// <summary>
+    /// Navigates to the editor and moves the rail selection with it, so the shell
+    /// doesn't end up showing the editor while "Record" is still highlighted.
+    /// </summary>
+    public void ShowEditor()
+    {
+        if (ReferenceEquals(NavView.SelectedItem, EditorNavItem))
+        {
+            // Already selected, so SelectionChanged won't fire — navigate directly.
+            NavFrame.Navigate(typeof(EditorPage));
+            return;
+        }
+
+        NavView.SelectedItem = EditorNavItem;
+    }
+
+    /// <summary>Surfaces a recording failure on the shell-level InfoBar.</summary>
+    public void ShowRecordingError(string message)
+    {
+        if (ShellInfoBar is null) return;
+        ShellInfoBar.Severity = InfoBarSeverity.Error;
+        ShellInfoBar.Title = string.Empty;
+        ShellInfoBar.Message = message;
+        ShellInfoBar.IsOpen = true;
+    }
 }

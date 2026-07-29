@@ -5,8 +5,8 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:Musio_App.Pages"
+    xmlns:controls="using:Musio_App.Controls"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
     mc:Ignorable="d">
 
     <Grid>
@@ -30,171 +30,64 @@
             VerticalAlignment="Center"
             Spacing="0">
 
-            <!-- Toolbar -->
-            <Border
-                HorizontalAlignment="Center"
-                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                BorderThickness="1"
-                CornerRadius="12"
-                Padding="6">
-                <Border.Transitions>
-                    <TransitionCollection>
-                        <EntranceThemeTransition FromVerticalOffset="30" />
-                    </TransitionCollection>
-                </Border.Transitions>
+            <!-- The same control the Mini window hosts, minus its inline Record
+                 button — this page renders a hero-sized one below instead. -->
+            <controls:RecordToolbarControl x:Name="Toolbar" HorizontalAlignment="Center" />
 
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <!-- Options section (disabled during recording) -->
-                    <StackPanel
-                        Orientation="Horizontal"
-                        Spacing="6"
-                        IsHitTestVisible="{x:Bind InvertBool(ViewModel.IsRecording), Mode=OneWay}"
-                        Opacity="{x:Bind RecordingOpacity(ViewModel.IsRecording), Mode=OneWay}">
-
-                    <!-- Capture Mode -->
-                    <ctk:Segmented
-                        x:Name="CaptureModeSelector"
-                        Height="36"
-                        Padding="0,1,0,-1"
-                        SelectionChanged="CaptureModeSelector_SelectionChanged">
-                        <ctk:Segmented.Resources>
-                            <ResourceDictionary>
-                                <ResourceDictionary.ThemeDictionaries>
-                                    <ResourceDictionary x:Key="Default">
-                                        <SolidColorBrush x:Key="SegmentedPillBackground" Color="Transparent" />
-                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="Transparent" />
-                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="Transparent" />
-                                    </ResourceDictionary>
-                                    <ResourceDictionary x:Key="HighContrast">
-                                        <SolidColorBrush x:Key="SegmentedPillBackground" Color="{StaticResource SystemColorHighlightColor}" />
-                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPointerOver" Color="{StaticResource SystemColorHighlightColor}" />
-                                        <SolidColorBrush x:Key="SegmentedPillBackgroundPressed" Color="{StaticResource SystemColorHighlightColor}" />
-                                    </ResourceDictionary>
-                                </ResourceDictionary.ThemeDictionaries>
-                            </ResourceDictionary>
-                        </ctk:Segmented.Resources>
-                        <ctk:SegmentedItem Content="Full Screen" Tag="FullScreen">
-                            <ctk:SegmentedItem.Icon>
-                                <FontIcon Glyph="&#xE740;" />
-                            </ctk:SegmentedItem.Icon>
-                        </ctk:SegmentedItem>
-                        <ctk:SegmentedItem Content="Window" Tag="Window">
-                            <ctk:SegmentedItem.Icon>
-                                <FontIcon Glyph="&#xE737;" />
-                            </ctk:SegmentedItem.Icon>
-                        </ctk:SegmentedItem>
-                        <ctk:SegmentedItem Content="Region" Tag="CustomRegion">
-                            <ctk:SegmentedItem.Icon>
-                                <FontIcon Glyph="&#xE7A8;" />
-                            </ctk:SegmentedItem.Icon>
-                        </ctk:SegmentedItem>
-                    </ctk:Segmented>
-
-                    <!-- Inline: Window picker (expands when Window mode selected) -->
-                    <StackPanel x:Name="WindowPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
-                        <AppBarSeparator />
-                        <Button
-                            x:Name="SelectWindowButton"
-                            VerticalAlignment="Center"
-                            Click="SelectWindowButton_Click"
-                            Content="Select Window"
-                            ToolTipService.ToolTip="Click to visually select a window" />
-                    </StackPanel>
-
-                    <!-- Inline: Region selector (expands when Region mode selected) -->
-                    <StackPanel x:Name="RegionPanel" Orientation="Horizontal" Spacing="4" Visibility="Collapsed">
-                        <AppBarSeparator />
-                        <Button
-                            x:Name="SelectRegionButton"
-                            VerticalAlignment="Center"
-                            Click="SelectRegionButton_Click"
-                            Content="Select Region"
-                            ToolTipService.ToolTip="Click to select a custom screen region" />
-                    </StackPanel>
-
-                    <AppBarSeparator />
-
-                    <!-- Audio & Camera toggles -->
-                    <ToggleButton
-                        IsChecked="{x:Bind ViewModel.IsMicEnabled, Mode=TwoWay}"
-                        ToolTipService.ToolTip="Microphone"
-                        VerticalAlignment="Center"
-                        Width="36" Height="36" Padding="0">
-                        <FontIcon Glyph="&#xE720;" FontSize="14" />
-                    </ToggleButton>
-                    <ToggleButton
-                        IsChecked="{x:Bind ViewModel.IsSystemAudioEnabled, Mode=TwoWay}"
-                        ToolTipService.ToolTip="System Audio"
-                        VerticalAlignment="Center"
-                        Width="36" Height="36" Padding="0">
-                        <FontIcon Glyph="&#xE767;" FontSize="14" />
-                    </ToggleButton>
-                    <ToggleButton
-                        IsChecked="{x:Bind ViewModel.IsWebcamEnabled, Mode=TwoWay}"
-                        ToolTipService.ToolTip="Camera"
-                        VerticalAlignment="Center"
-                        Width="36" Height="36" Padding="0">
-                        <FontIcon Glyph="&#xE714;" FontSize="14" />
-                    </ToggleButton>
-                </StackPanel>
-            </StackPanel>
-        </Border>
-
-        <!-- Selection metadata text below toolbar -->
-        <TextBlock
-            x:Name="SelectionMetadataText"
-            HorizontalAlignment="Center"
-            Margin="0,8,0,0"
-            MaxWidth="400"
-            FontSize="12"
-            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-            TextTrimming="CharacterEllipsis"
-            TextAlignment="Center"
-            Visibility="Collapsed" />
-
-        <!-- Record button — hero style (visible when not recording) -->
-        <Button
-            x:Name="StartRecordButton"
-            HorizontalAlignment="Center"
-            Margin="0,32,0,0"
-            Height="60"
-            Padding="40,0"
-            Click="StartRecordButton_Click"
-            CornerRadius="30"
-            Style="{StaticResource AccentButtonStyle}"
-            Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
-            ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
-            <StackPanel Orientation="Horizontal" Spacing="10">
-                <FontIcon FontSize="18" Glyph="&#xE7C8;" />
-                <TextBlock Text="Record" VerticalAlignment="Center" FontSize="16" FontWeight="SemiBold" />
-            </StackPanel>
-        </Button>
-
-        <!-- Stop button + timer (visible during recording) -->
-        <StackPanel
-            HorizontalAlignment="Center"
-            Margin="0,32,0,0"
-            Orientation="Horizontal"
-            Spacing="12"
-            Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}">
-            <Button
-                x:Name="StopRecordButton"
-                Height="48"
-                Width="48"
-                Padding="0"
-                CornerRadius="24"
-                Command="{x:Bind ViewModel.StopRecordingCommand}"
-                ToolTipService.ToolTip="Stop recording">
-                <FontIcon FontSize="18" Foreground="Red" Glyph="&#xE71A;" />
-            </Button>
+            <!-- Selection metadata text below toolbar -->
             <TextBlock
-                VerticalAlignment="Center"
-                FontSize="16"
-                FontWeight="SemiBold"
-                Foreground="Red"
-                Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}" />
-        </StackPanel>
+                x:Name="SelectionMetadataText"
+                HorizontalAlignment="Center"
+                Margin="0,8,0,0"
+                MaxWidth="400"
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                TextTrimming="CharacterEllipsis"
+                TextAlignment="Center"
+                Visibility="Collapsed" />
+
+            <!-- Record button — hero style (visible when not recording) -->
+            <Button
+                x:Name="StartRecordButton"
+                HorizontalAlignment="Center"
+                Margin="0,32,0,0"
+                Height="60"
+                Padding="40,0"
+                Click="StartRecordButton_Click"
+                CornerRadius="30"
+                Style="{StaticResource AccentButtonStyle}"
+                Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
+                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <FontIcon FontSize="18" Glyph="&#xE7C8;" />
+                    <TextBlock Text="Record" VerticalAlignment="Center" FontSize="16" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+
+            <!-- Stop button + timer (visible during recording) -->
+            <StackPanel
+                HorizontalAlignment="Center"
+                Margin="0,32,0,0"
+                Orientation="Horizontal"
+                Spacing="12"
+                Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}">
+                <Button
+                    x:Name="StopRecordButton"
+                    Height="48"
+                    Width="48"
+                    Padding="0"
+                    CornerRadius="24"
+                    Command="{x:Bind ViewModel.StopRecordingCommand}"
+                    ToolTipService.ToolTip="Stop recording">
+                    <FontIcon FontSize="18" Foreground="Red" Glyph="&#xE71A;" />
+                </Button>
+                <TextBlock
+                    VerticalAlignment="Center"
+                    FontSize="16"
+                    FontWeight="SemiBold"
+                    Foreground="Red"
+                    Text="{x:Bind ViewModel.ElapsedTime, Mode=OneWay}" />
+            </StackPanel>
 
         </StackPanel>
 

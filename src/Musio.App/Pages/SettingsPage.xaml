@@ -40,6 +40,15 @@
                 CornerRadius="8">
                 <StackPanel Spacing="16">
                     <ComboBox
+                        x:Name="StartupModeCombo"
+                        Header="Open Musio in"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="StartupModeCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Choose whether Musio launches as the compact Mini toolbar or the full app window">
+                        <ComboBoxItem Content="Mini mode (compact toolbar)" Tag="Mini" />
+                        <ComboBoxItem Content="Full app window" Tag="Full" />
+                    </ComboBox>
+                    <ComboBox
                         x:Name="ThemeSelector"
                         Header="Theme"
                         HorizontalAlignment="Stretch"
