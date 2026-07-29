@@ -66,11 +66,19 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
         bool didMinimize = false;
         IntPtr mainHwnd = IntPtr.Zero;
+        var shell = Musio_App.Services.ShellCoordinator.Instance;
         var mainWindow = Musio_App.App.Current.MainAppWindow;
 
         try
         {
-            if (mainWindow is not null)
+            if (shell is not null)
+            {
+                // The shell knows whether the Mini pill or the full window is up.
+                shell.HideForPicker();
+                didMinimize = true;
+                await Task.Delay(400);
+            }
+            else if (mainWindow is not null)
             {
                 mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
                 ShowWindow(mainHwnd, SW_MINIMIZE);
@@ -139,10 +147,17 @@ public sealed partial class WindowSelectorOverlay : UserControl
             catch { /* already closed */ }
             _hostWindow = null;
 
-            if (didMinimize && mainHwnd != IntPtr.Zero)
+            if (didMinimize)
             {
-                ShowWindow(mainHwnd, SW_RESTORE);
-                mainWindow?.Activate();
+                if (shell is not null)
+                {
+                    shell.RestoreAfterPicker();
+                }
+                else if (mainHwnd != IntPtr.Zero)
+                {
+                    ShowWindow(mainHwnd, SW_RESTORE);
+                    mainWindow?.Activate();
+                }
             }
         }
     }

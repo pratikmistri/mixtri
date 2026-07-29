@@ -10,6 +10,7 @@ public sealed partial class SettingsPage : Page
     private List<WebcamDeviceInfo> _webcamDevices = [];
     private bool _suppressWebcamEvents;
     private bool _suppressExportDefaultEvents;
+    private bool _suppressStartupModeEvents;
 
     public SettingsPage()
     {
@@ -21,6 +22,16 @@ public sealed partial class SettingsPage : Page
     {
         SystemAudioToggle.IsOn = AppSettings.Instance.IsSystemAudioEnabled;
         MicToggle.IsOn = AppSettings.Instance.IsMicEnabled;
+
+        _suppressStartupModeEvents = true;
+        try
+        {
+            SelectComboBoxByTag(StartupModeCombo, ShellSettings.Instance.StartupMode.ToString());
+        }
+        finally
+        {
+            _suppressStartupModeEvents = false;
+        }
 
         _suppressExportDefaultEvents = true;
         try
@@ -115,6 +126,16 @@ public sealed partial class SettingsPage : Page
         if (_suppressWebcamEvents) return;
         if (WebcamDeviceCombo.SelectedItem is WebcamDeviceInfo device)
             AppSettings.Instance.WebcamDeviceId = device.Id;
+    }
+
+    private void StartupModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressStartupModeEvents) return;
+        if (StartupModeCombo.SelectedItem is ComboBoxItem item
+            && Enum.TryParse<Musio.Core.Shell.StartupMode>(item.Tag?.ToString(), out var mode))
+        {
+            ShellSettings.Instance.StartupMode = mode;
+        }
     }
 
     private void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)

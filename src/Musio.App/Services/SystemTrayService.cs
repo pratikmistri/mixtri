@@ -12,6 +12,7 @@ public sealed class SystemTrayService : IDisposable
 {
     public event EventHandler? StartRecordingRequested;
     public event EventHandler? ShowWindowRequested;
+    public event EventHandler? ShowMiniRequested;
     public event EventHandler? ExitRequested;
 
     private Window? _mainWindow;
@@ -26,6 +27,7 @@ public sealed class SystemTrayService : IDisposable
     private const uint IDM_START_RECORDING = 1001;
     private const uint IDM_OPEN = 1002;
     private const uint IDM_EXIT = 1003;
+    private const uint IDM_OPEN_MINI = 1004;
 
     public void Initialize(Window mainWindow)
     {
@@ -131,7 +133,8 @@ public sealed class SystemTrayService : IDisposable
 
             if (mouseMsg == WM_LBUTTONUP)
             {
-                ShowWindowRequested?.Invoke(this, EventArgs.Empty);
+                // Left-click is the shortcut back to the compact Mini pill.
+                ShowMiniRequested?.Invoke(this, EventArgs.Empty);
             }
             else if (mouseMsg == WM_RBUTTONUP)
             {
@@ -148,6 +151,9 @@ public sealed class SystemTrayService : IDisposable
             {
                 case IDM_START_RECORDING:
                     StartRecordingRequested?.Invoke(this, EventArgs.Empty);
+                    break;
+                case IDM_OPEN_MINI:
+                    ShowMiniRequested?.Invoke(this, EventArgs.Empty);
                     break;
                 case IDM_OPEN:
                     ShowWindowRequested?.Invoke(this, EventArgs.Empty);
@@ -170,6 +176,7 @@ public sealed class SystemTrayService : IDisposable
         try
         {
             AppendMenu(hMenu, MF_STRING, IDM_START_RECORDING, "Start Recording");
+            AppendMenu(hMenu, MF_STRING, IDM_OPEN_MINI, "Open Musio Mini");
             AppendMenu(hMenu, MF_STRING, IDM_OPEN, "Open Musio");
             AppendMenu(hMenu, MF_SEPARATOR, 0, null);
             AppendMenu(hMenu, MF_STRING, IDM_EXIT, "Exit");

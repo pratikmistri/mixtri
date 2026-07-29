@@ -196,8 +196,17 @@ public sealed partial class RegionSelectorOverlay : UserControl
         // Minimize Musio so it doesn't appear in the screenshot
         bool didMinimize = false;
         IntPtr mainHwnd = IntPtr.Zero;
+        var shell = Musio_App.Services.ShellCoordinator.Instance;
         var mainWindow = Musio_App.App.Current.MainAppWindow;
-        if (mainWindow is not null)
+
+        if (shell is not null)
+        {
+            // The shell knows whether the Mini pill or the full window is up.
+            shell.HideForPicker();
+            didMinimize = true;
+            await Task.Delay(300); // let the hide/minimize animation complete
+        }
+        else if (mainWindow is not null)
         {
             mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
             ShowWindow(mainHwnd, SW_MINIMIZE);
@@ -206,83 +215,97 @@ public sealed partial class RegionSelectorOverlay : UserControl
         }
 
         // Capture the virtual desktop screenshot
-        var (screenshotSource, pixels, ssW, ssH) = await CaptureDesktopScreenshotAsync();
-        _screenshotPixels = pixels;
-        _screenshotWidth = ssW;
-        _screenshotHeight = ssH;
-
-        _hostWindow = new Window();
-        _hostWindow.Content = this;
-        _hostWindow.ExtendsContentIntoTitleBar = true;
-        _hostWindow.Title = "Select Region";
-
-        // Hide title bar chrome; do NOT maximize — Maximize() only covers a
-        // single monitor. We size the window manually to the full virtual
-        // desktop so the overlay covers every display.
-        if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
+        try
         {
-            presenter.SetBorderAndTitleBar(false, false);
-            presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = false;
-            presenter.IsMaximizable = false;
-            presenter.IsMinimizable = false;
+            var (screenshotSource, pixels, ssW, ssH) = await CaptureDesktopScreenshotAsync();
+            _screenshotPixels = pixels;
+            _screenshotWidth = ssW;
+            _screenshotHeight = ssH;
+
+            _hostWindow = new Window();
+            _hostWindow.Content = this;
+            _hostWindow.ExtendsContentIntoTitleBar = true;
+            _hostWindow.Title = "Select Region";
+
+            // Hide title bar chrome; do NOT maximize — Maximize() only covers a
+            // single monitor. We size the window manually to the full virtual
+            // desktop so the overlay covers every display.
+            if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.SetBorderAndTitleBar(false, false);
+                presenter.IsAlwaysOnTop = true;
+                presenter.IsResizable = false;
+                presenter.IsMaximizable = false;
+                presenter.IsMinimizable = false;
+            }
+
+            // Position and size the window to span the entire virtual desktop
+            // (all monitors) in physical pixels. This matches the dimensions of
+            // the screenshot we captured above so the image displays 1:1 with
+            // each monitor's physical pixels, even across mixed-DPI setups.
+            int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            int vdWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            int vdHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (vdWidth > 0 && vdHeight > 0)
+            {
+                _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                    vdLeft, vdTop, vdWidth, vdHeight));
+            }
+
+            // Set the screenshot as background
+            if (screenshotSource is not null)
+                ScreenshotImage.Source = screenshotSource;
+
+            _hostWindow.Closed += (_, _) =>
+            {
+                // System-close (Alt+F4, taskbar close, etc.) skips the explicit
+                // CancelSelection path, so flag it as a cancel so callers still
+                // get the "kept previous region" hint.
+                if (!_tcs.Task.IsCompleted)
+                    WasCancelled = true;
+                _tcs.TrySetResult(null);
+            };
+
+            // Install low-level keyboard hook so Escape works even without XAML focus
+            _hookProc = EscapeHookCallback;
+            _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+
+            _hostWindow.Activate();
+
+            return await _tcs.Task;
         }
-
-        // Position and size the window to span the entire virtual desktop
-        // (all monitors) in physical pixels. This matches the dimensions of
-        // the screenshot we captured above so the image displays 1:1 with
-        // each monitor's physical pixels, even across mixed-DPI setups.
-        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        int vdWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vdHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (vdWidth > 0 && vdHeight > 0)
+        finally
         {
-            _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
-                vdLeft, vdTop, vdWidth, vdHeight));
+            // Must run even if the screenshot or host window fails: the shell's
+            // hide is reference counted, so leaking it here would leave every
+            // later picker unable to bring a surface back — and the Mini pill
+            // isn't in Alt-Tab, so the user would have only the tray icon left.
+            if (_keyboardHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_keyboardHook);
+                _keyboardHook = IntPtr.Zero;
+            }
+            _hookProc = null;
+
+            try { _hostWindow?.Close(); }
+            catch { /* already closed */ }
+            _hostWindow = null;
+
+            // Restore Musio if we minimized it
+            if (didMinimize)
+            {
+                if (shell is not null)
+                {
+                    shell.RestoreAfterPicker();
+                }
+                else if (mainHwnd != IntPtr.Zero)
+                {
+                    ShowWindow(mainHwnd, SW_RESTORE);
+                    mainWindow?.Activate();
+                }
+            }
         }
-
-        // Set the screenshot as background
-        if (screenshotSource is not null)
-            ScreenshotImage.Source = screenshotSource;
-
-        _hostWindow.Closed += (_, _) =>
-        {
-            // System-close (Alt+F4, taskbar close, etc.) skips the explicit
-            // CancelSelection path, so flag it as a cancel so callers still
-            // get the "kept previous region" hint.
-            if (!_tcs.Task.IsCompleted)
-                WasCancelled = true;
-            _tcs.TrySetResult(null);
-        };
-
-        // Install low-level keyboard hook so Escape works even without XAML focus
-        _hookProc = EscapeHookCallback;
-        _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
-
-        _hostWindow.Activate();
-
-        var result = await _tcs.Task;
-
-        if (_keyboardHook != IntPtr.Zero)
-        {
-            UnhookWindowsHookEx(_keyboardHook);
-            _keyboardHook = IntPtr.Zero;
-        }
-        _hookProc = null;
-
-        try { _hostWindow.Close(); }
-        catch { /* already closed */ }
-        _hostWindow = null;
-
-        // Restore Musio if we minimized it
-        if (didMinimize && mainHwnd != IntPtr.Zero)
-        {
-            ShowWindow(mainHwnd, SW_RESTORE);
-            mainWindow?.Activate();
-        }
-
-        return result;
     }
 
     /// <summary>

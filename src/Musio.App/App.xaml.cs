@@ -18,6 +18,7 @@ namespace Musio_App;
 public partial class App : Application
 {
     private Window? _window;
+    private ShellCoordinator? _shell;
     private SystemTrayService? _trayService;
     private GlobalHotkeyService? _hotkeyService;
     private ExtendedExecutionSession? _extendedSession;
@@ -87,10 +88,15 @@ public partial class App : Application
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
+        // The full window is always constructed (it anchors app lifetime, hotkeys
+        // and the quiesce path), but only shown when the startup mode asks for it.
+        var mainWindow = new MainWindow();
+        _window = mainWindow;
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
-        _window.Activate();
+
+        _shell = new ShellCoordinator(mainWindow, ShellSettings.Instance.StartupMode);
+        _shell.Start();
 
         // Clean up .frames/ from previously-exported sessions in the background
         var savePath = AppSettings.Instance.DefaultSavePath;
@@ -103,7 +109,9 @@ public partial class App : Application
             _trayService = new SystemTrayService();
             _trayService.Initialize(_window);
             _trayService.Show();
+            _trayService.ShowMiniRequested += OnShowMiniRequested;
             _trayService.ShowWindowRequested += OnShowWindowRequested;
+            _trayService.StartRecordingRequested += OnStartRecordingRequested;
             _trayService.ExitRequested += OnExitRequested;
             _window.AppWindow.Closing += OnWindowClosing;
         }
@@ -138,11 +146,30 @@ public partial class App : Application
 
     private void OnShowWindowRequested(object? sender, EventArgs e)
     {
+        if (_shell is not null)
+        {
+            _shell.ShowFullFromTray();
+            ReleaseExtendedExecution();
+            return;
+        }
+
         if (_window is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         ShowWindow(hwnd, SW_SHOW);
         _window.Activate();
         ReleaseExtendedExecution();
+    }
+
+    private void OnShowMiniRequested(object? sender, EventArgs e)
+    {
+        _shell?.ActivateFromTray();
+        ReleaseExtendedExecution();
+    }
+
+    private void OnStartRecordingRequested(object? sender, EventArgs e)
+    {
+        if (_shell is null) return;
+        _window?.DispatcherQueue.TryEnqueue(() => _ = _shell.StartRecordingAsync());
     }
 
     /// <summary>
@@ -165,6 +192,7 @@ public partial class App : Application
         try { ReleaseExtendedExecution(); } catch { }
         try { _hotkeyService?.Dispose(); } catch { }
         try { _trayService?.Dispose(); } catch { }
+        try { _shell?.Dispose(); } catch { }
 
         _quiesceTimer = new System.Threading.Timer(
             _ => Environment.Exit(0), null, timeoutMs, System.Threading.Timeout.Infinite);
@@ -253,8 +281,7 @@ public partial class App : Application
         {
             case GlobalHotkeyService.StartStopRecording:
                 // TODO: wire to recording start/stop
-                break;
-            case GlobalHotkeyService.PauseResumeRecording:
+                break;            case GlobalHotkeyService.PauseResumeRecording:
                 // TODO: wire to pause/resume
                 break;
             case GlobalHotkeyService.TakeScreenshot:

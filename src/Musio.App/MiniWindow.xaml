@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Musio_App.MiniWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:controls="using:Musio_App.Controls"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="Musio Mini"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootGrid" CornerRadius="14" Padding="4">
+        <StackPanel Spacing="0" HorizontalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="0" VerticalAlignment="Center">
+                <!-- Thin drag handle: the window is frameless, so this is the only
+                     region handed to SetTitleBar for moving it around. -->
+                <Border
+                    x:Name="DragGrip"
+                    Width="18"
+                    Height="36"
+                    Margin="4,0,0,0"
+                    VerticalAlignment="Center"
+                    Background="Transparent">
+                    <FontIcon
+                        Glyph="&#xE76F;"
+                        FontSize="12"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                </Border>
+
+                <controls:RecordToolbarControl
+                    x:Name="Toolbar"
+                    ShowInlineRecordButton="True"
+                    ShowExpandButton="True"
+                    VerticalAlignment="Center" />
+
+                <Button
+                    x:Name="HideButton"
+                    Click="HideButton_Click"
+                    Width="32" Height="32" Padding="0"
+                    Margin="0,0,6,0"
+                    VerticalAlignment="Center"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    ToolTipService.ToolTip="Hide to the system tray (Esc)"
+                    AutomationProperties.Name="Hide to system tray">
+                    <FontIcon Glyph="&#xE711;" FontSize="12" />
+                </Button>
+            </StackPanel>
+
+            <!-- Selection summary / transient messages, only takes space when used -->
+            <TextBlock
+                x:Name="StatusText"
+                Visibility="Collapsed"
+                Margin="14,0,14,6"
+                MaxWidth="420"
+                FontSize="12"
+                TextTrimming="CharacterEllipsis"
+                TextAlignment="Center"
+                HorizontalAlignment="Center"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+    </Grid>
+</Window>
