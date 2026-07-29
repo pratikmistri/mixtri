@@ -387,6 +387,11 @@ public sealed partial class EditorPage : Page
                 double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
                     - mouseOffset;
                 if (clickTime < 0) continue; // skip pre-roll clicks before video started
+                // ...and clicks after capture stopped. Their zoom-in ramp starts a second
+                // early, so the segment would be drawn on the zoom track while
+                // AutoZoomEngine (which applies the same range rule) refuses to render it,
+                // leaving a visible segment that does nothing.
+                if (project.Duration > TimeSpan.Zero && clickTime > project.Duration.TotalSeconds) continue;
                 ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
                 {
                     Timestamp = TimeSpan.FromSeconds(clickTime),
@@ -916,8 +921,14 @@ public sealed partial class EditorPage : Page
                 try
                 {
                     ctx.Renderer = new PreviewRenderer();
+                    // The compositor is driven with ABSOLUTE source times
+                    // (SourceStart + localOffset), so its timelines must span the end of
+                    // the clip's source extent, not just the clip's length. Passing the
+                    // bare SourceDuration would drop cursor samples and auto-zoom for the
+                    // visible tail of any clip trimmed from the front. Mirrors
+                    // SegmentFrameComposer.ResolveSourceDuration on the export path.
                     await ctx.Renderer.InitializeAsync(
-                        mouseData, config, w, h, seg.SourceDuration,
+                        mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
                         seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
                     ctx.Ready = true;
                 }
@@ -3815,6 +3826,10 @@ public sealed partial class EditorPage : Page
 
     private bool _suppressAspectRatioEvents;
 
+    // Set once the user picks a fit mode explicitly, so the Contain default applied when a
+    // real aspect ratio is first chosen never overwrites a deliberate choice.
+    private bool _fitModeChosenByUser;
+
     /// <summary>
     /// Initializes the aspect ratio flyout from the current project + composition state.
     /// Safe to call multiple times; uses a suppression flag so event handlers don't
@@ -3931,6 +3946,10 @@ public sealed partial class EditorPage : Page
         if (FitModeSegmented.SelectedItem is not CommunityToolkit.WinUI.Controls.SegmentedItem item) return;
         if (item.Tag is not string tag) return;
         if (!Enum.TryParse<FitMode>(tag, out var fit)) return;
+
+        // Programmatic syncs are suppressed above, so reaching here means the user picked
+        // the fit themselves and it must survive an Auto round-trip (see ApplyAspectRatio).
+        _fitModeChosenByUser = true;
         ApplyFitMode(fit);
     }
 
@@ -3960,11 +3979,15 @@ public sealed partial class EditorPage : Page
         var config = ProjectService.Instance.CurrentComposition;
         if (project is null || config is null) return;
 
-        // Fit mode is ignored while the ratio is Auto, so whatever value was stored was
-        // never a deliberate choice. Default it to Contain the moment a real ratio makes
+        // Fit mode is ignored while the ratio is Auto, so a value carried over from Auto was
+        // never a deliberate choice. Default it to Contain the first time a real ratio makes
         // the control meaningful, so switching ratio keeps the whole frame visible instead
         // of silently cropping it; Cover stays available as the explicit alternative.
-        bool fitBecomesRelevant = project.AspectRatio == AspectRatio.Auto && ratio != AspectRatio.Auto;
+        // Once the user has picked a fit themselves it is never overridden, so cycling
+        // through Auto and back does not discard it.
+        bool fitBecomesRelevant = !_fitModeChosenByUser
+            && project.AspectRatio == AspectRatio.Auto
+            && ratio != AspectRatio.Auto;
 
         project.AspectRatio = ratio;
         config = config with { AspectRatio = ratio };

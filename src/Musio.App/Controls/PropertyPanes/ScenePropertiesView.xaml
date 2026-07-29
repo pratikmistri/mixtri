@@ -310,7 +310,7 @@
         </StackPanel>
 
         <!-- Zoom scope: binary choice rendered as a segmented control -->
-        <StackPanel x:Name="ZoomScopePanel" x:FieldModifier="public" Spacing="8">
+        <StackPanel Spacing="8">
             <TextBlock Text="Zoom scope" Style="{StaticResource PropertyLabelStyle}" />
             <ctk:Segmented x:Name="ZoomScopeSegmented" x:FieldModifier="public"
                            HorizontalAlignment="Stretch">
@@ -436,7 +436,7 @@
         <!-- Primary color -->
         <StackPanel x:Name="ColorPanel" x:FieldModifier="public" Spacing="6">
             <TextBlock Text="Color" Style="{StaticResource PropertyLabelStyle}" />
-            <DropDownButton x:Name="BgColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+            <DropDownButton HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
                         x:Name="BgColorSwatch"
@@ -462,7 +462,7 @@
         <!-- Gradient end color (only visible for Gradient type) -->
         <StackPanel x:Name="GradientPanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
             <TextBlock Text="Gradient End Color" Style="{StaticResource PropertyLabelStyle}" />
-            <DropDownButton x:Name="GradEndColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+            <DropDownButton HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
                         x:Name="GradEndColorSwatch"

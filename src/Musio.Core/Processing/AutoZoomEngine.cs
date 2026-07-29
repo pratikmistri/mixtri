@@ -71,8 +71,9 @@ public class AutoZoomEngine
     /// normally be 1.0f — no DPI scaling is required.
     /// </summary>
     /// <param name="durationSeconds">
-    /// Length of the video the clicks are being mapped onto. Clicks falling outside it are
-    /// ignored; pass 0 to keep every click. See <see cref="RebuildAutoSegments"/>.
+    /// Length of the video the clicks are being mapped onto. Clicks landing past it are
+    /// ignored; pass 0 when the length is unknown to skip only the upper bound. Clicks
+    /// before the video starts are always ignored. See <see cref="RebuildAutoSegments"/>.
     /// </param>
     public void BuildZoomTimeline(
         MouseRecordingData mouseData,
@@ -159,10 +160,7 @@ public class AutoZoomEngine
             });
         }
 
-        if (rawSegments.Count == 0) return;
-
-        _autoSegments = MergeSegments(rawSegments);
-    }
+        _autoSegments = MergeSegments(rawSegments);    }
 
     /// <summary>
     /// Merge overlapping or closely-spaced zoom segments to prevent flickering.

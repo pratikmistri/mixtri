@@ -30,7 +30,6 @@ public sealed partial class EditorPage
     private RadioButton Ratio21x9 => PropertiesPanel.Scene.Ratio21x9;
     private StackPanel FitModePanel => PropertiesPanel.Scene.FitModePanel;
     private Segmented FitModeSegmented => PropertiesPanel.Scene.FitModeSegmented;
-    private StackPanel ZoomScopePanel => PropertiesPanel.Scene.ZoomScopePanel;
     private Segmented ZoomScopeSegmented => PropertiesPanel.Scene.ZoomScopeSegmented;
     private StackPanel CropAnchorPanel => PropertiesPanel.Scene.CropAnchorPanel;
     private Grid CropAnchorGrid => PropertiesPanel.Scene.CropAnchorGrid;

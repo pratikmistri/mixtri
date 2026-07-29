@@ -100,7 +100,7 @@
         <!-- Text color -->
         <StackPanel Spacing="6">
             <TextBlock Text="Text Color" Style="{StaticResource PropertyLabelStyle}" />
-            <DropDownButton x:Name="SlideTextColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+            <DropDownButton HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
                         x:Name="SlideTextColorSwatch"
@@ -172,7 +172,7 @@
         <!-- Solid color / gradient start color -->
         <StackPanel x:Name="SlideColorPanel" x:FieldModifier="public" Spacing="6">
             <TextBlock x:Name="SlideColorLabel" x:FieldModifier="public" Text="Color" Style="{StaticResource PropertyLabelStyle}" />
-            <DropDownButton x:Name="SlideBgColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+            <DropDownButton HorizontalAlignment="Stretch">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Border
                         x:Name="SlideBgColorSwatch"
@@ -211,7 +211,7 @@
                 SelectionMode="Single" />
             <StackPanel Spacing="6">
                 <TextBlock Text="End Color" Style="{StaticResource PropertyLabelStyle}" />
-                <DropDownButton x:Name="SlideGradEndColorButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+                <DropDownButton HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Border
                             x:Name="SlideGradEndColorSwatch"

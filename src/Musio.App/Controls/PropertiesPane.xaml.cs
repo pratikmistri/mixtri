@@ -83,15 +83,6 @@ public sealed partial class PropertiesPane : UserControl
     private PropertyPaneKind _selected = PropertyPaneKind.Scene;
     private bool _isOpen = true;
 
-    /// <summary>Raised whenever the selected panel or the expanded state changes.</summary>
-    public event EventHandler? PaneStateChanged;
-
-    /// <summary>The panel currently shown in the panel body.</summary>
-    public PropertyPaneKind SelectedPane => _selected;
-
-    /// <summary>Whether the panel body is expanded (the rail is always visible).</summary>
-    public bool IsPaneOpen => _isOpen;
-
     /// <summary>
     /// Selects <paramref name="kind"/> and expands the panel body. Ignored when the
     /// panel's rail tab is currently hidden.
@@ -122,10 +113,6 @@ public sealed partial class PropertiesPane : UserControl
             _selected = PropertyPaneKind.Scene;
         UpdateVisualState();
     }
-
-    /// <summary>Whether a panel's rail tab is currently shown.</summary>
-    public bool IsPaneAvailable(PropertyPaneKind kind)
-        => TabFor(kind).Visibility == Visibility.Visible;
 
     private void PaneTab_Click(object sender, RoutedEventArgs e)
     {
@@ -197,7 +184,6 @@ public sealed partial class PropertiesPane : UserControl
         }
 
         UpdateEdgeFades();
-        PaneStateChanged?.Invoke(this, EventArgs.Empty);
 
         Visibility Vis(PropertyPaneKind kind)
             => _selected == kind ? Visibility.Visible : Visibility.Collapsed;

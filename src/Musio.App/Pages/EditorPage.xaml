@@ -171,7 +171,6 @@
 
         <!-- Editor toolbar -->
         <Grid
-            x:Name="ToolbarGrid"
             Grid.Row="2"
             Padding="8,4"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -185,7 +184,6 @@
 
             <!-- Undo / Redo buttons -->
             <StackPanel
-                x:Name="LeftToolbarGroup"
                 Grid.Column="0"
                 Orientation="Horizontal"
                 Spacing="4">
@@ -272,7 +270,6 @@
 
             <!-- Speed controls -->
             <StackPanel
-                x:Name="RightToolbarGroup"
                 Grid.Column="2"
                 Orientation="Horizontal"
                 Spacing="8"
