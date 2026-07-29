@@ -4,18 +4,23 @@
 
     <!--
         Store-style navigation rail item: icon stacked over label, centred across the full
-        rail width.
+        rail width. Selecting an item drops its label so the icon centres on its own.
 
-        NavigationView has no built-in mode for this. Its stock item lays the icon and label
-        out in a row and gives the label only the width left beside a reserved icon column,
-        which clamps the label to ~26px in a 64px rail and clips every caption. That layout
-        lives in NavigationViewItemPresenter, and an implicit style for the presenter is
-        ignored — verified by giving a presenter template a red background and seeing it
-        never render, from both NavigationView.Resources and Application.Resources — because
-        NavigationViewItem supplies its presenter's style itself.
+        NavigationView has no built-in mode for this, and its stock item cannot be coaxed
+        into it:
+          * Assigning a UIElement to NavigationViewItem.Content CRASHES the XAML runtime
+            (0xc000027b) as the item is realised, so the layout cannot be passed as content.
+          * The stock item gives the label only the width left beside a reserved icon column,
+            clamping captions to ~26px in a 72px rail and clipping every one. That layout
+            lives in NavigationViewItemPresenter, and an implicit style for the presenter is
+            ignored from both NavigationView.Resources and Application.Resources (verified
+            with a presenter template whose red background never rendered) because
+            NavigationViewItem supplies its presenter's style itself.
 
-        Templating NavigationViewItem directly does take effect, so the item becomes a plain
-        content host and its ContentTemplate lays the icon and label out across the full rail.
+        Templating NavigationViewItem directly does take effect. The icon and label live in
+        this template rather than in a ContentTemplate so the visual states can address the
+        label directly — a state Setter cannot reach inside a ContentPresenter's DataTemplate.
+        Items therefore use the native Icon and Content (a plain string) properties.
     -->
     <Style TargetType="NavigationViewItem">
         <Setter Property="HorizontalAlignment" Value="Stretch" />
@@ -27,13 +32,14 @@
         <Setter Property="Padding" Value="0" />
         <Setter Property="Margin" Value="4,2" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
-        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <!-- Unselected items sit back so the selected one carries the emphasis. -->
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="NavigationViewItem">
                     <!-- Stretch vertically: if the root only sized to its content the item
                          would centre that content in a taller slot, leaving the selection
-                         indicator sitting above the true centre. -->
+                         bar sitting above the item's true centre. -->
                     <Grid x:Name="LayoutRoot"
                           Background="Transparent"
                           VerticalAlignment="Stretch"
@@ -41,28 +47,69 @@
                         <Border x:Name="ItemBackground"
                                 Background="Transparent"
                                 CornerRadius="4" />
-                        <Border x:Name="SelectionIndicator"
+
+                        <!-- Deliberately NOT named "SelectionIndicator": NavigationView looks
+                             up a template part with that name and animates its position
+                             itself, which yanked this bar to the top of the item on every
+                             navigation. Renaming it also opts out of that animation, so the
+                             grow/fade is driven from the visual states below. -->
+                        <Border x:Name="RailSelectionBar"
                                 Width="3"
                                 Height="20"
                                 HorizontalAlignment="Left"
                                 VerticalAlignment="Center"
+                                RenderTransformOrigin="0.5,0.5"
                                 CornerRadius="2"
                                 Background="{ThemeResource AccentFillColorDefaultBrush}"
-                                Opacity="0" />
-                        <ContentPresenter
-                            Content="{TemplateBinding Content}"
-                            ContentTemplate="{TemplateBinding ContentTemplate}"
-                            Foreground="{TemplateBinding Foreground}"
-                            HorizontalAlignment="Stretch"
-                            VerticalAlignment="Center" />
+                                Opacity="0">
+                            <Border.RenderTransform>
+                                <ScaleTransform x:Name="RailSelectionBarScale" ScaleY="0" />
+                            </Border.RenderTransform>
+                        </Border>
+
+                        <StackPanel x:Name="ContentStack"
+                                    Spacing="6"
+                                    Padding="0,10"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Center">
+                            <ContentPresenter x:Name="IconHost"
+                                              Content="{TemplateBinding Icon}"
+                                              Foreground="{TemplateBinding Foreground}"
+                                              HorizontalAlignment="Center" />
+                            <TextBlock x:Name="LabelHost"
+                                       Text="{TemplateBinding Content}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       FontSize="12"
+                                       TextAlignment="Center"
+                                       HorizontalAlignment="Center" />
+                        </StackPanel>
 
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup x:Name="CommonStates">
-                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="Normal">
+                                    <Storyboard>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBar"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="0" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBarScale"
+                                            Storyboard.TargetProperty="ScaleY"
+                                            To="0" Duration="0:0:0.15">
+                                            <DoubleAnimation.EasingFunction>
+                                                <CubicEase EasingMode="EaseIn" />
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </VisualState>
                                 <VisualState x:Name="PointerOver">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                        <Setter Target="IconHost.Foreground"
+                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
+                                        <Setter Target="LabelHost.Foreground"
+                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
                                 </VisualState>
                                 <VisualState x:Name="Pressed">
@@ -71,27 +118,72 @@
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
                                     </VisualState.Setters>
                                 </VisualState>
+
+                                <!-- Selected: the label is dropped and the icon centres itself,
+                                     since ContentStack is centred and the label is the only
+                                     other thing in it. -->
                                 <VisualState x:Name="Selected">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
-                                        <Setter Target="SelectionIndicator.Opacity" Value="1" />
+                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <Setter Target="IconHost.Foreground"
+                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBar"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBarScale"
+                                            Storyboard.TargetProperty="ScaleY"
+                                            To="1" Duration="0:0:0.25">
+                                            <DoubleAnimation.EasingFunction>
+                                                <BackEase EasingMode="EaseOut" Amplitude="0.4" />
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PointerOverSelected">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        <Setter Target="SelectionIndicator.Opacity" Value="1" />
+                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <Setter Target="IconHost.Foreground"
+                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBar"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBarScale"
+                                            Storyboard.TargetProperty="ScaleY"
+                                            To="1" Duration="0:0:0.12" />
+                                    </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PressedSelected">
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        <Setter Target="SelectionIndicator.Opacity" Value="1" />
+                                        <Setter Target="LabelHost.Visibility" Value="Collapsed" />
+                                        <Setter Target="IconHost.Foreground"
+                                                Value="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBar"
+                                            Storyboard.TargetProperty="Opacity"
+                                            To="1" Duration="0:0:0.12" />
+                                        <DoubleAnimation
+                                            Storyboard.TargetName="RailSelectionBarScale"
+                                            Storyboard.TargetProperty="ScaleY"
+                                            To="1" Duration="0:0:0.12" />
+                                    </Storyboard>
                                 </VisualState>
+
                                 <VisualState x:Name="Disabled">
                                     <VisualState.Setters>
                                         <Setter Target="LayoutRoot.Opacity" Value="0.4" />

@@ -32,12 +32,9 @@
         <!-- Store-style rail: a fixed-width pane that is always open but never expandable,
              so there is no hamburger and no flyout.
 
-             NavigationView has no built-in icon-over-label mode, so each item supplies that
-             layout through ContentTemplate, with Content carrying the label. The layout must
-             go in a template and NOT directly in Content — assigning a UIElement to
-             NavigationViewItem.Content crashes the XAML runtime (0xc000027b) as the item is
-             realised. Icon is deliberately left unset so the presenter reserves no icon
-             column and the stacked content can centre in the rail. -->
+             Items use the native Icon and Content properties; the stacked icon-over-label
+             layout, the dimming of unselected items and the selected item's label drop all
+             live in the NavigationViewItem template in Themes/NavigationRailStyles.xaml. -->
         <NavigationView
             x:Name="NavView"
             Grid.Row="1"
@@ -49,38 +46,24 @@
             IsPaneToggleButtonVisible="False"
             IsSettingsVisible="False"
             SelectionChanged="NavView_SelectionChanged">
-            <NavigationView.Resources>
-                <DataTemplate x:Key="RecordItemTemplate">
-                    <StackPanel Spacing="6" Padding="0,10">
-                        <FontIcon FontSize="18" Glyph="&#xE7C8;" HorizontalAlignment="Center" />
-                        <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
-                    </StackPanel>
-                </DataTemplate>
-                <DataTemplate x:Key="EditorItemTemplate">
-                    <StackPanel Spacing="6" Padding="0,10">
-                        <FontIcon FontSize="18" Glyph="&#xE78A;" HorizontalAlignment="Center" />
-                        <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
-                    </StackPanel>
-                </DataTemplate>
-                <DataTemplate x:Key="SettingsItemTemplate">
-                    <StackPanel Spacing="6" Padding="0,10">
-                        <FontIcon FontSize="18" Glyph="&#xE713;" HorizontalAlignment="Center" />
-                        <TextBlock Text="{Binding}" FontSize="12" HorizontalAlignment="Center" />
-                    </StackPanel>
-                </DataTemplate>
-            </NavigationView.Resources>
             <NavigationView.MenuItems>
                 <NavigationViewItem
                     Tag="record"
                     Content="Record"
                     IsSelected="True"
-                    ContentTemplate="{StaticResource RecordItemTemplate}"
-                    ToolTipService.ToolTip="Configure and start screen recording" />
+                    ToolTipService.ToolTip="Configure and start screen recording">
+                    <NavigationViewItem.Icon>
+                        <FontIcon FontSize="18" Glyph="&#xE7C8;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem
                     Tag="editor"
                     Content="Editor"
-                    ContentTemplate="{StaticResource EditorItemTemplate}"
-                    ToolTipService.ToolTip="Edit your recorded clips" />
+                    ToolTipService.ToolTip="Edit your recorded clips">
+                    <NavigationViewItem.Icon>
+                        <FontIcon FontSize="18" Glyph="&#xE78A;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <!-- Settings uses a footer item rather than NavigationView's built-in one so it
                  gets the same stacked layout as the rest of the rail. -->
@@ -88,8 +71,11 @@
                 <NavigationViewItem
                     Tag="settings"
                     Content="Settings"
-                    ContentTemplate="{StaticResource SettingsItemTemplate}"
-                    ToolTipService.ToolTip="App settings" />
+                    ToolTipService.ToolTip="App settings">
+                    <NavigationViewItem.Icon>
+                        <FontIcon FontSize="18" Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.FooterMenuItems>
             <Frame x:Name="NavFrame" />
         </NavigationView>
