@@ -38,23 +38,31 @@ public enum HighlightStyle
 /// </remarks>
 public sealed class SelectionHighlight : IDisposable
 {
-    /// <summary>Width of the border ring, in physical pixels.</summary>
-    private const int BorderThickness = 3;
+    /// <summary>Width of the border ring, in DIPs.</summary>
+    private const double BorderThicknessDip = 2;
 
-    /// <summary>Corner radius of the selection edge, in physical pixels.</summary>
-    private const int CornerRadius = 4;
+    /// <summary>Corner radius of the selection edge, in DIPs.</summary>
+    private const double CornerRadiusDip = 4;
 
-    /// <summary>Length of each dash along the border, in physical pixels.</summary>
-    private const int DashLength = 10;
+    /// <summary>Length of each dash along the border, in DIPs.</summary>
+    private const double DashLengthDip = 7;
 
-    /// <summary>Gap between dashes, in physical pixels.</summary>
-    private const int DashGap = 7;
+    /// <summary>Gap between dashes, in DIPs.</summary>
+    private const double DashGapDip = 5;
 
     /// <summary>Dim applied outside the selection — 0x4D matches the pickers' 30% mask.</summary>
     private const byte SmokeAlpha = 0x4D;
 
     // COLORREF is 0x00BBGGRR, i.e. byte-reversed from the #RRGGBB used in XAML.
     private const uint BorderColor = 0x00D47800; // #0078D4 accent blue
+
+    // Physical-pixel geometry for the monitor the selection currently sits on.
+    // Recomputed per render so the ring matches the pickers' DIP-based stroke on
+    // any display, instead of being hardcoded pixels that shrink as DPI rises.
+    private int _thickness = 2;
+    private int _radius = 4;
+    private int _dashLength = 7;
+    private int _dashGap = 5;
 
     private IntPtr _borderHwnd;
     private IntPtr _smokeHwnd;
@@ -158,6 +166,8 @@ public sealed class SelectionHighlight : IDisposable
         EnsureClassRegistered();
         EnsureBorderBrush();
 
+        UpdateScale(x, y, width, height);
+
         _x = x; _y = y; _width = width; _height = height;
 
         UpdateSmoke(x, y, width, height);
@@ -167,16 +177,43 @@ public sealed class SelectionHighlight : IDisposable
     }
 
     /// <summary>
+    /// Converts the DIP-based geometry to physical pixels for the monitor the
+    /// selection sits on, so the ring is the same visual weight as the pickers'
+    /// XAML stroke regardless of that monitor's scaling.
+    /// </summary>
+    private void UpdateScale(int x, int y, int width, int height)
+    {
+        double scale = 1.0;
+
+        var rect = new RECT { Left = x, Top = y, Right = x + width, Bottom = y + height };
+        var monitor = MonitorFromRect(ref rect, MONITOR_DEFAULTTONEAREST);
+        if (monitor != IntPtr.Zero
+            && GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0
+            && dpiX > 0)
+        {
+            scale = dpiX / 96.0;
+        }
+
+        _thickness = ToPixels(BorderThicknessDip, scale);
+        _radius = ToPixels(CornerRadiusDip, scale);
+        _dashLength = ToPixels(DashLengthDip, scale);
+        _dashGap = ToPixels(DashGapDip, scale);
+    }
+
+    private static int ToPixels(double dip, double scale) =>
+        Math.Max(1, (int)Math.Round(dip * scale));
+
+    /// <summary>
     /// Positions the border window over the selection, shaped as a rounded dashed
     /// ring so the middle stays fully interactive and undimmed.
     /// </summary>
     private void UpdateBorder(int x, int y, int width, int height)
     {
         // The ring sits *outside* the selection so it never covers captured content.
-        int outerX = x - BorderThickness;
-        int outerY = y - BorderThickness;
-        int outerW = width + (2 * BorderThickness);
-        int outerH = height + (2 * BorderThickness);
+        int outerX = x - _thickness;
+        int outerY = y - _thickness;
+        int outerW = width + (2 * _thickness);
+        int outerH = height + (2 * _thickness);
 
         if (_borderHwnd == IntPtr.Zero)
         {
@@ -192,11 +229,11 @@ public sealed class SelectionHighlight : IDisposable
         // Region coordinates are window-relative. The outer radius is bumped by the
         // thickness so the ring's inner and outer curves stay concentric.
         var ring = CreateRoundRectRgn(0, 0, outerW + 1, outerH + 1,
-            (CornerRadius + BorderThickness) * 2, (CornerRadius + BorderThickness) * 2);
+            (_radius + _thickness) * 2, (_radius + _thickness) * 2);
         var inner = CreateRoundRectRgn(
-            BorderThickness, BorderThickness,
-            BorderThickness + width + 1, BorderThickness + height + 1,
-            CornerRadius * 2, CornerRadius * 2);
+            _thickness, _thickness,
+            _thickness + width + 1, _thickness + height + 1,
+            _radius * 2, _radius * 2);
 
         CombineRgn(ring, ring, inner, RGN_DIFF);
         DeleteObject(inner);
@@ -216,29 +253,29 @@ public sealed class SelectionHighlight : IDisposable
     /// Gaps are kept clear of the corners: cutting into the rounded arcs would
     /// square them off again and lose the rounding.
     /// </remarks>
-    private static void PunchDashGaps(IntPtr ring, int outerW, int outerH)
+    private void PunchDashGaps(IntPtr ring, int outerW, int outerH)
     {
-        int margin = CornerRadius + (2 * BorderThickness);
-        int stride = DashLength + DashGap;
+        int margin = _radius + (2 * _thickness);
+        int stride = _dashLength + _dashGap;
 
         for (int x = margin; x < outerW - margin; x += stride)
         {
-            int start = Math.Min(x + DashLength, outerW - margin);
-            int end = Math.Min(start + DashGap, outerW - margin);
+            int start = Math.Min(x + _dashLength, outerW - margin);
+            int end = Math.Min(start + _dashGap, outerW - margin);
             if (end <= start) break;
 
-            Subtract(ring, start, 0, end, BorderThickness);
-            Subtract(ring, start, outerH - BorderThickness, end, outerH);
+            Subtract(ring, start, 0, end, _thickness);
+            Subtract(ring, start, outerH - _thickness, end, outerH);
         }
 
         for (int y = margin; y < outerH - margin; y += stride)
         {
-            int start = Math.Min(y + DashLength, outerH - margin);
-            int end = Math.Min(start + DashGap, outerH - margin);
+            int start = Math.Min(y + _dashLength, outerH - margin);
+            int end = Math.Min(start + _dashGap, outerH - margin);
             if (end <= start) break;
 
-            Subtract(ring, 0, start, BorderThickness, end);
-            Subtract(ring, outerW - BorderThickness, start, outerW, end);
+            Subtract(ring, 0, start, _thickness, end);
+            Subtract(ring, outerW - _thickness, start, outerW, end);
         }
     }
 
@@ -273,14 +310,14 @@ public sealed class SelectionHighlight : IDisposable
         }
 
         // Punch out the selection *and* its ring, so the border isn't dimmed too.
-        int holeX = x - vx - BorderThickness;
-        int holeY = y - vy - BorderThickness;
-        int holeW = width + (2 * BorderThickness);
-        int holeH = height + (2 * BorderThickness);
+        int holeX = x - vx - _thickness;
+        int holeY = y - vy - _thickness;
+        int holeW = width + (2 * _thickness);
+        int holeH = height + (2 * _thickness);
 
         var full = CreateRectRgn(0, 0, vw, vh);
         var hole = CreateRoundRectRgn(holeX, holeY, holeX + holeW + 1, holeY + holeH + 1,
-            (CornerRadius + BorderThickness) * 2, (CornerRadius + BorderThickness) * 2);
+            (_radius + _thickness) * 2, (_radius + _thickness) * 2);
 
         CombineRgn(full, full, hole, RGN_DIFF);
         DeleteObject(hole);
@@ -408,6 +445,8 @@ public sealed class SelectionHighlight : IDisposable
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const int RGN_DIFF = 4;
     private const int BLACK_BRUSH = 4;
+    private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const int MDT_EFFECTIVE_DPI = 0;
     private const int SM_XVIRTUALSCREEN = 76;
     private const int SM_YVIRTUALSCREEN = 77;
     private const int SM_CXVIRTUALSCREEN = 78;
@@ -457,6 +496,12 @@ public sealed class SelectionHighlight : IDisposable
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);

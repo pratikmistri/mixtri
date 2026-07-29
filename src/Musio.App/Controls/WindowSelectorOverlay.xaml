@@ -41,8 +41,8 @@
                 x:Name="HighlightRect"
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="3"
-                StrokeDashArray="3,2"
+                StrokeThickness="2"
+                StrokeDashArray="3.5,2.5"
                 RadiusX="4"
                 RadiusY="4"
                 Visibility="Collapsed" />
