@@ -422,8 +422,13 @@ public sealed class ShellCoordinator : IDisposable
                 if (_viewModel.SelectedRegion is not { } region) return false;
                 if (region.Width <= 0 || region.Height <= 0) return false;
 
-                float dpiScale = GetRegionMonitorDpiScale(region);
-                var (monLeft, monTop) = GetRegionMonitorOrigin(region);
+                // No falling back to the primary monitor: the region's coordinates
+                // are monitor-local, so if its display is gone they would place the
+                // highlight on the wrong screen, over content that will never be
+                // captured. RecordingViewModel.BuildCaptureTarget refuses the same
+                // case at record time; showing nothing here matches that.
+                if (!TryResolveRegionMonitor(region, out int monLeft, out int monTop, out float dpiScale))
+                    return false;
 
                 // Math.Round on the origin and even-flooring on the size mirror the
                 // crop rect computed by RecordingSession (H.264 needs even
@@ -566,45 +571,43 @@ public sealed class ShellCoordinator : IDisposable
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 
-    private static CaptureTarget? FindMonitorForRegion(CaptureRegion region)
+    /// <summary>
+    /// Resolves the origin and DPI scale of the monitor that owns
+    /// <paramref name="region"/>, returning false when that display is no longer
+    /// connected.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately has no primary-monitor fallback — see the call site.
+    /// </remarks>
+    private static bool TryResolveRegionMonitor(
+        CaptureRegion region, out int left, out int top, out float dpiScale)
     {
-        var monitors = MonitorEnumerator.GetAllMonitors();
+        left = 0;
+        top = 0;
+        dpiScale = 1.0f;
+
         // Exact match against the raw device name. DisplayName is either
         // "\\.\DISPLAY1" or "\\.\DISPLAY1 (Primary)", so Contains would wrongly
         // match "\\.\DISPLAY1" against "\\.\DISPLAY10".
-        return monitors.FirstOrDefault(m =>
-                m.DisplayName == region.MonitorId
-                || m.DisplayName.StartsWith(region.MonitorId + " "))
-            ?? monitors.FirstOrDefault();
+        var monitor = MonitorEnumerator.GetAllMonitors().FirstOrDefault(m =>
+            m.DisplayName == region.MonitorId
+            || m.DisplayName.StartsWith(region.MonitorId + " "));
+
+        if (monitor is null || monitor.Handle == IntPtr.Zero) return false;
+
+        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(monitor.Handle, ref info)) return false;
+
+        left = info.rcMonitor.Left;
+        top = info.rcMonitor.Top;
+
+        if (GetDpiForMonitor(monitor.Handle, MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0 && dpiX > 0)
+            dpiScale = dpiX / 96.0f;
+
+        return true;
     }
 
-    private static float GetRegionMonitorDpiScale(CaptureRegion region)
-    {
-        var monitor = FindMonitorForRegion(region);
-
-        if (monitor is not null && monitor.Handle != IntPtr.Zero)
-        {
-            int hr = GetDpiForMonitor(monitor.Handle, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
-            if (hr == 0 && dpiX > 0)
-                return dpiX / 96.0f;
-        }
-
-        return 1.0f;
-    }
-
-    private static (int Left, int Top) GetRegionMonitorOrigin(CaptureRegion region)
-    {
-        var monitor = FindMonitorForRegion(region);
-
-        if (monitor is not null && monitor.Handle != IntPtr.Zero)
-        {
-            var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-            if (GetMonitorInfo(monitor.Handle, ref info))
-                return (info.rcMonitor.Left, info.rcMonitor.Top);
-        }
-
-        return (0, 0);
-    }
+    private const int MDT_EFFECTIVE_DPI = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
