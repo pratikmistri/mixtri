@@ -118,12 +118,11 @@ public sealed class ShellCoordinator : IDisposable
     /// it afterwards. That is wrong under Mini mode: the full window is hidden,
     /// not minimised, so restoring it would pop it back up alongside the pill.
     /// Routing through the coordinator restores whatever was actually showing.
-    /// Reference-counted because a picker can be launched while another is
-    /// unwinding.
     /// </remarks>
     public void HideForPicker()
     {
-        if (_pickerDepth++ > 0) return;
+        if (_isPickerHiding) return;
+        _isPickerHiding = true;
 
         if (_stateMachine.CurrentState == AppShellState.Mini)
             _miniWindow?.HideMini();
@@ -134,8 +133,8 @@ public sealed class ShellCoordinator : IDisposable
     /// <summary>Puts back whatever <see cref="HideForPicker"/> took away.</summary>
     public void RestoreAfterPicker()
     {
-        if (_pickerDepth == 0) return;
-        if (--_pickerDepth > 0) return;
+        if (!_isPickerHiding) return;
+        _isPickerHiding = false;
 
         // A recording that began while the picker was up owns the screen now.
         if (_stateMachine.CurrentState == AppShellState.Recording) return;
@@ -143,7 +142,13 @@ public sealed class ShellCoordinator : IDisposable
         ApplyState(_stateMachine.CurrentState);
     }
 
-    private int _pickerDepth;
+    /// <summary>
+    /// Whether a picker has hidden the shell. A plain latch rather than a reference
+    /// count on purpose: a count that ever got out of step (two surfaces opening a
+    /// picker, an unbalanced restore) would leave every window hidden with no way
+    /// back, whereas a latch always restores on the first release.
+    /// </summary>
+    private bool _isPickerHiding;
 
     /// <summary>
     /// Brings up the full window. Goes through the state machine rather than poking

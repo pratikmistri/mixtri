@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -23,8 +24,28 @@ public sealed partial class RecordToolbarControl : UserControl
     public RecordingViewModel ViewModel { get; } = RecordingViewModel.Shared;
 
     private readonly RegionSelector _regionSelector = new();
-    private bool _isLoading = true;
-    private bool _isPickerOpen;
+
+    /// <summary>
+    /// Set immediately before a programmatic selector assignment and consumed by
+    /// the SelectionChanged handler, so seeding the selector from the view model
+    /// never auto-launches a picker.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately consumed inside the handler rather than being a scope flag
+    /// cleared after the assignment: <c>Segmented</c> derives from ListViewBase and
+    /// does not guarantee a synchronous SelectionChanged, so a scope flag could
+    /// already be back to false by the time the handler ran.
+    /// </remarks>
+    private bool _suppressPickerLaunch;
+
+    /// <summary>
+    /// Whether a capture picker is on screen, shared by every instance. The Record
+    /// page and the Mini window each own a toolbar, and both are alive at once, so a
+    /// per-instance flag let them open two pickers. That double-counted
+    /// <see cref="Services.ShellCoordinator.HideForPicker"/>, whose reference count
+    /// is process-wide, and a single restore then left every window hidden.
+    /// </summary>
+    private static bool _isPickerOpen;
 
     /// <summary>Raised when the inline Record button is pressed.</summary>
     public event EventHandler? RecordRequested;
@@ -52,6 +73,7 @@ public sealed partial class RecordToolbarControl : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     public static readonly DependencyProperty ShowInlineRecordButtonProperty =
@@ -88,10 +110,45 @@ public sealed partial class RecordToolbarControl : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        _isLoading = true;
-        CaptureModeSelector.SelectedIndex = (int)ViewModel.CaptureMode;
-        UpdateSelectionPanels();
-        _isLoading = false;
+        SyncFromViewModel();
+
+        // Observe the shared view model so a change made on the *other* surface is
+        // reflected here. Capture mode and the selected window/region are pushed
+        // imperatively (they aren't x:Bind-able the way the toggles are), and
+        // showing a hidden window doesn't re-run navigation or Loaded — so without
+        // this the Record page kept displaying a stale mode after the Mini pill
+        // changed it, and its Record button would then record a mode the UI wasn't
+        // showing.
+        ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        // RecordingViewModel.Shared is a process-wide singleton and a new control
+        // instance is built per RecordingPage navigation, so this must come off
+        // again or handlers accumulate for the life of the app.
+        ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        switch (e.PropertyName)
+        {
+            case nameof(RecordingViewModel.CaptureMode):
+            case nameof(RecordingViewModel.SelectedWindow):
+            case nameof(RecordingViewModel.SelectedRegion):
+            case nameof(RecordingViewModel.HasSelectedRegion):
+                break;
+            default:
+                return;
+        }
+
+        // The view model raises changes from background capture threads.
+        if (DispatcherQueue.HasThreadAccess)
+            SyncFromViewModel();
+        else
+            DispatcherQueue.TryEnqueue(SyncFromViewModel);
     }
 
     /// <summary>
@@ -123,11 +180,13 @@ public sealed partial class RecordToolbarControl : UserControl
     /// </summary>
     public void SyncFromViewModel()
     {
-        _isLoading = true;
         if (CaptureModeSelector.SelectedIndex != (int)ViewModel.CaptureMode)
+        {
+            _suppressPickerLaunch = true;
             CaptureModeSelector.SelectedIndex = (int)ViewModel.CaptureMode;
+        }
+
         UpdateSelectionPanels();
-        _isLoading = false;
     }
 
     private async void CaptureModeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -135,13 +194,18 @@ public sealed partial class RecordToolbarControl : UserControl
         if (CaptureModeSelector?.SelectedItem is not FrameworkElement item || item.Tag is not string tag)
             return;
 
+        // Consume the suppression here so it works whether SelectionChanged is
+        // raised synchronously or queued.
+        bool wasProgrammatic = _suppressPickerLaunch;
+        _suppressPickerLaunch = false;
+
         ViewModel.CaptureMode = Enum.Parse<CaptureMode>(tag);
         ShellSettings.Instance.LastCaptureMode = tag;
         UpdateSelectionPanels();
 
-        // Auto-launch the matching picker when the user chooses a mode, but not
-        // while we're seeding the selector from the view model.
-        if (_isLoading || _isPickerOpen) return;
+        // Auto-launch the matching picker when the *user* chooses a mode, but not
+        // when we're seeding the selector from the view model.
+        if (wasProgrammatic || _isPickerOpen) return;
 
         try
         {
