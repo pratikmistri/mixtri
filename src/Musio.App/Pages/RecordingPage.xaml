@@ -13,7 +13,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- InfoBar for recording status -->
@@ -206,41 +205,5 @@
             Subtitle="Press Ctrl+Shift+R to start recording instantly from anywhere."
             IsLightDismissEnabled="True"
             PreferredPlacement="Bottom" />
-
-        <!-- Status Bar -->
-        <Border
-            Grid.Row="2"
-            Padding="16,10"
-            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-            BorderThickness="0,1,0,0">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <StackPanel
-                    Grid.Column="0"
-                    HorizontalAlignment="Left"
-                    Orientation="Horizontal"
-                    Spacing="8">
-                    <Ellipse
-                        Width="8"
-                        Height="8"
-                        VerticalAlignment="Center"
-                        Fill="{ThemeResource SystemFillColorSuccessBrush}" />
-                    <TextBlock
-                        VerticalAlignment="Center"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="{x:Bind ViewModel.RecordingStatus, Mode=OneWay}" />
-                </StackPanel>
-                <ProgressRing
-                    x:Name="RecordingProgressRing"
-                    Grid.Column="1"
-                    Width="20"
-                    Height="20"
-                    IsActive="{x:Bind ViewModel.IsRecording, Mode=OneWay}"
-                    Visibility="{x:Bind BoolToVisibility(ViewModel.IsRecording), Mode=OneWay}" />
-            </Grid>
-        </Border>
     </Grid>
 </Page>
