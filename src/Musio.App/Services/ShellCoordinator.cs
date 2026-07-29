@@ -62,11 +62,14 @@ public sealed class ShellCoordinator : IDisposable
     public void Start()
     {
         if (_stateMachine.CurrentState == AppShellState.Mini)
+        {
+            // Refreshes the preview itself.
             ShowMiniSurface();
+        }
         else
+        {
             ShowFullSurface();
-
-        UpdateSelectionPreview();
+        }
     }
 
     #region Transitions
@@ -87,8 +90,6 @@ public sealed class ShellCoordinator : IDisposable
             if (_stateMachine.CurrentState == AppShellState.Mini)
                 ShowMiniSurface();
         }
-
-        UpdateSelectionPreview();
     }
 
     /// <summary>
@@ -192,24 +193,23 @@ public sealed class ShellCoordinator : IDisposable
         {
             case AppShellState.Mini:
                 HideMainWindow();
+                // ShowMiniSurface refreshes the preview itself.
                 ShowMiniSurface();
                 break;
 
             case AppShellState.Full:
                 _miniWindow?.HideMini();
                 ShowFullSurface();
+                // The preview belongs to the Mini surface, so take it away here.
+                UpdateSelectionPreview();
                 break;
 
             case AppShellState.Recording:
                 _miniWindow?.HideMini();
                 MinimizeMainWindow();
+                // OnRecordingBegan puts up the recording highlight instead.
                 break;
         }
-
-        // The preview belongs to the Mini surface, so every transition either puts
-        // it up or takes it away. Recording draws its own border instead.
-        if (state != AppShellState.Recording)
-            UpdateSelectionPreview();
     }
 
     #endregion
@@ -220,6 +220,11 @@ public sealed class ShellCoordinator : IDisposable
     {
         _miniWindow ??= CreateMiniWindow();
         _miniWindow.ShowMini();
+
+        // Refreshed here rather than at each call site so the preview comes back no
+        // matter how the pill was summoned — collapse from the full window, the tray
+        // icon, launch, or a picker unwinding.
+        UpdateSelectionPreview();
     }
 
     private MiniWindow CreateMiniWindow()

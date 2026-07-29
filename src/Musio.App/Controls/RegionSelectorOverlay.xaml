@@ -33,7 +33,7 @@
             <Rectangle x:Name="LeftMask" Fill="{ThemeResource RegionMaskBrush}" />
             <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
 
-            <!-- Selection rectangle outline. Solid 3px with a 4px radius so the
+            <!-- Selection rectangle outline. Dashed 3px with a 4px radius so the
                  picker, the persistent preview border and the recording border all
                  read as the same object. -->
             <Rectangle
@@ -41,6 +41,7 @@
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
                 StrokeThickness="3"
+                StrokeDashArray="3,2"
                 RadiusX="4"
                 RadiusY="4"
                 Visibility="Collapsed" />

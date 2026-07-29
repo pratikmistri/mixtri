@@ -4,7 +4,9 @@ using System.Runtime.InteropServices;
 namespace Musio_App.Services;
 
 /// <summary>
-/// Which state a <see cref="SelectionHighlight"/> is conveying.
+/// Which state a <see cref="SelectionHighlight"/> is conveying. The two look the
+/// same on screen; the distinction only drives whether the highlight keeps
+/// following a moving window.
 /// </summary>
 public enum HighlightStyle
 {
@@ -16,16 +18,21 @@ public enum HighlightStyle
 }
 
 /// <summary>
-/// Marks a screen region or window as the capture target: a rounded border ring
+/// Marks a screen region or window as the capture target: a rounded, dashed border
 /// around it, and a dimmed "smoke" layer over everything else.
 /// </summary>
 /// <remarks>
 /// Both layers are click-through, always-on-top, and excluded from screen capture,
 /// so they never land in the recording and never get in the user's way.
 /// <para>
+/// The look is deliberately identical whether the user is still choosing a target or
+/// already recording — the recording overlay says which of those is happening, so
+/// restyling the highlight as well would only add noise.
+/// </para>
+/// <para>
 /// Each layer is a single window shaped with <c>SetWindowRgn</c> rather than a set
-/// of plain bars — that is what allows the rounded corners, and it lets the smoke
-/// be one window with a hole in it instead of four abutting strips.
+/// of plain bars — that is what allows the rounded corners and the dashes, and it
+/// lets the smoke be one window with a hole in it instead of four abutting strips.
 /// </para>
 /// <para>All members must be called on the UI thread; these are HWNDs it owns.</para>
 /// </remarks>
@@ -37,17 +44,21 @@ public sealed class SelectionHighlight : IDisposable
     /// <summary>Corner radius of the selection edge, in physical pixels.</summary>
     private const int CornerRadius = 4;
 
+    /// <summary>Length of each dash along the border, in physical pixels.</summary>
+    private const int DashLength = 10;
+
+    /// <summary>Gap between dashes, in physical pixels.</summary>
+    private const int DashGap = 7;
+
     /// <summary>Dim applied outside the selection — 0x4D matches the pickers' 30% mask.</summary>
     private const byte SmokeAlpha = 0x4D;
 
     // COLORREF is 0x00BBGGRR, i.e. byte-reversed from the #RRGGBB used in XAML.
-    private const uint PreviewColor = 0x00D47800;   // #0078D4 accent blue
-    private const uint RecordingColor = 0x003030FF; // #FF3030 red
+    private const uint BorderColor = 0x00D47800; // #0078D4 accent blue
 
     private IntPtr _borderHwnd;
     private IntPtr _smokeHwnd;
     private IntPtr _borderBrush;
-    private uint _borderColor;
     private bool _disposed;
 
     private int _x, _y, _width, _height;
@@ -74,7 +85,7 @@ public sealed class SelectionHighlight : IDisposable
         if (_disposed) return;
 
         TrackedWindow = IntPtr.Zero;
-        Render(x, y, width, height, style);
+        Render(x, y, width, height);
     }
 
     /// <summary>
@@ -92,7 +103,7 @@ public sealed class SelectionHighlight : IDisposable
             return;
         }
 
-        Render(x, y, w, h, style);
+        Render(x, y, w, h);
     }
 
     /// <summary>
@@ -114,7 +125,7 @@ public sealed class SelectionHighlight : IDisposable
         if (IsShown && x == _x && y == _y && w == _width && h == _height)
             return true;
 
-        Render(x, y, w, h, style);
+        Render(x, y, w, h);
         return true;
     }
 
@@ -142,12 +153,10 @@ public sealed class SelectionHighlight : IDisposable
         return width > 0 && height > 0;
     }
 
-    private void Render(int x, int y, int width, int height, HighlightStyle style)
+    private void Render(int x, int y, int width, int height)
     {
-        uint color = style == HighlightStyle.Recording ? RecordingColor : PreviewColor;
-
         EnsureClassRegistered();
-        EnsureBorderBrush(color);
+        EnsureBorderBrush();
 
         _x = x; _y = y; _width = width; _height = height;
 
@@ -158,8 +167,8 @@ public sealed class SelectionHighlight : IDisposable
     }
 
     /// <summary>
-    /// Positions the border window over the selection, shaped as a rounded ring so
-    /// the middle stays fully interactive and undimmed.
+    /// Positions the border window over the selection, shaped as a rounded dashed
+    /// ring so the middle stays fully interactive and undimmed.
     /// </summary>
     private void UpdateBorder(int x, int y, int width, int height)
     {
@@ -182,19 +191,62 @@ public sealed class SelectionHighlight : IDisposable
 
         // Region coordinates are window-relative. The outer radius is bumped by the
         // thickness so the ring's inner and outer curves stay concentric.
-        var outer = CreateRoundRectRgn(0, 0, outerW + 1, outerH + 1,
+        var ring = CreateRoundRectRgn(0, 0, outerW + 1, outerH + 1,
             (CornerRadius + BorderThickness) * 2, (CornerRadius + BorderThickness) * 2);
         var inner = CreateRoundRectRgn(
             BorderThickness, BorderThickness,
             BorderThickness + width + 1, BorderThickness + height + 1,
             CornerRadius * 2, CornerRadius * 2);
 
-        CombineRgn(outer, outer, inner, RGN_DIFF);
+        CombineRgn(ring, ring, inner, RGN_DIFF);
         DeleteObject(inner);
 
+        PunchDashGaps(ring, outerW, outerH);
+
         // The window takes ownership of the region — it must not be deleted here.
-        SetWindowRgn(_borderHwnd, outer, true);
+        SetWindowRgn(_borderHwnd, ring, true);
         InvalidateRect(_borderHwnd, IntPtr.Zero, true);
+    }
+
+    /// <summary>
+    /// Cuts evenly spaced gaps out of the ring to make it read as a dashed outline,
+    /// matching the pickers' dashed selection rectangle.
+    /// </summary>
+    /// <remarks>
+    /// Gaps are kept clear of the corners: cutting into the rounded arcs would
+    /// square them off again and lose the rounding.
+    /// </remarks>
+    private static void PunchDashGaps(IntPtr ring, int outerW, int outerH)
+    {
+        int margin = CornerRadius + (2 * BorderThickness);
+        int stride = DashLength + DashGap;
+
+        for (int x = margin; x < outerW - margin; x += stride)
+        {
+            int start = Math.Min(x + DashLength, outerW - margin);
+            int end = Math.Min(start + DashGap, outerW - margin);
+            if (end <= start) break;
+
+            Subtract(ring, start, 0, end, BorderThickness);
+            Subtract(ring, start, outerH - BorderThickness, end, outerH);
+        }
+
+        for (int y = margin; y < outerH - margin; y += stride)
+        {
+            int start = Math.Min(y + DashLength, outerH - margin);
+            int end = Math.Min(start + DashGap, outerH - margin);
+            if (end <= start) break;
+
+            Subtract(ring, 0, start, BorderThickness, end);
+            Subtract(ring, outerW - BorderThickness, start, outerW, end);
+        }
+    }
+
+    private static void Subtract(IntPtr region, int left, int top, int right, int bottom)
+    {
+        var gap = CreateRectRgn(left, top, right, bottom);
+        CombineRgn(region, region, gap, RGN_DIFF);
+        DeleteObject(gap);
     }
 
     /// <summary>
@@ -264,7 +316,6 @@ public sealed class SelectionHighlight : IDisposable
         {
             DeleteObject(_borderBrush);
             _borderBrush = IntPtr.Zero;
-            _borderColor = 0;
         }
 
         TrackedWindow = IntPtr.Zero;
@@ -278,23 +329,17 @@ public sealed class SelectionHighlight : IDisposable
         Hide();
     }
 
-    private void EnsureBorderBrush(uint color)
+    private void EnsureBorderBrush()
     {
-        if (_borderBrush != IntPtr.Zero && _borderColor == color) return;
+        if (_borderBrush != IntPtr.Zero) return;
 
-        var old = _borderBrush;
-        _borderBrush = CreateSolidBrush(color);
-        _borderColor = color;
+        _borderBrush = CreateSolidBrush(BorderColor);
 
-        // The brush is per-window (the class has none), so an existing window has to
-        // be repointed at the new one before the old one is destroyed.
         if (_borderHwnd != IntPtr.Zero)
         {
             SetClassLongPtr(_borderHwnd, GCLP_HBRBACKGROUND, _borderBrush);
             InvalidateRect(_borderHwnd, IntPtr.Zero, true);
         }
-
-        if (old != IntPtr.Zero) DeleteObject(old);
     }
 
     private static IntPtr CreateLayerWindow(int x, int y, int w, int h, IntPtr brush, byte alpha)
