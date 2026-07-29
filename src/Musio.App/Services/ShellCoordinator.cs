@@ -313,13 +313,16 @@ public sealed class ShellCoordinator : IDisposable
 
     private void OnRecordingBegan()
     {
-        // Swap the accent preview border for the red recording one.
+        // Swap the accent preview highlight for the red recording one.
         StopWindowTracking();
         ShowHighlight(HighlightStyle.Recording);
 
         _overlay = new RecordingOverlayWindow(_viewModel);
         _overlay.StopRequested += OnOverlayStopRequested;
         _overlay.Activate();
+
+        // The overlay sits outside the selection, so lift it clear of the smoke.
+        _highlight?.KeepAbove(WinRT.Interop.WindowNative.GetWindowHandle(_overlay));
 
         // Everything captured before this point is discarded, so opening the gate
         // only once the overlay is up removes the startup delta.
@@ -477,6 +480,10 @@ public sealed class ShellCoordinator : IDisposable
             _highlight?.Hide();
             return;
         }
+
+        // The smoke would otherwise dim the pill along with the rest of the desktop.
+        if (_miniWindow is not null)
+            _highlight?.KeepAbove(WinRT.Interop.WindowNative.GetWindowHandle(_miniWindow));
 
         // A window can be moved or resized while the pill is up, so follow it.
         if (_highlight?.TrackedWindow != IntPtr.Zero)

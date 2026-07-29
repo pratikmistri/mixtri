@@ -16,32 +16,41 @@ public enum HighlightStyle
 }
 
 /// <summary>
-/// Draws a coloured border around a screen region or a window using four thin
-/// native windows (top, right, bottom, left). The bars are always-on-top,
-/// click-through, and excluded from screen capture so they never appear in the
-/// recording.
+/// Marks a screen region or window as the capture target: a rounded border ring
+/// around it, and a dimmed "smoke" layer over everything else.
 /// </summary>
 /// <remarks>
-/// Serves two jobs: the persistent <see cref="HighlightStyle.Preview"/> border that
-/// shows the user what they have selected before recording, and the
-/// <see cref="HighlightStyle.Recording"/> border shown while capture is live.
-/// All members must be called on the UI thread — the bars are HWNDs owned by it.
+/// Both layers are click-through, always-on-top, and excluded from screen capture,
+/// so they never land in the recording and never get in the user's way.
+/// <para>
+/// Each layer is a single window shaped with <c>SetWindowRgn</c> rather than a set
+/// of plain bars — that is what allows the rounded corners, and it lets the smoke
+/// be one window with a hole in it instead of four abutting strips.
+/// </para>
+/// <para>All members must be called on the UI thread; these are HWNDs it owns.</para>
 /// </remarks>
 public sealed class SelectionHighlight : IDisposable
 {
+    /// <summary>Width of the border ring, in physical pixels.</summary>
     private const int BorderThickness = 3;
+
+    /// <summary>Corner radius of the selection edge, in physical pixels.</summary>
+    private const int CornerRadius = 4;
+
+    /// <summary>Dim applied outside the selection — 0x4D matches the pickers' 30% mask.</summary>
+    private const byte SmokeAlpha = 0x4D;
 
     // COLORREF is 0x00BBGGRR, i.e. byte-reversed from the #RRGGBB used in XAML.
     private const uint PreviewColor = 0x00D47800;   // #0078D4 accent blue
     private const uint RecordingColor = 0x003030FF; // #FF3030 red
 
-    private IntPtr _hTop, _hRight, _hBottom, _hLeft;
-    private IntPtr _hBrush;
-    private uint _brushColor;
+    private IntPtr _borderHwnd;
+    private IntPtr _smokeHwnd;
+    private IntPtr _borderBrush;
+    private uint _borderColor;
     private bool _disposed;
 
     private int _x, _y, _width, _height;
-    private bool _isShown;
 
     private static bool _classRegistered;
     private const string ClassName = "MusioSelectionHighlight";
@@ -54,11 +63,11 @@ public sealed class SelectionHighlight : IDisposable
     /// <summary>The window currently being tracked, or <see cref="IntPtr.Zero"/> for a fixed region.</summary>
     public IntPtr TrackedWindow { get; private set; }
 
-    /// <summary>Whether a border is currently on screen.</summary>
-    public bool IsShown => _isShown;
+    /// <summary>Whether a highlight is currently on screen.</summary>
+    public bool IsShown { get; private set; }
 
     /// <summary>
-    /// Shows (or moves) the border around a fixed rectangle in physical screen pixels.
+    /// Shows (or moves) the highlight around a fixed rectangle in physical screen pixels.
     /// </summary>
     public void ShowRect(int x, int y, int width, int height, HighlightStyle style)
     {
@@ -69,7 +78,7 @@ public sealed class SelectionHighlight : IDisposable
     }
 
     /// <summary>
-    /// Shows the border around <paramref name="hwnd"/> and remembers it, so
+    /// Shows the highlight around <paramref name="hwnd"/> and remembers it, so
     /// <see cref="RefreshTrackedWindow"/> can follow the window as it moves.
     /// </summary>
     public void ShowWindow(IntPtr hwnd, HighlightStyle style)
@@ -87,9 +96,9 @@ public sealed class SelectionHighlight : IDisposable
     }
 
     /// <summary>
-    /// Re-reads the tracked window's bounds and repositions the border. Returns false
-    /// when the window has gone away or is no longer visible, so the caller can stop
-    /// polling and drop the highlight.
+    /// Re-reads the tracked window's bounds and repositions the highlight. Returns
+    /// false when the window has gone away or is no longer visible, so the caller can
+    /// stop polling and drop the highlight.
     /// </summary>
     public bool RefreshTrackedWindow(HighlightStyle style)
     {
@@ -101,8 +110,8 @@ public sealed class SelectionHighlight : IDisposable
             return false;
         }
 
-        // Nothing moved — skip the SetWindowPos churn.
-        if (_isShown && x == _x && y == _y && w == _width && h == _height)
+        // Nothing moved — skip the reshaping churn.
+        if (IsShown && x == _x && y == _y && w == _width && h == _height)
             return true;
 
         Render(x, y, w, h, style);
@@ -137,60 +146,129 @@ public sealed class SelectionHighlight : IDisposable
     {
         uint color = style == HighlightStyle.Recording ? RecordingColor : PreviewColor;
 
-        // Recreate only when the colour actually changes; otherwise reuse the bars
-        // so moving the highlight doesn't flicker.
-        if (_isShown && color != _brushColor)
-            DestroyBars();
-
-        EnsureBrush(color);
         EnsureClassRegistered();
+        EnsureBorderBrush(color);
 
         _x = x; _y = y; _width = width; _height = height;
 
-        // The bars sit *outside* the rect so they never cover the content being
-        // captured, and the corners are filled by the top and bottom bars.
-        PlaceBar(ref _hTop, x - BorderThickness, y - BorderThickness, width + (2 * BorderThickness), BorderThickness);
-        PlaceBar(ref _hBottom, x - BorderThickness, y + height, width + (2 * BorderThickness), BorderThickness);
-        PlaceBar(ref _hLeft, x - BorderThickness, y, BorderThickness, height);
-        PlaceBar(ref _hRight, x + width, y, BorderThickness, height);
+        UpdateSmoke(x, y, width, height);
+        UpdateBorder(x, y, width, height);
 
-        _isShown = true;
+        IsShown = true;
     }
 
-    private void PlaceBar(ref IntPtr hwnd, int x, int y, int w, int h)
+    /// <summary>
+    /// Positions the border window over the selection, shaped as a rounded ring so
+    /// the middle stays fully interactive and undimmed.
+    /// </summary>
+    private void UpdateBorder(int x, int y, int width, int height)
     {
-        if (hwnd == IntPtr.Zero)
+        // The ring sits *outside* the selection so it never covers captured content.
+        int outerX = x - BorderThickness;
+        int outerY = y - BorderThickness;
+        int outerW = width + (2 * BorderThickness);
+        int outerH = height + (2 * BorderThickness);
+
+        if (_borderHwnd == IntPtr.Zero)
         {
-            hwnd = CreateBorderWindow(x, y, w, h);
-            return;
+            _borderHwnd = CreateLayerWindow(outerX, outerY, outerW, outerH, _borderBrush, 255);
+            if (_borderHwnd == IntPtr.Zero) return;
+        }
+        else
+        {
+            SetWindowPos(_borderHwnd, HWND_TOPMOST, outerX, outerY, outerW, outerH,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
 
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        // Region coordinates are window-relative. The outer radius is bumped by the
+        // thickness so the ring's inner and outer curves stay concentric.
+        var outer = CreateRoundRectRgn(0, 0, outerW + 1, outerH + 1,
+            (CornerRadius + BorderThickness) * 2, (CornerRadius + BorderThickness) * 2);
+        var inner = CreateRoundRectRgn(
+            BorderThickness, BorderThickness,
+            BorderThickness + width + 1, BorderThickness + height + 1,
+            CornerRadius * 2, CornerRadius * 2);
+
+        CombineRgn(outer, outer, inner, RGN_DIFF);
+        DeleteObject(inner);
+
+        // The window takes ownership of the region — it must not be deleted here.
+        SetWindowRgn(_borderHwnd, outer, true);
+        InvalidateRect(_borderHwnd, IntPtr.Zero, true);
     }
 
-    /// <summary>Removes the border from screen. Safe to call when nothing is shown.</summary>
+    /// <summary>
+    /// Covers the whole virtual desktop with a dim layer, with the selection (plus
+    /// its border ring) punched out.
+    /// </summary>
+    private void UpdateSmoke(int x, int y, int width, int height)
+    {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vw <= 0 || vh <= 0) return;
+
+        if (_smokeHwnd == IntPtr.Zero)
+        {
+            _smokeHwnd = CreateLayerWindow(vx, vy, vw, vh, GetStockObject(BLACK_BRUSH), SmokeAlpha);
+            if (_smokeHwnd == IntPtr.Zero) return;
+        }
+        else
+        {
+            SetWindowPos(_smokeHwnd, HWND_TOPMOST, vx, vy, vw, vh,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+
+        // Punch out the selection *and* its ring, so the border isn't dimmed too.
+        int holeX = x - vx - BorderThickness;
+        int holeY = y - vy - BorderThickness;
+        int holeW = width + (2 * BorderThickness);
+        int holeH = height + (2 * BorderThickness);
+
+        var full = CreateRectRgn(0, 0, vw, vh);
+        var hole = CreateRoundRectRgn(holeX, holeY, holeX + holeW + 1, holeY + holeH + 1,
+            (CornerRadius + BorderThickness) * 2, (CornerRadius + BorderThickness) * 2);
+
+        CombineRgn(full, full, hole, RGN_DIFF);
+        DeleteObject(hole);
+
+        SetWindowRgn(_smokeHwnd, full, true);
+        InvalidateRect(_smokeHwnd, IntPtr.Zero, true);
+    }
+
+    /// <summary>
+    /// Re-raises <paramref name="hwnd"/> above the highlight layers.
+    /// </summary>
+    /// <remarks>
+    /// The smoke covers the whole desktop and is topmost, so anything of ours that
+    /// sits outside the selection — the Mini pill, the recording overlay — would
+    /// otherwise be dimmed along with everything else. Both are topmost too, so the
+    /// most recently raised wins.
+    /// </remarks>
+    public void KeepAbove(IntPtr hwnd)
+    {
+        if (_disposed || hwnd == IntPtr.Zero || !IsShown) return;
+
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    /// <summary>Removes the highlight from screen. Safe to call when nothing is shown.</summary>
     public void Hide()
     {
-        DestroyBars();
-        TrackedWindow = IntPtr.Zero;
-        _isShown = false;
-    }
+        DestroyLayer(ref _borderHwnd);
+        DestroyLayer(ref _smokeHwnd);
 
-    private void DestroyBars()
-    {
-        DestroyBorderWindow(ref _hTop);
-        DestroyBorderWindow(ref _hRight);
-        DestroyBorderWindow(ref _hBottom);
-        DestroyBorderWindow(ref _hLeft);
-
-        if (_hBrush != IntPtr.Zero)
+        if (_borderBrush != IntPtr.Zero)
         {
-            DeleteObject(_hBrush);
-            _hBrush = IntPtr.Zero;
-            _brushColor = 0;
+            DeleteObject(_borderBrush);
+            _borderBrush = IntPtr.Zero;
+            _borderColor = 0;
         }
 
-        _isShown = false;
+        TrackedWindow = IntPtr.Zero;
+        IsShown = false;
     }
 
     public void Dispose()
@@ -200,16 +278,26 @@ public sealed class SelectionHighlight : IDisposable
         Hide();
     }
 
-    private void EnsureBrush(uint color)
+    private void EnsureBorderBrush(uint color)
     {
-        if (_hBrush != IntPtr.Zero && _brushColor == color) return;
+        if (_borderBrush != IntPtr.Zero && _borderColor == color) return;
 
-        if (_hBrush != IntPtr.Zero) DeleteObject(_hBrush);
-        _hBrush = CreateSolidBrush(color);
-        _brushColor = color;
+        var old = _borderBrush;
+        _borderBrush = CreateSolidBrush(color);
+        _borderColor = color;
+
+        // The brush is per-window (the class has none), so an existing window has to
+        // be repointed at the new one before the old one is destroyed.
+        if (_borderHwnd != IntPtr.Zero)
+        {
+            SetClassLongPtr(_borderHwnd, GCLP_HBRBACKGROUND, _borderBrush);
+            InvalidateRect(_borderHwnd, IntPtr.Zero, true);
+        }
+
+        if (old != IntPtr.Zero) DeleteObject(old);
     }
 
-    private IntPtr CreateBorderWindow(int x, int y, int w, int h)
+    private static IntPtr CreateLayerWindow(int x, int y, int w, int h, IntPtr brush, byte alpha)
     {
         var hwnd = CreateWindowEx(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE,
@@ -220,18 +308,17 @@ public sealed class SelectionHighlight : IDisposable
 
         if (hwnd == IntPtr.Zero) return IntPtr.Zero;
 
-        // The class has no background brush (it would be shared across colours),
-        // so give each window its own and repaint from it.
-        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, _hBrush);
+        // The class has no background brush (it would be shared across colours and
+        // across the border/smoke layers), so give each window its own.
+        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
 
-        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        InvalidateRect(hwnd, IntPtr.Zero, true);
 
         return hwnd;
     }
 
-    private static void DestroyBorderWindow(ref IntPtr hwnd)
+    private static void DestroyLayer(ref IntPtr hwnd)
     {
         if (hwnd != IntPtr.Zero)
         {
@@ -252,8 +339,8 @@ public sealed class SelectionHighlight : IDisposable
             style = 0,
             lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_wndProc),
             hInstance = GetModuleHandle(null),
-            // Deliberately null: the brush is per-window (see CreateBorderWindow),
-            // because one class serves both the preview and recording colours.
+            // Deliberately null: the brush is per-window (see CreateLayerWindow),
+            // because one class serves the border and the smoke.
             hbrBackground = IntPtr.Zero,
             lpszClassName = ClassName,
         };
@@ -274,7 +361,15 @@ public sealed class SelectionHighlight : IDisposable
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
     private const int GCLP_HBRBACKGROUND = -10;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private const int RGN_DIFF = 4;
+    private const int BLACK_BRUSH = 4;
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+    private const int SM_CXVIRTUALSCREEN = 78;
+    private const int SM_CYVIRTUALSCREEN = 79;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_SHOWWINDOW = 0x0040;
 
@@ -295,6 +390,9 @@ public sealed class SelectionHighlight : IDisposable
         int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll")]
+    private static extern int SetWindowRgn(IntPtr hwnd, IntPtr hRgn, bool bRedraw);
+
+    [DllImport("user32.dll")]
     private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, byte dwFlags);
 
     [DllImport("user32.dll")]
@@ -311,6 +409,9 @@ public sealed class SelectionHighlight : IDisposable
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr DefWindowProcW(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hwnd);
@@ -332,6 +433,18 @@ public sealed class SelectionHighlight : IDisposable
 
     [DllImport("gdi32.dll")]
     private static extern IntPtr CreateSolidBrush(uint crColor);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr GetStockObject(int fnObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("gdi32.dll")]
+    private static extern int CombineRgn(IntPtr dest, IntPtr src1, IntPtr src2, int mode);
 
     [DllImport("gdi32.dll")]
     private static extern bool DeleteObject(IntPtr hObject);

@@ -34,15 +34,16 @@
             <Rectangle x:Name="RightMask" Fill="{ThemeResource RegionMaskBrush}" />
 
             <!-- Highlight border around hovered window. Shares the region selector's
-                 accent stroke so "this is what gets captured" reads the same in both
-                 pickers and matches the persistent selection border. -->
+                 accent stroke, thickness and corner radius so "this is what gets
+                 captured" reads identically in both pickers and in the persistent
+                 selection border. -->
             <Rectangle
                 x:Name="HighlightRect"
                 Fill="Transparent"
                 Stroke="{ThemeResource RegionSelectionStrokeBrush}"
-                StrokeThickness="1"
-                RadiusX="8"
-                RadiusY="8"
+                StrokeThickness="3"
+                RadiusX="4"
+                RadiusY="4"
                 Visibility="Collapsed" />
 
             <!-- Window info label -->
