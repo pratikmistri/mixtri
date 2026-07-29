@@ -11,6 +11,7 @@ using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
+using Musio_App.Controls;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -96,6 +97,7 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         ExportVM = new ExportViewModel();
         InitializeComponent();
+        WirePropertyPanels();
 
         Preview.Duration = GetMappedDuration();
 
@@ -385,6 +387,11 @@ public sealed partial class EditorPage : Page
                 double clickTime = (click.TimestampTicks - mouseData.StartTimestampTicks) / mouseData.TickFrequency
                     - mouseOffset;
                 if (clickTime < 0) continue; // skip pre-roll clicks before video started
+                // ...and clicks after capture stopped. Their zoom-in ramp starts a second
+                // early, so the segment would be drawn on the zoom track while
+                // AutoZoomEngine (which applies the same range rule) refuses to render it,
+                // leaving a visible segment that does nothing.
+                if (project.Duration > TimeSpan.Zero && clickTime > project.Duration.TotalSeconds) continue;
                 ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
                 {
                     Timestamp = TimeSpan.FromSeconds(clickTime),
@@ -914,8 +921,14 @@ public sealed partial class EditorPage : Page
                 try
                 {
                     ctx.Renderer = new PreviewRenderer();
+                    // The compositor is driven with ABSOLUTE source times
+                    // (SourceStart + localOffset), so its timelines must span the end of
+                    // the clip's source extent, not just the clip's length. Passing the
+                    // bare SourceDuration would drop cursor samples and auto-zoom for the
+                    // visible tail of any clip trimmed from the front. Mirrors
+                    // SegmentFrameComposer.ResolveSourceDuration on the export path.
                     await ctx.Renderer.InitializeAsync(
-                        mouseData, config, w, h, seg.SourceDuration,
+                        mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
                         seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
                     ctx.Ready = true;
                 }
@@ -1416,17 +1429,36 @@ public sealed partial class EditorPage : Page
         // Sync user-added zoom keyframes to the compositor
         if (_compositorReady && _previewRenderer is not null)
         {
-            // Only the PRIMARY recording's manual keyframes drive the primary renderer;
-            // appended recordings' keyframes belong to their own segment/source space.
-            var manualKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.IsManual && k.SourceVideoFilePath is null)
-                .ToList();
-            _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
-            _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+            SyncZoomStateToRenderer();
         }
 
         Timeline.Refresh();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    /// <summary>
+    /// Pushes the model's zoom state — manual keyframes plus the suppressed auto-zoom click
+    /// ticks — onto the primary preview renderer.
+    /// </summary>
+    /// <remarks>
+    /// This must run after every renderer rebuild as well as on every model change. A rebuilt
+    /// <see cref="FrameCompositor"/> regenerates auto-zoom from the raw mouse recording, so
+    /// skipping the suppressed ticks brings back auto-zoom segments the user deleted, and
+    /// skipping the manual list (in particular when it is empty) leaves the previous zooms in
+    /// place. Both show up as zoom happening in the preview with no matching timeline segment.
+    /// </remarks>
+    private void SyncZoomStateToRenderer()
+    {
+        if (_previewRenderer is null) return;
+
+        // Only the PRIMARY recording's manual keyframes drive the primary renderer;
+        // appended recordings' keyframes belong to their own segment/source space.
+        var manualKeyframes = ViewModel.Model.ZoomKeyframes
+            .Where(k => k.IsManual && k.SourceVideoFilePath is null)
+            .ToList();
+
+        _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
+        _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
@@ -1568,6 +1600,9 @@ public sealed partial class EditorPage : Page
         _suppressWebcamEvents = false;
         CameraFullscreenPanel.Visibility = Visibility.Visible;
         UpdateCameraFullscreenModeUI(seg.FullscreenEnabled, seg.FullscreenMode);
+
+        // Surface the video panel so the segment's settings are immediately editable.
+        PropertiesPanel.ShowPane(PropertyPaneKind.Video);
     }
 
     private void UpdateCameraFullscreenModeUI(bool fullscreenEnabled, CameraFullscreenMode mode)
@@ -2398,7 +2433,6 @@ public sealed partial class EditorPage : Page
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
         ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
-        RefreshToolbarResponsiveLayout();
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -2698,9 +2732,7 @@ public sealed partial class EditorPage : Page
     private void InitializeCursorControls(Project project, CompositionConfig config)
     {
         bool hasCursor = !string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath);
-        var vis = hasCursor ? Visibility.Visible : Visibility.Collapsed;
-        CursorButton.Visibility = vis;
-        RefreshToolbarResponsiveLayout();
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Cursor, hasCursor);
 
         if (!hasCursor) return;
 
@@ -2831,10 +2863,10 @@ public sealed partial class EditorPage : Page
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
-        // Style menu is available for all capture types. Monitor (full-screen)
+        // Style panel is available for all capture types. Monitor (full-screen)
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
-        StyleButton.Visibility = Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Scene, true);
 
         // Populate preset combo with built-in presets — each item is a small
         // swatch + label so users can identify gradients at a glance.
@@ -2918,6 +2950,29 @@ public sealed partial class EditorPage : Page
     // Sentinel tag used to identify the "+" tile in the wallpaper grid.
     private const string AddWallpaperTileTag = "__add_wallpaper__";
 
+    // Wallpaper tiles are laid out in a fixed number of columns that stretch to fill the
+    // pane, rather than at a fixed pixel size that leaves a ragged gap on the right.
+    private const int WallpaperColumns = 3;
+    private const double WallpaperTileAspect = 2.0 / 3.0; // height / width
+
+    /// <summary>
+    /// Divides the grid's width into <see cref="WallpaperColumns"/> equal columns so the
+    /// tiles always span the full pane, re-running whenever the pane is resized.
+    /// </summary>
+    private void WallpaperGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (WallpaperGrid.ItemsPanelRoot is not ItemsWrapGrid panel) return;
+
+        double available = e.NewSize.Width;
+        if (available <= 0) return;
+
+        double itemWidth = Math.Floor(available / WallpaperColumns);
+        if (itemWidth <= 0) return;
+
+        panel.ItemWidth = itemWidth;
+        panel.ItemHeight = Math.Round(itemWidth * WallpaperTileAspect);
+    }
+
     private static Border BuildAddWallpaperTile()
     {
         var plus = new FontIcon
@@ -2929,8 +2984,6 @@ public sealed partial class EditorPage : Page
         };
         return new Border
         {
-            Width = 72,
-            Height = 48,
             CornerRadius = new CornerRadius(4),
             BorderThickness = new Thickness(1),
             BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
@@ -2952,8 +3005,6 @@ public sealed partial class EditorPage : Page
         };
         return new Border
         {
-            Width = 72,
-            Height = 48,
             CornerRadius = new CornerRadius(4),
             Child = img,
         };
@@ -3520,13 +3571,10 @@ public sealed partial class EditorPage : Page
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom keyframes from the model (primary recording only — appended
-            // recordings' keyframes are mapped in their own segment's source space).
-            var primaryKeyframes = ViewModel.Model.ZoomKeyframes
-                .Where(k => k.SourceVideoFilePath is null)
-                .ToList();
-            if (primaryKeyframes.Count > 0)
-                _previewRenderer.UpdateZoomKeyframes(primaryKeyframes);
+            // Re-sync zoom state from the model. The new compositor has just regenerated
+            // auto-zoom from the raw mouse data, so this has to run unconditionally —
+            // an empty keyframe list and an empty suppression set are both meaningful.
+            SyncZoomStateToRenderer();
 
             _compositorReady = true;
         }
@@ -3566,68 +3614,12 @@ public sealed partial class EditorPage : Page
 
     // ─── Webcam Overlay Drag / Resize ──────────────────────────────────
 
-    private bool _toolbarLabelsCollapsed;
-
-    private void ToolbarGrid_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        UpdateToolbarResponsiveLayout(e.NewSize.Width);
-    }
-
-    /// <summary>
-    /// Re-evaluates the responsive toolbar layout using the current toolbar width.
-    /// Call this after toggling the visibility of any right-group button (Cursor,
-    /// Camera, Text Slide, zoom controls) so the collapse decision stays correct even
-    /// though those changes don't resize the full-width toolbar.
-    /// </summary>
-    private void RefreshToolbarResponsiveLayout()
-    {
-        if (ToolbarGrid is null) return;
-        UpdateToolbarResponsiveLayout(ToolbarGrid.ActualWidth);
-    }
-
-    /// <summary>
-    /// Collapses the Frame style / Cursor / Camera button labels to icon-only when the
-    /// toolbar's two edge groups would otherwise overlap, and restores them when there
-    /// is room again. Toggling the labels never changes the full-width toolbar size, so
-    /// this cannot feed back into <see cref="ToolbarGrid_SizeChanged"/>.
-    /// </summary>
-    private void UpdateToolbarResponsiveLayout(double availableWidth)
-    {
-        if (LeftToolbarGroup is null || RightToolbarGroup is null) return;
-        if (availableWidth <= 0) return;
-
-        // Measure both Auto groups with labels expanded to learn how much room they need.
-        SetToolbarLabelsCollapsed(false);
-        var inf = new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity);
-        LeftToolbarGroup.Measure(inf);
-        RightToolbarGroup.Measure(inf);
-
-        const double toolbarPadding = 16; // Grid Padding 8 on each side
-        const double minGap = 16;         // keep a gap so the groups never touch
-        double needed = LeftToolbarGroup.DesiredSize.Width + RightToolbarGroup.DesiredSize.Width
-                        + toolbarPadding + minGap;
-
-        if (needed > availableWidth)
-            SetToolbarLabelsCollapsed(true);
-    }
-
-    private void SetToolbarLabelsCollapsed(bool collapsed)
-    {
-        if (_toolbarLabelsCollapsed == collapsed) return;
-        _toolbarLabelsCollapsed = collapsed;
-        var vis = collapsed ? Visibility.Collapsed : Visibility.Visible;
-        if (FrameStyleLabel is not null) FrameStyleLabel.Visibility = vis;
-        if (CursorLabel is not null) CursorLabel.Visibility = vis;
-        if (CameraLabel is not null) CameraLabel.Visibility = vis;
-    }
-
     private void InitializeWebcamOverlay(CompositionConfig config)
     {        _hasWebcamOverlay = _webcamComposition is not null && config.WebcamStyle is not null;
         if (!_hasWebcamOverlay)
         {
             WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-            RefreshToolbarResponsiveLayout();
+            PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, false);
             return;
         }
 
@@ -3658,10 +3650,9 @@ public sealed partial class EditorPage : Page
         }
 
         WebcamOverlayRect.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
-        WebcamShapeButton.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, true);
         SyncWebcamOverlayUI(style);
         UpdateWebcamOverlayPosition();
-        RefreshToolbarResponsiveLayout();
     }
 
     private void UpdateWebcamOverlayPosition()
@@ -3835,6 +3826,10 @@ public sealed partial class EditorPage : Page
 
     private bool _suppressAspectRatioEvents;
 
+    // Set once the user picks a fit mode explicitly, so the Contain default applied when a
+    // real aspect ratio is first chosen never overwrites a deliberate choice.
+    private bool _fitModeChosenByUser;
+
     /// <summary>
     /// Initializes the aspect ratio flyout from the current project + composition state.
     /// Safe to call multiple times; uses a suppression flag so event handlers don't
@@ -3878,9 +3873,33 @@ public sealed partial class EditorPage : Page
     }
 
     private void SelectFitModeRadio(FitMode fit)
+        => SelectSegmentedByTag(FitModeSegmented, fit.ToString());
+
+    /// <summary>
+    /// Selects the segment carrying <paramref name="tag"/>. Matching on the tag rather
+    /// than a hard-coded index means the segments can be reordered in XAML without
+    /// silently remapping them to the wrong values.
+    /// </summary>
+    private static void SelectSegmentedByTag(CommunityToolkit.WinUI.Controls.Segmented segmented, string tag)
     {
-        FitModeSegmented.SelectedIndex = fit == FitMode.Contain ? 1 : 0;
+        for (int i = 0; i < segmented.Items.Count; i++)
+        {
+            if (segmented.Items[i] is CommunityToolkit.WinUI.Controls.SegmentedItem item
+                && item.Tag is string t && t == tag)
+            {
+                segmented.SelectedIndex = i;
+                return;
+            }
+        }
     }
+
+    /// <summary>The fit mode currently shown in the segmented control.</summary>
+    private FitMode CurrentFitModeSelection()
+        => FitModeSegmented.SelectedItem is CommunityToolkit.WinUI.Controls.SegmentedItem item
+           && item.Tag is string tag
+           && Enum.TryParse<FitMode>(tag, out var fit)
+            ? fit
+            : FitMode.Contain;
 
     private void SelectZoomScopeRadio(ZoomScope scope)
     {
@@ -3909,7 +3928,7 @@ public sealed partial class EditorPage : Page
     {
         bool ratioActive = ratio != AspectRatio.Auto;
         FitModePanel.Visibility = ratioActive ? Visibility.Visible : Visibility.Collapsed;
-        bool coverActive = ratioActive && FitModeSegmented.SelectedIndex == 0;
+        bool coverActive = ratioActive && CurrentFitModeSelection() == FitMode.Cover;
         CropAnchorPanel.Visibility = coverActive ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -3927,6 +3946,10 @@ public sealed partial class EditorPage : Page
         if (FitModeSegmented.SelectedItem is not CommunityToolkit.WinUI.Controls.SegmentedItem item) return;
         if (item.Tag is not string tag) return;
         if (!Enum.TryParse<FitMode>(tag, out var fit)) return;
+
+        // Programmatic syncs are suppressed above, so reaching here means the user picked
+        // the fit themselves and it must survive an Auto round-trip (see ApplyAspectRatio).
+        _fitModeChosenByUser = true;
         ApplyFitMode(fit);
     }
 
@@ -3956,8 +3979,29 @@ public sealed partial class EditorPage : Page
         var config = ProjectService.Instance.CurrentComposition;
         if (project is null || config is null) return;
 
+        // Fit mode is ignored while the ratio is Auto, so a value carried over from Auto was
+        // never a deliberate choice. Default it to Contain the first time a real ratio makes
+        // the control meaningful, so switching ratio keeps the whole frame visible instead
+        // of silently cropping it; Cover stays available as the explicit alternative.
+        // Once the user has picked a fit themselves it is never overridden, so cycling
+        // through Auto and back does not discard it.
+        bool fitBecomesRelevant = !_fitModeChosenByUser
+            && project.AspectRatio == AspectRatio.Auto
+            && ratio != AspectRatio.Auto;
+
         project.AspectRatio = ratio;
         config = config with { AspectRatio = ratio };
+
+        if (fitBecomesRelevant && project.FitMode != FitMode.Contain)
+        {
+            project.FitMode = FitMode.Contain;
+            config = config with { FitMode = FitMode.Contain };
+
+            _suppressAspectRatioEvents = true;
+            try { SelectFitModeRadio(FitMode.Contain); }
+            finally { _suppressAspectRatioEvents = false; }
+        }
+
         ProjectService.Instance.CurrentComposition = config;
 
         UpdateFitAndAnchorVisibility(ratio);
@@ -4111,14 +4155,13 @@ public sealed partial class EditorPage : Page
 
     private void ShowTextSlidePanel(TextSlideSegment slide)
     {
-        if (TextSlideButton is null) return;
+        if (PropertiesPanel is null) return;
 
         _suppressSlideEvents = true;
 
-        TextSlideButton.Visibility = Visibility.Visible;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
         if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
         if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
-        RefreshToolbarResponsiveLayout();
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -4173,22 +4216,15 @@ public sealed partial class EditorPage : Page
 
         _suppressSlideEvents = false;
 
-        // Open the flyout so properties are immediately editable on selection.
-        // Deferred so it doesn't conflict with a closing menu/flyout.
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (TextSlideButton.Visibility == Visibility.Visible)
-                TextSlideFlyout?.ShowAt(TextSlideButton);
-        });
+        // Reveal the text slide panel so properties are immediately editable on selection.
+        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
     }
 
     private void HideTextSlidePanel()
     {
-        if (TextSlideButton is not null)
-            TextSlideButton.Visibility = Visibility.Collapsed;
+        PropertiesPanel?.SetPaneAvailable(PropertyPaneKind.TextSlide, false);
         if (ZoomHintText is not null)
             ZoomHintText.Visibility = Visibility.Visible;
-        RefreshToolbarResponsiveLayout();
     }
 
     private static void UpdateSlideColorSwatch(

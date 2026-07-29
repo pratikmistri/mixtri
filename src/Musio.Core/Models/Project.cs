@@ -96,7 +96,7 @@ public class Project
     /// How the captured source frame fits into the canvas when <see cref="AspectRatio"/>
     /// differs from the source aspect ratio. Ignored when <see cref="AspectRatio"/> is Auto.
     /// </summary>
-    public FitMode FitMode { get; set; } = FitMode.Cover;
+    public FitMode FitMode { get; set; } = FitMode.Contain;
 
     /// <summary>
     /// Horizontal crop anchor in 0..1 when <see cref="FitMode"/> is Cover. 0 = left edge,

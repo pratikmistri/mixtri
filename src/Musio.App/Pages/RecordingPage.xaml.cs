@@ -77,6 +77,22 @@ public sealed partial class RecordingPage : Page
             });
         };
         ViewModel.PropertyChanged += _viewModelHandler;
+        ViewModel.ErrorRaised += OnViewModelErrorRaised;
+    }
+
+    private void OnViewModelErrorRaised(object? sender, string message)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            // A failed start leaves the main window minimized: StartRecordButton_Click
+            // minimizes it up front, and the only thing that restores it is the
+            // IsRecording PropertyChanged path — which never runs when the start bails
+            // out early. Leave an in-flight recording alone; its own stop path restores.
+            if (!ViewModel.IsRecording)
+                RestoreMainWindowIfMinimized();
+
+            ShowError(message);
+        });
     }
 
     protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
@@ -86,6 +102,7 @@ public sealed partial class RecordingPage : Page
             ViewModel.PropertyChanged -= _viewModelHandler;
             _viewModelHandler = null;
         }
+        ViewModel.ErrorRaised -= OnViewModelErrorRaised;
 
         // Detach the InfoBar timer so it can't fire (and keep this page alive)
         // after navigation. The timer is created on this page's DispatcherQueue
@@ -176,18 +193,25 @@ public sealed partial class RecordingPage : Page
         _regionBorder?.Dispose();
         _regionBorder = null;
 
-        // Restore main window only if recording was what minimized it
-        if (_recordingMinimizedWindow)
-        {
-            _recordingMinimizedWindow = false;
-            var mainWindow = App.Current.MainAppWindow;
-            if (mainWindow is not null)
-            {
-                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-                ShowWindow(hwnd, SW_RESTORE);
-                mainWindow.Activate();
-            }
-        }
+        RestoreMainWindowIfMinimized();
+    }
+
+    /// <summary>
+    /// Restores the main window if recording is what minimized it. Separate from
+    /// <see cref="CloseRecordingOverlay"/> so a start that fails before recording begins can
+    /// bring the window back without tearing down overlay state that was never created.
+    /// </summary>
+    private void RestoreMainWindowIfMinimized()
+    {
+        if (!_recordingMinimizedWindow) return;
+
+        _recordingMinimizedWindow = false;
+        var mainWindow = App.Current.MainAppWindow;
+        if (mainWindow is null) return;
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
+        ShowWindow(hwnd, SW_RESTORE);
+        mainWindow.Activate();
     }
 
     private void OnOverlayStopRequested(object? sender, EventArgs e)
@@ -374,6 +398,25 @@ public sealed partial class RecordingPage : Page
         _infoBarTimer.Tick -= OnInfoBarTimerTick;
         _infoBarTimer.Tick += OnInfoBarTimerTick;
         _infoBarTimer.Start();
+    }
+
+    /// <summary>
+    /// Surfaces a failure on the InfoBar. Unlike <see cref="ShowTransientInfo"/> this does
+    /// not auto-dismiss — an error the user never saw is the same as no error at all — so
+    /// it stays until they close it or another message replaces it.
+    /// </summary>
+    private void ShowError(string message)
+    {
+        if (RecordingInfoBar is null) return;
+
+        // Cancel any pending auto-dismiss so a transient info message already on screen
+        // cannot close the error out from under the user.
+        _infoBarTimer?.Stop();
+
+        RecordingInfoBar.Severity = InfoBarSeverity.Error;
+        RecordingInfoBar.Title = string.Empty;
+        RecordingInfoBar.Message = message;
+        RecordingInfoBar.IsOpen = true;
     }
 
     private void OnInfoBarTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)

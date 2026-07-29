@@ -23,39 +23,59 @@
             Title="Musio"
             BackRequested="TitleBar_BackRequested"
             IsBackButtonVisible="{x:Bind NavFrame.CanGoBack, Mode=OneWay}"
-            IsPaneToggleButtonVisible="True"
-            PaneToggleRequested="TitleBar_PaneToggleRequested">
+            IsPaneToggleButtonVisible="False">
             <TitleBar.IconSource>
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>
         </TitleBar>
 
+        <!-- Store-style rail: a fixed-width pane that is always open but never expandable,
+             so there is no hamburger and no flyout.
+
+             Items use the native Icon and Content properties; the stacked icon-over-label
+             layout, the dimming of unselected items and the selected item's label drop all
+             live in the NavigationViewItem template in Themes/NavigationRailStyles.xaml. -->
         <NavigationView
-            x:Name="NavView"
             Grid.Row="1"
-            IsPaneOpen="False"
+            PaneDisplayMode="Left"
+            OpenPaneLength="72"
+            CompactPaneLength="0"
+            IsPaneOpen="True"
             IsBackButtonVisible="Collapsed"
             IsPaneToggleButtonVisible="False"
+            IsSettingsVisible="False"
             SelectionChanged="NavView_SelectionChanged">
             <NavigationView.MenuItems>
                 <NavigationViewItem
+                    Tag="record"
                     Content="Record"
                     IsSelected="True"
-                    Tag="record"
                     ToolTipService.ToolTip="Configure and start screen recording">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE7C8;" />
+                        <FontIcon FontSize="18" Glyph="&#xE7C8;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
                 <NavigationViewItem
-                    Content="Editor"
                     Tag="editor"
+                    Content="Editor"
                     ToolTipService.ToolTip="Edit your recorded clips">
                     <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE78A;" />
+                        <FontIcon FontSize="18" Glyph="&#xE78A;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
+            <!-- Settings uses a footer item rather than NavigationView's built-in one so it
+                 gets the same stacked layout as the rest of the rail. -->
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem
+                    Tag="settings"
+                    Content="Settings"
+                    ToolTipService.ToolTip="App settings">
+                    <NavigationViewItem.Icon>
+                        <FontIcon FontSize="18" Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
             <Frame x:Name="NavFrame" />
         </NavigationView>
     </Grid>

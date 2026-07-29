@@ -45,6 +45,7 @@ public class AutoZoomEngine
     private float _lastCropOffsetX;
     private float _lastCropOffsetY;
     private double _lastTimeOffsetSeconds;
+    private double _lastDurationSeconds;
     private HashSet<long> _suppressedClickTicks = [];
 
     private struct ZoomSegment
@@ -69,6 +70,11 @@ public class AutoZoomEngine
     /// so <paramref name="coordScaleX"/> and <paramref name="coordScaleY"/> should
     /// normally be 1.0f — no DPI scaling is required.
     /// </summary>
+    /// <param name="durationSeconds">
+    /// Length of the video the clicks are being mapped onto. Clicks landing past it are
+    /// ignored; pass 0 when the length is unknown to skip only the upper bound. Clicks
+    /// before the video starts are always ignored. See <see cref="RebuildAutoSegments"/>.
+    /// </param>
     public void BuildZoomTimeline(
         MouseRecordingData mouseData,
         int sourceWidth,
@@ -78,7 +84,8 @@ public class AutoZoomEngine
         float coordScaleY = 1.0f,
         double timeOffsetSeconds = 0,
         float cropOffsetX = 0,
-        float cropOffsetY = 0)
+        float cropOffsetY = 0,
+        double durationSeconds = 0)
     {
         ArgumentNullException.ThrowIfNull(mouseData);
         _sourceWidth = sourceWidth;
@@ -92,6 +99,7 @@ public class AutoZoomEngine
         _lastCropOffsetX = cropOffsetX;
         _lastCropOffsetY = cropOffsetY;
         _lastTimeOffsetSeconds = timeOffsetSeconds;
+        _lastDurationSeconds = durationSeconds;
 
         RebuildAutoSegments();
     }
@@ -131,6 +139,15 @@ public class AutoZoomEngine
         {
             double clickTime = (click.TimestampTicks - startTick) / _lastTickFrequency - _lastTimeOffsetSeconds;
 
+            // Ignore clicks that land outside the video, mirroring the editor's own
+            // keyframe generation. A click recorded just before capture started still
+            // produces a segment whose hold/ease-out reaches into the visible range, so
+            // the preview zooms with nothing on the zoom track for the user to select —
+            // and because no segment is shown, its tick can never be suppressed by
+            // deleting it. Keeping both sides on the same rule avoids that shadow zoom.
+            if (clickTime < 0) continue;
+            if (_lastDurationSeconds > 0 && clickTime > _lastDurationSeconds) continue;
+
             rawSegments.Add(new ZoomSegment
             {
                 ZoomInStart = clickTime - _config.PreClickDuration,
@@ -143,8 +160,7 @@ public class AutoZoomEngine
             });
         }
 
-        _autoSegments = MergeSegments(rawSegments);
-    }
+        _autoSegments = MergeSegments(rawSegments);    }
 
     /// <summary>
     /// Merge overlapping or closely-spaced zoom segments to prevent flickering.

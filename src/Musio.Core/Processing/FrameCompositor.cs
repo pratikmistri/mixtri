@@ -18,7 +18,7 @@ public record CompositionConfig
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
     public int OutputFps { get; init; } = 30;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
-    public FitMode FitMode { get; init; } = FitMode.Cover;
+    public FitMode FitMode { get; init; } = FitMode.Contain;
     public double CropAnchorX { get; init; } = 0.5;
     public double CropAnchorY { get; init; } = 0.5;
     public ZoomScope ZoomScope { get; init; } = ZoomScope.Frame;
@@ -232,11 +232,14 @@ public class FrameCompositor : IDisposable
         // Precompute per-frame "last move" timestamps for cursor auto-hide
         PrecomputeLastMoveTimes();
 
-        // Build auto-zoom timeline with scaled coordinates and time offset + capture latency
+        // Build auto-zoom timeline with scaled coordinates and time offset + capture latency.
+        // The duration is passed so clicks outside the video (e.g. a click just before
+        // capture started) don't generate zoom the editor has no segment for.
         _zoomEngine.BuildZoomTimeline(
             mouseData, sourceWidth, sourceHeight, mouseData.TickFrequency,
             coordScaleX, coordScaleY, mouseToVideoOffsetSeconds,
-            cropOffsetX, cropOffsetY);
+            cropOffsetX, cropOffsetY,
+            duration?.TotalSeconds ?? 0);
 
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;

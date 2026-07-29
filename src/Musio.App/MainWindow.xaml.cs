@@ -107,11 +107,6 @@ public sealed partial class MainWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
 
-    private void TitleBar_PaneToggleRequested(TitleBar sender, object args)
-    {
-        NavView.IsPaneOpen = !NavView.IsPaneOpen;
-    }
-
     private void TitleBar_BackRequested(TitleBar sender, object args)
     {
         NavFrame.GoBack();
@@ -119,11 +114,9 @@ public sealed partial class MainWindow : Window
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        if (args.IsSettingsSelected)
-        {
-            NavFrame.Navigate(typeof(SettingsPage));
-        }
-        else if (args.SelectedItem is NavigationViewItem item)
+        // The built-in settings item is disabled in favour of a footer item that matches
+        // the rail's icon-over-label layout, so everything arrives here by Tag.
+        if (args.SelectedItem is NavigationViewItem item)
         {
             switch (item.Tag)
             {
@@ -132,6 +125,9 @@ public sealed partial class MainWindow : Window
                     break;
                 case "editor":
                     NavFrame.Navigate(typeof(EditorPage));
+                    break;
+                case "settings":
+                    NavFrame.Navigate(typeof(SettingsPage));
                     break;
                 default:
                     System.Diagnostics.Debug.WriteLine($"[MainWindow] Unknown navigation item tag: {item.Tag}");

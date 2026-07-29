@@ -429,4 +429,59 @@ public sealed class AutoZoomEngineTests
         Assert.AreEqual(1.0f, stateAfter.ZoomLevel, 0.01f,
             "Zoom should return to 1.0 after all segments end");
     }
+
+    [TestMethod]
+    public void GetZoomState_ClickBeforeVideoStart_DoesNotZoom()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        // Click lands 0.2s into the mouse recording, but capture only started 0.5s in, so
+        // it maps to -0.3s — before the first video frame.
+        var recording = BuildRecordingWithClicks(5.0, [(0.2, 960, 540)]);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency,
+            timeOffsetSeconds: 0.5, durationSeconds: 5.0);
+
+        // The pre-roll click's hold and ease-out still overlap the start of the video, so
+        // without the range check the preview zooms while the editor shows no segment on
+        // the zoom track — leaving the user no way to select or delete it.
+        Assert.AreEqual(1.0f, engine.GetZoomState(0.0).ZoomLevel, 0.001f,
+            "A click before the video started must not zoom the first frame");
+        Assert.AreEqual(1.0f, engine.GetZoomState(0.5).ZoomLevel, 0.001f,
+            "A click before the video started must not zoom during its hold window");
+    }
+
+    [TestMethod]
+    public void GetZoomState_ClickAfterVideoEnd_DoesNotZoom()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        // Click 0.4s past the end of a 5s video; its anticipatory zoom-in would otherwise
+        // begin at 4.4s and zoom the tail of the video.
+        var recording = BuildRecordingWithClicks(5.0, [(5.4, 960, 540)]);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency, durationSeconds: 5.0);
+
+        Assert.AreEqual(1.0f, engine.GetZoomState(4.9).ZoomLevel, 0.001f,
+            "A click past the end of the video must not zoom its final frames");
+    }
+
+    [TestMethod]
+    public void GetZoomState_ClickInsideVideo_StillZoomsWhenDurationKnown()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        var recording = BuildRecordingWithClicks(5.0, [(2.5, 960, 540)]);
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency, durationSeconds: 5.0);
+
+        Assert.IsTrue(engine.GetZoomState(2.5).ZoomLevel > 1.5f,
+            "Passing a duration must not stop in-range clicks from zooming");
+    }
+
+    [TestMethod]
+    public void GetZoomState_NoDurationSupplied_KeepsEveryInRangeClick()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        var recording = BuildRecordingWithClicks(5.0, [(4.9, 960, 540)]);
+        // durationSeconds defaults to 0, meaning "unknown" — only the negative check applies.
+        engine.BuildZoomTimeline(recording, 1920, 1080, TickFrequency);
+
+        Assert.IsTrue(engine.GetZoomState(4.9).ZoomLevel > 1.5f,
+            "With no duration supplied, clicks must not be filtered by an upper bound");
+    }
 }
