@@ -95,7 +95,9 @@ public sealed partial class RecordToolbarControl : UserControl
     {
         ToolbarBorder.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
         ToolbarBorder.BorderThickness = new Thickness(0);
-        ToolbarBorder.Padding = new Thickness(10, 6, 10, 6);
+        // The Mini window's drag grip supplies the gap on the left edge, so the
+        // toolbar adds nothing of its own there.
+        ToolbarBorder.Padding = new Thickness(0, 6, 10, 6);
     }
 
     /// <summary>

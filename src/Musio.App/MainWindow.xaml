@@ -40,7 +40,7 @@
                     BorderThickness="0"
                     ToolTipService.ToolTip="Collapse to Mini mode"
                     AutomationProperties.Name="Collapse to Mini mode">
-                    <FontIcon Glyph="&#xE73F;" FontSize="14" />
+                    <FontIcon Glyph="&#xEE47;" FontSize="14" />
                 </Button>
             </TitleBar.RightHeader>
         </TitleBar>

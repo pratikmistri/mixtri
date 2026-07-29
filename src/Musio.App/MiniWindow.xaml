@@ -10,21 +10,50 @@
     mc:Ignorable="d">
 
     <Grid x:Name="RootGrid" CornerRadius="14" Padding="4">
+        <!-- WinUI 3 has no Window.Resources, so window-scoped resources live on
+             the root Grid. -->
+        <Grid.Resources>
+            <Style x:Key="GripDotStyle" TargetType="Ellipse">
+                <Setter Property="Width" Value="2" />
+                <Setter Property="Height" Value="2" />
+                <Setter Property="Margin" Value="1" />
+                <Setter Property="Fill" Value="{ThemeResource TextFillColorTertiaryBrush}" />
+            </Style>
+        </Grid.Resources>
+
         <StackPanel Spacing="0" HorizontalAlignment="Center">
             <StackPanel Orientation="Horizontal" Spacing="0" VerticalAlignment="Center">
-                <!-- Thin drag handle: the window is frameless, so this is the only
-                     region handed to SetTitleBar for moving it around. -->
+                <!-- Drag handle: the window is frameless, so this is the only region
+                     handed to SetTitleBar for moving it around. Drawn as a 2x3 dot
+                     grid rather than a glyph so it reads as a tall vertical grabber
+                     and takes only the width the dots actually need. -->
                 <Border
                     x:Name="DragGrip"
-                    Width="18"
+                    Width="14"
                     Height="36"
-                    Margin="4,0,0,0"
+                    Margin="0,0,8,0"
                     VerticalAlignment="Center"
-                    Background="Transparent">
-                    <FontIcon
-                        Glyph="&#xE76F;"
-                        FontSize="12"
-                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    Background="Transparent"
+                    ToolTipService.ToolTip="Drag to move"
+                    AutomationProperties.Name="Drag to move">
+                    <Grid HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Ellipse Grid.Row="0" Grid.Column="0" Style="{StaticResource GripDotStyle}" />
+                        <Ellipse Grid.Row="0" Grid.Column="1" Style="{StaticResource GripDotStyle}" />
+                        <Ellipse Grid.Row="1" Grid.Column="0" Style="{StaticResource GripDotStyle}" />
+                        <Ellipse Grid.Row="1" Grid.Column="1" Style="{StaticResource GripDotStyle}" />
+                        <Ellipse Grid.Row="2" Grid.Column="0" Style="{StaticResource GripDotStyle}" />
+                        <Ellipse Grid.Row="2" Grid.Column="1" Style="{StaticResource GripDotStyle}" />
+                    </Grid>
                 </Border>
 
                 <controls:RecordToolbarControl

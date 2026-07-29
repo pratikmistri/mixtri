@@ -13,7 +13,7 @@ namespace Musio_App;
 
 /// <summary>
 /// The compact "Mini mode" window: a frameless, always-on-top pill docked at the
-/// top of the screen that carries the Record page's toolbar and a Record button.
+/// bottom of the screen that carries the Record page's toolbar and a Record button.
 /// </summary>
 /// <remarks>
 /// This is a genuinely separate window from <see cref="MainWindow"/> rather than a
@@ -97,11 +97,21 @@ public sealed partial class MiniWindow : Window
         // Alt+F4 / programmatic close should park the pill in the tray, not tear
         // down the process — the tray icon is how the user gets it back.
         AppWindow.Closing += OnClosing;
+
+        // Any resize (ours or the framework's) re-docks, so the pill can never be
+        // left floating away from the bottom edge on a stale height.
+        AppWindow.Changed += OnAppWindowChanged;
+    }
+
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        // Move() doesn't set DidSizeChange, so this cannot recurse.
+        if (args.DidSizeChange) DockBottomCenter();
     }
 
     /// <summary>
     /// Measures the content and resizes the window around it, then re-docks to the
-    /// top-centre of the work area so the pill stays centred as it grows.
+    /// bottom-centre of the work area so the pill stays centred as it grows.
     /// </summary>
     public void ResizeToContent()
     {
@@ -119,7 +129,7 @@ public sealed partial class MiniWindow : Window
             int height = (int)Math.Ceiling(desired.Height * scale);
 
             AppWindow.Resize(new SizeInt32(width, height));
-            DockTopCenter(width, height);
+            DockBottomCenter();
         }
         catch (Exception ex)
         {
@@ -127,14 +137,30 @@ public sealed partial class MiniWindow : Window
         }
     }
 
-    private void DockTopCenter(int widthPx, int heightPx)
+    /// <summary>
+    /// Docks the pill to the bottom centre of the work area using the window's
+    /// <em>actual</em> current size.
+    /// </summary>
+    /// <remarks>
+    /// Reads <see cref="AppWindow"/>.Size rather than trusting a caller-supplied
+    /// height: several paths resize the pill (initial load, status row appearing,
+    /// Record/Stop swap), and docking against a stale height left it floating well
+    /// above the taskbar. Also wired to <c>AppWindow.Changed</c> so any resize we
+    /// didn't initiate still re-docks.
+    /// </remarks>
+    private void DockBottomCenter()
     {
         try
         {
+            var size = AppWindow.Size;
+            if (size.Width <= 0 || size.Height <= 0) return;
+
             var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
             var workArea = displayArea.WorkArea;
-            int x = workArea.X + ((workArea.Width - widthPx) / 2);
-            int y = workArea.Y + 12;
+
+            int x = workArea.X + ((workArea.Width - size.Width) / 2);
+            // WorkArea already excludes the taskbar, so this sits just above it.
+            int y = workArea.Y + workArea.Height - size.Height - DockMarginPx;
             AppWindow.Move(new PointInt32(x, y));
         }
         catch
@@ -249,6 +275,9 @@ public sealed partial class MiniWindow : Window
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
+
+    /// <summary>Gap between the pill and the edge of the work area, in physical pixels.</summary>
+    private const int DockMarginPx = 12;
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
     private const int DWMWA_BORDER_COLOR = 34;
     private const int DWMWA_CAPTION_COLOR = 35;

@@ -179,7 +179,7 @@
                 Visibility="{x:Bind BoolToVisibility(ShowExpandButton), Mode=OneWay}"
                 ToolTipService.ToolTip="Open the full Musio app"
                 AutomationProperties.Name="Expand to full app">
-                <FontIcon Glyph="&#xE8A7;" FontSize="14" />
+                <FontIcon Glyph="&#xEE49;" FontSize="14" />
             </Button>
         </StackPanel>
     </Border>
