@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Musio_App.Services;
@@ -78,6 +79,21 @@ public sealed class SelectionHighlight : IDisposable
     // stay rooted for as long as the class is registered — otherwise it can be
     // collected and the next message dispatch jumps into freed memory.
     private static WndProcDelegate? _wndProc;
+
+    /// <summary>
+    /// Background brush per layer window, consulted by <see cref="HighlightWndProc"/>.
+    /// </summary>
+    /// <remarks>
+    /// The obvious route — <c>SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush)</c> —
+    /// does not work here: that value lives on the *class*, not the window, so the
+    /// border and the smoke (same class) would fight over one brush and the last
+    /// writer would win for both. Painting the background ourselves from a per-HWND
+    /// brush is what actually gives the two layers different colours.
+    /// </remarks>
+    private static readonly Dictionary<IntPtr, IntPtr> _layerBrushes = new();
+
+    /// <summary>Window we must stay below, re-asserted on every render.</summary>
+    private IntPtr _keepAboveHwnd;
 
     /// <summary>The window currently being tracked, or <see cref="IntPtr.Zero"/> for a fixed region.</summary>
     public IntPtr TrackedWindow { get; private set; }
@@ -174,6 +190,9 @@ public sealed class SelectionHighlight : IDisposable
         UpdateBorder(x, y, width, height);
 
         IsShown = true;
+
+        // Both layers were just re-inserted at the top of the topmost band.
+        ApplyKeepAbove();
     }
 
     /// <summary>
@@ -226,8 +245,11 @@ public sealed class SelectionHighlight : IDisposable
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
 
-        // Region coordinates are window-relative. The outer radius is bumped by the
-        // thickness so the ring's inner and outer curves stay concentric.
+        // The +1s are load-bearing: CreateRoundRectRgn produces a region one pixel
+        // smaller than CreateRectRgn given the same bounds (verified — for
+        // (0,0,10,10) the rect region covers 0..9 but the round-rect covers 0..8).
+        // Without them the ring falls a pixel short on its right and bottom edges,
+        // leaving those two sides visibly misaligned with the selection.
         var ring = CreateRoundRectRgn(0, 0, outerW + 1, outerH + 1,
             (_radius + _thickness) * 2, (_radius + _thickness) * 2);
         var inner = CreateRoundRectRgn(
@@ -316,6 +338,8 @@ public sealed class SelectionHighlight : IDisposable
         int holeH = height + (2 * _thickness);
 
         var full = CreateRectRgn(0, 0, vw, vh);
+        // +1 for the same round-rect quirk as the ring, so the hole lines up with
+        // the ring's outer edge exactly and leaves no undimmed seam.
         var hole = CreateRoundRectRgn(holeX, holeY, holeX + holeW + 1, holeY + holeH + 1,
             (_radius + _thickness) * 2, (_radius + _thickness) * 2);
 
@@ -337,9 +361,21 @@ public sealed class SelectionHighlight : IDisposable
     /// </remarks>
     public void KeepAbove(IntPtr hwnd)
     {
-        if (_disposed || hwnd == IntPtr.Zero || !IsShown) return;
+        if (_disposed) return;
 
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+        // Remembered, not just applied once: every render re-inserts both layers at
+        // the top of the topmost band, so a tracked window moving would otherwise
+        // lift the smoke over the pill and dim it.
+        _keepAboveHwnd = hwnd;
+        ApplyKeepAbove();
+    }
+
+    private void ApplyKeepAbove()
+    {
+        if (_keepAboveHwnd == IntPtr.Zero || !IsShown) return;
+        if (!IsWindow(_keepAboveHwnd)) { _keepAboveHwnd = IntPtr.Zero; return; }
+
+        SetWindowPos(_keepAboveHwnd, HWND_TOPMOST, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
@@ -356,6 +392,7 @@ public sealed class SelectionHighlight : IDisposable
         }
 
         TrackedWindow = IntPtr.Zero;
+        _keepAboveHwnd = IntPtr.Zero;
         IsShown = false;
     }
 
@@ -374,28 +411,29 @@ public sealed class SelectionHighlight : IDisposable
 
         if (_borderHwnd != IntPtr.Zero)
         {
-            SetClassLongPtr(_borderHwnd, GCLP_HBRBACKGROUND, _borderBrush);
+            _layerBrushes[_borderHwnd] = _borderBrush;
             InvalidateRect(_borderHwnd, IntPtr.Zero, true);
         }
     }
 
     private static IntPtr CreateLayerWindow(int x, int y, int w, int h, IntPtr brush, byte alpha)
     {
+        // Created hidden so the brush is registered before the first paint; the
+        // class has no background brush of its own.
         var hwnd = CreateWindowEx(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE,
             ClassName, "",
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             x, y, w, h,
             IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
 
         if (hwnd == IntPtr.Zero) return IntPtr.Zero;
 
-        // The class has no background brush (it would be shared across colours and
-        // across the border/smoke layers), so give each window its own.
-        SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, brush);
+        _layerBrushes[hwnd] = brush;
 
         SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         return hwnd;
     }
@@ -404,16 +442,36 @@ public sealed class SelectionHighlight : IDisposable
     {
         if (hwnd != IntPtr.Zero)
         {
+            _layerBrushes.Remove(hwnd);
             DestroyWindow(hwnd);
             hwnd = IntPtr.Zero;
         }
+    }
+
+    /// <summary>
+    /// Fills each layer with its own brush. Everything else falls through to
+    /// <c>DefWindowProc</c>.
+    /// </summary>
+    private static IntPtr HighlightWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (msg == WM_ERASEBKGND
+            && _layerBrushes.TryGetValue(hwnd, out var brush)
+            && brush != IntPtr.Zero
+            && GetClientRect(hwnd, out var rect))
+        {
+            // wParam is the device context for the erase.
+            FillRect(wParam, ref rect, brush);
+            return new IntPtr(1);
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     private static void EnsureClassRegistered()
     {
         if (_classRegistered) return;
 
-        _wndProc = DefWindowProcW;
+        _wndProc = HighlightWndProc;
 
         var wc = new WNDCLASSEX
         {
@@ -421,8 +479,8 @@ public sealed class SelectionHighlight : IDisposable
             style = 0,
             lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_wndProc),
             hInstance = GetModuleHandle(null),
-            // Deliberately null: the brush is per-window (see CreateLayerWindow),
-            // because one class serves the border and the smoke.
+            // Deliberately null — see _layerBrushes. A class brush is shared by every
+            // window of the class, which is exactly what we must avoid.
             hbrBackground = IntPtr.Zero,
             lpszClassName = ClassName,
         };
@@ -433,7 +491,6 @@ public sealed class SelectionHighlight : IDisposable
 
     // ── Win32 constants ─────────────────────────────────────────────
     private const int WS_POPUP = unchecked((int)0x80000000);
-    private const int WS_VISIBLE = 0x10000000;
     private const int WS_EX_TOPMOST = 0x00000008;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_TRANSPARENT = 0x00000020;
@@ -441,7 +498,8 @@ public sealed class SelectionHighlight : IDisposable
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const byte LWA_ALPHA = 0x02;
     private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-    private const int GCLP_HBRBACKGROUND = -10;
+    private const uint WM_ERASEBKGND = 0x0014;
+    private const int SW_SHOWNOACTIVATE = 4;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const int RGN_DIFF = 4;
     private const int BLACK_BRUSH = 4;
@@ -485,8 +543,14 @@ public sealed class SelectionHighlight : IDisposable
     [DllImport("user32.dll")]
     private static extern bool InvalidateRect(IntPtr hwnd, IntPtr lpRect, bool bErase);
 
-    [DllImport("user32.dll", EntryPoint = "SetClassLongPtrW")]
-    private static extern IntPtr SetClassLongPtr(IntPtr hwnd, int nIndex, IntPtr dwNewLong);
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hwnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern int FillRect(IntPtr hdc, ref RECT lprc, IntPtr hbr);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern ushort RegisterClassEx(ref WNDCLASSEX lpWndClass);

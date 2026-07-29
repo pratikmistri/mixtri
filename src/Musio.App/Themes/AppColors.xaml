@@ -109,7 +109,10 @@
             <SolidColorBrush x:Key="PreviewSurfaceClearBrush"  Color="{StaticResource SystemColorWindowColor}" />
 
             <!-- ── Region selector ── -->
-            <SolidColorBrush x:Key="RegionMaskBrush"             Color="{StaticResource SystemColorWindowColor}" />
+            <!-- Deliberately alpha-bearing rather than a system colour: the pickers
+                 dim a screenshot of the desktop that the user still has to see and
+                 aim at, so an opaque scrim would hide the very thing being picked. -->
+            <SolidColorBrush x:Key="RegionMaskBrush"             Color="#99000000" />
             <SolidColorBrush x:Key="RegionSelectionStrokeBrush"  Color="{StaticResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="RegionHandleFillBrush"       Color="{StaticResource SystemColorButtonFaceColor}" />
             <SolidColorBrush x:Key="RegionLabelBackgroundBrush"  Color="{StaticResource SystemColorWindowColor}" />
