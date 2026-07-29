@@ -28,11 +28,31 @@ public sealed partial class MiniWindow : Window
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
 
     /// <summary>
-    /// Widest the pill has been while visible, in physical pixels. The window grows
-    /// to fit but never shrinks, so the toolbar stretches into freed space instead
-    /// of the pill snapping narrower. Reset in <see cref="HideMini"/>.
+    /// Widest the pill has been while visible, in <em>DIPs</em>. The window grows to
+    /// fit but never shrinks, so the toolbar stretches into freed space instead of
+    /// the pill snapping narrower. Reset in <see cref="HideMini"/>.
     /// </summary>
-    private int _widestSeenPx;
+    /// <remarks>
+    /// Deliberately stored in DIPs, not physical pixels: dragging the pill from a
+    /// 200% monitor to a 100% one would otherwise clamp the new (correctly halved)
+    /// width back up to the stale high-DPI value and leave it roughly twice too wide.
+    /// </remarks>
+    private double _widestSeenDips;
+
+    /// <summary>
+    /// Set once the user drags the pill somewhere. After that the pill is clamped
+    /// on screen rather than re-centred, so a capture-mode switch cannot teleport it
+    /// away from where they parked it.
+    /// </summary>
+    private bool _userPositioned;
+
+    /// <summary>
+    /// Non-zero while we are moving/resizing the window ourselves, so those changes
+    /// aren't mistaken for a user drag. A depth counter rather than a bool because
+    /// <see cref="AppWindow"/>.Resize raises Changed synchronously, nesting a
+    /// programmatic move inside a programmatic resize.
+    /// </summary>
+    private int _programmaticChangeDepth;
 
     /// <summary>Raised when the user presses Record.</summary>
     public event EventHandler? RecordRequested;
@@ -112,6 +132,11 @@ public sealed partial class MiniWindow : Window
 
     private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
+        // A position change we didn't initiate means the user dragged the pill by
+        // its grip, so stop re-centring it from then on.
+        if (args.DidPositionChange && _programmaticChangeDepth == 0)
+            _userPositioned = true;
+
         // Move() doesn't set DidSizeChange, so this cannot recurse.
         if (args.DidSizeChange) DockBottomCenter();
     }
@@ -132,18 +157,28 @@ public sealed partial class MiniWindow : Window
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             double scale = GetDpiForWindow(hwnd) / 96.0;
 
-            int width = (int)Math.Ceiling(desired.Width * scale);
-            int height = (int)Math.Ceiling(desired.Height * scale);
-
             // Grow to fit, but never shrink: switching from Window/Region back to
             // Full Screen removes the picker button, and rather than snapping the
-            // pill narrower we hold the width and let the Segmented control's "*"
-            // column stretch into the freed space.
-            _widestSeenPx = Math.Max(_widestSeenPx, width);
-            width = _widestSeenPx;
+            // pill narrower we hold the width and let the Segmented control's
+            // starred column stretch into the freed space. Tracked in DIPs so the
+            // mark stays valid across monitors with different scaling.
+            _widestSeenDips = Math.Max(_widestSeenDips, desired.Width);
 
-            AppWindow.Resize(new SizeInt32(width, height));
-            DockBottomCenter();
+            int width = (int)Math.Ceiling(_widestSeenDips * scale);
+            int height = (int)Math.Ceiling(desired.Height * scale);
+
+            // A resize can itself nudge the window (e.g. when growing past a screen
+            // edge), so it counts as a programmatic change too.
+            _programmaticChangeDepth++;
+            try
+            {
+                AppWindow.Resize(new SizeInt32(width, height));
+                DockBottomCenter();
+            }
+            finally
+            {
+                _programmaticChangeDepth--;
+            }
         }
         catch (Exception ex)
         {
@@ -153,7 +188,8 @@ public sealed partial class MiniWindow : Window
 
     /// <summary>
     /// Docks the pill to the bottom centre of the work area using the window's
-    /// <em>actual</em> current size.
+    /// <em>actual</em> current size — unless the user has dragged it, in which case
+    /// its position is kept and merely clamped back on screen.
     /// </summary>
     /// <remarks>
     /// Reads <see cref="AppWindow"/>.Size rather than trusting a caller-supplied
@@ -172,15 +208,39 @@ public sealed partial class MiniWindow : Window
             var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
             var workArea = displayArea.WorkArea;
 
-            int x = workArea.X + ((workArea.Width - size.Width) / 2);
-            // WorkArea already excludes the taskbar, so this sits just above it.
-            int y = workArea.Y + workArea.Height - size.Height - DockMarginPx;
-            AppWindow.Move(new PointInt32(x, y));
+            int x, y;
+            if (_userPositioned)
+            {
+                // Respect where they put it; only pull it back if growing pushed an
+                // edge off screen.
+                var current = AppWindow.Position;
+                x = Math.Clamp(current.X, workArea.X, Math.Max(workArea.X, workArea.X + workArea.Width - size.Width));
+                y = Math.Clamp(current.Y, workArea.Y, Math.Max(workArea.Y, workArea.Y + workArea.Height - size.Height));
+                if (x == current.X && y == current.Y) return;
+            }
+            else
+            {
+                x = workArea.X + ((workArea.Width - size.Width) / 2);
+                // WorkArea already excludes the taskbar, so this sits just above it.
+                y = workArea.Y + workArea.Height - size.Height - DockMarginPx;
+            }
+
+            MoveProgrammatically(new PointInt32(x, y));
         }
         catch
         {
             // Fall back to wherever the OS put it.
         }
+    }
+
+    /// <summary>
+    /// Moves the window without the move being counted as a user drag.
+    /// </summary>
+    private void MoveProgrammatically(PointInt32 position)
+    {
+        _programmaticChangeDepth++;
+        try { AppWindow.Move(position); }
+        finally { _programmaticChangeDepth--; }
     }
 
     /// <summary>Shows the pill, re-syncing the toolbar with the shared view model first.</summary>
@@ -199,7 +259,8 @@ public sealed partial class MiniWindow : Window
     {
         // Drop the width high-water mark so a re-summoned pill fits itself tightly
         // again instead of inheriting the widest layout from a previous session.
-        _widestSeenPx = 0;
+        // A position the user chose is deliberately kept.
+        _widestSeenDips = 0;
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         ShowWindow(hwnd, SW_HIDE);

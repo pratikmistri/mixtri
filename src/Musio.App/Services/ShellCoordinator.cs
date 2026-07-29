@@ -86,9 +86,25 @@ public sealed class ShellCoordinator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a system tray icon exists to summon the app back. Tray setup is
+    /// best-effort (see <see cref="App"/>), and without it a hidden shell would be
+    /// unreachable — the Mini pill is not in Alt-Tab and the full window is
+    /// <c>SW_HIDE</c>-den — so the hide-to-tray paths fall back to the full window.
+    /// </summary>
+    public bool IsTrayAvailable { get; set; }
+
     /// <summary>Parks the shell in the tray without changing which surface is "current".</summary>
     public void HideToTray()
     {
+        if (!IsTrayAvailable)
+        {
+            // Nothing could bring the app back, so surface the full window instead
+            // of stranding the user with no reachable window.
+            ShowFullWindow();
+            return;
+        }
+
         _miniWindow?.HideMini();
         HideMainWindow();
     }
@@ -130,11 +146,11 @@ public sealed class ShellCoordinator : IDisposable
     private int _pickerDepth;
 
     /// <summary>
-    /// Tray "Open Musio": bring up the full window. Goes through the state
-    /// machine rather than poking the HWND, otherwise the shell would think Mini
-    /// is still current and later hide the full window out from under the user.
+    /// Brings up the full window. Goes through the state machine rather than poking
+    /// the HWND, otherwise the shell would think Mini is still current and later
+    /// hide the full window out from under the user.
     /// </summary>
-    public void ShowFullFromTray()
+    public void ShowFullWindow()
     {
         if (_stateMachine.CurrentState == AppShellState.Recording) return;
 

@@ -114,6 +114,9 @@ public partial class App : Application
             _trayService.StartRecordingRequested += OnStartRecordingRequested;
             _trayService.ExitRequested += OnExitRequested;
             _window.AppWindow.Closing += OnWindowClosing;
+
+            // Tell the shell a tray affordance exists, so hide-to-tray is safe.
+            if (_shell is not null) _shell.IsTrayAvailable = true;
         }
         catch (Exception)
         {
@@ -148,7 +151,7 @@ public partial class App : Application
     {
         if (_shell is not null)
         {
-            _shell.ShowFullFromTray();
+            _shell.ShowFullWindow();
             ReleaseExtendedExecution();
             return;
         }
