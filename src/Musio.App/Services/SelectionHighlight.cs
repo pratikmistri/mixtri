@@ -41,7 +41,7 @@ public sealed class SelectionHighlight : IDisposable
     private const byte SmokeAlpha = 0x4D;
 
     // COLORREF is 0x00BBGGRR, i.e. byte-reversed from the #RRGGBB used in XAML.
-    private const uint BorderColor = 0x00D47800; // #0078D4 accent blue
+    private const uint AccentColor = 0x00D47800; // #0078D4 accent blue
 
     // Physical-pixel geometry for the monitor the selection currently sits on.
     // Recomputed per render so the ring matches the pickers' DIP-based stroke on
@@ -54,6 +54,7 @@ public sealed class SelectionHighlight : IDisposable
     private IntPtr _borderHwnd;
     private IntPtr _smokeHwnd;
     private IntPtr _borderBrush;
+    private uint _borderColor;
     private bool _disposed;
 
     private int _x, _y, _width, _height;
@@ -375,6 +376,7 @@ public sealed class SelectionHighlight : IDisposable
         {
             DeleteObject(_borderBrush);
             _borderBrush = IntPtr.Zero;
+            _borderColor = 0;
         }
 
         TrackedWindow = IntPtr.Zero;
@@ -391,15 +393,44 @@ public sealed class SelectionHighlight : IDisposable
 
     private void EnsureBorderBrush()
     {
-        if (_borderBrush != IntPtr.Zero) return;
+        uint color = ResolveBorderColor();
+        if (_borderBrush != IntPtr.Zero && _borderColor == color) return;
 
-        _borderBrush = CreateSolidBrush(BorderColor);
+        var old = _borderBrush;
+        _borderBrush = CreateSolidBrush(color);
+        _borderColor = color;
 
+        // Repoint the window at the new brush *before* freeing the old one, or a
+        // repaint in between would use a freed GDI handle.
         if (_borderHwnd != IntPtr.Zero)
         {
             _layerBrushes[_borderHwnd] = _borderBrush;
             InvalidateRect(_borderHwnd, IntPtr.Zero, true);
         }
+
+        if (old != IntPtr.Zero) DeleteObject(old);
+    }
+
+    /// <summary>
+    /// The accent blue normally, or the system highlight colour under High Contrast.
+    /// </summary>
+    /// <remarks>
+    /// The XAML pickers stroke with <c>SystemColorHighlightColor</c> in High
+    /// Contrast, so a fixed blue here would both mismatch them and risk being
+    /// near-invisible on some schemes.
+    /// </remarks>
+    private static uint ResolveBorderColor()
+    {
+        var hc = new HIGHCONTRAST { cbSize = (uint)Marshal.SizeOf<HIGHCONTRAST>() };
+        if (SystemParametersInfo(SPI_GETHIGHCONTRAST, hc.cbSize, ref hc, 0)
+            && (hc.dwFlags & HCF_HIGHCONTRASTON) != 0)
+        {
+            // GetSysColor already returns a COLORREF, the same 0x00BBGGRR layout
+            // CreateSolidBrush expects.
+            return GetSysColor(COLOR_HIGHLIGHT);
+        }
+
+        return AccentColor;
     }
 
     private static IntPtr CreateLayerWindow(int x, int y, int w, int h, IntPtr brush, byte alpha)
@@ -491,6 +522,9 @@ public sealed class SelectionHighlight : IDisposable
     private const int BLACK_BRUSH = 4;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
     private const int MDT_EFFECTIVE_DPI = 0;
+    private const uint SPI_GETHIGHCONTRAST = 0x0042;
+    private const uint HCF_HIGHCONTRASTON = 0x00000001;
+    private const int COLOR_HIGHLIGHT = 13;
     private const int SM_XVIRTUALSCREEN = 76;
     private const int SM_YVIRTUALSCREEN = 77;
     private const int SM_CXVIRTUALSCREEN = 78;
@@ -547,6 +581,12 @@ public sealed class SelectionHighlight : IDisposable
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref HIGHCONTRAST pvParam, uint fWinIni);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetSysColor(int nIndex);
+
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
 
@@ -591,6 +631,14 @@ public sealed class SelectionHighlight : IDisposable
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct HIGHCONTRAST
+    {
+        public uint cbSize;
+        public uint dwFlags;
+        public IntPtr lpszDefaultScheme;
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX

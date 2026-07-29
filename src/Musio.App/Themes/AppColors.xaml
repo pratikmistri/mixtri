@@ -111,8 +111,10 @@
             <!-- ── Region selector ── -->
             <!-- Deliberately alpha-bearing rather than a system colour: the pickers
                  dim a screenshot of the desktop that the user still has to see and
-                 aim at, so an opaque scrim would hide the very thing being picked. -->
-            <SolidColorBrush x:Key="RegionMaskBrush"             Color="#99000000" />
+                 aim at, so an opaque scrim would hide the very thing being picked.
+                 Kept at the same 30% as the persistent highlight's smoke so the dim
+                 matches between picking and previewing. -->
+            <SolidColorBrush x:Key="RegionMaskBrush"             Color="#4D000000" />
             <SolidColorBrush x:Key="RegionSelectionStrokeBrush"  Color="{StaticResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="RegionHandleFillBrush"       Color="{StaticResource SystemColorButtonFaceColor}" />
             <SolidColorBrush x:Key="RegionLabelBackgroundBrush"  Color="{StaticResource SystemColorWindowColor}" />
