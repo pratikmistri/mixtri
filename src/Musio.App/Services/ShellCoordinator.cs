@@ -318,9 +318,10 @@ public sealed class ShellCoordinator : IDisposable
 
     private void OnRecordingBegan()
     {
-        // Swap the accent preview highlight for the red recording one.
+        // The highlight looks the same while recording; it just stops following the
+        // target, since the capture is locked to wherever it was when Record ran.
         StopWindowTracking();
-        ShowHighlight(HighlightStyle.Recording);
+        ShowHighlight();
 
         _overlay = new RecordingOverlayWindow(_viewModel);
         _overlay.StopRequested += OnOverlayStopRequested;
@@ -413,7 +414,7 @@ public sealed class ShellCoordinator : IDisposable
     /// DIPs from the selector overlay, so they are scaled to physical pixels and
     /// offset by the monitor's origin; window bounds are already physical pixels.
     /// </summary>
-    private bool ShowHighlight(HighlightStyle style)
+    private bool ShowHighlight()
     {
         switch (_viewModel.CaptureMode)
         {
@@ -441,7 +442,7 @@ public sealed class ShellCoordinator : IDisposable
                 if (ph < 2) ph = 2;
 
                 _highlight ??= new SelectionHighlight();
-                _highlight.ShowRect(px, py, pw, ph, style);
+                _highlight.ShowRect(px, py, pw, ph);
                 return true;
             }
 
@@ -450,7 +451,7 @@ public sealed class ShellCoordinator : IDisposable
                 if (_viewModel.SelectedWindow is not { } window) return false;
 
                 _highlight ??= new SelectionHighlight();
-                _highlight.ShowWindow(window.Handle, style);
+                _highlight.ShowWindow(window.Handle);
                 return _highlight.IsShown;
             }
 
@@ -484,7 +485,7 @@ public sealed class ShellCoordinator : IDisposable
             return;
         }
 
-        if (!ShowHighlight(HighlightStyle.Preview))
+        if (!ShowHighlight())
         {
             StopWindowTracking();
             _highlight?.Hide();
@@ -527,7 +528,7 @@ public sealed class ShellCoordinator : IDisposable
     {
         // Returns false once the target window is closed, hidden or minimised —
         // the highlight hides itself, so just stop polling.
-        if (_highlight is null || !_highlight.RefreshTrackedWindow(HighlightStyle.Preview))
+        if (_highlight is null || !_highlight.RefreshTrackedWindow())
             StopWindowTracking();
     }
 

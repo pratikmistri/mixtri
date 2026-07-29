@@ -5,20 +5,6 @@ using System.Runtime.InteropServices;
 namespace Musio_App.Services;
 
 /// <summary>
-/// Which state a <see cref="SelectionHighlight"/> is conveying. The two look the
-/// same on screen; the distinction only drives whether the highlight keeps
-/// following a moving window.
-/// </summary>
-public enum HighlightStyle
-{
-    /// <summary>What *would* be captured — shown while the user is still setting up.</summary>
-    Preview,
-
-    /// <summary>What *is* being captured right now.</summary>
-    Recording,
-}
-
-/// <summary>
 /// Marks a screen region or window as the capture target: a rounded, dashed border
 /// around it, and a dimmed "smoke" layer over everything else.
 /// </summary>
@@ -104,7 +90,7 @@ public sealed class SelectionHighlight : IDisposable
     /// <summary>
     /// Shows (or moves) the highlight around a fixed rectangle in physical screen pixels.
     /// </summary>
-    public void ShowRect(int x, int y, int width, int height, HighlightStyle style)
+    public void ShowRect(int x, int y, int width, int height)
     {
         if (_disposed) return;
 
@@ -116,7 +102,7 @@ public sealed class SelectionHighlight : IDisposable
     /// Shows the highlight around <paramref name="hwnd"/> and remembers it, so
     /// <see cref="RefreshTrackedWindow"/> can follow the window as it moves.
     /// </summary>
-    public void ShowWindow(IntPtr hwnd, HighlightStyle style)
+    public void ShowWindow(IntPtr hwnd)
     {
         if (_disposed) return;
 
@@ -135,7 +121,7 @@ public sealed class SelectionHighlight : IDisposable
     /// false when the window has gone away or is no longer visible, so the caller can
     /// stop polling and drop the highlight.
     /// </summary>
-    public bool RefreshTrackedWindow(HighlightStyle style)
+    public bool RefreshTrackedWindow()
     {
         if (_disposed || TrackedWindow == IntPtr.Zero) return false;
 
