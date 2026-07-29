@@ -30,11 +30,17 @@
             <TitleBar.RightHeader>
                 <!-- Swaps this window for the compact Mini pill. Lives in the title
                      bar so it is reachable from every page. -->
+                <!-- The TitleBar template parks RightHeader 132px further left than
+                     the caption buttons and ignores HorizontalAlignment, so this
+                     negative margin pulls the button back out to sit flush against
+                     them — i.e. its right edge 144px from the client right edge,
+                     which is exactly the width of the caption-button cluster. -->
                 <Button
                     x:Name="CollapseToMiniButton"
                     Click="CollapseToMiniButton_Click"
                     Width="40" Height="32" Padding="0"
-                    Margin="0,0,4,0"
+                    HorizontalAlignment="Right"
+                    Margin="0,0,-132,0"
                     VerticalAlignment="Center"
                     Background="Transparent"
                     BorderThickness="0"
