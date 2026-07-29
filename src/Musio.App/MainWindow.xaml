@@ -36,7 +36,6 @@
              layout, the dimming of unselected items and the selected item's label drop all
              live in the NavigationViewItem template in Themes/NavigationRailStyles.xaml. -->
         <NavigationView
-            x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Left"
             OpenPaneLength="72"

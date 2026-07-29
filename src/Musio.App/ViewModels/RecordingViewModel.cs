@@ -77,6 +77,24 @@ public partial class RecordingViewModel : ObservableObject
     [ObservableProperty]
     private string _recordingStatus = "Ready to record";
 
+    /// <summary>
+    /// Raised when an operation fails, so the view can surface it to the user.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RecordingStatus"/> is not a substitute: it also carries routine progress
+    /// text (per-frame counters, "Recording saved") and, since the recording page's status
+    /// bar was removed, has no UI surface of its own — failures written only to it would be
+    /// silent.
+    /// </remarks>
+    public event EventHandler<string>? ErrorRaised;
+
+    /// <summary>Records a failure on <see cref="RecordingStatus"/> and announces it.</summary>
+    private void SetError(string message)
+    {
+        RecordingStatus = message;
+        ErrorRaised?.Invoke(this, message);
+    }
+
     [ObservableProperty]
     private CaptureRegion? _selectedRegion;
 
@@ -207,7 +225,7 @@ public partial class RecordingViewModel : ObservableObject
             var target = BuildCaptureTarget();
             if (target is null)
             {
-                RecordingStatus = "Could not determine capture target";
+                SetError("Could not determine capture target");
                 return;
             }
 
@@ -249,7 +267,7 @@ public partial class RecordingViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            RecordingStatus = $"Failed to start: {ex.Message}";
+            SetError($"Failed to start: {ex.Message}");
             Debug.WriteLine($"[RecordingViewModel] Start error: {ex}");
             CleanupSession();
         }
@@ -290,7 +308,7 @@ public partial class RecordingViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            RecordingStatus = $"Stop error: {ex.Message}";
+            SetError($"Stop error: {ex.Message}");
             Debug.WriteLine($"[RecordingViewModel] Stop error: {ex}");
         }
         finally
@@ -314,14 +332,14 @@ public partial class RecordingViewModel : ObservableObject
             {
                 if (SelectedWindow is null)
                 {
-                    RecordingStatus = "No window selected — please select a window first";
+                    SetError("No window selected — please select a window first");
                     return null;
                 }
 
                 // Validate the window handle is still valid
                 if (!IsWindow(SelectedWindow.Handle))
                 {
-                    RecordingStatus = "Selected window is no longer available";
+                    SetError("Selected window is no longer available");
                     SelectedWindow = null;
                     return null;
                 }
@@ -341,7 +359,7 @@ public partial class RecordingViewModel : ObservableObject
 
                 if (SelectedRegion is null)
                 {
-                    RecordingStatus = "No region selected — please select a region first";
+                    SetError("No region selected — please select a region first");
                     return null;
                 }
 
@@ -362,7 +380,7 @@ public partial class RecordingViewModel : ObservableObject
                     // the user to reselect.
                     SelectedRegion = null;
                     HasSelectedRegion = false;
-                    RecordingStatus = "Saved region's monitor is no longer connected — please select a new region";
+                    SetError("Saved region's monitor is no longer connected — please select a new region");
                     return null;
                 }
 
@@ -393,7 +411,7 @@ public partial class RecordingViewModel : ObservableObject
     private void OnSessionError(object? sender, string message)
     {
         Debug.WriteLine($"[RecordingSession] Error: {message}");
-        RunOnUI(() => RecordingStatus = $"Error: {message}");
+        RunOnUI(() => SetError($"Error: {message}"));
     }
 
     private void OnSessionStateChanged(object? sender, RecordingState state)

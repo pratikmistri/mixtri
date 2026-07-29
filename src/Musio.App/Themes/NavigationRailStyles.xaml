@@ -84,12 +84,21 @@
                             <!-- The label keeps its layout space when selected and only fades
                                  out, while the icon is translated down over it. Collapsing the
                                  label instead would be unanimatable (Visibility is not) and
-                                 would make the item's height jump on every selection. -->
+                                 would make the item's height jump on every selection.
+
+                                 The selected-state translation (Y=11) is half of this label's
+                                 line box plus the stack Spacing, so the icon lands on the
+                                 item's centre. Keep the two in step if FontSize or Spacing
+                                 change. Under large Windows text scaling the label grows but
+                                 the FontIcon does not, so the selected icon sits slightly
+                                 high — cosmetic only, and the label is invisible by then. -->
                             <TextBlock x:Name="LabelHost"
                                        Text="{TemplateBinding Content}"
                                        Foreground="{TemplateBinding Foreground}"
                                        FontSize="12"
                                        TextAlignment="Center"
+                                       TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis"
                                        HorizontalAlignment="Center" />
                         </StackPanel>
 
@@ -141,6 +150,10 @@
                                     <VisualState.Setters>
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                        <!-- Without this, pressing a hovered item drops it back
+                                             to the base 0.6 opacity for the duration of the
+                                             press — a visible flicker on every navigation. -->
+                                        <Setter Target="ContentStack.Opacity" Value="1" />
                                     </VisualState.Setters>
                                 </VisualState>
 
@@ -251,6 +264,16 @@
                                     </Storyboard>
                                 </VisualState>
 
+                            </VisualStateGroup>
+
+                            <!-- NavigationViewItem calls GoToState twice — once with
+                                 Enabled/Disabled and once with Normal/Selected/... . With no
+                                 NavigationViewItemPresenter part in this template both calls
+                                 land on the item itself, so these must live in a SEPARATE
+                                 group: sharing one group let the second call immediately
+                                 overwrite Disabled, leaving a disabled item looking enabled. -->
+                            <VisualStateGroup x:Name="DisabledStates">
+                                <VisualState x:Name="Enabled" />
                                 <VisualState x:Name="Disabled">
                                     <VisualState.Setters>
                                         <Setter Target="LayoutRoot.Opacity" Value="0.4" />
