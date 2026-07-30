@@ -439,7 +439,8 @@ public static class MusioPackageService
                 progress?.Report(++done / (double)Math.Max(1, mediaEntries.Count));
             }
 
-            ExtractOrientationMarkers(markerEntries, pathByEntry, manifest.SchemaVersion, ct);
+            ExtractOrientationMarkers(
+                markerEntries, pathByEntry, manifest.SchemaVersion, manifest.SavedAt, ct);
 
             var composition = MusioPathRewriter.Rewrite(
                 manifest.Project,
@@ -456,16 +457,21 @@ public static class MusioPackageService
     /// Restores the per-video encoder-version markers beside the extracted media.
     /// </summary>
     /// <remarks>
-    /// Version 1 packages predate the companion marker, so their videos would read back as
-    /// "no marker" — which the decode path interprets as the pre-orientation-fix encoder
-    /// and compensates for by flipping. Packaging only ever existed alongside that fixed
-    /// encoder, so those videos are synthesized a current-version marker rather than being
-    /// mirrored on every open.
+    /// Version 1 packages predate the companion marker, so their videos read back as "no
+    /// marker", which the decode path treats as the pre-orientation-fix encoder and
+    /// compensates for by flipping. That default is right for a v1 package only when the
+    /// package was actually written before the encoder was fixed — packaging shipped
+    /// first, so v1 packages exist on both sides of that change and their videos really
+    /// can be mirrored. The manifest's <see cref="MusioManifest.SavedAt"/> is the only
+    /// evidence available, so it decides; guessing "current encoder" for every v1 package
+    /// would persist a wrong marker and leave the recording permanently upside down in the
+    /// preview, the filmstrip and every export, with no way to recover.
     /// </remarks>
     private static void ExtractOrientationMarkers(
         List<ZipArchiveEntry> markerEntries,
         Dictionary<string, string> pathByEntry,
         int schemaVersion,
+        DateTimeOffset savedAt,
         CancellationToken ct)
     {
         foreach (var entry in markerEntries)
@@ -489,6 +495,11 @@ public static class MusioPackageService
         if (schemaVersion >= 2)
             return;
 
+        // Saved before the encoder was fixed: leave the videos unmarked so the decode
+        // path's legacy default flips them, exactly as it does for an unmarked session.
+        if (savedAt < OrientationFixedUtc)
+            return;
+
         foreach (var videoPath in pathByEntry.Values)
         {
             if (!string.Equals(Path.GetExtension(videoPath), ".mp4", StringComparison.OrdinalIgnoreCase))
@@ -498,6 +509,13 @@ public static class MusioPackageService
                 RecordingMarker.TryWriteCompanion(videoPath, VideoWriter.EncoderVersion);
         }
     }
+
+    /// <summary>
+    /// When the vertically-mirrored-MP4 encoder bug was fixed. A version 1 package saved
+    /// before this carries mirrored video; one saved after does not.
+    /// </summary>
+    private static readonly DateTimeOffset OrientationFixedUtc =
+        new(2026, 7, 30, 0, 0, 0, TimeSpan.Zero);
 
     /// <summary>
     /// Resolves a package entry name to a path inside <paramref name="mediaFolder"/>,
