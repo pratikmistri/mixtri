@@ -85,28 +85,28 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Opens the <c>.musio</c> project the app was launched with, when it was started by
-    /// double-clicking one in Explorer.
+    /// The <c>.musio</c> path the app was launched with, when it was started by
+    /// double-clicking one in Explorer; <c>null</c> otherwise.
     /// </summary>
     /// <remarks>
-    /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
-    /// association should not prevent the app from starting.
+    /// Deliberately synchronous so <see cref="OnLaunched"/> can decide which shell
+    /// surface to open <em>before</em> starting it — resolving this asynchronously
+    /// would flash the Mini pill first and leave the project stranded behind it.
     /// </remarks>
-    private static async System.Threading.Tasks.Task TryOpenActivationProjectAsync(MainWindow window)
+    private static string? TryGetActivationProjectPath()
     {
-        string? path = null;
         try
         {
             var activation = Microsoft.Windows.AppLifecycle.AppInstance
                 .GetCurrent().GetActivatedEventArgs();
 
             if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
-                return;
+                return null;
 
             if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
-                return;
+                return null;
 
-            path = fileArgs.Files
+            return fileArgs.Files
                 .OfType<Windows.Storage.IStorageFile>()
                 .Select(f => f.Path)
                 .FirstOrDefault(MusioPackage.IsPackagePath);
@@ -115,12 +115,20 @@ public partial class App : Application
         {
             // Unpackaged runs have no activation info at all.
             System.Diagnostics.Debug.WriteLine($"[App] No file activation: {ex.Message}");
-            return;
+            return null;
         }
+    }
 
-        if (string.IsNullOrEmpty(path))
-            return;
-
+    /// <summary>
+    /// Opens the <c>.musio</c> project the app was launched with and shows it in
+    /// the editor tab of the full window.
+    /// </summary>
+    /// <remarks>
+    /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
+    /// association should not prevent the app from starting.
+    /// </remarks>
+    private static async System.Threading.Tasks.Task OpenActivationProjectAsync(MainWindow window, string path)
+    {
         try
         {
             await ProjectService.Instance.OpenPackageAsync(path);
@@ -147,7 +155,16 @@ public partial class App : Application
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
 
-        _shell = new ShellCoordinator(mainWindow, ShellSettings.Instance.StartupMode);
+        // Resolved before the shell starts: launching by double-clicking a .musio
+        // forces the full window, so the project lands in the editor tab instead of
+        // opening behind the Mini pill.
+        var activationPath = TryGetActivationProjectPath();
+
+        _shell = new ShellCoordinator(
+            mainWindow,
+            ShellSettings.ResolveLaunchMode(
+                ShellSettings.Instance.StartupMode,
+                hasFileActivation: activationPath is not null));
         _shell.Start();
 
         // Release captured JPEGs from finalized sessions in the background. Both roots are
@@ -165,7 +182,8 @@ public partial class App : Application
             SessionCleanupService.CleanupOrphanedImports(Musio.Core.Capture.SessionPaths.ImportsRoot);
         });
 
-        _ = TryOpenActivationProjectAsync(mainWindow);
+        if (activationPath is not null)
+            _ = OpenActivationProjectAsync(mainWindow, activationPath);
 
         // System tray and hotkeys are optional — app works without them
         try

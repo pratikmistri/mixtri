@@ -1379,3 +1379,14 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **`MediaClip` handle leak in `MeasureOutputDurationAsync`.** The duration fallback opened the freshly produced `video.mp4` with `MediaClip`, which the playbook already documents as releasing its file handle only on GC. If a later phase (audio extraction) then failed or was cancelled, `CleanupImportFolder` could not delete the still-open file and would leak the folder — which the conservative orphan gate then spares forever. Replaced with `MediaSource` + `OpenAsync` + `Duration`, disposed in a `finally`, so the handle is released deterministically.
 - **Test fixture hand-rolled the marker JSON** (`{"encoderVersion":N}`) instead of calling `RecordingMarker.BuildContent`, so it omitted `finalizedUtc` and would drift if the format changed. Now uses the shared helper.
 - **Process note — `git checkout <file>` to revert a temporary regression probe also discarded the real fix**, because the fix was unstaged in the same file. Verify the file after reverting a probe, or stage the fix first.
+
+
+## Opening a .musio file lands in the editor, not the Mini pill
+
+- **Feature/area**: `App.OnLaunched` file activation, `ShellCoordinator` startup surface, `ShellSettings`.
+- **Problem**: Double-clicking a `.musio` opened the app in whatever the persisted `StartupMode` was (Mini by default). `TryOpenActivationProjectAsync` did call `MainWindow.ShowEditor()`, but the full window was hidden behind the Mini pill, so the project appeared to open nowhere.
+- **Approaches tried**: Calling `ShellCoordinator.ShowFullWindow()` from the async open — rejected: the Mini pill still flashes on screen first, and the transition races `Start()`.
+- **What worked**: Split activation-path discovery from opening. `App.TryGetActivationProjectPath()` is synchronous (`GetActivatedEventArgs` always was), so `OnLaunched` can resolve the path BEFORE constructing `ShellCoordinator` and pass `ShellSettings.ResolveLaunchMode(configured, hasFileActivation)`, which forces `StartupMode.Full`. The async `OpenActivationProjectAsync(window, path)` then only opens and navigates. No Mini flash, no state-machine race.
+- **Convention reinforced**: launch-surface decisions belong in a pure static resolver on `ShellSettings` (like `ResolveStartupMode`) so they are unit testable without the settings store — `ShellSettingsTests` covers both new cases.
+- **Build/test**: VS BuildTools MSBuild `Musio.sln -p:Platform=ARM64 -p:Configuration=Debug`, then `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=ARM64 -c Debug`. `dotnet build` still fails with PriGen MSB4062.
+- **Not done**: single-instance redirection. Each file activation still launches its own instance; if that changes, the same forced-Full logic must run on the redirected activation too.

@@ -52,6 +52,28 @@ public class ShellSettingsTests
     }
 
     [TestMethod]
+    public void FileActivation_ForcesFullWindow()
+    {
+        Assert.AreEqual(
+            StartupMode.Full,
+            ShellSettings.ResolveLaunchMode(StartupMode.Mini, hasFileActivation: true));
+        Assert.AreEqual(
+            StartupMode.Full,
+            ShellSettings.ResolveLaunchMode(StartupMode.Full, hasFileActivation: true));
+    }
+
+    [TestMethod]
+    public void NoFileActivation_KeepsConfiguredMode()
+    {
+        Assert.AreEqual(
+            StartupMode.Mini,
+            ShellSettings.ResolveLaunchMode(StartupMode.Mini, hasFileActivation: false));
+        Assert.AreEqual(
+            StartupMode.Full,
+            ShellSettings.ResolveLaunchMode(StartupMode.Full, hasFileActivation: false));
+    }
+
+    [TestMethod]
     public void StartupMode_RoundTripsThroughStore()
     {
         ShellSettings.Instance.StartupMode = StartupMode.Full;
