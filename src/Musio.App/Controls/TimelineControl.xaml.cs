@@ -356,11 +356,6 @@ public sealed partial class TimelineControl : UserControl
     /// registered per-file so appended recordings show their own frames; this path
     /// is treated as the primary set used by the legacy clip filmstrip.
     /// </param>
-    /// <param name="filePath">
-    /// Source video file these thumbnails belong to. When provided, the set is also
-    /// registered per-file so appended recordings show their own frames; this path
-    /// is treated as the primary set used by the legacy clip filmstrip.
-    /// </param>
     public void SetThumbnails(CanvasBitmap[]? thumbnails, double intervalSeconds, double aspectRatio,
         string? filePath = null)
     {

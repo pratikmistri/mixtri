@@ -166,6 +166,22 @@ public static class MusioPackageService
                     var entry = archive.CreateEntry(
                         entryName, MusioPackage.CompressionFor(sourcePath));
 
+                    // Carry the source file's write time onto the entry so an extraction
+                    // can tell "same media as last time" from "a different take of the same
+                    // byte length". Set BEFORE writing: once the entry's data has been
+                    // written the header is already laid down.
+                    try
+                    {
+                        entry.LastWriteTime = File.GetLastWriteTime(sourcePath);
+                    }
+                    catch (Exception ex) when (ex is ArgumentOutOfRangeException
+                                               or IOException or UnauthorizedAccessException)
+                    {
+                        // Outside the zip epoch (1980-2107) or unreadable: leave the default.
+                        Debug.WriteLine(
+                            $"[MusioPackage] Could not stamp entry for '{sourcePath}': {ex.Message}");
+                    }
+
                     using (var entryStream = entry.Open())
                     using (var sourceStream = new FileStream(
                         sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -427,12 +443,33 @@ public static class MusioPackageService
 
                 var destination = ResolveExtractionPath(mediaFolder, entry.FullName, usedNames);
 
-                // Reuse a previous extraction when it is already byte-for-byte complete.
+                // Reuse a previous extraction only when it still matches the entry. Size
+                // alone is not identity: re-saving a project can replace media with a
+                // different take of the same byte length (a re-recorded WAV, a re-encoded
+                // MP4), and reusing it would silently open the project with the old audio
+                // or video. The write time is compared too, with a tolerance because zip
+                // stores timestamps at 2-second resolution.
                 var existing = new FileInfo(destination);
-                if (!existing.Exists || existing.Length != entry.Length)
+                if (!existing.Exists
+                    || existing.Length != entry.Length
+                    || !TimestampsMatch(existing.LastWriteTimeUtc, entry.LastWriteTime.UtcDateTime))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                     entry.ExtractToFile(destination, overwrite: true);
+
+                    // Stamp it explicitly so the reuse check above is self-consistent on
+                    // the next open rather than depending on extraction preserving it.
+                    try
+                    {
+                        File.SetLastWriteTimeUtc(destination, entry.LastWriteTime.UtcDateTime);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                               or ArgumentOutOfRangeException)
+                    {
+                        // Only costs a redundant re-extract next time.
+                        Debug.WriteLine(
+                            $"[MusioPackage] Could not stamp '{destination}': {ex.Message}");
+                    }
                 }
 
                 pathByEntry[entry.FullName] = destination;
@@ -509,6 +546,13 @@ public static class MusioPackageService
                 RecordingMarker.TryWriteCompanion(videoPath, VideoWriter.EncoderVersion);
         }
     }
+
+    /// <summary>
+    /// Compares two file timestamps allowing for the 2-second resolution of the zip
+    /// format's DOS timestamps, so a faithfully extracted file is not treated as stale.
+    /// </summary>
+    private static bool TimestampsMatch(DateTime left, DateTime right)
+        => Math.Abs((left - right).TotalSeconds) <= 2.0;
 
     /// <summary>
     /// When the vertically-mirrored-MP4 encoder bug was fixed. A version 1 package saved

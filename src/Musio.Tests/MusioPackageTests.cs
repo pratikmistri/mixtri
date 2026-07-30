@@ -520,6 +520,41 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task Open_ReExtractsMediaThatChangedWithoutChangingSize()
+    {
+        // Extraction reuses whatever is already in the media folder. Size alone is not
+        // identity: re-saving a project can replace media with a different take of exactly
+        // the same byte length (a re-recorded WAV, a re-encoded MP4), and reusing the old
+        // bytes would silently open the project with the previous audio or video.
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var first = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        long originalLength = new FileInfo(first.Project.VideoFilePath).Length;
+
+        // Replace the source recording with a different take of identical length, then
+        // re-save over the same package — the path a user actually takes.
+        var replacement = new byte[originalLength];
+        for (int i = 0; i < replacement.Length; i++)
+            replacement[i] = 0x5C;
+
+        File.WriteAllBytes(project.VideoFilePath, replacement);
+        File.SetLastWriteTimeUtc(project.VideoFilePath, DateTime.UtcNow.AddMinutes(5));
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var second = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        var reopened = File.ReadAllBytes(second.Project.VideoFilePath);
+
+        Assert.AreEqual(originalLength, reopened.Length, "the replacement must be the same size");
+        CollectionAssert.AreEqual(
+            replacement, reopened,
+            "the changed media should have been re-extracted, not reused from the previous open");
+    }
+
+    [TestMethod]
     public void StripEntryIndexPrefix_RemovesExactlyOneGroup()
     {
         Assert.AreEqual("video.mp4", MusioPackage.StripEntryIndexPrefix("0_video.mp4"));
