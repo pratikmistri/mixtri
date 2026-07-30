@@ -34,6 +34,19 @@ public sealed class VideoWriter : IDisposable
     /// </summary>
     private const string PartialSuffix = ".partial";
 
+    /// <summary>
+    /// Marker file written beside <c>video.mp4</c> once finalization fully succeeds.
+    /// Its presence is what makes the captured JPEGs safe to delete.
+    /// </summary>
+    public const string FinalizedMarkerName = "finalized.marker";
+
+    /// <summary>
+    /// Version of the recording encoder. Bumped when output changes in a way that makes
+    /// earlier files unusable as the editable master — version 2 corrected the vertical
+    /// flip that every earlier build produced.
+    /// </summary>
+    public const int EncoderVersion = 2;
+
     private readonly string _outputPath;
     private readonly string _framesDir;
     private readonly int _width;
@@ -467,6 +480,7 @@ public sealed class VideoWriter : IDisposable
                 throw new InvalidOperationException("MP4 finalization produced an empty file.");
 
             File.Move(partialPath, _outputPath, overwrite: true);
+            WriteFinalizedMarker();
         }
         catch
         {
@@ -479,6 +493,33 @@ public sealed class VideoWriter : IDisposable
         // The MP4 is now the durable master for this recording, so the captured JPEGs
         // have served their purpose as a write-ahead buffer.
         _finalizeSucceeded = true;
+    }
+
+    /// <summary>
+    /// Records that this session's MP4 was produced by the current, orientation-correct
+    /// encoder.
+    /// </summary>
+    /// <remarks>
+    /// Older builds wrote a vertically flipped MP4 (see the <c>BitmapFlip.Vertical</c>
+    /// comment in <see cref="ProduceFrameSampleAsync"/>). Nothing displayed that file at
+    /// the time, so the defect was invisible — but it means a legacy session's captured
+    /// JPEGs are its only correctly oriented copy. Cleanup keys off this marker so those
+    /// sessions keep their frames.
+    /// </remarks>
+    private void WriteFinalizedMarker()
+    {
+        try
+        {
+            var markerPath = Path.Combine(
+                Path.GetDirectoryName(_outputPath)!, FinalizedMarkerName);
+            File.WriteAllText(markerPath,
+                $"{{\"encoderVersion\":{EncoderVersion},\"finalizedUtc\":\"{DateTimeOffset.UtcNow:O}\"}}");
+        }
+        catch (Exception ex)
+        {
+            // Losing the marker only costs disk space (frames are retained), never data.
+            Debug.WriteLine($"[VideoWriter] Could not write finalized marker: {ex.Message}");
+        }
     }
 
     /// <summary>

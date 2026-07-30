@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Musio.Core.Capture;
 using Musio.Core.Processing;
 
 namespace Musio.Core.Services;
@@ -44,6 +45,40 @@ public static class SessionCleanupService
     }
 
     /// <summary>
+    /// Returns true when the session's captured JPEGs are safe to delete: the MP4 must
+    /// exist, be non-empty, and carry the marker proving it came from a completed run of
+    /// the current encoder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The marker is not redundant with the file simply existing. Builds before the
+    /// orientation fix wrote a vertically flipped MP4, so for those sessions the JPEGs
+    /// are the only correctly oriented copy of the recording — deleting them would leave
+    /// a permanently mirrored project with no way back.
+    /// </para>
+    /// <para>
+    /// It also proves the encode ran to completion. Older builds wrote <c>video.mp4</c>
+    /// in place, so a session interrupted mid-finalize can leave a non-empty but
+    /// truncated file that a length check alone would happily accept.
+    /// </para>
+    /// </remarks>
+    public static bool CanReleaseFrames(string sessionFolder)
+    {
+        if (!HasValidVideo(sessionFolder))
+            return false;
+
+        try
+        {
+            var markerPath = Path.Combine(sessionFolder, VideoWriter.FinalizedMarkerName);
+            return File.Exists(markerPath);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Returns true if the session has a valid video.mp4 (exists, non-zero size).
     /// </summary>
     public static bool HasValidVideo(string sessionFolder)
@@ -62,13 +97,13 @@ public static class SessionCleanupService
 
     /// <summary>
     /// Deletes the <c>.frames/</c> directory and finalize_debug.log from a session folder.
-    /// Only proceeds if video.mp4 exists and is non-empty, so an interrupted recording
-    /// never loses its only copy.
+    /// Only proceeds when <see cref="CanReleaseFrames"/> allows it, so an interrupted or
+    /// legacy recording never loses its only usable copy.
     /// </summary>
     /// <returns>Bytes reclaimed, or 0 if nothing was cleaned.</returns>
     public static long CleanupSession(string sessionFolder)
     {
-        if (!HasValidVideo(sessionFolder))
+        if (!CanReleaseFrames(sessionFolder))
             return 0;
 
         long reclaimed = 0;
@@ -155,7 +190,7 @@ public static class SessionCleanupService
             foreach (var dir in Directory.EnumerateDirectories(outputFolder, "session_*"))
             {
                 var framesPath = Path.Combine(dir, FramesDir);
-                if (Directory.Exists(framesPath) && HasValidVideo(dir))
+                if (Directory.Exists(framesPath) && CanReleaseFrames(dir))
                     total += GetDirectorySize(framesPath);
             }
         }

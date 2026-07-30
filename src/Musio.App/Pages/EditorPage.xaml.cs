@@ -440,9 +440,10 @@ public sealed partial class EditorPage : Page
         // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
         // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
         // (Appended recordings mirror this exact guard — see GenerateAppendedZoomKeyframes.)
-        // A project restored from a package is never regenerated: an empty zoom track is a
+        // A source restored from a package is never regenerated: an empty zoom track is a
         // saved choice there, not a not-yet-populated one.
-        if (!ProjectService.Instance.IsRestoredFromPackage && !ZoomKeyframesExistForSource(null))
+        if (!ProjectService.Instance.IsRestoredSource(project.VideoFilePath)
+            && !ZoomKeyframesExistForSource(null))
         {
             foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
@@ -986,7 +987,7 @@ public sealed partial class EditorPage : Page
             var global = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
             var config = BuildSegmentConfig(global, seg, previewFps);
 
-            if (!ProjectService.Instance.IsRestoredFromPackage)
+            if (!ProjectService.Instance.IsRestoredSource(seg.VideoFilePath))
             {
                 // Same rule as the primary preview: these are first-open defaults, and a
                 // restored project already carries the user's saved smoothing and zoom.
@@ -1259,8 +1260,10 @@ public sealed partial class EditorPage : Page
     /// </summary>
     private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
     {
-        // A restored project's zoom track is exactly what the user saved, including empty.
-        if (ProjectService.Instance.IsRestoredFromPackage)
+        // Only a source that came from the package carries saved zoom choices. A
+        // recording appended after opening a project is new and still needs its
+        // auto-zooms generated.
+        if (ProjectService.Instance.IsRestoredSource(seg.VideoFilePath))
             return;
 
         if (ZoomKeyframesExistForSource(seg.VideoFilePath))

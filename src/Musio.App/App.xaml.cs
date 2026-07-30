@@ -150,10 +150,16 @@ public partial class App : Application
         _shell = new ShellCoordinator(mainWindow, ShellSettings.Instance.StartupMode);
         _shell.Start();
 
-        // Clean up .frames/ from previously-exported sessions in the background
+        // Release captured JPEGs from finalized sessions in the background. Both roots are
+        // swept: the LocalAppData sessions folder used now, and the user's save folder,
+        // which holds sessions recorded before they moved out of it.
         var savePath = AppSettings.Instance.DefaultSavePath;
         _ = System.Threading.Tasks.Task.Run(() =>
-            SessionCleanupService.CleanupExportedSessions(savePath));
+        {
+            SessionCleanupService.CleanupExportedSessions(Musio.Core.Capture.SessionPaths.SessionsRoot);
+            if (!string.IsNullOrWhiteSpace(savePath))
+                SessionCleanupService.CleanupExportedSessions(savePath);
+        });
 
         _ = TryOpenActivationProjectAsync(mainWindow);
 

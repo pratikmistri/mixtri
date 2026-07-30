@@ -273,6 +273,8 @@ public sealed class VideoFrameReader : IDisposable
         }
 
         _source.Dispose();
-        _cacheGate.Dispose();
+
+        // _cacheGate is deliberately NOT disposed: SemaphoreSlim.Dispose does not release
+        // callers already parked in WaitAsync, so disposing it would strand them forever.
     }
 }

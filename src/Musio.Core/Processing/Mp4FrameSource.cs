@@ -65,6 +65,9 @@ public sealed class Mp4FrameSource : IFrameSource
     /// </summary>
     private static readonly TimeSpan DrainDelay = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>How long disposal waits for an in-flight request to finish.</summary>
+    private static readonly TimeSpan DisposeGateTimeout = TimeSpan.FromSeconds(5);
+
     private readonly MediaPlayer _player;
     private readonly CanvasDevice _device;
     private readonly CanvasRenderTarget _surface;
@@ -235,13 +238,9 @@ public sealed class Mp4FrameSource : IFrameSource
             // A frame abandoned by a previous timeout can still land later and would
             // otherwise satisfy this request with stale content — a wrong frame in an
             // export, not just a preview glitch. Let it drain first.
-            if (_needsDrain)
-            {
-                _needsDrain = false;
-                await Task.Delay(DrainDelay).ConfigureAwait(false);
-                if (_disposed)
-                    return null;
-            }
+            await DrainIfNeededAsync().ConfigureAwait(false);
+            if (_disposed)
+                return null;
 
             if (!await PositionAtAsync(frameIndex).ConfigureAwait(false))
                 return null;
@@ -296,7 +295,14 @@ public sealed class Mp4FrameSource : IFrameSource
                 if (!await IssueAndWaitAsync(() => _player.StepForwardOneFrame(), StepTimeout)
                         .ConfigureAwait(false))
                 {
-                    // Stepping stalled — fall back to an explicit seek for the target.
+                    // Stepping stalled. The abandoned step is for an index BEFORE the
+                    // target, so its late frame must be drained before seeking or it can
+                    // satisfy the seek's request and silently yield the wrong frame —
+                    // an off-by-N that would be invisible in an export.
+                    await DrainIfNeededAsync().ConfigureAwait(false);
+                    if (_disposed)
+                        return false;
+
                     _lastDeliveredIndex = -1;
                     return await SeekToAsync(frameIndex).ConfigureAwait(false);
                 }
@@ -305,6 +311,19 @@ public sealed class Mp4FrameSource : IFrameSource
         }
 
         return await SeekToAsync(frameIndex).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Waits out a frame abandoned by a previous timeout, so it cannot be mistaken for
+    /// the answer to the next request.
+    /// </summary>
+    private async Task DrainIfNeededAsync()
+    {
+        if (!_needsDrain)
+            return;
+
+        _needsDrain = false;
+        await Task.Delay(DrainDelay).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -426,18 +445,34 @@ public sealed class Mp4FrameSource : IFrameSource
         _disposed = true;
         Interlocked.Exchange(ref _framePending, null)?.TrySetResult(false);
 
+        // Wait for any in-flight request to leave the critical section before tearing
+        // down the player and surface it is reading from.
+        bool held = false;
+        try
+        {
+            held = _gate.Wait(DisposeGateTimeout);
+        }
+        catch (ObjectDisposedException) { }
+
         try
         {
             _player.VideoFrameAvailable -= OnVideoFrameAvailable;
             _player.Source = null;
             _player.Dispose();
+            _surface.Dispose();
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Mp4FrameSource] Dispose failed: {ex.Message}");
         }
+        finally
+        {
+            if (held) _gate.Release();
+        }
 
-        _surface.Dispose();
-        _gate.Dispose();
+        // _gate is deliberately NOT disposed. SemaphoreSlim.Dispose does not release
+        // callers already parked in WaitAsync, so disposing it would strand any queued
+        // request forever — a hung export rather than a dropped frame. The _disposed
+        // check inside the critical section makes queued callers return null instead.
     }
 }

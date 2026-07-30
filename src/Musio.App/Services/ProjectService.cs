@@ -36,6 +36,21 @@ public class ProjectService
     /// </remarks>
     public bool IsRestoredFromPackage { get; private set; }
 
+    private readonly HashSet<string> _restoredSourcePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when <paramref name="videoFilePath"/> came from the restored package, and so
+    /// already carries the user's saved zoom and style choices.
+    /// </summary>
+    /// <remarks>
+    /// Tracked per source rather than per project: a recording appended *after* opening a
+    /// package is brand new and must still get its first-open defaults and auto-zoom,
+    /// even though the project as a whole was restored.
+    /// </remarks>
+    public bool IsRestoredSource(string? videoFilePath)
+        => !string.IsNullOrEmpty(videoFilePath) && _restoredSourcePaths.Contains(videoFilePath);
+
     public event EventHandler? ProjectChanged;
 
     /// <summary>
@@ -80,6 +95,13 @@ public class ProjectService
         CurrentPackagePath = packagePath;
         IsRestoredFromPackage = true;
 
+        _restoredSourcePaths.Clear();
+        foreach (var path in MusioPathRewriter.Enumerate(
+                     result.Project, result.Timeline, result.Composition))
+        {
+            _restoredSourcePaths.Add(path);
+        }
+
         // A saved package carries its own timeline, so the primary segment must not be
         // synthesized the way SetProject does for a fresh recording.
         if (CurrentTimeline.Segments.Count == 0)
@@ -96,6 +118,7 @@ public class ProjectService
         CurrentProject = project;
         CurrentPackagePath = null;
         IsRestoredFromPackage = false;
+        _restoredSourcePaths.Clear();
         CurrentTimeline = new TimelineModel
         {
             Duration = project.Duration,
