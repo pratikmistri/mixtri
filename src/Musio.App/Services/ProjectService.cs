@@ -78,6 +78,9 @@ public class ProjectService
             packagePath, CurrentProject, CurrentComposition, CurrentTimeline, progress, ct);
 
         CurrentPackagePath = packagePath;
+
+        RecentProjectsStore.Remember(
+            packagePath, CurrentProject.Name, CurrentProject.Duration);
     }
 
     /// <summary>
@@ -109,6 +112,8 @@ public class ProjectService
             CurrentTimeline.Segments.Add(CreateVideoSegmentFromProject(result.Project));
             CurrentTimeline.RecalculateSegmentPositions();
         }
+
+        RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
 
         ProjectChanged?.Invoke(this, EventArgs.Empty);
     }

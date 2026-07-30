@@ -126,6 +126,9 @@ public sealed partial class MainWindow : Window
                 case "editor":
                     NavFrame.Navigate(typeof(EditorPage));
                     break;
+                case "projects":
+                    NavFrame.Navigate(typeof(OpenProjectsPage));
+                    break;
                 case "settings":
                     NavFrame.Navigate(typeof(SettingsPage));
                     break;

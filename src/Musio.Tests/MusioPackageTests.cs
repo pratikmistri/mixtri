@@ -443,6 +443,98 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task SaveThenReadManifest_ReturnsMetadataWithoutExtracting()
+    {
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        var manifest = MusioPackageService.ReadManifest(packagePath);
+
+        Assert.IsNotNull(manifest);
+        Assert.AreEqual("Round trip", manifest.Project.Name);
+        Assert.AreEqual(TimeSpan.FromSeconds(10), manifest.Project.Duration);
+        Assert.AreEqual(MusioPackage.CurrentSchemaVersion, manifest.SchemaVersion);
+
+        // Listing projects must not spill extracted media anywhere.
+        Assert.AreEqual(0, Directory.GetFileSystemEntries(_workingRoot).Length);
+    }
+
+    [TestMethod]
+    public void ReadManifest_NonPackage_ReturnsNull()
+    {
+        var bogus = Path.Combine(_root, "not-a-package.musio");
+        File.WriteAllText(bogus, "definitely not a zip");
+
+        Assert.IsNull(MusioPackageService.ReadManifest(bogus));
+        Assert.IsNull(MusioPackageService.ReadPoster(bogus));
+    }
+
+    [TestMethod]
+    public void ReadManifest_MissingFile_ReturnsNull()
+    {
+        Assert.IsNull(MusioPackageService.ReadManifest(Path.Combine(_root, "nope.musio")));
+        Assert.IsNull(MusioPackageService.ReadPoster(Path.Combine(_root, "nope.musio")));
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_SucceedsWhenNoPosterCanBeRendered()
+    {
+        // The stub video is not decodable, so no poster is produced. That must not stop
+        // the project from saving or reopening — the poster is presentation only.
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsNull(MusioPackageService.ReadPoster(packagePath));
+        Assert.AreEqual("Round trip", opened.Project.Name);
+    }
+
+    [TestMethod]
+    public async Task SaveOpenResave_DoesNotStackEntryPrefixes()
+    {
+        // Extraction restores the original file name, so re-saving an opened project keeps
+        // entry names stable instead of growing 0_video.mp4 -> 0_0_video.mp4 -> ...
+        var (project, timeline) = BuildProject();
+        var first = Path.Combine(_root, "first.musio");
+        var second = Path.Combine(_root, "second.musio");
+
+        await MusioPackageService.SaveAsync(first, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(first, _workingRoot);
+
+        await MusioPackageService.SaveAsync(
+            second, opened.Project, opened.Composition, opened.Timeline);
+
+        using var archive = ZipFile.OpenRead(second);
+        var mediaNames = archive.Entries
+            .Where(e => e.FullName.StartsWith("media/", StringComparison.Ordinal))
+            .Select(e => e.FullName)
+            .ToList();
+
+        CollectionAssert.Contains(mediaNames, "media/0_video.mp4");
+        Assert.IsFalse(mediaNames.Any(n => n.Contains("0_0_", StringComparison.Ordinal)),
+            $"entry names stacked prefixes: {string.Join(", ", mediaNames)}");
+    }
+
+    [TestMethod]
+    public void StripEntryIndexPrefix_RemovesExactlyOneGroup()
+    {
+        Assert.AreEqual("video.mp4", MusioPackage.StripEntryIndexPrefix("0_video.mp4"));
+        Assert.AreEqual("video.mp4", MusioPackage.StripEntryIndexPrefix("12_video.mp4"));
+
+        // A user file that genuinely starts with digits keeps its own name, because only
+        // the single prefix this format adds is removed.
+        Assert.AreEqual("2024_recap.mp4", MusioPackage.StripEntryIndexPrefix("0_2024_recap.mp4"));
+
+        // Names without a prefix are left alone.
+        Assert.AreEqual("video.mp4", MusioPackage.StripEntryIndexPrefix("video.mp4"));
+        Assert.AreEqual("_video.mp4", MusioPackage.StripEntryIndexPrefix("_video.mp4"));
+    }
+
+    [TestMethod]
     public void IsPackagePath_MatchesOnlyTheMusioExtension()
     {
         Assert.IsTrue(MusioPackage.IsPackagePath(@"C:\a\b.musio"));

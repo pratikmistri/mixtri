@@ -41,6 +41,12 @@ public static class MusioPackage
     /// <summary>Prefix for packed media entries.</summary>
     public const string MediaEntryPrefix = "media/";
 
+    /// <summary>
+    /// Entry name of the poster image: a single frame used to represent the project in
+    /// the Open page, so listing projects never has to decode their video.
+    /// </summary>
+    public const string PosterEntryName = "poster.jpg";
+
     internal static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -85,5 +91,31 @@ public static class MusioPackage
             name = name.Replace(invalid, '_');
 
         return $"{MediaEntryPrefix}{index}_{name}";
+    }
+
+    /// <summary>
+    /// Removes the single <c>&lt;index&gt;_</c> prefix that
+    /// <see cref="BuildMediaEntryName"/> adds, recovering the original file name.
+    /// </summary>
+    /// <remarks>
+    /// Exactly one group is removed, which is what makes this unambiguous: a file the user
+    /// genuinely named <c>2024_recap.mp4</c> is stored as <c>0_2024_recap.mp4</c> and comes
+    /// back intact. Without this, extracting and re-saving would stack prefixes on every
+    /// round trip — <c>0_video.mp4</c>, <c>0_0_video.mp4</c>, and so on.
+    /// <para>
+    /// Only ever call this on a name produced by <see cref="BuildMediaEntryName"/>, which
+    /// always carries the prefix. Applied to an arbitrary name it would strip a leading
+    /// digit group the user meant to keep.
+    /// </para>
+    /// </remarks>
+    internal static string StripEntryIndexPrefix(string entryFileName)
+    {
+        int i = 0;
+        while (i < entryFileName.Length && char.IsAsciiDigit(entryFileName[i]))
+            i++;
+
+        return i > 0 && i < entryFileName.Length - 1 && entryFileName[i] == '_'
+            ? entryFileName[(i + 1)..]
+            : entryFileName;
     }
 }

@@ -635,9 +635,10 @@ public sealed partial class EditorPage : Page
                     outgoing = await ComposePreviewFrameAsync(crossfade.OutgoingTime);
                     if (incoming is not null && outgoing is not null)
                     {
-                        var project = ProjectService.Instance.CurrentProject;
-                        int w = project?.Width > 0 ? project.Width : 1920;
-                        int h = project?.Height > 0 ? project.Height : 1080;
+                        // Blend at the composed canvas size. Using the raw capture size
+                        // here made the picture jump to the capture aspect ratio for the
+                        // length of the dissolve and snap back when it ended.
+                        var (w, h) = GetPreviewCanvasSize();
                         _transitionRenderer ??= new TransitionRenderer();
                         var blended = _transitionRenderer.Render(
                             outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
@@ -719,9 +720,7 @@ public sealed partial class EditorPage : Page
         {
             _textSlideRenderer ??= new TextSlideRenderer();
             await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
-            var project = ProjectService.Instance.CurrentProject;
-            int w = project?.Width > 0 ? project.Width : 1920;
-            int h = project?.Height > 0 ? project.Height : 1080;
+            var (w, h) = GetPreviewCanvasSize();
             double progress = slide.Duration.TotalSeconds > 0
                 ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
                 : 0;
@@ -806,6 +805,36 @@ public sealed partial class EditorPage : Page
     private Point _slideDragStart;
     private double _slideDragStartX, _slideDragStartY;
 
+    /// <summary>
+    /// Canvas size the preview composes to: the scene's aspect ratio, not the raw capture size.
+    /// </summary>
+    /// <remarks>
+    /// Everything the preview composites — video, text slides, and the crossfade that
+    /// blends them — must share one canvas. The exporter already does this
+    /// (<c>SegmentFrameComposer</c> works at its output dimensions); the preview used
+    /// <c>project.Width/Height</c>, so a scene set to anything other than the capture ratio
+    /// rendered slides at the wrong shape and jumped ratio for the length of a dissolve.
+    /// </remarks>
+    private (int Width, int Height) GetPreviewCanvasSize()
+    {
+        if (_compositorReady && _previewRenderer is { OutputWidth: > 0, OutputHeight: > 0 })
+            return (_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
+
+        var project = ProjectService.Instance.CurrentProject;
+        int w = project?.Width > 0 ? project.Width : 1920;
+        int h = project?.Height > 0 ? project.Height : 1080;
+
+        // Fallback for when the compositor has not initialised yet: derive the canvas from
+        // the scene ratio at the source height, matching how the compositor sizes it.
+        var ratio = ProjectService.Instance.CurrentComposition?.AspectRatio ?? AspectRatio.Auto;
+        var (ratioW, ratioH) = AspectRatioHelper.GetRatio(ratio);
+        if (ratioW == 0 || ratioH == 0)
+            return (w, h);
+
+        int outW = (int)Math.Round(h * (double)ratioW / ratioH);
+        return (Math.Max(2, outW & ~1), Math.Max(2, h & ~1));
+    }
+
     private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
     {
         _textSlideRenderer ??= new TextSlideRenderer();
@@ -814,9 +843,7 @@ public sealed partial class EditorPage : Page
         // RenderSlide call below never blocks on file I/O + GPU decode.
         await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
 
-        var project = ProjectService.Instance.CurrentProject;
-        int width = project?.Width > 0 ? project.Width : 1920;
-        int height = project?.Height > 0 ? project.Height : 1080;
+        var (width, height) = GetPreviewCanvasSize();
 
         _previewSlideId = slide.Id;
         _previewSlideW = width;
@@ -4550,7 +4577,17 @@ public sealed partial class EditorPage : Page
 
     // ─── Project package (.musio) save / open ───────────────────────────
 
-    private async void SaveProject_Click(object sender, RoutedEventArgs e)
+    private async void SaveProject_Click(SplitButton sender, SplitButtonClickEventArgs args)
+        => await SaveProjectAsync(forcePrompt: false);
+
+    private async void SaveProjectAs_Click(object sender, RoutedEventArgs e)
+        => await SaveProjectAsync(forcePrompt: true);
+
+    /// <summary>
+    /// Saves the current project, writing straight back to the file it came from unless
+    /// <paramref name="forcePrompt"/> is set or it has never been saved.
+    /// </summary>
+    private async Task SaveProjectAsync(bool forcePrompt)
     {
         var project = ProjectService.Instance.CurrentProject;
         if (project is null)
@@ -4559,10 +4596,37 @@ public sealed partial class EditorPage : Page
             return;
         }
 
+        var targetPath = forcePrompt ? null : ProjectService.Instance.CurrentPackagePath;
+
+        if (targetPath is null)
+        {
+            targetPath = await PickSavePathAsync(project.Name);
+            if (targetPath is null) return;
+        }
+
+        SaveProjectButton.IsEnabled = false;
+        try
+        {
+            await ProjectService.Instance.SavePackageAsync(targetPath);
+            ShowSaveConfirmation(targetPath);
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Project save failed: {ex}");
+            await ShowProjectDialogAsync("Could not save project", ex.Message);
+        }
+        finally
+        {
+            SaveProjectButton.IsEnabled = true;
+        }
+    }
+
+    private async Task<string?> PickSavePathAsync(string projectName)
+    {
         var picker = new Windows.Storage.Pickers.FileSavePicker
         {
             SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-            SuggestedFileName = SanitizeFileName(project.Name),
+            SuggestedFileName = SanitizeFileName(projectName),
         };
         picker.FileTypeChoices.Add("Musio project", [MusioPackage.FileExtension]);
 
@@ -4573,66 +4637,27 @@ public sealed partial class EditorPage : Page
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
         }
 
-        Windows.Storage.StorageFile? file = null;
-        try { file = await picker.PickSaveFileAsync(); }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[EditorPage] Save picker failed: {ex.Message}");
-        }
-        if (file is null) return;
-
-        SaveProjectButton.IsEnabled = false;
         try
         {
-            await ProjectService.Instance.SavePackageAsync(file.Path);
-            await ShowProjectDialogAsync(
-                "Project saved",
-                $"Saved to {file.Path}.\n\nThe recording is bundled inside the file, so you can " +
-                "move it anywhere and keep editing.");
+            var file = await picker.PickSaveFileAsync();
+            return file?.Path;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[EditorPage] Project save failed: {ex}");
-            await ShowProjectDialogAsync("Could not save project", ex.Message);
-        }
-        finally
-        {
-            SaveProjectButton.IsEnabled = true;
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Save picker failed: {ex.Message}");
+            return null;
         }
     }
 
-    private async void OpenProject_Click(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Confirms a save without a modal dialog: saving over an existing project is a
+    /// routine action and should not need dismissing.
+    /// </summary>
+    private void ShowSaveConfirmation(string path)
     {
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-        };
-        picker.FileTypeFilter.Add(MusioPackage.FileExtension);
-        InitializePicker(picker);
-
-        Windows.Storage.StorageFile? file = null;
-        try { file = await picker.PickSingleFileAsync(); }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[EditorPage] Open picker failed: {ex.Message}");
-        }
-        if (file is null) return;
-
-        OpenProjectButton.IsEnabled = false;
-        try
-        {
-            Preview.Pause();
-            await ProjectService.Instance.OpenPackageAsync(file.Path);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[EditorPage] Project open failed: {ex}");
-            await ShowProjectDialogAsync("Could not open project", ex.Message);
-        }
-        finally
-        {
-            OpenProjectButton.IsEnabled = true;
-        }
+        if (SavedFlyoutText is not null)
+            SavedFlyoutText.Text = System.IO.Path.GetFileName(path);
+        SavedFlyout?.ShowAt(SaveProjectButton);
     }
 
     private async Task ShowProjectDialogAsync(string title, string message)

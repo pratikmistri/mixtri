@@ -9,6 +9,24 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <Page.Resources>
+        <!-- Shown explicitly via ShowAt after a save. It lives here rather than on the
+             button because SplitButton already owns its Flyout property for the dropdown. -->
+        <Flyout x:Key="SavedFlyout" x:Name="SavedFlyout" Placement="Top">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <FontIcon
+                    FontSize="16"
+                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                    Glyph="&#xE73E;" />
+                <TextBlock VerticalAlignment="Center" Text="Saved" />
+                <TextBlock
+                    x:Name="SavedFlyoutText"
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Flyout>
+    </Page.Resources>
+
 
     <Page.KeyboardAccelerators>
         <KeyboardAccelerator
@@ -326,29 +344,27 @@
                     Text="Drag on zoom track to add segment"
                     FontStyle="Italic" />
 
-                <Button
-                    x:Name="OpenProjectButton"
-                    Height="40"
-                    Padding="8,6"
-                    Click="OpenProject_Click"
-                    ToolTipService.ToolTip="Open a saved .musio project">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon FontSize="14" Glyph="&#xE8E5;" />
-                        <TextBlock Text="Open" />
-                    </StackPanel>
-                </Button>
-
-                <Button
+                <SplitButton
                     x:Name="SaveProjectButton"
                     Height="40"
-                    Padding="8,6"
                     Click="SaveProject_Click"
-                    ToolTipService.ToolTip="Save this project as a single .musio file you can reopen and keep editing">
+                    ToolTipService.ToolTip="Save this project. Saves back to the same .musio file once it has one.">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE74E;" />
                         <TextBlock Text="Save" />
                     </StackPanel>
-                </Button>
+                    <SplitButton.Flyout>
+                        <MenuFlyout Placement="Top">
+                            <MenuFlyoutItem
+                                Click="SaveProjectAs_Click"
+                                Text="Save as…">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE792;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </SplitButton.Flyout>
+                </SplitButton>
 
                 <Button
                     x:Name="ExportButton"
