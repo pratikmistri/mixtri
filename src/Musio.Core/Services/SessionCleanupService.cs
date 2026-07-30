@@ -28,6 +28,14 @@ public static class SessionCleanupService
     private static readonly string FramesDir = VideoFrameReader.FramesDirectoryName;
 
     /// <summary>
+    /// Minimum age before an import folder with no finished <c>video.mp4</c> is considered an
+    /// abandoned orphan rather than an import that might still be running. Generous on purpose:
+    /// no single-file import takes anywhere near this long, so the window can never race a
+    /// live transcode.
+    /// </summary>
+    private static readonly TimeSpan MinOrphanImportAge = TimeSpan.FromHours(24);
+
+    /// <summary>
     /// Writes a marker file recording that this session has been exported at least once.
     /// Retained for capture history; it is no longer a precondition for cleanup.
     /// </summary>
@@ -173,6 +181,143 @@ public static class SessionCleanupService
             Debug.WriteLine($"[SessionCleanup] Startup cleanup reclaimed {FormatBytes(totalReclaimed)}");
 
         return totalReclaimed;
+    }
+
+    /// <summary>
+    /// Reclaims disk from <c>import_*</c> folders left behind by external-video imports that
+    /// never finished (a crash or process-kill between creating the folder and producing a
+    /// usable <c>video.mp4</c>). Runs synchronously; call via Task.Run.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is conservative by design.</b> An imported clip's media lives in its
+    /// <c>import_*</c> folder and a project references it by that path
+    /// (<c>ProjectService.ImportVideo</c> stores <c>result.VideoFilePath</c> directly). A user
+    /// can import a clip and edit the resulting project — unsaved — for as long as they like,
+    /// and <b>nothing on disk links that in-memory project back to the folder</b>. Age therefore
+    /// cannot tell a live import apart from an abandoned one.
+    /// </para>
+    /// <para>
+    /// So the gate deletes a folder only when it is BOTH old AND has no finished
+    /// <c>video.mp4</c> — i.e. a provably-failed import (empty, or only a <c>.partial</c>). A
+    /// folder that holds a real <c>video.mp4</c> is always spared, because it may be the only
+    /// copy of a clip a project still points at. This mirrors the recorder's rule that frames
+    /// are never released without a finalized MP4: when in doubt, keep the media.
+    /// </para>
+    /// <para>
+    /// <b>Only ever pass an app-owned root</b> (<see cref="SessionPaths.ImportsRoot"/>). This is
+    /// deliberately NOT folded into <see cref="CleanupExportedSessions"/>, which the app also
+    /// runs over the user's configured save folder: matching <c>import_*</c> by name there
+    /// would let a directory the user created and named themselves be deleted by a pattern
+    /// this pipeline never wrote. Recognising a name is not proof of ownership, so the caller
+    /// must choose the root explicitly.
+    /// </para>
+    /// </remarks>
+    /// <param name="importsRoot">
+    /// App-owned imports root to sweep. Never a user-controlled directory.
+    /// </param>
+    /// <returns>Total bytes reclaimed.</returns>
+    public static long CleanupOrphanedImports(string importsRoot)
+    {
+        if (!Directory.Exists(importsRoot))
+            return 0;
+
+        long reclaimed = 0;
+
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(
+                importsRoot, SessionPaths.ImportFolderPrefix + "*"))
+            {
+                if (!IsReclaimableOrphanImport(dir))
+                    continue;
+
+                long size = GetDirectorySize(dir);
+                try
+                {
+                    Directory.Delete(dir, recursive: true);
+                    reclaimed += size;
+                    Debug.WriteLine(
+                        $"[SessionCleanup] Deleted orphaned import '{dir}' ({FormatBytes(size)})");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[SessionCleanup] Failed to delete orphaned import '{dir}': {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SessionCleanup] Error during import cleanup: {ex.Message}");
+        }
+
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// True when <paramref name="importFolder"/> is safe to delete: it is one of ours (matches
+    /// the <c>import_&lt;guid&gt;</c> naming), holds no finished <c>video.mp4</c>, and is older
+    /// than <see cref="MinOrphanImportAge"/>. See <see cref="CleanupOrphanedImports"/> for why
+    /// all three conditions are required.
+    /// </summary>
+    internal static bool IsReclaimableOrphanImport(string importFolder)
+    {
+        try
+        {
+            // Only ever touch folders this app created, never an unrelated folder that happens
+            // to sit under the root and start with the prefix.
+            if (!IsImportFolderName(Path.GetFileName(importFolder)))
+                return false;
+
+            // A finished import may be the live media of an unsaved project — never delete it.
+            if (HasValidVideo(importFolder))
+                return false;
+
+            // Old enough that no import could still be writing into it.
+            return DateTime.UtcNow - GetNewestWriteUtc(importFolder) > MinOrphanImportAge;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="name"/> is a folder name this app produced for an import:
+    /// the <see cref="SessionPaths.ImportFolderPrefix"/> followed by a 32-char hex GUID.
+    /// </summary>
+    private static bool IsImportFolderName(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || !name.StartsWith(SessionPaths.ImportFolderPrefix, StringComparison.Ordinal))
+            return false;
+
+        var suffix = name[SessionPaths.ImportFolderPrefix.Length..];
+        return Guid.TryParseExact(suffix, "N", out _);
+    }
+
+    /// <summary>
+    /// Most recent write time across the folder itself and every file it contains, so a folder
+    /// still being written to is never seen as stale even if its own timestamp is old.
+    /// </summary>
+    private static DateTime GetNewestWriteUtc(string folder)
+    {
+        var newest = Directory.GetLastWriteTimeUtc(folder);
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
+            {
+                var t = File.GetLastWriteTimeUtc(file);
+                if (t > newest)
+                    newest = t;
+            }
+        }
+        catch (Exception ex)
+        {
+            // If we cannot enumerate, fall back to the folder time — the caller's age gate
+            // stays conservative because an unreadable folder is not deleted on a throw anyway.
+            Debug.WriteLine($"[SessionCleanup] Could not scan '{folder}' for write times: {ex.Message}");
+        }
+        return newest;
     }
 
     /// <summary>

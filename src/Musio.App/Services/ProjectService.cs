@@ -1,4 +1,5 @@
 using Musio.Core.Capture;
+using Musio.Core.Media;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Projects;
@@ -209,6 +210,57 @@ public class ProjectService
         CurrentTimeline.RecalculateSegmentPositions();
 
         ProjectChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Turns an external video file (already normalised by <see cref="VideoImportService"/>
+    /// into a constant-frame-rate H.264 clip plus extracted audio) into a project source and
+    /// appends it to the timeline, exactly as <see cref="AppendRecording"/> does for a captured
+    /// recording.
+    /// </summary>
+    /// <remarks>
+    /// An imported clip has none of the metadata a live capture produces: there is no cursor,
+    /// click or keystroke log, no crop offset, no DPI scale and no audio/mouse alignment to
+    /// correct. Those are therefore all zeroed here (<see cref="Project.CursorDataFilePath"/> is
+    /// left empty and <see cref="Project.KeyboardDataFilePath"/> null), and every consumer keys
+    /// off "no cursor data" to skip click-driven behaviour (auto-zoom, cursor overlay) rather
+    /// than fabricate it. <see cref="Project.DpiScale"/> is 1 because the pixels are already the
+    /// real frame pixels — there is no logical→physical mapping to undo.
+    /// </remarks>
+    public void ImportVideo(VideoImportResult result)
+    {
+        var project = new Project
+        {
+            Name = ProjectNameFromImport(result),
+            VideoFilePath = result.VideoFilePath,
+            CursorDataFilePath = string.Empty,
+            KeyboardDataFilePath = null,
+            AudioFilePaths = [.. result.AudioFilePaths],
+            Duration = result.Duration,
+            Width = result.Width,
+            Height = result.Height,
+            Fps = result.Fps,
+            MouseToVideoOffsetSeconds = 0,
+            AudioToVideoOffsetSeconds = 0,
+            CropOffsetX = 0,
+            CropOffsetY = 0,
+            DpiScale = 1,
+            CaptureType = CaptureTargetType.Monitor,
+        };
+
+        // AppendRecording already mirrors "no current project → make this the primary" via
+        // SetProject, so importing is also a valid way to START a project.
+        AppendRecording(project);
+    }
+
+    /// <summary>
+    /// Derives a project/segment name from the imported file's original name, falling back to
+    /// a generic label when the source name is unavailable.
+    /// </summary>
+    private static string ProjectNameFromImport(VideoImportResult result)
+    {
+        var name = Path.GetFileNameWithoutExtension(result.SourceFileName);
+        return string.IsNullOrWhiteSpace(name) ? "Imported video" : name;
     }
 
     private static VideoSegment CreateVideoSegmentFromProject(Project project) => new()

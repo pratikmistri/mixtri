@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Input;
 using Musio.Core.Audio;
 using Musio.Core.Capture;
 using Musio.Core.Export;
+using Musio.Core.Media;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Projects;
@@ -116,6 +117,15 @@ public sealed partial class EditorPage : Page
     /// initialisations join the running pass instead of cancelling and restarting it.
     /// </summary>
     private string? _thumbnailsInFlightForPath;
+
+    /// <summary>
+    /// Non-primary source files whose filmstrip is built or currently building. Appending a
+    /// recording or importing a video adds a source without changing the primary, so the
+    /// primary-keyed gate above cannot tell which strips are still missing; this tracks them
+    /// per file so a re-entrant initialisation builds only the new ones and never rebuilds
+    /// (and re-disposes the bitmaps of) a strip that is already on screen.
+    /// </summary>
+    private readonly HashSet<string> _thumbnailsDoneForFiles = new(StringComparer.OrdinalIgnoreCase);
 
     // Webcam overlay for editor preview
     private Windows.Media.Editing.MediaComposition? _webcamComposition;
@@ -348,6 +358,7 @@ public sealed partial class EditorPage : Page
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
             _thumbnailsInFlightForPath = null;
+            _thumbnailsDoneForFiles.Clear();
 
             // Unsubscribe VMs from singleton event sources
             ViewModel.Cleanup();
@@ -422,6 +433,7 @@ public sealed partial class EditorPage : Page
             _thumbnailGenerationId++;
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
+            _thumbnailsDoneForFiles.Clear();
             return;
         }
 
@@ -447,10 +459,20 @@ public sealed partial class EditorPage : Page
             _thumbnailGenerationId++; // cancel any pass for a different source
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
+            _thumbnailsDoneForFiles.Clear();
 
             // Deliberately started before, and independently of, the preview reader:
             // the filmstrip must not depend on the preview decoder opening successfully.
             _ = GenerateAllTimelineThumbnailsAsync(videoPath, fps);
+        }
+        else
+        {
+            // The primary strip is already built, but appending a recording or importing a
+            // video adds a NEW source to an unchanged primary — and the pass above is gated
+            // entirely on the primary path, so it would never run for that source and the
+            // clip would sit on the track as a flat colour until the project was reopened.
+            // Sources are tracked individually, so this only builds what is actually missing.
+            _ = GenerateAppendedThumbnailsAsync(videoPath);
         }
 
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
@@ -1230,6 +1252,14 @@ public sealed partial class EditorPage : Page
                 catch { }
             }
 
+            // An imported video has no cursor recording. Rather than skip the compositor for it
+            // (which would drop background styling and, more importantly, any manual zoom the
+            // user creates on it), fall back to an empty recording: FrameCompositor synthesizes
+            // a static centre position from it, and HideCursorWhenNoSamples stops a fictional
+            // cursor from being drawn at that centre — matching the export path
+            // (SegmentFrameComposer.ApplyCursorAvailability).
+            mouseData ??= new MouseRecordingData();
+
             int w = seg.SourceWidth > 0 ? seg.SourceWidth : 1920;
             int h = seg.SourceHeight > 0 ? seg.SourceHeight : 1080;
             int previewFps = Math.Min(fps, 30);
@@ -1252,37 +1282,43 @@ public sealed partial class EditorPage : Page
             if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
                 config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
 
-            if (mouseData is not null)
+            config = HideCursorWhenNoSamples(config, mouseData);
+
+            try
             {
-                try
-                {
-                    var renderer = new PreviewRenderer();
-                    // The compositor is driven with ABSOLUTE source times
-                    // (SourceStart + localOffset), so its timelines must span the end of
-                    // the clip's source extent, not just the clip's length. Passing the
-                    // bare SourceDuration would drop cursor samples and auto-zoom for the
-                    // visible tail of any clip trimmed from the front. Mirrors
-                    // SegmentFrameComposer.ResolveSourceDuration on the export path.
-                    await renderer.InitializeAsync(
-                        mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
-                        seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
+                var renderer = new PreviewRenderer();
+                // The compositor is driven with ABSOLUTE source times
+                // (SourceStart + localOffset), so its timelines must span the end of
+                // the clip's source extent, not just the clip's length. Passing the
+                // bare SourceDuration would drop cursor samples and auto-zoom for the
+                // visible tail of any clip trimmed from the front. Mirrors
+                // SegmentFrameComposer.ResolveSourceDuration on the export path.
+                await renderer.InitializeAsync(
+                    mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
+                    seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
 
-                    if (Abandoned())
-                    {
-                        renderer.Dispose();
-                        return Abandon();
-                    }
+                // Push this source's manual zooms onto its own compositor. Auto-zoom is rebuilt
+                // from the recording inside InitializeAsync, but manual keyframes live in the
+                // editor model and are the only zooms an imported (cursorless) clip can have, so
+                // this is what makes a zoom created on it actually render.
+                renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
+                renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
 
-                    ctx.Renderer = renderer;
-                    ctx.Ready = true;
-                }
-                catch (Exception ex)
+                if (Abandoned())
                 {
-                    System.Diagnostics.Debug.WriteLine($"[EditorPage] Segment compositor init failed: {ex.Message}");
-                    ctx.Renderer?.Dispose();
-                    ctx.Renderer = null;
-                    ctx.Ready = false;
+                    renderer.Dispose();
+                    return Abandon();
                 }
+
+                ctx.Renderer = renderer;
+                ctx.Ready = true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[EditorPage] Segment compositor init failed: {ex.Message}");
+                ctx.Renderer?.Dispose();
+                ctx.Renderer = null;
+                ctx.Ready = false;
             }
 
             if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
@@ -1653,13 +1689,23 @@ public sealed partial class EditorPage : Page
         {
             if (!File.Exists(file)) continue;
 
+            // Claim the file before awaiting: two overlapping initialisations would
+            // otherwise both build the same strip, and the loser's bitmaps would be handed
+            // to the timeline after the winner's and leak the ones it replaced.
+            if (!_thumbnailsDoneForFiles.Add(file)) continue;
+
             try
             {
-                await GenerateTimelineThumbnailsAsync(
+                bool applied = await GenerateTimelineThumbnailsAsync(
                     file, isPrimary: false, segmentFps > 0 ? segmentFps : 30);
+
+                // A pass cancelled by a newer generation applied nothing, so the claim must
+                // be released or this source would never get a strip again.
+                if (!applied) _thumbnailsDoneForFiles.Remove(file);
             }
             catch (Exception ex)
             {
+                _thumbnailsDoneForFiles.Remove(file);
                 System.Diagnostics.Debug.WriteLine(
                     $"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
             }
@@ -1676,7 +1722,12 @@ public sealed partial class EditorPage : Page
     /// yielding no frame, while also competing with the preview for the same file. The
     /// batch extractor measured ~15 ms per tile with none missing.
     /// </remarks>
-    private async Task GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
+    /// <returns>
+    /// <c>true</c> when a strip was handed to the timeline; <c>false</c> when the source was
+    /// undecodable or the pass was superseded by a newer generation, so the caller can let
+    /// it be retried.
+    /// </returns>
+    private async Task<bool> GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
     {
         var generationId = ++_thumbnailGenerationId;
 
@@ -1696,7 +1747,7 @@ public sealed partial class EditorPage : Page
         {
             if (strip is not null)
                 foreach (var t in strip.Thumbnails) t?.Dispose();
-            return;
+            return false;
         }
 
         // A tile that could not be decoded would leave a hole in the strip. Repeat the
@@ -1730,6 +1781,8 @@ public sealed partial class EditorPage : Page
         {
             Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
         }
+
+        return true;
     }
 
     private TimelineMapper? EnsureTimelineMapper()
@@ -1770,6 +1823,10 @@ public sealed partial class EditorPage : Page
             SyncZoomStateToRenderer();
         }
 
+        // Appended recordings and imported videos each drive their own segment renderer, so
+        // their zooms have to be synced separately from the primary compositor above.
+        SyncSegmentZoomStateToRenderers();
+
         Timeline.Refresh();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }
@@ -1791,12 +1848,54 @@ public sealed partial class EditorPage : Page
 
         // Only the PRIMARY recording's manual keyframes drive the primary renderer;
         // appended recordings' keyframes belong to their own segment/source space.
-        var manualKeyframes = ViewModel.Model.ZoomKeyframes
-            .Where(k => k.IsManual && k.SourceVideoFilePath is null)
-            .ToList();
-
-        _previewRenderer.UpdateZoomKeyframes(manualKeyframes);
+        _previewRenderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
         _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+    }
+
+    /// <summary>
+    /// The manual zoom keyframes that belong to a single source: the primary recording when
+    /// <paramref name="sourceVideoFilePath"/> is null, otherwise the appended recording or
+    /// imported video with that path. Each source composites through its own renderer, so its
+    /// keyframes must be matched by <see cref="ZoomKeyframe.SourceVideoFilePath"/> and never
+    /// leak onto another source's compositor.
+    /// </summary>
+    private List<ZoomKeyframe> ManualKeyframesForSource(string? sourceVideoFilePath) =>
+        [.. ViewModel.Model.ZoomKeyframes.Where(k =>
+            k.IsManual &&
+            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase))];
+
+    /// <summary>
+    /// Pushes each already-built appended/imported segment renderer its OWN source's manual
+    /// zoom keyframes plus the shared suppressed-click set. The primary renderer is handled by
+    /// <see cref="SyncZoomStateToRenderer"/>; appended and imported segments composite through
+    /// their own <see cref="PreviewRenderer"/>, so a zoom created or region-edited on one of
+    /// them only shows in the preview once its keyframes reach that renderer.
+    /// </summary>
+    private void SyncSegmentZoomStateToRenderers()
+    {
+        foreach (var (segmentId, ctx) in _segmentPreviews)
+        {
+            if (ctx.Renderer is null) continue;
+            var seg = ViewModel.Model.Segments.OfType<VideoSegment>()
+                .FirstOrDefault(v => v.Id == segmentId);
+            if (seg is null) continue;
+
+            ctx.Renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
+            ctx.Renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+        }
+    }
+
+    /// <summary>
+    /// Resolves the video segment that owns a zoom whose source path is
+    /// <paramref name="sourceVideoFilePath"/> (null = the primary recording). Used to map a
+    /// zoom's normalised centre against the correct source dimensions.
+    /// </summary>
+    private VideoSegment? SegmentForSource(string? sourceVideoFilePath)
+    {
+        var target = sourceVideoFilePath ?? PrimaryVideoPath;
+        if (target is null) return null;
+        return ViewModel.Model.Segments.OfType<VideoSegment>()
+            .FirstOrDefault(v => string.Equals(v.VideoFilePath, target, StringComparison.OrdinalIgnoreCase));
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
@@ -2272,8 +2371,12 @@ public sealed partial class EditorPage : Page
         Timeline.SelectedZoomKeyframeId = operation.CreatedId;
         OnZoomSegmentSelected(this, operation.CreatedId);
 
+        // Every source — the primary recording, an appended recording, or an imported
+        // video — positions its zoom in its own source space, so region editing is offered
+        // for all of them. EnterZoomRegionEditMode maps the overlay against the OWNING
+        // segment's dimensions, so differently-sized clips still line up.
         var createdKf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == operation.CreatedId);
-        if (createdKf is not null && e.FilePath is null)
+        if (createdKf is not null)
             EnterZoomRegionEditMode(operation.CreatedId, createdKf);
     }
 
@@ -2401,8 +2504,21 @@ public sealed partial class EditorPage : Page
         _zoomRegionCenterX = kf.CenterX;
         _zoomRegionCenterY = kf.CenterY;
         _zoomRegionZoomLevel = kf.ZoomLevel;
-        _zoomRegionSourceW = project.Width > 0 ? project.Width : 1920;
-        _zoomRegionSourceH = project.Height > 0 ? project.Height : 1080;
+
+        // A zoom centre is normalised 0..1 against the dimensions of the SOURCE it belongs
+        // to, and appended recordings / imported videos can be sized differently from the
+        // primary recording. Mapping the overlay against the primary's Width/Height would put
+        // the rectangle in the wrong place on any differently-sized clip, so resolve the
+        // owning segment (identified by the keyframe's SourceVideoFilePath) and use its
+        // source dimensions. Falls back to the primary project size when the source cannot be
+        // resolved (e.g. a keyframe on the primary recording, whose SourceVideoFilePath is null).
+        var owning = SegmentForSource(kf.SourceVideoFilePath);
+        _zoomRegionSourceW = owning is { SourceWidth: > 0 }
+            ? owning.SourceWidth
+            : (project.Width > 0 ? project.Width : 1920);
+        _zoomRegionSourceH = owning is { SourceHeight: > 0 }
+            ? owning.SourceHeight
+            : (project.Height > 0 ? project.Height : 1080);
 
         // Pause playback and move to segment timestamp for context
         Preview.Pause();
@@ -3759,6 +3875,30 @@ public sealed partial class EditorPage : Page
         return cfg;
     }
 
+    /// <summary>
+    /// Hides the cursor when a source has no recorded cursor samples (an imported video, or a
+    /// recording whose cursor log is missing). The compositor synthesizes a static centre
+    /// position for such a source so it can still zoom and apply background styling, but drawing
+    /// a cursor at that invented point would be pure fiction — a negative auto-hide delay keeps
+    /// it hidden from the very first frame. Mirrors
+    /// <c>SegmentFrameComposer.ApplyCursorAvailability</c> so preview and export agree.
+    /// </summary>
+    private static CompositionConfig HideCursorWhenNoSamples(CompositionConfig config, MouseRecordingData mouseData)
+    {
+        if (mouseData.Samples is { Count: > 0 })
+            return config;
+
+        return config with
+        {
+            Cursor = config.Cursor with
+            {
+                AutoHideEnabled = true,
+                AutoHideDelaySeconds = -1f,
+                AutoHideFadeDuration = 0f,
+            },
+        };
+    }
+
     /// <summary>The currently selected primary-track video segment, if any.</summary>
     private VideoSegment? SelectedVideoSegment =>
         _selectedPrimarySegmentId is { } id
@@ -3951,6 +4091,11 @@ public sealed partial class EditorPage : Page
         }
 
         mouseData ??= new MouseRecordingData();
+
+        // An imported video (or any source missing its cursor log) has no real cursor to draw;
+        // the compositor still zooms and styles it, but the invented centre cursor must stay
+        // hidden — same rule as the appended-segment and export paths.
+        effective = HideCursorWhenNoSamples(effective, mouseData);
 
         _compositorReady = false;
         _previewRenderer?.Dispose();
@@ -4488,6 +4633,113 @@ public sealed partial class EditorPage : Page
         Preview?.Pause();
         _audioPlayer?.Stop();
         Frame.Navigate(typeof(RecordingPage), "append");
+    }
+
+    /// <summary>
+    /// Lets the user pick an external video file and inserts it into the project. The file is
+    /// normalised by <see cref="VideoImportService"/> (transcoded to a constant-frame-rate
+    /// H.264 clip, its audio extracted to WAV) so the rest of the editor can treat it exactly
+    /// like an appended recording — the only difference being that it carries no cursor, click
+    /// or keystroke data.
+    /// </summary>
+    private async void ImportVideo_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        foreach (var ext in VideoImportService.SupportedExtensions)
+            picker.FileTypeFilter.Add(ext);
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Import picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        // Import transcodes the whole file, so it can run for many seconds; surface progress
+        // and a cancel path rather than freezing the UI on a silent await.
+        using var cts = new CancellationTokenSource();
+        var (dialog, bar) = BuildImportProgressDialog(cts);
+        var progress = new Progress<double>(p =>
+        {
+            // Progress arrives on a background thread; marshal the bound update onto the UI.
+            DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
+        });
+
+        var showTask = dialog.ShowAsync();
+        string? errorMessage = null;
+        try
+        {
+            var result = await VideoImportService.ImportAsync(file.Path, null, progress, cts.Token);
+
+            // The import staying on this page means the editor must be told to reload; appending
+            // fires ProjectService.ProjectChanged, which the EditorViewModel turns into a
+            // ModelReloaded the page already handles (timeline swap + preview re-init).
+            ProjectService.Instance.ImportVideo(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancelled — nothing to report.
+        }
+        catch (VideoImportException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Video import failed: {ex}");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            // Fully close the progress dialog before anything else opens one: only a single
+            // ContentDialog may be shown at a time, so the error dialog below must wait for it.
+            dialog.Hide();
+            try { await showTask; } catch { /* dialog dismissed */ }
+        }
+
+        if (errorMessage is not null)
+            await ShowProjectDialogAsync("Could not import video", errorMessage);
+    }
+
+    /// <summary>
+    /// Builds the modal progress dialog shown while a video import runs, wiring its Cancel
+    /// button to the supplied token source. Returns the dialog and the progress bar so the
+    /// caller can drive it from an <see cref="IProgress{T}"/>.
+    /// </summary>
+    private (ContentDialog Dialog, ProgressBar Bar) BuildImportProgressDialog(CancellationTokenSource cts)
+    {
+        var bar = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Width = 260,
+        };
+        var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Transcoding and importing the video…",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(bar);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Importing video",
+            Content = panel,
+            CloseButtonText = "Cancel",
+            XamlRoot = XamlRoot,
+        };
+        // Closing (via the Cancel button or Esc) requests cancellation; ImportAsync observes
+        // the token and throws OperationCanceledException, which the handler swallows.
+        dialog.CloseButtonClick += (_, _) => cts.Cancel();
+        return (dialog, bar);
     }
 
     private void RemoveTextSlide_Click(object sender, RoutedEventArgs e)

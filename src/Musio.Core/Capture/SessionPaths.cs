@@ -14,12 +14,42 @@ public static class SessionPaths
     /// <summary>Folder name holding all recording session working folders.</summary>
     public const string SessionsFolderName = "Sessions";
 
+    /// <summary>Prefix of the per-import working folder created under <see cref="SessionsRoot"/>.</summary>
+    public const string ImportFolderPrefix = "import_";
+
     /// <summary>
     /// Root under which each recording creates its own <c>session_*</c> working folder.
     /// </summary>
     public static string SessionsRoot => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Musio", SessionsFolderName);
+
+    /// <summary>
+    /// Root under which each external-video import creates its own <c>import_*</c> working
+    /// folder.
+    /// </summary>
+    /// <remarks>
+    /// Imports share <see cref="SessionsRoot"/> deliberately: an imported video is normalised
+    /// into the very same <c>video.mp4</c> + <c>finalized.marker</c> layout a recording
+    /// produces, so the decode, orientation and cleanup code already understands it without a
+    /// second concept of "working media". The <see cref="ImportFolderPrefix"/> (rather than
+    /// <c>session_</c>) keeps imports outside <c>SessionCleanupService</c>'s <c>session_*</c>
+    /// sweep — an import has no captured JPEGs to reclaim and no recording lifecycle to end.
+    /// </remarks>
+    public static string ImportsRoot => SessionsRoot;
+
+    /// <summary>
+    /// Creates and returns a fresh, empty <c>import_&lt;guid&gt;</c> folder under
+    /// <see cref="ImportsRoot"/> for a single video import.
+    /// </summary>
+    public static string CreateImportFolder(string? root = null)
+    {
+        var baseRoot = string.IsNullOrWhiteSpace(root) ? ImportsRoot : root!;
+        Directory.CreateDirectory(baseRoot);
+        var folder = Path.Combine(baseRoot, ImportFolderPrefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
 
     /// <summary>
     /// Ensures <see cref="SessionsRoot"/> exists and returns it, falling back to the
