@@ -266,6 +266,13 @@
                                     <FontIcon Glyph="&#xEA3A;" />
                                 </MenuFlyoutItem.Icon>
                             </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Import Video…"
+                                Click="ImportVideo_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE898;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>

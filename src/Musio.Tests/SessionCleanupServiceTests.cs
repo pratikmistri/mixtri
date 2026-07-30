@@ -1,3 +1,4 @@
+using Musio.Core.Capture;
 using Musio.Core.Services;
 
 namespace Musio.Tests;
@@ -271,6 +272,121 @@ public sealed class SessionCleanupServiceTests
     public void GetReclaimableSpace_NonExistentFolder_ReturnsZero()
     {
         Assert.AreEqual(0, SessionCleanupService.GetReclaimableSpace(
+            Path.Combine(_testRoot, "nope")));
+    }
+
+    #endregion
+
+    #region CleanupOrphanedImports
+
+    /// <summary>
+    /// Creates an <c>import_&lt;guid&gt;</c> folder like <c>VideoImportService</c> would, then
+    /// optionally ages it by back-dating the folder and every file in it.
+    /// </summary>
+    private string CreateImportFolder(
+        bool withVideo, bool withPartial = false, TimeSpan? age = null,
+        string? explicitName = null, long payloadSize = 4096)
+    {
+        var name = explicitName ?? (SessionPaths.ImportFolderPrefix + Guid.NewGuid().ToString("N"));
+        var dir = Path.Combine(_testRoot, name);
+        Directory.CreateDirectory(dir);
+
+        if (withVideo)
+        {
+            File.WriteAllBytes(Path.Combine(dir, "video.mp4"), new byte[payloadSize]);
+            File.WriteAllText(
+                Path.Combine(dir, Musio.Core.Capture.VideoWriter.FinalizedMarkerName),
+                $"{{\"encoderVersion\":{Musio.Core.Capture.VideoWriter.EncoderVersion}}}");
+        }
+        if (withPartial)
+        {
+            File.WriteAllBytes(Path.Combine(dir, "video.mp4.partial"), new byte[payloadSize]);
+        }
+
+        if (age is { } a)
+        {
+            var when = DateTime.UtcNow - a;
+            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                File.SetLastWriteTimeUtc(f, when);
+            Directory.SetLastWriteTimeUtc(dir, when);
+        }
+
+        return dir;
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_StaleFailedImport_IsReclaimed()
+    {
+        // Old, no finished video.mp4 — only a leftover partial: a provably-abandoned import.
+        var dir = CreateImportFolder(withVideo: false, withPartial: true, age: TimeSpan.FromDays(3));
+
+        long reclaimed = SessionCleanupService.CleanupOrphanedImports(_testRoot);
+
+        Assert.IsFalse(Directory.Exists(dir), "a stale, video-less import folder should be deleted");
+        Assert.IsTrue(reclaimed > 0, "the reclaimed byte count should reflect the deleted partial");
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_CompletedImport_IsNeverDeletedEvenWhenOld()
+    {
+        // The critical safety case: a finished import can be the live media of an unsaved
+        // project the user is still editing. Age must NOT make it eligible for deletion.
+        var dir = CreateImportFolder(withVideo: true, age: TimeSpan.FromDays(365));
+
+        long reclaimed = SessionCleanupService.CleanupOrphanedImports(_testRoot);
+
+        Assert.IsTrue(Directory.Exists(dir),
+            "an import folder holding a valid video.mp4 must never be deleted, however old");
+        Assert.IsTrue(File.Exists(Path.Combine(dir, "video.mp4")));
+        Assert.AreEqual(0, reclaimed);
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_FreshFailedImport_IsPreserved()
+    {
+        // No video.mp4 but recent — this could be an import in flight right now. Age gate spares it.
+        var dir = CreateImportFolder(withVideo: false, withPartial: true, age: TimeSpan.FromMinutes(5));
+
+        long reclaimed = SessionCleanupService.CleanupOrphanedImports(_testRoot);
+
+        Assert.IsTrue(Directory.Exists(dir), "a recent import folder must be preserved (may be in flight)");
+        Assert.AreEqual(0, reclaimed);
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_IgnoresNonImportFolders()
+    {
+        // A session folder and a foreign folder that merely starts with the prefix but is not
+        // one of our GUID-named imports must both be left untouched.
+        var session = CreateSessionFolder("session_keep", withVideo: false, withFrames: true);
+        var foreign = CreateImportFolder(
+            withVideo: false, withPartial: true, age: TimeSpan.FromDays(10),
+            explicitName: "import_not_a_guid");
+
+        long reclaimed = SessionCleanupService.CleanupOrphanedImports(_testRoot);
+
+        Assert.IsTrue(Directory.Exists(session), "session folders are not the import sweep's business");
+        Assert.IsTrue(Directory.Exists(foreign), "a non-GUID 'import_*' folder is not one of ours — leave it");
+        Assert.AreEqual(0, reclaimed);
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_IsFoldedIntoStartupSweep()
+    {
+        // The backstop must actually run from the startup entry point App calls, not only when
+        // invoked directly — otherwise nothing ever reclaims orphaned imports.
+        var stale = CreateImportFolder(withVideo: false, withPartial: true, age: TimeSpan.FromDays(3));
+
+        SessionCleanupService.CleanupExportedSessions(_testRoot);
+
+        Assert.IsFalse(Directory.Exists(stale),
+            "CleanupExportedSessions should also sweep stale orphaned imports");
+    }
+
+    [TestMethod]
+    public void CleanupOrphanedImports_NonExistentFolder_ReturnsZero()
+    {
+        Assert.AreEqual(0, SessionCleanupService.CleanupOrphanedImports(
             Path.Combine(_testRoot, "nope")));
     }
 
