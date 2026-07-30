@@ -232,11 +232,16 @@ public static class VideoImportService
                 sourceFile, importFolder, videoPartial, width, height, fps,
                 p => progress?.Report(0.08 + (p * 0.77)), ct);
 
-            // Move into place and stamp the marker together: a `video.mp4` existing must imply
-            // a complete, playable, orientation-correct file (the same invariant the recorder
-            // upholds), because RecordingMarker/SessionCleanupService key off its presence.
-            File.Move(videoPartial, videoPath, overwrite: true);
+            // Stamp the marker BEFORE promoting the file, so that `video.mp4` existing always
+            // implies a marker sits beside it. RecordingMarker treats an unmarked MP4 as
+            // legacy and flips it vertically, so the reverse order leaves a crash window in
+            // which a promoted-but-unmarked file would decode upside down. Ordering it this
+            // way also keeps the failure reclaimable: a kill before the Move leaves only a
+            // marker and a `.partial`, which the orphan sweep can retire because no valid
+            // `video.mp4` is present — whereas a promoted-but-unmarked file would be spared
+            // by that same guard and leak its disk permanently.
             WriteSessionMarker(importFolder);
+            File.Move(videoPartial, videoPath, overwrite: true);
 
             progress?.Report(0.86);
 
