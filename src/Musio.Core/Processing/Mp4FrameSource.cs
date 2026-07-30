@@ -382,6 +382,16 @@ public sealed class Mp4FrameSource : IFrameSource
                 .ConfigureAwait(false))
         {
             _lastDeliveredIndex = -1;
+
+            // The wake step delivered a frame for the WRONG index. OnVideoFrameAvailable
+            // does not guarantee exactly one raise per command, so a duplicate could
+            // otherwise complete the re-seek's request and be handed back as the frame
+            // that was asked for — an off-by-N baked silently into an export.
+            _needsDrain = true;
+            await DrainIfNeededAsync().ConfigureAwait(false);
+            if (_disposed)
+                return false;
+
             if (await TrySeekRoundAsync(frameIndex).ConfigureAwait(false))
                 return true;
         }

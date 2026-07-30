@@ -732,6 +732,12 @@ public sealed partial class EditorPage : Page
                     {
                         var (w, h) = GetPreviewCanvasSize();
 
+                        // Must run BEFORE composing the outgoing frame: committing an
+                        // in-place text edit changes the slide the outgoing frame is
+                        // composed from, and it releases the crossfade cache — doing it
+                        // afterwards would dispose the frame still referenced below.
+                        HideSlideEditOverlay();
+
                         // The outgoing side is held at a FIXED instant for the whole
                         // dissolve (SlideTransitions pins it to current.Start - 1 tick), so
                         // it composes to the identical image on every tick. Re-rendering it
@@ -743,7 +749,6 @@ public sealed partial class EditorPage : Page
                         // Force the normal path to fully redraw once the dissolve ends.
                         _lastRenderedFrameIndex = -1;
                         _lastRenderedSegmentId = null;
-                        HideSlideEditOverlay();
 
                         if (outgoing is not null)
                         {
@@ -845,9 +850,20 @@ public sealed partial class EditorPage : Page
 
         ReleaseCrossfadeOutgoing();
 
+        // Composing awaits an MP4 decode, during which a slide edit or a renderer rebuild
+        // can invalidate the cache. That invalidation sees an empty cache and clears
+        // nothing, so without this check the already-stale frame would be published
+        // afterwards and reused for the rest of the dissolve.
+        int generation = _crossfadeGeneration;
         var frame = await ComposePreviewFrameAsync(outgoingTime);
         if (frame is null)
             return null;
+
+        if (generation != _crossfadeGeneration)
+        {
+            frame.Dispose();
+            return null;
+        }
 
         _crossfadeOutgoing = frame;
         _crossfadeOutgoingKey = key;
@@ -856,6 +872,7 @@ public sealed partial class EditorPage : Page
 
     private void ReleaseCrossfadeOutgoing()
     {
+        _crossfadeGeneration++;
         _crossfadeOutgoing?.Dispose();
         _crossfadeOutgoing = null;
         _crossfadeOutgoingKey = null;
@@ -863,6 +880,7 @@ public sealed partial class EditorPage : Page
 
     private CanvasRenderTarget? _crossfadeOutgoing;
     private (TimeSpan OutgoingTime, int Width, int Height)? _crossfadeOutgoingKey;
+    private int _crossfadeGeneration;
 
     /// <summary>
     /// Renders a standalone preview frame for an arbitrary output position WITHOUT

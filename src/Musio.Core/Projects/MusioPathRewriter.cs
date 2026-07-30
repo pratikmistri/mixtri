@@ -142,7 +142,7 @@ public static class MusioPathRewriter
         if (timeline is null)
             return found;
 
-        Add(timeline.PrimaryVideoFilePath);
+        Add(timeline.PrimaryVideoFilePath, MediaReferenceKind.Recording);
 
         foreach (var segment in timeline.Segments)
         {
@@ -159,13 +159,15 @@ public static class MusioPathRewriter
                     Add(slide.BackgroundImagePath);
                     break;
                 case CameraSegment camera:
-                    Add(camera.WebcamFilePath);
+                    // Captured webcam media, not a decorative asset: dropping it on save
+                    // would take the only copy with it.
+                    Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
                     break;
             }
         }
 
         foreach (var camera in timeline.CameraSegments)
-            Add(camera.WebcamFilePath);
+            Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
 
         foreach (var zoom in timeline.ZoomKeyframes)
             Add(zoom.SourceVideoFilePath);
