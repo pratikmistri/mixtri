@@ -2525,10 +2525,9 @@ public sealed partial class EditorPage : Page
 
     private void UpdateZoomPanelVisibility()
     {
-        if (Timeline is null || ZoomSegmentPanel is null || ZoomHintText is null) return;
+        if (Timeline is null || ZoomSegmentPanel is null) return;
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
         ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
-        ZoomHintText.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -4257,7 +4256,6 @@ public sealed partial class EditorPage : Page
 
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
         if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
-        if (ZoomHintText is not null) ZoomHintText.Visibility = Visibility.Collapsed;
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -4319,8 +4317,6 @@ public sealed partial class EditorPage : Page
     private void HideTextSlidePanel()
     {
         PropertiesPanel?.SetPaneAvailable(PropertyPaneKind.TextSlide, false);
-        if (ZoomHintText is not null)
-            ZoomHintText.Visibility = Visibility.Visible;
     }
 
     private static void UpdateSlideColorSwatch(

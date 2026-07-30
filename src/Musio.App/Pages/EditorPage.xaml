@@ -336,14 +336,6 @@
                     </Button>
                 </StackPanel>
 
-                <!-- Default zoom controls hint (no segment selected) -->
-                <TextBlock
-                    x:Name="ZoomHintText"
-                    VerticalAlignment="Center"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="Drag on zoom track to add segment"
-                    FontStyle="Italic" />
-
                 <SplitButton
                     x:Name="SaveProjectButton"
                     Height="40"
