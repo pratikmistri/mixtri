@@ -296,7 +296,8 @@ public sealed class SessionCleanupServiceTests
             File.WriteAllBytes(Path.Combine(dir, "video.mp4"), new byte[payloadSize]);
             File.WriteAllText(
                 Path.Combine(dir, Musio.Core.Capture.VideoWriter.FinalizedMarkerName),
-                $"{{\"encoderVersion\":{Musio.Core.Capture.VideoWriter.EncoderVersion}}}");
+                Musio.Core.Capture.RecordingMarker.BuildContent(
+                    Musio.Core.Capture.VideoWriter.EncoderVersion));
         }
         if (withPartial)
         {
@@ -371,16 +372,24 @@ public sealed class SessionCleanupServiceTests
     }
 
     [TestMethod]
-    public void CleanupOrphanedImports_IsFoldedIntoStartupSweep()
+    public void CleanupExportedSessions_LeavesImportFoldersAlone()
     {
-        // The backstop must actually run from the startup entry point App calls, not only when
-        // invoked directly — otherwise nothing ever reclaims orphaned imports.
+        // CleanupExportedSessions is also run over the user's configured save folder, which
+        // they may put anything in — including a directory that happens to match import_*.
+        // Recognising a name is not proof this pipeline created it, so the session sweep must
+        // never delete import folders; only an explicitly-passed app-owned root may.
         var stale = CreateImportFolder(withVideo: false, withPartial: true, age: TimeSpan.FromDays(3));
 
         SessionCleanupService.CleanupExportedSessions(_testRoot);
 
+        Assert.IsTrue(Directory.Exists(stale),
+            "CleanupExportedSessions must not delete import folders — it is aimed at user-controlled paths");
+
+        // ...and the dedicated sweep, given an app-owned root, still reclaims it.
+        SessionCleanupService.CleanupOrphanedImports(_testRoot);
+
         Assert.IsFalse(Directory.Exists(stale),
-            "CleanupExportedSessions should also sweep stale orphaned imports");
+            "CleanupOrphanedImports should reclaim a stale failed import");
     }
 
     [TestMethod]

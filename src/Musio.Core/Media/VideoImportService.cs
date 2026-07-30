@@ -430,16 +430,29 @@ public static class VideoImportService
                 Debug.WriteLine($"[VideoImportService] Output VideoProperties duration failed: {ex.Message}");
             }
 
+            // Deliberately NOT MediaClip here. MediaClip is not closable — it releases its
+            // file handle only when collected — so measuring with it would keep `video.mp4`
+            // open for an unbounded time. If a later phase then fails or is cancelled,
+            // CleanupImportFolder could not delete the folder and would leak it. MediaSource
+            // is disposable, so the handle is released deterministically before we return.
             try
             {
-                var clip = await MediaClip.CreateFromFileAsync(file).AsTask(ct);
-                if (clip.OriginalDuration > TimeSpan.Zero)
-                    return clip.OriginalDuration;
+                var source = MediaSource.CreateFromStorageFile(file);
+                try
+                {
+                    await source.OpenAsync().AsTask(ct);
+                    if (source.Duration is { } d && d > TimeSpan.Zero)
+                        return d;
+                }
+                finally
+                {
+                    source.Dispose();
+                }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[VideoImportService] Output MediaClip duration failed: {ex.Message}");
+                Debug.WriteLine($"[VideoImportService] Output MediaSource duration failed: {ex.Message}");
             }
         }
         catch (OperationCanceledException) { throw; }

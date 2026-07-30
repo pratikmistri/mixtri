@@ -159,6 +159,10 @@ public partial class App : Application
             SessionCleanupService.CleanupExportedSessions(Musio.Core.Capture.SessionPaths.SessionsRoot);
             if (!string.IsNullOrWhiteSpace(savePath))
                 SessionCleanupService.CleanupExportedSessions(savePath);
+
+            // Aimed only at the app-owned imports root, never at savePath: the sweep matches
+            // import_* by name, and the user's save folder is theirs to put anything in.
+            SessionCleanupService.CleanupOrphanedImports(Musio.Core.Capture.SessionPaths.ImportsRoot);
         });
 
         _ = TryOpenActivationProjectAsync(mainWindow);

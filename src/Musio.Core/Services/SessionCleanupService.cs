@@ -177,13 +177,6 @@ public static class SessionCleanupService
             Debug.WriteLine($"[SessionCleanup] Error during bulk cleanup: {ex.Message}");
         }
 
-        // Backstop: reclaim abandoned import folders in the same root. Imports live under
-        // SessionPaths.ImportsRoot (== SessionsRoot), which is the folder App passes here at
-        // startup, so folding the sweep in means it runs without a second wiring point. When
-        // called for any other folder (e.g. the user's save location) there simply are no
-        // import_* folders and this is a no-op.
-        totalReclaimed += CleanupOrphanedImports(outputFolder);
-
         if (totalReclaimed > 0)
             Debug.WriteLine($"[SessionCleanup] Startup cleanup reclaimed {FormatBytes(totalReclaimed)}");
 
@@ -211,7 +204,18 @@ public static class SessionCleanupService
     /// copy of a clip a project still points at. This mirrors the recorder's rule that frames
     /// are never released without a finalized MP4: when in doubt, keep the media.
     /// </para>
+    /// <para>
+    /// <b>Only ever pass an app-owned root</b> (<see cref="SessionPaths.ImportsRoot"/>). This is
+    /// deliberately NOT folded into <see cref="CleanupExportedSessions"/>, which the app also
+    /// runs over the user's configured save folder: matching <c>import_*</c> by name there
+    /// would let a directory the user created and named themselves be deleted by a pattern
+    /// this pipeline never wrote. Recognising a name is not proof of ownership, so the caller
+    /// must choose the root explicitly.
+    /// </para>
     /// </remarks>
+    /// <param name="importsRoot">
+    /// App-owned imports root to sweep. Never a user-controlled directory.
+    /// </param>
     /// <returns>Total bytes reclaimed.</returns>
     public static long CleanupOrphanedImports(string importsRoot)
     {
