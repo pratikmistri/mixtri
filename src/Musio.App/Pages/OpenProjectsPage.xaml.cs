@@ -149,11 +149,14 @@ public sealed partial class OpenProjectsPage : Page
         var manifest = MusioPackageService.ReadManifest(entry.Path);
         var poster = MusioPackageService.ReadPoster(entry.Path);
 
-        var name = manifest?.Project.Name;
+        // The file name wins: it is what the user chose, what Explorer shows, and it stays
+        // right even if the file is renamed outside the app. The stored project name is
+        // only a fallback for a package whose file name is somehow unusable.
+        var name = Path.GetFileNameWithoutExtension(entry.Path);
+        if (string.IsNullOrWhiteSpace(name))
+            name = manifest?.Project.Name;
         if (string.IsNullOrWhiteSpace(name))
             name = entry.Name;
-        if (string.IsNullOrWhiteSpace(name))
-            name = System.IO.Path.GetFileNameWithoutExtension(entry.Path);
 
         var duration = manifest?.Project.Duration ?? entry.Duration;
         var saved = manifest?.SavedAt.ToLocalTime() ?? entry.LastUsedUtc.ToLocalTime();
@@ -162,7 +165,7 @@ public sealed partial class OpenProjectsPage : Page
         try { size = new FileInfo(entry.Path).Length; } catch { }
 
         var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {saved:d MMM yyyy}";
-        return (name, subtitle, poster);
+        return (name!, subtitle, poster);
     }
 
     private static async Task<BitmapImage?> CreateBitmapAsync(byte[] bytes)

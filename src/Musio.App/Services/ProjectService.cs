@@ -74,6 +74,14 @@ public class ProjectService
         if (CurrentProject is null)
             throw new InvalidOperationException("There is no project to save.");
 
+        // The file name the user chose is the project's identity from here on. Without
+        // this the project keeps its auto-generated "Recording <timestamp>" name, which
+        // then shows on the Projects card and in the export prefill instead of the name
+        // they actually picked.
+        var chosenName = Path.GetFileNameWithoutExtension(packagePath);
+        if (!string.IsNullOrWhiteSpace(chosenName))
+            CurrentProject.Name = chosenName;
+
         await MusioPackageService.SaveAsync(
             packagePath, CurrentProject, CurrentComposition, CurrentTimeline, progress, ct);
 

@@ -535,6 +535,31 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task Save_AdoptsTheChosenFileNameAsTheProjectName()
+    {
+        // The name in the manifest must match the file the user chose, so the Projects
+        // page and export prefill show that rather than the auto-generated capture name.
+        var (project, timeline) = BuildProject();
+        project.Name = "Recording 2026-07-29 20:37";
+
+        var packagePath = Path.Combine(_root, "Sample5.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        // MusioPackageService itself does not rename; ProjectService does before calling it.
+        // Verify the manifest faithfully carries whatever name it was handed.
+        var manifest = MusioPackageService.ReadManifest(packagePath);
+        Assert.IsNotNull(manifest);
+        Assert.AreEqual("Recording 2026-07-29 20:37", manifest.Project.Name);
+
+        project.Name = "Sample5";
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        manifest = MusioPackageService.ReadManifest(packagePath);
+        Assert.IsNotNull(manifest);
+        Assert.AreEqual("Sample5", manifest.Project.Name);
+    }
+
+    [TestMethod]
     public void IsPackagePath_MatchesOnlyTheMusioExtension()
     {
         Assert.IsTrue(MusioPackage.IsPackagePath(@"C:\a\b.musio"));
