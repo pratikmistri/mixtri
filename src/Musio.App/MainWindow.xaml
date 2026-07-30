@@ -88,6 +88,15 @@
                         <FontIcon FontSize="18" Glyph="&#xE78A;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem
+                    x:Name="ProjectsNavItem"
+                    Tag="projects"
+                    Content="Projects"
+                    ToolTipService.ToolTip="Open a saved project">
+                    <NavigationViewItem.Icon>
+                        <FontIcon FontSize="18" Glyph="&#xE8B7;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <!-- Settings uses a footer item rather than NavigationView's built-in one so it
                  gets the same stacked layout as the rest of the rail. -->

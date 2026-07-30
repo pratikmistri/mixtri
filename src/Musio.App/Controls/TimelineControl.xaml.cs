@@ -141,6 +141,7 @@ public sealed partial class TimelineControl : UserControl
     private Color SpeedLabelTextColor;
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
+    private Color TrackHintTextColor;
     private Color ClickStrokeColor;
 
     // Filmstrip thumbnail cache.
@@ -330,6 +331,7 @@ public sealed partial class TimelineControl : UserControl
         SpeedLabelTextColor   = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
         TrackCenterLineColor  = GetSystemBrushColor("DividerStrokeColorDefaultBrush", Color.FromArgb(100, 255, 255, 255));
         TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
+        TrackHintTextColor    = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(140, 255, 255, 255));
     }
 
     public void InvalidateAllCanvases()
@@ -431,8 +433,20 @@ public sealed partial class TimelineControl : UserControl
                 AspectRatio = _videoAspectRatio,
             };
         }
+
+        // Logged once per distinct key: this runs on every redraw, and a miss here is
+        // exactly what paints a video segment as a flat colour block.
+        if (!string.Equals(_lastUnresolvedThumbnailPath, filePath, StringComparison.Ordinal))
+        {
+            _lastUnresolvedThumbnailPath = filePath;
+            Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                $"no thumbnails for segment '{filePath}' (primary '{_primaryThumbnailFilePath}')");
+        }
+
         return null;
     }
+
+    private string? _lastUnresolvedThumbnailPath;
 
     /// <summary>Clears and disposes all cached thumbnails (primary and per-file).</summary>
     public void ClearThumbnails()
@@ -989,12 +1003,19 @@ public sealed partial class TimelineControl : UserControl
             float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
             float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
 
-            ds.DrawImage(thumb,
-                new Rect(drawX, y, drawW, thumbH),
-                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            try
+            {
+                ds.DrawImage(thumb,
+                    new Rect(drawX, y, drawW, thumbH),
+                    new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            }
+            catch (ObjectDisposedException)
+            {
+                // A single stale tile must not abort the draw - letting it propagate
+                // leaves the whole remainder of the track unpainted.
+            }
         }
     }
-
     /// <summary>Currently selected segment ID for text slide highlighting.</summary>
     private string? _selectedSegmentId;
 
@@ -1090,9 +1111,17 @@ public sealed partial class TimelineControl : UserControl
             float srcX = (drawX - tileX) / thumbW * thumb.SizeInPixels.Width;
             float srcW = drawW / thumbW * thumb.SizeInPixels.Width;
 
-            ds.DrawImage(thumb,
-                new Rect(drawX, y, drawW, thumbH),
-                new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            try
+            {
+                ds.DrawImage(thumb,
+                    new Rect(drawX, y, drawW, thumbH),
+                    new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+            }
+            catch (ObjectDisposedException)
+            {
+                // A single stale tile must not abort the draw - letting it propagate
+                // leaves the whole remainder of the track unpainted.
+            }
         }
     }
 
@@ -1118,6 +1147,25 @@ public sealed partial class TimelineControl : UserControl
 
         // Draw zoom segments as rounded rectangles
         var sorted = model.ZoomKeyframes.OrderBy(k => k.Timestamp).ToList();
+
+        // Empty state: the hint belongs on the track it describes, where the user is
+        // looking, rather than in the toolbar.
+        if (sorted.Count == 0)
+        {
+            using var hintFormat = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            {
+                FontSize = 11,
+                FontFamily = "Segoe UI",
+                FontStyle = Windows.UI.Text.FontStyle.Italic,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            };
+
+            ds.DrawText("Drag on zoom track to add segment",
+                new Rect(0, 0, w, h), TrackHintTextColor, hintFormat);
+            return;
+        }
+
         foreach (var kf in sorted)
         {
             float x1 = (float)GetZoomSegmentStartX(kf);

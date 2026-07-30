@@ -1,6 +1,7 @@
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
+using Musio.Core.Projects;
 using Musio.Core.Timeline;
 
 namespace Musio_App.Services;
@@ -18,11 +19,119 @@ public class ProjectService
     public CompositionConfig CurrentComposition { get; set; } = new();
     public TimelineModel? CurrentTimeline { get; set; }
 
+    /// <summary>
+    /// Path of the <c>.musio</c> file this project was opened from or last saved to,
+    /// or null when it has never been saved.
+    /// </summary>
+    public string? CurrentPackagePath { get; private set; }
+
+    /// <summary>
+    /// True when the current project's composition and timeline were restored from a
+    /// saved package rather than produced by a fresh recording.
+    /// </summary>
+    /// <remarks>
+    /// The editor applies opinionated defaults (cursor style, auto-zoom, smoothing) when
+    /// it first opens a recording. Those defaults must not run against a restored project
+    /// or they overwrite exactly the choices the user saved.
+    /// </remarks>
+    public bool IsRestoredFromPackage { get; private set; }
+
+    private readonly HashSet<string> _restoredSourcePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when <paramref name="videoFilePath"/> came from the restored package, and so
+    /// already carries the user's saved zoom and style choices.
+    /// </summary>
+    /// <remarks>
+    /// Tracked per source rather than per project: a recording appended *after* opening a
+    /// package is brand new and must still get its first-open defaults and auto-zoom,
+    /// even though the project as a whole was restored.
+    /// </remarks>
+    public bool IsRestoredSource(string? videoFilePath)
+        => !string.IsNullOrEmpty(videoFilePath) && _restoredSourcePaths.Contains(videoFilePath);
+
     public event EventHandler? ProjectChanged;
+
+    /// <summary>
+    /// Folder that <c>.musio</c> packages unpack their media into.
+    /// </summary>
+    /// <remarks>
+    /// Lives under LocalAppData rather than beside the package so opening a project from
+    /// a read-only location (a network share, a downloads folder) still works.
+    /// </remarks>
+    public static string PackageCacheRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Musio", "OpenProjects");
+
+    /// <summary>
+    /// Saves the current project, composition and timeline into a single
+    /// <c>.musio</c> package.
+    /// </summary>
+    public async Task SavePackageAsync(
+        string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        if (CurrentProject is null)
+            throw new InvalidOperationException("There is no project to save.");
+
+        // The file name the user chose is the project's identity from here on. Without
+        // this the project keeps its auto-generated "Recording <timestamp>" name, which
+        // then shows on the Projects card and in the export prefill instead of the name
+        // they actually picked.
+        var chosenName = Path.GetFileNameWithoutExtension(packagePath);
+        if (!string.IsNullOrWhiteSpace(chosenName))
+            CurrentProject.Name = chosenName;
+
+        await MusioPackageService.SaveAsync(
+            packagePath, CurrentProject, CurrentComposition, CurrentTimeline, progress, ct);
+
+        CurrentPackagePath = packagePath;
+
+        RecentProjectsStore.Remember(
+            packagePath, CurrentProject.Name, CurrentProject.Duration);
+    }
+
+    /// <summary>
+    /// Opens a <c>.musio</c> package and makes it the current project.
+    /// </summary>
+    public async Task OpenPackageAsync(
+        string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        var result = await MusioPackageService.OpenAsync(
+            packagePath, PackageCacheRoot, progress, ct);
+
+        CurrentProject = result.Project;
+        CurrentComposition = result.Composition;
+        CurrentTimeline = result.Timeline;
+        CurrentPackagePath = packagePath;
+        IsRestoredFromPackage = true;
+
+        _restoredSourcePaths.Clear();
+        foreach (var path in MusioPathRewriter.Enumerate(
+                     result.Project, result.Timeline, result.Composition))
+        {
+            _restoredSourcePaths.Add(path);
+        }
+
+        // A saved package carries its own timeline, so the primary segment must not be
+        // synthesized the way SetProject does for a fresh recording.
+        if (CurrentTimeline.Segments.Count == 0)
+        {
+            CurrentTimeline.Segments.Add(CreateVideoSegmentFromProject(result.Project));
+            CurrentTimeline.RecalculateSegmentPositions();
+        }
+
+        RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
+
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     public void SetProject(Project project)
     {
         CurrentProject = project;
+        CurrentPackagePath = null;
+        IsRestoredFromPackage = false;
+        _restoredSourcePaths.Clear();
         CurrentTimeline = new TimelineModel
         {
             Duration = project.Duration,

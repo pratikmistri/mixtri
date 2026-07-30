@@ -499,9 +499,9 @@ public sealed class SegmentFrameComposer : IDisposable
     {
         ct.ThrowIfCancellationRequested();
 
-        // Captured JPEG frames are the preferred source and are indexed with the
-        // RECORDING fps.
-        var reader = VideoFrameReader.OpenFromVideoPath(
+        // Captured JPEG frames are preferred when they still exist, otherwise frames are
+        // decoded from the finalized MP4. Either way they are indexed with the RECORDING fps.
+        var reader = await VideoFrameReader.OpenFromVideoPathAsync(
             videoFilePath, recordingFps > 0 ? recordingFps : 30);
 
         // Only open the video file when it is actually needed: as the frame source when

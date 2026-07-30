@@ -1,5 +1,6 @@
 namespace Musio.Core.Timeline;
 
+using System.Text.Json.Serialization;
 using Musio.Core.Processing;
 
 /// <summary>
@@ -7,6 +8,14 @@ using Musio.Core.Processing;
 /// The timeline is an ordered sequence of segments; each segment
 /// occupies a contiguous time range on the output.
 /// </summary>
+/// <remarks>
+/// The <c>$kind</c> discriminators are part of the on-disk <c>.musio</c> format. Renaming
+/// one silently breaks every project file already saved with it.
+/// </remarks>
+[JsonDerivedType(typeof(VideoSegment), "video")]
+[JsonDerivedType(typeof(TextSlideSegment), "textSlide")]
+[JsonDerivedType(typeof(CameraSegment), "camera")]
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$kind")]
 public abstract record TimelineSegment
 {
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
@@ -18,6 +27,7 @@ public abstract record TimelineSegment
     public TimeSpan Duration { get; set; }
 
     /// <summary>Position on the output timeline where this segment ends.</summary>
+    [JsonIgnore]
     public TimeSpan End => Start + Duration;
 
     /// <summary>Optional transition applied when entering this segment.</summary>

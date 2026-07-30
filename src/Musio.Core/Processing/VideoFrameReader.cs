@@ -1,64 +1,103 @@
 using Microsoft.Graphics.Canvas;
+using Musio.Core.Capture;
 
 namespace Musio.Core.Processing;
 
 /// <summary>
-/// Reads captured JPEG frames from a recording session's .frames directory
-/// and provides frame-at-time lookup for the editor preview.
+/// Provides frame-at-time lookup for the editor preview and the export compositor,
+/// backed by either a session's captured JPEGs or its finalized MP4.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The <c>.frames/</c> JPEG directory is preferred when present because it needs no
+/// decoding, but it is transient — it is deleted as soon as the MP4 finalizes. The MP4
+/// is the durable source and is what keeps a project editable indefinitely. Callers do
+/// not care which one is in use.
+/// </para>
+/// <para>
+/// Decoding an MP4 frame is far more expensive than loading a JPEG, so a small LRU of
+/// recently decoded frames sits in front of the source. The editor re-requests the frame
+/// at the current playhead on every property change, which would otherwise re-seek the
+/// decoder for an identical result.
+/// </para>
+/// </remarks>
 public sealed class VideoFrameReader : IDisposable
 {
-    private readonly string[] _framePaths;
+    /// <summary>Name of the transient per-session captured-frame scratch directory.</summary>
+    public const string FramesDirectoryName = ".frames";
+
+    private const int CacheCapacity = 12;
+
+    private readonly IFrameSource _source;
     private readonly int _fps;
-    private readonly CanvasDevice _device;
+
+    private readonly Dictionary<int, CanvasBitmap> _cache = [];
+    private readonly LinkedList<int> _cacheOrder = new();
+    private readonly SemaphoreSlim _cacheGate = new(1, 1);
+
     private bool _disposed;
 
-    public int FrameCount => _framePaths.Length;
+    public int FrameCount => _source.FrameCount;
     public int Fps => _fps;
+
+    /// <summary>Which backing store frames are being read from.</summary>
+    public FrameSourceKind SourceKind => _source.Kind;
+
     public TimeSpan Duration => _fps > 0
-        ? TimeSpan.FromSeconds((double)_framePaths.Length / _fps)
+        ? TimeSpan.FromSeconds((double)_source.FrameCount / _fps)
         : TimeSpan.Zero;
 
-    private VideoFrameReader(string[] framePaths, int fps, CanvasDevice device)
+    private VideoFrameReader(IFrameSource source, int fps)
     {
-        _framePaths = framePaths;
+        _source = source;
         _fps = fps;
-        _device = device;
     }
 
     /// <summary>
-    /// Creates a reader from a session folder that contains a .frames/ subdirectory.
+    /// Opens a session folder, preferring its captured JPEGs and falling back to the
+    /// finalized <c>video.mp4</c>. Returns null when neither is usable.
     /// </summary>
-    public static VideoFrameReader? OpenSession(string sessionFolder, int fps)
+    public static async Task<VideoFrameReader?> OpenSessionAsync(string sessionFolder, int fps)
     {
-        try
-        {
-            var framesDir = Path.Combine(sessionFolder, ".frames");
-            if (!Directory.Exists(framesDir))
-                return null;
-
-            var frames = Directory.GetFiles(framesDir, "frame_*.jpg");
-            Array.Sort(frames);
-
-            if (frames.Length == 0)
-                return null;
-
-            return new VideoFrameReader(frames, fps, CanvasDevice.GetSharedDevice());
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            System.Diagnostics.Debug.WriteLine($"[VideoFrameReader] Failed to open session: {ex.Message}");
+        if (string.IsNullOrEmpty(sessionFolder) || fps <= 0)
             return null;
-        }
+
+        var device = CanvasDevice.GetSharedDevice();
+
+        var jpeg = JpegFrameSource.Open(sessionFolder, device);
+        if (jpeg is not null)
+            return new VideoFrameReader(jpeg, fps);
+
+        var videoPath = Path.Combine(sessionFolder, "video.mp4");
+        var mp4 = await Mp4FrameSource.OpenAsync(
+            videoPath, fps, device, RecordingMarker.NeedsVerticalFlip(videoPath))
+            .ConfigureAwait(false);
+        return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
     }
 
     /// <summary>
-    /// Creates a reader from a video file path (looks for .frames/ in the same directory).
+    /// Opens the recording that <paramref name="videoFilePath"/> belongs to, preferring the
+    /// captured JPEGs alongside it and falling back to decoding the file itself.
     /// </summary>
-    public static VideoFrameReader? OpenFromVideoPath(string videoFilePath, int fps)
+    public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(string videoFilePath, int fps)
     {
+        if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
+            return null;
+
+        var device = CanvasDevice.GetSharedDevice();
+
         var dir = Path.GetDirectoryName(videoFilePath);
-        return dir is not null ? OpenSession(dir, fps) : null;
+        if (dir is not null)
+        {
+            var jpeg = JpegFrameSource.Open(dir, device);
+            if (jpeg is not null)
+                return new VideoFrameReader(jpeg, fps);
+        }
+
+        var mp4 = await Mp4FrameSource.OpenAsync(
+            videoFilePath, fps, device, RecordingMarker.NeedsVerticalFlip(videoFilePath))
+            .ConfigureAwait(false);
+        return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
     }
 
     /// <summary>
@@ -67,7 +106,7 @@ public sealed class VideoFrameReader : IDisposable
     public int GetFrameIndex(TimeSpan time)
     {
         int index = (int)(time.TotalSeconds * _fps);
-        return Math.Clamp(index, 0, Math.Max(0, _framePaths.Length - 1));
+        return Math.Clamp(index, 0, Math.Max(0, _source.FrameCount - 1));
     }
 
     /// <summary>
@@ -76,21 +115,96 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
     {
-        if (_disposed || frameIndex < 0 || frameIndex >= _framePaths.Length)
+        if (_disposed || frameIndex < 0 || frameIndex >= _source.FrameCount)
             return null;
 
-        var path = _framePaths[frameIndex];
-        if (!File.Exists(path))
+        // JPEG loads are cheap and already backed by the OS file cache; adding a GPU-side
+        // cache on top would cost memory for no gain.
+        if (_source.Kind == FrameSourceKind.CapturedJpeg)
+            return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+
+        if (!await TryEnterCacheAsync().ConfigureAwait(false))
             return null;
+        try
+        {
+            if (_cache.TryGetValue(frameIndex, out var cached))
+            {
+                Touch(frameIndex);
+                return Clone(cached);
+            }
+        }
+        finally
+        {
+            ReleaseCache();
+        }
+
+        var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        if (decoded is null)
+            return null;
+
+        if (!await TryEnterCacheAsync().ConfigureAwait(false))
+        {
+            // Disposed while decoding — the caller still owns this bitmap.
+            return decoded;
+        }
+        try
+        {
+            if (_cache.TryGetValue(frameIndex, out var raced))
+            {
+                // Another caller cached this frame while we were decoding.
+                Touch(frameIndex);
+                decoded.Dispose();
+                return Clone(raced);
+            }
+
+            _cache[frameIndex] = decoded;
+            _cacheOrder.AddFirst(frameIndex);
+            Evict();
+
+            return Clone(decoded);
+        }
+        finally
+        {
+            ReleaseCache();
+        }
+    }
+
+    /// <summary>
+    /// Acquires the cache lock, returning false when the reader has been disposed.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Dispose"/> takes the same lock before tearing the cache down, so holding
+    /// it guarantees no cached bitmap is disposed while it is being cloned. Callers treat
+    /// a disposed reader as "no frame" rather than an error, matching the pre-existing
+    /// non-throwing contract of this method.
+    /// </remarks>
+    private async Task<bool> TryEnterCacheAsync()
+    {
+        if (_disposed)
+            return false;
 
         try
         {
-            return await CanvasBitmap.LoadAsync(_device, path);
+            await _cacheGate.WaitAsync().ConfigureAwait(false);
         }
-        catch
+        catch (ObjectDisposedException)
         {
-            return null;
+            return false;
         }
+
+        if (_disposed)
+        {
+            ReleaseCache();
+            return false;
+        }
+
+        return true;
+    }
+
+    private void ReleaseCache()
+    {
+        try { _cacheGate.Release(); }
+        catch (ObjectDisposedException) { }
     }
 
     /// <summary>
@@ -100,8 +214,72 @@ public sealed class VideoFrameReader : IDisposable
     public Task<CanvasBitmap?> LoadFrameAtTimeAsync(TimeSpan time)
         => LoadFrameAsync(GetFrameIndex(time));
 
+    private void Touch(int frameIndex)
+    {
+        _cacheOrder.Remove(frameIndex);
+        _cacheOrder.AddFirst(frameIndex);
+    }
+
+    private void Evict()
+    {
+        while (_cacheOrder.Count > CacheCapacity)
+        {
+            var oldest = _cacheOrder.Last!.Value;
+            _cacheOrder.RemoveLast();
+            if (_cache.Remove(oldest, out var bitmap))
+                bitmap.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Returns an independent copy so cache eviction can never dispose a bitmap a caller
+    /// is still drawing with.
+    /// </summary>
+    private static CanvasBitmap Clone(CanvasBitmap source)
+    {
+        var copy = new CanvasRenderTarget(
+            CanvasDevice.GetSharedDevice(),
+            source.SizeInPixels.Width,
+            source.SizeInPixels.Height,
+            96);
+
+        using (var ds = copy.CreateDrawingSession())
+            ds.DrawImage(source);
+
+        return copy;
+    }
+
     public void Dispose()
     {
+        if (_disposed)
+            return;
+
         _disposed = true;
+
+        // Wait for any in-flight clone to finish before disposing the bitmaps it is
+        // reading from. The gate is only ever held for GPU blits, so this is brief.
+        bool held = false;
+        try
+        {
+            held = _cacheGate.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (ObjectDisposedException) { }
+
+        try
+        {
+            foreach (var bitmap in _cache.Values)
+                bitmap.Dispose();
+            _cache.Clear();
+            _cacheOrder.Clear();
+        }
+        finally
+        {
+            if (held) ReleaseCache();
+        }
+
+        _source.Dispose();
+
+        // _cacheGate is deliberately NOT disposed: SemaphoreSlim.Dispose does not release
+        // callers already parked in WaitAsync, so disposing it would strand them forever.
     }
 }

@@ -1,20 +1,35 @@
 using System.Diagnostics;
+using Musio.Core.Capture;
+using Musio.Core.Processing;
 
 namespace Musio.Core.Services;
 
 /// <summary>
-/// Cleans up disk space from recording session folders by removing
-/// raw .frames/ directories after a successful export. Preserves
-/// video.mp4 and metadata files for future capture history.
+/// Reclaims disk space from recording session folders by removing the transient
+/// <c>.frames/</c> scratch directories.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <c>VideoWriter</c> normally deletes its own frames the moment the MP4 finalizes, so
+/// this is a backstop for sessions that were interrupted — a crash between capture and
+/// finalization, or an app kill — plus a migration path for sessions recorded before the
+/// editor could decode MP4s.
+/// </para>
+/// <para>
+/// The safety rule is absolute: frames are only ever deleted when a non-empty
+/// <c>video.mp4</c> exists beside them. Until it does, they are the only copy of the
+/// recording. Export is no longer a precondition, because a project stays fully editable
+/// from its MP4.
+/// </para>
+/// </remarks>
 public static class SessionCleanupService
 {
     private const string ExportMarker = "exported.marker";
-    private const string FramesDir = ".frames";
+    private static readonly string FramesDir = VideoFrameReader.FramesDirectoryName;
 
     /// <summary>
-    /// Writes a marker file indicating this session has been successfully exported.
-    /// Call after a successful export so startup cleanup knows it's safe.
+    /// Writes a marker file recording that this session has been exported at least once.
+    /// Retained for capture history; it is no longer a precondition for cleanup.
     /// </summary>
     public static void MarkSessionExported(string sessionFolder)
     {
@@ -26,6 +41,40 @@ public static class SessionCleanupService
         catch (Exception ex)
         {
             Debug.WriteLine($"[SessionCleanup] Failed to write export marker: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Returns true when the session's captured JPEGs are safe to delete: the MP4 must
+    /// exist, be non-empty, and carry the marker proving it came from a completed run of
+    /// the current encoder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The marker is not redundant with the file simply existing. Builds before the
+    /// orientation fix wrote a vertically flipped MP4, so for those sessions the JPEGs
+    /// are the only correctly oriented copy of the recording — deleting them would leave
+    /// a permanently mirrored project with no way back.
+    /// </para>
+    /// <para>
+    /// It also proves the encode ran to completion. Older builds wrote <c>video.mp4</c>
+    /// in place, so a session interrupted mid-finalize can leave a non-empty but
+    /// truncated file that a length check alone would happily accept.
+    /// </para>
+    /// </remarks>
+    public static bool CanReleaseFrames(string sessionFolder)
+    {
+        if (!HasValidVideo(sessionFolder))
+            return false;
+
+        try
+        {
+            var videoPath = Path.Combine(sessionFolder, "video.mp4");
+            return RecordingMarker.ReadEncoderVersion(videoPath) >= VideoWriter.EncoderVersion;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -47,13 +96,14 @@ public static class SessionCleanupService
     }
 
     /// <summary>
-    /// Deletes the .frames/ directory and finalize_debug.log from a session folder.
-    /// Only proceeds if video.mp4 exists and is non-empty.
+    /// Deletes the <c>.frames/</c> directory and finalize_debug.log from a session folder.
+    /// Only proceeds when <see cref="CanReleaseFrames"/> allows it, so an interrupted or
+    /// legacy recording never loses its only usable copy.
     /// </summary>
     /// <returns>Bytes reclaimed, or 0 if nothing was cleaned.</returns>
     public static long CleanupSession(string sessionFolder)
     {
-        if (!HasValidVideo(sessionFolder))
+        if (!CanReleaseFrames(sessionFolder))
             return 0;
 
         long reclaimed = 0;
@@ -91,8 +141,8 @@ public static class SessionCleanupService
     }
 
     /// <summary>
-    /// Cleans up .frames/ from all session folders that have an export marker.
-    /// Runs synchronously on a background thread — call via Task.Run.
+    /// Cleans up leftover <c>.frames/</c> from every session folder that has a finalized
+    /// MP4. Runs synchronously on a background thread — call via Task.Run.
     /// </summary>
     /// <returns>Total bytes reclaimed.</returns>
     public static long CleanupExportedSessions(string outputFolder)
@@ -106,11 +156,7 @@ public static class SessionCleanupService
         {
             foreach (var dir in Directory.EnumerateDirectories(outputFolder, "session_*"))
             {
-                var markerPath = Path.Combine(dir, ExportMarker);
-                if (!File.Exists(markerPath))
-                    continue;
-
-                // Skip sessions whose .frames/ was already cleaned
+                // Skip sessions whose .frames/ was already released
                 var framesPath = Path.Combine(dir, FramesDir);
                 if (!Directory.Exists(framesPath))
                     continue;
@@ -130,7 +176,8 @@ public static class SessionCleanupService
     }
 
     /// <summary>
-    /// Calculates total reclaimable space from exported sessions that still have .frames/.
+    /// Calculates total reclaimable space from sessions that still have a <c>.frames/</c>
+    /// directory alongside a finalized MP4.
     /// </summary>
     public static long GetReclaimableSpace(string outputFolder)
     {
@@ -142,12 +189,8 @@ public static class SessionCleanupService
         {
             foreach (var dir in Directory.EnumerateDirectories(outputFolder, "session_*"))
             {
-                var markerPath = Path.Combine(dir, ExportMarker);
-                if (!File.Exists(markerPath))
-                    continue;
-
                 var framesPath = Path.Combine(dir, FramesDir);
-                if (Directory.Exists(framesPath) && HasValidVideo(dir))
+                if (Directory.Exists(framesPath) && CanReleaseFrames(dir))
                     total += GetDirectorySize(framesPath);
             }
         }

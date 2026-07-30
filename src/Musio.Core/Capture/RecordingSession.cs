@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Musio.Core.Models;
+using Musio.Core.Settings;
 using Windows.Foundation;
 
 namespace Musio.Core.Capture;
@@ -29,6 +30,12 @@ public record RecordingSessionConfig
     public bool IsWebcamEnabled { get; init; } = false;
     public string? WebcamDeviceId { get; init; }
     public string OutputFolder { get; init; } = "";
+
+    /// <summary>
+    /// Bitrate of the intermediate MP4, which doubles as the project's durable
+    /// re-editable master once the captured JPEGs are released.
+    /// </summary>
+    public CaptureQuality CaptureQuality { get; init; } = CaptureQuality.HighFidelity;
 }
 
 public class RecordingStatsEventArgs : EventArgs
@@ -333,9 +340,11 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             if (_keyboardRecorder is not null)
                 SaveKeyboardData(_keyboardDataFilePath, _keyboardRecorder.GetRecordedEvents());
 
-            // Finalize video writer (encode MP4 from frames)
-            // If encoding fails, the session still completes — the editor can
-            // work directly from the .frames/ JPEG directory.
+            // Finalize video writer (encode MP4 from frames).
+            // The captured JPEGs are a write-ahead buffer, not an archive: once the MP4
+            // exists the editor can decode from it indefinitely, so they are released
+            // straight away. If encoding fails they are the only surviving copy of the
+            // recording and are deliberately kept.
             if (_videoWriter is not null)
             {
                 try
@@ -349,6 +358,9 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                     Debug.WriteLine(
                         $"[RecordingSession] MP4 finalization failed (frames preserved): {finEx.Message}");
                 }
+
+                if (_videoWriter.FinalizeSucceeded)
+                    _videoWriter.DeleteCapturedFrames();
             }
 
             // Collect audio file paths
@@ -560,7 +572,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
                 _videoWriter = new VideoWriter(
                     _videoFilePath, _captureWidth, _captureHeight, _config.Fps,
-                    _screenEngine?.Device, _physicalCropRect);
+                    _screenEngine?.Device, _physicalCropRect, _config.CaptureQuality);
             }
 
             // Fill any missed frame slots with duplicates of the previous frame

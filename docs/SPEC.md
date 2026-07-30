@@ -300,7 +300,11 @@ Musio/
 
 4. **Hardware encoding**: Real-time capture uses HW encoder for temp file. Export also uses HW encoder with higher quality settings. Auto-detect: NVENC (NVIDIA) → QSV (Intel) → AMF (AMD) → CPU fallback.
 
-5. **Project file format**: Each recording session creates a project folder containing: raw video (MP4), cursor data (binary), audio tracks, project metadata (JSON). This allows non-destructive editing.
+5. **Project file format**: A recording session produces a working folder under `%LOCALAPPDATA%\Musio\Sessions\session_*` (raw video MP4, cursor/keyboard data, audio tracks). A session is working state, not a deliverable, so the user's Videos folder only ever receives things they asked for: a saved `.musio` project or an exported MP4. Saving bundles the session into a single `.musio` file — a ZIP with a `manifest.json` plus stored media entries — so a project is one item in Explorer, portable, and re-openable for non-destructive editing. Compression is per entry: already-compressed media is stored verbatim, PCM audio and event logs are deflated.
+
+6. **Captured frames are a scratch buffer, not an archive**: `VideoWriter` writes one JPEG per frame during capture as a write-ahead buffer, then encodes `video.mp4` and deletes them as soon as finalization succeeds (and only then — if it fails they are the sole copy). Finalization transcodes to `video.mp4.partial` and moves it into place only after every check passes, then writes a `finalized.marker`; cleanup requires that marker, so an interrupted or pre-orientation-fix session keeps its frames. The editor and exporter read frames through `VideoFrameReader`, which prefers those JPEGs when present and otherwise decodes the MP4 via `MediaPlayer` frame-server mode. The MP4 is the durable master, which is what keeps a project editable long after its frames are gone. Its bitrate is set by the **Capture quality** setting (12/30/60 Mbps base at 1080p, scaled by pixel count), encoded with a ~1s GOP so scrubbing never rewinds far. Filmstrip thumbnails come from `MediaComposition.GetThumbnailsAsync` instead, because sparse access through a single-position decoder is an order of magnitude slower and contends with the preview.
+
+7. **Audio stays uncompressed**: Capture converts the WASAPI mix format down to 16-bit PCM, but no further. A/V alignment is derived from the first captured sample, and compressed codecs prepend encoder priming samples that would silently shift it; size is recovered by deflating the WAV inside the `.musio` package instead.
 
 ---
 

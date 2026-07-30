@@ -235,9 +235,12 @@ public partial class RecordingViewModel : ObservableObject
                 SetForegroundWindow(SelectedWindow.Handle);
             }
 
-            var outputFolder = AppSettings.Instance.DefaultSavePath;
-            if (string.IsNullOrWhiteSpace(outputFolder))
-                outputFolder = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+            // Recordings are working state, not deliverables: they go to LocalAppData so
+            // the user's save folder only ever receives saved .musio projects and exports.
+            var fallback = AppSettings.Instance.DefaultSavePath;
+            if (string.IsNullOrWhiteSpace(fallback))
+                fallback = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+            var outputFolder = SessionPaths.EnsureSessionsRoot(fallback);
 
             var config = new RecordingSessionConfig
             {
@@ -248,6 +251,7 @@ public partial class RecordingViewModel : ObservableObject
                 IsWebcamEnabled = IsWebcamEnabled,
                 WebcamDeviceId = GetWebcamDeviceId(),
                 OutputFolder = outputFolder,
+                CaptureQuality = AppSettings.Instance.CaptureQuality,
             };
 
             _session = new RecordingSession(config);

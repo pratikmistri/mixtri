@@ -23,7 +23,7 @@ public sealed class SessionCleanupServiceTests
     }
 
     private string CreateSessionFolder(string name, bool withVideo = true, bool withFrames = false,
-        bool withMarker = false, long videoSize = 1024)
+        bool withMarker = false, long videoSize = 1024, bool finalized = true)
     {
         var dir = Path.Combine(_testRoot, name);
         Directory.CreateDirectory(dir);
@@ -45,6 +45,15 @@ public sealed class SessionCleanupServiceTests
         if (withMarker)
         {
             File.WriteAllText(Path.Combine(dir, "exported.marker"), DateTimeOffset.UtcNow.ToString("O"));
+        }
+
+        // Proves the MP4 came from a completed run of the current encoder. Without it the
+        // session is treated as legacy and its frames are never released.
+        if (withVideo && finalized)
+        {
+            File.WriteAllText(
+                Path.Combine(dir, Musio.Core.Capture.VideoWriter.FinalizedMarkerName),
+                $"{{\"encoderVersion\":{Musio.Core.Capture.VideoWriter.EncoderVersion}}}");
         }
 
         return dir;
@@ -156,17 +165,55 @@ public sealed class SessionCleanupServiceTests
     #region CleanupExportedSessions
 
     [TestMethod]
-    public void CleanupExportedSessions_CleansMarkedSessions()
+    public void CleanupExportedSessions_CleansEverySessionWithAFinalizedVideo()
     {
         CreateSessionFolder("session_a", withVideo: true, withFrames: true, withMarker: true);
         CreateSessionFolder("session_b", withVideo: true, withFrames: true, withMarker: false);
 
         long reclaimed = SessionCleanupService.CleanupExportedSessions(_testRoot);
 
-        Assert.IsTrue(reclaimed > 0, "Should reclaim from session_a");
+        Assert.IsTrue(reclaimed > 0, "Should reclaim from both sessions");
         Assert.IsFalse(Directory.Exists(Path.Combine(_testRoot, "session_a", ".frames")));
-        Assert.IsTrue(Directory.Exists(Path.Combine(_testRoot, "session_b", ".frames")),
-            "session_b should not be cleaned (no marker)");
+        Assert.IsFalse(Directory.Exists(Path.Combine(_testRoot, "session_b", ".frames")),
+            "Export is no longer a precondition — a finalized MP4 keeps the project editable");
+    }
+
+    [TestMethod]
+    public void CleanupExportedSessions_PreservesFramesWhenVideoIsMissing()
+    {
+        CreateSessionFolder("session_unfinalized", withVideo: false, withFrames: true, withMarker: true);
+
+        long reclaimed = SessionCleanupService.CleanupExportedSessions(_testRoot);
+
+        Assert.AreEqual(0, reclaimed);
+        Assert.IsTrue(Directory.Exists(Path.Combine(_testRoot, "session_unfinalized", ".frames")),
+            "Frames are the only copy of a recording whose MP4 never finalized");
+    }
+
+    [TestMethod]
+    public void CleanupExportedSessions_PreservesFramesOfLegacySessions()
+    {
+        // No finalized marker: the MP4 predates the orientation fix, so it is vertically
+        // flipped and the JPEGs are the only correctly oriented copy.
+        CreateSessionFolder("session_legacy", withVideo: true, withFrames: true, finalized: false);
+
+        long reclaimed = SessionCleanupService.CleanupExportedSessions(_testRoot);
+
+        Assert.AreEqual(0, reclaimed);
+        Assert.IsTrue(Directory.Exists(Path.Combine(_testRoot, "session_legacy", ".frames")),
+            "A legacy session's frames must never be deleted — its MP4 is unusable");
+    }
+
+    [TestMethod]
+    public void CanReleaseFrames_RequiresBothVideoAndFinalizedMarker()
+    {
+        var complete = CreateSessionFolder("session_complete", withVideo: true);
+        var legacy = CreateSessionFolder("session_nomarker", withVideo: true, finalized: false);
+        var novideo = CreateSessionFolder("session_novideo", withVideo: false);
+
+        Assert.IsTrue(SessionCleanupService.CanReleaseFrames(complete));
+        Assert.IsFalse(SessionCleanupService.CanReleaseFrames(legacy));
+        Assert.IsFalse(SessionCleanupService.CanReleaseFrames(novideo));
     }
 
     [TestMethod]
@@ -191,13 +238,33 @@ public sealed class SessionCleanupServiceTests
     }
 
     [TestMethod]
-    public void GetReclaimableSpace_NoMarker_ReturnsZero()
+    public void GetReclaimableSpace_NoMarker_StillCountsFinalizedSession()
     {
         CreateSessionFolder("session_nomarker", withVideo: true, withFrames: true, withMarker: false);
 
         long space = SessionCleanupService.GetReclaimableSpace(_testRoot);
 
+        Assert.IsTrue(space > 0, "A finalized MP4 is what makes frames reclaimable, not an export");
+    }
+
+    [TestMethod]
+    public void GetReclaimableSpace_NoVideo_ReturnsZero()
+    {
+        CreateSessionFolder("session_novideo", withVideo: false, withFrames: true, withMarker: true);
+
+        long space = SessionCleanupService.GetReclaimableSpace(_testRoot);
+
         Assert.AreEqual(0, space);
+    }
+
+    [TestMethod]
+    public void GetReclaimableSpace_LegacySession_ReturnsZero()
+    {
+        CreateSessionFolder("session_legacy", withVideo: true, withFrames: true, finalized: false);
+
+        long space = SessionCleanupService.GetReclaimableSpace(_testRoot);
+
+        Assert.AreEqual(0, space, "a legacy session's frames are not reclaimable");
     }
 
     [TestMethod]

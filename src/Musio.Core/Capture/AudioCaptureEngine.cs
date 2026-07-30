@@ -10,8 +10,8 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private WasapiLoopbackCapture? _systemCapture;
     private WasapiCapture? _micCapture;
-    private WaveFileWriter? _systemWriter;
-    private WaveFileWriter? _micWriter;
+    private Pcm16CaptureWriter? _systemWriter;
+    private Pcm16CaptureWriter? _micWriter;
 
     private string? _systemAudioFilePath;
     private string? _micAudioFilePath;
@@ -112,7 +112,7 @@ public sealed class AudioCaptureEngine : IDisposable
                         SystemAudioDeviceName = device.FriendlyName;
 
                         _systemCapture = new WasapiLoopbackCapture(device);
-                        _systemWriter = new WaveFileWriter(_systemAudioFilePath, _systemCapture.WaveFormat);
+                        _systemWriter = new Pcm16CaptureWriter(_systemAudioFilePath, _systemCapture.WaveFormat);
 
                         _systemCapture.DataAvailable += OnSystemDataAvailable;
                         _systemCapture.RecordingStopped += OnSystemRecordingStopped;
@@ -137,7 +137,7 @@ public sealed class AudioCaptureEngine : IDisposable
                         MicDeviceName = device.FriendlyName;
 
                         _micCapture = new WasapiCapture(device);
-                        _micWriter = new WaveFileWriter(_micAudioFilePath, _micCapture.WaveFormat);
+                        _micWriter = new Pcm16CaptureWriter(_micAudioFilePath, _micCapture.WaveFormat);
 
                         _micCapture.DataAvailable += OnMicDataAvailable;
                         _micCapture.RecordingStopped += OnMicRecordingStopped;
@@ -167,8 +167,8 @@ public sealed class AudioCaptureEngine : IDisposable
     {
         WasapiLoopbackCapture? sysCapture;
         WasapiCapture? micCapture;
-        WaveFileWriter? sysWriter;
-        WaveFileWriter? micWriter;
+        Pcm16CaptureWriter? sysWriter;
+        Pcm16CaptureWriter? micWriter;
 
         // Grab references and null out fields under lock so data handlers
         // become no-ops immediately. Then stop/dispose OUTSIDE the lock
@@ -225,7 +225,7 @@ public sealed class AudioCaptureEngine : IDisposable
             if (_isPaused || _systemWriter == null) return;
             try
             {
-                _systemWriter.Write(e.Buffer, 0, e.BytesRecorded);
+                _systemWriter.Write(e.Buffer, e.BytesRecorded);
             }
             catch (Exception ex)
             {
@@ -244,7 +244,7 @@ public sealed class AudioCaptureEngine : IDisposable
             if (_isPaused || _micWriter == null) return;
             try
             {
-                _micWriter.Write(e.Buffer, 0, e.BytesRecorded);
+                _micWriter.Write(e.Buffer, e.BytesRecorded);
             }
             catch (Exception ex)
             {
@@ -272,7 +272,7 @@ public sealed class AudioCaptureEngine : IDisposable
         }
     }
 
-    private static void StopAndDisposeCapture(IDisposable? capture, WaveFileWriter? writer)
+    private static void StopAndDisposeCapture(IDisposable? capture, Pcm16CaptureWriter? writer)
     {
         try
         {
@@ -290,7 +290,7 @@ public sealed class AudioCaptureEngine : IDisposable
         try { capture?.Dispose(); } catch { /* best-effort */ }
     }
 
-    private static void SafeDisposeWriter(WaveFileWriter? writer)
+    private static void SafeDisposeWriter(Pcm16CaptureWriter? writer)
     {
         try { writer?.Dispose(); } catch { /* best-effort dispose */ }
     }
@@ -301,8 +301,8 @@ public sealed class AudioCaptureEngine : IDisposable
     {
         WasapiLoopbackCapture? sysCapture;
         WasapiCapture? micCapture;
-        WaveFileWriter? sysWriter;
-        WaveFileWriter? micWriter;
+        Pcm16CaptureWriter? sysWriter;
+        Pcm16CaptureWriter? micWriter;
 
         lock (_lock)
         {

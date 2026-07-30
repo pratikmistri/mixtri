@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio_App.Pages;
 using Musio_App.Services;
+using Musio.Core.Projects;
 using Musio.Core.Services;
 using Musio.Core.Settings;
 using Windows.ApplicationModel.ExtendedExecution;
@@ -83,6 +85,56 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Opens the <c>.musio</c> project the app was launched with, when it was started by
+    /// double-clicking one in Explorer.
+    /// </summary>
+    /// <remarks>
+    /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
+    /// association should not prevent the app from starting.
+    /// </remarks>
+    private static async System.Threading.Tasks.Task TryOpenActivationProjectAsync(MainWindow window)
+    {
+        string? path = null;
+        try
+        {
+            var activation = Microsoft.Windows.AppLifecycle.AppInstance
+                .GetCurrent().GetActivatedEventArgs();
+
+            if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
+                return;
+
+            if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
+                return;
+
+            path = fileArgs.Files
+                .OfType<Windows.Storage.IStorageFile>()
+                .Select(f => f.Path)
+                .FirstOrDefault(MusioPackage.IsPackagePath);
+        }
+        catch (Exception ex)
+        {
+            // Unpackaged runs have no activation info at all.
+            System.Diagnostics.Debug.WriteLine($"[App] No file activation: {ex.Message}");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(path))
+            return;
+
+        try
+        {
+            await ProjectService.Instance.OpenPackageAsync(path);
+            window.DispatcherQueue.TryEnqueue(window.ShowEditor);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Could not open '{path}': {ex}");
+            window.DispatcherQueue.TryEnqueue(() =>
+                window.ShowRecordingError($"Could not open project: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
     /// Invoked when the application is launched.
     /// </summary>
     /// <param name="args">Details about the launch request and process.</param>
@@ -98,10 +150,18 @@ public partial class App : Application
         _shell = new ShellCoordinator(mainWindow, ShellSettings.Instance.StartupMode);
         _shell.Start();
 
-        // Clean up .frames/ from previously-exported sessions in the background
+        // Release captured JPEGs from finalized sessions in the background. Both roots are
+        // swept: the LocalAppData sessions folder used now, and the user's save folder,
+        // which holds sessions recorded before they moved out of it.
         var savePath = AppSettings.Instance.DefaultSavePath;
         _ = System.Threading.Tasks.Task.Run(() =>
-            SessionCleanupService.CleanupExportedSessions(savePath));
+        {
+            SessionCleanupService.CleanupExportedSessions(Musio.Core.Capture.SessionPaths.SessionsRoot);
+            if (!string.IsNullOrWhiteSpace(savePath))
+                SessionCleanupService.CleanupExportedSessions(savePath);
+        });
+
+        _ = TryOpenActivationProjectAsync(mainWindow);
 
         // System tray and hotkeys are optional — app works without them
         try

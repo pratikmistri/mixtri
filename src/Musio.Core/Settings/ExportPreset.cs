@@ -56,6 +56,27 @@ public enum VideoQuality
 }
 
 /// <summary>
+/// Bitrate of the intermediate MP4 written during recording.
+/// </summary>
+/// <remarks>
+/// This file is the durable, re-editable master for a project — the <c>.frames/</c> JPEGs
+/// are deleted once it finalizes — so it is encoded with generous headroom rather than at
+/// delivery bitrates. Every level here still costs far less disk than the JPEG sequence it
+/// replaces (~60 Mbps equivalent at 1080p30).
+/// </remarks>
+public enum CaptureQuality
+{
+    /// <summary>~12 Mbps at 1080p. Smallest files; visible softening on fast scrolling text.</summary>
+    Balanced,
+
+    /// <summary>~30 Mbps at 1080p. Default — comfortably above the JPEG path for screen content.</summary>
+    HighFidelity,
+
+    /// <summary>~60 Mbps at 1080p. Near-transparent; for footage that will be re-encoded repeatedly.</summary>
+    Master
+}
+
+/// <summary>
 /// Defines export settings for a recording.
 /// </summary>
 public class ExportPreset
