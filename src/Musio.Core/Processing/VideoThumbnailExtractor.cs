@@ -98,12 +98,14 @@ public static class VideoThumbnailExtractor
                 times, 0, targetHeight, VideoFramePrecision.NearestFrame).AsTask(ct);
 
             var thumbnails = new CanvasBitmap?[count];
+            bool flip = Musio.Core.Capture.RecordingMarker.NeedsVerticalFlip(videoFilePath);
             for (int i = 0; i < count && i < streams.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    thumbnails[i] = await CanvasBitmap.LoadAsync(device, streams[i]);
+                    var loaded = await CanvasBitmap.LoadAsync(device, streams[i]);
+                    thumbnails[i] = flip ? FlipVertically(loaded, device) : loaded;
                 }
                 catch (Exception ex)
                 {
@@ -121,6 +123,113 @@ public static class VideoThumbnailExtractor
         {
             Debug.WriteLine($"[VideoThumbnailExtractor] Failed for '{videoFilePath}': {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds a filmstrip from a session's captured JPEGs instead of its MP4.
+    /// </summary>
+    /// <remarks>
+    /// The JPEGs survive exactly when MP4 finalization failed — which is the case the
+    /// whole write-ahead design exists for, and precisely when
+    /// <see cref="ExtractAsync"/> can return nothing. Without this the preview would play
+    /// happily from the frames while the timeline showed a flat colour block.
+    /// </remarks>
+    /// <param name="fps">Recording FPS, used to turn frame indices into timestamps.</param>
+    public static async Task<ThumbnailStrip?> ExtractFromCapturedFramesAsync(
+        string videoFilePath,
+        int fps,
+        int targetHeight,
+        CanvasDevice device,
+        int maxCount = 300,
+        double minIntervalSeconds = 0.5,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0 || fps <= 0)
+            return null;
+
+        var sessionFolder = Path.GetDirectoryName(Path.GetFullPath(videoFilePath));
+        if (string.IsNullOrEmpty(sessionFolder))
+            return null;
+
+        using var source = JpegFrameSource.Open(sessionFolder, device);
+        if (source is null || source.FrameCount == 0)
+            return null;
+
+        double totalSeconds = source.FrameCount / (double)fps;
+        double interval = Math.Max(minIntervalSeconds, totalSeconds / 200);
+        int count = Math.Clamp((int)(totalSeconds / interval) + 1, 1, maxCount);
+
+        var thumbnails = new CanvasBitmap?[count];
+        double aspectRatio = 16.0 / 9.0;
+
+        for (int i = 0; i < count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            int frameIndex = Math.Clamp(
+                (int)(i * interval * fps), 0, source.FrameCount - 1);
+
+            using var frame = await source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+            if (frame is null)
+                continue;
+
+            double frameAspect = frame.Size.Height > 0
+                ? frame.Size.Width / frame.Size.Height
+                : aspectRatio;
+            if (i == 0)
+                aspectRatio = frameAspect;
+
+            try
+            {
+                int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
+                var scaled = new CanvasRenderTarget(device, width, targetHeight, 96);
+                using (var ds = scaled.CreateDrawingSession())
+                    ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
+
+                thumbnails[i] = scaled;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[VideoThumbnailExtractor] JPEG thumbnail {i} failed: {ex.Message}");
+            }
+        }
+
+        return new ThumbnailStrip(
+            thumbnails, interval, aspectRatio, TimeSpan.FromSeconds(totalSeconds));
+    }
+
+    /// <summary>
+    /// Returns a vertically mirrored copy of <paramref name="source"/> and disposes it.
+    /// </summary>
+    /// <remarks>
+    /// Needed for recordings written by the pre-orientation-fix encoder. The preview
+    /// applies the same correction when decoding, so without it the filmstrip and the
+    /// package poster would be the only upside-down surfaces in the app.
+    /// </remarks>
+    private static CanvasBitmap FlipVertically(CanvasBitmap source, CanvasDevice device)
+    {
+        try
+        {
+            float height = (float)source.Size.Height;
+            var flipped = new CanvasRenderTarget(
+                device, (float)source.Size.Width, height, source.Dpi);
+
+            using (var ds = flipped.CreateDrawingSession())
+            {
+                ds.Transform =
+                    System.Numerics.Matrix3x2.CreateScale(1, -1) *
+                    System.Numerics.Matrix3x2.CreateTranslation(0, height);
+                ds.DrawImage(source);
+            }
+
+            source.Dispose();
+            return flipped;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoThumbnailExtractor] Flip failed: {ex.Message}");
+            return source;
         }
     }
 }

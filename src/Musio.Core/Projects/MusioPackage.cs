@@ -19,6 +19,8 @@ namespace Musio.Core.Projects;
 /// <code>
 /// manifest.json          project, composition and timeline state (deflated)
 /// media/&lt;n&gt;_&lt;name&gt;   video / audio / webcam / cursor / keyboard files
+/// media/&lt;n&gt;_&lt;name&gt;.mp4.finalized.marker
+///                        encoder version of the video it sits beside
 /// </code>
 /// </para>
 /// <para>
@@ -30,7 +32,13 @@ namespace Musio.Core.Projects;
 public static class MusioPackage
 {
     /// <summary>Current on-disk format version.</summary>
-    public const int CurrentSchemaVersion = 1;
+    /// <remarks>
+    /// Version 2 packs a per-video <c>.finalized.marker</c> companion entry. Without it an
+    /// extracted MP4 is indistinguishable from one written by the pre-orientation-fix
+    /// encoder, which the decode path compensates for by flipping — so a version 1 package
+    /// is read back with markers synthesized for the current encoder instead.
+    /// </remarks>
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>File extension, including the leading dot.</summary>
     public const string FileExtension = ".musio";

@@ -5,6 +5,21 @@ using Musio.Core.Timeline;
 namespace Musio.Core.Projects;
 
 /// <summary>
+/// What a media reference is to the project.
+/// </summary>
+public enum MediaReferenceKind
+{
+    /// <summary>A decorative asset (background image, custom cursor image).</summary>
+    StyleAsset,
+
+    /// <summary>Captured content: video, audio, webcam, cursor or keyboard data.</summary>
+    Recording,
+}
+
+/// <summary>A media file referenced by a project, and what role it plays.</summary>
+public sealed record MediaReference(string Path, MediaReferenceKind Kind);
+
+/// <summary>
 /// Rewrites every media file reference held by a project and its timeline through a
 /// caller-supplied mapping.
 /// </summary>
@@ -74,26 +89,39 @@ public static class MusioPathRewriter
     /// </remarks>
     public static IReadOnlyList<string> Enumerate(
         Project project, TimelineModel? timeline, CompositionConfig? composition = null)
+        => [.. EnumerateReferences(project, timeline, composition).Select(r => r.Path)];
+
+    /// <summary>
+    /// Enumerates every distinct media reference along with what it is, so a caller can
+    /// tell irreplaceable recording media apart from decorative assets.
+    /// </summary>
+    /// <remarks>
+    /// The distinction matters when packing: a missing background image is cosmetic and
+    /// can be dropped, while a missing video or cursor log is the recording itself and
+    /// must never be dropped silently from a package that overwrites the previous one.
+    /// </remarks>
+    public static IReadOnlyList<MediaReference> EnumerateReferences(
+        Project project, TimelineModel? timeline, CompositionConfig? composition = null)
     {
         ArgumentNullException.ThrowIfNull(project);
 
-        var found = new List<string>();
+        var found = new List<MediaReference>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        void Add(string? path)
+        void Add(string? path, MediaReferenceKind kind = MediaReferenceKind.StyleAsset)
         {
             if (!string.IsNullOrWhiteSpace(path) && seen.Add(path))
-                found.Add(path);
+                found.Add(new MediaReference(path, kind));
         }
 
         void AddRecording(
             string video, string cursor, string? webcam, string? keyboard, List<string> audio)
         {
-            Add(video);
-            Add(cursor);
-            Add(webcam);
-            Add(keyboard);
-            foreach (var a in audio) Add(a);
+            Add(video, MediaReferenceKind.Recording);
+            Add(cursor, MediaReferenceKind.Recording);
+            Add(webcam, MediaReferenceKind.Recording);
+            Add(keyboard, MediaReferenceKind.Recording);
+            foreach (var a in audio) Add(a, MediaReferenceKind.Recording);
         }
 
         AddRecording(

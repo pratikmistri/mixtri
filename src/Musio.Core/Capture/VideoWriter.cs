@@ -512,8 +512,7 @@ public sealed class VideoWriter : IDisposable
         {
             var markerPath = Path.Combine(
                 Path.GetDirectoryName(_outputPath)!, FinalizedMarkerName);
-            File.WriteAllText(markerPath,
-                $"{{\"encoderVersion\":{EncoderVersion},\"finalizedUtc\":\"{DateTimeOffset.UtcNow:O}\"}}");
+            File.WriteAllText(markerPath, RecordingMarker.BuildContent(EncoderVersion));
         }
         catch (Exception ex)
         {
@@ -555,11 +554,25 @@ public sealed class VideoWriter : IDisposable
     /// <see cref="FinalizeSucceeded"/> is true, because before that the JPEGs are the only
     /// copy of the recording.
     /// </summary>
+    /// <remarks>
+    /// The marker is required as well as the flag. Writing it is best effort, and a
+    /// marker-less MP4 is indistinguishable from one produced by the pre-orientation-fix
+    /// encoder — so releasing the frames without it would leave a recording that later
+    /// gets flipped on the assumption it is legacy. Keeping the frames costs disk space;
+    /// dropping them here costs the only correctly oriented copy.
+    /// </remarks>
     /// <returns>Bytes reclaimed, or 0 if nothing was deleted.</returns>
     public long DeleteCapturedFrames()
     {
         if (!_finalizeSucceeded || !Directory.Exists(_framesDir))
             return 0;
+
+        if (!RecordingMarker.Exists(_outputPath))
+        {
+            Debug.WriteLine(
+                "[VideoWriter] Keeping captured frames: no finalized marker was written.");
+            return 0;
+        }
 
         try
         {

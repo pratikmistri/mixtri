@@ -69,8 +69,8 @@ public static class SessionCleanupService
 
         try
         {
-            var markerPath = Path.Combine(sessionFolder, VideoWriter.FinalizedMarkerName);
-            return File.Exists(markerPath);
+            var videoPath = Path.Combine(sessionFolder, "video.mp4");
+            return RecordingMarker.ReadEncoderVersion(videoPath) >= VideoWriter.EncoderVersion;
         }
         catch
         {

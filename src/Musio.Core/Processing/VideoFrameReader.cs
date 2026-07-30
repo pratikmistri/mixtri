@@ -1,4 +1,5 @@
 using Microsoft.Graphics.Canvas;
+using Musio.Core.Capture;
 
 namespace Musio.Core.Processing;
 
@@ -68,7 +69,9 @@ public sealed class VideoFrameReader : IDisposable
             return new VideoFrameReader(jpeg, fps);
 
         var videoPath = Path.Combine(sessionFolder, "video.mp4");
-        var mp4 = await Mp4FrameSource.OpenAsync(videoPath, fps, device).ConfigureAwait(false);
+        var mp4 = await Mp4FrameSource.OpenAsync(
+            videoPath, fps, device, RecordingMarker.NeedsVerticalFlip(videoPath))
+            .ConfigureAwait(false);
         return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
     }
 
@@ -91,7 +94,9 @@ public sealed class VideoFrameReader : IDisposable
                 return new VideoFrameReader(jpeg, fps);
         }
 
-        var mp4 = await Mp4FrameSource.OpenAsync(videoFilePath, fps, device).ConfigureAwait(false);
+        var mp4 = await Mp4FrameSource.OpenAsync(
+            videoFilePath, fps, device, RecordingMarker.NeedsVerticalFlip(videoFilePath))
+            .ConfigureAwait(false);
         return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
     }
 

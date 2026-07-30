@@ -60,8 +60,50 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    /// <summary>
+    /// Cache generation for <see cref="_segmentPreviews"/>. A build awaits a multi-second
+    /// decoder open, during which any of the clear sites below can run — disposing the
+    /// entry that build is still populating and then dropping it from the dictionary. The
+    /// build would go on to assign a live decoder and compositor onto that orphan, which
+    /// nothing would ever dispose. Each build captures this value and abandons once it
+    /// moves on, the same way <see cref="_previewInitGeneration"/> guards the primary.
+    /// </summary>
+    private int _segmentPreviewGeneration;
+
+    /// <summary>
+    /// Disposes and clears every cached appended-segment preview.
+    /// </summary>
+    /// <remarks>
+    /// Decoder teardown goes off the dispatcher: <see cref="VideoFrameReader.Dispose"/>
+    /// blocks on its cache gate and <c>Mp4FrameSource</c> on its decode gate, so with
+    /// several appended recordings this could otherwise freeze the UI for tens of seconds
+    /// — and it runs from ordinary style edits, not just teardown.
+    /// </remarks>
+    private void DisposeSegmentPreviews()
+    {
+        _segmentPreviewGeneration++;
+
+        foreach (var ctx in _segmentPreviews.Values)
+        {
+            DisposeOffUiThread(ctx.Reader);
+            ctx.Reader = null;
+            ctx.Dispose();
+        }
+
+        _segmentPreviews.Clear();
+    }
+
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
+
+    /// <summary>
+    /// Preview initialization versioning. <see cref="InitializePreviewCoreAsync"/> awaits a
+    /// multi-second decoder open, so an unload or a second run can start before the first
+    /// one finishes. Each run captures this value up front and abandons (disposing anything
+    /// it built) once the value moves on, instead of publishing a decoder onto a page that
+    /// has already torn down or that a newer run now owns.
+    /// </summary>
+    private int _previewInitGeneration;
 
     /// <summary>
     /// Source video path whose filmstrip is fully generated, so a re-entrant
@@ -280,8 +322,12 @@ public sealed partial class EditorPage : Page
             // Stop playback to halt timer ticks
             Preview.Pause();
 
+            // Abandon any preview init still awaiting the decoder open, so it disposes
+            // rather than publishes whatever it built onto this dead page.
+            _previewInitGeneration++;
+
             // Dispose owned resources
-            _frameReader?.Dispose();
+            DisposeOffUiThread(_frameReader);
             _frameReader = null;
             _previewRenderer?.Dispose();
             _previewRenderer = null;
@@ -289,8 +335,8 @@ public sealed partial class EditorPage : Page
             _textSlideRenderer = null;
             _transitionRenderer?.Dispose();
             _transitionRenderer = null;
-            foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
-            _segmentPreviews.Clear();
+            ReleaseCrossfadeOutgoing();
+            DisposeSegmentPreviews();
             _audioPlayer?.Dispose();
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
@@ -330,20 +376,44 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    /// <summary>
+    /// Disposes a decoder-backed resource off the dispatcher thread.
+    /// <see cref="VideoFrameReader.Dispose"/> blocks on the decode gate (up to 5s, and
+    /// <see cref="Mp4FrameSource"/> adds another 5s), which a single in-flight seek can
+    /// hold for seconds. Doing that on the UI thread freezes the app while switching
+    /// projects or navigating away mid-playback.
+    /// </summary>
+    private static void DisposeOffUiThread(IDisposable? resource)
+    {
+        if (resource is null) return;
+        _ = Task.Run(() =>
+        {
+            try { resource.Dispose(); }
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor", $"deferred dispose failed: {ex.Message}");
+            }
+        });
+    }
+
     private async Task InitializePreviewCoreAsync()
     {
-        _frameReader?.Dispose();
+        // Every await below is a point where this page can be unloaded or a newer init can
+        // start. Anything built after the generation moves on is disposed, never published.
+        int initGeneration = ++_previewInitGeneration;
+
+        DisposeOffUiThread(_frameReader);
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
         _styleDebounceTimer?.Stop();
+        ReleaseCrossfadeOutgoing();
         _frameReader = null;
         _previewRenderer = null;
         _audioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
-        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
-        _segmentPreviews.Clear();
+        DisposeSegmentPreviews();
         Timeline.ClearSegmentTrackVisuals();
 
         var project = ProjectService.Instance.CurrentProject;
@@ -383,7 +453,15 @@ public sealed partial class EditorPage : Page
             _ = GenerateAllTimelineThumbnailsAsync(videoPath, fps);
         }
 
-        _frameReader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
+        var reader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
+        if (initGeneration != _previewInitGeneration)
+        {
+            // Page unloaded or a newer init took over while the decoder was opening.
+            DisposeOffUiThread(reader);
+            return;
+        }
+
+        _frameReader = reader;
         if (_frameReader is null)
         {
             Musio.Core.Diagnostics.DiagLog.Write("Editor",
@@ -396,7 +474,8 @@ public sealed partial class EditorPage : Page
         _ = LoadAppendedTrackVisualsAsync();
 
         // Load audio waveform data for timeline visualization
-        await LoadAudioWaveformAsync(project);
+        await LoadAudioWaveformAsync(project, initGeneration);
+        if (initGeneration != _previewInitGeneration) return;
 
         // Load mouse data for cursor smoothing + click animations
         MouseRecordingData? mouseData = null;
@@ -529,16 +608,32 @@ public sealed partial class EditorPage : Page
 
         try
         {
-            _previewRenderer = new PreviewRenderer();
-            await _previewRenderer.InitializeAsync(
-                mouseData, config,
-                project.Width > 0 ? project.Width : 1920,
-                project.Height > 0 ? project.Height : 1080,
-                project.Duration,
-                project.MouseToVideoOffsetSeconds,
-                project.CropOffsetX,
-                project.CropOffsetY,
-                project.DpiScale);
+            var renderer = new PreviewRenderer();
+            try
+            {
+                await renderer.InitializeAsync(
+                    mouseData, config,
+                    project.Width > 0 ? project.Width : 1920,
+                    project.Height > 0 ? project.Height : 1080,
+                    project.Duration,
+                    project.MouseToVideoOffsetSeconds,
+                    project.CropOffsetX,
+                    project.CropOffsetY,
+                    project.DpiScale);
+            }
+            catch
+            {
+                renderer.Dispose();
+                throw;
+            }
+
+            if (initGeneration != _previewInitGeneration)
+            {
+                renderer.Dispose();
+                return;
+            }
+
+            _previewRenderer = renderer;
             _compositorReady = true;
         }
         catch (Exception ex)
@@ -551,6 +646,7 @@ public sealed partial class EditorPage : Page
 
         // Load webcam composition for preview overlay
         await LoadWebcamCompositionAsync(project);
+        if (initGeneration != _previewInitGeneration) return;
 
         // Initialize webcam overlay editing
         InitializeWebcamOverlay(config);
@@ -628,39 +724,69 @@ public sealed partial class EditorPage : Page
             var crossfade = Musio.Core.Timeline.SlideTransitions.Resolve(model, position);
             if (crossfade.Active)
             {
-                CanvasRenderTarget? incoming = null, outgoing = null;
+                CanvasRenderTarget? incoming = null;
                 try
                 {
                     incoming = await ComposePreviewFrameAsync(position);
-                    outgoing = await ComposePreviewFrameAsync(crossfade.OutgoingTime);
-                    if (incoming is not null && outgoing is not null)
+                    if (incoming is not null)
                     {
-                        // Blend at the composed canvas size. Using the raw capture size
-                        // here made the picture jump to the capture aspect ratio for the
-                        // length of the dissolve and snap back when it ended.
                         var (w, h) = GetPreviewCanvasSize();
-                        _transitionRenderer ??= new TransitionRenderer();
-                        var blended = _transitionRenderer.Render(
-                            outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
-                        HideSlideEditOverlay();
+
+                        // The outgoing side is held at a FIXED instant for the whole
+                        // dissolve (SlideTransitions pins it to current.Start - 1 tick), so
+                        // it composes to the identical image on every tick. Re-rendering it
+                        // meant a full-resolution text-slide pass (gradient + turbulence, or
+                        // a decoded neighbour frame) ~15 times per 500 ms dissolve, on the
+                        // UI thread, competing with the incoming decode. Compose once.
+                        var outgoing = await GetCrossfadeOutgoingAsync(crossfade.OutgoingTime, w, h);
+
                         // Force the normal path to fully redraw once the dissolve ends.
                         _lastRenderedFrameIndex = -1;
                         _lastRenderedSegmentId = null;
-                        Preview.SetFrame(blended);
+                        HideSlideEditOverlay();
+
+                        if (outgoing is not null)
+                        {
+                            // Blend at the composed canvas size. Using the raw capture size
+                            // here made the picture jump to the capture aspect ratio for the
+                            // length of the dissolve and snap back when it ended.
+                            _transitionRenderer ??= new TransitionRenderer();
+                            var blended = _transitionRenderer.Render(
+                                outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
+                            Preview.SetFrame(blended);
+                        }
+                        else
+                        {
+                            // Only the outgoing side is missing: present the incoming frame
+                            // un-dissolved rather than stranding the previous frame — the
+                            // text slide — on screen while the playhead is over capture.
+                            var present = incoming;
+                            incoming = null; // ownership moves to the preview
+                            Preview.SetFrame(present);
+                        }
                         return;
                     }
+
+                    // No incoming frame. Fall through to the normal render so it retries
+                    // rather than leaving the outgoing text slide frozen on screen for the
+                    // rest of the dissolve while the playhead runs on over the capture.
+                    Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                        $"crossfade incoming frame unavailable at {position}; falling back to direct render");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[EditorPage] Slide crossfade preview error: {ex.Message}");
+                    Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                        $"slide crossfade preview error at {position}: {ex.Message}");
                 }
                 finally
                 {
                     incoming?.Dispose();
-                    outgoing?.Dispose();
                 }
                 // Fall through to the normal render on any miss/failure.
+            }
+            else
+            {
+                ReleaseCrossfadeOutgoing();
             }
 
             var (segment, localOffset) = model.GetSegmentAtTime(position);
@@ -702,6 +828,41 @@ public sealed partial class EditorPage : Page
         TimeSpan sourcePosition = MapToSourceTime(position);
         await RenderVideoFrameAsync(sourcePosition, force);
     }
+
+    /// <summary>
+    /// Composes the held outgoing frame for a crossfade, reusing the previous result while
+    /// the dissolve stays on the same boundary and canvas size.
+    /// </summary>
+    /// <remarks>
+    /// The returned frame is owned by this page — callers must not dispose it or hand it to
+    /// <see cref="PreviewCanvas.SetFrame"/>, which takes ownership.
+    /// </remarks>
+    private async Task<CanvasRenderTarget?> GetCrossfadeOutgoingAsync(TimeSpan outgoingTime, int width, int height)
+    {
+        var key = (outgoingTime, width, height);
+        if (_crossfadeOutgoing is not null && _crossfadeOutgoingKey == key)
+            return _crossfadeOutgoing;
+
+        ReleaseCrossfadeOutgoing();
+
+        var frame = await ComposePreviewFrameAsync(outgoingTime);
+        if (frame is null)
+            return null;
+
+        _crossfadeOutgoing = frame;
+        _crossfadeOutgoingKey = key;
+        return frame;
+    }
+
+    private void ReleaseCrossfadeOutgoing()
+    {
+        _crossfadeOutgoing?.Dispose();
+        _crossfadeOutgoing = null;
+        _crossfadeOutgoingKey = null;
+    }
+
+    private CanvasRenderTarget? _crossfadeOutgoing;
+    private (TimeSpan OutgoingTime, int Width, int Height)? _crossfadeOutgoingKey;
 
     /// <summary>
     /// Renders a standalone preview frame for an arbitrary output position WITHOUT
@@ -878,7 +1039,16 @@ public sealed partial class EditorPage : Page
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
         var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourcePosition);
-        if (bitmap is null) return;
+        if (bitmap is null)
+        {
+            // The decoder produced nothing. Whatever was presented last — often a text
+            // slide the playhead has already left — stays on screen, so make sure the
+            // next tick retries even if the playhead has not moved, and leave a trace.
+            _lastRenderedFrameIndex = -1;
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"no decoded frame at {sourcePosition} (index {frameIndex}); preview is stale");
+            return;
+        }
 
         try
         {
@@ -888,14 +1058,15 @@ public sealed partial class EditorPage : Page
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
 
                 var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
-                bitmap.Dispose();
-
                 if (composed is not null)
                 {
+                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
                 }
+                // Compositor declined this frame — fall through and show the raw bitmap,
+                // which means it must still be alive here.
             }
 
             // Fallback: show raw frame without effects
@@ -940,7 +1111,13 @@ public sealed partial class EditorPage : Page
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
         var bitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
-        if (bitmap is null) return;
+        if (bitmap is null)
+        {
+            _lastRenderedFrameIndex = -1;
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"no decoded frame for appended segment at {sourceTime} (index {frameIndex}); preview is stale");
+            return;
+        }
 
         try
         {
@@ -962,13 +1139,14 @@ public sealed partial class EditorPage : Page
                 }
 
                 var composed = ctx.Renderer.RenderPreviewFrame(bitmap, sourceTime);
-                bitmap.Dispose();
                 if (composed is not null)
                 {
+                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
                 }
+                // Fall through to the raw-frame path, which still needs the bitmap.
             }
 
             // Fallback: raw frame
@@ -993,11 +1171,38 @@ public sealed partial class EditorPage : Page
 
         var ctx = new SegmentPreview();
         _segmentPreviews[seg.Id] = ctx; // insert early to avoid duplicate builds
+        int generation = _segmentPreviewGeneration;
+
+        // True once this build's entry has been dropped or replaced — by a cache clear, a
+        // per-segment style rebuild, or page teardown — while it was awaiting. Publishing
+        // onto it after that would leak a decoder nothing owns.
+        bool Abandoned() =>
+            generation != _segmentPreviewGeneration
+            || !_segmentPreviews.TryGetValue(seg.Id, out var current)
+            || !ReferenceEquals(current, ctx);
+
+        // Tears down whatever this build managed to create. The clear that abandoned it
+        // disposed an empty context, so everything built after that point is this build's
+        // to release.
+        SegmentPreview? Abandon()
+        {
+            DisposeOffUiThread(ctx.Reader);
+            ctx.Reader = null;
+            ctx.Dispose();
+            return null;
+        }
 
         try
         {
             int fps = seg.Fps > 0 ? seg.Fps : 30;
-            ctx.Reader = await VideoFrameReader.OpenFromVideoPathAsync(seg.VideoFilePath, fps);
+            var reader = await VideoFrameReader.OpenFromVideoPathAsync(seg.VideoFilePath, fps);
+            if (Abandoned())
+            {
+                DisposeOffUiThread(reader);
+                return Abandon();
+            }
+
+            ctx.Reader = reader;
             if (ctx.Reader is null) return ctx;
 
             MouseRecordingData? mouseData = null;
@@ -1033,16 +1238,24 @@ public sealed partial class EditorPage : Page
             {
                 try
                 {
-                    ctx.Renderer = new PreviewRenderer();
+                    var renderer = new PreviewRenderer();
                     // The compositor is driven with ABSOLUTE source times
                     // (SourceStart + localOffset), so its timelines must span the end of
                     // the clip's source extent, not just the clip's length. Passing the
                     // bare SourceDuration would drop cursor samples and auto-zoom for the
                     // visible tail of any clip trimmed from the front. Mirrors
                     // SegmentFrameComposer.ResolveSourceDuration on the export path.
-                    await ctx.Renderer.InitializeAsync(
+                    await renderer.InitializeAsync(
                         mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
                         seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
+
+                    if (Abandoned())
+                    {
+                        renderer.Dispose();
+                        return Abandon();
+                    }
+
+                    ctx.Renderer = renderer;
                     ctx.Ready = true;
                 }
                 catch (Exception ex)
@@ -1060,6 +1273,9 @@ public sealed partial class EditorPage : Page
                 {
                     var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(seg.WebcamFilePath);
                     var clip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(file);
+                    if (Abandoned())
+                        return Abandon();
+
                     var props = clip.GetVideoEncodingProperties();
                     ctx.WebcamW = (int)props.Width;
                     ctx.WebcamH = (int)props.Height;
@@ -1074,7 +1290,7 @@ public sealed partial class EditorPage : Page
             System.Diagnostics.Debug.WriteLine($"[EditorPage] GetOrBuildSegmentPreview failed: {ex.Message}");
         }
 
-        return ctx;
+        return Abandoned() ? Abandon() : ctx;
     }
 
     private static async Task<CanvasBitmap?> ExtractWebcamFrameAsync(
@@ -1380,7 +1596,7 @@ public sealed partial class EditorPage : Page
                 _thumbnailsInFlightForPath = primaryPath;
                 try
                 {
-                    await GenerateTimelineThumbnailsAsync(primaryPath, isPrimary: true);
+                    await GenerateTimelineThumbnailsAsync(primaryPath, isPrimary: true, fps);
                 }
                 finally
                 {
@@ -1409,19 +1625,20 @@ public sealed partial class EditorPage : Page
     {
         var model = ViewModel.Model;
         var files = model.Segments.OfType<VideoSegment>()
-            .Select(v => v.VideoFilePath)
-            .Where(p => !string.IsNullOrEmpty(p) &&
-                        !string.Equals(p, primaryPath, StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(v => !string.IsNullOrEmpty(v.VideoFilePath) &&
+                        !string.Equals(v.VideoFilePath, primaryPath, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(v => v.VideoFilePath, StringComparer.OrdinalIgnoreCase)
+            .Select(g => (Path: g.Key, Fps: g.Select(v => v.Fps).FirstOrDefault(f => f > 0)))
             .ToList();
 
-        foreach (var file in files)
+        foreach (var (file, segmentFps) in files)
         {
             if (!File.Exists(file)) continue;
 
             try
             {
-                await GenerateTimelineThumbnailsAsync(file, isPrimary: false);
+                await GenerateTimelineThumbnailsAsync(
+                    file, isPrimary: false, segmentFps > 0 ? segmentFps : 30);
             }
             catch (Exception ex)
             {
@@ -1441,7 +1658,7 @@ public sealed partial class EditorPage : Page
     /// yielding no frame, while also competing with the preview for the same file. The
     /// batch extractor measured ~15 ms per tile with none missing.
     /// </remarks>
-    private async Task GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary)
+    private async Task GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
     {
         var generationId = ++_thumbnailGenerationId;
 
@@ -1450,6 +1667,12 @@ public sealed partial class EditorPage : Page
 
         var device = CanvasDevice.GetSharedDevice();
         var strip = await VideoThumbnailExtractor.ExtractAsync(filePath, thumbH, device);
+
+        // The MP4 is unreadable — unfinalized, or finalization failed. The captured JPEGs
+        // are still there in exactly that case and the preview is already using them, so
+        // the filmstrip must not be the one surface that gives up.
+        strip ??= await VideoThumbnailExtractor.ExtractFromCapturedFramesAsync(
+            filePath, fps, thumbH, device);
 
         if (strip is null || generationId != _thumbnailGenerationId)
         {
@@ -1519,6 +1742,7 @@ public sealed partial class EditorPage : Page
     {
         _timelineMapper = null;
         _lastRenderedFrameIndex = -1;
+        ReleaseCrossfadeOutgoing();
 
         Preview.Duration = GetMappedDuration();
 
@@ -2547,7 +2771,7 @@ public sealed partial class EditorPage : Page
 
     // --- Audio waveform loading ---
 
-    private async Task LoadAudioWaveformAsync(Project project)
+    private async Task LoadAudioWaveformAsync(Project project, int initGeneration)
     {
         if (project.AudioFilePaths is not { Count: > 0 })
             return;
@@ -2606,6 +2830,11 @@ public sealed partial class EditorPage : Page
                 ViewModel.Model.SystemAudioWaveformSamples = systemWaveform;
             if (micWaveform is { Length: > 0 })
                 ViewModel.Model.MicAudioWaveformSamples = micWaveform;
+
+            // The waveform build above is a multi-second background pass; if the page
+            // unloaded or a newer preview init took over meanwhile, publishing a player
+            // here would strand it (nothing disposes it again) or clobber the new run's.
+            if (initGeneration != _previewInitGeneration) return;
 
             // At video time T, the audio file position is T + audioOffset
             _audioOffsetSeconds = audioOffset;
@@ -3541,8 +3770,7 @@ public sealed partial class EditorPage : Page
     /// rebuild with fresh (global or per-segment) config on next render.</summary>
     private void InvalidateSegmentPreviews()
     {
-        foreach (var ctx in _segmentPreviews.Values) ctx.Dispose();
-        _segmentPreviews.Clear();
+        DisposeSegmentPreviews();
         _lastRenderedSegmentId = null;
     }
 
@@ -3566,7 +3794,14 @@ public sealed partial class EditorPage : Page
         if (Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
             return;
 
-        await RebuildPreviewRendererAsync(global);
+        // Rebuild FOR THIS SEGMENT. Letting the rebuild re-derive the style from the
+        // playhead instead would not converge: whenever the playhead sits on a
+        // different segment than the one being rendered (a text slide, a slide↔video
+        // crossfade, or simply playback having advanced), the rebuild records segment
+        // A's style while this guard keeps testing segment B's, so every frame rebuilt
+        // the compositor again — reloading the cursor recording from disk and
+        // reallocating render targets on the UI thread until the app froze.
+        await RebuildPreviewRendererAsync(global, seg);
     }
 
     private void ApplyBackgroundStyle(BackgroundStyle bg)
@@ -3611,10 +3846,11 @@ public sealed partial class EditorPage : Page
         }
         else
         {
-            if (_segmentPreviews.TryGetValue(seg.Id, out var ctx))
+            if (_segmentPreviews.Remove(seg.Id, out var ctx))
             {
+                DisposeOffUiThread(ctx.Reader);
+                ctx.Reader = null;
                 ctx.Dispose();
-                _segmentPreviews.Remove(seg.Id);
             }
             _lastRenderedSegmentId = null;
             _lastRenderedFrameIndex = -1;
@@ -3626,14 +3862,62 @@ public sealed partial class EditorPage : Page
     /// Recreates only the PreviewRenderer with updated config, preserving
     /// frame reader, audio, and playhead position.
     /// </summary>
-    private async Task RebuildPreviewRendererAsync(CompositionConfig config)
+    /// <param name="forSegment">
+    /// The primary segment whose per-segment style the renderer must be built for. When
+    /// null the segment under the playhead is used. Callers that rebuild in order to
+    /// satisfy a specific segment (see <see cref="EnsurePrimaryRendererForSegmentAsync"/>)
+    /// must pass it explicitly, otherwise the recorded style and the style their guard
+    /// re-tests can disagree forever.
+    /// </param>
+    private async Task RebuildPreviewRendererAsync(
+        CompositionConfig config, VideoSegment? forSegment = null)
     {
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
 
+        // A rebuild ends by re-rendering, and rendering can ask for another rebuild, so
+        // this must not recurse. Requests that arrive mid-rebuild are coalesced rather
+        // than dropped: the style handlers call this fire-and-forget, so dropping would
+        // lose the last value of a slider drag.
+        if (_rebuildingPreviewRenderer)
+        {
+            _pendingRendererRebuild = (config, forSegment);
+            return;
+        }
+
+        _rebuildingPreviewRenderer = true;
+        try
+        {
+            await RebuildPreviewRendererCoreAsync(project, config, forSegment);
+
+            // Drain coalesced requests. Bounded purely as a backstop — the segment-scoped
+            // rebuild above converges — so a future regression degrades to a stale frame
+            // rather than to a frozen app.
+            for (int i = 0; i < MaxCoalescedRendererRebuilds && _pendingRendererRebuild is { } pending; i++)
+            {
+                _pendingRendererRebuild = null;
+                if (ProjectService.Instance.CurrentProject is not { } current) break;
+                await RebuildPreviewRendererCoreAsync(current, pending.Config, pending.Segment);
+            }
+
+            _pendingRendererRebuild = null;
+        }
+        finally
+        {
+            _rebuildingPreviewRenderer = false;
+        }
+    }
+
+    private const int MaxCoalescedRendererRebuilds = 4;
+    private bool _rebuildingPreviewRenderer;
+    private (CompositionConfig Config, VideoSegment? Segment)? _pendingRendererRebuild;
+
+    private async Task RebuildPreviewRendererCoreAsync(
+        Project project, CompositionConfig config, VideoSegment? forSegment)
+    {
         // Apply the active primary segment's per-segment frame style / cursor override
         // on top of the global config so the primary recording honors its own style.
-        var activePrimary = ActivePrimaryVideoSegment();
+        var activePrimary = forSegment ?? ActivePrimaryVideoSegment();
         var effective = config;
         if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
         if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
@@ -3652,6 +3936,9 @@ public sealed partial class EditorPage : Page
 
         _compositorReady = false;
         _previewRenderer?.Dispose();
+
+        // Composed with the previous renderer/config — must not survive it.
+        ReleaseCrossfadeOutgoing();
 
         try
         {
@@ -4433,6 +4720,9 @@ public sealed partial class EditorPage : Page
 
     private void RefreshSlidePreview()
     {
+        // Slide content/style just changed, so any held crossfade frame composed from it
+        // is stale — a dissolve would otherwise keep showing the pre-edit slide.
+        ReleaseCrossfadeOutgoing();
         Timeline.InvalidateAllCanvases();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }
@@ -4728,6 +5018,12 @@ public sealed partial class EditorPage : Page
         SlideEditCanvas.Visibility = Visibility.Collapsed;
     }
 
+    // Last text styling pushed onto the in-place slide editor. PositionSlideEditControls
+    // runs from Preview.FrameLayoutChanged, which fires inside the Win2D draw callback,
+    // so assigning a fresh FontFamily/SolidColorBrush there allocated new XAML+COM
+    // objects on every drawn frame and dirtied text layout each time.
+    private (string Family, double Size, bool Bold, bool Italic, string Color, SlideTextAlignment Align)? _slideEditStyle;
+
     private void PositionSlideEditControls(TextSlideSegment slide)
     {
         var layout = Preview.FrameLayoutRect;
@@ -4753,7 +5049,14 @@ public sealed partial class EditorPage : Page
         SlideEditBox.Height = h;
 
         // Match the slide's text styling so editing looks WYSIWYG.
-        SlideEditBox.FontSize = Math.Max(8, slide.FontSize * scaleY);
+        double fontSize = Math.Max(8, slide.FontSize * scaleY);
+        var style = (slide.FontFamily, fontSize, slide.IsBold, slide.IsItalic,
+            slide.TextColor, slide.TextAlignment);
+        if (_slideEditStyle == style)
+            return;
+        _slideEditStyle = style;
+
+        SlideEditBox.FontSize = fontSize;
         SlideEditBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(slide.FontFamily);
         SlideEditBox.FontWeight = slide.IsBold
             ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal;

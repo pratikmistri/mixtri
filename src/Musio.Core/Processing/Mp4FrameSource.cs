@@ -73,6 +73,7 @@ public sealed class Mp4FrameSource : IFrameSource
     private readonly CanvasRenderTarget _surface;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly int _fps;
+    private readonly bool _flipVertical;
 
     private TaskCompletionSource<bool>? _framePending;
     private int _lastDeliveredIndex = -1;
@@ -85,11 +86,13 @@ public sealed class Mp4FrameSource : IFrameSource
     public FrameSourceKind Kind => FrameSourceKind.EncodedVideo;
 
     private Mp4FrameSource(
-        MediaPlayer player, CanvasDevice device, int width, int height, int fps, int frameCount)
+        MediaPlayer player, CanvasDevice device, int width, int height, int fps, int frameCount,
+        bool flipVertical)
     {
         _player = player;
         _device = device;
         _fps = fps;
+        _flipVertical = flipVertical;
         Width = width;
         Height = height;
         FrameCount = frameCount;
@@ -106,7 +109,12 @@ public sealed class Mp4FrameSource : IFrameSource
     /// The recording FPS that frame indices are expressed in. Frame index N maps to
     /// presentation time N / fps.
     /// </param>
-    public static async Task<Mp4FrameSource?> OpenAsync(string videoFilePath, int fps, CanvasDevice device)
+    /// <param name="flipVertical">
+    /// Compensates for recordings written by the pre-orientation-fix encoder, whose MP4s
+    /// are vertically mirrored. See <see cref="Musio.Core.Capture.RecordingMarker"/>.
+    /// </param>
+    public static async Task<Mp4FrameSource?> OpenAsync(
+        string videoFilePath, int fps, CanvasDevice device, bool flipVertical = false)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
@@ -173,7 +181,8 @@ public sealed class Mp4FrameSource : IFrameSource
             // laid the JPEGs out, so the two sources stay interchangeable.
             int frameCount = Math.Max(1, (int)Math.Round(duration.TotalSeconds * fps));
 
-            var reader = new Mp4FrameSource(player, device, width, height, fps, frameCount);
+            var reader = new Mp4FrameSource(
+                player, device, width, height, fps, frameCount, flipVertical);
             player = null; // ownership transferred
 
             await reader.PrimeAsync();
@@ -251,7 +260,19 @@ public sealed class Mp4FrameSource : IFrameSource
             // caller can hold and dispose on its own schedule.
             var copy = new CanvasRenderTarget(_device, Width, Height, 96);
             using (var ds = copy.CreateDrawingSession())
+            {
+                // Legacy recordings are stored upside down; correcting it here keeps the
+                // preview, the export compositor and the filmstrip consistent, because
+                // they all read frames through this one path.
+                if (_flipVertical)
+                {
+                    ds.Transform =
+                        System.Numerics.Matrix3x2.CreateScale(1, -1) *
+                        System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                }
+
                 ds.DrawImage(_surface);
+            }
 
             return copy;
         }
@@ -338,6 +359,46 @@ public sealed class Mp4FrameSource : IFrameSource
     /// </remarks>
     private async Task<bool> SeekToAsync(int frameIndex)
     {
+        if (await TrySeekRoundAsync(frameIndex).ConfigureAwait(false))
+            return true;
+
+        // Every attempt completed without producing a frame. On a paused frame-server
+        // player the pipeline can settle into a state where re-assigning Position never
+        // wakes it again, and no number of extra seeks helps — but a step does. Step to
+        // force it to produce, drop that frame (it is for the wrong index), then seek
+        // again so what is finally delivered is still exactly the frame asked for. The
+        // exporter reads through this path too, where accepting the stepped frame would
+        // be a silently wrong frame rather than a preview glitch.
+        if (_disposed)
+            return false;
+
+        // Wait out any frame abandoned by the failed attempts first, so it cannot satisfy
+        // the wake step or the re-seek below and pass for the frame that was asked for.
+        await DrainIfNeededAsync().ConfigureAwait(false);
+        if (_disposed)
+            return false;
+
+        if (await IssueAndWaitAsync(() => _player.StepForwardOneFrame(), StepTimeout)
+                .ConfigureAwait(false))
+        {
+            _lastDeliveredIndex = -1;
+            if (await TrySeekRoundAsync(frameIndex).ConfigureAwait(false))
+                return true;
+        }
+
+        Debug.WriteLine(
+            $"[Mp4FrameSource] Gave up seeking to frame {frameIndex} after {SeekAttempts} attempts.");
+        _lastDeliveredIndex = -1;
+        _needsDrain = true;
+        return false;
+    }
+
+    /// <summary>
+    /// One round of <see cref="SeekAttempts"/> seek attempts. Returns true as soon as a
+    /// frame for <paramref name="frameIndex"/> lands.
+    /// </summary>
+    private async Task<bool> TrySeekRoundAsync(int frameIndex)
+    {
         var session = _player.PlaybackSession;
 
         for (int attempt = 0; attempt < SeekAttempts; attempt++)
@@ -387,10 +448,6 @@ public sealed class Mp4FrameSource : IFrameSource
             }
         }
 
-        Debug.WriteLine(
-            $"[Mp4FrameSource] Gave up seeking to frame {frameIndex} after {SeekAttempts} attempts.");
-        _lastDeliveredIndex = -1;
-        _needsDrain = true;
         return false;
     }
 

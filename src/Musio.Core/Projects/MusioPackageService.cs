@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using Microsoft.Graphics.Canvas;
+using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Timeline;
@@ -81,8 +82,29 @@ public static class MusioPackageService
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
 
-        var mediaFiles = MusioPathRewriter.Enumerate(project, timeline, composition)
-            .Where(File.Exists)
+        // A save writes over the file it came from, so a reference that silently vanishes
+        // here takes the only copy of that media with it. Cosmetic assets may be dropped;
+        // captured content may not.
+        var references = MusioPathRewriter.EnumerateReferences(project, timeline, composition);
+
+        var missing = references
+            .Where(r => r.Kind == MediaReferenceKind.Recording && !File.Exists(r.Path))
+            .Select(r => r.Path)
+            .ToList();
+
+        if (missing.Count > 0)
+        {
+            var names = string.Join(", ", missing.Take(3).Select(Path.GetFileName));
+            var more = missing.Count > 3 ? $" (+{missing.Count - 3} more)" : string.Empty;
+            throw new FileNotFoundException(
+                $"{missing.Count} recording file(s) this project needs are missing, so saving " +
+                $"would drop them permanently: {names}{more}.",
+                missing[0]);
+        }
+
+        var mediaFiles = references
+            .Where(r => File.Exists(r.Path))
+            .Select(r => r.Path)
             .ToList();
 
         // Map each real file to a package entry, then rewrite a *copy* of the project so
@@ -149,6 +171,21 @@ public static class MusioPackageService
                         sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
                         sourceStream.CopyTo(entryStream);
+                    }
+
+                    // Carry the recording's encoder version with it. A package's media all
+                    // lands in one flat folder, so the session-folder marker cannot come
+                    // along as-is; a per-file companion can. Losing it would make an
+                    // orientation-correct video look legacy on the next open and get
+                    // flipped.
+                    if (string.Equals(Path.GetExtension(sourcePath), ".mp4",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        var markerEntry = archive.CreateEntry(
+                            entryName + RecordingMarker.CompanionSuffix, CompressionLevel.Optimal);
+                        using var markerStream = new StreamWriter(markerEntry.Open());
+                        markerStream.Write(RecordingMarker.BuildContent(
+                            RecordingMarker.ReadEncoderVersion(sourcePath)));
                     }
 
                     progress?.Report(++done / (double)Math.Max(1, entryByPath.Count));
@@ -368,8 +405,18 @@ public static class MusioPackageService
             Directory.CreateDirectory(mediaFolder);
 
             var pathByEntry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var mediaEntries = archive.Entries
+            var allEntries = archive.Entries
                 .Where(e => e.FullName.StartsWith(MusioPackage.MediaEntryPrefix, StringComparison.Ordinal))
+                .ToList();
+
+            // Markers are resolved from their video's destination rather than through the
+            // name heuristic, so a package holding two recordings both called video.mp4
+            // cannot pair a marker with the wrong file.
+            var mediaEntries = allEntries
+                .Where(e => !e.FullName.EndsWith(RecordingMarker.CompanionSuffix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var markerEntries = allEntries
+                .Where(e => e.FullName.EndsWith(RecordingMarker.CompanionSuffix, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             int done = 0;
@@ -392,6 +439,8 @@ public static class MusioPackageService
                 progress?.Report(++done / (double)Math.Max(1, mediaEntries.Count));
             }
 
+            ExtractOrientationMarkers(markerEntries, pathByEntry, manifest.SchemaVersion, ct);
+
             var composition = MusioPathRewriter.Rewrite(
                 manifest.Project,
                 manifest.Timeline,
@@ -401,6 +450,53 @@ public static class MusioPackageService
             return new MusioOpenResult(
                 manifest.Project, composition, manifest.Timeline, mediaFolder);
         }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Restores the per-video encoder-version markers beside the extracted media.
+    /// </summary>
+    /// <remarks>
+    /// Version 1 packages predate the companion marker, so their videos would read back as
+    /// "no marker" — which the decode path interprets as the pre-orientation-fix encoder
+    /// and compensates for by flipping. Packaging only ever existed alongside that fixed
+    /// encoder, so those videos are synthesized a current-version marker rather than being
+    /// mirrored on every open.
+    /// </remarks>
+    private static void ExtractOrientationMarkers(
+        List<ZipArchiveEntry> markerEntries,
+        Dictionary<string, string> pathByEntry,
+        int schemaVersion,
+        CancellationToken ct)
+    {
+        foreach (var entry in markerEntries)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var videoEntryName = entry.FullName[..^RecordingMarker.CompanionSuffix.Length];
+            if (!pathByEntry.TryGetValue(videoEntryName, out var videoPath))
+                continue;
+
+            try
+            {
+                entry.ExtractToFile(RecordingMarker.CompanionMarkerPath(videoPath), overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MusioPackage] Could not restore marker for '{videoPath}': {ex.Message}");
+            }
+        }
+
+        if (schemaVersion >= 2)
+            return;
+
+        foreach (var videoPath in pathByEntry.Values)
+        {
+            if (!string.Equals(Path.GetExtension(videoPath), ".mp4", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!RecordingMarker.Exists(videoPath))
+                RecordingMarker.TryWriteCompanion(videoPath, VideoWriter.EncoderVersion);
+        }
     }
 
     /// <summary>
