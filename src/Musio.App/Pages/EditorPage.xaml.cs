@@ -118,6 +118,15 @@ public sealed partial class EditorPage : Page
     /// </summary>
     private string? _thumbnailsInFlightForPath;
 
+    /// <summary>
+    /// Non-primary source files whose filmstrip is built or currently building. Appending a
+    /// recording or importing a video adds a source without changing the primary, so the
+    /// primary-keyed gate above cannot tell which strips are still missing; this tracks them
+    /// per file so a re-entrant initialisation builds only the new ones and never rebuilds
+    /// (and re-disposes the bitmaps of) a strip that is already on screen.
+    /// </summary>
+    private readonly HashSet<string> _thumbnailsDoneForFiles = new(StringComparer.OrdinalIgnoreCase);
+
     // Webcam overlay for editor preview
     private Windows.Media.Editing.MediaComposition? _webcamComposition;
     private int _webcamWidth;
@@ -349,6 +358,7 @@ public sealed partial class EditorPage : Page
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
             _thumbnailsInFlightForPath = null;
+            _thumbnailsDoneForFiles.Clear();
 
             // Unsubscribe VMs from singleton event sources
             ViewModel.Cleanup();
@@ -423,6 +433,7 @@ public sealed partial class EditorPage : Page
             _thumbnailGenerationId++;
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
+            _thumbnailsDoneForFiles.Clear();
             return;
         }
 
@@ -448,10 +459,20 @@ public sealed partial class EditorPage : Page
             _thumbnailGenerationId++; // cancel any pass for a different source
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
+            _thumbnailsDoneForFiles.Clear();
 
             // Deliberately started before, and independently of, the preview reader:
             // the filmstrip must not depend on the preview decoder opening successfully.
             _ = GenerateAllTimelineThumbnailsAsync(videoPath, fps);
+        }
+        else
+        {
+            // The primary strip is already built, but appending a recording or importing a
+            // video adds a NEW source to an unchanged primary — and the pass above is gated
+            // entirely on the primary path, so it would never run for that source and the
+            // clip would sit on the track as a flat colour until the project was reopened.
+            // Sources are tracked individually, so this only builds what is actually missing.
+            _ = GenerateAppendedThumbnailsAsync(videoPath);
         }
 
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
@@ -1668,13 +1689,23 @@ public sealed partial class EditorPage : Page
         {
             if (!File.Exists(file)) continue;
 
+            // Claim the file before awaiting: two overlapping initialisations would
+            // otherwise both build the same strip, and the loser's bitmaps would be handed
+            // to the timeline after the winner's and leak the ones it replaced.
+            if (!_thumbnailsDoneForFiles.Add(file)) continue;
+
             try
             {
-                await GenerateTimelineThumbnailsAsync(
+                bool applied = await GenerateTimelineThumbnailsAsync(
                     file, isPrimary: false, segmentFps > 0 ? segmentFps : 30);
+
+                // A pass cancelled by a newer generation applied nothing, so the claim must
+                // be released or this source would never get a strip again.
+                if (!applied) _thumbnailsDoneForFiles.Remove(file);
             }
             catch (Exception ex)
             {
+                _thumbnailsDoneForFiles.Remove(file);
                 System.Diagnostics.Debug.WriteLine(
                     $"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
             }
@@ -1691,7 +1722,12 @@ public sealed partial class EditorPage : Page
     /// yielding no frame, while also competing with the preview for the same file. The
     /// batch extractor measured ~15 ms per tile with none missing.
     /// </remarks>
-    private async Task GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
+    /// <returns>
+    /// <c>true</c> when a strip was handed to the timeline; <c>false</c> when the source was
+    /// undecodable or the pass was superseded by a newer generation, so the caller can let
+    /// it be retried.
+    /// </returns>
+    private async Task<bool> GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
     {
         var generationId = ++_thumbnailGenerationId;
 
@@ -1711,7 +1747,7 @@ public sealed partial class EditorPage : Page
         {
             if (strip is not null)
                 foreach (var t in strip.Thumbnails) t?.Dispose();
-            return;
+            return false;
         }
 
         // A tile that could not be decoded would leave a hole in the strip. Repeat the
@@ -1745,6 +1781,8 @@ public sealed partial class EditorPage : Page
         {
             Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
         }
+
+        return true;
     }
 
     private TimelineMapper? EnsureTimelineMapper()
