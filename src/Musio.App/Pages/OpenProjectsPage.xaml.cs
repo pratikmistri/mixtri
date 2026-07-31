@@ -17,10 +17,10 @@ public sealed class ProjectCard
     public string Subtitle { get; init; } = string.Empty;
 
     /// <summary>
-    /// When the recording was created, in local time. Drives both the day grouping and
-    /// the order within a day.
+    /// When the project was last saved, in local time. Drives both the day grouping and
+    /// the order within a day, and is the same value the card's date shows.
     /// </summary>
-    public DateTime CreatedAt { get; init; }
+    public DateTime ModifiedAt { get; init; }
 
     public BitmapImage? Poster { get; init; }
 }
@@ -72,7 +72,7 @@ public sealed partial class OpenProjectsPage : Page
             {
                 // Manifest and poster are read off the UI thread; the BitmapImage itself
                 // must be created on it.
-                var (name, subtitle, created, poster) = await Task.Run(() => ReadCardData(entry));
+                var (name, subtitle, modified, poster) = await Task.Run(() => ReadCardData(entry));
 
                 BitmapImage? image = null;
                 if (poster is { Length: > 0 })
@@ -83,7 +83,7 @@ public sealed partial class OpenProjectsPage : Page
                     Path = entry.Path,
                     Name = name,
                     Subtitle = subtitle,
-                    CreatedAt = created,
+                    ModifiedAt = modified,
                     Poster = image,
                 });
             }
@@ -167,16 +167,16 @@ public sealed partial class OpenProjectsPage : Page
     /// project first within each day.
     /// </summary>
     /// <remarks>
-    /// Keyed on creation rather than last-used so a project's position never moves just
-    /// because it was opened — the list reads the same every time the page is visited.
+    /// Keyed on when the project was last saved, which is also the date printed on the
+    /// card — so a group header can never disagree with the cards under it.
     /// </remarks>
     private static List<ProjectGroup> GroupByDay(IEnumerable<ProjectCard> cards) => cards
-        .GroupBy(c => c.CreatedAt.Date)
+        .GroupBy(c => c.ModifiedAt.Date)
         .OrderByDescending(g => g.Key)
         .Select(g => new ProjectGroup
         {
             Header = FormatDayHeader(g.Key),
-            Items = g.OrderByDescending(c => c.CreatedAt).ToList(),
+            Items = g.OrderByDescending(c => c.ModifiedAt).ToList(),
         })
         .ToList();
 
@@ -194,7 +194,7 @@ public sealed partial class OpenProjectsPage : Page
             : day.ToString("d MMMM yyyy");
     }
 
-    private static (string Name, string Subtitle, DateTime Created, byte[]? Poster) ReadCardData(
+    private static (string Name, string Subtitle, DateTime Modified, byte[]? Poster) ReadCardData(
         RecentProject entry)
     {
         var manifest = MusioPackageService.ReadManifest(entry.Path);
@@ -210,34 +210,35 @@ public sealed partial class OpenProjectsPage : Page
             name = entry.Name;
 
         var duration = manifest?.Project.Duration ?? entry.Duration;
-        var saved = manifest?.SavedAt.ToLocalTime() ?? entry.LastUsedUtc.ToLocalTime();
+        var modified = ResolveModifiedAt(entry, manifest);
 
         long size = 0;
         try { size = new FileInfo(entry.Path).Length; } catch { }
 
-        var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {saved:d MMM yyyy}";
-        return (name!, subtitle, ResolveCreatedAt(entry, manifest), poster);
+        var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {modified:d MMM yyyy}";
+        return (name!, subtitle, modified, poster);
     }
 
     /// <summary>
-    /// When the recording behind a package was made, in local time.
+    /// When a package was last saved, in local time.
     /// </summary>
     /// <remarks>
-    /// The manifest's project is authoritative and travels with the file, so a project
-    /// copied between machines still groups under the day it was recorded. Falls back to
-    /// the file's own creation stamp, then to the recents entry, so a package with an
-    /// unreadable manifest still lands in a sensible group instead of at the epoch.
+    /// The manifest's own timestamp is preferred over the file's write time: it is
+    /// written by the app, travels with the package to another machine, and is not
+    /// disturbed by anything else that happens to touch the file. Falls back to the
+    /// file's write time and finally to the recents entry, so a package with an
+    /// unreadable manifest still lands in a sensible group instead of at
+    /// <see cref="DateTime.MinValue"/>.
     /// </remarks>
-    private static DateTime ResolveCreatedAt(RecentProject entry, MusioManifest? manifest)
+    private static DateTime ResolveModifiedAt(RecentProject entry, MusioManifest? manifest)
     {
-        var created = manifest?.Project.CreatedAt ?? default;
-        if (created != default)
-            return created.Kind == DateTimeKind.Utc ? created.ToLocalTime() : created;
+        if (manifest is not null && manifest.SavedAt != default)
+            return manifest.SavedAt.ToLocalTime().DateTime;
 
         try
         {
-            var fileCreated = File.GetCreationTime(entry.Path);
-            if (fileCreated != default) return fileCreated;
+            var written = File.GetLastWriteTime(entry.Path);
+            if (written != default) return written;
         }
         catch { }
 
