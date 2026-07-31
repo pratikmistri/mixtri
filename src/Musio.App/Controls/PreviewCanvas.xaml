@@ -8,38 +8,28 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+    <Grid
+        x:Name="PreviewRoot"
+        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+        PointerEntered="PreviewRoot_PointerEntered"
+        PointerExited="PreviewRoot_PointerExited">
         <canvas:CanvasControl
             x:Name="PreviewSurface"
             Draw="PreviewSurface_Draw" />
 
-        <Border
-            x:Name="QualityIndicator"
-            HorizontalAlignment="Right"
-            VerticalAlignment="Top"
-            Margin="12"
-            Padding="8,4"
-            Background="{ThemeResource OverlayDimBrush}"
-            CornerRadius="4"
-            IsHitTestVisible="False"
-            Visibility="Collapsed"
-            AutomationProperties.Name="Adaptive preview resolution"
-            ToolTipService.ToolTip="Preview is downscaled for performance. Export remains full resolution.">
-            <TextBlock
-                x:Name="QualityIndicatorText"
-                FontSize="12"
-                FontWeight="SemiBold"
-                Foreground="{ThemeResource OverlayForegroundBrush}" />
-        </Border>
-
         <!-- Playback controls overlay at bottom -->
         <StackPanel
+            x:Name="PlaybackChrome"
             VerticalAlignment="Bottom"
             HorizontalAlignment="Center"
             Orientation="Horizontal"
             Padding="8"
             Background="{ThemeResource OverlayDimBrush}"
-            CornerRadius="4,4,0,0">
+            CornerRadius="4,4,0,0"
+            Opacity="0"
+            IsHitTestVisible="False"
+            GotFocus="PlaybackChrome_GotFocus"
+            LostFocus="PlaybackChrome_LostFocus">
             <Button
                 x:Name="PlayPauseButton"
                 Click="PlayPause_Click"
@@ -52,6 +42,22 @@
                     Foreground="{ThemeResource OverlayForegroundBrush}"
                     FontSize="18" />
             </Button>
+            <Border
+                x:Name="QualityIndicator"
+                Margin="2,0,8,0"
+                Padding="7,3"
+                VerticalAlignment="Center"
+                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                CornerRadius="3"
+                Visibility="Collapsed"
+                AutomationProperties.Name="Adaptive preview resolution"
+                ToolTipService.ToolTip="Preview is downscaled for performance. Export remains full resolution.">
+                <TextBlock
+                    x:Name="QualityIndicatorText"
+                    FontSize="11"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource OverlayForegroundBrush}" />
+            </Border>
             <TextBlock
                 x:Name="TimeDisplay"
                 VerticalAlignment="Center"

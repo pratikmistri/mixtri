@@ -1610,3 +1610,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: The badge displays `Adaptive · 540p/720p/900p/1080p` only when the active tier is below the source resolution, updates after successful live reader swaps, hides for full-resolution preview or no project, and explains via tooltip that export remains full resolution. It is not hit-testable, so it cannot intercept preview input.
 - **What didn't work**: Nothing; existing overlay theme resources matched the playback controls and avoided new styling dependencies.
 - **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Shy preview playback chrome
+
+- **Feature/area**: `PreviewCanvas` playback controls and adaptive-quality badge placement.
+- **Approaches tried**: Moved the badge beside Play/Pause inside one bottom chrome and used a Composition opacity animation driven by preview pointer enter/exit plus keyboard focus.
+- **What worked**: The full chrome (Play/Pause, adaptive tier, and timecode) fades in over 140 ms on hover and out over 280 ms after leaving. Keyboard focus keeps it visible. Hidden chrome disables pointer hit-testing, preventing invisible buttons or tooltips from intercepting clicks, while keyboard focus can still reveal it.
+- **What didn't work**: The first version changed only opacity; transparent XAML elements still hit-test, so the invisible Play/Pause button could be clicked. Review caught it and `IsHitTestVisible` now follows the chrome state.
+- **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.
