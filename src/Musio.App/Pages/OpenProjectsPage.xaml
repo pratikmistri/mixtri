@@ -9,11 +9,34 @@
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
     <Page.Resources>
-        <!-- The GridViewHeaderItem template hard-codes a divider Rectangle beneath the
-             header, so it can't be turned off with BorderThickness. Shadowing the brush
-             it strokes with is scoped to this page and, unlike supplying our own header
-             template, keeps whatever else the default template gains later. -->
-        <SolidColorBrush x:Key="GridViewHeaderItemDividerStroke" Color="Transparent" />
+        <!-- The stock GridViewHeaderItem style indents its content by 12px and hard-codes
+             a divider Rectangle beneath it. Neither is reachable with setters, and unlike
+             GridViewItem there is no keyed default style to derive from (generic.xaml
+             declares GridViewHeaderItem's style implicitly, with no x:Key), so the
+             template is restated here without the divider and with the left padding
+             dropped, which lines the header up with the page title and the cards.
+             Everything else mirrors the stock setters. -->
+        <Style x:Key="ProjectsGroupHeaderStyle" TargetType="GridViewHeaderItem">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Margin" Value="0,0,0,4" />
+            <Setter Property="Padding" Value="0,8,0,0" />
+            <Setter Property="MinHeight" Value="{ThemeResource GridViewHeaderItemMinHeight}" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="VerticalContentAlignment" Value="Top" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewHeaderItem">
+                        <ContentPresenter
+                            Margin="{TemplateBinding Padding}"
+                            HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                            Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            ContentTransitions="{TemplateBinding ContentTransitions}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- ItemsPath names the child collection on each ProjectGroup; without it a
              grouped source renders the groups themselves as items. -->
@@ -160,7 +183,7 @@
                 </DataTemplate>
             </GridView.ItemTemplate>
             <GridView.GroupStyle>
-                <GroupStyle HidesIfEmpty="True">
+                <GroupStyle HeaderContainerStyle="{StaticResource ProjectsGroupHeaderStyle}" HidesIfEmpty="True">
                     <GroupStyle.HeaderTemplate>
                         <DataTemplate x:DataType="local:ProjectGroup">
                             <TextBlock
