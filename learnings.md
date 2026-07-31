@@ -1588,3 +1588,10 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: Application code merged automatically; only `learnings.md` required conflict resolution. The target branch's stability/performance changes and the adaptive preview changes coexist without code conflicts.
 - **What didn't work**: Nothing beyond the expected append-only documentation conflict.
 - **Verified**: Merged ARM64 app/test builds succeeded; full target-branch suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Adaptive preview Release deployment
+
+- **Feature/area**: Clean local deployment of `fix/top-stability-performance-risks`.
+- **Approaches tried**: Removed the existing loose package registration before deleting the exact ARM64 Release output directories, rebuilt with VS BuildTools MSBuild, registered the generated Release `AppxManifest.xml`, and launched through AppsFolder.
+- **What worked**: Package status is `Ok`, install location points to the fresh `win-arm64` Release output, and PID 33880 is responsive with window title `Musio`.
+- **What didn't work**: Nothing; removing registration before cleaning avoided stale loose-package paths.
