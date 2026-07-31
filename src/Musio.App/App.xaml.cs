@@ -150,6 +150,12 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Project whose open is currently in flight, or <c>null</c>. Only ever touched on
+    /// the UI thread.
+    /// </summary>
+    private string? _openInFlightPath;
+
+    /// <summary>
     /// Opens the <c>.musio</c> project the app was launched with and shows it in
     /// the editor tab of the full window.
     /// </summary>
@@ -157,8 +163,14 @@ public partial class App : Application
     /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
     /// association should not prevent the app from starting.
     /// </remarks>
-    private static async System.Threading.Tasks.Task OpenActivationProjectAsync(MainWindow window, string path)
+    private async System.Threading.Tasks.Task OpenActivationProjectAsync(MainWindow window, string path)
     {
+        // Recorded before the first await, because ProjectService only assigns
+        // CurrentPackagePath once the open has finished — and extracting a real project
+        // takes seconds. Without this, an impatient second double-click during that
+        // window starts a concurrent extraction into the same per-project cache folder,
+        // which is the corruption the whole single-instance path exists to prevent.
+        _openInFlightPath = path;
         try
         {
             await ProjectService.Instance.OpenPackageAsync(path);
@@ -169,6 +181,10 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"[App] Could not open '{path}': {ex}");
             window.DispatcherQueue.TryEnqueue(() =>
                 window.ShowRecordingError($"Could not open project: {ex.Message}"));
+        }
+        finally
+        {
+            _openInFlightPath = null;
         }
     }
 
@@ -193,9 +209,9 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Ensures at most one window per project file. Returns <c>true</c> when this
-    /// process handed its activation to the instance that already has
-    /// <paramref name="packagePath"/> open and should stop launching.
+    /// Ensures at most one window per project file <em>for files opened by activation</em>.
+    /// Returns <c>true</c> when this process handed its activation to the instance that
+    /// already has <paramref name="packagePath"/> open and should stop launching.
     /// </summary>
     /// <remarks>
     /// Opening one project in two windows is a correctness problem, not just
@@ -206,6 +222,17 @@ public partial class App : Application
     /// <para>
     /// Only file activations register a key. A plain launch stays un-keyed, so the
     /// recorder can still be started as many times as the user likes.
+    /// </para>
+    /// <para>
+    /// <b>Known limits.</b> The key is fixed for the process lifetime — it cannot be
+    /// moved, because <c>AppInstance.UnregisterKey</c> has open platform bugs (an
+    /// invalid key after re-registration, and a failfast when called off the
+    /// registering thread). So a window repointed at another project through the
+    /// in-app Open dialog still holds the key for the file it launched with, and
+    /// projects opened that way — including anything opened in the un-keyed recorder
+    /// instance — are not covered. <see cref="ServeRedirectedOpen"/> reconciles the
+    /// request when a redirect does arrive, but it cannot stop a double-click on an
+    /// unkeyed project from opening a second window.
     /// </para>
     /// </remarks>
     private bool TryRedirectToExistingProjectInstance(string packagePath)
@@ -229,27 +256,28 @@ public partial class App : Application
 
             // RedirectActivationToAsync deadlocks if awaited on the thread that is
             // pumping the activation, so it is driven from a worker and waited on here.
-            // Blocking is safe at this point: no window or XAML content exists yet.
-            var handedOver = false;
-            using var redirected = new System.Threading.ManualResetEventSlim(false);
-            System.Threading.Tasks.Task.Run(async () =>
+            // The blocking wait is on the STA UI thread, which the CLR keeps pumping COM
+            // for, so the cross-process call can still complete. A Task carries the
+            // outcome; an event would only report that the worker finished, not whether
+            // the hand-off actually succeeded.
+            var redirect = System.Threading.Tasks.Task.Run(async () =>
             {
                 try
                 {
                     await keyInstance.RedirectActivationToAsync(activationArgs);
-                    System.Threading.Volatile.Write(ref handedOver, true);
+                    return true;
                 }
                 catch (Exception ex)
                 {
                     // Most likely the owner died between FindOrRegisterForKey and the
                     // call, leaving a stale registration. Falls through to opening here.
                     System.Diagnostics.Debug.WriteLine($"[App] Redirect failed: {ex}");
+                    return false;
                 }
-                finally { redirected.Set(); }
             });
 
             // Bounded so a wedged owner can't hang the launch forever.
-            if (!redirected.Wait(TimeSpan.FromSeconds(5)))
+            if (!redirect.Wait(TimeSpan.FromSeconds(5)))
             {
                 // A timeout means the call hasn't returned — NOT that it failed, and
                 // it is not cancellable, so it may still land. Opening here as well
@@ -267,11 +295,11 @@ public partial class App : Application
                 return false;
             }
 
-            // Signalled is not the same as succeeded: the worker signals on the failure
-            // path too. Reporting a failed hand-off as success would exit this process
-            // without ever creating a window, so the double-click would do nothing at
-            // all — and that path is reached faster than the timeout above.
-            return System.Threading.Volatile.Read(ref handedOver);
+            // Completing is not the same as succeeding. Reporting a failed hand-off as
+            // success would exit this process without ever creating a window, so the
+            // double-click would do nothing at all — and the failure path returns
+            // faster than the timeout above, so it is the likelier of the two.
+            return redirect.Result;
         }
         catch (Exception ex)
         {
@@ -341,18 +369,55 @@ public partial class App : Application
 
     /// <summary>
     /// Serves a redirected activation on the UI thread: opens the requested project
-    /// if it isn't the one already showing, then brings the window forward.
+    /// if that is safe, then brings the window forward.
     /// </summary>
     private void HandleRedirectedActivation(string? requestedPath)
     {
-        if (requestedPath is not null
-            && _window is MainWindow mainWindow
-            && !IsSameProjectPath(requestedPath, ProjectService.Instance.CurrentPackagePath))
-        {
-            _ = OpenActivationProjectAsync(mainWindow, requestedPath);
-        }
+        // A recording owns both the screen and the project state. Swapping the project
+        // under a live capture would repoint the save target and spin the editor up
+        // mid-capture, and raising the window would film it — so nothing here is safe,
+        // not just the window manipulation.
+        if (_shell?.CurrentState == Musio.Core.Shell.AppShellState.Recording) return;
+
+        if (requestedPath is not null && _window is MainWindow mainWindow)
+            ServeRedirectedOpen(mainWindow, requestedPath);
 
         BringToForeground();
+    }
+
+    /// <summary>
+    /// Loads a redirected project request into this window, unless doing so would
+    /// race an open already running or destroy work that was never saved.
+    /// </summary>
+    private void ServeRedirectedOpen(MainWindow window, string requestedPath)
+    {
+        var projects = ProjectService.Instance;
+
+        // Already showing it, or already loading it — the ordinary case.
+        if (IsSameProjectPath(requestedPath, projects.CurrentPackagePath)
+            || IsSameProjectPath(requestedPath, _openInFlightPath))
+        {
+            return;
+        }
+
+        // A different project is still loading. Let it finish rather than run two
+        // extractions at once.
+        if (_openInFlightPath is not null) return;
+
+        // Work that was never saved has no package path to compare against — a fresh
+        // recording is the usual case, since ProjectService.SetProject clears
+        // CurrentPackagePath. Opening over it would discard it with no prompt, on a
+        // window the user may not even be looking at, triggered from another process.
+        if (projects.CurrentProject is not null && projects.CurrentPackagePath is null)
+        {
+            window.ShowShellMessage(
+                "This window has unsaved work, so the project you just opened was not "
+                + "loaded here. Save or close this window, then open the file again.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+            return;
+        }
+
+        _ = OpenActivationProjectAsync(window, requestedPath);
     }
 
     /// <summary>Guards <see cref="_window"/> publication against redirects racing startup.</summary>
