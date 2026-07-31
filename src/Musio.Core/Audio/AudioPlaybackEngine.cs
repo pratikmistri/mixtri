@@ -14,7 +14,10 @@ public sealed class AudioPlaybackEngine : IDisposable
     private readonly List<AudioFileReader> _readers = [];
     private readonly List<MediaFoundationResampler> _resamplers = [];
     private readonly object _transportLock = new();
+    private readonly object _scrubQueueLock = new();
     private Timer? _scrubTimer;
+    private TimeSpan? _queuedScrubPosition;
+    private bool _scrubWorkerRunning;
     private bool _disposed;
 
     /// <summary>
@@ -113,22 +116,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
-            // Stop output before repositioning to avoid racing the audio thread
-            // and to ensure subsequent playback starts from the new position.
-            try { _outputDevice?.Stop(); } catch { }
-
-            foreach (var reader in _readers)
-            {
-                try
-                {
-                    long targetBytes = (long)(position.TotalSeconds
-                        * reader.WaveFormat.AverageBytesPerSecond);
-                    // Align to block boundary
-                    targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
-                    reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
-                }
-                catch { /* best-effort seek */ }
-            }
+            SeekCore(position);
         }
     }
 
@@ -140,14 +128,80 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         if (_outputDevice is null) return;
 
-        lock (_transportLock)
+        lock (_scrubQueueLock)
         {
-            try { _outputDevice.Stop(); } catch { }
-            Seek(position);
-            try { _outputDevice.Play(); } catch { }
+            _scrubTimer?.Dispose();
+            _scrubTimer = null;
+            _queuedScrubPosition = position;
+            if (_scrubWorkerRunning)
+                return;
+
+            _scrubWorkerRunning = true;
         }
 
-        // Auto-stop after 80ms of no new scrub events
+        ThreadPool.QueueUserWorkItem(_ => ProcessScrubQueue());
+    }
+
+    private void ProcessScrubQueue()
+    {
+        while (true)
+        {
+            TimeSpan position;
+            lock (_scrubQueueLock)
+            {
+                if (_disposed || _queuedScrubPosition is not { } queued)
+                {
+                    _scrubWorkerRunning = false;
+                    return;
+                }
+
+                position = queued;
+                _queuedScrubPosition = null;
+            }
+
+            lock (_transportLock)
+            {
+                if (_disposed)
+                    continue;
+
+                SeekCore(position);
+                try { _outputDevice?.Play(); } catch { }
+            }
+
+            lock (_scrubQueueLock)
+            {
+                if (_queuedScrubPosition.HasValue)
+                    continue;
+
+                _scrubWorkerRunning = false;
+                if (_disposed)
+                    return;
+
+                ResetScrubStopTimer();
+                return;
+            }
+        }
+    }
+
+    private void SeekCore(TimeSpan position)
+    {
+        try { _outputDevice?.Stop(); } catch { }
+
+        foreach (var reader in _readers)
+        {
+            try
+            {
+                long targetBytes = (long)(position.TotalSeconds
+                    * reader.WaveFormat.AverageBytesPerSecond);
+                targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
+                reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
+            }
+            catch { }
+        }
+    }
+
+    private void ResetScrubStopTimer()
+    {
         _scrubTimer?.Dispose();
         _scrubTimer = new Timer(_ =>
         {
@@ -165,8 +219,12 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _scrubTimer?.Dispose();
-        _scrubTimer = null;
+        lock (_scrubQueueLock)
+        {
+            _queuedScrubPosition = null;
+            _scrubTimer?.Dispose();
+            _scrubTimer = null;
+        }
         Stop();
         _outputDevice?.Dispose();
         _outputDevice = null;

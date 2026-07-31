@@ -136,6 +136,10 @@ public sealed partial class EditorPage : Page
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+    private bool _syncingTimelineFromPlayback;
+    private AdaptivePreviewQuality? _adaptivePreviewQuality;
+    private string? _adaptivePreviewVideoPath;
+    private PreviewResolution _previewResolution = new(960, 540);
     private double _audioOffsetSeconds;
 
     // Background style editing state
@@ -193,6 +197,9 @@ public sealed partial class EditorPage : Page
             {
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
+                if (_syncingTimelineFromPlayback)
+                    return;
+
                 _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
                 // Play short audio burst at scrub position for editing feedback
                 if (!Preview.IsPlaying)
@@ -206,7 +213,15 @@ public sealed partial class EditorPage : Page
         // Sync playhead: when preview plays, update timeline
         Preview.PlaybackTick += (_, _) =>
         {
-            Timeline.PlayheadPosition = Preview.PlayheadPosition;
+            _syncingTimelineFromPlayback = true;
+            try
+            {
+                Timeline.PlayheadPosition = Preview.PlayheadPosition;
+            }
+            finally
+            {
+                _syncingTimelineFromPlayback = false;
+            }
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
 
@@ -454,6 +469,15 @@ public sealed partial class EditorPage : Page
         int previewFps = Math.Min(fps, 30);
         Preview.PreviewFps = previewFps;
 
+        if (!string.Equals(
+                _adaptivePreviewVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _adaptivePreviewQuality = new AdaptivePreviewQuality(
+                project.Width, project.Height, Environment.ProcessorCount);
+            _adaptivePreviewVideoPath = videoPath;
+            _previewResolution = _adaptivePreviewQuality.Current;
+        }
+
         if (!haveStrip && !alreadyGenerating)
         {
             _thumbnailGenerationId++; // cancel any pass for a different source
@@ -475,7 +499,8 @@ public sealed partial class EditorPage : Page
             _ = GenerateAppendedThumbnailsAsync(videoPath);
         }
 
-        var reader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
+        var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+            videoPath, fps, _previewResolution.MaxWidth, _previewResolution.MaxHeight);
         if (initGeneration != _previewInitGeneration)
         {
             // Page unloaded or a newer init took over while the decoder was opening.
@@ -708,7 +733,26 @@ public sealed partial class EditorPage : Page
             bool currentForce = force;
             do
             {
+                // Wall-clock time is intentionally used as the user-visible load signal:
+                // decode, composition and UI contention all reduce preview headroom.
+                long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 await RenderFrameAtAsync(currentPos, currentForce);
+
+                if (Preview.IsPlaying
+                    && IsVideoPosition(currentPos)
+                    && _adaptivePreviewQuality?.ObservePlaybackFrame(
+                        System.Diagnostics.Stopwatch.GetElapsedTime(renderStarted),
+                        Preview.PreviewFps) is { } resolution)
+                {
+                    if (await ApplyPreviewResolutionAsync(resolution))
+                    {
+                        _adaptivePreviewQuality.Commit(resolution);
+                        currentForce = true;
+                        continue;
+                    }
+
+                    _adaptivePreviewQuality.RejectChange();
+                }
 
                 // Consume any pending request that arrived during rendering
                 if (_pendingRenderPosition.HasValue)
@@ -728,6 +772,48 @@ public sealed partial class EditorPage : Page
         {
             _isRendering = false;
         }
+    }
+
+    private bool IsVideoPosition(TimeSpan position)
+    {
+        var model = ViewModel.Model;
+        return model.Segments.Count == 0
+            || model.GetSegmentAtTime(position).Segment is VideoSegment;
+    }
+
+    private async Task<bool> ApplyPreviewResolutionAsync(PreviewResolution resolution)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null
+            || string.IsNullOrEmpty(project.VideoFilePath)
+            || resolution == _previewResolution)
+        {
+            return false;
+        }
+
+        var videoPath = project.VideoFilePath;
+        int fps = project.Fps > 0 ? project.Fps : 30;
+        int initGeneration = _previewInitGeneration;
+
+        var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+            videoPath, fps, resolution.MaxWidth, resolution.MaxHeight);
+
+        if (!ReferenceEquals(project, ProjectService.Instance.CurrentProject)
+            || initGeneration != _previewInitGeneration
+            || reader is null)
+        {
+            DisposeOffUiThread(reader);
+            return false;
+        }
+
+        var oldReader = _frameReader;
+        _frameReader = reader;
+        _previewResolution = resolution;
+        DisposeOffUiThread(oldReader);
+        DisposeSegmentPreviews();
+        _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        return true;
     }
 
     private async Task RenderFrameAtAsync(TimeSpan position, bool force)
@@ -1235,7 +1321,8 @@ public sealed partial class EditorPage : Page
         try
         {
             int fps = seg.Fps > 0 ? seg.Fps : 30;
-            var reader = await VideoFrameReader.OpenFromVideoPathAsync(seg.VideoFilePath, fps);
+            var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+                seg.VideoFilePath, fps, _previewResolution.MaxWidth, _previewResolution.MaxHeight);
             if (Abandoned())
             {
                 DisposeOffUiThread(reader);

@@ -37,11 +37,6 @@ public sealed class Mp4FrameSource : IFrameSource
     /// land in ~20 ms and a cold seek across a GOP in a few hundred, so a stall past this
     /// means the seek produced no frame at all rather than a slow one.
     /// </summary>
-    private static readonly TimeSpan AttemptTimeout = TimeSpan.FromMilliseconds(600);
-
-    /// <summary>Number of times a frame request is re-issued before giving up.</summary>
-    private const int SeekAttempts = 3;
-
     /// <summary>
     /// How long to wait for a single frame step. Steps are the cheap path (a few
     /// milliseconds); anything past this is a stall, not slow decoding.
@@ -74,6 +69,9 @@ public sealed class Mp4FrameSource : IFrameSource
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly int _fps;
     private readonly bool _flipVertical;
+    private readonly int _seekAttempts;
+    private readonly TimeSpan _seekAttemptTimeout;
+    private readonly bool _enableSeekRecovery;
 
     private TaskCompletionSource<bool>? _framePending;
     private int _lastDeliveredIndex = -1;
@@ -87,12 +85,17 @@ public sealed class Mp4FrameSource : IFrameSource
 
     private Mp4FrameSource(
         MediaPlayer player, CanvasDevice device, int width, int height, int fps, int frameCount,
-        bool flipVertical)
+        bool flipVertical, FrameSourceOptions options)
     {
         _player = player;
         _device = device;
         _fps = fps;
         _flipVertical = flipVertical;
+        _seekAttempts = Math.Max(1, options.SeekAttempts);
+        _seekAttemptTimeout = options.SeekAttemptTimeout > TimeSpan.Zero
+            ? options.SeekAttemptTimeout
+            : TimeSpan.FromMilliseconds(600);
+        _enableSeekRecovery = options.EnableSeekRecovery;
         Width = width;
         Height = height;
         FrameCount = frameCount;
@@ -114,7 +117,11 @@ public sealed class Mp4FrameSource : IFrameSource
     /// are vertically mirrored. See <see cref="Musio.Core.Capture.RecordingMarker"/>.
     /// </param>
     public static async Task<Mp4FrameSource?> OpenAsync(
-        string videoFilePath, int fps, CanvasDevice device, bool flipVertical = false)
+        string videoFilePath,
+        int fps,
+        CanvasDevice device,
+        bool flipVertical = false,
+        FrameSourceOptions? options = null)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
@@ -181,8 +188,12 @@ public sealed class Mp4FrameSource : IFrameSource
             // laid the JPEGs out, so the two sources stay interchangeable.
             int frameCount = Math.Max(1, (int)Math.Round(duration.TotalSeconds * fps));
 
+            options ??= FrameSourceOptions.FullResolution;
+            var (outputWidth, outputHeight) = ComputeOutputDimensions(
+                width, height, options.MaxWidth, options.MaxHeight);
+
             var reader = new Mp4FrameSource(
-                player, device, width, height, fps, frameCount, flipVertical);
+                player, device, outputWidth, outputHeight, fps, frameCount, flipVertical, options);
             player = null; // ownership transferred
 
             await reader.PrimeAsync();
@@ -194,6 +205,23 @@ public sealed class Mp4FrameSource : IFrameSource
             player?.Dispose();
             return null;
         }
+    }
+
+    internal static (int Width, int Height) ComputeOutputDimensions(
+        int sourceWidth, int sourceHeight, int maxWidth, int maxHeight)
+    {
+        if (sourceWidth <= 0 || sourceHeight <= 0)
+            return (0, 0);
+        if (maxWidth <= 0 || maxHeight <= 0
+            || (sourceWidth <= maxWidth && sourceHeight <= maxHeight))
+        {
+            return (sourceWidth, sourceHeight);
+        }
+
+        double scale = Math.Min((double)maxWidth / sourceWidth, (double)maxHeight / sourceHeight);
+        int width = Math.Max(2, ((int)Math.Round(sourceWidth * scale)) & ~1);
+        int height = Math.Max(2, ((int)Math.Round(sourceHeight * scale)) & ~1);
+        return (width, height);
     }
 
     /// <summary>
@@ -362,6 +390,13 @@ public sealed class Mp4FrameSource : IFrameSource
         if (await TrySeekRoundAsync(frameIndex).ConfigureAwait(false))
             return true;
 
+        if (!_enableSeekRecovery)
+        {
+            _lastDeliveredIndex = -1;
+            _needsDrain = true;
+            return false;
+        }
+
         // Every attempt completed without producing a frame. On a paused frame-server
         // player the pipeline can settle into a state where re-assigning Position never
         // wakes it again, and no number of extra seeks helps — but a step does. Step to
@@ -397,21 +432,21 @@ public sealed class Mp4FrameSource : IFrameSource
         }
 
         Debug.WriteLine(
-            $"[Mp4FrameSource] Gave up seeking to frame {frameIndex} after {SeekAttempts} attempts.");
+            $"[Mp4FrameSource] Gave up seeking to frame {frameIndex} after {_seekAttempts} attempts.");
         _lastDeliveredIndex = -1;
         _needsDrain = true;
         return false;
     }
 
     /// <summary>
-    /// One round of <see cref="SeekAttempts"/> seek attempts. Returns true as soon as a
+    /// One round of configured seek attempts. Returns true as soon as a
     /// frame for <paramref name="frameIndex"/> lands.
     /// </summary>
     private async Task<bool> TrySeekRoundAsync(int frameIndex)
     {
         var session = _player.PlaybackSession;
 
-        for (int attempt = 0; attempt < SeekAttempts; attempt++)
+        for (int attempt = 0; attempt < _seekAttempts; attempt++)
         {
             var seekDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             void OnSeekCompleted(MediaPlaybackSession s, object a) => seekDone.TrySetResult(true);
@@ -432,7 +467,7 @@ public sealed class Mp4FrameSource : IFrameSource
                 var settled = await Task.WhenAny(
                     pending.Task,
                     Task.WhenAll(seekDone.Task, Task.Delay(PostSeekGrace)),
-                    Task.Delay(AttemptTimeout)).ConfigureAwait(false);
+                    Task.Delay(_seekAttemptTimeout)).ConfigureAwait(false);
 
                 if (settled == pending.Task && await pending.Task.ConfigureAwait(false))
                     return true;
