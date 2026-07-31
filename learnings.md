@@ -1664,3 +1664,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: Recovery pauses rendering, invalidates all async generations, drops old-device frames/thumbnails/readers/compositors, rebuilds from the replacement shared device, regenerates filmstrips, and rerenders the playhead. A deterministic recovery lifecycle probe completed in about 500 ms while the editor remained responsive.
 - **What didn't work**: Calling Win2D `RaiseDeviceLost()` directly on this packaged ARM64 setup returned `E_INVALIDARG`; invoking the same recovery lifecycle directly provided deterministic end-to-end validation. A single queued flag also dropped a second loss during recovery, so recovery now records additional requests and loops until stable.
 - **Verified**: ARM64 Debug solution build succeeded; the full suite passed 583 tests with 2 existing MP4 identity skips. A clean ARM64 Release package registered with status `Ok` and opened a responsive project editor.
+
+## PR 66 frame-callback fault retention
+
+- **Feature/area**: `RecordingSession.OnFrameCaptured` error handling.
+- **Approaches tried**: Validated the review thread against the free-threaded callback and existing `RecordFault`/`ReportFault` contract.
+- **What worked**: Frame callback exceptions now flow through `RecordFault`, retaining the degraded session state and insulating the capture callback from throwing `Error` subscribers.
+- **What didn't work**: Direct `Error` invocation bypassed fault retention and allowed subscriber exceptions to escape the capture callback.
+- **Verified**: ARM64 Debug solution build succeeded; recording fault tests passed 4/4 and the full suite passed 583 tests with 2 existing skips.

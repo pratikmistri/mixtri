@@ -776,7 +776,9 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Error?.Invoke(this, $"Frame write error: {ex.Message}");
+            RecordFault(new RecordingFault(
+                $"Frame write error: {ex.Message}",
+                Exception: ex));
         }
     }
 
