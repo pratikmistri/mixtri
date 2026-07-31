@@ -8,6 +8,15 @@
     mc:Ignorable="d"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
+    <Page.Resources>
+        <!-- ItemsPath names the child collection on each ProjectGroup; without it a
+             grouped source renders the groups themselves as items. -->
+        <CollectionViewSource
+            x:Name="ProjectsSource"
+            IsSourceGrouped="True"
+            ItemsPath="Items" />
+    </Page.Resources>
+
     <Grid Padding="24" RowSpacing="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -20,22 +29,22 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="0" Spacing="2">
-                <TextBlock FontSize="24" FontWeight="SemiBold" Text="Projects" />
-                <TextBlock
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="Saved .musio projects. Each one bundles its recording, so it can be moved anywhere." />
-            </StackPanel>
+            <TextBlock
+                Grid.Column="0"
+                VerticalAlignment="Center"
+                FontSize="24"
+                FontWeight="SemiBold"
+                Text="Projects" />
 
             <Button
                 Grid.Column="1"
                 Height="36"
-                VerticalAlignment="Bottom"
+                VerticalAlignment="Center"
                 Click="Open_Click"
                 ToolTipService.ToolTip="Open a .musio project from anywhere on disk">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xE8E5;" />
-                    <TextBlock Text="Open…" />
+                    <TextBlock Text="Open" />
                 </StackPanel>
             </Button>
         </Grid>
@@ -144,6 +153,20 @@
                     </Grid>
                 </DataTemplate>
             </GridView.ItemTemplate>
+            <GridView.GroupStyle>
+                <GroupStyle HidesIfEmpty="True">
+                    <GroupStyle.HeaderTemplate>
+                        <DataTemplate x:DataType="local:ProjectGroup">
+                            <TextBlock
+                                Margin="0,0,0,8"
+                                FontSize="14"
+                                FontWeight="SemiBold"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="{x:Bind Header}" />
+                        </DataTemplate>
+                    </GroupStyle.HeaderTemplate>
+                </GroupStyle>
+            </GridView.GroupStyle>
         </GridView>
     </Grid>
 </Page>

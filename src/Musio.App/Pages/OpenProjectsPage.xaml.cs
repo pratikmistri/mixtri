@@ -15,7 +15,23 @@ public sealed class ProjectCard
     public string Path { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string Subtitle { get; init; } = string.Empty;
+
+    /// <summary>
+    /// When the recording was created, in local time. Drives both the day grouping and
+    /// the order within a day.
+    /// </summary>
+    public DateTime CreatedAt { get; init; }
+
     public BitmapImage? Poster { get; init; }
+}
+
+/// <summary>
+/// One day's worth of projects, as shown under a single header on the Open page.
+/// </summary>
+public sealed class ProjectGroup
+{
+    public string Header { get; init; } = string.Empty;
+    public List<ProjectCard> Items { get; init; } = new();
 }
 
 /// <summary>
@@ -56,7 +72,7 @@ public sealed partial class OpenProjectsPage : Page
             {
                 // Manifest and poster are read off the UI thread; the BitmapImage itself
                 // must be created on it.
-                var (name, subtitle, poster) = await Task.Run(() => ReadCardData(entry));
+                var (name, subtitle, created, poster) = await Task.Run(() => ReadCardData(entry));
 
                 BitmapImage? image = null;
                 if (poster is { Length: > 0 })
@@ -67,11 +83,13 @@ public sealed partial class OpenProjectsPage : Page
                     Path = entry.Path,
                     Name = name,
                     Subtitle = subtitle,
+                    CreatedAt = created,
                     Poster = image,
                 });
             }
 
-            ProjectsGrid.ItemsSource = cards;
+            ProjectsSource.Source = GroupByDay(cards);
+            ProjectsGrid.ItemsSource = ProjectsSource.View;
             EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
@@ -144,7 +162,40 @@ public sealed partial class OpenProjectsPage : Page
             Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Musio");
     }
 
-    private static (string Name, string Subtitle, byte[]? Poster) ReadCardData(RecentProject entry)
+    /// <summary>
+    /// Buckets cards into one group per calendar day, newest day first and newest
+    /// project first within each day.
+    /// </summary>
+    /// <remarks>
+    /// Keyed on creation rather than last-used so a project's position never moves just
+    /// because it was opened — the list reads the same every time the page is visited.
+    /// </remarks>
+    private static List<ProjectGroup> GroupByDay(IEnumerable<ProjectCard> cards) => cards
+        .GroupBy(c => c.CreatedAt.Date)
+        .OrderByDescending(g => g.Key)
+        .Select(g => new ProjectGroup
+        {
+            Header = FormatDayHeader(g.Key),
+            Items = g.OrderByDescending(c => c.CreatedAt).ToList(),
+        })
+        .ToList();
+
+    /// <summary>Names a day group: "Today", "Yesterday", or the full date.</summary>
+    private static string FormatDayHeader(DateTime day)
+    {
+        var today = DateTime.Now.Date;
+        if (day == today) return "Today";
+        if (day == today.AddDays(-1)) return "Yesterday";
+
+        // The year is noise for anything recorded this year, and the weekday is the part
+        // people actually recognise when scanning a recent list.
+        return day.Year == today.Year
+            ? day.ToString("dddd, d MMMM")
+            : day.ToString("d MMMM yyyy");
+    }
+
+    private static (string Name, string Subtitle, DateTime Created, byte[]? Poster) ReadCardData(
+        RecentProject entry)
     {
         var manifest = MusioPackageService.ReadManifest(entry.Path);
         var poster = MusioPackageService.ReadPoster(entry.Path);
@@ -165,7 +216,32 @@ public sealed partial class OpenProjectsPage : Page
         try { size = new FileInfo(entry.Path).Length; } catch { }
 
         var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {saved:d MMM yyyy}";
-        return (name!, subtitle, poster);
+        return (name!, subtitle, ResolveCreatedAt(entry, manifest), poster);
+    }
+
+    /// <summary>
+    /// When the recording behind a package was made, in local time.
+    /// </summary>
+    /// <remarks>
+    /// The manifest's project is authoritative and travels with the file, so a project
+    /// copied between machines still groups under the day it was recorded. Falls back to
+    /// the file's own creation stamp, then to the recents entry, so a package with an
+    /// unreadable manifest still lands in a sensible group instead of at the epoch.
+    /// </remarks>
+    private static DateTime ResolveCreatedAt(RecentProject entry, MusioManifest? manifest)
+    {
+        var created = manifest?.Project.CreatedAt ?? default;
+        if (created != default)
+            return created.Kind == DateTimeKind.Utc ? created.ToLocalTime() : created;
+
+        try
+        {
+            var fileCreated = File.GetCreationTime(entry.Path);
+            if (fileCreated != default) return fileCreated;
+        }
+        catch { }
+
+        return entry.LastUsedUtc.ToLocalTime().DateTime;
     }
 
     private static async Task<BitmapImage?> CreateBitmapAsync(byte[] bytes)
