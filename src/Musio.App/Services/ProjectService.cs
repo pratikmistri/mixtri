@@ -112,7 +112,16 @@ public class ProjectService
             await MusioPackageService.SaveAsync(
                 packagePath, project, CurrentComposition, CurrentTimeline, progress, ct);
 
-            CurrentPackagePath = packagePath;
+            // Only rebind the current package when the project we just wrote is still
+            // the one on screen. A save can be started while an open is already in
+            // flight (the redirected open is fire-and-forget, so Ctrl+S stays live),
+            // and that open may finish first — publishing its own project and path.
+            // Rebinding here regardless would leave the newly opened project pointing
+            // at the file this save wrote, so the next save would silently overwrite
+            // that file with the wrong project's content. The package itself was
+            // written correctly either way, so the recents entry is still accurate.
+            if (ReferenceEquals(CurrentProject, project))
+                CurrentPackagePath = packagePath;
 
             RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
         }
