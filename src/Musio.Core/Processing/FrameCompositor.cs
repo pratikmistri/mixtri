@@ -813,8 +813,16 @@ public class FrameCompositor : IDisposable
         // identical to Linear, so use the cheaper path. Use the same explicit
         // near-unit threshold form as ComposeFramePostCompositeZoom so the two
         // paths stay aligned over time.
-        double scaleX = _sourceAreaWidth / viewport.Width;
-        double scaleY = _sourceAreaHeight / viewport.Height;
+        double bitmapScaleX = source.SizeInPixels.Width / (double)_sourceWidth;
+        double bitmapScaleY = source.SizeInPixels.Height / (double)_sourceHeight;
+        var bitmapViewport = new Rect(
+            viewport.X * bitmapScaleX,
+            viewport.Y * bitmapScaleY,
+            viewport.Width * bitmapScaleX,
+            viewport.Height * bitmapScaleY);
+
+        double scaleX = _sourceAreaWidth / bitmapViewport.Width;
+        double scaleY = _sourceAreaHeight / bitmapViewport.Height;
         const double nearUnitScaleMinimum = 0.95;
         const double nearUnitScaleMaximum = 1.05;
         bool nearUnitScale =
@@ -829,7 +837,7 @@ public class FrameCompositor : IDisposable
 
         ds.DrawImage(source,
             new Rect(0, 0, _sourceAreaWidth, _sourceAreaHeight),
-            viewport,
+            bitmapViewport,
             1f, interpolation);
         return _croppedBuffer;
     }

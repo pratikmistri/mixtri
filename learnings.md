@@ -1498,3 +1498,46 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Restated control templates lose more than the visuals you were looking at.** The `GridViewHeaderItem` replacement dropped `UseSystemFocusVisuals` (stock style sets it; `Control` defaults it to `false`) while providing no focus visual of its own — a keyboard user focusing a group header would get no indicator. Re-added explicitly. When restating a stock template, diff the *setters* as well as the template body.
 - **Dead code removed**: `DiscoverProjects` still ended with `.OrderByDescending(e => e.LastUsedUtc)` after grouping took over sorting. Removed, and `GroupByDay` now breaks ties on `Name` so ordering no longer depends on the dictionary order projects were discovered in.
 - **`FileInfo` metadata is cached by the `Exists` probe — later reads cannot throw** (PR review claimed otherwise twice; measured and refuted). `FileSystemInfo.Exists` calls `Refresh()`, which snapshots `WIN32_FILE_ATTRIBUTE_DATA`; `Length` and `LastWriteTime` then read that snapshot with no further I/O. Demonstrated: create a file, read `.Exists` (True), **delete the file**, then `.Length` still returns `13` and `.LastWriteTime` still returns the real timestamp — no exception. A *fresh* `FileInfo` on a missing path is the dangerous one (`LastWriteTime` → `12/31/1600`). So `if (info.Exists)` once, then reuse that instance, is sufficient — adding try/catch around the subsequent property reads would be unreachable code. Access-denied is covered too: `Exists` returns false on any error, so the code falls through to the manifest/recents fallbacks.
+## Preview playback and rapid-seek lag investigation
+
+- **Feature/area**: Editor timeline scrubbing, preview render scheduling, MP4 frame decoding, and audio scrub feedback.
+- **Approaches tried**: Traced pointer movement through `TimelineControl.PlayheadPosition`, `EditorPage.UpdatePreviewFrameAsync`, `VideoFrameReader`, `Mp4FrameSource`, and `AudioPlaybackEngine`; compared the current behavior with the prior MP4 preview-stutter findings.
+- **What worked**: The root cause is an uncancellable single-decoder pipeline. Every pointer move updates the playhead immediately, but an in-flight obsolete MP4 seek must finish before the coalesced latest position can render. A stalled random seek can consume multiple 600 ms retries, grace periods, wake-step recovery, and drain delays; meanwhile playback advances far enough to miss the eight-frame step window and require another full GOP seek. The last presented frame remains visible throughout, which appears as a freeze. Synchronous `ScrubTo` stop/seek/play work on every pointer move adds UI-thread latency, and playback schedules preview updates both through the timeline property callback and the playback-tick handler.
+- **What didn't work**: Treating this as playhead drawing/layout cost or raw compositor cost does not explain the multi-second freezes; the playhead is already an overlay and render requests are coalesced. Coalescing limits queue growth but cannot preempt the obsolete decode already holding `Mp4FrameSource._gate`.
+
+## Preview seek fix design
+
+- **Feature/area**: Behavior-preserving preview playback and scrubbing responsiveness.
+- **Approaches tried**: Compared decode-quality reductions, longer caches, pure debouncing, additional decoder instances, and cancellation-aware latest-position scheduling.
+- **What worked**: Keep exact decoding and composition, but make preview requests supersedable. Add preview-only cancellation through `VideoFrameReader`/`Mp4FrameSource`, safely abandon the current seek without allowing its late frame to satisfy the next request, render scrub positions at a bounded cadence, and force the exact final frame on pointer release. Suppress the timeline callback during playback-driven playhead updates so each tick schedules one render. Move audio scrub transport onto a latest-only throttled worker so pointer handling remains immediate.
+- **What didn't work**: Reducing preview quality, changing GOP/frame accuracy, or removing audio feedback changes expected behavior. Coalescing without decoder cancellation still waits behind obsolete work; cancellation without stale-frame isolation risks presenting or exporting the wrong frame.
+
+## Preview cache and reduced-resolution direction
+
+- **Feature/area**: Revised preview-performance design after product preference clarification.
+- **Approaches tried**: Evaluated enlarging the existing 12-frame source-resolution GPU cache, caching final composed frames, scaling decoded frames, and using a dedicated low-resolution preview proxy.
+- **What worked**: Use a byte-budgeted LRU of low-resolution decoded source frames, preserving live composition of cursor, zoom, webcam, transitions, and styles. A 960x540 BGRA frame is about 2 MiB versus about 8 MiB at 1080p, so a 128-256 MiB budget can retain roughly 64-128 frames. For materially cheaper H.264 seeks, decode a low-resolution, short-GOP preview proxy; scaling only after full-resolution decode reduces composition and cache cost but not the GOP decode work. Keep cancellation/latest-request handling because cache misses and first visits still occur.
+- **What didn't work**: A larger cache alone cannot accelerate frames never visited, and rapid long-distance movement has poor cache locality. Caching final composed frames requires broad invalidation and risks stale effects; an unlimited full-resolution cache scales to hundreds of MiB or GiB, especially with 4K and appended recordings.
+
+## Reduced-resolution preview cache implementation
+
+- **Feature/area**: Editor preview decoding, frame caching, playback scheduling, compositor sampling, and audio scrub transport on `feature/preview-proxy-cache`.
+- **Approaches tried**: Considered a persisted short-GOP proxy file, then implemented a lower-risk preview-only decoder surface because it requires no project/package schema change or proxy-generation delay. Added a real MP4 integration test rather than relying only on dimension math.
+- **What worked**: `Mp4FrameSource` now accepts preview options and copies frames directly into a bounded 960x540 GPU surface; `FrameCompositor` maps full-resolution zoom/crop coordinates into the reduced bitmap. `VideoFrameReader` uses a 192 MiB byte-budgeted LRU for preview while export keeps the existing full-resolution/count-bounded reader. Preview seeks use one bounded attempt without export's expensive recovery sequence, playback no longer schedules the same frame twice, and scrub audio is latest-only on a worker thread. A real 1280x720 MP4 decoded successfully into a 960x540 frame.
+- **What didn't work**: Direct VS MSBuild invocation was intermittently denied by the shell; the documented `ProcessStartInfo` wrapper worked. The existing sequential/random MP4 frame-identity tests remain ignored for pre-existing decoder correctness defects and were not changed.
+- **Verified**: ARM64 app and test builds succeeded; preview tests passed 7/7; full suite passed 518 with 2 existing ignored tests.
+
+## Preview optimization branch build and launch
+
+- **Feature/area**: ARM64 Debug build and local launch of `feature/preview-proxy-cache`.
+- **Approaches tried**: Stopped the existing app by PID, built with VS BuildTools MSBuild through the established `ProcessStartInfo` wrapper, and launched the generated executable directly.
+- **What worked**: Build succeeded and PID 29604 remained responsive with window title `Musio Mini`.
+- **What didn't work**: Nothing; stopping the previous process avoided output-lock failures.
+
+## Adaptive preview resolution
+
+- **Feature/area**: Runtime preview quality selection and live reader swaps on `feature/preview-proxy-cache`.
+- **Approaches tried**: Replaced the fixed 960x540 cap with 540p/720p/900p/1080p tiers. Initial quality uses source size plus logical processor count; runtime quality uses an EMA of user-visible playback frame time with asymmetric promotion/demotion thresholds and cooldown.
+- **What worked**: Machines with 8+ logical processors start at up to 1080p, lower-capability machines start lower, sustained headroom promotes after 120 samples, and overload demotes after 12. Resolution changes open the replacement reader before disposing the current one, clear appended-reader caches only after success, and use generation/project guards across awaits. The controller proposes a tier and commits only after the reader swap succeeds.
+- **What didn't work**: The first controller version committed its tier before the reader opened, leaving controller and actual resolution divergent after an open failure; changed to propose/commit/reject. Review also found a disposal race that could recreate an audio scrub timer after shutdown; the timer is now guarded and disposed under the scrub lock.
+- **Verified**: ARM64 app/test builds succeeded; 12 focused preview tests passed before review fixes; final full suite passed 524 with 2 existing ignored MP4 identity tests.
