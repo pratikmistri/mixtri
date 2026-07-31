@@ -63,7 +63,7 @@
                 VerticalAlignment="Center"
                 FontSize="24"
                 FontWeight="SemiBold"
-                Text="Projects" />
+                Text="Gallery" />
 
             <Button
                 Grid.Column="1"

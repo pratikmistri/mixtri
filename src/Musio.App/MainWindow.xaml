@@ -91,8 +91,8 @@
                 <NavigationViewItem
                     x:Name="ProjectsNavItem"
                     Tag="projects"
-                    Content="Projects"
-                    ToolTipService.ToolTip="Open a saved project">
+                    Content="Gallery"
+                    ToolTipService.ToolTip="Browse your saved projects">
                     <NavigationViewItem.Icon>
                         <FontIcon FontSize="18" Glyph="&#xE8B7;" />
                     </NavigationViewItem.Icon>
