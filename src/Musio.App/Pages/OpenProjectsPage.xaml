@@ -21,6 +21,10 @@
             <Setter Property="Margin" Value="0,0,0,4" />
             <Setter Property="Padding" Value="0,8,0,0" />
             <Setter Property="MinHeight" Value="{ThemeResource GridViewHeaderItemMinHeight}" />
+            <!-- Restored from the stock style: Control.UseSystemFocusVisuals defaults to
+                 false, and this template draws no focus visual of its own, so a header
+                 that takes keyboard focus would otherwise show no indicator. -->
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
             <Setter Property="HorizontalContentAlignment" Value="Left" />
             <Setter Property="VerticalContentAlignment" Value="Top" />
             <Setter Property="Template">

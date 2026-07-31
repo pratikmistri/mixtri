@@ -8,7 +8,7 @@ using Windows.Storage.Streams;
 namespace Musio_App.Pages;
 
 /// <summary>
-/// One saved project as shown in the Open page.
+/// One saved project as shown in the Gallery.
 /// </summary>
 public sealed class ProjectCard
 {
@@ -26,7 +26,7 @@ public sealed class ProjectCard
 }
 
 /// <summary>
-/// One day's worth of projects, as shown under a single header on the Open page.
+/// One day's worth of projects, as shown under a single header in the Gallery.
 /// </summary>
 public sealed class ProjectGroup
 {
@@ -148,7 +148,8 @@ public sealed partial class OpenProjectsPage : Page
             }
         }
 
-        return byPath.Values.OrderByDescending(e => e.LastUsedUtc).ToList();
+        // Ordering is left to GroupByDay, which re-sorts everything on ModifiedAt.
+        return byPath.Values.ToList();
     }
 
     private static IEnumerable<string> SaveFolders()
@@ -176,7 +177,12 @@ public sealed partial class OpenProjectsPage : Page
         .Select(g => new ProjectGroup
         {
             Header = FormatDayHeader(g.Key),
-            Items = g.OrderByDescending(c => c.ModifiedAt).ToList(),
+            // Name breaks ties so the order does not depend on the order projects were
+            // discovered in, which is dictionary order and not stable.
+            Items = g
+                .OrderByDescending(c => c.ModifiedAt)
+                .ThenBy(c => c.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToList(),
         })
         .ToList();
 
@@ -210,37 +216,46 @@ public sealed partial class OpenProjectsPage : Page
             name = entry.Name;
 
         var duration = manifest?.Project.Duration ?? entry.Duration;
-        var modified = ResolveModifiedAt(entry, manifest);
 
-        long size = 0;
-        try { size = new FileInfo(entry.Path).Length; } catch { }
+        // One probe serves both the size and the modified date. FileInfo caches its
+        // metadata when Exists is read, so a file that vanishes mid-refresh still yields
+        // the values captured here rather than throwing.
+        FileInfo? file = null;
+        try
+        {
+            var info = new FileInfo(entry.Path);
+            if (info.Exists) file = info;
+        }
+        catch { }
+
+        var size = file?.Length ?? 0;
+        var modified = ResolveModifiedAt(entry, manifest, file);
 
         var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {modified:d MMM yyyy}";
         return (name!, subtitle, modified, poster);
     }
 
     /// <summary>
-    /// When a package was last saved, in local time.
+    /// When a package was last modified, in local time.
     /// </summary>
     /// <remarks>
-    /// The manifest's own timestamp is preferred over the file's write time: it is
-    /// written by the app, travels with the package to another machine, and is not
-    /// disturbed by anything else that happens to touch the file. Falls back to the
-    /// file's write time and finally to the recents entry, so a package with an
-    /// unreadable manifest still lands in a sensible group instead of at
-    /// <see cref="DateTime.MinValue"/>.
+    /// The file's own write time is preferred: it is the "date modified" Explorer shows,
+    /// it is always present for a file that exists, and a Windows copy carries it to
+    /// another machine. It is taken from a probed <see cref="FileInfo"/> rather than from
+    /// <see cref="File.GetLastWriteTime"/>, which for a missing or unreachable path
+    /// neither throws nor returns <c>default</c> — it returns 1601-01-01, which would
+    /// park the card under a phantom "31 December 1600" header.
     /// </remarks>
-    private static DateTime ResolveModifiedAt(RecentProject entry, MusioManifest? manifest)
+    private static DateTime ResolveModifiedAt(
+        RecentProject entry, MusioManifest? manifest, FileInfo? file)
     {
-        if (manifest is not null && manifest.SavedAt != default)
-            return manifest.SavedAt.ToLocalTime().DateTime;
+        if (file is not null) return file.LastWriteTime;
 
-        try
-        {
-            var written = File.GetLastWriteTime(entry.Path);
-            if (written != default) return written;
-        }
-        catch { }
+        // The manifest travels inside the package, so it still dates a project whose file
+        // could not be stat'd. It cannot be range-checked the way the write time can:
+        // MusioManifest.SavedAt is initialised to DateTimeOffset.UtcNow, so a manifest
+        // that omits the field deserialises to the moment it was read, not to default.
+        if (manifest is not null) return manifest.SavedAt.ToLocalTime().DateTime;
 
         return entry.LastUsedUtc.ToLocalTime().DateTime;
     }
