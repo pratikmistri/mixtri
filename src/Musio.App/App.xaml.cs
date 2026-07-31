@@ -143,22 +143,145 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Activation-manager key identifying the instance that owns a given project
+    /// file. Hashed rather than using the path verbatim because keys are compared
+    /// as opaque strings with a length limit, and paths are neither short nor
+    /// case-consistent.
+    /// </summary>
+    private static string BuildProjectInstanceKey(string packagePath)
+    {
+        // Full path first, so two different links to the same name don't collide,
+        // then case-folded because Windows paths are case-insensitive and Explorer
+        // hands back whatever casing the user typed.
+        string normalized;
+        try { normalized = System.IO.Path.GetFullPath(packagePath); }
+        catch { normalized = packagePath; }
+
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(normalized.ToLowerInvariant()));
+        return "musio-project-" + Convert.ToHexString(hash);
+    }
+
+    /// <summary>
+    /// Ensures at most one window per project file. Returns <c>true</c> when this
+    /// process handed its activation to the instance that already has
+    /// <paramref name="packagePath"/> open and should stop launching.
+    /// </summary>
+    /// <remarks>
+    /// Opening one project in two windows is a correctness problem, not just
+    /// clutter: <c>MusioPackageService.OpenAsync</c> extracts media to a cache keyed
+    /// by project id, so a second open re-extracts over files the first window still
+    /// holds handles to, and both windows then save over the same <c>.musio</c>,
+    /// silently discarding one set of edits.
+    /// <para>
+    /// Only file activations register a key. A plain launch stays un-keyed, so the
+    /// recorder can still be started as many times as the user likes.
+    /// </para>
+    /// </remarks>
+    private bool TryRedirectToExistingProjectInstance(string packagePath)
+    {
+        try
+        {
+            var keyInstance = Microsoft.Windows.AppLifecycle.AppInstance
+                .FindOrRegisterForKey(BuildProjectInstanceKey(packagePath));
+
+            if (keyInstance.IsCurrent)
+            {
+                // We own this file now. Later activations for it are redirected here.
+                Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().Activated
+                    += OnRedirectedActivated;
+                return false;
+            }
+
+            var activationArgs = Microsoft.Windows.AppLifecycle.AppInstance
+                .GetCurrent().GetActivatedEventArgs();
+
+            // RedirectActivationToAsync deadlocks if awaited on the thread that is
+            // pumping the activation, so it is driven from a worker and waited on here.
+            // Blocking is safe at this point: no window or XAML content exists yet.
+            using var redirected = new System.Threading.ManualResetEventSlim(false);
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                try { await keyInstance.RedirectActivationToAsync(activationArgs); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[App] Redirect failed: {ex}");
+                }
+                finally { redirected.Set(); }
+            });
+
+            // Bounded: a hung or dying owner must not leave the user with no window at
+            // all, so a timeout falls through and this instance opens the file itself.
+            if (!redirected.Wait(TimeSpan.FromSeconds(5)))
+            {
+                System.Diagnostics.Debug.WriteLine("[App] Redirect timed out; opening locally.");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Unpackaged runs have no activation manager. Duplicate windows are far
+            // better than failing to open the file at all.
+            System.Diagnostics.Debug.WriteLine($"[App] Instance redirection unavailable: {ex}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Another process was launched for a project this instance already has open;
+    /// surface our window instead of letting it open a second copy.
+    /// </summary>
+    private void OnRedirectedActivated(
+        object? sender, Microsoft.Windows.AppLifecycle.AppActivationArguments args)
+    {
+        // Raised on a background thread by the activation manager.
+        _window?.DispatcherQueue.TryEnqueue(BringToForeground);
+    }
+
+    /// <summary>Restores and focuses the main window, whatever state it was left in.</summary>
+    private void BringToForeground()
+    {
+        if (_window is null) return;
+
+        // Goes through the coordinator so the shell doesn't still believe Mini is the
+        // current surface and hide the window again on the next transition.
+        _shell?.ShowFullWindow();
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+        _window.Activate();
+        SetForegroundWindow(hwnd);
+    }
+
+    /// <summary>
     /// Invoked when the application is launched.
     /// </summary>
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        // Resolved before anything is constructed: launching by double-clicking a
+        // .musio forces the full window, and may hand the whole activation to an
+        // instance that already has that file open.
+        var activationPath = TryGetActivationProjectPath();
+
+        if (activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
+        {
+            // The owning instance is taking over. Exit before creating a window, so
+            // no second surface for this project ever appears. Environment.Exit rather
+            // than Application.Exit: with no window built there is no message loop to
+            // unwind, and nothing (tray icon, capture, hotkey) has been claimed yet.
+            Environment.Exit(0);
+            return;
+        }
+
         // The full window is always constructed (it anchors app lifetime, hotkeys
         // and the quiesce path), but only shown when the startup mode asks for it.
         var mainWindow = new MainWindow();
         _window = mainWindow;
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
-
-        // Resolved before the shell starts: launching by double-clicking a .musio
-        // forces the full window, so the project lands in the editor tab instead of
-        // opening behind the Mini pill.
-        var activationPath = TryGetActivationProjectPath();
 
         _shell = new ShellCoordinator(
             mainWindow,
@@ -184,6 +307,30 @@ public partial class App : Application
 
         if (activationPath is not null)
             _ = OpenActivationProjectAsync(mainWindow, activationPath);
+
+        // Document instances deliberately claim none of the app-global, singleton-ish
+        // affordances below. Each .musio activation spawns its own process, so one tray
+        // icon per open file would spam a notification area that is usually collapsed,
+        // and the first process to call RegisterHotKey wins outright — a document window
+        // opened before the recorder would take the capture hotkeys with it.
+        // Everything downstream already copes with both being absent: window close is
+        // allowed to proceed when _trayService is null (OnWindowClosing), and
+        // ShellCoordinator.IsTrayAvailable stays false so hide-to-tray falls back to
+        // showing the full window rather than stranding an unreachable process.
+        if (activationPath is null)
+        {
+            InitializeTrayAndHotkeys();
+        }
+    }
+
+    /// <summary>
+    /// Sets up the system tray icon and the global capture hotkeys. Both are
+    /// best-effort: the app works without either, and each is skipped for
+    /// file-activated document instances (see <see cref="OnLaunched"/>).
+    /// </summary>
+    private void InitializeTrayAndHotkeys()
+    {
+        if (_window is null) return;
 
         // System tray and hotkeys are optional — app works without them
         try
@@ -417,7 +564,14 @@ public partial class App : Application
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
+    private const int SW_RESTORE = 9;
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 }
