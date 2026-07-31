@@ -224,6 +224,11 @@ public sealed partial class TimelineControl : UserControl
         InitializeComponent();
         ResolveThemeColors();
         ActualThemeChanged += (_, _) => { ResolveThemeColors(); InvalidateAllCanvases(); };
+
+        // The playhead offset is derived from the ruler canvas width, and the Win2D canvases
+        // repaint themselves on resize — so a resize only needs the overlay repositioned.
+        Loaded += (_, _) => UpdatePlayheadVisual();
+        TimeRulerCanvas.SizeChanged += (_, _) => UpdatePlayheadVisual();
     }
 
     private Color GetBrushColor(string key, Color fallback)
@@ -334,6 +339,11 @@ public sealed partial class TimelineControl : UserControl
         TrackHintTextColor    = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(140, 255, 255, 255));
     }
 
+    /// <summary>
+    /// Repaints every track canvas and re-positions the playhead overlay. Call this for
+    /// changes that alter what the tracks draw (model/segment edits, zoom, scroll,
+    /// selection, thumbnails, waveforms, theme) — never for a mere playhead move.
+    /// </summary>
     public void InvalidateAllCanvases()
     {
         TimeRulerCanvas?.Invalidate();
@@ -343,6 +353,9 @@ public sealed partial class TimelineControl : UserControl
         CameraTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
+        // Durations / zoom / scroll may have changed with the tracks, which moves the
+        // playhead's pixel position even when the time itself is unchanged.
+        UpdatePlayheadVisual();
     }
 
     // --- Filmstrip Thumbnail Management ---
@@ -518,8 +531,13 @@ public sealed partial class TimelineControl : UserControl
         {
             if (control.Model is { } model)
                 model.PlayheadPosition = (TimeSpan)e.NewValue;
+
+            // PERF-001: the playhead is a XAML overlay element (PlayheadLine) — no track
+            // canvas draws it — so a playback tick / scrub only has to move that element.
+            // Repainting every CanvasControl here re-rendered filmstrips, waveforms and the
+            // cursor path on every frame. Track redraws stay wired to their real triggers
+            // (model, zoom/scroll, selection, thumbnails, waveforms, theme and edits).
             control.UpdatePlayheadVisual();
-            control.InvalidateAll();
         }
     }
 
@@ -600,23 +618,69 @@ public sealed partial class TimelineControl : UserControl
         return atStart ? nearest.SourceStart : nearest.SourceStart + nearest.SourceDuration;
     }
 
-    private void InvalidateAll()
-    {
-        TimeRulerCanvas?.Invalidate();
-        VideoTrackCanvas?.Invalidate();
-        CursorTrackCanvas?.Invalidate();
-        ZoomTrackCanvas?.Invalidate();
-        CameraTrackCanvas?.Invalidate();
-        AudioTrackCanvas?.Invalidate();
-        MicTrackCanvas?.Invalidate();
-        UpdatePlayheadVisual();
-    }
+    /// <summary>
+    /// Internal alias for <see cref="InvalidateAllCanvases"/>, used by the drag/edit
+    /// gesture handlers that change what the tracks paint.
+    /// </summary>
+    private void InvalidateAll() => InvalidateAllCanvases();
 
+
+    /// <summary>Last offset pushed to <c>PlayheadLine</c>, to skip no-op layout passes.</summary>
+    private double _playheadVisualX = double.NaN;
+
+    /// <summary>Sub-pixel movement below this is not worth a layout pass.</summary>
+    private const double PlayheadOffsetEpsilon = 0.05;
+
+    /// <summary>Fallback width when <c>PlayheadLine.Width</c> is unset (XAML sets it to 2).</summary>
+    private const double PlayheadFallbackWidth = 2;
+
+    /// <summary>
+    /// Moves the XAML playhead overlay to the current <see cref="PlayheadPosition"/>.
+    /// This is the only visual update a playback tick / scrub needs.
+    /// </summary>
     private void UpdatePlayheadVisual()
     {
         if (PlayheadLine is null) return;
-        double x = TimeToX(PlayheadPosition);
-        PlayheadLine.Margin = new Thickness(x, 0, 0, 0);
+
+        double viewportWidth = TimeRulerCanvas?.ActualWidth ?? 0;
+        if (viewportWidth <= 0) viewportWidth = ActualWidth;
+
+        double lineWidth = PlayheadLine.Width;
+        if (double.IsNaN(lineWidth) || lineWidth <= 0) lineWidth = PlayheadFallbackWidth;
+
+        var (offsetX, isVisible) = ComputePlayheadPlacement(TimeToX(PlayheadPosition), viewportWidth, lineWidth);
+
+        if (!isVisible)
+        {
+            // Scrolled/zoomed out of the track viewport — hide rather than let a negative
+            // margin paint the line over the (unclipped) track-label column.
+            if (PlayheadLine.Visibility != Visibility.Collapsed)
+                PlayheadLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (double.IsNaN(_playheadVisualX) || Math.Abs(_playheadVisualX - offsetX) >= PlayheadOffsetEpsilon)
+        {
+            _playheadVisualX = offsetX;
+            PlayheadLine.Margin = new Thickness(offsetX, 0, 0, 0);
+        }
+
+        if (PlayheadLine.Visibility != Visibility.Visible)
+            PlayheadLine.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Pure placement rule for the playhead overlay: the left margin to apply and whether
+    /// the line intersects the track viewport at all. Kept side-effect free so the geometry
+    /// can be reasoned about (and exercised) without a UI harness.
+    /// </summary>
+    internal static (double OffsetX, bool IsVisible) ComputePlayheadPlacement(
+        double x, double viewportWidth, double lineWidth)
+    {
+        if (double.IsNaN(x) || double.IsInfinity(x)) return (0, false);
+        if (viewportWidth <= 0) return (x, true); // not laid out yet — don't hide it
+        bool visible = x + lineWidth > 0 && x < viewportWidth;
+        return (x, visible);
     }
 
     // --- Time Ruler ---
@@ -2215,6 +2279,9 @@ public sealed partial class TimelineControl : UserControl
             PlayheadPosition = XToTime(x);
             _dragMode = DragMode.Playhead;
             canvas.CapturePointer(e.Pointer);
+            // The deselect above changes what the primary track paints; a playhead change no
+            // longer repaints canvases, so request the redraw explicitly.
+            VideoTrackCanvas?.Invalidate();
             return;
         }
 

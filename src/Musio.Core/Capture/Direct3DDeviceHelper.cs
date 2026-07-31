@@ -9,11 +9,19 @@ namespace Musio.Core.Capture;
 /// <summary>
 /// Creates an IDirect3DDevice from a D3D11 device via DXGI interop.
 /// </summary>
+/// <remarks>
+/// Every COM pointer obtained here is owned by this class and released exactly once, on both the
+/// success and the failure paths. In particular, CsWinRT's <c>MarshalInterface&lt;T&gt;.FromAbi</c>
+/// is NON-owning: it forwards to <c>ComWrappers.GetOrCreateObjectForComInstance</c>, which takes
+/// its own reference on the ABI pointer and never consumes the caller's. The caller must therefore
+/// release the raw pointer itself (that is what <c>MarshalInterface&lt;T&gt;.DisposeAbi</c> exists
+/// for), otherwise every device creation leaks a reference and pins GPU resources.
+/// </remarks>
 public static class Direct3DDeviceHelper
 {
     public static IDirect3DDevice CreateDevice()
     {
-        object d3dDevice;
+        IntPtr d3dDevice;
 
         try
         {
@@ -34,24 +42,60 @@ public static class Direct3DDeviceHelper
             }
         }
 
-        // The D3D11 device implements IDXGIDevice; get its IUnknown for the DXGI interop call
-        var dxgiDevicePtr = Marshal.GetIUnknownForObject(d3dDevice);
         try
         {
-            var hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevicePtr, out var graphicsDevice);
+            // The D3D11 device implements IDXGIDevice; the interop entry point takes its IUnknown.
+            var hr = CreateDirect3D11DeviceFromDXGIDevice(d3dDevice, out var graphicsDevice);
             Marshal.ThrowExceptionForHR(hr);
 
-            return MarshalInterface<IDirect3DDevice>.FromAbi(graphicsDevice);
+            if (graphicsDevice == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("CreateDirect3D11DeviceFromDXGIDevice reported success but returned a null device.");
+            }
+
+            return ProjectAbi(
+                graphicsDevice,
+                MarshalInterface<IDirect3DDevice>.FromAbi,
+                MarshalInterface<IDirect3DDevice>.DisposeAbi);
         }
         finally
         {
-            Marshal.Release(dxgiDevicePtr);
-            Marshal.ReleaseComObject(d3dDevice);
+            Marshal.Release(d3dDevice);
         }
     }
 
-    private static object CreateD3D11Device(D3D_DRIVER_TYPE driverType)
+    /// <summary>
+    /// Projects a WinRT ABI pointer into its managed projection and then releases the caller's
+    /// reference on that pointer exactly once — including when the projection throws.
+    /// </summary>
+    /// <remarks>
+    /// The projection keeps its own reference, so releasing here neither leaks nor over-releases.
+    /// The delegates are parameters purely so this ownership contract can be regression-tested
+    /// without a real GPU device.
+    /// </remarks>
+    internal static T ProjectAbi<T>(IntPtr abi, Func<IntPtr, T> fromAbi, Action<IntPtr> disposeAbi)
     {
+        try
+        {
+            return fromAbi(abi);
+        }
+        finally
+        {
+            if (abi != IntPtr.Zero)
+            {
+                disposeAbi(abi);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Creates a D3D11 device and returns its raw ID3D11Device pointer; the caller owns that single
+    /// reference and must release it.
+    /// </summary>
+    private static IntPtr CreateD3D11Device(D3D_DRIVER_TYPE driverType)
+    {
+        // A null ppImmediateContext keeps D3D from handing back a context reference that this
+        // helper would only have to release again.
         var hr = D3D11CreateDevice(
             IntPtr.Zero,
             driverType,
@@ -62,8 +106,23 @@ public static class Direct3DDeviceHelper
             D3D11_SDK_VERSION,
             out var d3dDevice,
             out _,
-            out _);
-        Marshal.ThrowExceptionForHR(hr);
+            IntPtr.Zero);
+
+        if (hr < 0)
+        {
+            if (d3dDevice != IntPtr.Zero)
+            {
+                Marshal.Release(d3dDevice);
+            }
+
+            Marshal.ThrowExceptionForHR(hr);
+        }
+
+        if (d3dDevice == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("D3D11CreateDevice reported success but returned a null device.");
+        }
+
         return d3dDevice;
     }
 
@@ -90,9 +149,9 @@ public static class Direct3DDeviceHelper
         [MarshalAs(UnmanagedType.LPArray)] int[]? featureLevels,
         uint featureLevelCount,
         uint sdkVersion,
-        [MarshalAs(UnmanagedType.IUnknown)] out object ppDevice,
+        out IntPtr ppDevice,
         out int pFeatureLevel,
-        [MarshalAs(UnmanagedType.IUnknown)] out object? ppImmediateContext);
+        IntPtr ppImmediateContext);
 
     [DllImport("d3d11.dll", EntryPoint = "CreateDirect3D11DeviceFromDXGIDevice", SetLastError = true)]
     private static extern int CreateDirect3D11DeviceFromDXGIDevice(

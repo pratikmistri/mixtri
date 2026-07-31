@@ -2,9 +2,21 @@ using Windows.Graphics.DirectX.Direct3D11;
 
 namespace Musio.Core.Capture;
 
+/// <summary>
+/// A single accepted capture frame, delivered on the free-threaded frame-pool callback.
+/// </summary>
+/// <remarks>
+/// <see cref="Surface"/> belongs to the capture frame pool and is recycled as soon as the
+/// handler returns. Handlers must copy anything they need into their own resource before
+/// returning, and must never retain, queue or reuse the surface afterwards.
+/// </remarks>
 public class CapturedFrameEventArgs : EventArgs
 {
+    /// <summary>
+    /// Borrowed capture surface. Valid only for the duration of the event handler.
+    /// </summary>
     public IDirect3DSurface Surface { get; }
+
     public TimeSpan Timestamp { get; }
     public int Width { get; }
     public int Height { get; }

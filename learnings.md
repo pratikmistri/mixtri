@@ -1498,3 +1498,43 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Restated control templates lose more than the visuals you were looking at.** The `GridViewHeaderItem` replacement dropped `UseSystemFocusVisuals` (stock style sets it; `Control` defaults it to `false`) while providing no focus visual of its own — a keyboard user focusing a group header would get no indicator. Re-added explicitly. When restating a stock template, diff the *setters* as well as the template body.
 - **Dead code removed**: `DiscoverProjects` still ended with `.OrderByDescending(e => e.LastUsedUtc)` after grouping took over sorting. Removed, and `GroupByDay` now breaks ties on `Name` so ordering no longer depends on the dictionary order projects were discovered in.
 - **`FileInfo` metadata is cached by the `Exists` probe — later reads cannot throw** (PR review claimed otherwise twice; measured and refuted). `FileSystemInfo.Exists` calls `Refresh()`, which snapshots `WIN32_FILE_ATTRIBUTE_DATA`; `Length` and `LastWriteTime` then read that snapshot with no further I/O. Demonstrated: create a file, read `.Exists` (True), **delete the file**, then `.Length` still returns `13` and `.LastWriteTime` still returns the real timestamp — no exception. A *fresh* `FileInfo` on a missing path is the dangerous one (`LastWriteTime` → `12/31/1600`). So `if (info.Exists)` once, then reuse that instance, is sufficient — adding try/catch around the subsequent property reads would be unreachable code. Access-denied is covered too: `Exists` returns false on any error, so the code falls through to the manifest/recents fallbacks.
+
+
+## Repository stability and performance backlog refresh
+
+- **Feature/area**: Full repository review for dead code, freeze/crash risks, resource lifetime, and performance; `docs/todo.md`.
+- **Approaches tried**: Compared the historical stability todo against current code, searched blocking/threading/disposal patterns and production call sites, reviewed capture/UI/media paths independently, and reconciled candidates with the settled playbooks and recent freeze investigations.
+- **What worked**: Replaced the stale todo with a prioritized, evidence-linked backlog. The highest-value current work is capture JPEG I/O/backpressure, bounded webcam teardown, exception policy, timeline playhead invalidation, frame-write error visibility, and render-resource caching.
+- **What didn't work**: `dotnet build` failed with the known PriGen MSB4062 environment issue; the build playbook already requires VS MSBuild. Several old findings were rejected because current code or learnings show they are fixed or intentional, including editor preview generation races, UI-thread decoder disposal, per-frame export surface ownership, timeline geometry disposal, and the bounded app-instance redirect.
+
+
+## Top stability and performance risks implemented
+
+- **Feature/area**: XAML exception policy, recording capture/write lifecycle, webcam teardown, Direct3D interop ownership, timeline playback rendering, and image-background loading.
+- **Approaches tried**: Split non-overlapping implementation areas across Opus 5 agents, integrated the shared worktree, ran two adversarial combined-diff reviews, corrected truthful frame-preservation reporting and retryable wallpaper failures, then built/tested with the ARM64 playbook.
+- **What worked**:
+  - Unknown XAML exceptions are logged but left unhandled; only a narrow allow-list of cancellation/shutdown faults is recoverable.
+  - Capture callbacks copy into independently owned render targets and enqueue into a bounded writer; one worker serializes JPEG/gap writes, preserves CFR via duplicate slots, and exposes the first write failure.
+  - Webcam stop has a watchdog and abandons a wedged driver call without blocking the rest of recording finalization.
+  - Recording faults only advertise preserved JPEGs after finalization decides whether the directory actually remains.
+  - CsWinRT `FromAbi` does not consume the caller's COM reference; release the returned ABI pointer exactly once in `finally`.
+  - The playhead is a XAML overlay, so playhead changes move it without invalidating static timeline canvases.
+  - Wallpaper loads are asynchronously prewarmed, device/path keyed, nonblocking during render, cancellation-safe, and retried with bounded exponential backoff.
+- **What didn't work**: A first integration pass attached the frames directory to degraded faults before successful finalization deleted it. The first wallpaper cache also permanently latched cancellation/transient failures. Both designs were replaced and covered by regression tests.
+- **Verified**: ARM64 VS MSBuild succeeded; full test assembly passed 568, skipped 2, failed 0.
+
+
+## Build and launch after stability fixes
+
+- **Feature/area**: ARM64 Debug build and local launch.
+- **Approaches tried**: Built `Musio.App.csproj` with ARM64 VS BuildTools MSBuild and launched the self-contained `win-arm64\Musio.App.exe` directly.
+- **What worked**: The build completed and the launched process remained responsive with window title `Musio`.
+- **What didn't work**: Nothing; no existing Musio process was holding the build output.
+
+
+## Release deployment after stability fixes
+
+- **Feature/area**: Clean ARM64 Release build, loose package registration, and packaged launch.
+- **Approaches tried**: Stopped the running Debug process by PID, removed the previous package registration, deleted only ARM64 Release build outputs, rebuilt with VS MSBuild, registered the generated Release `AppxManifest.xml`, and launched through AppsFolder.
+- **What worked**: Developer Mode was enabled; the package registered with status `Ok`, pointed at the fresh Release output, and launched a responsive `Musio` window.
+- **What didn't work**: Nothing; the earlier no-Developer-Mode limitation no longer applies on this machine.
