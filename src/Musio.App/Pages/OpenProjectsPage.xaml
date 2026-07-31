@@ -9,6 +9,12 @@
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
     <Page.Resources>
+        <!-- The GridViewHeaderItem template hard-codes a divider Rectangle beneath the
+             header, so it can't be turned off with BorderThickness. Shadowing the brush
+             it strokes with is scoped to this page and, unlike supplying our own header
+             template, keeps whatever else the default template gains later. -->
+        <SolidColorBrush x:Key="GridViewHeaderItemDividerStroke" Color="Transparent" />
+
         <!-- ItemsPath names the child collection on each ProjectGroup; without it a
              grouped source renders the groups themselves as items. -->
         <CollectionViewSource
