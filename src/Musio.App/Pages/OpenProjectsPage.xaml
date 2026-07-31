@@ -70,6 +70,8 @@
                 Height="36"
                 VerticalAlignment="Center"
                 Click="Open_Click"
+                CornerRadius="18"
+                Style="{StaticResource AccentButtonStyle}"
                 ToolTipService.ToolTip="Open a .musio project from anywhere on disk">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xE8E5;" />
