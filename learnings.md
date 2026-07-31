@@ -1641,3 +1641,10 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: A 40 x 40 button with a 20 px corner radius produces a true circular hover/pressed surface while preserving the centered 18 px icon.
 - **What didn't work**: Padding alone allowed the default button template to render a rounded rectangle.
 - **Verified**: The ARM64 Debug app build compiled the updated XAML successfully.
+
+## Circular preview control Release deployment
+
+- **Feature/area**: Clean ARM64 Release deployment after preview control geometry updates.
+- **Approaches tried**: Pushed the UI changes, removed the prior loose package registration, cleaned the exact Release outputs, rebuilt, registered the new manifest, and launched through AppsFolder.
+- **What worked**: The package registered with status `Ok` and launched a responsive Musio process from the fresh ARM64 Release output.
+- **What didn't work**: Nothing.
