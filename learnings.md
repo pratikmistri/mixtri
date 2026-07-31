@@ -1595,3 +1595,10 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Approaches tried**: Removed the existing loose package registration before deleting the exact ARM64 Release output directories, rebuilt with VS BuildTools MSBuild, registered the generated Release `AppxManifest.xml`, and launched through AppsFolder.
 - **What worked**: Package status is `Ok`, install location points to the fresh `win-arm64` Release output, and PID 33880 is responsive with window title `Musio`.
 - **What didn't work**: Nothing; removing registration before cleaning avoided stale loose-package paths.
+
+## Adaptive preview branch push
+
+- **Feature/area**: Upstream synchronization for `fix/top-stability-performance-risks`.
+- **Approaches tried**: Verified the three local commits and pushed the branch to its existing `origin` upstream.
+- **What worked**: Remote advanced from `53b82ab` to `8a95826`; unrelated untracked `files/` remained excluded.
+- **What didn't work**: Nothing.
