@@ -150,12 +150,6 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Project whose open is currently in flight, or <c>null</c>. Only ever touched on
-    /// the UI thread.
-    /// </summary>
-    private string? _openInFlightPath;
-
-    /// <summary>
     /// Opens the <c>.musio</c> project the app was launched with and shows it in
     /// the editor tab of the full window.
     /// </summary>
@@ -165,12 +159,6 @@ public partial class App : Application
     /// </remarks>
     private async System.Threading.Tasks.Task OpenActivationProjectAsync(MainWindow window, string path)
     {
-        // Recorded before the first await, because ProjectService only assigns
-        // CurrentPackagePath once the open has finished — and extracting a real project
-        // takes seconds. Without this, an impatient second double-click during that
-        // window starts a concurrent extraction into the same per-project cache folder,
-        // which is the corruption the whole single-instance path exists to prevent.
-        _openInFlightPath = path;
         try
         {
             await ProjectService.Instance.OpenPackageAsync(path);
@@ -181,10 +169,6 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"[App] Could not open '{path}': {ex}");
             window.DispatcherQueue.TryEnqueue(() =>
                 window.ShowRecordingError($"Could not open project: {ex.Message}"));
-        }
-        finally
-        {
-            _openInFlightPath = null;
         }
     }
 
@@ -395,14 +379,24 @@ public partial class App : Application
 
         // Already showing it, or already loading it — the ordinary case.
         if (IsSameProjectPath(requestedPath, projects.CurrentPackagePath)
-            || IsSameProjectPath(requestedPath, _openInFlightPath))
+            || IsSameProjectPath(requestedPath, projects.OpenInFlightPath))
         {
             return;
         }
 
-        // A different project is still loading. Let it finish rather than run two
-        // extractions at once.
-        if (_openInFlightPath is not null) return;
+        // Another project is mid-open or mid-save. Both publish their result only when
+        // they finish, so swapping now would let the loser overwrite the winner's state:
+        // a save landing after the swap rebinds CurrentPackagePath to the file it was
+        // writing, leaving the newly opened project pointed at the old project's package
+        // and silently overwriting it on the next save.
+        if (projects.OpenInFlightPath is not null || projects.IsSaveInFlight)
+        {
+            window.ShowShellMessage(
+                "This window is busy with another project, so the file you just opened "
+                + "was not loaded here. Try opening it again in a moment.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational);
+            return;
+        }
 
         // Work that was never saved has no package path to compare against — a fresh
         // recording is the usual case, since ProjectService.SetProject clears
