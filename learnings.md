@@ -1672,3 +1672,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: Frame callback exceptions now flow through `RecordFault`, retaining the degraded session state and insulating the capture callback from throwing `Error` subscribers.
 - **What didn't work**: Direct `Error` invocation bypassed fault retention and allowed subscriber exceptions to escape the capture callback.
 - **Verified**: ARM64 Debug solution build succeeded; recording fault tests passed 4/4 and the full suite passed 583 tests with 2 existing skips.
+
+## Preview reduced-surface CI reliability
+
+- **Feature/area**: Reduced-resolution MP4 preview decoding test.
+- **Approaches tried**: Inspected the failed GitHub Actions job and separated output-scaling validation from the production preview seek budget.
+- **What worked**: The reduced-surface test uses normal recovery settings while still requesting 960x540 output; the existing options test independently verifies the one-attempt, 400 ms preview policy.
+- **What didn't work**: Requiring a cold CI decoder to return its first frame within the production best-effort preview budget made the scaling test timing-dependent.
+- **Verified**: The exact AnyCPU Release build succeeded, the formerly failing test passed five consecutive runs, and the full suite passed 583 tests with 2 existing skips.

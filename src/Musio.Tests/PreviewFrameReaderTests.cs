@@ -75,12 +75,18 @@ public class PreviewFrameReaderTests
                 Assert.IsTrue(writer.FinalizeSucceeded);
             }
 
+            var reducedSurfaceOptions = new FrameSourceOptions
+            {
+                MaxWidth = 960,
+                MaxHeight = 540,
+            };
+
             using var source = await Mp4FrameSource.OpenAsync(
                 videoPath,
                 fps,
                 device,
                 RecordingMarker.NeedsVerticalFlip(videoPath),
-                FrameSourceOptions.CreatePreview(960, 540));
+                reducedSurfaceOptions);
 
             Assert.IsNotNull(source);
             Assert.AreEqual(960, source.Width);
