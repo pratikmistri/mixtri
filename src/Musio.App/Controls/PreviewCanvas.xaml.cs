@@ -3,6 +3,9 @@ using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.UI;
 
@@ -15,6 +18,7 @@ public sealed partial class PreviewCanvas : UserControl
     private System.Diagnostics.Stopwatch? _playbackClock;
     private TimeSpan _playbackStartPosition;
     private bool _isPlaying;
+    private bool _pointerOverPreview;
     private Color _previewClearColor = Color.FromArgb(255, 20, 20, 20);
 
     /// <summary>
@@ -98,6 +102,92 @@ public sealed partial class PreviewCanvas : UserControl
         UpdateTimeDisplay();
     }
 
+    /// <summary>
+    /// Shows the active adaptive preview tier when it is below the source resolution.
+    /// </summary>
+    public void SetQualityIndicator(
+        int maxPreviewWidth, int maxPreviewHeight, int sourceWidth, int sourceHeight)
+    {
+        bool downscaled = sourceWidth > maxPreviewWidth || sourceHeight > maxPreviewHeight;
+        if (!downscaled)
+        {
+            QualityIndicator.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        QualityIndicatorText.Text = $"Adaptive \u00b7 {maxPreviewHeight}p";
+        QualityIndicator.Visibility = Visibility.Visible;
+    }
+
+    public void HideQualityIndicator()
+    {
+        QualityIndicator.Visibility = Visibility.Collapsed;
+    }
+
+    public void ClearFrame()
+    {
+        SetFrame(null);
+    }
+
+    public void InvalidateSurface()
+    {
+        PreviewSurface.Invalidate();
+    }
+
+    private void PreviewRoot_PointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        _pointerOverPreview = true;
+        AnimatePlaybackChrome(1, TimeSpan.FromMilliseconds(140));
+    }
+
+    private void PreviewRoot_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _pointerOverPreview = false;
+        if (!IsFocusWithinPlaybackChrome())
+            AnimatePlaybackChrome(0, TimeSpan.FromMilliseconds(280));
+    }
+
+    private void PlaybackChrome_GotFocus(object sender, RoutedEventArgs e)
+    {
+        AnimatePlaybackChrome(1, TimeSpan.FromMilliseconds(120));
+    }
+
+    private void PlaybackChrome_LostFocus(object sender, RoutedEventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_pointerOverPreview && !IsFocusWithinPlaybackChrome())
+                AnimatePlaybackChrome(0, TimeSpan.FromMilliseconds(280));
+        });
+    }
+
+    private void AnimatePlaybackChrome(float targetOpacity, TimeSpan duration)
+    {
+        PlaybackChrome.IsHitTestVisible = targetOpacity > 0;
+        var visual = ElementCompositionPreview.GetElementVisual(PlaybackChrome);
+        var animation = visual.Compositor.CreateScalarKeyFrameAnimation();
+        animation.InsertKeyFrame(1, targetOpacity);
+        animation.Duration = duration;
+        visual.StartAnimation("Opacity", animation);
+    }
+
+    private bool IsFocusWithinPlaybackChrome()
+    {
+        if (XamlRoot is null)
+            return false;
+
+        DependencyObject? current = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, PlaybackChrome))
+                return true;
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
     private void ResolveThemeColors()
     {
         try
@@ -117,7 +207,11 @@ public sealed partial class PreviewCanvas : UserControl
     {
         var old = _previewFrame;
         _previewFrame = frame;
-        old?.Dispose();
+        if (old is not null)
+        {
+            try { old.Dispose(); }
+            catch { /* the frame may belong to a lost graphics device */ }
+        }
         PreviewSurface.Invalidate();
     }
 

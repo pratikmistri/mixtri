@@ -57,6 +57,24 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
+    /// Warms the background-image cache for the configured background style so preview
+    /// rendering never blocks the UI thread on file I/O or GPU decode.
+    /// <see cref="InitializeAsync"/> already does this; call it again after any live
+    /// background configuration change. A no-op when the image is already cached.
+    /// </summary>
+    public Task PrewarmBackgroundAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _compositor?.PrewarmBackgroundAsync(cancellationToken) ?? Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// True when the configured background can be rendered at full fidelity without
+    /// blocking (non-image backgrounds are always ready).
+    /// </summary>
+    public bool IsBackgroundReady => _compositor?.IsBackgroundReady ?? true;
+
+    /// <summary>
     /// Renders a single preview frame at the given playback position.
     /// Uses the exact playback time for cursor, click, and zoom alignment
     /// rather than deriving time from a frame index.

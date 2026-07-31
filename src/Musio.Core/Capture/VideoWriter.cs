@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading.Channels;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
@@ -14,12 +15,63 @@ using Windows.Storage.Streams;
 namespace Musio.Core.Capture;
 
 /// <summary>
+/// Details of the first frame that could not be persisted during recording.
+/// </summary>
+/// <remarks>
+/// Raised from the writer's background thread — handlers must be free-threaded.
+/// </remarks>
+public sealed class FrameWriteFailedEventArgs(Exception exception, long frameIndex, string framesDirectory)
+    : EventArgs
+{
+    /// <summary>The failure that stopped the frame from reaching disk.</summary>
+    public Exception Exception { get; } = exception;
+
+    /// <summary>Index the frame would have occupied, or -1 if it failed before it had one.</summary>
+    public long FrameIndex { get; } = frameIndex;
+
+    /// <summary>Directory holding the frames that <em>were</em> captured, for user-facing recovery.</summary>
+    public string FramesDirectory { get; } = framesDirectory;
+}
+
+/// <summary>
 /// Captures Direct3D frames to JPEG images during recording, then assembles
 /// them into a valid MP4 file in <see cref="FinalizeAsync"/>.
 /// </summary>
+/// <remarks>
+/// Frames are accepted on the capture engine's free-threaded frame-pool callback, which
+/// must never block on disk or on JPEG encoding. <see cref="TryWriteFrame"/> therefore only
+/// copies the capture surface into an independently owned render target and hands it to a
+/// bounded queue; a single background consumer does the encode and the write. Dropping is
+/// explicit and never loses wall-clock time: a dropped frame becomes an owed CFR slot that
+/// the next persisted frame fills with a duplicate.
+/// </remarks>
 public sealed class VideoWriter : IDisposable
 {
     private static readonly TimeSpan FinalizeTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>How long <see cref="FinalizeAsync"/> waits for a still-running writer to drain.</summary>
+    private static readonly TimeSpan FinalizeDrainTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>Grace period given to the writer loop to observe cancellation before it is abandoned.</summary>
+    private static readonly TimeSpan WriterShutdownGrace = TimeSpan.FromSeconds(5);
+
+    private const float JpegQuality = 0.85f;
+
+    /// <summary>
+    /// Upper bound on GPU memory held by queued frames. The queue exists to absorb disk and
+    /// encoder jitter, not to buffer the recording, so it is deliberately shallow.
+    /// </summary>
+    private const long MaxQueuedFrameBytes = 192L * 1024 * 1024;
+
+    private const int MinQueueCapacity = 2;
+    private const int MaxQueueCapacity = 8;
+
+    /// <summary>
+    /// After this many consecutive write failures the writer stops accepting frames: a full
+    /// disk or a lost device never recovers, and every further frame would burn GPU time to
+    /// produce nothing. The retained failure is still reported.
+    /// </summary>
+    private const int MaxConsecutiveWriteFailures = 30;
 
     /// <summary>
     /// <c>CODECAPI_AVEncMPVGOPSize</c>. Bounds how many frames a decoder must rewind and
@@ -56,28 +108,96 @@ public sealed class VideoWriter : IDisposable
     private readonly CanvasDevice _device;
     private readonly Rect? _cropRect;
 
-    private CanvasRenderTarget? _cropTarget;
-
     private long _frameCount;
-    private int _writesInFlight;
     private volatile bool _stopAccepting;
     private bool _finalized;
     private bool _finalizeSucceeded;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     // Track actual timestamps for each frame to handle variable capture rate
     private readonly List<TimeSpan> _frameTimestamps = new(1000);
     private readonly object _tsLock = new();
 
-    // Serializes all frame writes (WriteFrame + FillGapFrames) so concurrent
-    // capture callbacks cannot interleave frame indices.
-    private readonly object _writeLock = new();
+    // ── Bounded producer/consumer ───────────────────────────────────
+    // Producer: the free-threaded capture callback (copy + enqueue only).
+    // Consumer: a single background loop that owns all frame indices, JPEG
+    // encoding, gap filling and disk writes, so ordering needs no lock.
+
+    private readonly Channel<PendingFrame> _frameQueue;
+    private readonly CancellationTokenSource _writerCts = new();
+    private readonly Task _writerLoop;
+    private readonly int _queueCapacity;
+    private int _queueDepth;
+    private int _writerCompleted;
+
+    private long _droppedFrames;
+    private long _failedWrites;
+    private int _consecutiveFailures;
+
+    /// <summary>CFR slots owed by dropped frames, applied to the next queued frame.</summary>
+    private int _pendingSkippedSlots;
+
+    private Exception? _firstWriteError;
+    private long _firstWriteErrorIndex = -1;
+    private readonly object _errorLock = new();
+
+    // Render targets are recycled between frames to avoid churning VRAM at 60 FPS.
+    // Ownership is strictly single-threaded: a target is either idle in the pool, owned
+    // by the producer that is filling it, or owned by the consumer that is encoding it.
+    private readonly Stack<CanvasRenderTarget> _targetPool = new();
+    private readonly object _poolLock = new();
+    private int _poolWidth;
+    private int _poolHeight;
+
+    /// <summary>A captured frame waiting to be encoded. A null bitmap is a gap-only marker.</summary>
+    private readonly record struct PendingFrame(
+        CanvasRenderTarget? Bitmap, TimeSpan Timestamp, int SkippedSlots);
 
     public string OutputPath => _outputPath;
     public int Width => _width;
     public int Height => _height;
     public int Fps => _fps;
+
+    /// <summary>
+    /// Frames durably on disk. A frame is only counted once its JPEG exists, so
+    /// <c>frame_{i}.jpg</c> is guaranteed present for every <c>i &lt; FrameCount</c>.
+    /// </summary>
     public long FrameCount => Interlocked.Read(ref _frameCount);
+
+    /// <summary>Maximum number of frames that may be queued for encoding at once.</summary>
+    public int QueueCapacity => _queueCapacity;
+
+    /// <summary>Frames currently queued or being encoded (diagnostic).</summary>
+    public int QueuedFrames => Volatile.Read(ref _queueDepth);
+
+    /// <summary>
+    /// Frames refused because the writer queue was saturated. Each one is replayed as a
+    /// duplicate of the previous frame so CFR timing still matches wall clock.
+    /// </summary>
+    public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+
+    /// <summary>Frames that reached the writer but could not be persisted.</summary>
+    public long FailedFrameWrites => Interlocked.Read(ref _failedWrites);
+
+    /// <summary>
+    /// The first failure that prevented a frame from reaching disk, retained so the session
+    /// can report it instead of discovering it as a missing JPEG at finalization time.
+    /// </summary>
+    public Exception? FirstWriteError
+    {
+        get { lock (_errorLock) { return _firstWriteError; } }
+    }
+
+    /// <summary>Index of the frame that hit <see cref="FirstWriteError"/>, or -1.</summary>
+    public long FirstWriteErrorFrameIndex
+    {
+        get { lock (_errorLock) { return _firstWriteErrorIndex; } }
+    }
+
+    public bool HasWriteFailure => FirstWriteError is not null;
+
+    /// <summary>Raised once, on the writer thread, for the first frame that fails to persist.</summary>
+    public event EventHandler<FrameWriteFailedEventArgs>? WriteFailed;
 
     /// <summary>Directory holding the transient captured JPEGs for this recording.</summary>
     public string FramesDirectory => _framesDir;
@@ -148,143 +268,515 @@ public sealed class VideoWriter : IDisposable
             ?? throw new ArgumentException("Output path must include a directory.", nameof(outputPath));
         _framesDir = Path.Combine(dir, VideoFrameReader.FramesDirectoryName);
         Directory.CreateDirectory(_framesDir);
+
+        _queueCapacity = ComputeQueueCapacity(width, height);
+        _frameQueue = Channel.CreateBounded<PendingFrame>(new BoundedChannelOptions(_queueCapacity + 1)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false,
+        });
+
+        _writerLoop = Task.Run(ProcessQueuedFramesAsync);
     }
 
     /// <summary>
-    /// Copies the GPU surface to a JPEG file on disk.
-    /// Called from the capture engine's thread-pool callback.
+    /// Depth of the writer queue, capped so a 4K capture cannot pin an unbounded amount of VRAM.
     /// </summary>
-    public void WriteFrame(IDirect3DSurface surface, TimeSpan timestamp)
+    internal static int ComputeQueueCapacity(int width, int height)
+    {
+        long frameBytes = Math.Max(1L, (long)Math.Max(1, width) * Math.Max(1, height) * 4);
+        long affordable = MaxQueuedFrameBytes / frameBytes;
+        return (int)Math.Clamp(affordable, MinQueueCapacity, MaxQueueCapacity);
+    }
+
+    /// <summary>
+    /// Copies the capture surface into an independently owned buffer and queues it for
+    /// encoding. Never blocks on disk, on the GPU readback or on JPEG encoding, so it is
+    /// safe to call from the free-threaded frame-pool callback.
+    /// </summary>
+    /// <param name="surface">
+    /// Capture surface. It is read only for the duration of this call — the caller may
+    /// return it to the frame pool as soon as this method returns.
+    /// </param>
+    /// <param name="timestamp">Capture time of this frame, relative to capture start.</param>
+    /// <param name="skippedSlots">CFR slots missed since the previous accepted frame.</param>
+    /// <returns>False when the frame was dropped because the writer queue was saturated.</returns>
+    public bool TryWriteFrame(IDirect3DSurface surface, TimeSpan timestamp, int skippedSlots = 0)
+        => WriteFrameCore(surface, timestamp, skippedSlots, block: false);
+
+    /// <summary>
+    /// Queues a frame, waiting for writer capacity instead of dropping. For offline
+    /// producers that own their own pacing; never call this from a capture callback.
+    /// </summary>
+    public void WriteFrame(IDirect3DSurface surface, TimeSpan timestamp, int skippedSlots = 0)
+        => WriteFrameCore(surface, timestamp, skippedSlots, block: true);
+
+    private bool WriteFrameCore(
+        IDirect3DSurface surface, TimeSpan timestamp, int skippedSlots, bool block)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Frames still in flight when the capture stops are expected, not an error.
+        if (_stopAccepting)
+            return false;
 
         if (_finalized)
             throw new InvalidOperationException("Writer has been finalized.");
 
-        if (_stopAccepting)
-            return;
+        if (skippedSlots < 0)
+            skippedSlots = 0;
 
-        Interlocked.Increment(ref _writesInFlight);
+        if (!TryReserveQueueSlot(block))
+        {
+            DropFrame(skippedSlots);
+            return false;
+        }
+
+        CanvasRenderTarget? copy = null;
         try
         {
-            if (_stopAccepting)
-                return;
+            copy = CopyFrame(surface);
 
-            lock (_writeLock)
+            int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+            if (!_frameQueue.Writer.TryWrite(new PendingFrame(copy, timestamp, skippedSlots + owed)))
             {
-                using var bitmap = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
-
-                // Determine the image to save: cropped or full frame
-                CanvasBitmap imageToSave;
-                if (_cropRect is Rect crop)
-                {
-                    _cropTarget ??= new CanvasRenderTarget(_device, _width, _height, 96);
-                    using (var ds = _cropTarget.CreateDrawingSession())
-                    {
-                        ds.Clear(Windows.UI.Color.FromArgb(255, 0, 0, 0));
-                        ds.DrawImage(bitmap,
-                            new Rect(0, 0, _width, _height),
-                            crop);
-                    }
-                    imageToSave = _cropTarget;
-                }
-                else
-                {
-                    imageToSave = bitmap;
-                }
-
-                long index = Interlocked.Increment(ref _frameCount) - 1;
-
-                lock (_tsLock)
-                {
-                    _frameTimestamps.Add(timestamp);
-                }
-
-                string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
-
-                using var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write);
-                imageToSave.SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, 0.85f)
-                      .AsTask().GetAwaiter().GetResult();
+                // The queue closed underneath us (stop/dispose raced this callback).
+                Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + owed);
+                ReleaseFrame(new PendingFrame(copy, timestamp, 0));
+                return false;
             }
-        }
-        catch (Exception ex) when (ex is not ObjectDisposedException)
-        {
-            // Log frame write failures prominently for debugging
-            Debug.WriteLine($"[VideoWriter] ERROR frame {Interlocked.Read(ref _frameCount)}: {ex.GetType().Name}: {ex.Message}");
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _writesInFlight);
-        }
-    }
 
-    public void StopAcceptingFrames()
-    {
-        _stopAccepting = true;
-    }
-
-    public async Task WaitForQuiescenceAsync(TimeSpan timeout, CancellationToken ct)
-    {
-        var sw = Stopwatch.StartNew();
-        while (Volatile.Read(ref _writesInFlight) != 0)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (sw.Elapsed >= timeout)
-                throw new TimeoutException($"Timed out waiting {timeout} for frame writes to finish.");
-
-            await Task.Delay(10, ct).ConfigureAwait(false);
+            return true;
         }
-
-        lock (_writeLock)
+        catch (Exception ex)
         {
-            // Drain any queued FillGapFrames call, which also uses this lock.
+            // A failed copy is a lost frame, not a lost recording: keep the CFR slot owed
+            // so the duration stays honest, and retain the failure for the session to report.
+            if (copy is not null)
+                ReleaseFrame(new PendingFrame(copy, timestamp, 0));
+            else
+                Interlocked.Decrement(ref _queueDepth);
+
+            Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + 1);
+            RecordWriteFailure(ex, -1);
+            return false;
         }
     }
 
     /// <summary>
-    /// Fills missed frame slots by duplicating the most recently written JPEG.
-    /// This preserves true CFR timing so frame N always corresponds to
-    /// wall-clock time N/fps after the first frame. Must be called BEFORE
-    /// <see cref="WriteFrame"/> for the current frame.
+    /// Reserves queue depth before any GPU work happens, so a saturated writer costs the
+    /// capture callback nothing.
+    /// </summary>
+    private bool TryReserveQueueSlot(bool block)
+    {
+        while (true)
+        {
+            int depth = Volatile.Read(ref _queueDepth);
+            if (depth < _queueCapacity)
+            {
+                if (Interlocked.CompareExchange(ref _queueDepth, depth + 1, depth) == depth)
+                    return true;
+                continue;
+            }
+
+            if (!block || _stopAccepting || _disposed || _writerLoop.IsCompleted)
+                return false;
+
+            Thread.Sleep(1);
+        }
+    }
+
+    private void DropFrame(int skippedSlots)
+    {
+        Interlocked.Increment(ref _droppedFrames);
+
+        // The dropped frame still occupied a CFR slot. Owe it to the next frame that makes
+        // it through, which fills it with a duplicate — the recording keeps wall-clock length.
+        Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + 1);
+    }
+
+    /// <summary>
+    /// Copies (and crops) the capture surface into a buffer this writer owns outright.
+    /// The frame pool recycles its surfaces as soon as the callback returns, so nothing
+    /// downstream may reference the source surface.
+    /// </summary>
+    private CanvasRenderTarget CopyFrame(IDirect3DSurface surface)
+    {
+        using var source = CanvasBitmap.CreateFromDirect3D11Surface(_device, surface);
+
+        if (_cropRect is Rect crop)
+        {
+            var target = RentTarget(_width, _height);
+            try
+            {
+                using var ds = target.CreateDrawingSession();
+                ds.Clear(Windows.UI.Color.FromArgb(255, 0, 0, 0));
+                ds.DrawImage(source, new Rect(0, 0, _width, _height), crop);
+            }
+            catch
+            {
+                target.Dispose();
+                throw;
+            }
+
+            return target;
+        }
+
+        // Uncropped captures are stored at their native size, exactly as the previous
+        // synchronous path saved the wrapped surface.
+        int width = (int)source.SizeInPixels.Width;
+        int height = (int)source.SizeInPixels.Height;
+        var copy = RentTarget(width, height);
+        try
+        {
+            using var ds = copy.CreateDrawingSession();
+
+            // Copy blend so the source pixels (including alpha) survive verbatim rather
+            // than being composited onto the render target's transparent black.
+            ds.Blend = CanvasBlend.Copy;
+            ds.DrawImage(source, new Rect(0, 0, width, height), new Rect(0, 0, width, height));
+        }
+        catch
+        {
+            copy.Dispose();
+            throw;
+        }
+
+        return copy;
+    }
+
+    private CanvasRenderTarget RentTarget(int width, int height)
+    {
+        lock (_poolLock)
+        {
+            if (_poolWidth != width || _poolHeight != height)
+            {
+                ClearTargetPoolLocked();
+                _poolWidth = width;
+                _poolHeight = height;
+            }
+            else if (_targetPool.Count > 0)
+            {
+                return _targetPool.Pop();
+            }
+        }
+
+        return new CanvasRenderTarget(_device, width, height, 96);
+    }
+
+    private void ReturnTarget(CanvasRenderTarget target)
+    {
+        lock (_poolLock)
+        {
+            if (!_disposed
+                && (int)target.SizeInPixels.Width == _poolWidth
+                && (int)target.SizeInPixels.Height == _poolHeight
+                && _targetPool.Count <= _queueCapacity)
+            {
+                _targetPool.Push(target);
+                return;
+            }
+        }
+
+        target.Dispose();
+    }
+
+    private void ClearTargetPool()
+    {
+        lock (_poolLock)
+        {
+            ClearTargetPoolLocked();
+        }
+    }
+
+    private void ClearTargetPoolLocked()
+    {
+        while (_targetPool.Count > 0)
+        {
+            try { _targetPool.Pop().Dispose(); }
+            catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Target dispose failed: {ex.Message}"); }
+        }
+    }
+
+    // ── Writer loop ─────────────────────────────────────────────────
+
+    private async Task ProcessQueuedFramesAsync()
+    {
+        var ct = _writerCts.Token;
+        var reader = _frameQueue.Reader;
+
+        try
+        {
+            while (await reader.WaitToReadAsync(ct).ConfigureAwait(false))
+            {
+                while (reader.TryRead(out var frame))
+                {
+                    try
+                    {
+                        await WriteQueuedFrameAsync(frame, ct).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ReleaseFrame(frame);
+                    }
+
+                    if (ct.IsCancellationRequested)
+                        return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            RecordWriteFailure(ex, -1);
+        }
+        finally
+        {
+            DrainQueue();
+        }
+    }
+
+    private async Task WriteQueuedFrameAsync(PendingFrame frame, CancellationToken ct)
+    {
+        if (frame.SkippedSlots > 0)
+            FillGapFramesCore(frame.SkippedSlots);
+
+        if (frame.Bitmap is null)
+            return;
+
+        long index = Interlocked.Read(ref _frameCount);
+        string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
+
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+
+            using (var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write))
+            {
+                await frame.Bitmap
+                    .SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, JpegQuality)
+                    .AsTask(ct).ConfigureAwait(false);
+            }
+
+            lock (_tsLock)
+            {
+                _frameTimestamps.Add(frame.Timestamp);
+            }
+
+            // Publish the frame only once its JPEG is on disk: FrameCount is the
+            // finalizer's guarantee that every index below it can be decoded.
+            Interlocked.Increment(ref _frameCount);
+            Interlocked.Exchange(ref _consecutiveFailures, 0);
+        }
+        catch (OperationCanceledException)
+        {
+            TryDeleteFrameFile(framePath);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            TryDeleteFrameFile(framePath);
+            RecordWriteFailure(ex, index);
+        }
+    }
+
+    /// <summary>
+    /// Fills missed frame slots by duplicating the most recently written JPEG so frame N
+    /// always corresponds to wall-clock time N/fps. Writer-thread only.
+    /// </summary>
+    private void FillGapFramesCore(int count)
+    {
+        long prevIndex = Interlocked.Read(ref _frameCount) - 1;
+        if (prevIndex < 0) return;
+
+        string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
+        if (!File.Exists(srcPath)) return;
+
+        for (int i = 0; i < count; i++)
+        {
+            long gapIndex = Interlocked.Read(ref _frameCount);
+            string dstPath = Path.Combine(_framesDir, $"frame_{gapIndex:D8}.jpg");
+
+            try
+            {
+                File.Copy(srcPath, dstPath, overwrite: true);
+
+                // Synthetic timestamp: interpolate between previous and next slot
+                lock (_tsLock)
+                {
+                    var lastTs = _frameTimestamps.Count > 0
+                        ? _frameTimestamps[^1]
+                        : TimeSpan.Zero;
+                    _frameTimestamps.Add(lastTs + TimeSpan.FromSeconds(1.0 / _fps));
+                }
+
+                Interlocked.Increment(ref _frameCount);
+            }
+            catch (Exception ex)
+            {
+                // Leaving the slot unfilled shortens the recording slightly; leaving a hole
+                // in the sequence would break finalization outright.
+                TryDeleteFrameFile(dstPath);
+                RecordWriteFailure(ex, gapIndex);
+                return;
+            }
+        }
+    }
+
+    private void ReleaseFrame(PendingFrame frame)
+    {
+        if (frame.Bitmap is not null)
+        {
+            try { ReturnTarget(frame.Bitmap); }
+            catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Frame release failed: {ex.Message}"); }
+        }
+
+        Interlocked.Decrement(ref _queueDepth);
+    }
+
+    private void DrainQueue()
+    {
+        while (_frameQueue.Reader.TryRead(out var frame))
+            ReleaseFrame(frame);
+    }
+
+    private static void TryDeleteFrameFile(string path)
+    {
+        try { File.Delete(path); }
+        catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Could not remove partial frame: {ex.Message}"); }
+    }
+
+    private void RecordWriteFailure(Exception ex, long frameIndex)
+    {
+        Interlocked.Increment(ref _failedWrites);
+        int consecutive = Interlocked.Increment(ref _consecutiveFailures);
+
+        bool isFirst = false;
+        lock (_errorLock)
+        {
+            if (_firstWriteError is null)
+            {
+                _firstWriteError = ex;
+                _firstWriteErrorIndex = frameIndex;
+                isFirst = true;
+            }
+        }
+
+        Debug.WriteLine(
+            $"[VideoWriter] ERROR writing frame {frameIndex}: {ex.GetType().Name}: {ex.Message}");
+
+        if (consecutive >= MaxConsecutiveWriteFailures && !_stopAccepting)
+        {
+            _stopAccepting = true;
+            Debug.WriteLine(
+                $"[VideoWriter] Giving up after {consecutive} consecutive write failures; " +
+                $"{Interlocked.Read(ref _frameCount)} frames preserved in {_framesDir}.");
+        }
+
+        if (!isFirst)
+            return;
+
+        try
+        {
+            WriteFailed?.Invoke(this, new FrameWriteFailedEventArgs(ex, frameIndex, _framesDir));
+        }
+        catch (Exception handlerEx)
+        {
+            // A subscriber must never take down the writer thread.
+            Debug.WriteLine($"[VideoWriter] WriteFailed handler threw: {handlerEx.Message}");
+        }
+    }
+
+    // ── Shutdown ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Closes the frame gate. Already-queued frames are still written; anything the capture
+    /// engine hands over afterwards is ignored. Idempotent.
+    /// </summary>
+    public void StopAcceptingFrames()
+    {
+        _stopAccepting = true;
+
+        if (Interlocked.Exchange(ref _writerCompleted, 1) != 0)
+            return;
+
+        // Flush the CFR slots owed by dropped frames so a recording whose tail was dropped
+        // still ends at the right wall-clock time.
+        int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+        if (owed > 0)
+        {
+            Interlocked.Increment(ref _queueDepth);
+            if (!_frameQueue.Writer.TryWrite(new PendingFrame(null, TimeSpan.Zero, owed)))
+                Interlocked.Decrement(ref _queueDepth);
+        }
+
+        _frameQueue.Writer.TryComplete();
+    }
+
+    /// <summary>
+    /// Waits for every accepted frame to be encoded and written. On return (normal or
+    /// faulted) the writer loop is guaranteed to have stopped touching the frames
+    /// directory, so finalization can never race a pending write.
+    /// </summary>
+    public async Task WaitForQuiescenceAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        StopAcceptingFrames();
+
+        try
+        {
+            await _writerLoop.WaitAsync(timeout, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            await AbortWriterAsync().ConfigureAwait(false);
+            throw new TimeoutException($"Timed out waiting {timeout} for frame writes to finish.");
+        }
+        catch (OperationCanceledException)
+        {
+            await AbortWriterAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task AbortWriterAsync()
+    {
+        try { _writerCts.Cancel(); }
+        catch (ObjectDisposedException) { }
+        catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Writer cancel failed: {ex.Message}"); }
+
+        try
+        {
+            await _writerLoop.WaitAsync(WriterShutdownGrace, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"[VideoWriter] Writer loop did not stop within {WriterShutdownGrace}: {ex.Message}");
+        }
+
+        DrainQueue();
+    }
+
+    /// <summary>
+    /// Accrues CFR gap slots to be filled just before the next queued frame is written.
+    /// Retained for producers that compute gaps separately from the frame they precede;
+    /// <see cref="TryWriteFrame"/> carries its own <c>skippedSlots</c>.
     /// </summary>
     public void FillGapFrames(int count)
     {
         if (count <= 0) return;
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        lock (_writeLock)
-        {
-            long prevIndex = Interlocked.Read(ref _frameCount) - 1;
-            if (prevIndex < 0) return;
+        if (_stopAccepting)
+            return;
 
-            string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
-            if (!File.Exists(srcPath)) return;
-
-            for (int i = 0; i < count; i++)
-            {
-                long gapIndex = Interlocked.Increment(ref _frameCount) - 1;
-                string dstPath = Path.Combine(_framesDir, $"frame_{gapIndex:D8}.jpg");
-
-                try
-                {
-                    File.Copy(srcPath, dstPath, overwrite: true);
-
-                    // Synthetic timestamp: interpolate between previous and next slot
-                    lock (_tsLock)
-                    {
-                        var lastTs = _frameTimestamps.Count > 0
-                            ? _frameTimestamps[^1]
-                            : TimeSpan.Zero;
-                        _frameTimestamps.Add(lastTs + TimeSpan.FromSeconds(1.0 / _fps));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine(
-                        $"[VideoWriter] Gap fill failed at index {gapIndex}: {ex.Message}");
-                }
-            }
-        }
+        Interlocked.Add(ref _pendingSkippedSlots, count);
     }
 
     /// <summary>
@@ -297,7 +789,14 @@ public sealed class VideoWriter : IDisposable
         if (_finalized)
             return;
 
+        // Close the gate before flagging finalization so a capture callback that is still
+        // in flight sees a refusal rather than "writer has been finalized".
+        StopAcceptingFrames();
         _finalized = true;
+
+        // Finalization reads the frames directory, so the writer must be done with it.
+        // Callers normally reach quiescence first; this makes it a guarantee either way.
+        await DrainWriterForFinalizeAsync(ct).ConfigureAwait(false);
 
         long totalFrames = Interlocked.Read(ref _frameCount);
         if (totalFrames == 0)
@@ -310,7 +809,9 @@ public sealed class VideoWriter : IDisposable
             File.WriteAllText(logPath,
                 $"Width={_width}, Height={_height}, FPS={_fps}, TotalFrames={totalFrames}\n" +
                 $"CropRect={_cropRect}\n" +
-                $"OutputPath={_outputPath}\n");
+                $"OutputPath={_outputPath}\n" +
+                $"DroppedFrames={DroppedFrames}, FailedWrites={FailedFrameWrites}\n" +
+                $"FirstWriteError={FirstWriteError?.Message ?? "none"}\n");
         }
         catch { /* best effort */ }
 
@@ -655,6 +1156,28 @@ public sealed class VideoWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops the frame gate and waits for the writer loop to finish, so finalization never
+    /// races a pending JPEG write. Falls back to cancelling the loop if it will not drain.
+    /// </summary>
+    private async Task DrainWriterForFinalizeAsync(CancellationToken ct)
+    {
+        StopAcceptingFrames();
+
+        if (_writerLoop.IsCompleted)
+            return;
+
+        try
+        {
+            await _writerLoop.WaitAsync(FinalizeDrainTimeout, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoWriter] Writer did not drain before finalize: {ex.Message}");
+            await AbortWriterAsync().ConfigureAwait(false);
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -662,7 +1185,26 @@ public sealed class VideoWriter : IDisposable
 
         _disposed = true;
 
-        _cropTarget?.Dispose();
-        _cropTarget = null;
+        StopAcceptingFrames();
+
+        try { _writerCts.Cancel(); }
+        catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Writer cancel failed: {ex.Message}"); }
+
+        try
+        {
+            if (!_writerLoop.Wait(WriterShutdownGrace))
+                Debug.WriteLine($"[VideoWriter] Writer loop still running after {WriterShutdownGrace}.");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoWriter] Writer loop shutdown failed: {ex.Message}");
+        }
+
+        DrainQueue();
+        ClearTargetPool();
+
+        // Only safe once nothing can still observe the token.
+        if (_writerLoop.IsCompleted)
+            _writerCts.Dispose();
     }
 }

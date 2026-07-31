@@ -132,7 +132,9 @@
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
 
-        <!-- Playhead overlay line -->
+        <!-- Playhead overlay line — the only visual moved on a playback tick / scrub
+             (see UpdatePlayheadVisual). Purely decorative: not hit-testable, and kept out
+             of the automation tree so it isn't announced while playing. -->
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
@@ -141,6 +143,7 @@
             Width="2"
             HorizontalAlignment="Left"
             Background="{ThemeResource TimelinePlayheadOverlayBrush}"
+            AutomationProperties.AccessibilityView="Raw"
             IsHitTestVisible="False" />
     </Grid>
 </UserControl>

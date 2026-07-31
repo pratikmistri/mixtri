@@ -44,6 +44,11 @@ public sealed class ScreenCaptureEngine : IDisposable
     public long ThrottledFrames => Interlocked.Read(ref _throttledFrames);
     public IDirect3DDevice Device => _device;
 
+    /// <summary>
+    /// Raised for every accepted frame, on a free-threaded frame-pool callback.
+    /// The event's surface is only valid until the handler returns — handlers must copy
+    /// what they need and must never block on disk or encoding.
+    /// </summary>
     public event EventHandler<CapturedFrameEventArgs>? FrameCaptured;
     public event EventHandler? CaptureStarted;
     public event EventHandler? CaptureStopped;
@@ -195,14 +200,22 @@ public sealed class ScreenCaptureEngine : IDisposable
 
             // Frame-slot gating: compute which slot this frame belongs to
             // and only emit one frame per slot for consistent CFR pacing.
+            // FrameArrived is free-threaded, so claim the slot with a CAS loop —
+            // an exchange-and-restore can lose a concurrent claim and emit twice.
             long slot = (long)(timestamp.TotalSeconds / _frameInterval.TotalSeconds);
-            long previousSlot = Interlocked.Exchange(ref _lastEmittedSlot, slot);
-            if (slot <= previousSlot)
+            long previousSlot;
+            while (true)
             {
-                // Already emitted a frame for this slot — skip
-                Interlocked.Exchange(ref _lastEmittedSlot, previousSlot);
-                Interlocked.Increment(ref _throttledFrames);
-                return;
+                previousSlot = Interlocked.Read(ref _lastEmittedSlot);
+                if (slot <= previousSlot)
+                {
+                    // Already emitted a frame for this slot — skip
+                    Interlocked.Increment(ref _throttledFrames);
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref _lastEmittedSlot, slot, previousSlot) == previousSlot)
+                    break;
             }
 
             var surface = frame.Surface;

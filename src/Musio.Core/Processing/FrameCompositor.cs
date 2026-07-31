@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.AI;
 using Musio.Core.Capture;
+using Musio.Core.Diagnostics;
 using Musio.Core.Models;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
@@ -246,7 +247,35 @@ public class FrameCompositor : IDisposable
         _cursorRenderer.TickFrequency = mouseData.TickFrequency;
         await _cursorRenderer.LoadCursorAsync(_device);
 
+        // Warm the background wallpaper so the synchronous composite path never blocks
+        // on file I/O / GPU decode. A failure here is not fatal — the background renders
+        // with its solid-colour fallback — but it must not silently force that fallback
+        // for the whole export: the failure is logged here, and the render path retries
+        // the key on a bounded backoff so a transient setup failure still recovers.
+        await _bgCompositor.PreloadAsync(_device, _config.Background);
+        ReportBackgroundImageFailure("InitializeAsync");
+
         _initialized = true;
+    }
+
+    /// <summary>
+    /// The last background-image load failure, or null when the configured background
+    /// image loaded (or the style does not use one). Non-null after
+    /// <see cref="InitializeAsync"/> means frames will composite with the solid-colour
+    /// fallback until a retry succeeds.
+    /// </summary>
+    public BackgroundImageLoadFailure? BackgroundImageFailure => _bgCompositor.LastImageLoadFailure;
+
+    private void ReportBackgroundImageFailure(string phase)
+    {
+        var failure = _bgCompositor.LastImageLoadFailure;
+        if (failure is null) return;
+
+        DiagLog.Write(
+            "FrameCompositor",
+            $"{phase}: background image '{failure.Path}' unavailable ({failure.Reason}, "
+            + $"attempt {failure.Attempts}); compositing with the solid-colour fallback"
+            + (failure.WillRetry ? " and retrying in the background." : " — no retries left."));
     }
 
     /// <summary>
@@ -380,6 +409,26 @@ public class FrameCompositor : IDisposable
     {
         _zoomEngine.SetSuppressedClickTicks(suppressedTicks);
     }
+
+    /// <summary>
+    /// Asynchronously warms the background-image cache for the configured background
+    /// style so <see cref="ComposeFrame(CanvasBitmap, double)"/> never blocks on file I/O
+    /// or GPU decode. Already called by <see cref="InitializeAsync"/>; expose it for
+    /// callers that change background configuration on a live compositor. Safe to call
+    /// repeatedly — it is a no-op once the image is cached for this device.
+    /// </summary>
+    public Task PrewarmBackgroundAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _bgCompositor.PreloadAsync(_device, _config.Background, cancellationToken);
+    }
+
+    /// <summary>
+    /// True when the configured background can be drawn at full fidelity without
+    /// blocking (non-image backgrounds are always ready).
+    /// </summary>
+    public bool IsBackgroundReady =>
+        !_disposed && _bgCompositor.IsBackgroundImageReady(_device, _config.Background);
 
     /// <summary>
     /// Compose a single output frame at the given frame index.
@@ -626,6 +675,10 @@ public class FrameCompositor : IDisposable
     private void OnCanvasDeviceLost(CanvasDevice sender, object args)
     {
         _deviceLost = true;
+        // Cached GPU resources belong to the lost device — drop them so a rebuilt
+        // compositor reloads the wallpaper on the new device instead of drawing
+        // (or disposing) a dead surface.
+        _bgCompositor.InvalidateImageCache();
     }
 
     private void ThrowIfDeviceLost()
@@ -813,8 +866,16 @@ public class FrameCompositor : IDisposable
         // identical to Linear, so use the cheaper path. Use the same explicit
         // near-unit threshold form as ComposeFramePostCompositeZoom so the two
         // paths stay aligned over time.
-        double scaleX = _sourceAreaWidth / viewport.Width;
-        double scaleY = _sourceAreaHeight / viewport.Height;
+        double bitmapScaleX = source.SizeInPixels.Width / (double)_sourceWidth;
+        double bitmapScaleY = source.SizeInPixels.Height / (double)_sourceHeight;
+        var bitmapViewport = new Rect(
+            viewport.X * bitmapScaleX,
+            viewport.Y * bitmapScaleY,
+            viewport.Width * bitmapScaleX,
+            viewport.Height * bitmapScaleY);
+
+        double scaleX = _sourceAreaWidth / bitmapViewport.Width;
+        double scaleY = _sourceAreaHeight / bitmapViewport.Height;
         const double nearUnitScaleMinimum = 0.95;
         const double nearUnitScaleMaximum = 1.05;
         bool nearUnitScale =
@@ -829,7 +890,7 @@ public class FrameCompositor : IDisposable
 
         ds.DrawImage(source,
             new Rect(0, 0, _sourceAreaWidth, _sourceAreaHeight),
-            viewport,
+            bitmapViewport,
             1f, interpolation);
         return _croppedBuffer;
     }

@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio_App.Pages;
 using Musio_App.Services;
+using Musio.Core.Diagnostics;
 using Musio.Core.Projects;
 using Musio.Core.Services;
 using Musio.Core.Settings;
@@ -73,15 +74,58 @@ public partial class App : Application
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
             System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:O}] ({source}) {ex?.GetType().Name}: {ex?.Message}\n{ex?.StackTrace}\n\n");
+                $"[{DateTime.Now:O}] ({source}) {DescribeException(ex)}\n");
         }
         catch { }
     }
 
+    /// <summary>
+    /// Renders the whole inner-exception chain with HRESULTs. A terminating fault gets one
+    /// shot at leaving evidence behind, and the useful detail is usually two wrappers down.
+    /// </summary>
+    private static string DescribeException(Exception? ex)
+    {
+        if (ex is null) return "(no exception object)\n";
+
+        var text = new System.Text.StringBuilder();
+        var current = ex;
+        for (var depth = 0; current is not null && depth < 5; depth++)
+        {
+            if (depth > 0) text.Append("--> inner: ");
+            text.Append(current.GetType().FullName)
+                .Append($" (HR=0x{(uint)current.HResult:X8}): ")
+                .Append(current.Message).Append('\n')
+                .Append(current.StackTrace).Append('\n');
+
+            current = current is AggregateException aggregate
+                ? aggregate.Flatten().InnerExceptions.FirstOrDefault()
+                : current.InnerException;
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// Last-chance handler for exceptions that escaped to the XAML framework.
+    /// </summary>
+    /// <remarks>
+    /// Only failures <see cref="UnhandledExceptionPolicy"/> explicitly recognises as recoverable
+    /// are marked handled. Anything else is logged and then left unhandled on purpose, so the
+    /// runtime terminates the process here rather than letting it run on top of half-mutated
+    /// navigation, project or native state and die later as a context-free stowed failfast.
+    /// </remarks>
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
-        LogCrash("XAML", e.Exception);
-        e.Handled = true;
+        Exception? exception;
+        try { exception = e.Exception; }
+        catch { exception = null; }
+
+        var decision = UnhandledExceptionPolicy.Classify(exception, _isExiting);
+        LogCrash(
+            $"XAML {(decision.ShouldRecover ? "recovered" : "fatal")} — {decision.Reason}",
+            exception);
+
+        e.Handled = decision.ShouldRecover;
     }
 
     /// <summary>

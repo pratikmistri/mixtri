@@ -1498,3 +1498,185 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Restated control templates lose more than the visuals you were looking at.** The `GridViewHeaderItem` replacement dropped `UseSystemFocusVisuals` (stock style sets it; `Control` defaults it to `false`) while providing no focus visual of its own — a keyboard user focusing a group header would get no indicator. Re-added explicitly. When restating a stock template, diff the *setters* as well as the template body.
 - **Dead code removed**: `DiscoverProjects` still ended with `.OrderByDescending(e => e.LastUsedUtc)` after grouping took over sorting. Removed, and `GroupByDay` now breaks ties on `Name` so ordering no longer depends on the dictionary order projects were discovered in.
 - **`FileInfo` metadata is cached by the `Exists` probe — later reads cannot throw** (PR review claimed otherwise twice; measured and refuted). `FileSystemInfo.Exists` calls `Refresh()`, which snapshots `WIN32_FILE_ATTRIBUTE_DATA`; `Length` and `LastWriteTime` then read that snapshot with no further I/O. Demonstrated: create a file, read `.Exists` (True), **delete the file**, then `.Length` still returns `13` and `.LastWriteTime` still returns the real timestamp — no exception. A *fresh* `FileInfo` on a missing path is the dangerous one (`LastWriteTime` → `12/31/1600`). So `if (info.Exists)` once, then reuse that instance, is sufficient — adding try/catch around the subsequent property reads would be unreachable code. Access-denied is covered too: `Exists` returns false on any error, so the code falls through to the manifest/recents fallbacks.
+## Repository stability and performance backlog refresh
+
+- **Feature/area**: Full repository review for dead code, freeze/crash risks, resource lifetime, and performance; `docs/todo.md`.
+- **Approaches tried**: Compared the historical stability todo against current code, searched blocking/threading/disposal patterns and production call sites, reviewed capture/UI/media paths independently, and reconciled candidates with the settled playbooks and recent freeze investigations.
+- **What worked**: Replaced the stale todo with a prioritized, evidence-linked backlog. The highest-value current work is capture JPEG I/O/backpressure, bounded webcam teardown, exception policy, timeline playhead invalidation, frame-write error visibility, and render-resource caching.
+- **What didn't work**: `dotnet build` failed with the known PriGen MSB4062 environment issue; the build playbook already requires VS MSBuild. Several old findings were rejected because current code or learnings show they are fixed or intentional, including editor preview generation races, UI-thread decoder disposal, per-frame export surface ownership, timeline geometry disposal, and the bounded app-instance redirect.
+
+
+## Top stability and performance risks implemented
+
+- **Feature/area**: XAML exception policy, recording capture/write lifecycle, webcam teardown, Direct3D interop ownership, timeline playback rendering, and image-background loading.
+- **Approaches tried**: Split non-overlapping implementation areas across Opus 5 agents, integrated the shared worktree, ran two adversarial combined-diff reviews, corrected truthful frame-preservation reporting and retryable wallpaper failures, then built/tested with the ARM64 playbook.
+- **What worked**:
+  - Unknown XAML exceptions are logged but left unhandled; only a narrow allow-list of cancellation/shutdown faults is recoverable.
+  - Capture callbacks copy into independently owned render targets and enqueue into a bounded writer; one worker serializes JPEG/gap writes, preserves CFR via duplicate slots, and exposes the first write failure.
+  - Webcam stop has a watchdog and abandons a wedged driver call without blocking the rest of recording finalization.
+  - Recording faults only advertise preserved JPEGs after finalization decides whether the directory actually remains.
+  - CsWinRT `FromAbi` does not consume the caller's COM reference; release the returned ABI pointer exactly once in `finally`.
+  - The playhead is a XAML overlay, so playhead changes move it without invalidating static timeline canvases.
+  - Wallpaper loads are asynchronously prewarmed, device/path keyed, nonblocking during render, cancellation-safe, and retried with bounded exponential backoff.
+- **What didn't work**: A first integration pass attached the frames directory to degraded faults before successful finalization deleted it. The first wallpaper cache also permanently latched cancellation/transient failures. Both designs were replaced and covered by regression tests.
+- **Verified**: ARM64 VS MSBuild succeeded; full test assembly passed 568, skipped 2, failed 0.
+
+
+## Build and launch after stability fixes
+
+- **Feature/area**: ARM64 Debug build and local launch.
+- **Approaches tried**: Built `Musio.App.csproj` with ARM64 VS BuildTools MSBuild and launched the self-contained `win-arm64\Musio.App.exe` directly.
+- **What worked**: The build completed and the launched process remained responsive with window title `Musio`.
+- **What didn't work**: Nothing; no existing Musio process was holding the build output.
+
+
+## Release deployment after stability fixes
+
+- **Feature/area**: Clean ARM64 Release build, loose package registration, and packaged launch.
+- **Approaches tried**: Stopped the running Debug process by PID, removed the previous package registration, deleted only ARM64 Release build outputs, rebuilt with VS MSBuild, registered the generated Release `AppxManifest.xml`, and launched through AppsFolder.
+- **What worked**: Developer Mode was enabled; the package registered with status `Ok`, pointed at the fresh Release output, and launched a responsive `Musio` window.
+- **What didn't work**: Nothing; the earlier no-Developer-Mode limitation no longer applies on this machine.
+
+## Preview playback and rapid-seek lag investigation
+
+- **Feature/area**: Editor timeline scrubbing, preview render scheduling, MP4 frame decoding, and audio scrub feedback.
+- **Approaches tried**: Traced pointer movement through `TimelineControl.PlayheadPosition`, `EditorPage.UpdatePreviewFrameAsync`, `VideoFrameReader`, `Mp4FrameSource`, and `AudioPlaybackEngine`; compared the current behavior with the prior MP4 preview-stutter findings.
+- **What worked**: The root cause is an uncancellable single-decoder pipeline. Every pointer move updates the playhead immediately, but an in-flight obsolete MP4 seek must finish before the coalesced latest position can render. A stalled random seek can consume multiple 600 ms retries, grace periods, wake-step recovery, and drain delays; meanwhile playback advances far enough to miss the eight-frame step window and require another full GOP seek. The last presented frame remains visible throughout, which appears as a freeze. Synchronous `ScrubTo` stop/seek/play work on every pointer move adds UI-thread latency, and playback schedules preview updates both through the timeline property callback and the playback-tick handler.
+- **What didn't work**: Treating this as playhead drawing/layout cost or raw compositor cost does not explain the multi-second freezes; the playhead is already an overlay and render requests are coalesced. Coalescing limits queue growth but cannot preempt the obsolete decode already holding `Mp4FrameSource._gate`.
+
+## Preview seek fix design
+
+- **Feature/area**: Behavior-preserving preview playback and scrubbing responsiveness.
+- **Approaches tried**: Compared decode-quality reductions, longer caches, pure debouncing, additional decoder instances, and cancellation-aware latest-position scheduling.
+- **What worked**: Keep exact decoding and composition, but make preview requests supersedable. Add preview-only cancellation through `VideoFrameReader`/`Mp4FrameSource`, safely abandon the current seek without allowing its late frame to satisfy the next request, render scrub positions at a bounded cadence, and force the exact final frame on pointer release. Suppress the timeline callback during playback-driven playhead updates so each tick schedules one render. Move audio scrub transport onto a latest-only throttled worker so pointer handling remains immediate.
+- **What didn't work**: Reducing preview quality, changing GOP/frame accuracy, or removing audio feedback changes expected behavior. Coalescing without decoder cancellation still waits behind obsolete work; cancellation without stale-frame isolation risks presenting or exporting the wrong frame.
+
+## Preview cache and reduced-resolution direction
+
+- **Feature/area**: Revised preview-performance design after product preference clarification.
+- **Approaches tried**: Evaluated enlarging the existing 12-frame source-resolution GPU cache, caching final composed frames, scaling decoded frames, and using a dedicated low-resolution preview proxy.
+- **What worked**: Use a byte-budgeted LRU of low-resolution decoded source frames, preserving live composition of cursor, zoom, webcam, transitions, and styles. A 960x540 BGRA frame is about 2 MiB versus about 8 MiB at 1080p, so a 128-256 MiB budget can retain roughly 64-128 frames. For materially cheaper H.264 seeks, decode a low-resolution, short-GOP preview proxy; scaling only after full-resolution decode reduces composition and cache cost but not the GOP decode work. Keep cancellation/latest-request handling because cache misses and first visits still occur.
+- **What didn't work**: A larger cache alone cannot accelerate frames never visited, and rapid long-distance movement has poor cache locality. Caching final composed frames requires broad invalidation and risks stale effects; an unlimited full-resolution cache scales to hundreds of MiB or GiB, especially with 4K and appended recordings.
+
+## Reduced-resolution preview cache implementation
+
+- **Feature/area**: Editor preview decoding, frame caching, playback scheduling, compositor sampling, and audio scrub transport on `feature/preview-proxy-cache`.
+- **Approaches tried**: Considered a persisted short-GOP proxy file, then implemented a lower-risk preview-only decoder surface because it requires no project/package schema change or proxy-generation delay. Added a real MP4 integration test rather than relying only on dimension math.
+- **What worked**: `Mp4FrameSource` now accepts preview options and copies frames directly into a bounded 960x540 GPU surface; `FrameCompositor` maps full-resolution zoom/crop coordinates into the reduced bitmap. `VideoFrameReader` uses a 192 MiB byte-budgeted LRU for preview while export keeps the existing full-resolution/count-bounded reader. Preview seeks use one bounded attempt without export's expensive recovery sequence, playback no longer schedules the same frame twice, and scrub audio is latest-only on a worker thread. A real 1280x720 MP4 decoded successfully into a 960x540 frame.
+- **What didn't work**: Direct VS MSBuild invocation was intermittently denied by the shell; the documented `ProcessStartInfo` wrapper worked. The existing sequential/random MP4 frame-identity tests remain ignored for pre-existing decoder correctness defects and were not changed.
+- **Verified**: ARM64 app and test builds succeeded; preview tests passed 7/7; full suite passed 518 with 2 existing ignored tests.
+
+## Preview optimization branch build and launch
+
+- **Feature/area**: ARM64 Debug build and local launch of `feature/preview-proxy-cache`.
+- **Approaches tried**: Stopped the existing app by PID, built with VS BuildTools MSBuild through the established `ProcessStartInfo` wrapper, and launched the generated executable directly.
+- **What worked**: Build succeeded and PID 29604 remained responsive with window title `Musio Mini`.
+- **What didn't work**: Nothing; stopping the previous process avoided output-lock failures.
+
+## Adaptive preview resolution
+
+- **Feature/area**: Runtime preview quality selection and live reader swaps on `feature/preview-proxy-cache`.
+- **Approaches tried**: Replaced the fixed 960x540 cap with 540p/720p/900p/1080p tiers. Initial quality uses source size plus logical processor count; runtime quality uses an EMA of user-visible playback frame time with asymmetric promotion/demotion thresholds and cooldown.
+- **What worked**: Machines with 8+ logical processors start at up to 1080p, lower-capability machines start lower, sustained headroom promotes after 120 samples, and overload demotes after 12. Resolution changes open the replacement reader before disposing the current one, clear appended-reader caches only after success, and use generation/project guards across awaits. The controller proposes a tier and commits only after the reader swap succeeds.
+- **What didn't work**: The first controller version committed its tier before the reader opened, leaving controller and actual resolution divergent after an open failure; changed to propose/commit/reject. Review also found a disposal race that could recreate an audio scrub timer after shutdown; the timer is now guarded and disposed under the scrub lock.
+- **Verified**: ARM64 app/test builds succeeded; 12 focused preview tests passed before review fixes; final full suite passed 524 with 2 existing ignored MP4 identity tests.
+
+## Adaptive preview merge into stability branch
+
+- **Feature/area**: Merge of `feature/preview-proxy-cache` into `fix/top-stability-performance-risks`.
+- **Approaches tried**: Committed the feature branch, merged with `--no-ff`, preserved both append-only learnings histories, then rebuilt and retested on the target branch before completing the merge commit.
+- **What worked**: Application code merged automatically; only `learnings.md` required conflict resolution. The target branch's stability/performance changes and the adaptive preview changes coexist without code conflicts.
+- **What didn't work**: Nothing beyond the expected append-only documentation conflict.
+- **Verified**: Merged ARM64 app/test builds succeeded; full target-branch suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Adaptive preview Release deployment
+
+- **Feature/area**: Clean local deployment of `fix/top-stability-performance-risks`.
+- **Approaches tried**: Removed the existing loose package registration before deleting the exact ARM64 Release output directories, rebuilt with VS BuildTools MSBuild, registered the generated Release `AppxManifest.xml`, and launched through AppsFolder.
+- **What worked**: Package status is `Ok`, install location points to the fresh `win-arm64` Release output, and PID 33880 is responsive with window title `Musio`.
+- **What didn't work**: Nothing; removing registration before cleaning avoided stale loose-package paths.
+
+## Adaptive preview branch push
+
+- **Feature/area**: Upstream synchronization for `fix/top-stability-performance-risks`.
+- **Approaches tried**: Verified the three local commits and pushed the branch to its existing `origin` upstream.
+- **What worked**: Remote advanced from `53b82ab` to `8a95826`; unrelated untracked `files/` remained excluded.
+- **What didn't work**: Nothing.
+
+## Adaptive preview resolution badge
+
+- **Feature/area**: `PreviewCanvas` quality indicator and adaptive-tier UI synchronization.
+- **Approaches tried**: Added a compact top-right in-canvas badge rather than another playback control or permanent status label.
+- **What worked**: The badge displays `Adaptive · 540p/720p/900p/1080p` only when the active tier is below the source resolution, updates after successful live reader swaps, hides for full-resolution preview or no project, and explains via tooltip that export remains full resolution. It is not hit-testable, so it cannot intercept preview input.
+- **What didn't work**: Nothing; existing overlay theme resources matched the playback controls and avoided new styling dependencies.
+- **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Shy preview playback chrome
+
+- **Feature/area**: `PreviewCanvas` playback controls and adaptive-quality badge placement.
+- **Approaches tried**: Moved the badge beside Play/Pause inside one bottom chrome and used a Composition opacity animation driven by preview pointer enter/exit plus keyboard focus.
+- **What worked**: The full chrome (Play/Pause, adaptive tier, and timecode) fades in over 140 ms on hover and out over 280 ms after leaving. Keyboard focus keeps it visible. Hidden chrome disables pointer hit-testing, preventing invisible buttons or tooltips from intercepting clicks, while keyboard focus can still reveal it.
+- **What didn't work**: The first version changed only opacity; transparent XAML elements still hit-test, so the invisible Play/Pause button could be clicked. Review caught it and `IsHitTestVisible` now follows the chrome state.
+- **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Shy preview chrome Release deployment
+
+- **Feature/area**: Clean ARM64 Release build, loose package registration, and local launch.
+- **Approaches tried**: Removed the existing package before cleaning the exact Release outputs, rebuilt with VS BuildTools MSBuild, registered the loose manifest, and launched through AppsFolder.
+- **What worked**: `Add-AppxPackage -Path <AppxManifest.xml> -Register` registered the fresh output with status `Ok`; the launched process was responsive with window title `Musio`.
+- **What didn't work**: Adding `-DisableDevelopmentMode` rejected the loose manifest with `0x80073CF9` ("manifest is not in the package root"); omit that switch for this development registration.
+
+## Floating rounded preview chrome
+
+- **Feature/area**: `PreviewCanvas` playback chrome placement and shape.
+- **Approaches tried**: Added a 12 px bottom margin and changed the container from top-only corners to a uniform pill radius.
+- **What worked**: A 25 px radius matches half the chrome's rendered height, producing semicircular ends with straight horizontal sides while keeping the existing padding, controls, and shy behavior unchanged.
+- **What didn't work**: An oversized radius such as 999 is normalized against both container dimensions by WinUI and turns the entire wide chrome into an oval instead of a stadium-shaped pill.
+- **Verified**: ARM64 Release builds compile the corrected XAML successfully.
+
+## Circular preview play button
+
+- **Feature/area**: `PreviewCanvas` Play/Pause button shape.
+- **Approaches tried**: Replaced the content-sized default button geometry with an explicit square hit target and half-size radius.
+- **What worked**: A 40 x 40 button with a 20 px corner radius produces a true circular hover/pressed surface while preserving the centered 18 px icon.
+- **What didn't work**: Padding alone allowed the default button template to render a rounded rectangle.
+- **Verified**: The ARM64 Debug app build compiled the updated XAML successfully.
+
+## Circular preview control Release deployment
+
+- **Feature/area**: Clean ARM64 Release deployment after preview control geometry updates.
+- **Approaches tried**: Pushed the UI changes, removed the prior loose package registration, cleaned the exact Release outputs, rebuilt, registered the new manifest, and launched through AppsFolder.
+- **What worked**: The package registered with status `Ok` and launched a responsive Musio process from the fresh ARM64 Release output.
+- **What didn't work**: Nothing.
+
+## PR 66 review fixes
+
+- **Feature/area**: Timeline playhead clipping, D3D11/WinRT device interop, and background-image cache invalidation.
+- **Approaches tried**: Validated all three review threads against current code, fixed each at its geometry or ownership boundary, and added deterministic in-flight invalidation tests.
+- **What worked**: Visible playhead offsets are clamped inside the track viewport; the D3D11 device is queried for `IDXGIDevice` before WinRT projection; cache loads carry generation IDs so invalidated or superseded completions cannot republish stale bitmaps.
+- **What didn't work**: Clearing only the in-flight path/device is insufficient when a replacement load immediately uses the same key, because the older completion can match the replacement key.
+- **Verified**: ARM64 Debug solution build succeeded; 20 focused tests and the full suite of 583 passing tests with 2 existing skips completed successfully.
+
+## Editor graphics-device recovery
+
+- **Feature/area**: Preview, filmstrip, timeline, appended-segment rendering, and adaptive preview resource lifecycle.
+- **Approaches tried**: Added editor-level shared-device loss handling, coordinated GPU-resource teardown/reinitialization, exception-safe disposal for dead-device resources, bounded per-reader cache budgets, appended-preview LRU eviction, and adaptive reader validation before swaps.
+- **What worked**: Recovery pauses rendering, invalidates all async generations, drops old-device frames/thumbnails/readers/compositors, rebuilds from the replacement shared device, regenerates filmstrips, and rerenders the playhead. A deterministic recovery lifecycle probe completed in about 500 ms while the editor remained responsive.
+- **What didn't work**: Calling Win2D `RaiseDeviceLost()` directly on this packaged ARM64 setup returned `E_INVALIDARG`; invoking the same recovery lifecycle directly provided deterministic end-to-end validation. A single queued flag also dropped a second loss during recovery, so recovery now records additional requests and loops until stable.
+- **Verified**: ARM64 Debug solution build succeeded; the full suite passed 583 tests with 2 existing MP4 identity skips. A clean ARM64 Release package registered with status `Ok` and opened a responsive project editor.
+
+## PR 66 frame-callback fault retention
+
+- **Feature/area**: `RecordingSession.OnFrameCaptured` error handling.
+- **Approaches tried**: Validated the review thread against the free-threaded callback and existing `RecordFault`/`ReportFault` contract.
+- **What worked**: Frame callback exceptions now flow through `RecordFault`, retaining the degraded session state and insulating the capture callback from throwing `Error` subscribers.
+- **What didn't work**: Direct `Error` invocation bypassed fault retention and allowed subscriber exceptions to escape the capture callback.
+- **Verified**: ARM64 Debug solution build succeeded; recording fault tests passed 4/4 and the full suite passed 583 tests with 2 existing skips.
+
+## Preview reduced-surface CI reliability
+
+- **Feature/area**: Reduced-resolution MP4 preview decoding test.
+- **Approaches tried**: Inspected the failed GitHub Actions job and separated output-scaling validation from the production preview seek budget.
+- **What worked**: The reduced-surface test uses normal recovery settings while still requesting 960x540 output; the existing options test independently verifies the one-attempt, 400 ms preview policy.
+- **What didn't work**: Requiring a cold CI decoder to return its first frame within the production best-effort preview budget made the scaling test timing-dependent.
+- **Verified**: The exact AnyCPU Release build succeeded, the formerly failing test passed five consecutive runs, and the full suite passed 583 tests with 2 existing skips.

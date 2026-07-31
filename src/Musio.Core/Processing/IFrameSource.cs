@@ -44,3 +44,26 @@ public interface IFrameSource : IDisposable
     /// </summary>
     Task<CanvasBitmap?> LoadFrameAsync(int frameIndex);
 }
+
+/// <summary>
+/// Controls how an encoded frame source is opened.
+/// </summary>
+public sealed record FrameSourceOptions
+{
+    public static FrameSourceOptions FullResolution { get; } = new();
+
+    public static FrameSourceOptions CreatePreview(int maxWidth, int maxHeight) => new()
+    {
+        MaxWidth = maxWidth,
+        MaxHeight = maxHeight,
+        SeekAttempts = 1,
+        SeekAttemptTimeout = TimeSpan.FromMilliseconds(400),
+        EnableSeekRecovery = false,
+    };
+
+    public int MaxWidth { get; init; }
+    public int MaxHeight { get; init; }
+    public int SeekAttempts { get; init; } = 3;
+    public TimeSpan SeekAttemptTimeout { get; init; } = TimeSpan.FromMilliseconds(600);
+    public bool EnableSeekRecovery { get; init; } = true;
+}

@@ -26,14 +26,17 @@ public sealed class VideoFrameReader : IDisposable
     /// <summary>Name of the transient per-session captured-frame scratch directory.</summary>
     public const string FramesDirectoryName = ".frames";
 
-    private const int CacheCapacity = 12;
+    private const int DefaultCacheCapacity = 12;
+    private const long PreviewCacheBudgetBytes = 192L * 1024 * 1024;
 
     private readonly IFrameSource _source;
     private readonly int _fps;
+    private readonly long _cacheBudgetBytes;
 
     private readonly Dictionary<int, CanvasBitmap> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
+    private long _cachedBytes;
 
     private bool _disposed;
 
@@ -47,10 +50,11 @@ public sealed class VideoFrameReader : IDisposable
         ? TimeSpan.FromSeconds((double)_source.FrameCount / _fps)
         : TimeSpan.Zero;
 
-    private VideoFrameReader(IFrameSource source, int fps)
+    private VideoFrameReader(IFrameSource source, int fps, long cacheBudgetBytes = 0)
     {
         _source = source;
         _fps = fps;
+        _cacheBudgetBytes = cacheBudgetBytes;
     }
 
     /// <summary>
@@ -98,6 +102,39 @@ public sealed class VideoFrameReader : IDisposable
             videoFilePath, fps, device, RecordingMarker.NeedsVerticalFlip(videoFilePath))
             .ConfigureAwait(false);
         return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
+    }
+
+    /// <summary>
+    /// Opens a reduced-resolution, low-latency reader for interactive editor preview.
+    /// Export and other correctness-first callers continue using
+    /// <see cref="OpenFromVideoPathAsync"/>.
+    /// </summary>
+    public static async Task<VideoFrameReader?> OpenPreviewFromVideoPathAsync(
+        string videoFilePath, int fps, int maxWidth, int maxHeight,
+        long cacheBudgetBytes = PreviewCacheBudgetBytes)
+    {
+        if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
+            return null;
+
+        var device = CanvasDevice.GetSharedDevice();
+        var dir = Path.GetDirectoryName(videoFilePath);
+        if (dir is not null)
+        {
+            var jpeg = JpegFrameSource.Open(dir, device);
+            if (jpeg is not null)
+                return new VideoFrameReader(jpeg, fps);
+        }
+
+        var mp4 = await Mp4FrameSource.OpenAsync(
+            videoFilePath,
+            fps,
+            device,
+            RecordingMarker.NeedsVerticalFlip(videoFilePath),
+            FrameSourceOptions.CreatePreview(maxWidth, maxHeight)).ConfigureAwait(false);
+
+        return mp4 is not null
+            ? new VideoFrameReader(mp4, fps, Math.Max(0, cacheBudgetBytes))
+            : null;
     }
 
     /// <summary>
@@ -158,6 +195,7 @@ public sealed class VideoFrameReader : IDisposable
             }
 
             _cache[frameIndex] = decoded;
+            _cachedBytes += EstimateBytes(decoded);
             _cacheOrder.AddFirst(frameIndex);
             Evict();
 
@@ -222,14 +260,22 @@ public sealed class VideoFrameReader : IDisposable
 
     private void Evict()
     {
-        while (_cacheOrder.Count > CacheCapacity)
+        while (_cacheBudgetBytes > 0
+            ? _cachedBytes > _cacheBudgetBytes
+            : _cacheOrder.Count > DefaultCacheCapacity)
         {
             var oldest = _cacheOrder.Last!.Value;
             _cacheOrder.RemoveLast();
             if (_cache.Remove(oldest, out var bitmap))
+            {
+                _cachedBytes -= EstimateBytes(bitmap);
                 bitmap.Dispose();
+            }
         }
     }
+
+    internal static long EstimateBytes(CanvasBitmap bitmap)
+        => checked((long)bitmap.SizeInPixels.Width * bitmap.SizeInPixels.Height * 4);
 
     /// <summary>
     /// Returns an independent copy so cache eviction can never dispose a bitmap a caller
@@ -271,6 +317,7 @@ public sealed class VideoFrameReader : IDisposable
                 bitmap.Dispose();
             _cache.Clear();
             _cacheOrder.Clear();
+            _cachedBytes = 0;
         }
         finally
         {

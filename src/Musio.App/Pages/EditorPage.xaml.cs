@@ -48,16 +48,17 @@ public sealed partial class EditorPage : Page
         public VideoFrameReader? Reader;
         public PreviewRenderer? Renderer;
         public bool Ready;
+        public long LastUsed;
         public Windows.Media.Editing.MediaComposition? Webcam;
         public int WebcamW, WebcamH;
         public CanvasBitmap? LastWebcamFrame;
 
         public void Dispose()
         {
-            Reader?.Dispose();
-            Renderer?.Dispose();
-            Webcam?.Clips.Clear();
-            LastWebcamFrame?.Dispose();
+            TryDispose(Reader);
+            TryDispose(Renderer);
+            try { Webcam?.Clips.Clear(); } catch { }
+            TryDispose(LastWebcamFrame);
         }
     }
 
@@ -70,6 +71,11 @@ public sealed partial class EditorPage : Page
     /// moves on, the same way <see cref="_previewInitGeneration"/> guards the primary.
     /// </summary>
     private int _segmentPreviewGeneration;
+    private long _segmentPreviewUseCounter;
+
+    private const int MaxCachedSegmentPreviews = 2;
+    private const long PrimaryPreviewCacheBudgetBytes = 96L * 1024 * 1024;
+    private const long SegmentPreviewCacheBudgetBytes = 32L * 1024 * 1024;
 
     /// <summary>
     /// Disposes and clears every cached appended-segment preview.
@@ -92,6 +98,21 @@ public sealed partial class EditorPage : Page
         }
 
         _segmentPreviews.Clear();
+    }
+
+    private void TrimSegmentPreviewCache()
+    {
+        while (_segmentPreviews.Count >= MaxCachedSegmentPreviews)
+        {
+            var oldest = _segmentPreviews.MinBy(pair => pair.Value.LastUsed);
+            if (string.IsNullOrEmpty(oldest.Key))
+                return;
+
+            _segmentPreviews.Remove(oldest.Key);
+            DisposeOffUiThread(oldest.Value.Reader);
+            oldest.Value.Reader = null;
+            oldest.Value.Dispose();
+        }
     }
 
     // Thumbnail generation versioning — prevents stale results
@@ -136,7 +157,16 @@ public sealed partial class EditorPage : Page
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+    private bool _syncingTimelineFromPlayback;
+    private AdaptivePreviewQuality? _adaptivePreviewQuality;
+    private string? _adaptivePreviewVideoPath;
+    private PreviewResolution _previewResolution = new(960, 540);
     private double _audioOffsetSeconds;
+    private CanvasDevice? _graphicsDevice;
+    private int _graphicsRecoveryQueued;
+    private int _graphicsRecoveryRequested;
+    private bool _graphicsRecoveryInProgress;
+    private bool _pageUnloaded;
 
     // Background style editing state
     private DispatcherTimer? _styleDebounceTimer;
@@ -162,6 +192,12 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         ExportVM = new ExportViewModel();
         InitializeComponent();
+        AttachGraphicsDevice();
+        Loaded += (_, _) =>
+        {
+            _pageUnloaded = false;
+            AttachGraphicsDevice();
+        };
         WirePropertyPanels();
 
         Preview.Duration = GetMappedDuration();
@@ -193,6 +229,9 @@ public sealed partial class EditorPage : Page
             {
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
+                if (_syncingTimelineFromPlayback)
+                    return;
+
                 _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition);
                 // Play short audio burst at scrub position for editing feedback
                 if (!Preview.IsPlaying)
@@ -206,7 +245,15 @@ public sealed partial class EditorPage : Page
         // Sync playhead: when preview plays, update timeline
         Preview.PlaybackTick += (_, _) =>
         {
-            Timeline.PlayheadPosition = Preview.PlayheadPosition;
+            _syncingTimelineFromPlayback = true;
+            try
+            {
+                Timeline.PlayheadPosition = Preview.PlayheadPosition;
+            }
+            finally
+            {
+                _syncingTimelineFromPlayback = false;
+            }
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
 
@@ -324,6 +371,8 @@ public sealed partial class EditorPage : Page
         // Clean up when page is unloaded to prevent leaks
         Unloaded += (_, _) =>
         {
+            _pageUnloaded = true;
+            DetachGraphicsDevice();
             _styleDebounceTimer?.Stop();
             _styleDebounceTimer = null;
             _cursorDebounceTimer?.Stop();
@@ -372,6 +421,139 @@ public sealed partial class EditorPage : Page
     /// </summary>
     public void PausePlayback() => Preview.Pause();
 
+    private void AttachGraphicsDevice()
+    {
+        try
+        {
+            var device = CanvasDevice.GetSharedDevice();
+            if (ReferenceEquals(_graphicsDevice, device))
+                return;
+
+            DetachGraphicsDevice();
+            _graphicsDevice = device;
+            _graphicsDevice.DeviceLost += OnGraphicsDeviceLost;
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor", $"failed to attach graphics-device recovery: {ex.Message}");
+        }
+    }
+
+    private void DetachGraphicsDevice()
+    {
+        if (_graphicsDevice is null)
+            return;
+
+        _graphicsDevice.DeviceLost -= OnGraphicsDeviceLost;
+        _graphicsDevice = null;
+    }
+
+    private void OnGraphicsDeviceLost(CanvasDevice sender, object args)
+    {
+        Musio.Core.Diagnostics.DiagLog.Write(
+            "Editor", "shared CanvasDevice lost; scheduling editor graphics recovery");
+
+        Interlocked.Exchange(ref _graphicsRecoveryRequested, 1);
+        if (Interlocked.Exchange(ref _graphicsRecoveryQueued, 1) != 0)
+            return;
+
+        if (!DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    do
+                    {
+                        Interlocked.Exchange(ref _graphicsRecoveryRequested, 0);
+                        await RecoverGraphicsDeviceAsync();
+                    }
+                    while (!_pageUnloaded
+                        && Interlocked.CompareExchange(
+                            ref _graphicsRecoveryRequested, 0, 0) != 0);
+                }
+                catch (Exception ex)
+                {
+                    Musio.Core.Diagnostics.DiagLog.Write(
+                        "Editor", $"graphics recovery failed: {ex}");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
+                }
+            }))
+        {
+            Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
+        }
+    }
+
+    private async Task RecoverGraphicsDeviceAsync()
+    {
+        if (_pageUnloaded || _graphicsRecoveryInProgress)
+            return;
+
+        _graphicsRecoveryInProgress = true;
+        TimeSpan position = Preview.PlayheadPosition;
+        try
+        {
+            Preview.Pause();
+            _pendingRenderPosition = null;
+            _pendingRenderForce = false;
+
+            while (_isRendering && !_pageUnloaded)
+                await Task.Delay(25);
+
+            if (_pageUnloaded)
+                return;
+
+            _previewInitGeneration++;
+            _thumbnailGenerationId++;
+            _segmentPreviewGeneration++;
+
+            Preview.ClearFrame();
+            DisposeOffUiThread(_frameReader);
+            _frameReader = null;
+            TryDispose(_previewRenderer);
+            _previewRenderer = null;
+            _compositorReady = false;
+            TryDispose(_textSlideRenderer);
+            _textSlideRenderer = null;
+            TryDispose(_transitionRenderer);
+            _transitionRenderer = null;
+            ReleaseCrossfadeOutgoing();
+            DisposeSegmentPreviews();
+            TryDispose(_lastWebcamFrame);
+            _lastWebcamFrame = null;
+            try { _webcamComposition?.Clips.Clear(); } catch { }
+            _webcamComposition = null;
+
+            Timeline.ClearThumbnails();
+            Timeline.ClearSegmentTrackVisuals();
+            _thumbnailsCompletedForPath = null;
+            _thumbnailsInFlightForPath = null;
+            _thumbnailsDoneForFiles.Clear();
+
+            DetachGraphicsDevice();
+            AttachGraphicsDevice();
+            await InitializePreviewCoreAsync();
+            position = Preview.PlayheadPosition;
+            _pendingRenderPosition = null;
+            _pendingRenderForce = false;
+        }
+        finally
+        {
+            _graphicsRecoveryInProgress = false;
+        }
+
+        if (_pageUnloaded)
+            return;
+
+        Timeline.InvalidateAllCanvases();
+        Preview.InvalidateSurface();
+        await UpdatePreviewFrameAsync(position, force: true);
+        Musio.Core.Diagnostics.DiagLog.Write(
+            "Editor", "editor graphics recovery completed");
+    }
+
     private async Task InitializePreviewAsync()
     {
         // Started fire-and-forget from ModelReloaded, so anything thrown here would be
@@ -407,6 +589,17 @@ public sealed partial class EditorPage : Page
         });
     }
 
+    private static void TryDispose(IDisposable? resource)
+    {
+        if (resource is null) return;
+        try { resource.Dispose(); }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor", $"graphics resource disposal failed: {ex.Message}");
+        }
+    }
+
     private async Task InitializePreviewCoreAsync()
     {
         // Every await below is a point where this page can be unloaded or a newer init can
@@ -430,6 +623,7 @@ public sealed partial class EditorPage : Page
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
         {
+            Preview.HideQualityIndicator();
             _thumbnailGenerationId++;
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
@@ -454,6 +648,21 @@ public sealed partial class EditorPage : Page
         int previewFps = Math.Min(fps, 30);
         Preview.PreviewFps = previewFps;
 
+        if (!string.Equals(
+                _adaptivePreviewVideoPath, videoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _adaptivePreviewQuality = new AdaptivePreviewQuality(
+                project.Width, project.Height, Environment.ProcessorCount);
+            _adaptivePreviewVideoPath = videoPath;
+            _previewResolution = _adaptivePreviewQuality.Current;
+        }
+
+        Preview.SetQualityIndicator(
+            _previewResolution.MaxWidth,
+            _previewResolution.MaxHeight,
+            project.Width,
+            project.Height);
+
         if (!haveStrip && !alreadyGenerating)
         {
             _thumbnailGenerationId++; // cancel any pass for a different source
@@ -475,7 +684,12 @@ public sealed partial class EditorPage : Page
             _ = GenerateAppendedThumbnailsAsync(videoPath);
         }
 
-        var reader = await VideoFrameReader.OpenFromVideoPathAsync(videoPath, fps);
+        var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+            videoPath,
+            fps,
+            _previewResolution.MaxWidth,
+            _previewResolution.MaxHeight,
+            PrimaryPreviewCacheBudgetBytes);
         if (initGeneration != _previewInitGeneration)
         {
             // Page unloaded or a newer init took over while the decoder was opening.
@@ -688,6 +902,12 @@ public sealed partial class EditorPage : Page
     private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
     {
         if (_frameReader is null) return;
+        if (_graphicsRecoveryInProgress)
+        {
+            _pendingRenderPosition = position;
+            _pendingRenderForce |= force;
+            return;
+        }
 
         // Coalesce overlapping render requests: if a render is already in
         // flight, record the latest requested position and let the active
@@ -708,7 +928,26 @@ public sealed partial class EditorPage : Page
             bool currentForce = force;
             do
             {
+                // Wall-clock time is intentionally used as the user-visible load signal:
+                // decode, composition and UI contention all reduce preview headroom.
+                long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 await RenderFrameAtAsync(currentPos, currentForce);
+
+                if (Preview.IsPlaying
+                    && IsVideoPosition(currentPos)
+                    && _adaptivePreviewQuality?.ObservePlaybackFrame(
+                        System.Diagnostics.Stopwatch.GetElapsedTime(renderStarted),
+                        Preview.PreviewFps) is { } resolution)
+                {
+                    if (await ApplyPreviewResolutionAsync(resolution))
+                    {
+                        _adaptivePreviewQuality.Commit(resolution);
+                        currentForce = true;
+                        continue;
+                    }
+
+                    _adaptivePreviewQuality.RejectChange();
+                }
 
                 // Consume any pending request that arrived during rendering
                 if (_pendingRenderPosition.HasValue)
@@ -728,6 +967,66 @@ public sealed partial class EditorPage : Page
         {
             _isRendering = false;
         }
+    }
+
+    private bool IsVideoPosition(TimeSpan position)
+    {
+        var model = ViewModel.Model;
+        return model.Segments.Count == 0
+            || model.GetSegmentAtTime(position).Segment is VideoSegment;
+    }
+
+    private async Task<bool> ApplyPreviewResolutionAsync(PreviewResolution resolution)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null
+            || string.IsNullOrEmpty(project.VideoFilePath)
+            || resolution == _previewResolution)
+        {
+            return false;
+        }
+
+        var videoPath = project.VideoFilePath;
+        int fps = project.Fps > 0 ? project.Fps : 30;
+        int initGeneration = _previewInitGeneration;
+
+        var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+            videoPath,
+            fps,
+            resolution.MaxWidth,
+            resolution.MaxHeight,
+            PrimaryPreviewCacheBudgetBytes);
+
+        if (!ReferenceEquals(project, ProjectService.Instance.CurrentProject)
+            || initGeneration != _previewInitGeneration
+            || reader is null)
+        {
+            DisposeOffUiThread(reader);
+            return false;
+        }
+
+        using var probe = await reader.LoadFrameAtTimeAsync(TimeSpan.Zero);
+        if (probe is null
+            || !ReferenceEquals(project, ProjectService.Instance.CurrentProject)
+            || initGeneration != _previewInitGeneration)
+        {
+            DisposeOffUiThread(reader);
+            return false;
+        }
+
+        var oldReader = _frameReader;
+        _frameReader = reader;
+        _previewResolution = resolution;
+        Preview.SetQualityIndicator(
+            resolution.MaxWidth,
+            resolution.MaxHeight,
+            project.Width,
+            project.Height);
+        DisposeOffUiThread(oldReader);
+        DisposeSegmentPreviews();
+        _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        return true;
     }
 
     private async Task RenderFrameAtAsync(TimeSpan position, bool force)
@@ -895,7 +1194,7 @@ public sealed partial class EditorPage : Page
     private void ReleaseCrossfadeOutgoing()
     {
         _crossfadeGeneration++;
-        _crossfadeOutgoing?.Dispose();
+        TryDispose(_crossfadeOutgoing);
         _crossfadeOutgoing = null;
         _crossfadeOutgoingKey = null;
     }
@@ -1207,9 +1506,13 @@ public sealed partial class EditorPage : Page
     private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
     {
         if (_segmentPreviews.TryGetValue(seg.Id, out var existing))
+        {
+            existing.LastUsed = ++_segmentPreviewUseCounter;
             return existing;
+        }
 
-        var ctx = new SegmentPreview();
+        TrimSegmentPreviewCache();
+        var ctx = new SegmentPreview { LastUsed = ++_segmentPreviewUseCounter };
         _segmentPreviews[seg.Id] = ctx; // insert early to avoid duplicate builds
         int generation = _segmentPreviewGeneration;
 
@@ -1235,7 +1538,12 @@ public sealed partial class EditorPage : Page
         try
         {
             int fps = seg.Fps > 0 ? seg.Fps : 30;
-            var reader = await VideoFrameReader.OpenFromVideoPathAsync(seg.VideoFilePath, fps);
+            var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+                seg.VideoFilePath,
+                fps,
+                _previewResolution.MaxWidth,
+                _previewResolution.MaxHeight,
+                SegmentPreviewCacheBudgetBytes);
             if (Abandoned())
             {
                 DisposeOffUiThread(reader);
