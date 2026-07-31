@@ -17,6 +17,23 @@ public class ProjectService
     public static ProjectService Instance => _instance ??= new();
 
     public Project? CurrentProject { get; set; }
+
+    /// <summary>
+    /// Package whose open is currently in flight, or <c>null</c>. Published before the
+    /// first await, because <see cref="CurrentPackagePath"/> is only assigned once the
+    /// open finishes — seconds later for a real project — and callers need to tell
+    /// "this project is loading" from "this project is loaded".
+    /// </summary>
+    /// <remarks>UI-thread affine, like the rest of this service.</remarks>
+    public string? OpenInFlightPath { get; private set; }
+
+    /// <summary>
+    /// Whether a save is running. Same rationale as <see cref="OpenInFlightPath"/>:
+    /// <see cref="SavePackageAsync"/> rebinds <see cref="CurrentPackagePath"/> only on
+    /// completion, so anything that swaps the project mid-save would leave the new
+    /// project bound to the old project's file.
+    /// </summary>
+    public bool IsSaveInFlight { get; private set; }
     public CompositionConfig CurrentComposition { get; set; } = new();
     public TimelineModel? CurrentTimeline { get; set; }
 
@@ -75,21 +92,43 @@ public class ProjectService
         if (CurrentProject is null)
             throw new InvalidOperationException("There is no project to save.");
 
+        // Captured before the await: the project can be swapped underneath a running
+        // save (a redirected file activation opens into this window), and reading
+        // CurrentProject afterwards would stamp the wrong name and duration onto this
+        // package's recents entry.
+        var project = CurrentProject;
+
         // The file name the user chose is the project's identity from here on. Without
         // this the project keeps its auto-generated "Recording <timestamp>" name, which
         // then shows on the Projects card and in the export prefill instead of the name
         // they actually picked.
         var chosenName = Path.GetFileNameWithoutExtension(packagePath);
         if (!string.IsNullOrWhiteSpace(chosenName))
-            CurrentProject.Name = chosenName;
+            project.Name = chosenName;
 
-        await MusioPackageService.SaveAsync(
-            packagePath, CurrentProject, CurrentComposition, CurrentTimeline, progress, ct);
+        IsSaveInFlight = true;
+        try
+        {
+            await MusioPackageService.SaveAsync(
+                packagePath, project, CurrentComposition, CurrentTimeline, progress, ct);
 
-        CurrentPackagePath = packagePath;
+            // Only rebind the current package when the project we just wrote is still
+            // the one on screen. A save can be started while an open is already in
+            // flight (the redirected open is fire-and-forget, so Ctrl+S stays live),
+            // and that open may finish first — publishing its own project and path.
+            // Rebinding here regardless would leave the newly opened project pointing
+            // at the file this save wrote, so the next save would silently overwrite
+            // that file with the wrong project's content. The package itself was
+            // written correctly either way, so the recents entry is still accurate.
+            if (ReferenceEquals(CurrentProject, project))
+                CurrentPackagePath = packagePath;
 
-        RecentProjectsStore.Remember(
-            packagePath, CurrentProject.Name, CurrentProject.Duration);
+            RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
+        }
+        finally
+        {
+            IsSaveInFlight = false;
+        }
     }
 
     /// <summary>
@@ -98,33 +137,43 @@ public class ProjectService
     public async Task OpenPackageAsync(
         string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
     {
-        var result = await MusioPackageService.OpenAsync(
-            packagePath, PackageCacheRoot, progress, ct);
-
-        CurrentProject = result.Project;
-        CurrentComposition = result.Composition;
-        CurrentTimeline = result.Timeline;
-        CurrentPackagePath = packagePath;
-        IsRestoredFromPackage = true;
-
-        _restoredSourcePaths.Clear();
-        foreach (var path in MusioPathRewriter.Enumerate(
-                     result.Project, result.Timeline, result.Composition))
+        // Marked here rather than at the call sites so every open path is covered —
+        // file activation, the Open dialog and the recents list alike.
+        OpenInFlightPath = packagePath;
+        try
         {
-            _restoredSourcePaths.Add(path);
-        }
+            var result = await MusioPackageService.OpenAsync(
+                packagePath, PackageCacheRoot, progress, ct);
 
-        // A saved package carries its own timeline, so the primary segment must not be
-        // synthesized the way SetProject does for a fresh recording.
-        if (CurrentTimeline.Segments.Count == 0)
+            CurrentProject = result.Project;
+            CurrentComposition = result.Composition;
+            CurrentTimeline = result.Timeline;
+            CurrentPackagePath = packagePath;
+            IsRestoredFromPackage = true;
+
+            _restoredSourcePaths.Clear();
+            foreach (var path in MusioPathRewriter.Enumerate(
+                         result.Project, result.Timeline, result.Composition))
+            {
+                _restoredSourcePaths.Add(path);
+            }
+
+            // A saved package carries its own timeline, so the primary segment must not be
+            // synthesized the way SetProject does for a fresh recording.
+            if (CurrentTimeline.Segments.Count == 0)
+            {
+                CurrentTimeline.Segments.Add(CreateVideoSegmentFromProject(result.Project));
+                CurrentTimeline.RecalculateSegmentPositions();
+            }
+
+            RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
+
+            ProjectChanged?.Invoke(this, EventArgs.Empty);
+        }
+        finally
         {
-            CurrentTimeline.Segments.Add(CreateVideoSegmentFromProject(result.Project));
-            CurrentTimeline.RecalculateSegmentPositions();
+            OpenInFlightPath = null;
         }
-
-        RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
-
-        ProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void SetProject(Project project)

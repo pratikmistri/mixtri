@@ -85,42 +85,80 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Opens the <c>.musio</c> project the app was launched with, when it was started by
-    /// double-clicking one in Explorer.
+    /// Pulls the <c>.musio</c> path out of an activation, or <c>null</c> if the
+    /// activation is not a file activation for a project we can open.
     /// </summary>
-    /// <remarks>
-    /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
-    /// association should not prevent the app from starting.
-    /// </remarks>
-    private static async System.Threading.Tasks.Task TryOpenActivationProjectAsync(MainWindow window)
+    private static string? ExtractProjectPath(
+        Microsoft.Windows.AppLifecycle.AppActivationArguments? activation)
     {
-        string? path = null;
+        if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
+            return null;
+
+        if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
+            return null;
+
+        return fileArgs.Files
+            .OfType<Windows.Storage.IStorageFile>()
+            .Select(f => f.Path)
+            .FirstOrDefault(MusioPackage.IsPackagePath);
+    }
+
+    /// <summary>
+    /// Whether two paths name the same project file. Compared case-insensitively
+    /// and fully resolved, since Explorer, the recent-projects list and the Open
+    /// dialog can each hand back a different spelling of one file.
+    /// </summary>
+    private static bool IsSameProjectPath(string? left, string? right)
+    {
+        if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right)) return false;
+
         try
         {
-            var activation = Microsoft.Windows.AppLifecycle.AppInstance
-                .GetCurrent().GetActivatedEventArgs();
+            return string.Equals(
+                System.IO.Path.GetFullPath(left),
+                System.IO.Path.GetFullPath(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
 
-            if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
-                return;
-
-            if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
-                return;
-
-            path = fileArgs.Files
-                .OfType<Windows.Storage.IStorageFile>()
-                .Select(f => f.Path)
-                .FirstOrDefault(MusioPackage.IsPackagePath);
+    /// <summary>
+    /// The <c>.musio</c> path the app was launched with, when it was started by
+    /// double-clicking one in Explorer; <c>null</c> otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately synchronous so <see cref="OnLaunched"/> can decide which shell
+    /// surface to open <em>before</em> starting it — resolving this asynchronously
+    /// would flash the Mini pill first and leave the project stranded behind it.
+    /// </remarks>
+    private static string? TryGetActivationProjectPath()
+    {
+        try
+        {
+            return ExtractProjectPath(Microsoft.Windows.AppLifecycle.AppInstance
+                .GetCurrent().GetActivatedEventArgs());
         }
         catch (Exception ex)
         {
             // Unpackaged runs have no activation info at all.
             System.Diagnostics.Debug.WriteLine($"[App] No file activation: {ex.Message}");
-            return;
+            return null;
         }
+    }
 
-        if (string.IsNullOrEmpty(path))
-            return;
-
+    /// <summary>
+    /// Opens the <c>.musio</c> project the app was launched with and shows it in
+    /// the editor tab of the full window.
+    /// </summary>
+    /// <remarks>
+    /// Failures are surfaced on the shell InfoBar rather than thrown: a bad file
+    /// association should not prevent the app from starting.
+    /// </remarks>
+    private async System.Threading.Tasks.Task OpenActivationProjectAsync(MainWindow window, string path)
+    {
         try
         {
             await ProjectService.Instance.OpenPackageAsync(path);
@@ -135,19 +173,326 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Activation-manager key identifying the instance that owns a given project
+    /// file. Hashed rather than using the path verbatim because keys are compared
+    /// as opaque strings with a length limit, and paths are neither short nor
+    /// case-consistent.
+    /// </summary>
+    private static string BuildProjectInstanceKey(string packagePath)
+    {
+        // Full path first, so two different links to the same name don't collide,
+        // then case-folded because Windows paths are case-insensitive and Explorer
+        // hands back whatever casing the user typed.
+        string normalized;
+        try { normalized = System.IO.Path.GetFullPath(packagePath); }
+        catch { normalized = packagePath; }
+
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(normalized.ToLowerInvariant()));
+        return "musio-project-" + Convert.ToHexString(hash);
+    }
+
+    /// <summary>
+    /// Ensures at most one window per project file <em>for files opened by activation</em>.
+    /// Returns <c>true</c> when this process handed its activation to the instance that
+    /// already has <paramref name="packagePath"/> open and should stop launching.
+    /// </summary>
+    /// <remarks>
+    /// Opening one project in two windows is a correctness problem, not just
+    /// clutter: <c>MusioPackageService.OpenAsync</c> extracts media to a cache keyed
+    /// by project id, so a second open re-extracts over files the first window still
+    /// holds handles to, and both windows then save over the same <c>.musio</c>,
+    /// silently discarding one set of edits.
+    /// <para>
+    /// Only file activations register a key. A plain launch stays un-keyed, so the
+    /// recorder can still be started as many times as the user likes.
+    /// </para>
+    /// <para>
+    /// <b>Known limits.</b> The key is fixed for the process lifetime — it cannot be
+    /// moved, because <c>AppInstance.UnregisterKey</c> has open platform bugs (an
+    /// invalid key after re-registration, and a failfast when called off the
+    /// registering thread). So a window repointed at another project through the
+    /// in-app Open dialog still holds the key for the file it launched with, and
+    /// projects opened that way — including anything opened in the un-keyed recorder
+    /// instance — are not covered. <see cref="ServeRedirectedOpen"/> reconciles the
+    /// request when a redirect does arrive, but it cannot stop a double-click on an
+    /// unkeyed project from opening a second window.
+    /// </para>
+    /// </remarks>
+    private bool TryRedirectToExistingProjectInstance(string packagePath)
+    {
+        try
+        {
+            var key = BuildProjectInstanceKey(packagePath);
+            var keyInstance = Microsoft.Windows.AppLifecycle.AppInstance
+                .FindOrRegisterForKey(key);
+
+            if (keyInstance.IsCurrent)
+            {
+                // We own this file now. Later activations for it are redirected here.
+                Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().Activated
+                    += OnRedirectedActivated;
+                return false;
+            }
+
+            var activationArgs = Microsoft.Windows.AppLifecycle.AppInstance
+                .GetCurrent().GetActivatedEventArgs();
+
+            // RedirectActivationToAsync deadlocks if awaited on the thread that is
+            // pumping the activation, so it is driven from a worker and waited on here.
+            // The blocking wait is on the STA UI thread, which the CLR keeps pumping COM
+            // for, so the cross-process call can still complete. A Task carries the
+            // outcome; an event would only report that the worker finished, not whether
+            // the hand-off actually succeeded.
+            var redirect = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await keyInstance.RedirectActivationToAsync(activationArgs);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    // Most likely the owner died between FindOrRegisterForKey and the
+                    // call, leaving a stale registration. Falls through to opening here.
+                    System.Diagnostics.Debug.WriteLine($"[App] Redirect failed: {ex}");
+                    return false;
+                }
+            });
+
+            // Bounded so a wedged owner can't hang the launch forever.
+            if (!redirect.Wait(TimeSpan.FromSeconds(5)))
+            {
+                // A timeout means the call hasn't returned — NOT that it failed, and
+                // it is not cancellable, so it may still land. Opening here as well
+                // would put two windows on one project, which is the corruption this
+                // whole path exists to prevent. Only fall back when the owner is
+                // actually gone; a live-but-slow owner keeps the activation.
+                if (IsKeyHeldByAnotherInstance(key))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        "[App] Redirect slow but owner alive; leaving the file to it.");
+                    return true;
+                }
+
+                System.Diagnostics.Debug.WriteLine("[App] Redirect timed out; opening locally.");
+                return false;
+            }
+
+            // Completing is not the same as succeeding. Reporting a failed hand-off as
+            // success would exit this process without ever creating a window, so the
+            // double-click would do nothing at all — and the failure path returns
+            // faster than the timeout above, so it is the likelier of the two.
+            return redirect.Result;
+        }
+        catch (Exception ex)
+        {
+            // Unpackaged runs have no activation manager. Duplicate windows are far
+            // better than failing to open the file at all.
+            System.Diagnostics.Debug.WriteLine($"[App] Instance redirection unavailable: {ex}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether some other live instance still holds <paramref name="key"/>. Used to
+    /// tell "the owner is wedged" from "the owner is gone" after a redirect timeout.
+    /// </summary>
+    private static bool IsKeyHeldByAnotherInstance(string key)
+    {
+        try
+        {
+            return Microsoft.Windows.AppLifecycle.AppInstance.GetInstances()
+                .Any(i => !i.IsCurrent && string.Equals(i.Key, key, StringComparison.Ordinal));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Could not enumerate instances: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Another process was launched for a project this instance owns the key for;
+    /// surface our window instead of letting it open a second copy.
+    /// </summary>
+    private void OnRedirectedActivated(
+        object? sender, Microsoft.Windows.AppLifecycle.AppActivationArguments args)
+    {
+        // The key is bound to the file this instance launched with, but the window can
+        // since have been pointed at a different project through the in-app Open
+        // dialog. So the request is honoured from the activation itself rather than
+        // assumed to match — otherwise a redirect would raise a window showing an
+        // unrelated project and the file the user double-clicked would never open.
+        string? requested = null;
+        try { requested = ExtractProjectPath(args); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Redirected args unreadable: {ex.Message}");
+        }
+
+        // Raised on a background thread by the activation manager, and the key is
+        // registered before the window is built — so a redirect can land while
+        // _window is still null. The sending process has already exited by then, so
+        // dropping it would lose the activation outright; park it under the gate
+        // instead and let OnLaunched drain it.
+        Window? window;
+        lock (_foregroundGate)
+        {
+            window = _window;
+            if (window is null)
+            {
+                _pendingForegroundRequest = true;
+                _pendingProjectPath = requested;
+                return;
+            }
+        }
+
+        window.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(requested));
+    }
+
+    /// <summary>
+    /// Serves a redirected activation on the UI thread: opens the requested project
+    /// if that is safe, then brings the window forward.
+    /// </summary>
+    private void HandleRedirectedActivation(string? requestedPath)
+    {
+        // A recording owns both the screen and the project state. Swapping the project
+        // under a live capture would repoint the save target and spin the editor up
+        // mid-capture, and raising the window would film it — so nothing here is safe,
+        // not just the window manipulation.
+        if (_shell?.CurrentState == Musio.Core.Shell.AppShellState.Recording) return;
+
+        if (requestedPath is not null && _window is MainWindow mainWindow)
+            ServeRedirectedOpen(mainWindow, requestedPath);
+
+        BringToForeground();
+    }
+
+    /// <summary>
+    /// Loads a redirected project request into this window, unless doing so would
+    /// race an open already running or destroy work that was never saved.
+    /// </summary>
+    private void ServeRedirectedOpen(MainWindow window, string requestedPath)
+    {
+        var projects = ProjectService.Instance;
+
+        // Already showing it, or already loading it — the ordinary case.
+        if (IsSameProjectPath(requestedPath, projects.CurrentPackagePath)
+            || IsSameProjectPath(requestedPath, projects.OpenInFlightPath))
+        {
+            return;
+        }
+
+        // Another project is mid-open or mid-save. Both publish their result only when
+        // they finish, so swapping now would let the loser overwrite the winner's state:
+        // a save landing after the swap rebinds CurrentPackagePath to the file it was
+        // writing, leaving the newly opened project pointed at the old project's package
+        // and silently overwriting it on the next save.
+        if (projects.OpenInFlightPath is not null || projects.IsSaveInFlight)
+        {
+            window.ShowShellMessage(
+                "This window is busy with another project, so the file you just opened "
+                + "was not loaded here. Try opening it again in a moment.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational);
+            return;
+        }
+
+        // Work that was never saved has no package path to compare against — a fresh
+        // recording is the usual case, since ProjectService.SetProject clears
+        // CurrentPackagePath. Opening over it would discard it with no prompt, on a
+        // window the user may not even be looking at, triggered from another process.
+        if (projects.CurrentProject is not null && projects.CurrentPackagePath is null)
+        {
+            window.ShowShellMessage(
+                "This window has unsaved work, so the project you just opened was not "
+                + "loaded here. Save or close this window, then open the file again.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+            return;
+        }
+
+        _ = OpenActivationProjectAsync(window, requestedPath);
+    }
+
+    /// <summary>Guards <see cref="_window"/> publication against redirects racing startup.</summary>
+    private readonly object _foregroundGate = new();
+
+    /// <summary>A redirect arrived before the window existed and still owes a focus.</summary>
+    private bool _pendingForegroundRequest;
+
+    /// <summary>The project that pending redirect asked for, if any.</summary>
+    private string? _pendingProjectPath;
+
+    /// <summary>Restores and focuses the main window, whatever state it was left in.</summary>
+    private void BringToForeground()
+    {
+        if (_window is null) return;
+
+        // A recording owns the screen. The coordinator deliberately minimises the main
+        // window for AppShellState.Recording, and ShowFullWindow() honours that by
+        // no-opping — but the raw calls below would not, so they would both film the
+        // window and leave the state machine believing it is still minimised.
+        if (_shell?.CurrentState == Musio.Core.Shell.AppShellState.Recording) return;
+
+        // Goes through the coordinator so the shell doesn't still believe Mini is the
+        // current surface and hide the window again on the next transition.
+        _shell?.ShowFullWindow();
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+        _window.Activate();
+        SetForegroundWindow(hwnd);
+    }
+
+    /// <summary>
     /// Invoked when the application is launched.
     /// </summary>
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        // Resolved before anything is constructed: launching by double-clicking a
+        // .musio forces the full window, and may hand the whole activation to an
+        // instance that already has that file open.
+        var activationPath = TryGetActivationProjectPath();
+
+        if (activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
+        {
+            // The owning instance is taking over. Exit before creating a window, so
+            // no second surface for this project ever appears. Process.Kill rather
+            // than Application.Exit/Environment.Exit: those run finalizers and
+            // ProcessExit handlers on an STA thread whose message loop was never
+            // started, which is the documented way to leave a windowless zombie here.
+            // The activation is already delivered — RedirectActivationToAsync
+            // completed — so there is nothing left to flush.
+            System.Diagnostics.Process.GetCurrentProcess().Kill();
+            return;
+        }
+
         // The full window is always constructed (it anchors app lifetime, hotkeys
         // and the quiesce path), but only shown when the startup mode asks for it.
         var mainWindow = new MainWindow();
-        _window = mainWindow;
+
+        // Published under the gate so a redirect racing startup either sees the window
+        // or leaves a pending request for the drain below — never neither.
+        bool focusOwed;
+        string? pendingPath;
+        lock (_foregroundGate)
+        {
+            _window = mainWindow;
+            focusOwed = _pendingForegroundRequest;
+            pendingPath = _pendingProjectPath;
+            _pendingForegroundRequest = false;
+            _pendingProjectPath = null;
+        }
+
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
 
-        _shell = new ShellCoordinator(mainWindow, ShellSettings.Instance.StartupMode);
+        _shell = new ShellCoordinator(
+            mainWindow,
+            ShellSettings.ResolveLaunchMode(
+                ShellSettings.Instance.StartupMode,
+                hasFileActivation: activationPath is not null));
         _shell.Start();
 
         // Release captured JPEGs from finalized sessions in the background. Both roots are
@@ -165,7 +510,43 @@ public partial class App : Application
             SessionCleanupService.CleanupOrphanedImports(Musio.Core.Capture.SessionPaths.ImportsRoot);
         });
 
-        _ = TryOpenActivationProjectAsync(mainWindow);
+        if (activationPath is not null)
+            _ = OpenActivationProjectAsync(mainWindow, activationPath);
+
+        // Document instances deliberately claim none of the app-global, singleton-ish
+        // affordances below. Each .musio activation spawns its own process, so one tray
+        // icon per open file would spam a notification area that is usually collapsed,
+        // and the first process to call RegisterHotKey wins outright — a document window
+        // opened before the recorder would take the capture hotkeys with it.
+        // Everything downstream already copes with both being absent: window close is
+        // allowed to proceed when _trayService is null (OnWindowClosing), and
+        // ShellCoordinator.IsTrayAvailable stays false so hide-to-tray falls back to
+        // showing the full window rather than stranding an unreachable process.
+        if (activationPath is null)
+        {
+            InitializeTrayAndHotkeys();
+        }
+
+        // A redirect that landed while the window was still being built. Queued rather
+        // than called directly so it runs after OnLaunched has finished wiring up.
+        if (focusOwed)
+        {
+            // This instance is already opening activationPath, so only a request for a
+            // *different* project needs opening — passing the same path again would
+            // race the open already in flight, since CurrentPackagePath isn't set yet.
+            var reopen = IsSameProjectPath(pendingPath, activationPath) ? null : pendingPath;
+            mainWindow.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(reopen));
+        }
+    }
+
+    /// <summary>
+    /// Sets up the system tray icon and the global capture hotkeys. Both are
+    /// best-effort: the app works without either, and each is skipped for
+    /// file-activated document instances (see <see cref="OnLaunched"/>).
+    /// </summary>
+    private void InitializeTrayAndHotkeys()
+    {
+        if (_window is null) return;
 
         // System tray and hotkeys are optional — app works without them
         try
@@ -399,7 +780,14 @@ public partial class App : Application
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
+    private const int SW_RESTORE = 9;
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
 }

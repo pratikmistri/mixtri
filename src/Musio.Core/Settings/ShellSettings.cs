@@ -67,4 +67,12 @@ public sealed class ShellSettings
             ? parsed
             : StartupMode.Mini;
     }
+
+    /// <summary>
+    /// Which surface a launch should actually open with. A file activation always
+    /// wins over the persisted preference: the user asked for a specific project,
+    /// and the Mini pill has nowhere to show it.
+    /// </summary>
+    public static StartupMode ResolveLaunchMode(StartupMode configured, bool hasFileActivation)
+        => hasFileActivation ? StartupMode.Full : configured;
 }

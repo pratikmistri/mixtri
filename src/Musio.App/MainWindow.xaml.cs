@@ -158,13 +158,17 @@ public sealed partial class MainWindow : Window
         NavView.SelectedItem = EditorNavItem;
     }
 
-    /// <summary>Surfaces a recording failure on the shell-level InfoBar.</summary>
-    public void ShowRecordingError(string message)
+    /// <summary>Surfaces a message on the shell-level InfoBar.</summary>
+    public void ShowShellMessage(string message, InfoBarSeverity severity)
     {
         if (ShellInfoBar is null) return;
-        ShellInfoBar.Severity = InfoBarSeverity.Error;
+        ShellInfoBar.Severity = severity;
         ShellInfoBar.Title = string.Empty;
         ShellInfoBar.Message = message;
         ShellInfoBar.IsOpen = true;
     }
+
+    /// <summary>Surfaces a recording failure on the shell-level InfoBar.</summary>
+    public void ShowRecordingError(string message)
+        => ShowShellMessage(message, InfoBarSeverity.Error);
 }
