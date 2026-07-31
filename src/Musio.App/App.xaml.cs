@@ -199,12 +199,19 @@ public partial class App : Application
             // RedirectActivationToAsync deadlocks if awaited on the thread that is
             // pumping the activation, so it is driven from a worker and waited on here.
             // Blocking is safe at this point: no window or XAML content exists yet.
+            var handedOver = false;
             using var redirected = new System.Threading.ManualResetEventSlim(false);
             System.Threading.Tasks.Task.Run(async () =>
             {
-                try { await keyInstance.RedirectActivationToAsync(activationArgs); }
+                try
+                {
+                    await keyInstance.RedirectActivationToAsync(activationArgs);
+                    System.Threading.Volatile.Write(ref handedOver, true);
+                }
                 catch (Exception ex)
                 {
+                    // Most likely the owner died between FindOrRegisterForKey and the
+                    // call, leaving a stale registration. Falls through to opening here.
                     System.Diagnostics.Debug.WriteLine($"[App] Redirect failed: {ex}");
                 }
                 finally { redirected.Set(); }
@@ -218,7 +225,11 @@ public partial class App : Application
                 return false;
             }
 
-            return true;
+            // Signalled is not the same as succeeded: the worker signals on the failure
+            // path too. Reporting a failed hand-off as success would exit this process
+            // without ever creating a window, so the double-click would do nothing at
+            // all — and that path is reached faster than the timeout above.
+            return System.Threading.Volatile.Read(ref handedOver);
         }
         catch (Exception ex)
         {
@@ -236,14 +247,41 @@ public partial class App : Application
     private void OnRedirectedActivated(
         object? sender, Microsoft.Windows.AppLifecycle.AppActivationArguments args)
     {
-        // Raised on a background thread by the activation manager.
-        _window?.DispatcherQueue.TryEnqueue(BringToForeground);
+        // Raised on a background thread by the activation manager, and the key is
+        // registered before the window is built — so a redirect can land while
+        // _window is still null. The sending process has already exited by then, so
+        // dropping it would lose the activation outright; park it under the gate
+        // instead and let OnLaunched drain it.
+        Window? window;
+        lock (_foregroundGate)
+        {
+            window = _window;
+            if (window is null)
+            {
+                _pendingForegroundRequest = true;
+                return;
+            }
+        }
+
+        window.DispatcherQueue.TryEnqueue(BringToForeground);
     }
+
+    /// <summary>Guards <see cref="_window"/> publication against redirects racing startup.</summary>
+    private readonly object _foregroundGate = new();
+
+    /// <summary>A redirect arrived before the window existed and still owes a focus.</summary>
+    private bool _pendingForegroundRequest;
 
     /// <summary>Restores and focuses the main window, whatever state it was left in.</summary>
     private void BringToForeground()
     {
         if (_window is null) return;
+
+        // A recording owns the screen. The coordinator deliberately minimises the main
+        // window for AppShellState.Recording, and ShowFullWindow() honours that by
+        // no-opping — but the raw calls below would not, so they would both film the
+        // window and leave the state machine believing it is still minimised.
+        if (_shell?.CurrentState == Musio.Core.Shell.AppShellState.Recording) return;
 
         // Goes through the coordinator so the shell doesn't still believe Mini is the
         // current surface and hide the window again on the next transition.
@@ -269,17 +307,30 @@ public partial class App : Application
         if (activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
         {
             // The owning instance is taking over. Exit before creating a window, so
-            // no second surface for this project ever appears. Environment.Exit rather
-            // than Application.Exit: with no window built there is no message loop to
-            // unwind, and nothing (tray icon, capture, hotkey) has been claimed yet.
-            Environment.Exit(0);
+            // no second surface for this project ever appears. Process.Kill rather
+            // than Application.Exit/Environment.Exit: those run finalizers and
+            // ProcessExit handlers on an STA thread whose message loop was never
+            // started, which is the documented way to leave a windowless zombie here.
+            // The activation is already delivered — RedirectActivationToAsync
+            // completed — so there is nothing left to flush.
+            System.Diagnostics.Process.GetCurrentProcess().Kill();
             return;
         }
 
         // The full window is always constructed (it anchors app lifetime, hotkeys
         // and the quiesce path), but only shown when the startup mode asks for it.
         var mainWindow = new MainWindow();
-        _window = mainWindow;
+
+        // Published under the gate so a redirect racing startup either sees the window
+        // or leaves a pending request for the drain below — never neither.
+        bool focusOwed;
+        lock (_foregroundGate)
+        {
+            _window = mainWindow;
+            focusOwed = _pendingForegroundRequest;
+            _pendingForegroundRequest = false;
+        }
+
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
 
@@ -320,6 +371,13 @@ public partial class App : Application
         if (activationPath is null)
         {
             InitializeTrayAndHotkeys();
+        }
+
+        // A redirect that landed while the window was still being built. Queued rather
+        // than called directly so it runs after OnLaunched has finished wiring up.
+        if (focusOwed)
+        {
+            mainWindow.DispatcherQueue.TryEnqueue(BringToForeground);
         }
     }
 
