@@ -98,6 +98,28 @@ public sealed partial class PreviewCanvas : UserControl
         UpdateTimeDisplay();
     }
 
+    /// <summary>
+    /// Shows the active adaptive preview tier when it is below the source resolution.
+    /// </summary>
+    public void SetQualityIndicator(
+        int maxPreviewWidth, int maxPreviewHeight, int sourceWidth, int sourceHeight)
+    {
+        bool downscaled = sourceWidth > maxPreviewWidth || sourceHeight > maxPreviewHeight;
+        if (!downscaled)
+        {
+            QualityIndicator.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        QualityIndicatorText.Text = $"Adaptive \u00b7 {maxPreviewHeight}p";
+        QualityIndicator.Visibility = Visibility.Visible;
+    }
+
+    public void HideQualityIndicator()
+    {
+        QualityIndicator.Visibility = Visibility.Collapsed;
+    }
+
     private void ResolveThemeColors()
     {
         try

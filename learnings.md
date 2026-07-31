@@ -1602,3 +1602,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Approaches tried**: Verified the three local commits and pushed the branch to its existing `origin` upstream.
 - **What worked**: Remote advanced from `53b82ab` to `8a95826`; unrelated untracked `files/` remained excluded.
 - **What didn't work**: Nothing.
+
+## Adaptive preview resolution badge
+
+- **Feature/area**: `PreviewCanvas` quality indicator and adaptive-tier UI synchronization.
+- **Approaches tried**: Added a compact top-right in-canvas badge rather than another playback control or permanent status label.
+- **What worked**: The badge displays `Adaptive · 540p/720p/900p/1080p` only when the active tier is below the source resolution, updates after successful live reader swaps, hides for full-resolution preview or no project, and explains via tooltip that export remains full resolution. It is not hit-testable, so it cannot intercept preview input.
+- **What didn't work**: Nothing; existing overlay theme resources matched the playback controls and avoided new styling dependencies.
+- **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.

@@ -445,6 +445,7 @@ public sealed partial class EditorPage : Page
         var project = ProjectService.Instance.CurrentProject;
         if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
         {
+            Preview.HideQualityIndicator();
             _thumbnailGenerationId++;
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
@@ -477,6 +478,12 @@ public sealed partial class EditorPage : Page
             _adaptivePreviewVideoPath = videoPath;
             _previewResolution = _adaptivePreviewQuality.Current;
         }
+
+        Preview.SetQualityIndicator(
+            _previewResolution.MaxWidth,
+            _previewResolution.MaxHeight,
+            project.Width,
+            project.Height);
 
         if (!haveStrip && !alreadyGenerating)
         {
@@ -809,6 +816,11 @@ public sealed partial class EditorPage : Page
         var oldReader = _frameReader;
         _frameReader = reader;
         _previewResolution = resolution;
+        Preview.SetQualityIndicator(
+            resolution.MaxWidth,
+            resolution.MaxHeight,
+            project.Width,
+            project.Height);
         DisposeOffUiThread(oldReader);
         DisposeSegmentPreviews();
         _lastRenderedFrameIndex = -1;
