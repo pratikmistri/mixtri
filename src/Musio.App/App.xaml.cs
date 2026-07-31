@@ -85,6 +85,47 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Pulls the <c>.musio</c> path out of an activation, or <c>null</c> if the
+    /// activation is not a file activation for a project we can open.
+    /// </summary>
+    private static string? ExtractProjectPath(
+        Microsoft.Windows.AppLifecycle.AppActivationArguments? activation)
+    {
+        if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
+            return null;
+
+        if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
+            return null;
+
+        return fileArgs.Files
+            .OfType<Windows.Storage.IStorageFile>()
+            .Select(f => f.Path)
+            .FirstOrDefault(MusioPackage.IsPackagePath);
+    }
+
+    /// <summary>
+    /// Whether two paths name the same project file. Compared case-insensitively
+    /// and fully resolved, since Explorer, the recent-projects list and the Open
+    /// dialog can each hand back a different spelling of one file.
+    /// </summary>
+    private static bool IsSameProjectPath(string? left, string? right)
+    {
+        if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right)) return false;
+
+        try
+        {
+            return string.Equals(
+                System.IO.Path.GetFullPath(left),
+                System.IO.Path.GetFullPath(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
     /// The <c>.musio</c> path the app was launched with, when it was started by
     /// double-clicking one in Explorer; <c>null</c> otherwise.
     /// </summary>
@@ -97,19 +138,8 @@ public partial class App : Application
     {
         try
         {
-            var activation = Microsoft.Windows.AppLifecycle.AppInstance
-                .GetCurrent().GetActivatedEventArgs();
-
-            if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
-                return null;
-
-            if (activation.Data is not Windows.ApplicationModel.Activation.IFileActivatedEventArgs fileArgs)
-                return null;
-
-            return fileArgs.Files
-                .OfType<Windows.Storage.IStorageFile>()
-                .Select(f => f.Path)
-                .FirstOrDefault(MusioPackage.IsPackagePath);
+            return ExtractProjectPath(Microsoft.Windows.AppLifecycle.AppInstance
+                .GetCurrent().GetActivatedEventArgs());
         }
         catch (Exception ex)
         {
@@ -182,8 +212,9 @@ public partial class App : Application
     {
         try
         {
+            var key = BuildProjectInstanceKey(packagePath);
             var keyInstance = Microsoft.Windows.AppLifecycle.AppInstance
-                .FindOrRegisterForKey(BuildProjectInstanceKey(packagePath));
+                .FindOrRegisterForKey(key);
 
             if (keyInstance.IsCurrent)
             {
@@ -217,10 +248,21 @@ public partial class App : Application
                 finally { redirected.Set(); }
             });
 
-            // Bounded: a hung or dying owner must not leave the user with no window at
-            // all, so a timeout falls through and this instance opens the file itself.
+            // Bounded so a wedged owner can't hang the launch forever.
             if (!redirected.Wait(TimeSpan.FromSeconds(5)))
             {
+                // A timeout means the call hasn't returned — NOT that it failed, and
+                // it is not cancellable, so it may still land. Opening here as well
+                // would put two windows on one project, which is the corruption this
+                // whole path exists to prevent. Only fall back when the owner is
+                // actually gone; a live-but-slow owner keeps the activation.
+                if (IsKeyHeldByAnotherInstance(key))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        "[App] Redirect slow but owner alive; leaving the file to it.");
+                    return true;
+                }
+
                 System.Diagnostics.Debug.WriteLine("[App] Redirect timed out; opening locally.");
                 return false;
             }
@@ -241,12 +283,42 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Another process was launched for a project this instance already has open;
+    /// Whether some other live instance still holds <paramref name="key"/>. Used to
+    /// tell "the owner is wedged" from "the owner is gone" after a redirect timeout.
+    /// </summary>
+    private static bool IsKeyHeldByAnotherInstance(string key)
+    {
+        try
+        {
+            return Microsoft.Windows.AppLifecycle.AppInstance.GetInstances()
+                .Any(i => !i.IsCurrent && string.Equals(i.Key, key, StringComparison.Ordinal));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Could not enumerate instances: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Another process was launched for a project this instance owns the key for;
     /// surface our window instead of letting it open a second copy.
     /// </summary>
     private void OnRedirectedActivated(
         object? sender, Microsoft.Windows.AppLifecycle.AppActivationArguments args)
     {
+        // The key is bound to the file this instance launched with, but the window can
+        // since have been pointed at a different project through the in-app Open
+        // dialog. So the request is honoured from the activation itself rather than
+        // assumed to match — otherwise a redirect would raise a window showing an
+        // unrelated project and the file the user double-clicked would never open.
+        string? requested = null;
+        try { requested = ExtractProjectPath(args); }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[App] Redirected args unreadable: {ex.Message}");
+        }
+
         // Raised on a background thread by the activation manager, and the key is
         // registered before the window is built — so a redirect can land while
         // _window is still null. The sending process has already exited by then, so
@@ -259,11 +331,28 @@ public partial class App : Application
             if (window is null)
             {
                 _pendingForegroundRequest = true;
+                _pendingProjectPath = requested;
                 return;
             }
         }
 
-        window.DispatcherQueue.TryEnqueue(BringToForeground);
+        window.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(requested));
+    }
+
+    /// <summary>
+    /// Serves a redirected activation on the UI thread: opens the requested project
+    /// if it isn't the one already showing, then brings the window forward.
+    /// </summary>
+    private void HandleRedirectedActivation(string? requestedPath)
+    {
+        if (requestedPath is not null
+            && _window is MainWindow mainWindow
+            && !IsSameProjectPath(requestedPath, ProjectService.Instance.CurrentPackagePath))
+        {
+            _ = OpenActivationProjectAsync(mainWindow, requestedPath);
+        }
+
+        BringToForeground();
     }
 
     /// <summary>Guards <see cref="_window"/> publication against redirects racing startup.</summary>
@@ -271,6 +360,9 @@ public partial class App : Application
 
     /// <summary>A redirect arrived before the window existed and still owes a focus.</summary>
     private bool _pendingForegroundRequest;
+
+    /// <summary>The project that pending redirect asked for, if any.</summary>
+    private string? _pendingProjectPath;
 
     /// <summary>Restores and focuses the main window, whatever state it was left in.</summary>
     private void BringToForeground()
@@ -324,11 +416,14 @@ public partial class App : Application
         // Published under the gate so a redirect racing startup either sees the window
         // or leaves a pending request for the drain below — never neither.
         bool focusOwed;
+        string? pendingPath;
         lock (_foregroundGate)
         {
             _window = mainWindow;
             focusOwed = _pendingForegroundRequest;
+            pendingPath = _pendingProjectPath;
             _pendingForegroundRequest = false;
+            _pendingProjectPath = null;
         }
 
         _window.Closed += OnWindowClosed;
@@ -377,7 +472,11 @@ public partial class App : Application
         // than called directly so it runs after OnLaunched has finished wiring up.
         if (focusOwed)
         {
-            mainWindow.DispatcherQueue.TryEnqueue(BringToForeground);
+            // This instance is already opening activationPath, so only a request for a
+            // *different* project needs opening — passing the same path again would
+            // race the open already in flight, since CurrentPackagePath isn't set yet.
+            var reopen = IsSameProjectPath(pendingPath, activationPath) ? null : pendingPath;
+            mainWindow.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(reopen));
         }
     }
 
