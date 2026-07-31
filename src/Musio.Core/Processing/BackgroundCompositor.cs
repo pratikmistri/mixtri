@@ -62,6 +62,8 @@ public sealed class BackgroundCompositor : IDisposable
     private Task? _inflightLoad;
     private string? _inflightPath;
     private CanvasDevice? _inflightDevice;
+    private long _currentLoadId;
+    private long _nextLoadId;
 
     // Last key that failed to load, with a bounded exponential backoff. Remembered so the
     // render path does not re-request a doomed load every frame, while still recovering
@@ -348,6 +350,10 @@ public sealed class BackgroundCompositor : IDisposable
             _cachedBackgroundImage = null;
             _cachedBackgroundPath = null;
             _cachedDevice = null;
+            _inflightLoad = null;
+            _inflightPath = null;
+            _inflightDevice = null;
+            _currentLoadId = 0;
             ClearFailure();
         }
 
@@ -386,18 +392,24 @@ public sealed class BackgroundCompositor : IDisposable
                 _cachedBackgroundPath = null;
                 _cachedDevice = null;
 
+                long loadId = ++_nextLoadId;
                 _inflightPath = path;
                 _inflightDevice = device;
+                _currentLoadId = loadId;
                 // LoadImageAsync yields to the thread pool before touching the file system,
                 // so no I/O happens while this lock is held or on the calling thread. The
                 // load runs on the compositor's own shutdown token, never on a caller's
                 // token: one caller cancelling must not abort the shared load for everyone.
-                inflight = LoadImageAsync(device, path, _shutdownCts.Token);
+                inflight = LoadImageAsync(device, path, loadId, _shutdownCts.Token);
 
                 // A load that completed synchronously has already published its result and
                 // cleared the in-flight key; only record it while it is genuinely current.
-                if (PathMatches(_inflightPath, path) && ReferenceEquals(_inflightDevice, device))
+                if (_currentLoadId == loadId
+                    && PathMatches(_inflightPath, path)
+                    && ReferenceEquals(_inflightDevice, device))
+                {
                     _inflightLoad = inflight;
+                }
             }
         }
 
@@ -497,7 +509,8 @@ public sealed class BackgroundCompositor : IDisposable
         return _failedAttempts;
     }
 
-    private async Task LoadImageAsync(CanvasDevice device, string path, CancellationToken ct)
+    private async Task LoadImageAsync(
+        CanvasDevice device, string path, long loadId, CancellationToken ct)
     {
         CanvasBitmap? loaded = null;
         string? failure = null;
@@ -534,12 +547,13 @@ public sealed class BackgroundCompositor : IDisposable
         }
         finally
         {
-            Publish(device, path, loaded, failure, canceled);
+            Publish(device, path, loadId, loaded, failure, canceled);
         }
     }
 
     private void Publish(
-        CanvasDevice device, string path, CanvasBitmap? loaded, string? failure, bool canceled)
+        CanvasDevice device, string path, long loadId,
+        CanvasBitmap? loaded, string? failure, bool canceled)
     {
         CanvasBitmap? stale = null;
         bool discard = false;
@@ -548,11 +562,14 @@ public sealed class BackgroundCompositor : IDisposable
 
         lock (_cacheLock)
         {
-            if (PathMatches(_inflightPath, path) && ReferenceEquals(_inflightDevice, device))
+            if (_currentLoadId == loadId
+                && PathMatches(_inflightPath, path)
+                && ReferenceEquals(_inflightDevice, device))
             {
                 _inflightLoad = null;
                 _inflightPath = null;
                 _inflightDevice = null;
+                _currentLoadId = 0;
             }
             else
             {
@@ -795,6 +812,7 @@ public sealed class BackgroundCompositor : IDisposable
             _inflightLoad = null;
             _inflightPath = null;
             _inflightDevice = null;
+            _currentLoadId = 0;
             ClearFailure();
         }
 

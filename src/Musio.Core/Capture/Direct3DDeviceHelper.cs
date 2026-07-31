@@ -42,11 +42,28 @@ public static class Direct3DDeviceHelper
             }
         }
 
+        IntPtr dxgiDevice = IntPtr.Zero;
         try
         {
-            // The D3D11 device implements IDXGIDevice; the interop entry point takes its IUnknown.
-            var hr = CreateDirect3D11DeviceFromDXGIDevice(d3dDevice, out var graphicsDevice);
+            var iid = IID_IDXGIDevice;
+            var hr = Marshal.QueryInterface(d3dDevice, in iid, out dxgiDevice);
             Marshal.ThrowExceptionForHR(hr);
+
+            if (dxgiDevice == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("The D3D11 device did not expose IDXGIDevice.");
+            }
+
+            hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, out var graphicsDevice);
+            if (hr < 0)
+            {
+                if (graphicsDevice != IntPtr.Zero)
+                {
+                    MarshalInterface<IDirect3DDevice>.DisposeAbi(graphicsDevice);
+                }
+
+                Marshal.ThrowExceptionForHR(hr);
+            }
 
             if (graphicsDevice == IntPtr.Zero)
             {
@@ -60,6 +77,11 @@ public static class Direct3DDeviceHelper
         }
         finally
         {
+            if (dxgiDevice != IntPtr.Zero)
+            {
+                Marshal.Release(dxgiDevice);
+            }
+
             Marshal.Release(d3dDevice);
         }
     }
@@ -127,6 +149,7 @@ public static class Direct3DDeviceHelper
     }
 
     private const uint D3D11_SDK_VERSION = 7;
+    private static readonly Guid IID_IDXGIDevice = new("54EC77FA-1377-44E6-8C32-88FD5F44C84C");
 
     [Flags]
     private enum D3D11_CREATE_DEVICE_FLAG : uint

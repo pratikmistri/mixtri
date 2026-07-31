@@ -110,7 +110,8 @@ public sealed class VideoFrameReader : IDisposable
     /// <see cref="OpenFromVideoPathAsync"/>.
     /// </summary>
     public static async Task<VideoFrameReader?> OpenPreviewFromVideoPathAsync(
-        string videoFilePath, int fps, int maxWidth, int maxHeight)
+        string videoFilePath, int fps, int maxWidth, int maxHeight,
+        long cacheBudgetBytes = PreviewCacheBudgetBytes)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
@@ -132,7 +133,7 @@ public sealed class VideoFrameReader : IDisposable
             FrameSourceOptions.CreatePreview(maxWidth, maxHeight)).ConfigureAwait(false);
 
         return mp4 is not null
-            ? new VideoFrameReader(mp4, fps, PreviewCacheBudgetBytes)
+            ? new VideoFrameReader(mp4, fps, Math.Max(0, cacheBudgetBytes))
             : null;
     }
 

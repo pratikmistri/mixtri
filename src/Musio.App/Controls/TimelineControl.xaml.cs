@@ -382,7 +382,7 @@ public sealed partial class TimelineControl : UserControl
             foreach (var key in shared) _thumbnailsByFile.Remove(key);
 
             foreach (var t in _thumbnails)
-                t?.Dispose();
+                SafeDispose(t);
         }
 
         _thumbnails = thumbnails;
@@ -410,7 +410,7 @@ public sealed partial class TimelineControl : UserControl
             !ReferenceEquals(existing.Thumbnails, thumbnails))
         {
             foreach (var t in existing.Thumbnails)
-                t?.Dispose();
+                SafeDispose(t);
         }
 
         _thumbnailsByFile[filePath] = new ThumbnailSet
@@ -474,20 +474,27 @@ public sealed partial class TimelineControl : UserControl
         {
             if (ReferenceEquals(set.Thumbnails, primary)) primaryDisposed = true;
             foreach (var t in set.Thumbnails)
-                t?.Dispose();
+                SafeDispose(t);
         }
         _thumbnailsByFile.Clear();
 
         if (primary is not null && !primaryDisposed)
         {
             foreach (var t in primary)
-                t?.Dispose();
+                SafeDispose(t);
         }
 
         _thumbnailIntervalSeconds = 0;
         _videoAspectRatio = 16.0 / 9.0;
         _primaryThumbnailFilePath = null;
         VideoTrackCanvas?.Invalidate();
+    }
+
+    private static void SafeDispose(CanvasBitmap? bitmap)
+    {
+        if (bitmap is null) return;
+        try { bitmap.Dispose(); }
+        catch { /* the bitmap may belong to a lost graphics device */ }
     }
 
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
@@ -680,7 +687,10 @@ public sealed partial class TimelineControl : UserControl
         if (double.IsNaN(x) || double.IsInfinity(x)) return (0, false);
         if (viewportWidth <= 0) return (x, true); // not laid out yet — don't hide it
         bool visible = x + lineWidth > 0 && x < viewportWidth;
-        return (x, visible);
+        if (!visible) return (x, false);
+
+        double maxOffset = Math.Max(0, viewportWidth - lineWidth);
+        return (Math.Clamp(x, 0, maxOffset), true);
     }
 
     // --- Time Ruler ---

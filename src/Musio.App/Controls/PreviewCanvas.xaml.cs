@@ -124,6 +124,16 @@ public sealed partial class PreviewCanvas : UserControl
         QualityIndicator.Visibility = Visibility.Collapsed;
     }
 
+    public void ClearFrame()
+    {
+        SetFrame(null);
+    }
+
+    public void InvalidateSurface()
+    {
+        PreviewSurface.Invalidate();
+    }
+
     private void PreviewRoot_PointerEntered(object sender, PointerRoutedEventArgs e)
     {
         _pointerOverPreview = true;
@@ -197,7 +207,11 @@ public sealed partial class PreviewCanvas : UserControl
     {
         var old = _previewFrame;
         _previewFrame = frame;
-        old?.Dispose();
+        if (old is not null)
+        {
+            try { old.Dispose(); }
+            catch { /* the frame may belong to a lost graphics device */ }
+        }
         PreviewSurface.Invalidate();
     }
 

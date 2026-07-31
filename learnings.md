@@ -1648,3 +1648,19 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **Approaches tried**: Pushed the UI changes, removed the prior loose package registration, cleaned the exact Release outputs, rebuilt, registered the new manifest, and launched through AppsFolder.
 - **What worked**: The package registered with status `Ok` and launched a responsive Musio process from the fresh ARM64 Release output.
 - **What didn't work**: Nothing.
+
+## PR 66 review fixes
+
+- **Feature/area**: Timeline playhead clipping, D3D11/WinRT device interop, and background-image cache invalidation.
+- **Approaches tried**: Validated all three review threads against current code, fixed each at its geometry or ownership boundary, and added deterministic in-flight invalidation tests.
+- **What worked**: Visible playhead offsets are clamped inside the track viewport; the D3D11 device is queried for `IDXGIDevice` before WinRT projection; cache loads carry generation IDs so invalidated or superseded completions cannot republish stale bitmaps.
+- **What didn't work**: Clearing only the in-flight path/device is insufficient when a replacement load immediately uses the same key, because the older completion can match the replacement key.
+- **Verified**: ARM64 Debug solution build succeeded; 20 focused tests and the full suite of 583 passing tests with 2 existing skips completed successfully.
+
+## Editor graphics-device recovery
+
+- **Feature/area**: Preview, filmstrip, timeline, appended-segment rendering, and adaptive preview resource lifecycle.
+- **Approaches tried**: Added editor-level shared-device loss handling, coordinated GPU-resource teardown/reinitialization, exception-safe disposal for dead-device resources, bounded per-reader cache budgets, appended-preview LRU eviction, and adaptive reader validation before swaps.
+- **What worked**: Recovery pauses rendering, invalidates all async generations, drops old-device frames/thumbnails/readers/compositors, rebuilds from the replacement shared device, regenerates filmstrips, and rerenders the playhead. A deterministic recovery lifecycle probe completed in about 500 ms while the editor remained responsive.
+- **What didn't work**: Calling Win2D `RaiseDeviceLost()` directly on this packaged ARM64 setup returned `E_INVALIDARG`; invoking the same recovery lifecycle directly provided deterministic end-to-end validation. A single queued flag also dropped a second loss during recovery, so recovery now records additional requests and loops until stable.
+- **Verified**: ARM64 Debug solution build succeeded; the full suite passed 583 tests with 2 existing MP4 identity skips. A clean ARM64 Release package registered with status `Ok` and opened a responsive project editor.

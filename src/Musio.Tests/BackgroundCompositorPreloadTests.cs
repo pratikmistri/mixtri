@@ -17,6 +17,7 @@ public sealed class BackgroundCompositorPreloadTests
 {
     private const string SolidHex = "#0000FF"; // blue fallback
     private static readonly Color ImageColor = Color.FromArgb(255, 255, 0, 0); // red wallpaper
+    private static readonly Color ReplacementColor = Color.FromArgb(255, 0, 255, 0);
 
     private static string TempDir =>
         Path.Combine(AppContext.BaseDirectory, "BackgroundCompositorPreloadTests");
@@ -232,6 +233,86 @@ public sealed class BackgroundCompositorPreloadTests
             Assert.IsFalse(compositor.IsBackgroundImageReady(device, style));
             var color = RenderCenterPixel(device, compositor, style, out _);
             Assert.AreEqual(ColorHelper.ParseColor(SolidHex), color);
+        }
+    }
+
+    [TestMethod]
+    public async Task InvalidateImageCache_DiscardsInflightLoadWhenItCompletes()
+    {
+        var device = TryCreateDevice();
+        if (device is null) { Assert.Inconclusive("Win2D CanvasDevice unavailable."); return; }
+
+        using (device)
+        {
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var compositor = new BackgroundCompositor();
+            compositor.ImageLoaderOverride = async (dev, _, _) =>
+            {
+                started.SetResult();
+                await release.Task.ConfigureAwait(false);
+                return RedPixel(dev);
+            };
+
+            var style = ImageStyle(FakePath);
+            var preload = compositor.PreloadAsync(device, style);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            compositor.InvalidateImageCache();
+            release.SetResult();
+            await preload;
+
+            Assert.IsFalse(compositor.IsBackgroundImageReady(device, style),
+                "A load completing after invalidation must not repopulate the cache.");
+        }
+    }
+
+    [TestMethod]
+    public async Task InvalidateImageCache_OldSameKeyLoadCannotReplaceNewLoad()
+    {
+        var device = TryCreateDevice();
+        if (device is null) { Assert.Inconclusive("Win2D CanvasDevice unavailable."); return; }
+
+        using (device)
+        {
+            int calls = 0;
+            var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var compositor = new BackgroundCompositor();
+            compositor.ImageLoaderOverride = async (dev, _, _) =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    firstStarted.SetResult();
+                    await releaseFirst.Task.ConfigureAwait(false);
+                    return RedPixel(dev);
+                }
+
+                secondStarted.SetResult();
+                await releaseSecond.Task.ConfigureAwait(false);
+                return CanvasBitmap.CreateFromColors(dev, [ReplacementColor], 1, 1);
+            };
+
+            var style = ImageStyle(FakePath);
+            var firstPreload = compositor.PreloadAsync(device, style);
+            await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            compositor.InvalidateImageCache();
+            var secondPreload = compositor.PreloadAsync(device, style);
+            await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            releaseFirst.SetResult();
+            await firstPreload;
+            releaseSecond.SetResult();
+            await secondPreload;
+
+            Assert.IsTrue(compositor.IsBackgroundImageReady(device, style));
+            Assert.AreEqual(
+                ReplacementColor,
+                RenderCenterPixel(device, compositor, style, out _),
+                "The completion orphaned by invalidation must not publish over the replacement load.");
         }
     }
 
