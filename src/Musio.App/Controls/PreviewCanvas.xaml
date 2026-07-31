@@ -26,7 +26,7 @@
             Margin="0,0,0,12"
             Padding="8"
             Background="{ThemeResource OverlayDimBrush}"
-            CornerRadius="999"
+            CornerRadius="25"
             Opacity="0"
             IsHitTestVisible="False"
             GotFocus="PlaybackChrome_GotFocus"
@@ -34,9 +34,12 @@
             <Button
                 x:Name="PlayPauseButton"
                 Click="PlayPause_Click"
+                Width="40"
+                Height="40"
                 Background="Transparent"
                 BorderBrush="Transparent"
-                Padding="8">
+                CornerRadius="20"
+                Padding="0">
                 <FontIcon
                     x:Name="PlayPauseIcon"
                     Glyph="&#xE768;"

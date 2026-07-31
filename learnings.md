@@ -1630,6 +1630,14 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 
 - **Feature/area**: `PreviewCanvas` playback chrome placement and shape.
 - **Approaches tried**: Added a 12 px bottom margin and changed the container from top-only corners to a uniform pill radius.
-- **What worked**: An oversized `CornerRadius` is clamped to the rendered bounds, preserving a complete pill shape even when text scaling changes the chrome height while keeping the existing padding, controls, and shy behavior unchanged.
-- **What didn't work**: A fixed 25 px radius matched the current height but could stop being fully rounded when accessibility text scaling increased the container height.
-- **Verified**: The reviewed ARM64 Release build succeeded, registered with package status `Ok`, and launched as a responsive `Musio Mini` window.
+- **What worked**: A 25 px radius matches half the chrome's rendered height, producing semicircular ends with straight horizontal sides while keeping the existing padding, controls, and shy behavior unchanged.
+- **What didn't work**: An oversized radius such as 999 is normalized against both container dimensions by WinUI and turns the entire wide chrome into an oval instead of a stadium-shaped pill.
+- **Verified**: ARM64 Release builds compile the corrected XAML successfully.
+
+## Circular preview play button
+
+- **Feature/area**: `PreviewCanvas` Play/Pause button shape.
+- **Approaches tried**: Replaced the content-sized default button geometry with an explicit square hit target and half-size radius.
+- **What worked**: A 40 x 40 button with a 20 px corner radius produces a true circular hover/pressed surface while preserving the centered 18 px icon.
+- **What didn't work**: Padding alone allowed the default button template to render a rounded rectangle.
+- **Verified**: The ARM64 Debug app build compiled the updated XAML successfully.
