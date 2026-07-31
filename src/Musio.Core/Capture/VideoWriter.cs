@@ -270,15 +270,21 @@ public sealed class VideoWriter : IDisposable
         Directory.CreateDirectory(_framesDir);
 
         _queueCapacity = ComputeQueueCapacity(width, height);
-        _frameQueue = Channel.CreateBounded<PendingFrame>(new BoundedChannelOptions(_queueCapacity + 1)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false,
-        });
+        _frameQueue = Channel.CreateBounded<PendingFrame>(CreateQueueOptions(_queueCapacity));
 
         _writerLoop = Task.Run(ProcessQueuedFramesAsync);
     }
+
+    internal static BoundedChannelOptions CreateQueueOptions(int queueCapacity)
+        => new(queueCapacity + 1)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+
+            // AbortWriterAsync and Dispose may drain pending items after their bounded
+            // wait expires while the writer is still releasing its in-flight frame.
+            SingleReader = false,
+            SingleWriter = false,
+        };
 
     /// <summary>
     /// Depth of the writer queue, capped so a 4K capture cannot pin an unbounded amount of VRAM.

@@ -75,6 +75,19 @@ public class VideoWriterQueueTests
     }
 
     [TestMethod]
+    public void QueueOptions_AllowBoundedShutdownToDrainConcurrently()
+    {
+        var options = VideoWriter.CreateQueueOptions(queueCapacity: 4);
+
+        Assert.IsFalse(options.SingleReader,
+            "abort and dispose may drain pending frames while the writer loop is still stopping");
+        Assert.IsFalse(options.SingleWriter,
+            "capture callbacks may enqueue frames concurrently");
+        Assert.AreEqual(5, options.Capacity,
+            "the extra slot is reserved for the final gap-only marker");
+    }
+
+    [TestMethod]
     public async Task Quiescence_GuaranteesEveryCountedFrameIsOnDisk()
     {
         // FrameCount is the finalizer's contract: frame_{i}.jpg must exist for every

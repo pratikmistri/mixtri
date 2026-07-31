@@ -1680,3 +1680,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: The reduced-surface test uses normal recovery settings while still requesting 960x540 output; the existing options test independently verifies the one-attempt, 400 ms preview policy.
 - **What didn't work**: Requiring a cold CI decoder to return its first frame within the production best-effort preview budget made the scaling test timing-dependent.
 - **Verified**: The exact AnyCPU Release build succeeded, the formerly failing test passed five consecutive runs, and the full suite passed 583 tests with 2 existing skips.
+
+## VideoWriter shutdown drain race and package version
+
+- **Feature/area**: `VideoWriter` bounded shutdown queue ownership and app package versioning.
+- **Approaches tried**: Validated the review finding against both timeout drain sites, retained bounded caller-side cleanup, and changed the channel contract instead of removing cleanup or allowing unbounded shutdown waits.
+- **What worked**: The frame channel now declares multi-reader support because `AbortWriterAsync` and `Dispose` may drain pending frames while the writer releases its in-flight frame. A regression test locks that contract, and the manifest/settings version advanced past the published 1.2.0 packages to 1.2.1.
+- **What didn't work**: Direct `dotnet test` attempted to build through the known unsupported PriGen path; VS MSBuild followed by `dotnet test --no-build` worked.
+- **Verified**: ARM64 Debug solution build succeeded; focused queue tests passed 11/11 and the full suite passed 581 with 2 existing skips.
