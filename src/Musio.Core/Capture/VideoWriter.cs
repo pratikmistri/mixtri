@@ -276,6 +276,7 @@ public sealed class VideoWriter : IDisposable
     }
 
     internal static BoundedChannelOptions CreateQueueOptions(int queueCapacity)
+        // +1 reserves a slot for the final gap-only marker enqueued by StopAcceptingFrames().
         => new(queueCapacity + 1)
         {
             FullMode = BoundedChannelFullMode.Wait,
