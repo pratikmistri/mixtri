@@ -1618,3 +1618,18 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: The full chrome (Play/Pause, adaptive tier, and timecode) fades in over 140 ms on hover and out over 280 ms after leaving. Keyboard focus keeps it visible. Hidden chrome disables pointer hit-testing, preventing invisible buttons or tooltips from intercepting clicks, while keyboard focus can still reveal it.
 - **What didn't work**: The first version changed only opacity; transparent XAML elements still hit-test, so the invisible Play/Pause button could be clicked. Review caught it and `IsHitTestVisible` now follows the chrome state.
 - **Verified**: ARM64 app build succeeded; full suite passed 581 with 2 existing ignored MP4 identity tests.
+
+## Shy preview chrome Release deployment
+
+- **Feature/area**: Clean ARM64 Release build, loose package registration, and local launch.
+- **Approaches tried**: Removed the existing package before cleaning the exact Release outputs, rebuilt with VS BuildTools MSBuild, registered the loose manifest, and launched through AppsFolder.
+- **What worked**: `Add-AppxPackage -Path <AppxManifest.xml> -Register` registered the fresh output with status `Ok`; the launched process was responsive with window title `Musio`.
+- **What didn't work**: Adding `-DisableDevelopmentMode` rejected the loose manifest with `0x80073CF9` ("manifest is not in the package root"); omit that switch for this development registration.
+
+## Floating rounded preview chrome
+
+- **Feature/area**: `PreviewCanvas` playback chrome placement and shape.
+- **Approaches tried**: Added a 12 px bottom margin and changed the container from top-only corners to a uniform pill radius.
+- **What worked**: An oversized `CornerRadius` is clamped to the rendered bounds, preserving a complete pill shape even when text scaling changes the chrome height while keeping the existing padding, controls, and shy behavior unchanged.
+- **What didn't work**: A fixed 25 px radius matched the current height but could stop being fully rounded when accessibility text scaling increased the container height.
+- **Verified**: The reviewed ARM64 Release build succeeded, registered with package status `Ok`, and launched as a responsive `Musio Mini` window.
