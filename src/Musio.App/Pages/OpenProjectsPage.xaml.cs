@@ -8,14 +8,30 @@ using Windows.Storage.Streams;
 namespace Musio_App.Pages;
 
 /// <summary>
-/// One saved project as shown in the Open page.
+/// One saved project as shown in the Gallery.
 /// </summary>
 public sealed class ProjectCard
 {
     public string Path { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string Subtitle { get; init; } = string.Empty;
+
+    /// <summary>
+    /// When the project was last saved, in local time. Drives both the day grouping and
+    /// the order within a day, and is the same value the card's date shows.
+    /// </summary>
+    public DateTime ModifiedAt { get; init; }
+
     public BitmapImage? Poster { get; init; }
+}
+
+/// <summary>
+/// One day's worth of projects, as shown under a single header in the Gallery.
+/// </summary>
+public sealed class ProjectGroup
+{
+    public string Header { get; init; } = string.Empty;
+    public List<ProjectCard> Items { get; init; } = new();
 }
 
 /// <summary>
@@ -56,7 +72,7 @@ public sealed partial class OpenProjectsPage : Page
             {
                 // Manifest and poster are read off the UI thread; the BitmapImage itself
                 // must be created on it.
-                var (name, subtitle, poster) = await Task.Run(() => ReadCardData(entry));
+                var (name, subtitle, modified, poster) = await Task.Run(() => ReadCardData(entry));
 
                 BitmapImage? image = null;
                 if (poster is { Length: > 0 })
@@ -67,11 +83,13 @@ public sealed partial class OpenProjectsPage : Page
                     Path = entry.Path,
                     Name = name,
                     Subtitle = subtitle,
+                    ModifiedAt = modified,
                     Poster = image,
                 });
             }
 
-            ProjectsGrid.ItemsSource = cards;
+            ProjectsSource.Source = GroupByDay(cards);
+            ProjectsGrid.ItemsSource = ProjectsSource.View;
             EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
@@ -130,7 +148,8 @@ public sealed partial class OpenProjectsPage : Page
             }
         }
 
-        return byPath.Values.OrderByDescending(e => e.LastUsedUtc).ToList();
+        // Ordering is left to GroupByDay, which re-sorts everything on ModifiedAt.
+        return byPath.Values.ToList();
     }
 
     private static IEnumerable<string> SaveFolders()
@@ -144,7 +163,45 @@ public sealed partial class OpenProjectsPage : Page
             Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Musio");
     }
 
-    private static (string Name, string Subtitle, byte[]? Poster) ReadCardData(RecentProject entry)
+    /// <summary>
+    /// Buckets cards into one group per calendar day, newest day first and newest
+    /// project first within each day.
+    /// </summary>
+    /// <remarks>
+    /// Keyed on when the project was last saved, which is also the date printed on the
+    /// card — so a group header can never disagree with the cards under it.
+    /// </remarks>
+    private static List<ProjectGroup> GroupByDay(IEnumerable<ProjectCard> cards) => cards
+        .GroupBy(c => c.ModifiedAt.Date)
+        .OrderByDescending(g => g.Key)
+        .Select(g => new ProjectGroup
+        {
+            Header = FormatDayHeader(g.Key),
+            // Name breaks ties so the order does not depend on the order projects were
+            // discovered in, which is dictionary order and not stable.
+            Items = g
+                .OrderByDescending(c => c.ModifiedAt)
+                .ThenBy(c => c.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToList(),
+        })
+        .ToList();
+
+    /// <summary>Names a day group: "Today", "Yesterday", or the full date.</summary>
+    private static string FormatDayHeader(DateTime day)
+    {
+        var today = DateTime.Now.Date;
+        if (day == today) return "Today";
+        if (day == today.AddDays(-1)) return "Yesterday";
+
+        // The year is noise for anything recorded this year, and the weekday is the part
+        // people actually recognise when scanning a recent list.
+        return day.Year == today.Year
+            ? day.ToString("dddd, d MMMM")
+            : day.ToString("d MMMM yyyy");
+    }
+
+    private static (string Name, string Subtitle, DateTime Modified, byte[]? Poster) ReadCardData(
+        RecentProject entry)
     {
         var manifest = MusioPackageService.ReadManifest(entry.Path);
         var poster = MusioPackageService.ReadPoster(entry.Path);
@@ -159,13 +216,48 @@ public sealed partial class OpenProjectsPage : Page
             name = entry.Name;
 
         var duration = manifest?.Project.Duration ?? entry.Duration;
-        var saved = manifest?.SavedAt.ToLocalTime() ?? entry.LastUsedUtc.ToLocalTime();
 
-        long size = 0;
-        try { size = new FileInfo(entry.Path).Length; } catch { }
+        // One probe serves both the size and the modified date. FileInfo caches its
+        // metadata when Exists is read, so a file that vanishes mid-refresh still yields
+        // the values captured here rather than throwing.
+        FileInfo? file = null;
+        try
+        {
+            var info = new FileInfo(entry.Path);
+            if (info.Exists) file = info;
+        }
+        catch { }
 
-        var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {saved:d MMM yyyy}";
-        return (name!, subtitle, poster);
+        var size = file?.Length ?? 0;
+        var modified = ResolveModifiedAt(entry, manifest, file);
+
+        var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {modified:d MMM yyyy}";
+        return (name!, subtitle, modified, poster);
+    }
+
+    /// <summary>
+    /// When a package was last modified, in local time.
+    /// </summary>
+    /// <remarks>
+    /// The file's own write time is preferred: it is the "date modified" Explorer shows,
+    /// it is always present for a file that exists, and a Windows copy carries it to
+    /// another machine. It is taken from a probed <see cref="FileInfo"/> rather than from
+    /// <see cref="File.GetLastWriteTime"/>, which for a missing or unreachable path
+    /// neither throws nor returns <c>default</c> — it returns 1601-01-01, which would
+    /// park the card under a phantom "31 December 1600" header.
+    /// </remarks>
+    private static DateTime ResolveModifiedAt(
+        RecentProject entry, MusioManifest? manifest, FileInfo? file)
+    {
+        if (file is not null) return file.LastWriteTime;
+
+        // The manifest travels inside the package, so it still dates a project whose file
+        // could not be stat'd. It cannot be range-checked the way the write time can:
+        // MusioManifest.SavedAt is initialised to DateTimeOffset.UtcNow, so a manifest
+        // that omits the field deserialises to the moment it was read, not to default.
+        if (manifest is not null) return manifest.SavedAt.ToLocalTime().DateTime;
+
+        return entry.LastUsedUtc.ToLocalTime().DateTime;
     }
 
     private static async Task<BitmapImage?> CreateBitmapAsync(byte[] bytes)

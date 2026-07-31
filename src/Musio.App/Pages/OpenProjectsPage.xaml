@@ -8,6 +8,48 @@
     mc:Ignorable="d"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
+    <Page.Resources>
+        <!-- The stock GridViewHeaderItem style indents its content by 12px and hard-codes
+             a divider Rectangle beneath it. Neither is reachable with setters, and unlike
+             GridViewItem there is no keyed default style to derive from (generic.xaml
+             declares GridViewHeaderItem's style implicitly, with no x:Key), so the
+             template is restated here without the divider and with the left padding
+             dropped, which lines the header up with the page title and the cards.
+             Everything else mirrors the stock setters. -->
+        <Style x:Key="ProjectsGroupHeaderStyle" TargetType="GridViewHeaderItem">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Margin" Value="0,0,0,4" />
+            <Setter Property="Padding" Value="0,8,0,0" />
+            <Setter Property="MinHeight" Value="{ThemeResource GridViewHeaderItemMinHeight}" />
+            <!-- Restored from the stock style: Control.UseSystemFocusVisuals defaults to
+                 false, and this template draws no focus visual of its own, so a header
+                 that takes keyboard focus would otherwise show no indicator. -->
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <Setter Property="VerticalContentAlignment" Value="Top" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GridViewHeaderItem">
+                        <ContentPresenter
+                            Margin="{TemplateBinding Padding}"
+                            HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                            Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            ContentTransitions="{TemplateBinding ContentTransitions}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ItemsPath names the child collection on each ProjectGroup; without it a
+             grouped source renders the groups themselves as items. -->
+        <CollectionViewSource
+            x:Name="ProjectsSource"
+            IsSourceGrouped="True"
+            ItemsPath="Items" />
+    </Page.Resources>
+
     <Grid Padding="24" RowSpacing="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -20,22 +62,24 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="0" Spacing="2">
-                <TextBlock FontSize="24" FontWeight="SemiBold" Text="Projects" />
-                <TextBlock
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Text="Saved .musio projects. Each one bundles its recording, so it can be moved anywhere." />
-            </StackPanel>
+            <TextBlock
+                Grid.Column="0"
+                VerticalAlignment="Center"
+                FontSize="24"
+                FontWeight="SemiBold"
+                Text="Gallery" />
 
             <Button
                 Grid.Column="1"
                 Height="36"
-                VerticalAlignment="Bottom"
+                VerticalAlignment="Center"
                 Click="Open_Click"
+                CornerRadius="18"
+                Style="{StaticResource AccentButtonStyle}"
                 ToolTipService.ToolTip="Open a .musio project from anywhere on disk">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xE8E5;" />
-                    <TextBlock Text="Open…" />
+                    <TextBlock Text="Open" />
                 </StackPanel>
             </Button>
         </Grid>
@@ -144,6 +188,20 @@
                     </Grid>
                 </DataTemplate>
             </GridView.ItemTemplate>
+            <GridView.GroupStyle>
+                <GroupStyle HeaderContainerStyle="{StaticResource ProjectsGroupHeaderStyle}" HidesIfEmpty="True">
+                    <GroupStyle.HeaderTemplate>
+                        <DataTemplate x:DataType="local:ProjectGroup">
+                            <TextBlock
+                                Margin="0,0,0,8"
+                                FontSize="14"
+                                FontWeight="SemiBold"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="{x:Bind Header}" />
+                        </DataTemplate>
+                    </GroupStyle.HeaderTemplate>
+                </GroupStyle>
+            </GridView.GroupStyle>
         </GridView>
     </Grid>
 </Page>
