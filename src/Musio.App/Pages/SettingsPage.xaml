@@ -235,7 +235,7 @@
                 <StackPanel Spacing="12">
                     <TextBlock
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="Editor shortcuts are disabled while typing or adjusting a control."
+                        Text="Timeline-editing shortcuts are disabled while typing or adjusting a control."
                         TextWrapping="Wrap" />
 
                     <Grid ColumnSpacing="24" RowSpacing="8">

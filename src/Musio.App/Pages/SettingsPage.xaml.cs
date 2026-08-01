@@ -96,7 +96,7 @@ public sealed partial class SettingsPage : Page
 
         MiniHotkeyInfoBar.Severity = InfoBarSeverity.Warning;
         MiniHotkeyInfoBar.Message =
-            "Win+Shift+X is unavailable because Windows or another app is already using it.";
+            "Win+Shift+X is not active in this app window. It may be reserved by Windows or another app.";
     }
 
     private static void SelectComboBoxByTag(ComboBox combo, string tag)

@@ -1806,3 +1806,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: The final size-change event now re-centers the window and replaces the animation's stale target, so first launch finishes at the exact horizontal center while later reveals preserve a user-moved position.
 - **What didn't work**: Rebasing immediately after `AppWindow.Resize` still used the old width because `AppWindow.Size` updates asynchronously; the later reveal tick then restored the stale X coordinate.
 - **Verified**: ARM64 Debug build passed; the first-launch HWND measured a 0 px center delta, and a moved Mini window returned to the same X after Escape plus Win+Shift+X.
+
+## PR 68 review feedback
+
+- **Feature/area**: Shortcut documentation, Mini hotkey availability copy, and reveal-animation failure cleanup.
+- **Approaches tried**: Validated all four review threads against current behavior, narrowed the shortcut copy to timeline-editing commands, made unavailable-hotkey copy cover document instances, and tracked whether layered opacity was actually applied.
+- **What worked**: Reveal setup, timer ticks, and final-position restoration now clean up timer, opacity, style, and programmatic-move depth even when AppWindow operations throw; idle stop paths no longer call layered-window APIs unnecessarily.
+- **What didn't work**: An initial live hotkey probe targeted a stale process and did not observe a reveal; the deterministic build and full test suite remained successful.
+- **Verified**: ARM64 Debug solution build passed and all 584 active tests passed with 2 existing skips.

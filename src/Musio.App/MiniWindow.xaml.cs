@@ -32,6 +32,7 @@ public sealed partial class MiniWindow : Window
     private PointInt32 _revealFinalPosition;
     private nint _revealOriginalExStyle;
     private bool _revealAddedLayeredStyle;
+    private bool _revealLayeredOpacityApplied;
     private bool _revealMoveScopeActive;
 
     /// <summary>
@@ -360,17 +361,27 @@ public sealed partial class MiniWindow : Window
             RestoreWindowOpacity(hwnd);
             return;
         }
+        _revealLayeredOpacityApplied = true;
 
         _programmaticChangeDepth++;
         _revealMoveScopeActive = true;
-        AppWindow.Move(new PointInt32(
-            _revealFinalPosition.X,
-            _revealFinalPosition.Y + offset));
+        try
+        {
+            AppWindow.Move(new PointInt32(
+                _revealFinalPosition.X,
+                _revealFinalPosition.Y + offset));
 
-        _revealTimer = DispatcherQueue.CreateTimer();
-        _revealTimer.Interval = TimeSpan.FromMilliseconds(16);
-        _revealTimer.Tick += OnRevealTimerTick;
-        _revealStopwatch = new System.Diagnostics.Stopwatch();
+            _revealTimer = DispatcherQueue.CreateTimer();
+            _revealTimer.Interval = TimeSpan.FromMilliseconds(16);
+            _revealTimer.Tick += OnRevealTimerTick;
+            _revealStopwatch = new System.Diagnostics.Stopwatch();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[MiniWindow] Reveal preparation failed: {ex.Message}");
+            StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
     }
 
     private void StartRevealAnimation()
@@ -396,18 +407,27 @@ public sealed partial class MiniWindow : Window
         object args)
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        double elapsed = _revealStopwatch?.Elapsed.TotalMilliseconds ?? RevealDurationMs;
-        double progress = Math.Clamp(elapsed / RevealDurationMs, 0, 1);
-        double eased = 1 - Math.Pow(1 - progress, 3);
-        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        try
+        {
+            double elapsed = _revealStopwatch?.Elapsed.TotalMilliseconds ?? RevealDurationMs;
+            double progress = Math.Clamp(elapsed / RevealDurationMs, 0, 1);
+            double eased = 1 - Math.Pow(1 - progress, 3);
+            int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
 
-        AppWindow.Move(new PointInt32(
-            _revealFinalPosition.X,
-            _revealFinalPosition.Y + (int)Math.Round(offset * (1 - eased))));
+            AppWindow.Move(new PointInt32(
+                _revealFinalPosition.X,
+                _revealFinalPosition.Y + (int)Math.Round(offset * (1 - eased))));
 
-        byte alpha = (byte)Math.Round(byte.MaxValue * eased);
-        if (!SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA) || progress >= 1)
+            byte alpha = (byte)Math.Round(byte.MaxValue * eased);
+            if (!SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA) || progress >= 1)
+                StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[MiniWindow] Reveal animation failed: {ex.Message}");
             StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
     }
 
     private void StopRevealAnimation(nint hwnd, bool restoreFinalPosition)
@@ -423,11 +443,21 @@ public sealed partial class MiniWindow : Window
 
         if (_revealMoveScopeActive)
         {
-            if (restoreFinalPosition)
-                AppWindow.Move(_revealFinalPosition);
-
-            _revealMoveScopeActive = false;
-            _programmaticChangeDepth--;
+            try
+            {
+                if (restoreFinalPosition)
+                    AppWindow.Move(_revealFinalPosition);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MiniWindow] Reveal position restore failed: {ex.Message}");
+            }
+            finally
+            {
+                _revealMoveScopeActive = false;
+                _programmaticChangeDepth = Math.Max(0, _programmaticChangeDepth - 1);
+            }
         }
 
         RestoreWindowOpacity(hwnd);
@@ -435,7 +465,11 @@ public sealed partial class MiniWindow : Window
 
     private void RestoreWindowOpacity(nint hwnd)
     {
-        SetLayeredWindowAttributes(hwnd, 0, byte.MaxValue, LWA_ALPHA);
+        if (_revealLayeredOpacityApplied)
+        {
+            SetLayeredWindowAttributes(hwnd, 0, byte.MaxValue, LWA_ALPHA);
+            _revealLayeredOpacityApplied = false;
+        }
 
         if (_revealAddedLayeredStyle)
         {
