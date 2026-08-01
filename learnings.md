@@ -1798,3 +1798,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: Repeated save commands can no longer overlap or open multiple pickers; Settings warns when Win+Shift+X is unavailable; the complete acrylic window now fades from 0 to 255 and moves upward 12 DIPs over 180 ms, then restores its original extended style and final position.
 - **What didn't work**: A root-element storyboard could not animate the separate system backdrop. The first external Escape probe did not hide Mini mode until the pill received a real pointer click, after which hide and hotkey reveal passed.
 - **Verified**: ARM64 Debug solution build passed, all 584 active tests passed with 2 existing skips, clean ARM64 Release deployment reported package status `Ok`, and a live HWND probe observed the reveal position/alpha progression and style cleanup.
+
+## Initial Mini-mode horizontal centering
+
+- **Feature/area**: First-launch Mini window placement during its reveal animation.
+- **Approaches tried**: Deferred reveal-target rebasing until visible layout, ignored initialization position events until placement completed, centered against the requested resize dimensions, and updated the active reveal target when the final AppWindow size event arrived.
+- **What worked**: The final size-change event now re-centers the window and replaces the animation's stale target, so first launch finishes at the exact horizontal center while later reveals preserve a user-moved position.
+- **What didn't work**: Rebasing immediately after `AppWindow.Resize` still used the old width because `AppWindow.Size` updates asynchronously; the later reveal tick then restored the stale X coordinate.
+- **Verified**: ARM64 Debug build passed; the first-launch HWND measured a 0 px center delta, and a moved Mini window returned to the same X after Escape plus Win+Shift+X.

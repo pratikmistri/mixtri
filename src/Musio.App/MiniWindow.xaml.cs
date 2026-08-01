@@ -52,6 +52,7 @@ public sealed partial class MiniWindow : Window
     /// away from where they parked it.
     /// </summary>
     private bool _userPositioned;
+    private bool _hasCompletedInitialPlacement;
 
     /// <summary>
     /// Non-zero while we are moving/resizing the window ourselves, so those changes
@@ -141,11 +142,21 @@ public sealed partial class MiniWindow : Window
     {
         // A position change we didn't initiate means the user dragged the pill by
         // its grip, so stop re-centring it from then on.
-        if (args.DidPositionChange && _programmaticChangeDepth == 0)
+        if (args.DidPositionChange
+            && _hasCompletedInitialPlacement
+            && _programmaticChangeDepth == 0)
             _userPositioned = true;
 
         // Move() doesn't set DidSizeChange, so this cannot recurse.
-        if (args.DidSizeChange) DockBottomCenter();
+        if (args.DidSizeChange)
+        {
+            DockBottomCenter();
+
+            // Initial XAML layout can finish after the reveal has captured its
+            // target. Keep the animation aimed at the newly centered final size.
+            if (_revealMoveScopeActive && !_userPositioned)
+                _revealFinalPosition = AppWindow.Position;
+        }
     }
 
     /// <summary>
@@ -180,7 +191,7 @@ public sealed partial class MiniWindow : Window
             try
             {
                 AppWindow.Resize(new SizeInt32(width, height));
-                DockBottomCenter();
+                DockBottomCenter(new SizeInt32(width, height));
             }
             finally
             {
@@ -199,17 +210,15 @@ public sealed partial class MiniWindow : Window
     /// its position is kept and merely clamped back on screen.
     /// </summary>
     /// <remarks>
-    /// Reads <see cref="AppWindow"/>.Size rather than trusting a caller-supplied
-    /// height: several paths resize the pill (initial load, status row appearing,
-    /// Record/Stop swap), and docking against a stale height left it floating well
-    /// above the taskbar. Also wired to <c>AppWindow.Changed</c> so any resize we
-    /// didn't initiate still re-docks.
+    /// Uses a requested size when called immediately after <see cref="AppWindow.Resize"/>
+    /// because the AppWindow size property can still contain the previous dimensions
+    /// until its Changed event arrives. Otherwise it reads the current AppWindow size.
     /// </remarks>
-    private void DockBottomCenter()
+    private void DockBottomCenter(SizeInt32? requestedSize = null)
     {
         try
         {
-            var size = AppWindow.Size;
+            var size = requestedSize ?? AppWindow.Size;
             if (size.Width <= 0 || size.Height <= 0) return;
 
             var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
@@ -277,7 +286,41 @@ public sealed partial class MiniWindow : Window
         SetForegroundWindow(hwnd);
 
         if (shouldAnimate)
-            StartRevealAnimation();
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!IsVisible)
+                {
+                    StopRevealAnimation(hwnd, restoreFinalPosition: true);
+                    return;
+                }
+
+                // The first ShowWindow call can complete XAML layout and widen the
+                // pill after the pre-show target was captured. Re-center using the
+                // final size, then rebase the animation so it cannot restore a stale X.
+                if (!_hasCompletedInitialPlacement || !_userPositioned)
+                {
+                    _userPositioned = false;
+                    ResizeToContent();
+                    RebaseRevealPosition(hwnd);
+                }
+
+                _hasCompletedInitialPlacement = true;
+                StartRevealAnimation();
+            });
+        }
+        else if (!_hasCompletedInitialPlacement)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!IsVisible) return;
+
+                _userPositioned = false;
+                ResizeToContent();
+                DockBottomCenter();
+                _hasCompletedInitialPlacement = true;
+            });
+        }
     }
 
     /// <summary>Hides the pill without destroying it, so state and position survive.</summary>
@@ -337,6 +380,15 @@ public sealed partial class MiniWindow : Window
 
         _revealStopwatch.Start();
         _revealTimer.Start();
+    }
+
+    private void RebaseRevealPosition(nint hwnd)
+    {
+        _revealFinalPosition = AppWindow.Position;
+        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        AppWindow.Move(new PointInt32(
+            _revealFinalPosition.X,
+            _revealFinalPosition.Y + offset));
     }
 
     private void OnRevealTimerTick(
