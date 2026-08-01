@@ -554,5 +554,48 @@
             x:Name="BorderToggle"
             x:FieldModifier="public"
             Header="Border" />
+
+        <!-- Section break: extra margin gives the divider room to read as a real
+             separator rather than another row in the stack. -->
+        <Border Height="1" Margin="0,6"
+                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+        <TextBlock Text="Motion" Style="{StaticResource PropertySectionHeaderStyle}" />
+
+        <!-- Motion blur: global, applies while the cursor moves and the view zooms/pans. -->
+        <StackPanel Spacing="6">
+            <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="MotionBlurToggle"
+                x:FieldModifier="public"
+                Header="Motion Blur" />
+            <TextBlock
+                Text="Cinematic blur while the cursor moves and the view zooms."
+                Style="{StaticResource PropertyHintStyle}" />
+        </StackPanel>
+
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="MotionBlurSlider"
+            x:FieldModifier="public"
+            Header="Blur Amount"
+            Minimum="0" Maximum="100"
+            StepFrequency="5" />
+
+        <!-- Camera drift: global, keeps a scene gently moving for the whole zoom segment. -->
+        <StackPanel Spacing="6">
+            <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="CameraDriftToggle"
+                x:FieldModifier="public"
+                Header="Camera Drift" />
+            <TextBlock
+                Text="Keeps the scene gently moving during zoom segments."
+                Style="{StaticResource PropertyHintStyle}" />
+        </StackPanel>
+
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="CameraDriftSlider"
+            x:FieldModifier="public"
+            Header="Drift Amount"
+            Minimum="0" Maximum="100"
+            StepFrequency="5" />
     </StackPanel>
 </UserControl>

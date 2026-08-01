@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.AI;
@@ -15,6 +16,13 @@ public record CompositionConfig
     public BackgroundStyle Background { get; init; } = new();
     public CursorStyle Cursor { get; init; } = new();
     public AutoZoomConfig Zoom { get; init; } = new();
+
+    /// <summary>Shutter-based camera motion blur for cursor, zoom, and pan movement.</summary>
+    public MotionBlurSettings MotionBlur { get; init; } = new();
+
+    /// <summary>Continuous subtle zoom/pan motion applied while a zoom segment is active.</summary>
+    public CameraDriftSettings CameraDrift { get; init; } = new();
+
     public SmoothingAlgorithm SmoothingAlgorithm { get; init; } = SmoothingAlgorithm.ZeroPhaseSpring;
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
     public int OutputFps { get; init; } = 30;
@@ -245,6 +253,9 @@ public class FrameCompositor : IDisposable
         // Load cursor bitmap / geometry
         _cursorRenderer.StartTimestampTicks = mouseData.StartTimestampTicks;
         _cursorRenderer.TickFrequency = mouseData.TickFrequency;
+        // Needed by the shutter motion-blur path to convert relative velocity
+        // (px/s) into a per-frame travel distance.
+        _cursorRenderer.OutputFps = _config.OutputFps;
         await _cursorRenderer.LoadCursorAsync(_device);
 
         // Warm the background wallpaper so the synchronous composite path never blocks
@@ -465,16 +476,7 @@ public class FrameCompositor : IDisposable
             0, _smoothedPositions.Count - 1);
         var cursorPos = _smoothedPositions[cursorIndex];
 
-        // Get zoom state — use smoothed cursor position as center hint
-        // so the viewport always keeps the cursor in view
-        var zoomState = _zoomEngine.GetZoomState(timeSeconds);
-        if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
-        {
-            // Override zoom center with actual cursor position for auto segments.
-            // Manual segments keep their user-defined center.
-            zoomState = _zoomEngine.ComputeViewportForCenter(
-                zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
-        }
+        var zoomState = ResolveZoomState(timeSeconds);
 
         // Choose zoom path based on user-selected ZoomScope. Frame zoom (default)
         // operates on the entire composed canvas; Source zoom keeps the
@@ -486,6 +488,88 @@ public class FrameCompositor : IDisposable
         // No padding or no zoom — direct composition (fast path)
         return ComposeFrameDirect(
             sourceFrame, zoomState, cursorPos, cursorIndex, timeSeconds);
+    }
+
+    /// <summary>
+    /// Resolves the zoom/pan state for an arbitrary point in timeline time,
+    /// including the cursor-center override and continuous camera drift.
+    /// <para>
+    /// This is a <b>pure function of <paramref name="timeSeconds"/></b> — it reads
+    /// only stable per-clip state (smoothed cursor path, zoom engine, source
+    /// dimensions) and mutates nothing. That purity is what lets the shutter-blur
+    /// accumulation below sample several sub-frame times per output frame and get
+    /// exactly the same answer preview scrubbing, playback, and export would each
+    /// produce for that instant on their own.
+    /// </para>
+    /// </summary>
+    private ZoomState ResolveZoomState(double timeSeconds)
+    {
+        // Same cursor-index formula as ComposeFrame: mouse frame = (videoTime + offset) * fps.
+        int cursorIndex = Math.Clamp(
+            (int)Math.Round((timeSeconds + _mouseTimeOffset) * _config.OutputFps),
+            0, _smoothedPositions.Count - 1);
+        var cursorPos = _smoothedPositions[cursorIndex];
+
+        // Get zoom state — use smoothed cursor position as center hint
+        // so the viewport always keeps the cursor in view.
+        var zoomState = _zoomEngine.GetZoomState(timeSeconds);
+        if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
+        {
+            // Override zoom center with actual cursor position for auto segments.
+            // Manual segments keep their user-defined center.
+            // ComputeViewportForCenter returns a fresh state, so the segment identity
+            // has to be carried across by hand — losing it here would silently
+            // disable camera drift for every auto zoom, which is the common case.
+            var recentred = _zoomEngine.ComputeViewportForCenter(
+                zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
+            recentred.HasSegment = zoomState.HasSegment;
+            recentred.SegmentProgress = zoomState.SegmentProgress;
+            recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
+            recentred.SegmentHeadingY = zoomState.SegmentHeadingY;
+            zoomState = recentred;
+        }
+
+        return ApplyCameraDrift(zoomState, timeSeconds);
+    }
+
+    /// <summary>
+    /// Layers continuous "living camera" drift on top of an already-resolved zoom
+    /// state. No-ops for an un-zoomed frame (<see cref="CameraDrift.Window"/> is
+    /// exactly 0 at 1×), which is what guarantees drift never touches a frame
+    /// outside a zoom segment and a segment always returns to its exact original
+    /// framing as the zoom releases.
+    /// </summary>
+    private ZoomState ApplyCameraDrift(ZoomState zoomState, double timeSeconds)
+    {
+        if (!_config.CameraDrift.Enabled || zoomState.ZoomLevel <= 1f || !zoomState.HasSegment)
+            return zoomState;
+
+        var vp = _zoomEngine.ComputeViewportForCenter(
+            zoomState.ZoomLevel, zoomState.CenterX, zoomState.CenterY);
+
+        // Room left between the viewport and the nearer source edge on each axis —
+        // bounds the float layer so it can never push the viewport into the clamp,
+        // which would stall the motion dead instead of settling naturally.
+        float slackX = Math.Max(0f, Math.Min(vp.ViewportX, _sourceWidth - vp.ViewportX - vp.ViewportWidth));
+        float slackY = Math.Max(0f, Math.Min(vp.ViewportY, _sourceHeight - vp.ViewportY - vp.ViewportHeight));
+
+        var drift = Musio.Core.Processing.CameraDrift.Evaluate(
+            _config.CameraDrift, zoomState.SegmentProgress, zoomState.ZoomLevel,
+            vp.ViewportWidth, vp.ViewportHeight, slackX, slackY, zoomState.SegmentHeadingX, zoomState.SegmentHeadingY);
+        if (!drift.IsActive) return zoomState;
+
+        // ApplyZoom (never a plain multiply) preserves the 1x == 1x invariant.
+        float driftedZoom = Musio.Core.Processing.CameraDrift.ApplyZoom(zoomState.ZoomLevel, drift);
+        float cx = zoomState.CenterX + drift.OffsetX;
+        float cy = zoomState.CenterY + drift.OffsetY;
+
+        var drifted = _zoomEngine.ComputeViewportForCenter(driftedZoom, cx, cy);
+        drifted.IsManualOverride = zoomState.IsManualOverride;
+        drifted.HasSegment = zoomState.HasSegment;
+        drifted.SegmentProgress = zoomState.SegmentProgress;
+        drifted.SegmentHeadingX = zoomState.SegmentHeadingX;
+        drifted.SegmentHeadingY = zoomState.SegmentHeadingY;
+        return drifted;
     }
 
     /// <summary>
@@ -505,8 +589,14 @@ public class FrameCompositor : IDisposable
         // Adjust viewport for target aspect ratio (center-crop within viewport)
         var viewport = ComputeEffectiveViewport(zoomState);
 
-        // Crop source frame to the effective viewport, scaled to content dimensions
-        var croppedFrame = CropSourceFrame(sourceFrame, viewport);
+        // Crop source frame to the effective viewport, scaled to content dimensions.
+        // Only the cropped source content is candidate for blur here — the
+        // background/padding is unaffected, which is correct: in ZoomScope.Source
+        // only the source content itself zooms/pans.
+        var croppedFrame = CropSourceFrameWithMotionBlur(sourceFrame, viewport, timeSeconds);
+
+        // Camera velocity relative to the frame, for the cursor's own blur (Step E).
+        var cameraVelocity = ComputeCameraVelocityDirect(timeSeconds, viewport);
 
         // Create output render target
         var output = CreateRenderTarget(OutputWidth, OutputHeight, "direct composition output");
@@ -519,7 +609,8 @@ public class FrameCompositor : IDisposable
                 _config.Background);
 
             // Cursor overlay with position transformed to output space
-            RenderCursorOverlay(ds, cursorPos, viewport, timeSeconds, cursorIndex);
+            RenderCursorOverlay(
+                ds, cursorPos, viewport, timeSeconds, cursorIndex, _config.MotionBlur, cameraVelocity);
 
             // Webcam overlay
             if (_webcamCompositor is not null && _webcamFrame is not null)
@@ -565,7 +656,20 @@ public class FrameCompositor : IDisposable
         // 2. Crop source at 1x
         var croppedFrame = CropSourceFrame(sourceFrame, viewport1x);
 
-        // 3. Render 1x composite: background + content + cursor
+        // 3. Compute the frame-time crop rect up front — needed to pick interpolation
+        //    and to drive the shutter-blur accumulation below.
+        var frameCropRect = ComputeCompositeCropRect(zoomState, viewport1x);
+
+        // The cursor is drawn INTO the 1x composite buffer, so the shutter
+        // accumulation in step 5 already smears it by the camera's motion along with
+        // everything else in that buffer. Its own blur must therefore be its absolute
+        // velocity within the buffer, with no camera term: subtracting camera velocity
+        // here would double-count it. (The ZoomScope.Source path is the opposite case —
+        // there the cursor is drawn after the crop, in output space, so it does need
+        // the subtraction. See ComputeCameraVelocityDirect.)
+        var cursorCameraVelocity = Vector2.Zero;
+
+        // 4. Render 1x composite: background + content + cursor
         EnsureCompositeBuffer();
         using (var ds = _compositeBuffer!.CreateDrawingSession())
         {
@@ -574,34 +678,22 @@ public class FrameCompositor : IDisposable
                 ds, croppedFrame, OutputWidth, OutputHeight,
                 _sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight,
                 _config.Background);
-            RenderCursorOverlay(ds, cursorPos, viewport1x, timeSeconds, cursorIndex);
+            RenderCursorOverlay(
+                ds, cursorPos, viewport1x, timeSeconds, cursorIndex, _config.MotionBlur, cursorCameraVelocity);
         }
 
-        // 4. Compute zoom viewport in composite space. _sourceAreaOffsetX/Y already
-        //    includes user-padding plus any AR-fit gap, so no separate +padding.
-        float cx_comp = (float)((zoomState.CenterX - viewport1x.X)
-            * _sourceAreaWidth / viewport1x.Width + _sourceAreaOffsetX);
-        float cy_comp = (float)((zoomState.CenterY - viewport1x.Y)
-            * _sourceAreaHeight / viewport1x.Height + _sourceAreaOffsetY);
-        float cropW = OutputWidth / zoomState.ZoomLevel;
-        float cropH = OutputHeight / zoomState.ZoomLevel;
-        float cropX = Math.Clamp(
-            cx_comp - cropW / 2f, 0f, Math.Max(0f, OutputWidth - cropW));
-        float cropY = Math.Clamp(
-            cy_comp - cropH / 2f, 0f, Math.Max(0f, OutputHeight - cropH));
-
-        // 5. Draw zoomed composite + fixed overlays
+        // 5. Draw zoomed composite (shutter-blurred when the camera is moving
+        //    fast enough) + fixed overlays
         var output = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom output");
         using (var ds = output.CreateDrawingSession())
         {
             // Use high-quality interpolation only when zoomed; linear is cheaper at 1:1
-            var interpolation = (cropW < OutputWidth * 0.95f || cropH < OutputHeight * 0.95f)
+            var interpolation = (frameCropRect.Width < OutputWidth * 0.95
+                || frameCropRect.Height < OutputHeight * 0.95)
                 ? CanvasImageInterpolation.HighQualityCubic
                 : CanvasImageInterpolation.Linear;
-            ds.DrawImage(_compositeBuffer,
-                new Rect(0, 0, OutputWidth, OutputHeight),
-                new Rect(cropX, cropY, cropW, cropH),
-                1f, interpolation);
+
+            DrawCompositeWithMotionBlur(ds, viewport1x, frameCropRect, timeSeconds, interpolation);
 
             // Webcam overlay (fixed position, not zoomed)
             if (_webcamCompositor is not null && _webcamFrame is not null)
@@ -639,6 +731,214 @@ public class FrameCompositor : IDisposable
             _compositeBuffer = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom buffer");
         }
     }
+
+    #region Camera Motion Blur (shutter accumulation)
+
+    /// <summary>
+    /// Computes the zoomed crop rect (in <see cref="_compositeBuffer"/> pixel
+    /// space) for a given zoom state — the same math
+    /// <see cref="ComposeFramePostCompositeZoom"/> used to do inline, factored out
+    /// so the shutter-blur accumulation can re-evaluate it at several sub-frame times.
+    /// </summary>
+    private Rect ComputeCompositeCropRect(ZoomState zoomState, Rect viewport1x)
+    {
+        // _sourceAreaOffsetX/Y already includes user-padding plus any AR-fit gap,
+        // so no separate +padding is needed here.
+        float cxComp = (float)((zoomState.CenterX - viewport1x.X)
+            * _sourceAreaWidth / viewport1x.Width + _sourceAreaOffsetX);
+        float cyComp = (float)((zoomState.CenterY - viewport1x.Y)
+            * _sourceAreaHeight / viewport1x.Height + _sourceAreaOffsetY);
+        float cropW = OutputWidth / zoomState.ZoomLevel;
+        float cropH = OutputHeight / zoomState.ZoomLevel;
+        float cropX = Math.Clamp(
+            cxComp - cropW / 2f, 0f, Math.Max(0f, OutputWidth - cropW));
+        float cropY = Math.Clamp(
+            cyComp - cropH / 2f, 0f, Math.Max(0f, OutputHeight - cropH));
+        return new Rect(cropX, cropY, cropW, cropH);
+    }
+
+    /// <summary>
+    /// Maps a point in <see cref="_compositeBuffer"/> pixel space to output-canvas
+    /// pixel space through a given crop rect. This is exactly the inverse of the
+    /// crop-and-scale <see cref="Windows.Foundation.Rect"/> pair Win2D's
+    /// <c>DrawImage(dest, source)</c> overload applies.
+    /// </summary>
+    private Vector2 MapCompositeToOutput(Vector2 compositePoint, Rect cropRect)
+    {
+        return new Vector2(
+            (float)((compositePoint.X - cropRect.X) * (OutputWidth / cropRect.Width)),
+            (float)((compositePoint.Y - cropRect.Y) * (OutputHeight / cropRect.Height)));
+    }
+
+    /// <summary>
+    /// Maps a point in source-frame pixel space to output-canvas pixel space
+    /// through a given viewport, mirroring the transform
+    /// <see cref="RenderCursorOverlay"/> applies to the cursor position.
+    /// </summary>
+    private Vector2 MapSourcePointToOutput(Vector2 sourcePoint, Rect viewport)
+    {
+        float scaleX = (float)(_sourceAreaWidth / viewport.Width);
+        float scaleY = (float)(_sourceAreaHeight / viewport.Height);
+        return new Vector2(
+            (float)(sourcePoint.X - viewport.X) * scaleX + _sourceAreaOffsetX,
+            (float)(sourcePoint.Y - viewport.Y) * scaleY + _sourceAreaOffsetY);
+    }
+
+    /// <summary>
+    /// Estimates how far the camera swept across a shutter interval by mapping the
+    /// four corners of <paramref name="referenceRect"/> through the shutter-open
+    /// (<paramref name="mapStart"/>) and shutter-close (<paramref name="mapEnd"/>)
+    /// camera transforms and taking the largest displacement. Corners (not just the
+    /// centre) are what catch pure zoom motion — under a scale change alone the
+    /// centre barely moves, but the corners sweep a long way. The centre's own
+    /// displacement is reported separately as the pan component.
+    /// </summary>
+    private static (float maxCornerTravel, float panTravel) EstimateShutterTravel(
+        Rect referenceRect, Func<Vector2, Vector2> mapStart, Func<Vector2, Vector2> mapEnd)
+    {
+        Vector2 topLeft = new((float)referenceRect.X, (float)referenceRect.Y);
+        Vector2 topRight = new((float)(referenceRect.X + referenceRect.Width), (float)referenceRect.Y);
+        Vector2 bottomLeft = new((float)referenceRect.X, (float)(referenceRect.Y + referenceRect.Height));
+        Vector2 bottomRight = new(
+            (float)(referenceRect.X + referenceRect.Width), (float)(referenceRect.Y + referenceRect.Height));
+        Vector2 center = new(
+            (float)(referenceRect.X + referenceRect.Width / 2.0),
+            (float)(referenceRect.Y + referenceRect.Height / 2.0));
+
+        float maxCornerTravel = 0f;
+        foreach (var corner in new[] { topLeft, topRight, bottomLeft, bottomRight })
+            maxCornerTravel = Math.Max(maxCornerTravel, (mapEnd(corner) - mapStart(corner)).Length());
+
+        float panTravel = (mapEnd(center) - mapStart(center)).Length();
+        return (maxCornerTravel, panTravel);
+    }
+
+    /// <summary>
+    /// Blends the pan/zoom channel strengths by how much each contributed to the
+    /// estimated travel, then resolves how many shutter samples to average and how
+    /// much of the shutter interval to actually sweep. Scaling the shutter itself
+    /// (not just the sample count) is what makes e.g. <c>ZoomStrength = 0</c>
+    /// genuinely suppress zoom blur rather than just averaging fewer samples across
+    /// the same physical smear.
+    /// </summary>
+    private static (int sampleCount, double shutterSeconds) ResolveShutterSamples(
+        MotionBlurSettings motionBlur, double shutter, float maxCornerTravel, float panTravel)
+    {
+        float zoomTravel = Math.Max(0f, maxCornerTravel - panTravel);
+        const float epsilon = 1e-4f;
+        float channelScale = (panTravel * motionBlur.PanStrength + zoomTravel * motionBlur.ZoomStrength)
+            / Math.Max(epsilon, panTravel + zoomTravel);
+
+        float effectiveTravel = maxCornerTravel * channelScale;
+        int sampleCount = motionBlur.ResolveSampleCount(effectiveTravel);
+        double scaledShutter = shutter * channelScale;
+
+        // Never emit a smear we cannot sample smoothly. ResolveSampleCount caps at
+        // MaxSamples, so a fast camera would otherwise be rendered as a handful of
+        // widely-spaced copies — which on a small high-contrast element like the
+        // cursor reads as discrete duplicate pointers rather than as blur. When the
+        // travel exceeds what the available samples can cover at the target spacing,
+        // shorten the shutter instead of letting the samples spread apart: a slightly
+        // shorter blur is invisible, banding is not.
+        if (sampleCount > 1)
+        {
+            float renderableTravel = (sampleCount - 1) * Math.Max(0.25f, motionBlur.SampleSpacingPixels);
+            if (effectiveTravel > renderableTravel)
+                scaledShutter *= renderableTravel / effectiveTravel;
+        }
+
+        return (sampleCount, scaledShutter);
+    }
+
+    /// <summary>
+    /// Draws the 1x composite buffer into <paramref name="ds"/>, cropped/scaled to
+    /// <paramref name="frameCropRect"/>. When the camera travels far enough during
+    /// the virtual shutter interval, this instead averages several sub-frame crop
+    /// samples (temporal supersampling) rather than a single draw. That one
+    /// mechanism covers both zoom and pan motion — directional/Gaussian blur would
+    /// be physically wrong for the radial smear a zoom produces.
+    /// </summary>
+    private void DrawCompositeWithMotionBlur(
+        CanvasDrawingSession ds,
+        Rect viewport1x,
+        Rect frameCropRect,
+        double timeSeconds,
+        CanvasImageInterpolation interpolation)
+    {
+        var motionBlur = _config.MotionBlur;
+        double shutter = motionBlur.ShutterFraction / _config.OutputFps;
+        if (!motionBlur.Enabled || shutter <= 0)
+        {
+            ds.DrawImage(_compositeBuffer,
+                new Rect(0, 0, OutputWidth, OutputHeight), frameCropRect, 1f, interpolation);
+            return;
+        }
+
+        double halfShutter = shutter / 2.0;
+        var cropStart = ComputeCompositeCropRect(ResolveZoomState(timeSeconds - halfShutter), viewport1x);
+        var cropEnd = ComputeCompositeCropRect(ResolveZoomState(timeSeconds + halfShutter), viewport1x);
+
+        var compositeRect = new Rect(0, 0, OutputWidth, OutputHeight);
+        var (maxCornerTravel, panTravel) = EstimateShutterTravel(
+            compositeRect,
+            pt => MapCompositeToOutput(pt, cropStart),
+            pt => MapCompositeToOutput(pt, cropEnd));
+
+        var (sampleCount, shutterSeconds) = ResolveShutterSamples(motionBlur, shutter, maxCornerTravel, panTravel);
+        if (sampleCount <= 1)
+        {
+            ds.DrawImage(_compositeBuffer,
+                new Rect(0, 0, OutputWidth, OutputHeight), frameCropRect, 1f, interpolation);
+            return;
+        }
+
+        // Progressive averaging: drawing sample i at opacity 1/(i+1) makes ordinary
+        // source-over blending compute an exact running mean of the samples drawn
+        // so far — after k draws the buffer holds the average of the first k
+        // samples. A uniform 1/N opacity would under-cover and wash the frame out.
+        // (Valid here only because every sample covers the entire opaque canvas; see
+        // CursorRenderer, where sparse sprites need additive accumulation instead.)
+        //
+        // Samples use Linear interpolation regardless of the sharp-frame choice: the
+        // result is being averaged into a smear, so the extra bandwidth of
+        // HighQualityCubic buys nothing visible and multiplies the per-frame cost by
+        // the sample count — which is what made playback stutter during zooms.
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double sampleTime = timeSeconds + shutterSeconds * ((i + 0.5) / sampleCount - 0.5);
+            var sampleCrop = ComputeCompositeCropRect(ResolveZoomState(sampleTime), viewport1x);
+            ds.DrawImage(_compositeBuffer,
+                new Rect(0, 0, OutputWidth, OutputHeight), sampleCrop, 1f / (i + 1),
+                CanvasImageInterpolation.Linear);
+        }
+    }
+
+    /// <summary>
+    /// Camera velocity in output-canvas pixels/second for the direct composition
+    /// path (<see cref="ZoomScope.Source"/> and unzoomed frames). Here the cursor is
+    /// drawn onto the output <i>after</i> the source crop, so — unlike the
+    /// post-composite zoom path, where the cursor rides inside the buffer being
+    /// blurred — nothing else smears it by the camera's motion. Subtracting this
+    /// from the cursor's own velocity is what keeps a cursor that the camera is
+    /// panning to follow looking sharp, since it is barely moving on screen.
+    /// </summary>
+    private Vector2 ComputeCameraVelocityDirect(double timeSeconds, Rect viewport)
+    {
+        if (timeSeconds <= 0) return Vector2.Zero;
+
+        double prevTime = timeSeconds - 1.0 / _config.OutputFps;
+        var prevViewport = ComputeEffectiveViewport(ResolveZoomState(prevTime));
+
+        var point = new Vector2(
+            (float)(viewport.X + viewport.Width / 2.0),
+            (float)(viewport.Y + viewport.Height / 2.0));
+
+        var mappedNow = MapSourcePointToOutput(point, viewport);
+        var mappedPrev = MapSourcePointToOutput(point, prevViewport);
+        return (mappedNow - mappedPrev) * (float)_config.OutputFps;
+    }
+
+    #endregion
 
     private void PreflightRenderTargetMemory()
     {
@@ -850,6 +1150,68 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private CanvasRenderTarget CropSourceFrame(CanvasBitmap source, Rect viewport)
     {
+        EnsureCroppedBuffer();
+        var interpolation = ResolveCropInterpolation(source, viewport);
+
+        using var ds = _croppedBuffer!.CreateDrawingSession();
+        ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+        DrawSourceCropSample(ds, source, viewport, interpolation, 1f);
+        return _croppedBuffer;
+    }
+
+    /// <summary>
+    /// Like <see cref="CropSourceFrame"/>, but when the camera (viewport) travels
+    /// far enough during the virtual shutter interval, averages several sub-frame
+    /// viewport samples into the buffer instead of drawing once. Used only by the
+    /// direct composition path (<see cref="ZoomScope.Source"/>, or an unzoomed
+    /// frame): only the cropped source content is blurred here, since in this
+    /// scope the background/padding never zooms or pans in the first place.
+    /// </summary>
+    private CanvasRenderTarget CropSourceFrameWithMotionBlur(CanvasBitmap source, Rect viewport, double timeSeconds)
+    {
+        var motionBlur = _config.MotionBlur;
+        double shutter = motionBlur.ShutterFraction / _config.OutputFps;
+        if (!motionBlur.Enabled || shutter <= 0)
+            return CropSourceFrame(source, viewport);
+
+        double halfShutter = shutter / 2.0;
+        var viewportStart = ComputeEffectiveViewport(ResolveZoomState(timeSeconds - halfShutter));
+        var viewportEnd = ComputeEffectiveViewport(ResolveZoomState(timeSeconds + halfShutter));
+
+        var (maxCornerTravel, panTravel) = EstimateShutterTravel(
+            viewport,
+            pt => MapSourcePointToOutput(pt, viewportStart),
+            pt => MapSourcePointToOutput(pt, viewportEnd));
+
+        var (sampleCount, shutterSeconds) = ResolveShutterSamples(motionBlur, shutter, maxCornerTravel, panTravel);
+        if (sampleCount <= 1)
+            return CropSourceFrame(source, viewport);
+
+        EnsureCroppedBuffer();
+
+        using var ds = _croppedBuffer!.CreateDrawingSession();
+        ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+
+        // Progressive averaging — see DrawCompositeWithMotionBlur for why 1/(i+1)
+        // (not a uniform 1/N) opacity gives an exact running mean. Samples use Linear
+        // rather than the sharp-path interpolation for the same reason as there: the
+        // result is a smear, so the cost of HighQualityCubic per sample buys nothing.
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double sampleTime = timeSeconds + shutterSeconds * ((i + 0.5) / sampleCount - 0.5);
+            var sampleViewport = ComputeEffectiveViewport(ResolveZoomState(sampleTime));
+            DrawSourceCropSample(ds, source, sampleViewport, CanvasImageInterpolation.Linear, 1f / (i + 1));
+        }
+
+        return _croppedBuffer;
+    }
+
+    /// <summary>
+    /// Ensures the reusable source-crop buffer is allocated at the current
+    /// source-area dimensions.
+    /// </summary>
+    private void EnsureCroppedBuffer()
+    {
         if (_croppedBuffer is null
             || _croppedBuffer.SizeInPixels.Width != (uint)_sourceAreaWidth
             || _croppedBuffer.SizeInPixels.Height != (uint)_sourceAreaHeight)
@@ -858,22 +1220,20 @@ public class FrameCompositor : IDisposable
             _croppedBuffer = null;
             _croppedBuffer = CreateRenderTarget(_sourceAreaWidth, _sourceAreaHeight, "source crop buffer");
         }
+    }
 
-        // Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
-        // significantly more expensive than Linear. It only meaningfully improves
-        // quality when actually resampling (zoom in/out or aspect-ratio crop with
-        // non-unit scale). At ~1:1 the bicubic filter produces output essentially
-        // identical to Linear, so use the cheaper path. Use the same explicit
-        // near-unit threshold form as ComposeFramePostCompositeZoom so the two
-        // paths stay aligned over time.
-        double bitmapScaleX = source.SizeInPixels.Width / (double)_sourceWidth;
-        double bitmapScaleY = source.SizeInPixels.Height / (double)_sourceHeight;
-        var bitmapViewport = new Rect(
-            viewport.X * bitmapScaleX,
-            viewport.Y * bitmapScaleY,
-            viewport.Width * bitmapScaleX,
-            viewport.Height * bitmapScaleY);
-
+    /// <summary>
+    /// Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
+    /// significantly more expensive than Linear. It only meaningfully improves
+    /// quality when actually resampling (zoom in/out or aspect-ratio crop with
+    /// non-unit scale). At ~1:1 the bicubic filter produces output essentially
+    /// identical to Linear, so use the cheaper path. Use the same explicit
+    /// near-unit threshold form as ComposeFramePostCompositeZoom so the two
+    /// paths stay aligned over time.
+    /// </summary>
+    private CanvasImageInterpolation ResolveCropInterpolation(CanvasBitmap source, Rect viewport)
+    {
+        var bitmapViewport = ToBitmapViewport(source, viewport);
         double scaleX = _sourceAreaWidth / bitmapViewport.Width;
         double scaleY = _sourceAreaHeight / bitmapViewport.Height;
         const double nearUnitScaleMinimum = 0.95;
@@ -881,18 +1241,41 @@ public class FrameCompositor : IDisposable
         bool nearUnitScale =
             scaleX >= nearUnitScaleMinimum && scaleX <= nearUnitScaleMaximum &&
             scaleY >= nearUnitScaleMinimum && scaleY <= nearUnitScaleMaximum;
-        var interpolation = nearUnitScale
+        return nearUnitScale
             ? CanvasImageInterpolation.Linear
             : CanvasImageInterpolation.HighQualityCubic;
+    }
 
-        using var ds = _croppedBuffer.CreateDrawingSession();
-        ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
-
+    /// <summary>
+    /// Draws one viewport sample of the source bitmap into the crop buffer at the
+    /// given opacity. Shared by the single-draw path and the shutter-blur
+    /// accumulation, which calls this once per sub-frame sample.
+    /// </summary>
+    private void DrawSourceCropSample(
+        CanvasDrawingSession ds, CanvasBitmap source, Rect viewport,
+        CanvasImageInterpolation interpolation, float opacity)
+    {
+        var bitmapViewport = ToBitmapViewport(source, viewport);
         ds.DrawImage(source,
             new Rect(0, 0, _sourceAreaWidth, _sourceAreaHeight),
             bitmapViewport,
-            1f, interpolation);
-        return _croppedBuffer;
+            opacity, interpolation);
+    }
+
+    /// <summary>
+    /// Converts a viewport expressed in logical source pixels to the source
+    /// bitmap's own pixel space (they can differ, e.g. preview's reduced-resolution
+    /// frame source vs full-resolution export).
+    /// </summary>
+    private Rect ToBitmapViewport(CanvasBitmap source, Rect viewport)
+    {
+        double bitmapScaleX = source.SizeInPixels.Width / (double)_sourceWidth;
+        double bitmapScaleY = source.SizeInPixels.Height / (double)_sourceHeight;
+        return new Rect(
+            viewport.X * bitmapScaleX,
+            viewport.Y * bitmapScaleY,
+            viewport.Width * bitmapScaleX,
+            viewport.Height * bitmapScaleY);
     }
 
     #endregion
@@ -904,7 +1287,9 @@ public class FrameCompositor : IDisposable
         SmoothedPosition cursorPos,
         Rect viewport,
         double timeSeconds,
-        int frameIndex)
+        int frameIndex,
+        MotionBlurSettings? motionBlur = null,
+        Vector2 cameraVelocity = default)
     {
         // Scale factors from source-viewport space → output (canvas) space.
         // Source area is positioned at (_sourceAreaOffsetX, _sourceAreaOffsetY) in the
@@ -928,7 +1313,8 @@ public class FrameCompositor : IDisposable
 
         double lastMoveTime = _lastMoveTimes[frameIndex];
 
-        _cursorRenderer.RenderFrame(session, transformedPos, activeClicks, timeSeconds, lastMoveTime);
+        _cursorRenderer.RenderFrame(
+            session, transformedPos, activeClicks, timeSeconds, lastMoveTime, motionBlur, cameraVelocity);
     }
 
     /// <summary>

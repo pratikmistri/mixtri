@@ -3,6 +3,7 @@ using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Geometry;
 using Musio.Core.Models;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Windows.Foundation;
 using Windows.UI;
 
@@ -43,11 +44,26 @@ public class CursorRenderer : IDisposable
     /// <summary>Tick frequency from the recording (from MouseRecordingData.TickFrequency).</summary>
     public double TickFrequency { get; set; } = 1.0;
 
+    /// <summary>
+    /// Output video frame rate, used to convert the shutter model's fractional-frame
+    /// blur interval into a pixel travel distance. Set by <see cref="FrameCompositor"/>;
+    /// defaults to 30 as a safe fallback for callers that never set it.
+    /// </summary>
+    public double OutputFps { get; set; } = 30.0;
+
     private const float ClickDownDurationSeconds = 0.04f;    // 40ms snap down
     private const float ClickUpDurationSeconds = 0.11f;     // 110ms bouncy spring back
     private const float ClickDownScale = 0.55f;             // scale to 55% on press
     private const float MotionBlurVelocityThreshold = 200f; // px/s
     private const int MotionBlurGhostCount = 4;
+
+    // Scratch render target for shutter-based cursor blur (progressive-average
+    // compositing). Cached and grown-only, like FrameCompositor's buffers.
+    private CanvasRenderTarget? _shutterBlurScratch;
+    private const int ShutterBlurMaxDimension = 2048;
+    private const long ShutterBlurMaxArea = (long)ShutterBlurMaxDimension * ShutterBlurMaxDimension;
+    private const float ShutterBlurSizeQuantum = 64f; // round scratch target up to reduce reallocation churn
+    private const float ShutterBlurFootprintUnscaled = 32f; // conservative cursor half-extent at scale=1, in glyph-space px
 
     public CursorRenderer(CursorStyle style)
     {
@@ -111,12 +127,24 @@ public class CursorRenderer : IDisposable
     /// <summary>
     /// Render cursor at a specific frame with click animations and effects.
     /// </summary>
+    /// <param name="motionBlur">
+    /// Global shutter-based motion blur settings. When null, the legacy
+    /// <see cref="CursorStyle.MotionBlurEnabled"/> ghost-trail behaviour is used.
+    /// </param>
+    /// <param name="cameraVelocity">
+    /// Velocity of the camera itself, in <b>output canvas</b> pixels/second. The cursor
+    /// must be blurred by its velocity <i>relative to the frame</i>: while the camera
+    /// pans to follow the cursor, the cursor is nearly stationary on screen and should
+    /// stay sharp even though its absolute velocity is high.
+    /// </param>
     public void RenderFrame(
         CanvasDrawingSession session,
         SmoothedPosition position,
         List<ClickEvent> activeClicks,
         double currentTimeSeconds,
-        double lastMoveTimeSeconds)
+        double lastMoveTimeSeconds,
+        MotionBlurSettings? motionBlur = null,
+        Vector2 cameraVelocity = default)
     {
         // Touch cursor: render at click positions only (float up, tap, fade out)
         if (_style.Type == CursorType.Touch)
@@ -137,14 +165,25 @@ public class CursorRenderer : IDisposable
 
         float finalScale = Math.Clamp(_style.Scale, 1.0f, 6.0f) * clickScale;
 
-        // Motion blur ghosts (drawn behind cursor)
-        if (_style.MotionBlurEnabled)
+        // Compute velocity-based tilt for cinematic feel
+        float tiltAngle = _style.TiltEnabled ? ComputeTiltAngle(position) : 0f;
+
+        // The scene-level shutter model (motionBlur != null) is the new master switch and
+        // takes precedence over CursorStyle.MotionBlurEnabled; when it's active it fully
+        // replaces the main cursor draw with a set of shutter samples averaged together.
+        // When motionBlur is null (legacy callers/tests), preserve today's ghost-trail exactly.
+        bool useShutterBlur = motionBlur is not null && motionBlur.Enabled && motionBlur.CursorStrength > 0f;
+        if (useShutterBlur)
+        {
+            RenderShutterMotionBlur(session, position, finalScale, autoHideOpacity, tiltAngle, motionBlur!, cameraVelocity);
+            return;
+        }
+
+        // Legacy ghost-trail motion blur (drawn behind cursor)
+        if (motionBlur is null && _style.MotionBlurEnabled)
         {
             RenderMotionBlur(session, position, finalScale, autoHideOpacity);
         }
-
-        // Compute velocity-based tilt for cinematic feel
-        float tiltAngle = _style.TiltEnabled ? ComputeTiltAngle(position) : 0f;
 
         // Main cursor
         RenderCursor(session, x, y, finalScale, autoHideOpacity, tiltAngle, position.Shape);
@@ -406,6 +445,187 @@ public class CursorRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Shutter-model cursor blur: the cursor is blurred by its velocity <i>relative to
+    /// the frame</i> (own velocity minus camera velocity), over a symmetric interval
+    /// centred on the actual position, exactly mirroring the screen-blur shutter math
+    /// (<see cref="MotionBlurSettings.ShutterFraction"/> / <see cref="MotionBlurSettings.ResolveSampleCount"/>).
+    /// </summary>
+    private void RenderShutterMotionBlur(
+        CanvasDrawingSession session, SmoothedPosition position,
+        float scale, float opacity, float tiltAngle,
+        MotionBlurSettings settings, Vector2 cameraVelocity)
+    {
+        float x = (float)position.X;
+        float y = (float)position.Y;
+        CursorShape shape = position.Shape;
+
+        float vx = SanitizeVelocityComponent(position.VelocityX);
+        float vy = SanitizeVelocityComponent(position.VelocityY);
+        float cvx = SanitizeVelocityComponent(cameraVelocity.X);
+        float cvy = SanitizeVelocityComponent(cameraVelocity.Y);
+
+        // Relative velocity: while the camera pans to follow the cursor, the cursor is
+        // nearly stationary on screen and must stay sharp despite high absolute velocity.
+        var relativeVelocity = new Vector2(vx - cvx, vy - cvy);
+        float speed = relativeVelocity.Length();
+
+        double fps = OutputFps > 0.0 && double.IsFinite(OutputFps) ? OutputFps : 30.0;
+
+        float travel = 0f;
+        if (speed > 0f)
+        {
+            travel = (float)(speed * settings.ShutterFraction / fps);
+            travel *= Math.Clamp(settings.CursorStrength, 0f, 4f);
+        }
+        if (!float.IsFinite(travel) || travel < 0f) travel = 0f;
+
+        int sampleCount = settings.ResolveSampleCount(travel);
+        if (sampleCount <= 1)
+        {
+            RenderCursor(session, x, y, scale, opacity, tiltAngle, shape);
+            return;
+        }
+
+        // Never smear further than the available samples can cover at the target
+        // spacing. ResolveSampleCount caps at MaxSamples, so a fast cursor would
+        // otherwise be drawn as a few widely-spaced copies — which on a small,
+        // high-contrast, hard-edged sprite like a pointer reads as a second faded
+        // cursor sitting behind the real one, not as motion blur. Clamping the
+        // travel shortens the smear slightly; that is far less noticeable than
+        // duplicate pointers.
+        float maxSmoothTravel = (sampleCount - 1) * Math.Max(0.25f, settings.SampleSpacingPixels);
+        if (travel > maxSmoothTravel) travel = maxSmoothTravel;
+
+        // Samples span -travel/2 .. +travel/2 along the relative-velocity direction,
+        // centred on the frame time — a real shutter integrates leading and trailing
+        // motion, not just a trailing comet tail.
+        Vector2 direction = relativeVelocity / speed;
+        Vector2 center = new(x, y);
+        Vector2 start = center - direction * (travel / 2f);
+        Vector2 step = direction * (travel / (sampleCount - 1));
+
+        if (!TryRenderShutterSamplesViaScratch(session, start, step, sampleCount, scale, opacity, tiltAngle, shape))
+        {
+            // Fallback: draw the samples straight onto the session. Overlapping source-over
+            // draws will look slightly washed out, but this only triggers when the scratch
+            // target can't be allocated or the swept area is implausibly large.
+            float ghostOpacity = opacity / sampleCount;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                Vector2 samplePos = start + step * i;
+                RenderCursor(session, samplePos.X, samplePos.Y, scale, ghostOpacity, tiltAngle, shape);
+            }
+        }
+    }
+
+    private static float SanitizeVelocityComponent(double value)
+    {
+        float v = (float)value;
+        return float.IsFinite(v) ? v : 0f;
+    }
+
+    /// <summary>
+    /// Renders <paramref name="sampleCount"/> cursor copies into a cached scratch render
+    /// target, accumulated <b>additively</b> at <c>1/N</c> opacity each so the target holds
+    /// the exact per-pixel mean of the samples — precisely what a shutter integrates. The
+    /// averaged result is then drawn onto <paramref name="session"/> once at the frame's
+    /// opacity, so overlapping samples composite as a single coherent sprite rather than
+    /// compounding into a washed-out stack.
+    /// Returns <c>false</c> (having drawn nothing) if the scratch target could not be used,
+    /// so the caller can fall back to direct compositing.
+    /// </summary>
+    private bool TryRenderShutterSamplesViaScratch(
+        CanvasDrawingSession session, Vector2 start, Vector2 step, int sampleCount,
+        float scale, float opacity, float tiltAngle, CursorShape shape)
+    {
+        Vector2 end = start + step * (sampleCount - 1);
+        float footprint = GetCursorFootprintRadius(scale) + 4f; // small margin
+
+        float left = Math.Min(start.X, end.X) - footprint;
+        float top = Math.Min(start.Y, end.Y) - footprint;
+        float right = Math.Max(start.X, end.X) + footprint;
+        float bottom = Math.Max(start.Y, end.Y) + footprint;
+
+        float neededWidth = Math.Max(1f, right - left);
+        float neededHeight = Math.Max(1f, bottom - top);
+
+        int targetWidth = (int)(Math.Ceiling(neededWidth / ShutterBlurSizeQuantum) * ShutterBlurSizeQuantum);
+        int targetHeight = (int)(Math.Ceiling(neededHeight / ShutterBlurSizeQuantum) * ShutterBlurSizeQuantum);
+
+        if (targetWidth > ShutterBlurMaxDimension || targetHeight > ShutterBlurMaxDimension
+            || (long)targetWidth * targetHeight > ShutterBlurMaxArea)
+        {
+            return false;
+        }
+
+        if (_shutterBlurScratch is null
+            || _shutterBlurScratch.SizeInPixels.Width < (uint)targetWidth
+            || _shutterBlurScratch.SizeInPixels.Height < (uint)targetHeight)
+        {
+            _shutterBlurScratch?.Dispose();
+            _shutterBlurScratch = null;
+            try
+            {
+                _shutterBlurScratch = new CanvasRenderTarget(session.Device, targetWidth, targetHeight, 96);
+            }
+            catch (Exception ex) when (ex is OutOfMemoryException or COMException)
+            {
+                _shutterBlurScratch = null;
+                return false;
+            }
+        }
+
+        uint bufferWidth = _shutterBlurScratch.SizeInPixels.Width;
+        uint bufferHeight = _shutterBlurScratch.SizeInPixels.Height;
+
+        using (var scratchSession = _shutterBlurScratch.CreateDrawingSession())
+        {
+            scratchSession.Clear(Color.FromArgb(0, 0, 0, 0));
+
+            // Additive blending, each sample at 1/N, accumulates exactly (1/N) * sum(sample_i)
+            // in premultiplied space — a true per-pixel mean, which is what a shutter
+            // integrates. The obvious alternative of progressive 1/(i+1) opacities with
+            // ordinary source-over does NOT work for sprites: source-over leaves a pixel
+            // untouched wherever the incoming sample has zero alpha, so a pixel covered only
+            // by an early sample keeps that sample's full opacity forever. That renders the
+            // leading end of the sweep as a hard, solid cursor instead of a faint ghost —
+            // precisely at the high speeds this effect exists for. (That trick is valid in
+            // the frame compositor only because every sample there covers the whole canvas.)
+            scratchSession.Blend = CanvasBlend.Add;
+            float sampleOpacity = 1f / sampleCount;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                Vector2 samplePos = start + step * i;
+                RenderCursor(scratchSession, samplePos.X - left, samplePos.Y - top, scale, sampleOpacity, tiltAngle, shape);
+            }
+        }
+
+        session.DrawImage(
+            _shutterBlurScratch,
+            new Rect(left, top, bufferWidth, bufferHeight),
+            new Rect(0, 0, bufferWidth, bufferHeight),
+            opacity);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Conservative half-extent of a rendered cursor around its hotspot, used to size the
+    /// shutter-blur scratch target. Vector glyphs are normalized to ~26-30px; bitmap
+    /// cursors are drawn from the hotspot without centering, so their full extent is used.
+    /// </summary>
+    private float GetCursorFootprintRadius(float scale)
+    {
+        if (_cursorBitmap != null && _style.Type == CursorType.Custom)
+        {
+            float w = (float)_cursorBitmap.Size.Width * scale;
+            float h = (float)_cursorBitmap.Size.Height * scale;
+            return MathF.Max(w, h);
+        }
+        return ShutterBlurFootprintUnscaled * scale;
+    }
+
     #endregion
 
     #region Auto-Hide
@@ -626,5 +846,7 @@ public class CursorRenderer : IDisposable
         _defaultCursorGeometry?.Dispose();
         _defaultCursorGeometry = null;
         DisposeGlyphs();
+        _shutterBlurScratch?.Dispose();
+        _shutterBlurScratch = null;
     }
 }

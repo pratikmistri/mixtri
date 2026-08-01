@@ -27,6 +27,30 @@ public struct ZoomState
     public float ViewportHeight;
     /// <summary>True when the zoom center comes from a manual keyframe and should not be overridden.</summary>
     public bool IsManualOverride;
+
+    /// <summary>True when a zoom segment (auto or manual) is active at this instant.</summary>
+    public bool HasSegment;
+
+    /// <summary>
+    /// Normalized progress <c>[0,1]</c> through the active zoom, blended across
+    /// overlapping segments by the same activation weights used for the focal point.
+    /// Camera drift is driven from this rather than from absolute time: a segment
+    /// lasts only a few seconds, so an absolute-time oscillator can sit on a
+    /// stationary point for the entire hold and leave the camera visibly parked.
+    /// </summary>
+    public float SegmentProgress;
+
+    /// <summary>
+    /// Drift heading for the active zoom, as a vector so overlapping segments can be
+    /// blended component-wise (averaging raw angles breaks across the ±π wrap). Like
+    /// the focal point, it is weight-blended rather than snapped to whichever segment
+    /// currently has the highest zoom — overlapping auto-zooms are common, and a
+    /// snap here would jerk the camera mid-drift.
+    /// </summary>
+    public float SegmentHeadingX;
+
+    /// <summary>Y component of <see cref="SegmentHeadingX"/>'s heading vector.</summary>
+    public float SegmentHeadingY;
 }
 
 public class AutoZoomEngine
@@ -224,6 +248,21 @@ public class AutoZoomEngine
     }
 
     /// <summary>
+    /// Result of evaluating the zoom timeline at one instant: the resolved zoom and
+    /// focal point, plus the drift parameters of the segments contributing to it.
+    /// </summary>
+    private readonly record struct ZoomEvaluation(
+        float Zoom, float CenterX, float CenterY,
+        bool HasSegment, float SegmentProgress, float HeadingX, float HeadingY);
+
+    /// <summary>
+    /// Builds a stable, process-independent seed from a segment's start time, so the
+    /// same segment always drifts the same way in preview and in export.
+    /// </summary>
+    private static int SegmentSeedFromStart(double startSeconds)
+        => (int)Math.Round(startSeconds * 1000.0);
+
+    /// <summary>
     /// Get the zoom state at any timestamp. Manual keyframes override auto-zoom.
     /// </summary>
     public ZoomState GetZoomState(double timeSeconds)
@@ -241,7 +280,7 @@ public class AutoZoomEngine
         return ComputeViewport(autoResult);
     }
 
-    private (float zoom, float cx, float cy)? EvaluateManualKeyframes(double timeSeconds)
+    private ZoomEvaluation? EvaluateManualKeyframes(double timeSeconds)
     {
         // When multiple keyframes overlap (e.g. A zooming out while B zooms in),
         // use max-zoom for the zoom level but blend centers by each keyframe's
@@ -259,6 +298,12 @@ public class AutoZoomEngine
         // segment is active (since bestZoom starts at -inf).
         float fallbackCx = _sourceWidth / 2f;
         float fallbackCy = _sourceHeight / 2f;
+        float fallbackProgress = 0f;
+        float fallbackHeadingX = 1f;
+        float fallbackHeadingY = 0f;
+        double progressSum = 0.0;
+        double headingXSum = 0.0;
+        double headingYSum = 0.0;
 
         foreach (var kf in _manualKeyframes)
         {
@@ -299,33 +344,52 @@ public class AutoZoomEngine
             cxSum += w * cx;
             cySum += w * cy;
 
+            // Blend drift parameters by the same activation weight as the focal point,
+            // so an overlap hands over smoothly instead of snapping.
+            float segProgress = postEnd > preStart
+                ? (float)Math.Clamp((timeSeconds - preStart) / (postEnd - preStart), 0.0, 1.0)
+                : 0f;
+            var (hx, hy) = CameraDrift.HeadingFromSeed(SegmentSeedFromStart(preStart));
+            progressSum += w * segProgress;
+            headingXSum += w * hx;
+            headingYSum += w * hy;
+
             if (zoom > bestZoom)
             {
                 bestZoom = zoom;
                 fallbackCx = cx;
                 fallbackCy = cy;
+                fallbackProgress = segProgress;
+                fallbackHeadingX = hx;
+                fallbackHeadingY = hy;
             }
         }
 
         if (!anyActive)
             return null;
 
-        float outCx, outCy;
+        float outCx, outCy, outProgress, outHeadingX, outHeadingY;
         if (weightSum > 1e-6)
         {
             outCx = (float)(cxSum / weightSum);
             outCy = (float)(cySum / weightSum);
+            outProgress = (float)(progressSum / weightSum);
+            outHeadingX = (float)(headingXSum / weightSum);
+            outHeadingY = (float)(headingYSum / weightSum);
         }
         else
         {
             outCx = fallbackCx;
             outCy = fallbackCy;
+            outProgress = fallbackProgress;
+            outHeadingX = fallbackHeadingX;
+            outHeadingY = fallbackHeadingY;
         }
 
-        return (bestZoom, outCx, outCy);
+        return new ZoomEvaluation(bestZoom, outCx, outCy, true, outProgress, outHeadingX, outHeadingY);
     }
 
-    private (float zoom, float cx, float cy) EvaluateAutoSegments(double timeSeconds)
+    private ZoomEvaluation EvaluateAutoSegments(double timeSeconds)
     {
         // Same strategy as manual keyframes: max zoom for level, weighted
         // average for center to avoid focal-point snaps across overlapping
@@ -333,6 +397,13 @@ public class AutoZoomEngine
         float bestZoom = 1.0f;
         float fallbackCx = _sourceWidth / 2f;
         float fallbackCy = _sourceHeight / 2f;
+        float fallbackProgress = 0f;
+        float fallbackHeadingX = 1f;
+        float fallbackHeadingY = 0f;
+        double progressSum = 0.0;
+        double headingXSum = 0.0;
+        double headingYSum = 0.0;
+        bool anySegment = false;
         double weightSum = 0.0;
         double cxSum = 0.0;
         double cySum = 0.0;
@@ -365,27 +436,59 @@ public class AutoZoomEngine
             cxSum += w * seg.CenterX;
             cySum += w * seg.CenterY;
 
-            if (zoom > bestZoom)
+            // Blend drift parameters by the same activation weight as the focal point.
+            // Overlapping auto-zooms are common (clicks can be as little as 0.5s apart
+            // while a segment spans ~3.9s), so snapping these to whichever segment
+            // currently has the highest zoom would visibly jerk the camera.
+            float segProgress = seg.ZoomOutEnd > seg.ZoomInStart
+                ? (float)Math.Clamp(
+                    (timeSeconds - seg.ZoomInStart) / (seg.ZoomOutEnd - seg.ZoomInStart), 0.0, 1.0)
+                : 0f;
+            var (hx, hy) = CameraDrift.HeadingFromSeed(SegmentSeedFromStart(seg.ZoomInStart));
+            progressSum += w * segProgress;
+            headingXSum += w * hx;
+            headingYSum += w * hy;
+
+            // Seed the fallback from the first in-range segment, not just the first one
+            // to beat the zoom floor: at a segment's very edge every weight is 0, and
+            // without this the fallback would report a default heading instead of this
+            // segment's own.
+            bool firstInRange = !anySegment;
+            anySegment = true;
+
+            if (firstInRange || zoom > bestZoom)
             {
-                bestZoom = zoom;
                 fallbackCx = seg.CenterX;
                 fallbackCy = seg.CenterY;
+                fallbackProgress = segProgress;
+                fallbackHeadingX = hx;
+                fallbackHeadingY = hy;
             }
+
+            if (zoom > bestZoom)
+                bestZoom = zoom;
         }
 
-        float outCx, outCy;
+        float outCx, outCy, outProgress, outHeadingX, outHeadingY;
         if (weightSum > 1e-6)
         {
             outCx = (float)(cxSum / weightSum);
             outCy = (float)(cySum / weightSum);
+            outProgress = (float)(progressSum / weightSum);
+            outHeadingX = (float)(headingXSum / weightSum);
+            outHeadingY = (float)(headingYSum / weightSum);
         }
         else
         {
             outCx = fallbackCx;
             outCy = fallbackCy;
+            outProgress = fallbackProgress;
+            outHeadingX = fallbackHeadingX;
+            outHeadingY = fallbackHeadingY;
         }
 
-        return (bestZoom, outCx, outCy);
+        return new ZoomEvaluation(
+            bestZoom, outCx, outCy, anySegment, outProgress, outHeadingX, outHeadingY);
     }
 
     /// <summary>
@@ -485,8 +588,15 @@ public class AutoZoomEngine
     /// <summary>
     /// Compute the visible viewport rectangle from zoom level and center, clamped to source bounds.
     /// </summary>
-    private ZoomState ComputeViewport((float zoom, float cx, float cy) state)
-        => ComputeViewportForCenter(state.zoom, state.cx, state.cy);
+    private ZoomState ComputeViewport(ZoomEvaluation evaluation)
+    {
+        var state = ComputeViewportForCenter(evaluation.Zoom, evaluation.CenterX, evaluation.CenterY);
+        state.HasSegment = evaluation.HasSegment;
+        state.SegmentProgress = evaluation.SegmentProgress;
+        state.SegmentHeadingX = evaluation.HeadingX;
+        state.SegmentHeadingY = evaluation.HeadingY;
+        return state;
+    }
 
     /// <summary>
     /// Public API: compute viewport for a given zoom level and center point.

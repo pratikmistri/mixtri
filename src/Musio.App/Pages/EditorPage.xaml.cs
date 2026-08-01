@@ -173,6 +173,10 @@ public sealed partial class EditorPage : Page
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
 
+    // Motion (motion blur / camera drift) editing state — separate debounce timer so a
+    // slider drag on these controls doesn't interact with the background-style debounce.
+    private DispatcherTimer? _motionDebounceTimer;
+
     // Cursor style editing state
     private DispatcherTimer? _cursorDebounceTimer;
     private bool _suppressCursorEvents;
@@ -377,6 +381,8 @@ public sealed partial class EditorPage : Page
             _styleDebounceTimer = null;
             _cursorDebounceTimer?.Stop();
             _cursorDebounceTimer = null;
+            _motionDebounceTimer?.Stop();
+            _motionDebounceTimer = null;
 
             // Stop playback to halt timer ticks
             Preview.Pause();
@@ -610,6 +616,7 @@ public sealed partial class EditorPage : Page
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
         _styleDebounceTimer?.Stop();
+        _motionDebounceTimer?.Stop();
         ReleaseCrossfadeOutgoing();
         _frameReader = null;
         _previewRenderer = null;
@@ -3856,6 +3863,19 @@ public sealed partial class EditorPage : Page
             ShadowToggle.IsOn = bg.ShadowEnabled;
             BorderToggle.IsOn = bg.BorderEnabled;
 
+            // Motion blur / camera drift live on CompositionConfig, not on BackgroundStyle,
+            // so they're read straight from the current composition (falling back to record
+            // defaults) rather than from the `bg` parameter passed in here.
+            var motionConfig = ProjectService.Instance.CurrentComposition;
+            var motionBlur = motionConfig?.MotionBlur ?? new MotionBlurSettings();
+            var cameraDrift = motionConfig?.CameraDrift ?? new CameraDriftSettings();
+            MotionBlurToggle.IsOn = motionBlur.Enabled;
+            MotionBlurSlider.Value = motionBlur.Strength * 100.0;
+            MotionBlurSlider.IsEnabled = motionBlur.Enabled;
+            CameraDriftToggle.IsOn = cameraDrift.Enabled;
+            CameraDriftSlider.Value = cameraDrift.Strength * 50.0;
+            CameraDriftSlider.IsEnabled = cameraDrift.Enabled;
+
             // Select matching preset or (Custom)
             PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
         }
@@ -4045,6 +4065,76 @@ public sealed partial class EditorPage : Page
     {
         if (_suppressStyleEvents) return;
         ScheduleStyleUpdate();
+    }
+
+    // Motion (motion blur / camera drift) — deliberately separate from StyleToggle_Toggled
+    // / StyleSlider_ValueChanged: those funnel into ApplyBackgroundStyle, which routes to a
+    // selected video segment's FrameStyleOverride. Motion settings are global-only (like
+    // ZoomScope), so they must never take that per-segment path.
+    private void MotionToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+
+        // Keep the paired slider's enabled state in sync with its toggle immediately;
+        // the model update itself still goes through the debounce below.
+        if (ReferenceEquals(sender, MotionBlurToggle))
+            MotionBlurSlider.IsEnabled = MotionBlurToggle.IsOn;
+        else if (ReferenceEquals(sender, CameraDriftToggle))
+            CameraDriftSlider.IsEnabled = CameraDriftToggle.IsOn;
+
+        ScheduleMotionUpdate();
+    }
+
+    private void MotionSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressStyleEvents) return;
+        ScheduleMotionUpdate();
+    }
+
+    private void ScheduleMotionUpdate()
+    {
+        // Separate timer/instance from _styleDebounceTimer so a motion slider drag never
+        // races or gets coalesced with an in-flight background-style update.
+        if (_motionDebounceTimer is null)
+        {
+            _motionDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _motionDebounceTimer.Tick += (_, _) =>
+            {
+                _motionDebounceTimer.Stop();
+                ApplyMotionSettings();
+            };
+        }
+        _motionDebounceTimer.Stop();
+        _motionDebounceTimer.Start();
+    }
+
+    private void ApplyMotionSettings()
+    {
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is null) return;
+
+        // Motion blur / camera drift are global (CompositionConfig-only) settings, mirroring
+        // ZoomScope/AspectRatio/FitMode/CropAnchor — there is no per-project field to mirror
+        // them onto. Rebuild `with` the existing sub-record so tuned values (shutter angle,
+        // per-channel strengths, drift frequencies, etc.) survive; a `new` record would reset
+        // them to their Musio.Core defaults.
+        config = config with
+        {
+            MotionBlur = config.MotionBlur with
+            {
+                Enabled = MotionBlurToggle.IsOn,
+                Strength = (float)(MotionBlurSlider.Value / 100.0),
+            },
+            CameraDrift = config.CameraDrift with
+            {
+                Enabled = CameraDriftToggle.IsOn,
+                Strength = (float)(CameraDriftSlider.Value / 50.0),
+            },
+        };
+        ProjectService.Instance.CurrentComposition = config;
+
+        InvalidateSegmentPreviews();
+        _ = RebuildPreviewRendererAsync(config);
     }
 
     private void WallpaperGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
