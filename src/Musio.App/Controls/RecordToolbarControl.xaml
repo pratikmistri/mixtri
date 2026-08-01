@@ -166,7 +166,7 @@
                 Style="{StaticResource AccentButtonStyle}"
                 VerticalAlignment="Center"
                 Visibility="{x:Bind InlineRecordVisibility(ShowInlineRecordButton, ViewModel.IsRecording), Mode=OneWay}"
-                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)"
+                ToolTipService.ToolTip="Start recording"
                 AutomationProperties.Name="Record">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="14" Glyph="&#xE7C8;" />

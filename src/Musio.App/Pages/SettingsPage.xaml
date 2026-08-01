@@ -232,11 +232,56 @@
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
                 CornerRadius="8">
-                <InfoBar
-                    IsOpen="True"
-                    IsClosable="False"
-                    Severity="Informational"
-                    Message="Hotkey configuration coming soon" />
+                <StackPanel Spacing="12">
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Editor shortcuts are disabled while typing or adjusting a control."
+                        TextWrapping="Wrap" />
+
+                    <Grid ColumnSpacing="24" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" FontWeight="SemiBold" Text="Open Mini mode (global)" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" FontFamily="Consolas" Text="Win+Shift+X" />
+                        <TextBlock Grid.Row="1" Text="Split at playhead" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" FontFamily="Consolas" Text="S" />
+                        <TextBlock Grid.Row="2" Text="Play or pause" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" FontFamily="Consolas" Text="Space" />
+                        <TextBlock Grid.Row="3" Text="Delete selected segment" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" FontFamily="Consolas" Text="Delete" />
+                        <TextBlock Grid.Row="4" Text="Cut timeline selection" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+X" />
+                        <TextBlock Grid.Row="5" Text="Undo project edit" />
+                        <TextBlock Grid.Row="5" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Z" />
+                        <TextBlock Grid.Row="6" Text="Redo project edit" />
+                        <TextBlock Grid.Row="6" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Y" />
+                        <TextBlock Grid.Row="7" Text="Save project" />
+                        <TextBlock Grid.Row="7" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+S" />
+                        <TextBlock Grid.Row="8" Text="Save project as" />
+                        <TextBlock Grid.Row="8" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Shift+S" />
+                    </Grid>
+
+                    <InfoBar
+                        x:Name="MiniHotkeyInfoBar"
+                        IsOpen="True"
+                        IsClosable="False"
+                        Severity="Informational"
+                        Message="Win+Shift+X reveals Mini mode from any app; it never starts or stops recording." />
+                </StackPanel>
             </Border>
 
             <!-- About -->

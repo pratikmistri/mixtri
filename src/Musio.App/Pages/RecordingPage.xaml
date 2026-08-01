@@ -57,7 +57,7 @@
                 CornerRadius="30"
                 Style="{StaticResource AccentButtonStyle}"
                 Visibility="{x:Bind InvertBoolToVisibility(ViewModel.IsRecording), Mode=OneWay}"
-                ToolTipService.ToolTip="Start recording (Ctrl+Shift+R)">
+                ToolTipService.ToolTip="Start recording">
                 <StackPanel Orientation="Horizontal" Spacing="10">
                     <FontIcon FontSize="18" Glyph="&#xE7C8;" />
                     <TextBlock Text="Record" VerticalAlignment="Center" FontSize="16" FontWeight="SemiBold" />
@@ -95,7 +95,7 @@
         <TeachingTip
             x:Name="QuickRecordTip"
             Title="Quick Record"
-            Subtitle="Press Ctrl+Shift+R to start recording instantly from anywhere."
+            Subtitle="Use Mini mode to keep recording controls available without opening the full app."
             IsLightDismissEnabled="True"
             PreferredPlacement="Bottom" />
     </Grid>

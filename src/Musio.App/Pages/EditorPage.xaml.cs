@@ -2464,6 +2464,8 @@ public sealed partial class EditorPage : Page
 
     private void UndoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsFocusOnInteractiveControl()) return;
+
         if (ViewModel.CanUndo)
         {
             ViewModel.UndoCommand.Execute(null);
@@ -2473,6 +2475,8 @@ public sealed partial class EditorPage : Page
 
     private void RedoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsFocusOnInteractiveControl()) return;
+
         if (ViewModel.CanRedo)
         {
             ViewModel.RedoCommand.Execute(null);
@@ -2482,12 +2486,16 @@ public sealed partial class EditorPage : Page
 
     private void SplitAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsFocusOnInteractiveControl()) return;
+
         ViewModel.SplitAtPlayheadCommand.Execute(null);
         args.Handled = true;
     }
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsFocusOnInteractiveControl()) return;
+
         // If a camera segment is selected, remove it.
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
         {
@@ -2526,8 +2534,26 @@ public sealed partial class EditorPage : Page
 
     private void CutAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (IsFocusOnInteractiveControl()) return;
+
         ViewModel.CutSelectionCommand.Execute(null);
         args.Handled = true;
+    }
+
+    private async void SaveAccelerator_Invoked(
+        KeyboardAccelerator sender,
+        KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        await SaveProjectAsync(forcePrompt: false);
+    }
+
+    private async void SaveAsAccelerator_Invoked(
+        KeyboardAccelerator sender,
+        KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        await SaveProjectAsync(forcePrompt: true);
     }
 
     private void PlayPauseAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -5447,30 +5473,36 @@ public sealed partial class EditorPage : Page
     private async void SaveProjectAs_Click(object sender, RoutedEventArgs e)
         => await SaveProjectAsync(forcePrompt: true);
 
+    private bool _isSavingProject;
+
     /// <summary>
     /// Saves the current project, writing straight back to the file it came from unless
     /// <paramref name="forcePrompt"/> is set or it has never been saved.
     /// </summary>
     private async Task SaveProjectAsync(bool forcePrompt)
     {
-        var project = ProjectService.Instance.CurrentProject;
-        if (project is null)
-        {
-            await ShowProjectDialogAsync("Nothing to save", "Record or open a project first.");
+        if (_isSavingProject || ProjectService.Instance.IsSaveInFlight)
             return;
-        }
 
-        var targetPath = forcePrompt ? null : ProjectService.Instance.CurrentPackagePath;
-
-        if (targetPath is null)
-        {
-            targetPath = await PickSavePathAsync(project.Name);
-            if (targetPath is null) return;
-        }
-
+        _isSavingProject = true;
         SaveProjectButton.IsEnabled = false;
         try
         {
+            var project = ProjectService.Instance.CurrentProject;
+            if (project is null)
+            {
+                await ShowProjectDialogAsync("Nothing to save", "Record or open a project first.");
+                return;
+            }
+
+            var targetPath = forcePrompt ? null : ProjectService.Instance.CurrentPackagePath;
+
+            if (targetPath is null)
+            {
+                targetPath = await PickSavePathAsync(project.Name);
+                if (targetPath is null) return;
+            }
+
             await ProjectService.Instance.SavePackageAsync(targetPath);
             ShowSaveConfirmation(targetPath);
         }
@@ -5481,6 +5513,7 @@ public sealed partial class EditorPage : Page
         }
         finally
         {
+            _isSavingProject = false;
             SaveProjectButton.IsEnabled = true;
         }
     }
