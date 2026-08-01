@@ -1814,3 +1814,10 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: Reveal setup, timer ticks, and final-position restoration now clean up timer, opacity, style, and programmatic-move depth even when AppWindow operations throw; idle stop paths no longer call layered-window APIs unnecessarily.
 - **What didn't work**: An initial live hotkey probe targeted a stale process and did not observe a reveal; the deterministic build and full test suite remained successful.
 - **Verified**: ARM64 Debug solution build passed and all 584 active tests passed with 2 existing skips.
+
+## PR 68 follow-up review
+
+- **Feature/area**: Automated review of native-integer style conversion in `MiniWindow`.
+- **Approaches tried**: Compared the comment with the current C# compiler result rather than changing valid interop code speculatively.
+- **What worked**: `new nint(long)` is accepted by the repository's compiler and both occurrences built successfully in the ARM64 Debug solution.
+- **What didn't work**: The automated reviewer incorrectly reported the native-integer constructor as a compile failure.
