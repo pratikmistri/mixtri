@@ -50,6 +50,14 @@
         <KeyboardAccelerator
             Key="Space"
             Invoked="PlayPauseAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="S"
+            Invoked="SaveAccelerator_Invoked"
+            Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="S"
+            Invoked="SaveAsAccelerator_Invoked"
+            Modifiers="Control,Shift" />
     </Page.KeyboardAccelerators>
 
     <Grid>
@@ -347,7 +355,7 @@
                     x:Name="SaveProjectButton"
                     Height="40"
                     Click="SaveProject_Click"
-                    ToolTipService.ToolTip="Save this project. Saves back to the same .musio file once it has one.">
+                    ToolTipService.ToolTip="Save project (Ctrl+S). Saves back to the same .musio file once it has one.">
                     <StackPanel Orientation="Horizontal" Spacing="4">
                         <FontIcon FontSize="14" Glyph="&#xE74E;" />
                         <TextBlock Text="Save" />
@@ -356,7 +364,7 @@
                         <MenuFlyout Placement="Top">
                             <MenuFlyoutItem
                                 Click="SaveProjectAs_Click"
-                                Text="Save as…">
+                                Text="Save as… (Ctrl+Shift+S)">
                                 <MenuFlyoutItem.Icon>
                                     <FontIcon Glyph="&#xE792;" />
                                 </MenuFlyoutItem.Icon>

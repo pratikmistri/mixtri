@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Musio_App.ViewModels;
 using Windows.Graphics;
+using Windows.UI.ViewManagement;
 
 namespace Musio_App;
 
@@ -26,6 +27,13 @@ public sealed partial class MiniWindow : Window
     private readonly RecordingViewModel _viewModel = RecordingViewModel.Shared;
     private bool _isClosingProgrammatically;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _revealTimer;
+    private System.Diagnostics.Stopwatch? _revealStopwatch;
+    private PointInt32 _revealFinalPosition;
+    private nint _revealOriginalExStyle;
+    private bool _revealAddedLayeredStyle;
+    private bool _revealLayeredOpacityApplied;
+    private bool _revealMoveScopeActive;
 
     /// <summary>
     /// Widest the pill has been while visible, in <em>DIPs</em>. The window grows to
@@ -45,6 +53,7 @@ public sealed partial class MiniWindow : Window
     /// away from where they parked it.
     /// </summary>
     private bool _userPositioned;
+    private bool _hasCompletedInitialPlacement;
 
     /// <summary>
     /// Non-zero while we are moving/resizing the window ourselves, so those changes
@@ -114,9 +123,9 @@ public sealed partial class MiniWindow : Window
         uint captionNone = DWMWA_COLOR_NONE;
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref captionNone, sizeof(uint));
 
-        var style = GetWindowLong(hwnd, GWL_STYLE);
+        long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
         style &= ~(WS_BORDER | WS_DLGFRAME);
-        SetWindowLong(hwnd, GWL_STYLE, style);
+        SetWindowLongPtr(hwnd, GWL_STYLE, new nint(style));
 
         uint roundPreference = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
@@ -134,11 +143,21 @@ public sealed partial class MiniWindow : Window
     {
         // A position change we didn't initiate means the user dragged the pill by
         // its grip, so stop re-centring it from then on.
-        if (args.DidPositionChange && _programmaticChangeDepth == 0)
+        if (args.DidPositionChange
+            && _hasCompletedInitialPlacement
+            && _programmaticChangeDepth == 0)
             _userPositioned = true;
 
         // Move() doesn't set DidSizeChange, so this cannot recurse.
-        if (args.DidSizeChange) DockBottomCenter();
+        if (args.DidSizeChange)
+        {
+            DockBottomCenter();
+
+            // Initial XAML layout can finish after the reveal has captured its
+            // target. Keep the animation aimed at the newly centered final size.
+            if (_revealMoveScopeActive && !_userPositioned)
+                _revealFinalPosition = AppWindow.Position;
+        }
     }
 
     /// <summary>
@@ -173,7 +192,7 @@ public sealed partial class MiniWindow : Window
             try
             {
                 AppWindow.Resize(new SizeInt32(width, height));
-                DockBottomCenter();
+                DockBottomCenter(new SizeInt32(width, height));
             }
             finally
             {
@@ -192,17 +211,15 @@ public sealed partial class MiniWindow : Window
     /// its position is kept and merely clamped back on screen.
     /// </summary>
     /// <remarks>
-    /// Reads <see cref="AppWindow"/>.Size rather than trusting a caller-supplied
-    /// height: several paths resize the pill (initial load, status row appearing,
-    /// Record/Stop swap), and docking against a stale height left it floating well
-    /// above the taskbar. Also wired to <c>AppWindow.Changed</c> so any resize we
-    /// didn't initiate still re-docks.
+    /// Uses a requested size when called immediately after <see cref="AppWindow.Resize"/>
+    /// because the AppWindow size property can still contain the previous dimensions
+    /// until its Changed event arrives. Otherwise it reads the current AppWindow size.
     /// </remarks>
-    private void DockBottomCenter()
+    private void DockBottomCenter(SizeInt32? requestedSize = null)
     {
         try
         {
-            var size = AppWindow.Size;
+            var size = requestedSize ?? AppWindow.Size;
             if (size.Width <= 0 || size.Height <= 0) return;
 
             var displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
@@ -254,26 +271,217 @@ public sealed partial class MiniWindow : Window
     /// <summary>Shows the pill, re-syncing the toolbar with the shared view model first.</summary>
     public void ShowMini()
     {
+        bool shouldAnimate = !IsVisible && AreAnimationsEnabled();
         Toolbar.SyncFromViewModel();
+        ResizeToContent();
+
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (shouldAnimate)
+            PrepareRevealAnimation(hwnd);
+        else
+            StopRevealAnimation(hwnd, restoreFinalPosition: true);
+
         ShowWindow(hwnd, SW_SHOW);
         IsVisible = true;
-        ResizeToContent();
         Activate();
         SetForegroundWindow(hwnd);
+
+        if (shouldAnimate)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!IsVisible)
+                {
+                    StopRevealAnimation(hwnd, restoreFinalPosition: true);
+                    return;
+                }
+
+                // The first ShowWindow call can complete XAML layout and widen the
+                // pill after the pre-show target was captured. Re-center using the
+                // final size, then rebase the animation so it cannot restore a stale X.
+                if (!_hasCompletedInitialPlacement || !_userPositioned)
+                {
+                    _userPositioned = false;
+                    ResizeToContent();
+                    RebaseRevealPosition(hwnd);
+                }
+
+                _hasCompletedInitialPlacement = true;
+                StartRevealAnimation();
+            });
+        }
+        else if (!_hasCompletedInitialPlacement)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!IsVisible) return;
+
+                _userPositioned = false;
+                ResizeToContent();
+                DockBottomCenter();
+                _hasCompletedInitialPlacement = true;
+            });
+        }
     }
 
     /// <summary>Hides the pill without destroying it, so state and position survive.</summary>
     public void HideMini()
     {
+        IsVisible = false;
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        ShowWindow(hwnd, SW_HIDE);
+
         // Drop the width high-water mark so a re-summoned pill fits itself tightly
         // again instead of inheriting the widest layout from a previous session.
         // A position the user chose is deliberately kept.
         _widestSeenDips = 0;
+    }
 
-        IsVisible = false;
+    private void PrepareRevealAnimation(nint hwnd)
+    {
+        StopRevealAnimation(hwnd, restoreFinalPosition: true);
+
+        _revealFinalPosition = AppWindow.Position;
+        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        _revealOriginalExStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+        _revealAddedLayeredStyle =
+            (_revealOriginalExStyle.ToInt64() & WS_EX_LAYERED) == 0;
+
+        if (_revealAddedLayeredStyle)
+        {
+            SetWindowLongPtr(
+                hwnd,
+                GWL_EXSTYLE,
+                new nint(_revealOriginalExStyle.ToInt64() | WS_EX_LAYERED));
+        }
+
+        if (!SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA))
+        {
+            RestoreWindowOpacity(hwnd);
+            return;
+        }
+        _revealLayeredOpacityApplied = true;
+
+        _programmaticChangeDepth++;
+        _revealMoveScopeActive = true;
+        try
+        {
+            AppWindow.Move(new PointInt32(
+                _revealFinalPosition.X,
+                _revealFinalPosition.Y + offset));
+
+            _revealTimer = DispatcherQueue.CreateTimer();
+            _revealTimer.Interval = TimeSpan.FromMilliseconds(16);
+            _revealTimer.Tick += OnRevealTimerTick;
+            _revealStopwatch = new System.Diagnostics.Stopwatch();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[MiniWindow] Reveal preparation failed: {ex.Message}");
+            StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
+    }
+
+    private void StartRevealAnimation()
+    {
+        if (_revealTimer is null || _revealStopwatch is null)
+            return;
+
+        _revealStopwatch.Start();
+        _revealTimer.Start();
+    }
+
+    private void RebaseRevealPosition(nint hwnd)
+    {
+        _revealFinalPosition = AppWindow.Position;
+        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        AppWindow.Move(new PointInt32(
+            _revealFinalPosition.X,
+            _revealFinalPosition.Y + offset));
+    }
+
+    private void OnRevealTimerTick(
+        Microsoft.UI.Dispatching.DispatcherQueueTimer sender,
+        object args)
+    {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        ShowWindow(hwnd, SW_HIDE);
+        try
+        {
+            double elapsed = _revealStopwatch?.Elapsed.TotalMilliseconds ?? RevealDurationMs;
+            double progress = Math.Clamp(elapsed / RevealDurationMs, 0, 1);
+            double eased = 1 - Math.Pow(1 - progress, 3);
+            int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+
+            AppWindow.Move(new PointInt32(
+                _revealFinalPosition.X,
+                _revealFinalPosition.Y + (int)Math.Round(offset * (1 - eased))));
+
+            byte alpha = (byte)Math.Round(byte.MaxValue * eased);
+            if (!SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA) || progress >= 1)
+                StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[MiniWindow] Reveal animation failed: {ex.Message}");
+            StopRevealAnimation(hwnd, restoreFinalPosition: true);
+        }
+    }
+
+    private void StopRevealAnimation(nint hwnd, bool restoreFinalPosition)
+    {
+        if (_revealTimer is not null)
+        {
+            _revealTimer.Stop();
+            _revealTimer.Tick -= OnRevealTimerTick;
+            _revealTimer = null;
+        }
+
+        _revealStopwatch = null;
+
+        if (_revealMoveScopeActive)
+        {
+            try
+            {
+                if (restoreFinalPosition)
+                    AppWindow.Move(_revealFinalPosition);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MiniWindow] Reveal position restore failed: {ex.Message}");
+            }
+            finally
+            {
+                _revealMoveScopeActive = false;
+                _programmaticChangeDepth = Math.Max(0, _programmaticChangeDepth - 1);
+            }
+        }
+
+        RestoreWindowOpacity(hwnd);
+    }
+
+    private void RestoreWindowOpacity(nint hwnd)
+    {
+        if (_revealLayeredOpacityApplied)
+        {
+            SetLayeredWindowAttributes(hwnd, 0, byte.MaxValue, LWA_ALPHA);
+            _revealLayeredOpacityApplied = false;
+        }
+
+        if (_revealAddedLayeredStyle)
+        {
+            SetWindowLongPtr(hwnd, GWL_EXSTYLE, _revealOriginalExStyle);
+            _revealAddedLayeredStyle = false;
+        }
+    }
+
+    private static bool AreAnimationsEnabled()
+    {
+        try { return new UISettings().AnimationsEnabled; }
+        catch { return true; }
     }
 
     /// <summary>Closes the window for real, used only during app shutdown.</summary>
@@ -281,6 +489,9 @@ public sealed partial class MiniWindow : Window
     {
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _statusTimer?.Stop();
+        StopRevealAnimation(
+            WinRT.Interop.WindowNative.GetWindowHandle(this),
+            restoreFinalPosition: false);
         _isClosingProgrammatically = true;
         try { Close(); }
         catch { /* already gone */ }
@@ -365,6 +576,8 @@ public sealed partial class MiniWindow : Window
 
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
+    private const double RevealOffsetDips = 12;
+    private const double RevealDurationMs = 180;
 
     /// <summary>Gap between the pill and the edge of the work area, in physical pixels.</summary>
     private const int DockMarginPx = 12;
@@ -375,8 +588,11 @@ public sealed partial class MiniWindow : Window
     private const uint DWMWCP_ROUND = 2;
     private const uint DWMWA_COLOR_NONE = 0xFFFFFFFE;
     private const int GWL_STYLE = -16;
-    private const int WS_BORDER = 0x00800000;
-    private const int WS_DLGFRAME = 0x00400000;
+    private const int GWL_EXSTYLE = -20;
+    private const long WS_BORDER = 0x00800000L;
+    private const long WS_DLGFRAME = 0x00400000L;
+    private const long WS_EX_LAYERED = 0x00080000L;
+    private const uint LWA_ALPHA = 0x00000002;
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
@@ -394,8 +610,16 @@ public sealed partial class MiniWindow : Window
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-    private static extern int GetWindowLong(IntPtr hwnd, int nIndex);
+    private static extern nint GetWindowLongPtr(nint hwnd, int nIndex);
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
-    private static extern int SetWindowLong(IntPtr hwnd, int nIndex, int dwNewLong);
+    private static extern nint SetWindowLongPtr(nint hwnd, int nIndex, nint dwNewLong);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetLayeredWindowAttributes(
+        nint hwnd,
+        uint colorKey,
+        byte alpha,
+        uint flags);
 }

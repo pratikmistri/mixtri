@@ -30,6 +30,7 @@ public partial class App : Application
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
     public Window? MainAppWindow => _window;
+    public bool IsMiniHotkeyRegistered { get; private set; }
 
     public static new App Current => (App)Application.Current;
 
@@ -561,14 +562,14 @@ public partial class App : Application
         // affordances below. Each .musio activation spawns its own process, so one tray
         // icon per open file would spam a notification area that is usually collapsed,
         // and the first process to call RegisterHotKey wins outright — a document window
-        // opened before the recorder would take the capture hotkeys with it.
+        // opened before the recorder would take the Mini-mode hotkey with it.
         // Everything downstream already copes with both being absent: window close is
         // allowed to proceed when _trayService is null (OnWindowClosing), and
         // ShellCoordinator.IsTrayAvailable stays false so hide-to-tray falls back to
         // showing the full window rather than stranding an unreachable process.
         if (activationPath is null)
         {
-            InitializeTrayAndHotkeys();
+            InitializeTray();
         }
 
         // A redirect that landed while the window was still being built. Queued rather
@@ -584,13 +585,14 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Sets up the system tray icon and the global capture hotkeys. Both are
-    /// best-effort: the app works without either, and each is skipped for
-    /// file-activated document instances (see <see cref="OnLaunched"/>).
+    /// Sets up the system tray icon and the global Mini-mode hotkey. Both are
+    /// best-effort and are skipped for file-activated document instances
+    /// (see <see cref="OnLaunched"/>).
     /// </summary>
-    private void InitializeTrayAndHotkeys()
+    private void InitializeTray()
     {
         if (_window is null) return;
+        IsMiniHotkeyRegistered = false;
 
         // System tray and hotkeys are optional — app works without them
         try
@@ -618,20 +620,29 @@ public partial class App : Application
             _hotkeyService = new GlobalHotkeyService();
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
             _hotkeyService.Initialize(hwnd);
-            _hotkeyService.RegisterHotkey(
-                GlobalHotkeyService.StartStopRecording,
-                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x52);
-            _hotkeyService.RegisterHotkey(
-                GlobalHotkeyService.PauseResumeRecording,
-                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x50);
-            _hotkeyService.RegisterHotkey(
-                GlobalHotkeyService.TakeScreenshot,
-                ModifierKeys.Ctrl | ModifierKeys.Shift, 0x53);
-            _hotkeyService.HotkeyPressed += OnHotkeyPressed;
+
+            bool registered = _hotkeyService.RegisterHotkey(
+                GlobalHotkeyService.ShowMini,
+                ModifierKeys.Win | ModifierKeys.Shift | ModifierKeys.NoRepeat,
+                0x58); // X
+
+            if (!registered)
+            {
+                DiagLog.Write("Hotkeys", "Win+Shift+X could not be registered.");
+                _hotkeyService.Dispose();
+                _hotkeyService = null;
+            }
+            else
+            {
+                IsMiniHotkeyRegistered = true;
+                _hotkeyService.HotkeyPressed += OnHotkeyPressed;
+            }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Global hotkeys not available — continue without them
+            IsMiniHotkeyRegistered = false;
+            DiagLog.Write("Hotkeys", $"Mini-mode hotkey initialization failed: {ex}");
+            _hotkeyService?.Dispose();
             _hotkeyService = null;
         }
     }
@@ -683,6 +694,7 @@ public partial class App : Application
 
         try { ReleaseExtendedExecution(); } catch { }
         try { _hotkeyService?.Dispose(); } catch { }
+        IsMiniHotkeyRegistered = false;
         try { _trayService?.Dispose(); } catch { }
         try { _shell?.Dispose(); } catch { }
 
@@ -769,18 +781,13 @@ public partial class App : Application
 
     private void OnHotkeyPressed(object? sender, HotkeyPressedEventArgs e)
     {
-        switch (e.HotkeyId)
+        if (e.HotkeyId != GlobalHotkeyService.ShowMini || _window is null) return;
+
+        _window.DispatcherQueue.TryEnqueue(() =>
         {
-            case GlobalHotkeyService.StartStopRecording:
-                // TODO: wire to recording start/stop
-                break;
-            case GlobalHotkeyService.PauseResumeRecording:
-                // TODO: wire to pause/resume
-                break;
-            case GlobalHotkeyService.TakeScreenshot:
-                // TODO: wire to screenshot
-                break;
-        }
+            _shell?.ActivateFromTray();
+            ReleaseExtendedExecution();
+        });
     }
 
     private void OnExitRequested(object? sender, EventArgs e)

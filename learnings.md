@@ -1688,3 +1688,136 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - **What worked**: The frame channel now declares multi-reader support because `AbortWriterAsync` and `Dispose` may drain pending frames while the writer releases its in-flight frame. A regression test locks that contract, and the manifest/settings version advanced past the published 1.2.0 packages to 1.2.1.
 - **What didn't work**: Direct `dotnet test` attempted to build through the known unsupported PriGen path; VS MSBuild followed by `dotnet test --no-build` worked.
 - **Verified**: ARM64 Debug solution build succeeded; focused queue tests passed 11/11 and the full suite passed 581 with 2 existing skips.
+
+## Version 1.2.1 Store packages
+
+- **Feature/area**: Microsoft Store package generation for version 1.2.1.
+- **Approaches tried**: Updated `master`, cleaned exact project `bin`/`obj` directories between architectures, and built unsigned non-bundled Release MSIX packages with VS MSBuild.
+- **What worked**: Separate x64 and ARM64 builds produced validated `1.2.1.0` packages in `Packages`, with matching embedded processor architectures.
+- **What didn't work**: Nothing; the existing missing `mspdbcmf.exe` warning only prevented symbol-package generation and did not affect either MSIX.
+- **Artifact handoff**: Moved both validated MSIX files to the user's `Downloads` folder for Store submission.
+
+## Microsoft Store screenshot capture
+
+- **Feature/area**: App-only marketing screenshots for the full window and Mini mode.
+- **Approaches tried**: Used `PrintWindow` at UI Automation physical bounds, temporarily disabled Mini mode's capture affinity in a local build, and restored the source afterward.
+- **What worked**: `PrintWindow` captured clean app-only PNGs without desktop content; UI Automation bounds avoided DPI-virtualized cropping at 150% scaling.
+- **What didn't work**: Screen capture APIs omitted Mini mode because of `WDA_EXCLUDEFROMCAPTURE`, and `GetWindowRect` from a DPI-unaware PowerShell process returned undersized logical dimensions.
+
+## Store screenshots for insert and text slides
+
+- **Feature/area**: Marketing coverage for external-video import, appended recording, and animated text slides.
+- **Approaches tried**: Captured the Insert flyout with a physical desktop bitmap and captured the resulting text-slide editor with `PrintWindow`.
+- **What worked**: The Insert flyout clearly shows Text Slide, Record More, and Import Video; inserting an unsaved slide exposes the animation, typography, duration, and timeline UI without changing the saved project.
+- **What didn't work**: `PrintWindow` does not include popup-host flyouts, while the desktop bitmap included translucent window-edge background that had to be cropped and masked.
+
+## Text-slide screenshot preparation
+
+- **Feature/area**: Interactive setup for a user-composed Store screenshot.
+- **Approaches tried**: Launched the current Release build, reused the already-open text-slide editor state, maximized the window, and brought it to the foreground.
+- **What worked**: The editor retained a text slide with image-background controls available, so no saved-project changes were required to prepare the screenshot.
+- **What didn't work**: A combined navigation script assumed Mini mode was still visible after expansion and failed when the app had already switched to the full editor window.
+
+## Customized text-slide Store screenshot
+
+- **Feature/area**: Final app-only text-slide marketing image.
+- **Approaches tried**: Restored the window from maximized state and captured it with `PrintWindow` at the same 1536x1152 physical size as the other full-window assets.
+- **What worked**: The final image shows a Cambria title over a photographic background together with animation, duration, font-size, and timeline controls.
+- **What didn't work**: Nothing; restoring the prior window placement preserved the established screenshot dimensions.
+
+## Version 1.2.1 local Release deployment
+
+- **Feature/area**: Clean ARM64 Release build and local package deployment.
+- **Approaches tried**: Closed the running app, removed the old loose package registration, deleted exact App/Core `bin` and `obj` directories, rebuilt with VS BuildTools MSBuild, registered the generated manifest, and launched via AppsFolder.
+- **What worked**: Package version `1.2.1.0` registered with status `Ok` from the fresh Release output and launched a responsive `Musio Mini` process.
+- **What didn't work**: Nothing.
+
+## Hotkeys and shortcuts feature branch
+
+- **Feature/area**: Branch setup for hotkey and keyboard-shortcut improvements.
+- **Approaches tried**: Created a feature branch directly from the current `master` commit while leaving existing uncommitted screenshot assets and learnings changes intact.
+- **What worked**: `feature/hotkeys-shortcuts` now points at the current baseline and preserves the working tree for continued development.
+- **What didn't work**: Nothing.
+
+## Hotkey and shortcut inventory
+
+- **Feature/area**: Existing global hotkeys and editor keyboard accelerators.
+- **Approaches tried**: Traced every accelerator and `RegisterHotKey` call, then compared candidates with Microsoft's Windows shortcut and keyboard-interaction guidance.
+- **What worked**: The inventory separated global conflicts from focus-scoped editor commands and identified the existing interactive-control guard as the pattern to apply consistently.
+- **What didn't work**: Plain `S`, Delete, Ctrl+X, Ctrl+Z, and Ctrl+Y currently lack that guard; the advertised global Ctrl+Shift shortcuts are registered but their handlers remain TODOs.
+
+## Safe editor shortcuts and global hotkey removal
+
+- **Feature/area**: Text-input-safe editor accelerators, standard save shortcuts, and shortcut discoverability.
+- **Approaches tried**: Applied the existing interactive-control focus guard to all destructive/editor accelerators, added Ctrl+S/Ctrl+Shift+S, removed placeholder system-wide registrations, and replaced the Settings placeholder with a shortcut reference.
+- **What worked**: Typing `S`, using Delete/Ctrl+X, and native Ctrl+Z/Ctrl+Y inside text and property controls no longer invoke timeline commands; timeline-focused shortcuts remain familiar. The app no longer reserves Ctrl+Shift+R/P/S globally before configurable hotkeys exist.
+- **What didn't work**: The first solution build failed after removing the `Musio.Core.Services` import because `SessionCleanupService` also lives in that namespace; restoring the import fixed the build. An ARM64-qualified `dotnet test --no-build` looked for a RID-specific test DLL that the solution build does not produce, so the verified no-build test command omits `--arch`.
+- **Verified**: ARM64 Debug app/solution builds succeeded and the full suite passed 584 tests with 2 existing MP4 identity skips.
+
+## Hotkeys branch Release deployment
+
+- **Feature/area**: Clean local deployment of `feature/hotkeys-shortcuts`.
+- **Approaches tried**: Removed the existing package registration, deleted exact App/Core build outputs, rebuilt ARM64 Release with VS BuildTools MSBuild, registered the generated manifest, and launched through AppsFolder.
+- **What worked**: Version `1.2.1.0` registered with status `Ok` from the fresh branch output and launched a responsive `Musio Mini` process.
+- **What didn't work**: Nothing.
+
+## Global hotkey default recommendation
+
+- **Feature/area**: Default system-wide recording shortcut.
+- **Approaches tried**: Compared mnemonic letter combinations, Windows-key shortcuts, AltGr-sensitive Ctrl+Alt combinations, and modified function keys.
+- **What worked**: `Ctrl+Shift+F9` is a reasonable opt-in start/stop preset because Windows does not reserve it, it cannot fire during ordinary typing, and `RegisterHotKey` supports it.
+- **What didn't work**: No global combination is universally conflict-free; Win-key combinations are often OS-reserved, Ctrl+Shift+letter combinations are common app commands, Ctrl+Alt can collide with AltGr layouts, and F12 is reserved for debuggers.
+
+## Win+Shift+X Mini-mode hotkey
+
+- **Feature/area**: System-wide shortcut for revealing Mini mode without using the tray icon.
+- **Approaches tried**: Reused `GlobalHotkeyService`, added `MOD_NOREPEAT`, registered Win+Shift+X only in the primary app instance, routed it through `ShellCoordinator.ActivateFromTray`, and exposed it in Settings.
+- **What worked**: Win+Shift+X is not assigned in Microsoft's current Windows shortcut list and registered successfully on this PC. An end-to-end probe hid Mini mode with Esc, sent Win+Shift+X, and confirmed the same window became visible and responsive without starting or stopping recording.
+- **What didn't work**: Microsoft reserves the Win-key namespace in principle, so this combination could be claimed by a future Windows release even though it is available today; registration failure remains non-fatal and is logged.
+- **Verified**: ARM64 Debug solution build and 584 active tests passed; a clean ARM64 Release deployed with package status `Ok`, and the live hotkey visibility probe passed.
+
+## Mini-mode reveal animation
+
+- **Feature/area**: Mini window appearance when launched, restored from the tray, collapsed from the full app, or summoned by Win+Shift+X.
+- **Approaches tried**: Added a root-content fade from 0 to 1 and a 12-DIP upward translate over 180 ms with cubic ease-out, gated by the Windows animation preference.
+- **What worked**: The animation is prepared before `SW_SHOW`, only runs when transitioning from hidden to visible, resets cleanly after completion, and repeated hide/hotkey-reveal cycles leave the app responsive. Hiding the HWND before resetting animation values avoids a one-frame flash.
+- **What didn't work**: The first automated Esc probe immediately after external process launch did not hide the pill because foreground activation had not settled; a subsequent hide/reveal cycle passed.
+- **Verified**: ARM64 Debug solution build and 584 active tests passed; a clean ARM64 Release deployed with package status `Ok`, and two live Win+Shift+X reveal attempts completed with the final cycle fully verified.
+
+## Hotkeys branch code review
+
+- **Feature/area**: Review of editor accelerators, global Mini hotkey, Settings copy, and reveal animation.
+- **Approaches tried**: Reviewed the complete branch diff against `master`, traced save concurrency into package creation, checked hotkey failure handling, and compared the root animation with the separate Window system backdrop.
+- **What worked**: Text-input guards, primary-instance hotkey ownership, no-repeat registration, recording-state suppression, reduced-motion handling, and shutdown disposal are coherent.
+- **What didn't work**: Save accelerators bypass the disabled Save button and can start overlapping writes to the same `.saving` path; the root fade/translate leaves the acrylic HWND shell static and immediately visible; Settings advertises Win+Shift+X even when registration fails and only a log is written.
+
+## Hotkeys branch review fixes
+
+- **Feature/area**: Save shortcut concurrency, Mini-mode reveal animation, and global-hotkey status reporting.
+- **Approaches tried**: Added a page-level save gate around picker and package writes, exposed successful hotkey registration to Settings, and replaced the XAML-only reveal with a temporary whole-window layered-alpha and AppWindow-position animation.
+- **What worked**: Repeated save commands can no longer overlap or open multiple pickers; Settings warns when Win+Shift+X is unavailable; the complete acrylic window now fades from 0 to 255 and moves upward 12 DIPs over 180 ms, then restores its original extended style and final position.
+- **What didn't work**: A root-element storyboard could not animate the separate system backdrop. The first external Escape probe did not hide Mini mode until the pill received a real pointer click, after which hide and hotkey reveal passed.
+- **Verified**: ARM64 Debug solution build passed, all 584 active tests passed with 2 existing skips, clean ARM64 Release deployment reported package status `Ok`, and a live HWND probe observed the reveal position/alpha progression and style cleanup.
+
+## Initial Mini-mode horizontal centering
+
+- **Feature/area**: First-launch Mini window placement during its reveal animation.
+- **Approaches tried**: Deferred reveal-target rebasing until visible layout, ignored initialization position events until placement completed, centered against the requested resize dimensions, and updated the active reveal target when the final AppWindow size event arrived.
+- **What worked**: The final size-change event now re-centers the window and replaces the animation's stale target, so first launch finishes at the exact horizontal center while later reveals preserve a user-moved position.
+- **What didn't work**: Rebasing immediately after `AppWindow.Resize` still used the old width because `AppWindow.Size` updates asynchronously; the later reveal tick then restored the stale X coordinate.
+- **Verified**: ARM64 Debug build passed; the first-launch HWND measured a 0 px center delta, and a moved Mini window returned to the same X after Escape plus Win+Shift+X.
+
+## PR 68 review feedback
+
+- **Feature/area**: Shortcut documentation, Mini hotkey availability copy, and reveal-animation failure cleanup.
+- **Approaches tried**: Validated all four review threads against current behavior, narrowed the shortcut copy to timeline-editing commands, made unavailable-hotkey copy cover document instances, and tracked whether layered opacity was actually applied.
+- **What worked**: Reveal setup, timer ticks, and final-position restoration now clean up timer, opacity, style, and programmatic-move depth even when AppWindow operations throw; idle stop paths no longer call layered-window APIs unnecessarily.
+- **What didn't work**: An initial live hotkey probe targeted a stale process and did not observe a reveal; the deterministic build and full test suite remained successful.
+- **Verified**: ARM64 Debug solution build passed and all 584 active tests passed with 2 existing skips.
+
+## PR 68 follow-up review
+
+- **Feature/area**: Automated review of native-integer style conversion in `MiniWindow`.
+- **Approaches tried**: Compared the comment with the current C# compiler result rather than changing valid interop code speculatively.
+- **What worked**: `new nint(long)` is accepted by the repository's compiler and both occurrences built successfully in the ARM64 Debug solution.
+- **What didn't work**: The automated reviewer incorrectly reported the native-integer constructor as a compile failure.

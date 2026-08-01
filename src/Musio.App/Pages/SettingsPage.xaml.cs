@@ -60,6 +60,7 @@ public sealed partial class SettingsPage : Page
 
         _suppressWebcamEvents = true;
         WebcamToggle.IsOn = AppSettings.Instance.IsWebcamEnabled;
+        UpdateMiniHotkeyStatus();
 
         try
         {
@@ -81,6 +82,21 @@ public sealed partial class SettingsPage : Page
         {
             _suppressWebcamEvents = false;
         }
+    }
+
+    private void UpdateMiniHotkeyStatus()
+    {
+        if (App.Current.IsMiniHotkeyRegistered)
+        {
+            MiniHotkeyInfoBar.Severity = InfoBarSeverity.Informational;
+            MiniHotkeyInfoBar.Message =
+                "Win+Shift+X reveals Mini mode from any app; it never starts or stops recording.";
+            return;
+        }
+
+        MiniHotkeyInfoBar.Severity = InfoBarSeverity.Warning;
+        MiniHotkeyInfoBar.Message =
+            "Win+Shift+X is not active in this app window. It may be reserved by Windows or another app.";
     }
 
     private static void SelectComboBoxByTag(ComboBox combo, string tag)

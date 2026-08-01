@@ -9,7 +9,8 @@ public enum ModifierKeys
     Alt = 1,
     Ctrl = 2,
     Shift = 4,
-    Win = 8
+    Win = 8,
+    NoRepeat = 0x4000
 }
 
 public record HotkeyPressedEventArgs(int HotkeyId);
@@ -20,9 +21,7 @@ public record HotkeyPressedEventArgs(int HotkeyId);
 /// </summary>
 public sealed class GlobalHotkeyService : IDisposable
 {
-    public const int StartStopRecording = 1;
-    public const int PauseResumeRecording = 2;
-    public const int TakeScreenshot = 3;
+    public const int ShowMini = 1;
 
     public event EventHandler<HotkeyPressedEventArgs>? HotkeyPressed;
 
