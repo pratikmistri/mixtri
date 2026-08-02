@@ -33,3 +33,6 @@ BundleArtifacts/
 
 # Windows
 Thumbs.db
+
+# Local scratch / scratch tools (not part of the build)
+files/

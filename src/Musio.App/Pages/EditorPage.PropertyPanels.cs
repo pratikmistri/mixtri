@@ -51,6 +51,10 @@ public sealed partial class EditorPage
     private Slider CornerRadiusSlider => PropertiesPanel.Scene.CornerRadiusSlider;
     private ToggleSwitch ShadowToggle => PropertiesPanel.Scene.ShadowToggle;
     private ToggleSwitch BorderToggle => PropertiesPanel.Scene.BorderToggle;
+    private ToggleSwitch MotionBlurToggle => PropertiesPanel.Scene.MotionBlurToggle;
+    private Slider MotionBlurSlider => PropertiesPanel.Scene.MotionBlurSlider;
+    private ToggleSwitch CameraDriftToggle => PropertiesPanel.Scene.CameraDriftToggle;
+    private Slider CameraDriftSlider => PropertiesPanel.Scene.CameraDriftSlider;
 
     // ─── Text slide panel ───────────────────────────────────────────────
 
@@ -137,6 +141,10 @@ public sealed partial class EditorPage
         CornerRadiusSlider.ValueChanged += StyleSlider_ValueChanged;
         ShadowToggle.Toggled += StyleToggle_Toggled;
         BorderToggle.Toggled += StyleToggle_Toggled;
+        MotionBlurToggle.Toggled += MotionToggle_Toggled;
+        MotionBlurSlider.ValueChanged += MotionSlider_ValueChanged;
+        CameraDriftToggle.Toggled += MotionToggle_Toggled;
+        CameraDriftSlider.ValueChanged += MotionSlider_ValueChanged;
 
         // Text slide
         SlideTextBox.TextChanged += SlideTextBox_TextChanged;
