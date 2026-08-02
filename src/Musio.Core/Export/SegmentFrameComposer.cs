@@ -209,6 +209,24 @@ public sealed class SegmentFrameComposer : IDisposable
     }
 
     /// <summary>
+    /// Selects the text overlays authored against <paramref name="videoFilePath"/>'s
+    /// source-time space. An overlay with no <see cref="TextOverlaySegment.SourceVideoFilePath"/>
+    /// belongs to the primary recording — the identical ownership convention
+    /// <see cref="SelectManualZoomKeyframes"/> uses for <see cref="ZoomKeyframe"/> (both share
+    /// the <see cref="BelongsToSource(string?, string, string?)"/> rule below), so a text
+    /// overlay authored on an appended clip never bleeds onto the primary recording's
+    /// compositor, or vice versa.
+    /// </summary>
+    public static List<TextOverlaySegment> SelectTextOverlays(TimelineModel timeline, string videoFilePath)
+    {
+        ArgumentNullException.ThrowIfNull(timeline);
+
+        return timeline.TextOverlays
+            .Where(o => BelongsToSource(o.SourceVideoFilePath, videoFilePath, timeline.PrimaryVideoFilePath))
+            .ToList();
+    }
+
+    /// <summary>
     /// True when <paramref name="keyframe"/> was authored against
     /// <paramref name="videoFilePath"/>'s source-time space.
     /// </summary>
@@ -217,10 +235,22 @@ public sealed class SegmentFrameComposer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(keyframe);
 
-        return keyframe.SourceVideoFilePath is null
+        return BelongsToSource(keyframe.SourceVideoFilePath, videoFilePath, primaryVideoFilePath);
+    }
+
+    /// <summary>
+    /// Shared ownership rule behind <see cref="BelongsToSource(ZoomKeyframe, string, string?)"/>
+    /// and <see cref="SelectTextOverlays"/>: <paramref name="sourceVideoFilePath"/> of
+    /// <see langword="null"/> means "the primary recording", otherwise it must name
+    /// <paramref name="videoFilePath"/> exactly (case-insensitively, since these are file paths).
+    /// </summary>
+    private static bool BelongsToSource(
+        string? sourceVideoFilePath, string videoFilePath, string? primaryVideoFilePath)
+    {
+        return sourceVideoFilePath is null
             ? primaryVideoFilePath is null
               || string.Equals(videoFilePath, primaryVideoFilePath, StringComparison.OrdinalIgnoreCase)
-            : string.Equals(videoFilePath, keyframe.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+            : string.Equals(videoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
     }
 
     #region Frame composition
@@ -621,11 +651,20 @@ public sealed class SegmentFrameComposer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Applies every per-source-file piece of state a compositor needs beyond its base
+    /// <see cref="CompositionConfig"/>: manual zoom keyframes, suppressed auto-zoom clicks,
+    /// and text overlays, each filtered to the ones belonging to
+    /// <paramref name="videoFilePath"/>. Called for both the primary recording's context
+    /// and every appended/imported recording's context, so overlays and zooms authored
+    /// against one source never bleed onto another.
+    /// </summary>
     private static void SyncZoomState(FrameCompositor compositor, TimelineModel? timeline, string videoFilePath)
     {
         if (timeline is null) return;
 
         compositor.SyncManualZoomKeyframes(SelectManualZoomKeyframes(timeline, videoFilePath));
+        compositor.SyncTextOverlays(SelectTextOverlays(timeline, videoFilePath));
 
         // Suppressed ticks are raw click timestamps from the recording that produced
         // them, so they can only ever match that recording's auto-zoom segments.

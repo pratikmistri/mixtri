@@ -16,6 +16,7 @@ public enum PropertyPaneKind
     TextSlide,
     Cursor,
     Video,
+    TextOverlay,
 }
 
 /// <summary>
@@ -26,8 +27,8 @@ public enum PropertyPaneKind
 /// <remarks>
 /// This control is purely presentational. It owns no editing logic — the hosting
 /// <c>EditorPage</c> reaches into the individual views (<see cref="Scene"/>,
-/// <see cref="TextSlide"/>, <see cref="Cursor"/>, <see cref="Video"/>) to wire events and
-/// push state.
+/// <see cref="TextSlide"/>, <see cref="Cursor"/>, <see cref="Video"/>,
+/// <see cref="TextOverlay"/>) to wire events and push state.
 /// </remarks>
 public sealed partial class PropertiesPane : UserControl
 {
@@ -79,6 +80,9 @@ public sealed partial class PropertiesPane : UserControl
 
     /// <summary>Video / camera overlay panel.</summary>
     public VideoPropertiesView Video => VideoView;
+
+    /// <summary>Animated text overlay panel.</summary>
+    public TextOverlayPropertiesView TextOverlay => TextOverlayView;
 
     private PropertyPaneKind _selected = PropertyPaneKind.Scene;
     private bool _isOpen = true;
@@ -140,6 +144,7 @@ public sealed partial class PropertiesPane : UserControl
         PropertyPaneKind.TextSlide => TextSlideTab,
         PropertyPaneKind.Cursor => CursorTab,
         PropertyPaneKind.Video => VideoTab,
+        PropertyPaneKind.TextOverlay => TextOverlayTab,
         _ => SceneTab,
     };
 
@@ -148,6 +153,7 @@ public sealed partial class PropertiesPane : UserControl
         if (tab == TextSlideTab) return PropertyPaneKind.TextSlide;
         if (tab == CursorTab) return PropertyPaneKind.Cursor;
         if (tab == VideoTab) return PropertyPaneKind.Video;
+        if (tab == TextOverlayTab) return PropertyPaneKind.TextOverlay;
         return PropertyPaneKind.Scene;
     }
 
@@ -156,6 +162,7 @@ public sealed partial class PropertiesPane : UserControl
         PropertyPaneKind.TextSlide => "Text Slide",
         PropertyPaneKind.Cursor => "Mouse",
         PropertyPaneKind.Video => "Video",
+        PropertyPaneKind.TextOverlay => "Text Overlay",
         _ => "Scene",
     };
 
@@ -170,11 +177,13 @@ public sealed partial class PropertiesPane : UserControl
         TextSlideTab.IsChecked = _isOpen && _selected == PropertyPaneKind.TextSlide;
         CursorTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Cursor;
         VideoTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Video;
+        TextOverlayTab.IsChecked = _isOpen && _selected == PropertyPaneKind.TextOverlay;
 
         SceneView.Visibility = Vis(PropertyPaneKind.Scene);
         TextSlideView.Visibility = Vis(PropertyPaneKind.TextSlide);
         CursorView.Visibility = Vis(PropertyPaneKind.Cursor);
         VideoView.Visibility = Vis(PropertyPaneKind.Video);
+        TextOverlayView.Visibility = Vis(PropertyPaneKind.TextOverlay);
 
         // Each panel starts at the top rather than inheriting the previous panel's scroll.
         if (_renderedPane != _selected)

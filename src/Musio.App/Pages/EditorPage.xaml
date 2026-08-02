@@ -160,32 +160,36 @@
                 </StackPanel>
             </Grid>
 
-            <!-- Text slide edit overlay (reposition + in-place editing) -->
-            <Canvas x:Name="SlideEditCanvas" Visibility="Collapsed">
-                <Border x:Name="SlideTextRegion"
+            <!-- Shared text edit overlay (reposition + in-place editing), used by both
+                 full-screen text slides and text overlays — see EditorPage.xaml.cs's
+                 ITextEditTarget abstraction. -->
+            <Canvas x:Name="TextEditCanvas" Visibility="Collapsed">
+                <Border x:Name="TextEditRegion"
+                        AutomationProperties.Name="Text edit region"
                         BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
                         BorderThickness="1.5"
                         CornerRadius="2"
-                        DoubleTapped="SlideTextRegion_DoubleTapped"
-                        PointerEntered="SlideTextRegion_PointerEntered"
-                        PointerExited="SlideTextRegion_PointerExited"
-                        PointerPressed="SlideTextRegion_PointerPressed"
-                        PointerMoved="SlideTextRegion_PointerMoved"
-                        PointerReleased="SlideTextRegion_PointerReleased">
+                        DoubleTapped="TextEditRegion_DoubleTapped"
+                        PointerEntered="TextEditRegion_PointerEntered"
+                        PointerExited="TextEditRegion_PointerExited"
+                        PointerPressed="TextEditRegion_PointerPressed"
+                        PointerMoved="TextEditRegion_PointerMoved"
+                        PointerReleased="TextEditRegion_PointerReleased">
                     <Border.Background>
                         <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
                     </Border.Background>
                 </Border>
-                <TextBox x:Name="SlideEditBox"
+                <TextBox x:Name="TextEditBox"
+                         AutomationProperties.Name="Text edit box"
                          Visibility="Collapsed"
                          AcceptsReturn="True"
                          TextWrapping="Wrap"
                          Background="Transparent"
                          BorderThickness="0"
                          Padding="0"
-                         TextChanged="SlideEditBox_TextChanged"
-                         KeyDown="SlideEditBox_KeyDown"
-                         LostFocus="SlideEditBox_LostFocus" />
+                         TextChanged="TextEditBox_TextChanged"
+                         KeyDown="TextEditBox_KeyDown"
+                         LostFocus="TextEditBox_LostFocus" />
             </Canvas>
         </Grid>
 
@@ -265,6 +269,14 @@
                                 Click="AddTextSlide_Click">
                                 <MenuFlyoutItem.Icon>
                                     <FontIcon Glyph="&#xE8D2;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Text Overlay"
+                                Click="AddTextOverlay_Click"
+                                AutomationProperties.Name="Insert text overlay">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE7C8;" />
                                 </MenuFlyoutItem.Icon>
                             </MenuFlyoutItem>
                             <MenuFlyoutItem

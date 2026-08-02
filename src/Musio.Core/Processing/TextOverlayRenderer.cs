@@ -1,0 +1,422 @@
+using System.Numerics;
+using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Brushes;
+using Microsoft.Graphics.Canvas.Effects;
+using Microsoft.Graphics.Canvas.Geometry;
+using Microsoft.Graphics.Canvas.Text;
+using Musio.Core.Timeline;
+using Windows.Foundation;
+using Windows.UI;
+
+namespace Musio.Core.Processing;
+
+/// <summary>
+/// Draws animated <see cref="TextOverlaySegment"/>s on top of an already-composed output
+/// frame. Unlike <see cref="TextSlideRenderer"/> (which replaces the whole frame with a
+/// slide), every overlay background here is clipped to its own text box, so the recording
+/// underneath continues to show through everywhere else. The cinematic entrance/exit
+/// animation math is shared with <see cref="TextSlideRenderer"/> via
+/// <see cref="AnimatedTextEngine"/> rather than duplicated.
+/// </summary>
+public class TextOverlayRenderer : IDisposable
+{
+    /// <summary>
+    /// Reference output height an overlay's pixel-valued properties (font size, corner
+    /// radius, outline width, accent thickness, blur amount) are authored against.
+    /// Every such value is multiplied by <c>height / ReferenceHeight</c> before use, so an
+    /// overlay looks proportionally identical whether the preview renders at 720p or the
+    /// export renders at 4K — without this, the same overlay would look tiny on a small
+    /// canvas and enormous on a large one.
+    /// </summary>
+    private const double ReferenceHeight = 1080.0;
+
+    /// <summary>
+    /// Number of offset copies drawn for the <see cref="TextOverlayBackground.OutlineShadow"/>
+    /// outline pass. Kept small (evenly spaced around a circle) since each pass re-measures
+    /// and redraws the whole text via <see cref="AnimatedTextEngine.DrawAnimatedText"/>.
+    /// </summary>
+    private const int OutlinePassCount = 8;
+
+    private readonly CanvasDevice _device;
+    private readonly AnimatedTextEngine _textEngine;
+    private bool _disposed;
+
+    // Scratch render target used to sample the already-composed frame for the
+    // frosted-glass (Blur) background. Allocated lazily — only the first time an active
+    // overlay actually uses Blur — and resized via allocate-then-swap after that so a
+    // failed allocation never leaves the field pointing at a disposed target, and normal
+    // frames with no Blur overlay never touch the GPU for it at all.
+    private CanvasRenderTarget? _blurScratch;
+    private (int W, int H) _blurScratchKey;
+
+    public TextOverlayRenderer(CanvasDevice? device = null)
+    {
+        _device = device ?? CanvasDevice.GetSharedDevice();
+        _textEngine = new AnimatedTextEngine(_device);
+    }
+
+    /// <summary>
+    /// Draws every active text overlay on top of an already-composed frame.
+    /// <paramref name="target"/> is the finished output frame; it is both read (for the
+    /// frosted-blur background, which samples the video behind the text) and drawn into,
+    /// which is why this takes the render target rather than an open drawing session.
+    /// Overlays are drawn in list order, so later entries stack on top of earlier ones.
+    /// Disabled overlays and ones whose source range does not contain
+    /// <paramref name="sourceTime"/> are skipped. This method is on the hot path for both
+    /// preview and export, so it does nothing at all (no allocations, no GPU work) when
+    /// <paramref name="overlays"/> is empty or none are currently active.
+    /// </summary>
+    public void Render(
+        CanvasRenderTarget target,
+        IReadOnlyList<TextOverlaySegment> overlays,
+        TimeSpan sourceTime,
+        int width, int height)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(overlays);
+
+        if (overlays.Count == 0 || width <= 0 || height <= 0)
+            return;
+
+        bool anyActive = false;
+        foreach (var overlay in overlays)
+        {
+            if (IsActive(overlay, sourceTime)) { anyActive = true; break; }
+        }
+        if (!anyActive)
+            return;
+
+        foreach (var overlay in overlays)
+        {
+            if (IsActive(overlay, sourceTime))
+                RenderOverlay(target, overlay, sourceTime, width, height);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="overlay"/> should be shown at <paramref name="sourceTime"/>:
+    /// enabled, has text, and the instant falls inside its source range. Ownership by
+    /// recording (<see cref="TextOverlaySegment.SourceVideoFilePath"/>) is the caller's
+    /// concern (see <see cref="TimelineModel.GetActiveTextOverlays"/>) — this is a
+    /// defensive re-check so <see cref="Render"/> is safe to call with an unfiltered list.
+    /// </summary>
+    private static bool IsActive(TextOverlaySegment overlay, TimeSpan sourceTime) =>
+        overlay.Enabled
+        && !string.IsNullOrEmpty(overlay.Text)
+        && sourceTime >= overlay.Start && sourceTime < overlay.End;
+
+    // ─────────────────────────── Geometry ───────────────────────────
+
+    private void RenderOverlay(
+        CanvasRenderTarget target, TextOverlaySegment overlay, TimeSpan sourceTime, int width, int height)
+    {
+        double progress = TimelineModel.GetTextOverlayProgress(overlay, sourceTime);
+        double durationSeconds = overlay.Duration.TotalSeconds;
+
+        // The whole-overlay animation envelope: the background (drawn manually below)
+        // is transformed/faded in lockstep with this, while the text itself gets the
+        // same envelope applied internally by AnimatedTextEngine.DrawAnimatedText.
+        var (scale, tx, ty, envelopeOpacity) = AnimatedTextEngine.ComputeEnvelope(
+            overlay.Animation, progress, durationSeconds, width, height);
+        if (envelopeOpacity <= 0.001)
+            return;
+
+        float fontScale = (float)(height / ReferenceHeight);
+        float scaledFontSize = (float)Math.Max(1.0, overlay.FontSize * fontScale);
+        double scaledCornerRadius = Math.Max(0.0, overlay.CornerRadius * fontScale);
+        double scaledOutlineWidth = Math.Max(0.0, overlay.OutlineWidth * fontScale);
+        double scaledAccentThickness = Math.Max(1.0, overlay.AccentThickness * fontScale);
+        double scaledBlurAmount = Math.Max(0.01, overlay.BlurAmount * fontScale);
+
+        var hAlign = ToCanvasAlignment(overlay.TextAlignment);
+
+        // Measure with a Top-aligned format so LayoutBounds reflects the text's true ink
+        // extents (matches TextSlideRenderer.MeasureTextHeight's approach) — the actual
+        // draw pass below uses a separately-built Center-aligned format.
+        using var measureFormat = AnimatedTextEngine.CreateFormat(
+            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
+            hAlign, CanvasVerticalAlignment.Top, wrap: true);
+
+        double maxWidth = Math.Max(1.0, overlay.WidthFraction * width);
+        using var layout = new CanvasTextLayout(_device, overlay.Text, measureFormat, (float)maxWidth, (float)height);
+
+        double textW = Math.Max(1.0, layout.LayoutBounds.Width);
+        double textH = Math.Max(1.0, layout.LayoutBounds.Height);
+
+        double padding = overlay.PaddingScale * scaledFontSize;
+        double boxW = textW + padding * 2;
+        double boxH = textH + padding * 2;
+
+        var (nx, ny) = TextOverlaySegment.ResolveCenter(
+            overlay.Anchor, overlay.X, overlay.Y, overlay.MarginFraction, boxW / width, boxH / height);
+
+        double left = nx * width - boxW / 2;
+        double top = ny * height - boxH / 2;
+
+        // Clamp fully inside the frame. When the box is larger than the frame this pins
+        // it to the top-left rather than letting it hang off both edges at once.
+        left = Math.Clamp(left, 0.0, Math.Max(0.0, width - boxW));
+        top = Math.Clamp(top, 0.0, Math.Max(0.0, height - boxH));
+
+        var box = new Rect(left, top, boxW, boxH);
+        var textRect = new Rect(left + padding, top + padding, textW, textH);
+        var boxCenter = new Vector2((float)(left + boxW / 2), (float)(top + boxH / 2));
+
+        using var drawFormat = AnimatedTextEngine.CreateFormat(
+            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
+            hAlign, CanvasVerticalAlignment.Center, wrap: true);
+
+        DrawOverlay(
+            target, overlay, box, textRect, boxCenter, drawFormat,
+            scale, tx, ty, envelopeOpacity, progress, durationSeconds, scaledFontSize,
+            scaledCornerRadius, scaledOutlineWidth, scaledAccentThickness, scaledBlurAmount,
+            width, height);
+    }
+
+    private static CanvasHorizontalAlignment ToCanvasAlignment(SlideTextAlignment a) => a switch
+    {
+        SlideTextAlignment.Left => CanvasHorizontalAlignment.Left,
+        SlideTextAlignment.Right => CanvasHorizontalAlignment.Right,
+        _ => CanvasHorizontalAlignment.Center,
+    };
+
+    // ─────────────────────────── Drawing ───────────────────────────
+
+    private void DrawOverlay(
+        CanvasRenderTarget target, TextOverlaySegment overlay, Rect box, Rect textRect, Vector2 boxCenter,
+        CanvasTextFormat drawFormat, float scale, float tx, float ty, double envelopeOpacity,
+        double progress, double durationSeconds, float scaledFontSize, double scaledCornerRadius,
+        double scaledOutlineWidth, double scaledAccentThickness, double scaledBlurAmount,
+        int width, int height)
+    {
+        // Blur must sample `target`'s current pixels *before* a drawing session is opened
+        // on it — Win2D forbids reading from and drawing into the same render target in
+        // one pass. Copy into the cached scratch target and build the blur effect graph
+        // first; every other background mode only ever draws into `target`.
+        using var borderEffect = overlay.Background == TextOverlayBackground.Blur
+            ? new BorderEffect
+            {
+                Source = CopyFrameIntoBlurScratch(target, width, height),
+                ExtendX = CanvasEdgeBehavior.Clamp,
+                ExtendY = CanvasEdgeBehavior.Clamp,
+            }
+            : null;
+        using var blurEffect = borderEffect is not null
+            ? new GaussianBlurEffect { Source = borderEffect, BlurAmount = (float)scaledBlurAmount }
+            : null;
+
+        using var ds = target.CreateDrawingSession();
+
+        if (overlay.Background == TextOverlayBackground.OutlineShadow)
+        {
+            // No box — the "background" is a shadow + outline drawn directly around the
+            // glyphs, each pass already animated in lockstep with the fill via DrawAnimatedText.
+            DrawOutlineShadow(
+                ds, overlay, textRect, drawFormat, progress, durationSeconds,
+                scaledOutlineWidth, scaledFontSize, width, height);
+        }
+        else if (overlay.Background != TextOverlayBackground.None)
+        {
+            var saved = ds.Transform;
+            ds.Transform = Matrix3x2.CreateScale(scale, boxCenter) * Matrix3x2.CreateTranslation(tx, ty);
+            try
+            {
+                switch (overlay.Background)
+                {
+                    case TextOverlayBackground.Solid:
+                        DrawSolidBackground(ds, overlay, box, scaledCornerRadius, envelopeOpacity);
+                        break;
+                    case TextOverlayBackground.Blur:
+                        DrawBlurBackground(ds, blurEffect!, overlay, box, scaledCornerRadius, envelopeOpacity);
+                        break;
+                    case TextOverlayBackground.GradientScrim:
+                        DrawGradientScrim(ds, overlay, box, envelopeOpacity, width, height);
+                        break;
+                    case TextOverlayBackground.AccentBar:
+                        DrawAccentBarBackground(ds, overlay, box, scaledCornerRadius, scaledAccentThickness, envelopeOpacity);
+                        break;
+                }
+            }
+            finally
+            {
+                ds.Transform = saved;
+            }
+        }
+
+        var textColor = AnimatedTextEngine.ParseColor(overlay.TextColor);
+        _textEngine.DrawAnimatedText(
+            ds, overlay.Text, drawFormat, textRect, textColor, overlay.Animation, progress,
+            width, height, scaledFontSize, durationSeconds);
+    }
+
+    /// <summary>
+    /// Copies the current contents of <paramref name="target"/> into the cached blur
+    /// scratch target (resizing it via allocate-then-swap if needed) and returns it, ready
+    /// to be wrapped in the blur effect graph. Must be called while no drawing session is
+    /// open on <paramref name="target"/>.
+    /// </summary>
+    private CanvasRenderTarget CopyFrameIntoBlurScratch(CanvasRenderTarget target, int width, int height)
+    {
+        var scratch = EnsureBlurScratch(width, height);
+        using (var scratchDs = scratch.CreateDrawingSession())
+        {
+            scratchDs.Clear(Color.FromArgb(0, 0, 0, 0));
+            scratchDs.DrawImage(target);
+        }
+        return scratch;
+    }
+
+    private CanvasRenderTarget EnsureBlurScratch(int width, int height)
+    {
+        if (_blurScratch is null || _blurScratch.Device != _device || _blurScratchKey != (width, height))
+        {
+            var next = new CanvasRenderTarget(_device, width, height, 96);
+            _blurScratch?.Dispose();
+            _blurScratch = next;
+            _blurScratchKey = (width, height);
+        }
+        return _blurScratch;
+    }
+
+    // ─────────────────────────── Backgrounds ───────────────────────────
+
+    private static void DrawSolidBackground(
+        CanvasDrawingSession ds, TextOverlaySegment overlay, Rect box, double cornerRadius, double envelopeOpacity)
+    {
+        var color = AnimatedTextEngine.ParseColor(overlay.BackgroundColor);
+        byte alpha = ToByteAlpha(overlay.BackgroundOpacity * envelopeOpacity);
+        ds.FillRoundedRectangle(box, (float)cornerRadius, (float)cornerRadius, Color.FromArgb(alpha, color.R, color.G, color.B));
+    }
+
+    /// <summary>
+    /// Frosted-glass background: draws the pre-blurred sample of the frame behind the
+    /// text, clipped to the rounded-rect box via a layer (so nothing bleeds outside it),
+    /// then a flat legibility tint on top.
+    /// </summary>
+    private static void DrawBlurBackground(
+        CanvasDrawingSession ds, ICanvasImage blurredFrame,
+        TextOverlaySegment overlay, Rect box, double cornerRadius, double envelopeOpacity)
+    {
+        using var clip = CanvasGeometry.CreateRoundedRectangle(ds, box, (float)cornerRadius, (float)cornerRadius);
+        using (ds.CreateLayer((float)envelopeOpacity, clip))
+        {
+            ds.DrawImage(blurredFrame);
+        }
+
+        var tint = AnimatedTextEngine.ParseColor(overlay.BackgroundColor);
+        byte tintAlpha = ToByteAlpha(overlay.BlurTintOpacity * envelopeOpacity);
+        ds.FillRoundedRectangle(box, (float)cornerRadius, (float)cornerRadius, Color.FromArgb(tintAlpha, tint.R, tint.G, tint.B));
+    }
+
+    /// <summary>
+    /// A directional scrim: a linear gradient from an opaque edge at the frame boundary
+    /// to fully transparent at the near edge of the text box, extended past the box
+    /// itself so the fade — not a hard rectangle edge — is what reads as the background.
+    /// </summary>
+    private static void DrawGradientScrim(
+        CanvasDrawingSession ds, TextOverlaySegment overlay, Rect box, double envelopeOpacity, int width, int height)
+    {
+        var baseColor = AnimatedTextEngine.ParseColor(overlay.BackgroundColor);
+        byte alpha = ToByteAlpha(overlay.ScrimStrength * envelopeOpacity);
+        var opaque = Color.FromArgb(alpha, baseColor.R, baseColor.G, baseColor.B);
+        var transparent = Color.FromArgb(0, baseColor.R, baseColor.G, baseColor.B);
+
+        Rect band;
+        Vector2 start, end;
+        switch (overlay.ScrimDirection)
+        {
+            case ScrimDirection.Top:
+                band = new Rect(box.X, 0, box.Width, box.Bottom);
+                start = new Vector2((float)box.X, 0f);
+                end = new Vector2((float)box.X, (float)box.Bottom);
+                break;
+            case ScrimDirection.Left:
+                band = new Rect(0, box.Y, box.Right, box.Height);
+                start = new Vector2(0f, (float)box.Y);
+                end = new Vector2((float)box.Right, (float)box.Y);
+                break;
+            case ScrimDirection.Right:
+                band = new Rect(box.X, box.Y, width - box.X, box.Height);
+                start = new Vector2((float)width, (float)box.Y);
+                end = new Vector2((float)box.X, (float)box.Y);
+                break;
+            default: // Bottom
+                band = new Rect(box.X, box.Y, box.Width, height - box.Y);
+                start = new Vector2((float)box.X, (float)height);
+                end = new Vector2((float)box.X, (float)box.Y);
+                break;
+        }
+
+        using var brush = new CanvasLinearGradientBrush(ds, opaque, transparent) { StartPoint = start, EndPoint = end };
+        ds.FillRectangle(band, brush);
+    }
+
+    /// <summary>A thin solid stripe along one edge of the box, on top of a normal solid backing.</summary>
+    private static void DrawAccentBarBackground(
+        CanvasDrawingSession ds, TextOverlaySegment overlay, Rect box, double cornerRadius,
+        double thickness, double envelopeOpacity)
+    {
+        DrawSolidBackground(ds, overlay, box, cornerRadius, envelopeOpacity);
+
+        var accent = AnimatedTextEngine.ParseColor(overlay.AccentColor);
+        byte alpha = ToByteAlpha(envelopeOpacity);
+        var color = Color.FromArgb(alpha, accent.R, accent.G, accent.B);
+
+        var stripe = overlay.AccentSide switch
+        {
+            AccentSide.Right => new Rect(box.Right - thickness, box.Y, thickness, box.Height),
+            AccentSide.Top => new Rect(box.X, box.Y, box.Width, thickness),
+            AccentSide.Bottom => new Rect(box.X, box.Bottom - thickness, box.Width, thickness),
+            _ => new Rect(box.X, box.Y, thickness, box.Height), // Left
+        };
+        ds.FillRectangle(stripe, color);
+    }
+
+    /// <summary>
+    /// No box: a soft drop shadow (a single downward-offset dark copy) plus a stroked
+    /// outline (a ring of offset copies in <see cref="TextOverlaySegment.OutlineColor"/>)
+    /// drawn behind where the fill pass will land. Every pass goes through
+    /// <see cref="AnimatedTextEngine.DrawAnimatedText"/> so it animates identically to the
+    /// fill (same envelope, computed independently from the same progress/duration).
+    /// </summary>
+    private void DrawOutlineShadow(
+        CanvasDrawingSession ds, TextOverlaySegment overlay, Rect textRect, CanvasTextFormat format,
+        double progress, double durationSeconds, double outlineWidth, float fontSize, int width, int height)
+    {
+        if (overlay.ShadowStrength > 0.001)
+        {
+            double shadowOffset = Math.Max(1.0, fontSize * 0.06);
+            var shadowRect = new Rect(textRect.X, textRect.Y + shadowOffset, textRect.Width, textRect.Height);
+            var shadowColor = Color.FromArgb(ToByteAlpha(overlay.ShadowStrength), 0, 0, 0);
+            _textEngine.DrawAnimatedText(
+                ds, overlay.Text, format, shadowRect, shadowColor, overlay.Animation, progress,
+                width, height, fontSize, durationSeconds);
+        }
+
+        if (outlineWidth > 0.01)
+        {
+            var outlineColor = AnimatedTextEngine.ParseColor(overlay.OutlineColor);
+            for (int i = 0; i < OutlinePassCount; i++)
+            {
+                double angle = i * (2.0 * Math.PI / OutlinePassCount);
+                double dx = Math.Cos(angle) * outlineWidth;
+                double dy = Math.Sin(angle) * outlineWidth;
+                var rect = new Rect(textRect.X + dx, textRect.Y + dy, textRect.Width, textRect.Height);
+                _textEngine.DrawAnimatedText(
+                    ds, overlay.Text, format, rect, outlineColor, overlay.Animation, progress,
+                    width, height, fontSize, durationSeconds);
+            }
+        }
+    }
+
+    private static byte ToByteAlpha(double normalized) => (byte)Math.Clamp(normalized * 255.0, 0, 255);
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _blurScratch?.Dispose();
+        GC.SuppressFinalize(this);
+    }
+}

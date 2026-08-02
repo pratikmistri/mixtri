@@ -99,6 +99,21 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
+    /// Syncs the text overlays belonging to this preview's source recording to the
+    /// compositor. Call this whenever the active/current preview recording changes and
+    /// whenever a text overlay is added, edited, removed, or reordered (including
+    /// undo/redo) — the same events that already drive <see cref="UpdateZoomKeyframes"/>.
+    /// Callers should select the overlays with
+    /// <see cref="Export.SegmentFrameComposer.SelectTextOverlays"/> so preview uses the
+    /// identical per-source ownership rule export does.
+    /// </summary>
+    public void UpdateTextOverlays(IReadOnlyList<TextOverlaySegment> overlays)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _compositor?.SyncTextOverlays(overlays);
+    }
+
+    /// <summary>
     /// Syncs the set of suppressed auto-zoom click ticks to the compositor.
     /// Call this when auto-generated zoom segments are deleted or restored (undo).
     /// </summary>

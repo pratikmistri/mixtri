@@ -172,6 +172,11 @@ public static class MusioPathRewriter
         foreach (var zoom in timeline.ZoomKeyframes)
             Add(zoom.SourceVideoFilePath);
 
+        // Mirrors zoom keyframes: a back-reference to a recording collected above, not a
+        // distinct asset.
+        foreach (var overlay in timeline.TextOverlays)
+            Add(overlay.SourceVideoFilePath);
+
         return found;
     }
 
@@ -246,6 +251,16 @@ public static class MusioPathRewriter
             timeline.ZoomKeyframes[i] = timeline.ZoomKeyframes[i] with
             {
                 SourceVideoFilePath = ApplyOptional(timeline.ZoomKeyframes[i].SourceVideoFilePath, map),
+            };
+        }
+
+        // Mirrors zoom keyframes: SourceVideoFilePath names the recording whose source-time
+        // space the overlay was authored against, not a distinct asset.
+        for (int i = 0; i < timeline.TextOverlays.Count; i++)
+        {
+            timeline.TextOverlays[i] = timeline.TextOverlays[i] with
+            {
+                SourceVideoFilePath = ApplyOptional(timeline.TextOverlays[i].SourceVideoFilePath, map),
             };
         }
     }

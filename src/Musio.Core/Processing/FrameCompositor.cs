@@ -62,6 +62,12 @@ public class FrameCompositor : IDisposable
     private List<KeyPressEvent>? _keyboardEvents;
     private double _tickFrequency;
 
+    // Text overlays authored against this compositor's source recording (see
+    // SyncTextOverlays). The renderer is created lazily — only once a non-empty
+    // list is synced — so projects with no text overlays never pay for it.
+    private TextOverlayRenderer? _textOverlayRenderer;
+    private IReadOnlyList<TextOverlaySegment> _textOverlays = [];
+
     private List<SmoothedPosition> _smoothedPositions = [];
     private double[] _lastMoveTimes = [];
     private MouseRecordingData? _mouseData;
@@ -422,6 +428,21 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Sets the text overlays that belong to this compositor's source recording.
+    /// Call this when the user adds, edits, or removes a text overlay in the editor,
+    /// and once up front when a compositor is created for preview or export. The
+    /// <see cref="TextOverlayRenderer"/> is created lazily the first time a
+    /// non-empty list is supplied, so a project with no overlays never allocates
+    /// one or touches the GPU for it.
+    /// </summary>
+    public void SyncTextOverlays(IReadOnlyList<TextOverlaySegment> overlays)
+    {
+        _textOverlays = overlays ?? [];
+        if (_textOverlays.Count > 0)
+            _textOverlayRenderer ??= new TextOverlayRenderer(_device);
+    }
+
+    /// <summary>
     /// Asynchronously warms the background-image cache for the configured background
     /// style so <see cref="ComposeFrame(CanvasBitmap, double)"/> never blocks on file I/O
     /// or GPU decode. Already called by <see cref="InitializeAsync"/>; expose it for
@@ -630,6 +651,14 @@ public class FrameCompositor : IDisposable
             _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
         }
 
+        // Text overlays are drawn after the drawing session above has closed (not inside
+        // it) because TextOverlayRenderer's frosted-blur background samples the pixels of
+        // the already-composed frame — it needs `output` fully flushed and readable, not
+        // an in-progress drawing session. They stay fixed on screen and are never scaled
+        // by a zoom, the same rule webcam/keyboard/subtitle overlays follow above (there is
+        // no zoom in this direct-composition path to begin with, but the rule still holds
+        // if that ever changes).
+        RenderTextOverlays(output, timeSeconds);
         return output;
     }
 
@@ -713,7 +742,30 @@ public class FrameCompositor : IDisposable
             _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
         }
 
+        // Text overlays, like the fixed overlays above, are drawn outside the drawing
+        // session and after the zoom: outside because TextOverlayRenderer's
+        // frosted-blur background samples the already-composed `output` pixels (it
+        // needs a closed, flushed drawing session to read from, not an open one), and
+        // after the zoom because overlays stay fixed on screen and are never scaled by
+        // it — the same rule the webcam/keyboard/subtitle overlays follow just above.
+        RenderTextOverlays(output, timeSeconds);
         return output;
+    }
+
+    /// <summary>
+    /// Draws every active text overlay onto an already-finished output frame. Shared by
+    /// both compose paths, called after their drawing session has closed. No-ops
+    /// immediately (no allocation, no branch into GPU work) when no overlays have been
+    /// synced via <see cref="SyncTextOverlays"/>, which keeps the hot path free for the
+    /// common case of a project with no text overlays.
+    /// </summary>
+    private void RenderTextOverlays(CanvasRenderTarget output, double timeSeconds)
+    {
+        if (_textOverlayRenderer is null || _textOverlays.Count == 0)
+            return;
+
+        var sourceTime = TimeSpan.FromSeconds(timeSeconds);
+        _textOverlayRenderer.Render(output, _textOverlays, sourceTime, OutputWidth, OutputHeight);
     }
 
     /// <summary>
@@ -1415,6 +1467,7 @@ public class FrameCompositor : IDisposable
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
             _webcamCompositor?.Dispose();
+            _textOverlayRenderer?.Dispose();
             _smoothedPositions = [];
             _lastMoveTimes = [];
             _mouseData = null;

@@ -35,7 +35,7 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate }
     private DragMode _dragMode = DragMode.None;
 
     // ── Primary-track (video / text slide) segment drag state ──
@@ -351,6 +351,7 @@ public sealed partial class TimelineControl : UserControl
         CursorTrackCanvas?.Invalidate();
         ZoomTrackCanvas?.Invalidate();
         CameraTrackCanvas?.Invalidate();
+        TextTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
         // Durations / zoom / scroll may have changed with the tracks, which moves the
@@ -2969,6 +2970,368 @@ public sealed partial class TimelineControl : UserControl
             CameraSegmentSelected?.Invoke(this, hitId);
             CameraSegmentRemoveRequested?.Invoke(this, hitId);
         }
+    }
+
+    // ─────────────────────────── Text Overlay Track ───────────────────────────
+    // Text overlays are positioned in SOURCE time (like zoom/camera), mapped to X via
+    // SourceTimeToX so they stay aligned with the recording after reorder/trim.
+
+    private const float TextOverlayVerticalPadding = 6f;
+
+    private string? _selectedTextOverlayId;
+    private double _textOverlayDragStartX = double.NaN;
+    private double _textOverlayDragCurrentX = double.NaN;
+    private TimeSpan _textOverlayDragOriginalStart;
+    private TimeSpan _textOverlayDragOriginalEnd;
+    private bool _textOverlayCreateActive;
+    private TimeSpan _textOverlayCreateStart;
+    private TimeSpan _textOverlayCreateEnd;
+
+    /// <summary>Id of the selected text overlay, or null.</summary>
+    public string? SelectedTextOverlayId
+    {
+        get => _selectedTextOverlayId;
+        set { _selectedTextOverlayId = value; TextTrackCanvas?.Invalidate(); }
+    }
+
+    public void ClearTextOverlaySelection()
+    {
+        if (_selectedTextOverlayId is not null)
+        {
+            _selectedTextOverlayId = null;
+            TextOverlaySelected?.Invoke(this, null);
+            TextTrackCanvas?.Invalidate();
+        }
+    }
+
+    public event EventHandler<string?>? TextOverlaySelected;
+    public event EventHandler<(TimeSpan Start, TimeSpan End)>? TextOverlayCreated;
+    public event EventHandler<(string Id, TimeSpan NewStart)>? TextOverlayMoved;
+    public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? TextOverlayResized;
+    public event EventHandler<string>? TextOverlayRemoveRequested;
+
+    private void TextTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        var ds = args.DrawingSession;
+        var model = Model;
+        float w = (float)sender.ActualWidth;
+        float h = (float)sender.ActualHeight;
+
+        ds.Clear(ZoomTrackBackground);
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0) return;
+
+        // ── Amber/orange palette — kept visually distinct from the green camera track ──
+        var fill = Color.FromArgb(230, 245, 166, 35);
+        var fillSelected = Color.FromArgb(245, 255, 196, 80);
+        var fillDisabled = Color.FromArgb(120, 130, 125, 115);
+        var border = Color.FromArgb(255, 196, 128, 20);
+        var borderSelected = Color.FromArgb(255, 255, 235, 190);
+        var handleColor = Color.FromArgb(255, 255, 255, 255);
+        var textColor = Color.FromArgb(255, 255, 255, 255);
+
+        // Unlike the camera track, there is no per-video-segment "presence" bar here —
+        // text overlays don't correspond to a source recording, only to user-created
+        // TextOverlaySegments — so we go straight to drawing the overlay blocks.
+        foreach (var seg in model.TextOverlays)
+        {
+            float x1 = (float)GetTextOverlayStartX(seg);
+            float x2 = (float)GetTextOverlayEndX(seg);
+            if (x2 < 0 || x1 > w) continue;
+
+            float segW = Math.Max(2, x2 - x1);
+            float segY = TextOverlayVerticalPadding;
+            float segH = h - TextOverlayVerticalPadding * 2;
+            bool isSelected = seg.Id == _selectedTextOverlayId;
+
+            using var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, 4, 4);
+            ds.FillGeometry(rect, !seg.Enabled ? fillDisabled : isSelected ? fillSelected : fill);
+            ds.DrawGeometry(rect, isSelected ? borderSelected : border, isSelected ? 1.5f : 1f);
+
+            if (segW > 20)
+            {
+                // Label each block with the overlay's own text (single line, ellipsised
+                // when it doesn't fit) so the track is scannable without opening the
+                // property pane for every block, falling back to "Text" when empty.
+                string baseText = string.IsNullOrWhiteSpace(seg.Text) ? "Text" : seg.Text;
+                string label = seg.Enabled ? baseText : baseText + " (off)";
+                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                {
+                    FontSize = 11,
+                    FontFamily = "Segoe UI",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
+                };
+                ds.DrawText(label, new Rect(x1 + 6, segY, segW - 12, segH), textColor, fmt);
+            }
+
+            if (isSelected)
+            {
+                float handleW = 3, handleH = segH * 0.5f, handleY = segY + (segH - handleH) / 2;
+                ds.FillRoundedRectangle(x1 + 1, handleY, handleW, handleH, 1, 1, handleColor);
+                ds.FillRoundedRectangle(x2 - handleW - 1, handleY, handleW, handleH, 1, 1, handleColor);
+            }
+        }
+
+        // Create preview
+        if (_textOverlayCreateActive && _dragMode == DragMode.TextOverlayCreate)
+        {
+            float cx1 = (float)SourceTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd);
+            float cx2 = (float)SourceTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart);
+            float cw = Math.Max(2, cx2 - cx1);
+            float cy = TextOverlayVerticalPadding;
+            float ch = h - TextOverlayVerticalPadding * 2;
+            using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
+            ds.FillGeometry(preview, Color.FromArgb(120, 245, 166, 35));
+            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+        }
+    }
+
+    private double GetTextOverlayStartX(TextOverlaySegment seg)
+    {
+        if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
+        {
+            if (_dragMode == DragMode.TextOverlayBody)
+                return SourceTimeToX(_textOverlayDragOriginalStart) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+            if (_dragMode == DragMode.TextOverlayLeftEdge)
+                return _textOverlayDragCurrentX;
+        }
+        return SourceTimeToX(seg.Start);
+    }
+
+    private double GetTextOverlayEndX(TextOverlaySegment seg)
+    {
+        if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
+        {
+            if (_dragMode == DragMode.TextOverlayBody)
+                return SourceTimeToX(_textOverlayDragOriginalEnd) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+            if (_dragMode == DragMode.TextOverlayRightEdge)
+                return _textOverlayDragCurrentX;
+        }
+        return SourceTimeToX(seg.End);
+    }
+
+    private (string? Id, SegmentHitTarget Target) HitTestTextOverlay(double posX, double posY)
+    {
+        var model = Model;
+        if (model is null) return (null, SegmentHitTarget.None);
+
+        float h = (float)TextTrackCanvas.ActualHeight;
+        float segY = TextOverlayVerticalPadding;
+        float segH = h - TextOverlayVerticalPadding * 2;
+        if (posY < segY || posY > segY + segH) return (null, SegmentHitTarget.None);
+
+        for (int i = model.TextOverlays.Count - 1; i >= 0; i--)
+        {
+            var seg = model.TextOverlays[i];
+            float x1 = (float)SourceTimeToX(seg.Start);
+            float x2 = (float)SourceTimeToX(seg.End);
+            if (posX < x1 || posX > x2) continue;
+
+            if (posX - x1 <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.RightEdge);
+            return (seg.Id, SegmentHitTarget.Body);
+        }
+        return (null, SegmentHitTarget.None);
+    }
+
+    private void TextTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+        var (hitId, target) = HitTestTextOverlay(pos.X, pos.Y);
+
+        if (hitId is not null)
+        {
+            SelectedTextOverlayId = hitId;
+            TextOverlaySelected?.Invoke(this, hitId);
+
+            var seg = Model?.TextOverlays.FirstOrDefault(s => s.Id == hitId);
+            if (seg is null) return;
+
+            _textOverlayDragStartX = pos.X;
+            _textOverlayDragCurrentX = pos.X;
+            _textOverlayDragOriginalStart = seg.Start;
+            _textOverlayDragOriginalEnd = seg.End;
+
+            _dragMode = target switch
+            {
+                SegmentHitTarget.LeftEdge => DragMode.TextOverlayLeftEdge,
+                SegmentHitTarget.RightEdge => DragMode.TextOverlayRightEdge,
+                _ => DragMode.TextOverlayBody,
+            };
+            SetCursor(target is SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge
+                ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeAll);
+            canvas.CapturePointer(e.Pointer);
+        }
+        else
+        {
+            if (_selectedTextOverlayId is not null)
+            {
+                SelectedTextOverlayId = null;
+                TextOverlaySelected?.Invoke(this, null);
+            }
+            PlayheadPosition = XToTime(pos.X);
+
+            var start = XToPrimarySourceTime(pos.X);
+            if (start is null)
+            {
+                // No primary video on the timeline — nothing to attach a text overlay
+                // to. Reject the gesture, leaving no transient drag state.
+                _dragMode = DragMode.None;
+                return;
+            }
+
+            _textOverlayDragStartX = pos.X;
+            _textOverlayDragCurrentX = pos.X;
+            _textOverlayCreateActive = false;
+            _textOverlayCreateStart = start.Value;
+            _dragMode = DragMode.TextOverlayCreate;
+            canvas.CapturePointer(e.Pointer);
+        }
+    }
+
+    private void TextTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+
+        switch (_dragMode)
+        {
+            case DragMode.TextOverlayBody:
+                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeAll);
+                InvalidateAll();
+                break;
+            case DragMode.TextOverlayLeftEdge:
+            case DragMode.TextOverlayRightEdge:
+                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                InvalidateAll();
+                break;
+            case DragMode.TextOverlayCreate:
+                if (Math.Abs(pos.X - _textOverlayDragStartX) >= ZoomCreateDragThreshold)
+                {
+                    var end = XToPrimarySourceTime(pos.X);
+                    if (end is not null)
+                    {
+                        _textOverlayCreateActive = true;
+                        _textOverlayCreateEnd = end.Value;
+                        InvalidateAll();
+                    }
+                }
+                else
+                {
+                    PlayheadPosition = XToTime(pos.X);
+                }
+                break;
+            case DragMode.None:
+                var (_, target) = HitTestTextOverlay(pos.X, pos.Y);
+                SetCursor(target switch
+                {
+                    SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge => InputSystemCursorShape.SizeWestEast,
+                    SegmentHitTarget.Body => InputSystemCursorShape.Hand,
+                    _ => InputSystemCursorShape.Arrow,
+                });
+                break;
+        }
+    }
+
+    private void TextTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        switch (_dragMode)
+        {
+            case DragMode.TextOverlayBody when _selectedTextOverlayId is not null:
+            {
+                double deltaX = _textOverlayDragCurrentX - _textOverlayDragStartX;
+                if (Math.Abs(deltaX) > 1)
+                {
+                    var startTime = XToPrimarySourceTime(_textOverlayDragStartX);
+                    var movedTime = XToPrimarySourceTime(_textOverlayDragStartX + deltaX);
+                    if (startTime is not null && movedTime is not null)
+                    {
+                        var newStart = _textOverlayDragOriginalStart + (movedTime.Value - startTime.Value);
+                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                        TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
+                    }
+                    // else: unmappable — reject the move, leave the segment in place.
+                }
+                break;
+            }
+            case DragMode.TextOverlayLeftEdge when _selectedTextOverlayId is not null:
+            {
+                var newEdge = XToPrimarySourceTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalStart)
+                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, true, newEdge.Value));
+                break;
+            }
+            case DragMode.TextOverlayRightEdge when _selectedTextOverlayId is not null:
+            {
+                var newEdge = XToPrimarySourceTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalEnd)
+                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, false, newEdge.Value));
+                break;
+            }
+            case DragMode.TextOverlayCreate when _textOverlayCreateActive:
+            {
+                var start = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd;
+                var end = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart;
+                if ((end - start) >= TrimTextOverlayOperation.MinDuration)
+                    TextOverlayCreated?.Invoke(this, (start, end));
+                _textOverlayCreateActive = false;
+                break;
+            }
+        }
+
+        _textOverlayDragStartX = double.NaN;
+        _textOverlayDragCurrentX = double.NaN;
+        _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
+        canvas.ReleasePointerCapture(e.Pointer);
+        InvalidateAll();
+    }
+
+    private void TextTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+        var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
+        if (hitId is not null)
+        {
+            SelectedTextOverlayId = hitId;
+            TextOverlaySelected?.Invoke(this, hitId);
+            TextOverlayRemoveRequested?.Invoke(this, hitId);
+        }
+    }
+
+    /// <summary>
+    /// Double-clicking empty track space creates a default 3-second overlay starting at
+    /// the clicked source time. The camera track only supports drag-to-create, but a text
+    /// overlay's whole point is its wording, so this gives users a one-click way to drop
+    /// a default block down and then edit its text in the property pane — the primary
+    /// discoverable way to add an overlay. Double-clicking an existing block is a no-op
+    /// here because selection already happened on the preceding pointer-press.
+    /// </summary>
+    private void TextTrack_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+        var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
+        if (hitId is not null) return;
+
+        var start = XToPrimarySourceTime(pos.X);
+        if (start is null) return;
+
+        var clampedStart = start.Value < TimeSpan.Zero ? TimeSpan.Zero : start.Value;
+        var duration = TimeSpan.FromSeconds(3);
+        if (duration < TrimTextOverlayOperation.MinDuration)
+            duration = TrimTextOverlayOperation.MinDuration;
+
+        TextOverlayCreated?.Invoke(this, (clampedStart, clampedStart + duration));
     }
 
     private void Grid_PointerWheelChanged(object sender, PointerRoutedEventArgs e)

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -181,6 +182,12 @@ public sealed partial class EditorPage : Page
     private DispatcherTimer? _cursorDebounceTimer;
     private bool _suppressCursorEvents;
 
+    // Text overlay editing state — separate debounce timer so a text-box keystroke never
+    // interacts with the background-style / motion / cursor debounces above. The model is
+    // still committed (through UndoRedoManager, for undo) on every keystroke; only the
+    // (expensive) preview re-render is debounced.
+    private DispatcherTimer? _overlayPreviewDebounceTimer;
+
     // Webcam overlay drag state
     private bool _webcamDragging;
     private Windows.Foundation.Point _webcamDragStart;
@@ -215,15 +222,16 @@ public sealed partial class EditorPage : Page
             if (_hasWebcamOverlay)
                 UpdateWebcamOverlayPosition();
 
-            // Keep the text-slide edit overlay aligned with the preview frame
-            if (SlideEditCanvas.Visibility == Visibility.Visible && PreviewSlide() is { } s)
-                PositionSlideEditControls(s);
+            // Keep the shared text-edit overlay (slide or text overlay) aligned with the
+            // preview frame.
+            if (TextEditCanvas.Visibility == Visibility.Visible && GetActiveEditTarget() is { } activeTarget)
+                PositionTextEditControls(activeTarget);
         };
 
         // Hide the in-place text editor while playing
         Preview.IsPlayingChanged += (_, playing) =>
         {
-            if (playing) HideSlideEditOverlay();
+            if (playing) HideTextEditOverlay();
         };
 
         // Sync playhead: when timeline scrubs, update preview + audio
@@ -367,6 +375,13 @@ public sealed partial class EditorPage : Page
         Timeline.CameraSegmentResized += OnCameraSegmentResized;
         Timeline.CameraSegmentRemoveRequested += OnCameraSegmentRemoveRequested;
 
+        // Text overlay track events
+        Timeline.TextOverlaySelected += OnTextOverlaySelected;
+        Timeline.TextOverlayCreated += OnTextOverlayCreated;
+        Timeline.TextOverlayMoved += OnTextOverlayMoved;
+        Timeline.TextOverlayResized += OnTextOverlayResized;
+        Timeline.TextOverlayRemoveRequested += OnTextOverlayRemoveRequested;
+
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportFlyout.Closed += ExportFlyout_Closed;
@@ -383,6 +398,8 @@ public sealed partial class EditorPage : Page
             _cursorDebounceTimer = null;
             _motionDebounceTimer?.Stop();
             _motionDebounceTimer = null;
+            _overlayPreviewDebounceTimer?.Stop();
+            _overlayPreviewDebounceTimer = null;
 
             // Stop playback to halt timer ticks
             Preview.Pause();
@@ -1064,7 +1081,7 @@ public sealed partial class EditorPage : Page
                         // in-place text edit changes the slide the outgoing frame is
                         // composed from, and it releases the crossfade cache — doing it
                         // afterwards would dispose the frame still referenced below.
-                        HideSlideEditOverlay();
+                        HideTextEditOverlay();
 
                         // The outgoing side is held at a FIXED instant for the whole
                         // dissolve (SlideTransitions pins it to current.Start - 1 tick), so
@@ -1132,7 +1149,14 @@ public sealed partial class EditorPage : Page
 
             if (segment is VideoSegment videoSeg)
             {
-                HideSlideEditOverlay();
+                // A slide can't be showing while the playhead is over a video segment, so
+                // commit any in-place slide edit and drop the stale slide id — but don't
+                // collapse the shared canvas outright, since the selected text overlay (if
+                // any) may be visible right here; UpdateOverlayEditPreview below decides
+                // that once the frame is actually composed.
+                CommitActiveTextEditIfAny();
+                _previewSlideId = null;
+
                 // Map the playhead within this video segment to its source time
                 var sourceInSeg = videoSeg.SourceStart +
                     TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
@@ -1152,14 +1176,17 @@ public sealed partial class EditorPage : Page
                 await EnsurePrimaryRendererForSegmentAsync(videoSeg);
 
                 await RenderSegmentVideoAsync(videoSeg, sourceInSeg, force);
+                UpdateOverlayEditPreview(videoSeg.VideoFilePath, sourceInSeg);
                 return;
             }
         }
 
-        HideSlideEditOverlay();
+        CommitActiveTextEditIfAny();
+        _previewSlideId = null;
         // Legacy path: map output (playhead) time to source time
         TimeSpan sourcePosition = MapToSourceTime(position);
         await RenderVideoFrameAsync(sourcePosition, force);
+        UpdateOverlayEditPreview(PrimaryVideoPath, sourcePosition);
     }
 
     /// <summary>
@@ -1303,14 +1330,22 @@ public sealed partial class EditorPage : Page
         return fallback;
     }
 
-    // Text slide in-place editing state
+    // In-preview text editing state, shared by full-screen text slides and text overlays
+    // (see ITextEditTarget below). _previewSlideId/_previewOverlayId identify whichever
+    // segment the render pipeline currently considers "on screen" for editing purposes —
+    // at most one of them is non-null at a time (a slide always wins; see
+    // GetActiveEditTarget). _previewFrameW/H is the canvas size that ComputeRect's pixel
+    // math (and PositionTextEditControls' scale-to-layout math) is relative to.
     private string? _previewSlideId;
-    private int _previewSlideW = 1920;
-    private int _previewSlideH = 1080;
-    private string? _editingSlideId;
-    private bool _slideRegionDragging;
-    private Point _slideDragStart;
-    private double _slideDragStartX, _slideDragStartY;
+    private string? _previewOverlayId;
+    private int _previewFrameW = 1920;
+    private int _previewFrameH = 1080;
+    private string? _editingTextId;
+    private ITextEditTarget? _editTarget;
+    private ITextEditTarget? _dragTarget;
+    private bool _textRegionDragging;
+    private Point _textDragStart;
+    private double _textDragStartX, _textDragStartY;
 
     /// <summary>
     /// Canvas size the preview composes to: the scene's aspect ratio, not the raw capture size.
@@ -1353,8 +1388,9 @@ public sealed partial class EditorPage : Page
         var (width, height) = GetPreviewCanvasSize();
 
         _previewSlideId = slide.Id;
-        _previewSlideW = width;
-        _previewSlideH = height;
+        _previewOverlayId = null; // a slide always wins the shared canvas — see GetActiveEditTarget
+        _previewFrameW = width;
+        _previewFrameH = height;
 
         double progress = slide.Duration.TotalSeconds > 0
             ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
@@ -1363,7 +1399,7 @@ public sealed partial class EditorPage : Page
         try
         {
             // While editing, render background only — the editable TextBox shows the text.
-            bool drawText = _editingSlideId != slide.Id;
+            bool drawText = _editingTextId != slide.Id;
             var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height, drawText);
             _lastRenderedFrameIndex = -1; // force redraw next time
             Preview.SetFrame(frame);
@@ -1374,7 +1410,7 @@ public sealed partial class EditorPage : Page
                 $"[EditorPage] Text slide preview error: {ex.Message}");
         }
 
-        UpdateSlideEditOverlay(slide);
+        ShowTextEditOverlay();
     }
 
     private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
@@ -1618,6 +1654,7 @@ public sealed partial class EditorPage : Page
                 // this is what makes a zoom created on it actually render.
                 renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
                 renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+                SyncTextOverlaysToRenderer(renderer, seg.VideoFilePath);
 
                 if (Abandoned())
                 {
@@ -2165,6 +2202,24 @@ public sealed partial class EditorPage : Page
         // appended recordings' keyframes belong to their own segment/source space.
         _previewRenderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
         _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+        SyncTextOverlaysToRenderer(_previewRenderer, null);
+    }
+
+    /// <summary>
+    /// Pushes the text overlays that belong to <paramref name="sourceVideoFilePath"/>
+    /// (null = the primary recording) onto <paramref name="renderer"/>'s compositor, using
+    /// the exact same <see cref="SegmentFrameComposer.SelectTextOverlays"/> ownership rule
+    /// export uses, so preview and export always agree on which overlays a source shows.
+    /// Called alongside every zoom-keyframe sync above (renderer rebuilds, undo/redo, and
+    /// per-segment renderer creation) since overlays need the identical refresh cadence.
+    /// A no-op when there is no primary video to resolve the "primary" case against.
+    /// </summary>
+    private void SyncTextOverlaysToRenderer(PreviewRenderer renderer, string? sourceVideoFilePath)
+    {
+        var videoFilePath = sourceVideoFilePath ?? PrimaryVideoPath;
+        if (string.IsNullOrEmpty(videoFilePath)) return;
+
+        renderer.UpdateTextOverlays(SegmentFrameComposer.SelectTextOverlays(ViewModel.Model, videoFilePath));
     }
 
     /// <summary>
@@ -2197,6 +2252,7 @@ public sealed partial class EditorPage : Page
 
             ctx.Renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
             ctx.Renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+            SyncTextOverlaysToRenderer(ctx.Renderer, seg.VideoFilePath);
         }
     }
 
@@ -2447,6 +2503,715 @@ public sealed partial class EditorPage : Page
             DeleteCameraSegment(id);
     }
 
+    // ── Text overlay track handlers ──
+
+    private string? _selectedTextOverlayId;
+    private bool _suppressOverlayEvents;
+
+    private void OnTextOverlaySelected(object? sender, string? overlayId)
+    {
+        // Selection is tracked by the control; property editing is via the model/ops.
+        _selectedTextOverlayId = overlayId;
+        SyncTextOverlayUI(overlayId);
+    }
+
+    private TextOverlaySegment? SelectedTextOverlay() =>
+        _selectedTextOverlayId is null ? null : ViewModel.Model.TextOverlays
+            .FirstOrDefault(o => o.Id == _selectedTextOverlayId);
+
+    /// <summary>
+    /// Pushes every property of the overlay identified by <paramref name="overlayId"/> onto
+    /// its pane controls (or hides the pane entirely if the overlay no longer exists), then
+    /// reveals the pane. Mirrors <see cref="SyncCameraSegmentUI"/>/<see cref="ShowTextSlidePanel"/>.
+    /// </summary>
+    private void SyncTextOverlayUI(string? overlayId)
+    {
+        if (OverlayTextBox is null) return;
+
+        var overlay = overlayId is null
+            ? null
+            : ViewModel.Model.TextOverlays.FirstOrDefault(o => o.Id == overlayId);
+
+        if (overlay is null)
+        {
+            PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextOverlay, false);
+            return;
+        }
+
+        BuildOverlayPresetsIfNeeded();
+
+        _suppressOverlayEvents = true;
+
+        // Presets are a one-shot action, not a persisted field — clear any lingering tile
+        // selection so switching overlays (or editing controls directly) never leaves a
+        // stale preset looking selected. Guarded above/below by _suppressOverlayEvents since
+        // this re-raises OverlayPreset_SelectionChanged.
+        OverlayPresets.SelectedItem = null;
+
+        OverlayTextBox.Text = overlay.Text;
+        OverlayDurationBox.Value = overlay.Duration.TotalSeconds;
+        OverlayFontSizeBox.Value = overlay.FontSize;
+
+        OverlayBoldToggle.IsChecked = overlay.IsBold;
+        OverlayItalicToggle.IsChecked = overlay.IsItalic;
+        OverlayAlignSegmented.SelectedIndex = overlay.TextAlignment switch
+        {
+            SlideTextAlignment.Left => 0,
+            SlideTextAlignment.Right => 2,
+            _ => 1,
+        };
+
+        SetOverlayFontSelection(overlay.FontFamily);
+
+        var animName = overlay.Animation.ToString();
+        for (int i = 0; i < OverlayAnimationCombo.Items.Count; i++)
+        {
+            if (OverlayAnimationCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == animName)
+            {
+                OverlayAnimationCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        UpdateSlideColorSwatch(OverlayTextColorSwatch, OverlayTextColorText, OverlayTextColorPicker, overlay.TextColor);
+        UpdateSlideColorSwatch(OverlayBgColorSwatch, OverlayBgColorText, OverlayBgColorPicker, overlay.BackgroundColor);
+        UpdateSlideColorSwatch(OverlayOutlineColorSwatch, OverlayOutlineColorText, OverlayOutlineColorPicker, overlay.OutlineColor);
+        UpdateSlideColorSwatch(OverlayAccentColorSwatch, OverlayAccentColorText, OverlayAccentColorPicker, overlay.AccentColor);
+
+        // Anchor radios (nine-point grid) + the custom-position hint
+        bool isCustom = overlay.Anchor == TextOverlayAnchor.Custom;
+        var anchorName = overlay.Anchor.ToString();
+        foreach (var child in OverlayAnchorGrid.Children)
+        {
+            if (child is RadioButton rb)
+                rb.IsChecked = !isCustom && rb.Tag as string == anchorName;
+        }
+        OverlayCustomPositionHint.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+
+        OverlayWidthSlider.Value = overlay.WidthFraction * 100.0;
+        OverlayMarginSlider.Value = overlay.MarginFraction * 100.0;
+
+        var bgTypeName = overlay.Background.ToString();
+        for (int i = 0; i < OverlayBgTypeCombo.Items.Count; i++)
+        {
+            if (OverlayBgTypeCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == bgTypeName)
+            {
+                OverlayBgTypeCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        OverlayBgOpacitySlider.Value = overlay.BackgroundOpacity * 100.0;
+        OverlayCornerRadiusSlider.Value = overlay.CornerRadius;
+        OverlayPaddingSlider.Value = overlay.PaddingScale * 100.0;
+
+        OverlayBlurAmountSlider.Value = overlay.BlurAmount;
+        OverlayBlurTintSlider.Value = overlay.BlurTintOpacity * 100.0;
+
+        var scrimDirName = overlay.ScrimDirection.ToString();
+        for (int i = 0; i < OverlayScrimDirectionCombo.Items.Count; i++)
+        {
+            if (OverlayScrimDirectionCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == scrimDirName)
+            {
+                OverlayScrimDirectionCombo.SelectedIndex = i;
+                break;
+            }
+        }
+        OverlayScrimStrengthSlider.Value = overlay.ScrimStrength * 100.0;
+
+        OverlayOutlineWidthSlider.Value = overlay.OutlineWidth;
+        OverlayShadowStrengthSlider.Value = overlay.ShadowStrength * 100.0;
+
+        OverlayAccentThicknessSlider.Value = overlay.AccentThickness;
+        var accentSideName = overlay.AccentSide.ToString();
+        for (int i = 0; i < OverlayAccentSideCombo.Items.Count; i++)
+        {
+            if (OverlayAccentSideCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == accentSideName)
+            {
+                OverlayAccentSideCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        OverlayEnabledToggle.IsOn = overlay.Enabled;
+
+        UpdateOverlayBackgroundPanels(overlay.Background);
+
+        _suppressOverlayEvents = false;
+
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextOverlay, true);
+        PropertiesPanel.ShowPane(PropertyPaneKind.TextOverlay);
+    }
+
+    /// <summary>
+    /// Shows/hides each background sub-panel for the selected <see cref="TextOverlayBackground"/>.
+    /// <see cref="OverlayBoxPanel"/> (color/opacity/corner-radius/padding) backs a filled box
+    /// and is shared by Solid, Blur and AccentBar; the other panels each add their own
+    /// mode-specific controls on top of it (GradientScrim/OutlineShadow stand alone since
+    /// those modes draw no filled box).
+    /// </summary>
+    private void UpdateOverlayBackgroundPanels(TextOverlayBackground background)
+    {
+        OverlayBoxPanel.Visibility =
+            background is TextOverlayBackground.Solid or TextOverlayBackground.Blur or TextOverlayBackground.AccentBar
+                ? Visibility.Visible : Visibility.Collapsed;
+        OverlayBlurPanel.Visibility = background == TextOverlayBackground.Blur ? Visibility.Visible : Visibility.Collapsed;
+        OverlayScrimPanel.Visibility = background == TextOverlayBackground.GradientScrim ? Visibility.Visible : Visibility.Collapsed;
+        OverlayOutlinePanel.Visibility = background == TextOverlayBackground.OutlineShadow ? Visibility.Visible : Visibility.Collapsed;
+        OverlayAccentPanel.Visibility = background == TextOverlayBackground.AccentBar ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnTextOverlayCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    {
+        var operation = new AddTextOverlayOperation(e.Start, e.End - e.Start);
+        ViewModel.UndoRedoManager.Execute(operation);
+        Timeline.SelectedTextOverlayId = operation.CreatedId;
+        _selectedTextOverlayId = operation.CreatedId;
+        SyncTextOverlayUI(operation.CreatedId);
+        RefreshOverlayPreview();
+    }
+
+    private void OnTextOverlayMoved(object? sender, (string Id, TimeSpan NewStart) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new MoveTextOverlayOperation(e.Id, e.NewStart));
+        RefreshOverlayPreview();
+    }
+
+    private void OnTextOverlayResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+    {
+        ViewModel.UndoRedoManager.Execute(new TrimTextOverlayOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
+        RefreshOverlayPreview();
+    }
+
+    private void OnTextOverlayRemoveRequested(object? sender, string overlayId)
+    {
+        DeleteTextOverlay(overlayId);
+    }
+
+    private void DeleteTextOverlay(string overlayId)
+    {
+        ViewModel.UndoRedoManager.Execute(new RemoveTextOverlayOperation(overlayId));
+        Timeline.ClearTextOverlaySelection();
+        _selectedTextOverlayId = null;
+        SyncTextOverlayUI(null);
+        RefreshOverlayPreview();
+    }
+
+    private void RemoveTextOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedTextOverlayId is { } id)
+            DeleteTextOverlay(id);
+    }
+
+    /// <summary>
+    /// Re-syncs every renderer's overlay list, then forces a preview re-render at the current
+    /// playhead. <see cref="UndoRedoManager"/>'s state-changed event already drives the same
+    /// re-sync through <see cref="InvalidatePreview"/>, but that path is skipped whenever
+    /// <c>_compositorReady</c> is false or a segment renderer hasn't been (re)built yet, so this
+    /// explicit call guarantees adding/editing/removing/undoing an overlay updates the preview
+    /// immediately rather than only after a full renderer rebuild — property edits mutate the
+    /// live segment in place, so a compositor that already has the list synced (see
+    /// <see cref="SyncTextOverlaysToRenderer"/>) would pick the change up on its own next
+    /// repaint anyway, but add/remove need the list itself re-fetched.
+    /// </summary>
+    private void RefreshOverlayPreview()
+    {
+        if (_previewRenderer is not null)
+        {
+            SyncTextOverlaysToRenderer(_previewRenderer, null);
+        }
+        foreach (var (segmentId, ctx) in _segmentPreviews)
+        {
+            if (ctx.Renderer is null) continue;
+            var seg = ViewModel.Model.Segments.OfType<VideoSegment>().FirstOrDefault(v => v.Id == segmentId);
+            if (seg is null) continue;
+            SyncTextOverlaysToRenderer(ctx.Renderer, seg.VideoFilePath);
+        }
+
+        _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition, force: true);
+    }
+
+    /// <summary>
+    /// Debounces <see cref="RefreshOverlayPreview"/> for the high-frequency
+    /// <see cref="OverlayTextBox_TextChanged"/> handler: the model is committed on every
+    /// keystroke (so undo/redo and export always see the latest text), but repainting the
+    /// preview on every keystroke would be wasteful, so only that part is deferred — mirrors
+    /// <see cref="ScheduleMotionPreviewRebuild"/>'s split between an immediate model commit
+    /// and a debounced preview rebuild.
+    /// </summary>
+    private void ScheduleOverlayPreviewRefresh()
+    {
+        if (_overlayPreviewDebounceTimer is null)
+        {
+            _overlayPreviewDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _overlayPreviewDebounceTimer.Tick += (_, _) =>
+            {
+                _overlayPreviewDebounceTimer.Stop();
+                RefreshOverlayPreview();
+            };
+        }
+        _overlayPreviewDebounceTimer.Stop();
+        _overlayPreviewDebounceTimer.Start();
+    }
+
+    private void OverlayPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayPresets.SelectedItem is not Border { Tag: string presetName }) return;
+
+        var preset = TextOverlayPresets.ByName(presetName);
+        if (preset is null) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, preset.Apply, $"Apply {preset.Name} Preset"));
+
+        // Re-sync every control (anchor grid, background sub-panels, etc.) so the pane
+        // reflects the preset's full style rather than just the fields a targeted handler
+        // would have touched. SyncTextOverlayUI clears OverlayPresets.SelectedItem again,
+        // which is why this handler must be re-entrancy-guarded above.
+        SyncTextOverlayUI(id);
+        Timeline.InvalidateAllCanvases();
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        var text = OverlayTextBox.Text;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.Text = text, "Change Overlay Text"));
+
+        Timeline.InvalidateAllCanvases();
+        ScheduleOverlayPreviewRefresh();
+    }
+
+    private void OverlayAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayAnimationCombo.SelectedItem is not ComboBoxItem item) return;
+        if (!Enum.TryParse<TextSlideAnimation>(item.Tag?.ToString(), out var anim)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.Animation = anim, "Change Overlay Animation"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayFontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayFontCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string font ||
+            string.IsNullOrWhiteSpace(font)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.FontFamily = font, "Change Overlay Font"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayDurationBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (double.IsNaN(args.NewValue)) return;
+
+        double seconds = Math.Max(args.NewValue, TrimTextOverlayOperation.MinDuration.TotalSeconds);
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.Duration = TimeSpan.FromSeconds(seconds), "Change Overlay Duration"));
+
+        Timeline.InvalidateAllCanvases();
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (double.IsNaN(args.NewValue)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.FontSize = args.NewValue, "Change Overlay Font Size"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayTextColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        var hex = ColorToHex(args.NewColor);
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.TextColor = hex, "Change Overlay Text Color"));
+
+        OverlayTextColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        OverlayTextColorText.Text = hex;
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayBold_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        bool isBold = OverlayBoldToggle.IsChecked == true;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.IsBold = isBold, "Change Overlay Bold"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayItalic_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        bool isItalic = OverlayItalicToggle.IsChecked == true;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.IsItalic = isItalic, "Change Overlay Italic"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayAlignSegmented_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayAlignSegmented.SelectedItem is not CommunityToolkit.WinUI.Controls.SegmentedItem item ||
+            !Enum.TryParse<SlideTextAlignment>(item.Tag?.ToString(), out var align)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.TextAlignment = align, "Change Overlay Alignment"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayAnchor_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (sender is not RadioButton { Tag: string tag } || !Enum.TryParse<TextOverlayAnchor>(tag, out var anchor)) return;
+
+        var overlay = SelectedTextOverlay();
+        if (overlay is null) return;
+
+        // The renderer always recomputes each non-Custom anchor's true centre from its own
+        // measured text box at render/export time (ResolveCenter ignores the passed-in X/Y
+        // entirely for those anchors) — this stored X/Y only matters once the user drags the
+        // overlay to Custom, so it just needs a reasonable snapped starting point, approximated
+        // here from the authored width/typography rather than an exact glyph measurement.
+        double boxHeightFraction = Math.Clamp(
+            (overlay.FontSize * 1.6 + overlay.PaddingScale * overlay.FontSize * 2) / 1080.0, 0.02, 0.5);
+        var (x, y) = TextOverlaySegment.ResolveCenter(
+            anchor, overlay.X, overlay.Y, overlay.MarginFraction, overlay.WidthFraction, boxHeightFraction);
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(id, o =>
+        {
+            o.Anchor = anchor;
+            o.X = x;
+            o.Y = y;
+        }, "Change Overlay Anchor"));
+
+        OverlayCustomPositionHint.Visibility = Visibility.Collapsed;
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayWidthSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double fraction = e.NewValue / 100.0;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.WidthFraction = fraction, "Change Overlay Width"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayMarginSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double fraction = e.NewValue / 100.0;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.MarginFraction = fraction, "Change Overlay Margin"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayBgTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayBgTypeCombo.SelectedItem is not ComboBoxItem item ||
+            !Enum.TryParse<TextOverlayBackground>(item.Tag?.ToString(), out var background)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.Background = background, "Change Overlay Background Type"));
+
+        UpdateOverlayBackgroundPanels(background);
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayBgColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        var hex = ColorToHex(args.NewColor);
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.BackgroundColor = hex, "Change Overlay Background Color"));
+
+        OverlayBgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        OverlayBgColorText.Text = hex;
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>
+    /// Shared by <see cref="OverlayBgOpacitySlider"/>, <see cref="OverlayCornerRadiusSlider"/>
+    /// and <see cref="OverlayPaddingSlider"/> — all three live in <see cref="OverlayBoxPanel"/>
+    /// and drive the box's style regardless of which background type is selected (mirrors how
+    /// Scene's <c>StyleSlider_ValueChanged</c> is shared by several sliders).
+    /// </summary>
+    private void OverlayBoxSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double value = e.NewValue;
+        if (ReferenceEquals(sender, OverlayBgOpacitySlider))
+        {
+            double opacity = value / 100.0;
+            ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                id, o => o.BackgroundOpacity = opacity, "Change Overlay Background Opacity"));
+        }
+        else if (ReferenceEquals(sender, OverlayCornerRadiusSlider))
+        {
+            ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                id, o => o.CornerRadius = value, "Change Overlay Corner Radius"));
+        }
+        else if (ReferenceEquals(sender, OverlayPaddingSlider))
+        {
+            double padding = value / 100.0;
+            ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                id, o => o.PaddingScale = padding, "Change Overlay Padding"));
+        }
+        else
+        {
+            return;
+        }
+
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>Shared by <see cref="OverlayBlurAmountSlider"/> and <see cref="OverlayBlurTintSlider"/>.</summary>
+    private void OverlayBlurSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double value = e.NewValue;
+        if (ReferenceEquals(sender, OverlayBlurAmountSlider))
+        {
+            ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                id, o => o.BlurAmount = value, "Change Overlay Blur Amount"));
+        }
+        else if (ReferenceEquals(sender, OverlayBlurTintSlider))
+        {
+            double tint = value / 100.0;
+            ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                id, o => o.BlurTintOpacity = tint, "Change Overlay Blur Tint"));
+        }
+        else
+        {
+            return;
+        }
+
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayScrimDirectionCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayScrimDirectionCombo.SelectedItem is not ComboBoxItem item ||
+            !Enum.TryParse<ScrimDirection>(item.Tag?.ToString(), out var direction)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.ScrimDirection = direction, "Change Overlay Scrim Direction"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayScrimStrengthSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double strength = e.NewValue / 100.0;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.ScrimStrength = strength, "Change Overlay Scrim Strength"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayOutlineWidthSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double width = e.NewValue;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.OutlineWidth = width, "Change Overlay Outline Width"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayOutlineColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        var hex = ColorToHex(args.NewColor);
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.OutlineColor = hex, "Change Overlay Outline Color"));
+
+        OverlayOutlineColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        OverlayOutlineColorText.Text = hex;
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayShadowStrengthSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double strength = e.NewValue / 100.0;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.ShadowStrength = strength, "Change Overlay Shadow Strength"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayAccentColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        var hex = ColorToHex(args.NewColor);
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.AccentColor = hex, "Change Overlay Accent Color"));
+
+        OverlayAccentColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
+        OverlayAccentColorText.Text = hex;
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayAccentThicknessSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        double thickness = e.NewValue;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.AccentThickness = thickness, "Change Overlay Accent Thickness"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayAccentSideCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+        if (OverlayAccentSideCombo.SelectedItem is not ComboBoxItem item ||
+            !Enum.TryParse<AccentSide>(item.Tag?.ToString(), out var side)) return;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.AccentSide = side, "Change Overlay Accent Side"));
+        RefreshOverlayPreview();
+    }
+
+    private void OverlayEnabledToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressOverlayEvents) return;
+        if (_selectedTextOverlayId is not { } id) return;
+
+        bool enabled = OverlayEnabledToggle.IsOn;
+        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+            id, o => o.Enabled = enabled, "Change Overlay Enabled"));
+
+        Timeline.InvalidateAllCanvases();
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>
+    /// Selects the combo item matching <paramref name="fontFamily"/>; if the overlay uses a
+    /// font that isn't in the curated list, it is inserted at the top so the actual font is
+    /// represented (and not silently changed). Mirrors <see cref="SetSlideFontSelection"/>.
+    /// </summary>
+    private void SetOverlayFontSelection(string fontFamily)
+    {
+        for (int i = 0; i < OverlayFontCombo.Items.Count; i++)
+        {
+            if (OverlayFontCombo.Items[i] is ComboBoxItem item &&
+                string.Equals(item.Tag?.ToString(), fontFamily, StringComparison.OrdinalIgnoreCase))
+            {
+                OverlayFontCombo.SelectedIndex = i;
+                return;
+            }
+        }
+
+        var custom = new ComboBoxItem { Content = fontFamily, Tag = fontFamily };
+        try { custom.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily); }
+        catch { /* unknown family — fall back to default rendering */ }
+        OverlayFontCombo.Items.Insert(0, custom);
+        OverlayFontCombo.SelectedIndex = 0;
+    }
+
+    private bool _overlayPresetsBuilt;
+
+    /// <summary>
+    /// Populates <see cref="OverlayPresets"/> from <see cref="TextOverlayPresets.All"/>, one
+    /// tile per preset showing its glyph and name — mirrors <see cref="BuildGradientPresetsIfNeeded"/>'s
+    /// tile-construction approach for the text slide pane's gradient presets.
+    /// </summary>
+    private void BuildOverlayPresetsIfNeeded()
+    {
+        if (_overlayPresetsBuilt) return;
+        _overlayPresetsBuilt = true;
+
+        foreach (var preset in TextOverlayPresets.All)
+        {
+            var stack = new StackPanel
+            {
+                Spacing = 4,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            stack.Children.Add(new FontIcon
+            {
+                Glyph = preset.Glyph,
+                FontSize = 18,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = preset.Name,
+                FontSize = 11,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            });
+
+            var tile = new Border
+            {
+                Width = 84,
+                Height = 64,
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(6),
+                Tag = preset.Name,
+                Child = stack,
+                BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+                BorderThickness = new Thickness(1),
+            };
+            ToolTipService.SetToolTip(tile, preset.Name);
+            OverlayPresets.Items.Add(tile);
+        }
+    }
+
     private void UpdateSpeedPanelVisibility()
     {
         if (SpeedComboBox is null) return;
@@ -2507,6 +3272,14 @@ public sealed partial class EditorPage : Page
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
         {
             DeleteCameraSegment(cameraSegId);
+            args.Handled = true;
+            return;
+        }
+
+        // If a text overlay is selected, remove it.
+        if (Timeline.SelectedTextOverlayId is { } overlayId)
+        {
+            DeleteTextOverlay(overlayId);
             args.Handled = true;
             return;
         }
@@ -5069,6 +5842,59 @@ public sealed partial class EditorPage : Page
         Timeline.InvalidateAllCanvases();
     }
 
+    /// <summary>
+    /// Creates a new text overlay at the playhead's current source time (mapping through
+    /// the same output→source logic the live preview uses) and selects it so its pane opens
+    /// immediately. A no-op when the playhead can't be mapped to any source (no primary
+    /// video loaded yet).
+    /// </summary>
+    private void AddTextOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetPlayheadSourceTimeForOverlay() is not { } mapped) return;
+
+        var operation = new AddTextOverlayOperation(
+            mapped.SourceTime, TimeSpan.FromSeconds(3), sourceVideoFilePath: mapped.VideoFilePath);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        Timeline.SelectedTextOverlayId = operation.CreatedId;
+        _selectedTextOverlayId = operation.CreatedId;
+        SyncTextOverlayUI(operation.CreatedId);
+        Timeline.InvalidateAllCanvases();
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>
+    /// Maps the playhead's output-time position to the source time (and owning recording)
+    /// a newly-created text overlay should be authored against, mirroring the output→source
+    /// mapping the live preview renders with. Returns null when there is nothing to author
+    /// the overlay against (no primary video, or the playhead sits over a non-video segment
+    /// such as a text slide).
+    /// </summary>
+    private (string? VideoFilePath, TimeSpan SourceTime)? GetPlayheadSourceTimeForOverlay()
+    {
+        var model = ViewModel.Model;
+        var position = Timeline.PlayheadPosition;
+
+        if (model.Segments.Count > 0)
+        {
+            var (segment, localOffset) = model.GetSegmentAtTime(position);
+            if (segment is not VideoSegment videoSeg) return null;
+
+            var sourceInSeg = videoSeg.SourceStart +
+                TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
+
+            // null SourceVideoFilePath means "the primary recording" (mirrors
+            // ZoomKeyframe/TextOverlaySegment's convention), so map the primary video's own
+            // segments to null rather than storing its path explicitly.
+            bool isPrimary = string.Equals(videoSeg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase);
+            return (isPrimary ? null : videoSeg.VideoFilePath, sourceInSeg);
+        }
+
+        // Legacy (pre-segment) projects: the whole timeline is the primary recording.
+        if (string.IsNullOrEmpty(PrimaryVideoPath)) return null;
+        return (null, MapToSourceTime(position));
+    }
+
     private void RecordMore_Click(object sender, RoutedEventArgs e)
     {
         // Navigate to RecordingPage in append mode
@@ -5696,93 +6522,157 @@ public sealed partial class EditorPage : Page
     }
 
     // ─── In-preview text editing & repositioning ────────────────────────
+    //
+    // Both full-screen text slides and text overlays support the same two preview
+    // gestures — drag-to-reposition and double-click-to-edit — via ITextEditTarget, a
+    // small adapter that lets the shared gesture code below (originally written only for
+    // TextSlideSegment) work against either kind of segment without duplicating it. The
+    // two kinds differ only in how a gesture is *persisted* (see SlideTextEditTarget vs.
+    // OverlayTextEditTarget): slides mutate the live segment directly (no undo, matching
+    // their pre-existing behaviour); overlays commit exactly once per gesture through
+    // UpdateTextOverlayPropertiesOperation so drags/edits are each a single undo step.
 
     private TextSlideSegment? PreviewSlide() =>
         _previewSlideId is null ? null : ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _previewSlideId);
 
+    private TextOverlaySegment? PreviewOverlay() =>
+        _previewOverlayId is null ? null : ViewModel.Model.TextOverlays
+            .FirstOrDefault(o => o.Id == _previewOverlayId);
+
     /// <summary>
-    /// Shows and positions the text-edit overlay over the slide's text region.
-    /// Hidden during playback. Safe to call from any thread.
+    /// Resolves whichever segment the shared text-edit canvas should currently track: the
+    /// previewed slide if one is showing, otherwise the previewed overlay. A slide always
+    /// wins — the render pipeline never sets both _previewSlideId and _previewOverlayId at
+    /// once (see RenderFrameAtAsync/RenderTextSlidePreviewAsync/UpdateOverlayEditPreview),
+    /// but the priority keeps the two concerns cleanly separated regardless.
     /// </summary>
-    private void UpdateSlideEditOverlay(TextSlideSegment slide)
+    private ITextEditTarget? GetActiveEditTarget()
+    {
+        if (PreviewSlide() is { } slide) return new SlideTextEditTarget(this, slide.Id);
+        if (PreviewOverlay() is { } overlay) return new OverlayTextEditTarget(this, overlay.Id);
+        return null;
+    }
+
+    /// <summary>
+    /// Recomputes which text overlay (if any) is under the playhead and should show the
+    /// shared drag/edit region: the *selected* overlay, but only while the playhead's
+    /// source time actually falls inside its active range and it belongs to the source
+    /// video on screen (mirrors <see cref="TimelineModel.GetActiveTextOverlays"/>'s
+    /// per-recording ownership rule) — otherwise the region would let you drag an overlay
+    /// that isn't actually visible. Called once per rendered video frame (see
+    /// RenderFrameAtAsync's VideoSegment/legacy branches).
+    /// </summary>
+    private void UpdateOverlayEditPreview(string? videoFilePath, TimeSpan sourceTime)
+    {
+        _previewOverlayId = null;
+        if (_selectedTextOverlayId is { } selectedId
+            && ViewModel.Model.GetActiveTextOverlays(sourceTime, videoFilePath).Any(o => o.Id == selectedId))
+        {
+            _previewOverlayId = selectedId;
+        }
+
+        var (w, h) = GetPreviewCanvasSize();
+        _previewFrameW = w;
+        _previewFrameH = h;
+
+        // Handles both cases: shows+positions the region when _previewOverlayId (above)
+        // resolved to something, or hides it when it didn't.
+        ShowTextEditOverlay();
+    }
+
+    /// <summary>Commits an in-progress WYSIWYG text edit, if any, without touching the
+    /// shared canvas's Visibility — used where the caller will immediately decide the
+    /// canvas's Show/Hide state itself (see UpdateOverlayEditPreview).</summary>
+    private void CommitActiveTextEditIfAny()
+    {
+        if (_editingTextId is not null)
+            CommitTextEdit();
+    }
+
+    /// <summary>
+    /// Shows and positions the shared text-edit overlay over whatever <see cref="GetActiveEditTarget"/>
+    /// currently resolves to. Hidden during playback or zoom-region edit mode. Safe to call
+    /// from any thread.
+    /// </summary>
+    private void ShowTextEditOverlay()
     {
         if (!DispatcherQueue.HasThreadAccess)
         {
-            DispatcherQueue.TryEnqueue(() => UpdateSlideEditOverlay(slide));
+            DispatcherQueue.TryEnqueue(ShowTextEditOverlay);
             return;
         }
 
-        if (Preview.IsPlaying || _zoomRegionEditMode)
+        if (Preview.IsPlaying || _zoomRegionEditMode || GetActiveEditTarget() is not { } target)
         {
-            HideSlideEditOverlay();
+            HideTextEditOverlay();
             return;
         }
 
-        SlideEditCanvas.Visibility = Visibility.Visible;
-        PositionSlideEditControls(slide);
+        TextEditCanvas.Visibility = Visibility.Visible;
+        PositionTextEditControls(target);
     }
 
-    private void HideSlideEditOverlay()
+    private void HideTextEditOverlay()
     {
-        if (SlideEditCanvas is null) return;
+        if (TextEditCanvas is null) return;
         if (!DispatcherQueue.HasThreadAccess)
         {
-            DispatcherQueue.TryEnqueue(HideSlideEditOverlay);
+            DispatcherQueue.TryEnqueue(HideTextEditOverlay);
             return;
         }
-        if (_editingSlideId is not null)
-            CommitSlideTextEdit();
-        SlideEditCanvas.Visibility = Visibility.Collapsed;
+        CommitActiveTextEditIfAny();
+        TextEditCanvas.Visibility = Visibility.Collapsed;
     }
 
-    // Last text styling pushed onto the in-place slide editor. PositionSlideEditControls
-    // runs from Preview.FrameLayoutChanged, which fires inside the Win2D draw callback,
-    // so assigning a fresh FontFamily/SolidColorBrush there allocated new XAML+COM
-    // objects on every drawn frame and dirtied text layout each time.
-    private (string Family, double Size, bool Bold, bool Italic, string Color, SlideTextAlignment Align)? _slideEditStyle;
+    // Last text styling pushed onto the in-place editor. PositionTextEditControls runs
+    // from Preview.FrameLayoutChanged, which fires inside the Win2D draw callback, so
+    // assigning a fresh FontFamily/SolidColorBrush there allocated new XAML+COM objects on
+    // every drawn frame and dirtied text layout each time. One cache serves both slide and
+    // overlay targets since it's keyed on the resolved style values, not the target kind.
+    private (string Family, double Size, bool Bold, bool Italic, string Color, SlideTextAlignment Align)? _textEditStyle;
 
-    private void PositionSlideEditControls(TextSlideSegment slide)
+    private void PositionTextEditControls(ITextEditTarget target)
     {
         var layout = Preview.FrameLayoutRect;
-        if (layout.Width <= 0 || _previewSlideW <= 0) return;
+        if (layout.Width <= 0 || _previewFrameW <= 0) return;
 
-        double scaleX = layout.Width / _previewSlideW;
-        double scaleY = layout.Height / _previewSlideH;
+        double scaleX = layout.Width / _previewFrameW;
+        double scaleY = layout.Height / _previewFrameH;
 
-        var textRect = TextSlideRenderer.ComputeTextRect(slide, _previewSlideW, _previewSlideH);
+        var textRect = target.ComputeRect(_previewFrameW, _previewFrameH);
         double left = layout.X + textRect.X * scaleX;
         double top = layout.Y + textRect.Y * scaleY;
         double w = textRect.Width * scaleX;
         double h = textRect.Height * scaleY;
 
-        Canvas.SetLeft(SlideTextRegion, left);
-        Canvas.SetTop(SlideTextRegion, top);
-        SlideTextRegion.Width = w;
-        SlideTextRegion.Height = h;
+        Canvas.SetLeft(TextEditRegion, left);
+        Canvas.SetTop(TextEditRegion, top);
+        TextEditRegion.Width = w;
+        TextEditRegion.Height = h;
 
-        Canvas.SetLeft(SlideEditBox, left);
-        Canvas.SetTop(SlideEditBox, top);
-        SlideEditBox.Width = w;
-        SlideEditBox.Height = h;
+        Canvas.SetLeft(TextEditBox, left);
+        Canvas.SetTop(TextEditBox, top);
+        TextEditBox.Width = w;
+        TextEditBox.Height = h;
 
-        // Match the slide's text styling so editing looks WYSIWYG.
-        double fontSize = Math.Max(8, slide.FontSize * scaleY);
-        var style = (slide.FontFamily, fontSize, slide.IsBold, slide.IsItalic,
-            slide.TextColor, slide.TextAlignment);
-        if (_slideEditStyle == style)
+        // Match the target's text styling so editing looks WYSIWYG.
+        double fontSize = Math.Max(8, target.FontSize * scaleY);
+        var style = (target.FontFamily, fontSize, target.IsBold, target.IsItalic,
+            target.TextColor, target.TextAlignment);
+        if (_textEditStyle == style)
             return;
-        _slideEditStyle = style;
+        _textEditStyle = style;
 
-        SlideEditBox.FontSize = fontSize;
-        SlideEditBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(slide.FontFamily);
-        SlideEditBox.FontWeight = slide.IsBold
+        TextEditBox.FontSize = fontSize;
+        TextEditBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(target.FontFamily);
+        TextEditBox.FontWeight = target.IsBold
             ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal;
-        SlideEditBox.FontStyle = slide.IsItalic
+        TextEditBox.FontStyle = target.IsItalic
             ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal;
-        SlideEditBox.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(ParseHexColor(slide.TextColor));
-        SlideEditBox.TextAlignment = slide.TextAlignment switch
+        TextEditBox.Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(ParseHexColor(target.TextColor));
+        TextEditBox.TextAlignment = target.TextAlignment switch
         {
             SlideTextAlignment.Left => TextAlignment.Left,
             SlideTextAlignment.Right => TextAlignment.Right,
@@ -5790,117 +6680,152 @@ public sealed partial class EditorPage : Page
         };
     }
 
-    private void SlideTextRegion_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    private void TextEditRegion_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (_editingSlideId is null)
+        if (_editingTextId is null)
             ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeAll);
     }
 
-    private void SlideTextRegion_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    private void TextEditRegion_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (!_slideRegionDragging)
+        if (!_textRegionDragging)
             ProtectedCursor = null;
     }
 
-    private void SlideTextRegion_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    private void TextEditRegion_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (_editingSlideId is not null) return; // editing — let the textbox handle it
-        var slide = PreviewSlide();
-        if (slide is null) return;
+        if (_editingTextId is not null) return; // editing — let the textbox handle it
+        var target = GetActiveEditTarget();
+        if (target is null) return;
 
-        _slideRegionDragging = true;
-        _slideDragStart = e.GetCurrentPoint(SlideEditCanvas).Position;
-        _slideDragStartX = slide.TextX;
-        _slideDragStartY = slide.TextY;
-        SlideTextRegion.CapturePointer(e.Pointer);
+        _textRegionDragging = true;
+        _dragTarget = target; // pins the target (and, for overlays, its captured pre-drag
+                               // original) for the whole gesture — see OverlayTextEditTarget
+        _textDragStart = e.GetCurrentPoint(TextEditCanvas).Position;
+        (_textDragStartX, _textDragStartY) = target.Center;
+        TextEditRegion.CapturePointer(e.Pointer);
         e.Handled = true;
     }
 
-    private void SlideTextRegion_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    private void TextEditRegion_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (!_slideRegionDragging) return;
-        var slide = PreviewSlide();
+        if (!_textRegionDragging || _dragTarget is not { } target) return;
         var layout = Preview.FrameLayoutRect;
-        if (slide is null || layout.Width <= 0) return;
+        if (layout.Width <= 0) return;
 
-        var pos = e.GetCurrentPoint(SlideEditCanvas).Position;
-        double dx = (pos.X - _slideDragStart.X) / layout.Width;
-        double dy = (pos.Y - _slideDragStart.Y) / layout.Height;
+        var pos = e.GetCurrentPoint(TextEditCanvas).Position;
+        double dx = (pos.X - _textDragStart.X) / layout.Width;
+        double dy = (pos.Y - _textDragStart.Y) / layout.Height;
 
-        slide.TextX = Math.Clamp(_slideDragStartX + dx, 0.0, 1.0);
-        slide.TextY = Math.Clamp(_slideDragStartY + dy, 0.0, 1.0);
+        // Live preview only — mutates the model directly with no undo entry. The overlay
+        // target's CommitPosition (called once on release, below) restores this back to
+        // the pre-drag position before committing a single undoable step; the slide target
+        // just leaves it as the final, already-persisted value (matching its pre-refactor
+        // direct-mutation behaviour).
+        target.Center = (
+            Math.Clamp(_textDragStartX + dx, 0.0, 1.0),
+            Math.Clamp(_textDragStartY + dy, 0.0, 1.0));
 
-        PositionSlideEditControls(slide);
-        RefreshSlidePreview();
+        PositionTextEditControls(target);
+        target.OnLivePositionChanged();
         e.Handled = true;
     }
 
-    private void SlideTextRegion_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    private void TextEditRegion_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (!_slideRegionDragging) return;
-        _slideRegionDragging = false;
-        SlideTextRegion.ReleasePointerCapture(e.Pointer);
+        if (!_textRegionDragging) return;
+        _textRegionDragging = false;
+        TextEditRegion.ReleasePointerCapture(e.Pointer);
         ProtectedCursor = null;
+
+        if (_dragTarget is { } target)
+        {
+            var (finalX, finalY) = target.Center;
+            target.CommitPosition(finalX, finalY);
+        }
+        _dragTarget = null;
         e.Handled = true;
     }
 
-    private void SlideTextRegion_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    private void TextEditRegion_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
     {
-        EnterSlideTextEdit();
+        EnterTextEdit();
         e.Handled = true;
     }
 
-    private void EnterSlideTextEdit()
+    private void EnterTextEdit()
     {
-        var slide = PreviewSlide();
-        if (slide is null) return;
+        var target = GetActiveEditTarget();
+        if (target is null) return;
 
         // The taps that opened the editor may have started a region drag (and
         // captured the pointer) without a matching PointerReleased, because the
         // region gets collapsed below. Clear that state so the box doesn't follow
         // the mouse after editing finishes.
-        _slideRegionDragging = false;
-        SlideTextRegion.ReleasePointerCaptures();
+        _textRegionDragging = false;
+        _dragTarget = null;
+        TextEditRegion.ReleasePointerCaptures();
         ProtectedCursor = null;
 
-        _editingSlideId = slide.Id;
-        SlideTextRegion.Visibility = Visibility.Collapsed;
-        SlideEditBox.Visibility = Visibility.Visible;
-        SlideEditBox.Text = slide.Text;
-        SlideEditBox.Focus(FocusState.Programmatic);
-        SlideEditBox.SelectAll();
+        _editingTextId = target.Id;
+        _editTarget = target; // pins the target (and, for overlays, its captured
+                               // pre-edit original text) for the whole edit session
+        TextEditRegion.Visibility = Visibility.Collapsed;
+        TextEditBox.Visibility = Visibility.Visible;
+        TextEditBox.Text = target.Text;
+        TextEditBox.Focus(FocusState.Programmatic);
+        TextEditBox.SelectAll();
 
-        // Re-render background-only so the rendered text doesn't double up.
-        RefreshSlidePreview();
+        target.BeginTextEdit();
     }
 
-    private void CommitSlideTextEdit()
+    private void CommitTextEdit()
     {
-        if (_editingSlideId is null) return;
-        _editingSlideId = null;
-        SlideEditBox.Visibility = Visibility.Collapsed;
-        SlideTextRegion.Visibility = Visibility.Visible;
-        RefreshSlidePreview();
+        if (_editingTextId is null) return;
+        _editingTextId = null;
+        var target = _editTarget;
+        _editTarget = null;
+
+        TextEditBox.Visibility = Visibility.Collapsed;
+        TextEditRegion.Visibility = Visibility.Visible;
+
+        target?.CommitText(TextEditBox.Text);
     }
 
-    private void SlideEditBox_TextChanged(object sender, TextChangedEventArgs e)
+    private void TextEditBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_editingSlideId is null) return;
-        var slide = ViewModel.Model.Segments.OfType<TextSlideSegment>()
-            .FirstOrDefault(s => s.Id == _editingSlideId);
-        if (slide is null) return;
+        if (_editTarget is not { } target) return;
 
-        slide.Text = SlideEditBox.Text;
-        if (SlideTextBox is not null && SlideTextBox.Text != slide.Text)
-            SlideTextBox.Text = slide.Text; // keep flyout in sync
+        // Live model update; committed as one undoable op on exit — see CommitTextEdit.
+        target.Text = TextEditBox.Text;
+
+        // Keep whichever properties-pane textbox mirrors this target in sync. The slide
+        // flyout's own TextChanged mutates the slide directly (idempotent, no undo) so it
+        // needs no guard; the overlay pane's does push an undoable operation per keystroke,
+        // so the programmatic assignment must be suppressed to avoid a second undo entry.
+        if (target is SlideTextEditTarget)
+        {
+            if (SlideTextBox is not null && SlideTextBox.Text != TextEditBox.Text)
+                SlideTextBox.Text = TextEditBox.Text;
+        }
+        else if (target is OverlayTextEditTarget)
+        {
+            if (OverlayTextBox is not null && OverlayTextBox.Text != TextEditBox.Text)
+            {
+                _suppressOverlayEvents = true;
+                try { OverlayTextBox.Text = TextEditBox.Text; }
+                finally { _suppressOverlayEvents = false; }
+            }
+        }
 
         // Re-measure so the edit box grows/shrinks to hug the wrapped text live
         // instead of staying at the height it had when editing started.
-        PositionSlideEditControls(slide);
+        PositionTextEditControls(target);
+        target.OnLiveTextChanged();
         Timeline.InvalidateAllCanvases();
     }
 
-    private void SlideEditBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    private void TextEditBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
         // Enter commits (Shift+Enter inserts a newline); Esc commits too.
         var shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
@@ -5910,13 +6835,298 @@ public sealed partial class EditorPage : Page
         if ((e.Key == Windows.System.VirtualKey.Enter && !shift)
             || e.Key == Windows.System.VirtualKey.Escape)
         {
-            CommitSlideTextEdit();
+            CommitTextEdit();
             e.Handled = true;
         }
     }
 
-    private void SlideEditBox_LostFocus(object sender, RoutedEventArgs e)
+    private void TextEditBox_LostFocus(object sender, RoutedEventArgs e)
     {
-        CommitSlideTextEdit();
+        CommitTextEdit();
+    }
+
+    /// <summary>
+    /// Reproduces <see cref="TextOverlayRenderer"/>'s text-box geometry (font scaled by
+    /// height/1080, measured via <see cref="CanvasTextLayout"/> constrained to
+    /// <see cref="TextOverlaySegment.WidthFraction"/> * width, padded by
+    /// <see cref="TextOverlaySegment.PaddingScale"/> * scaled font size, centred via
+    /// <see cref="TextOverlaySegment.ResolveCenter"/>) so the drag/edit hit region lines up
+    /// with the rendered box. <b>Must be kept in sync with TextOverlayRenderer.RenderOverlay's
+    /// own geometry</b> — that renderer is owned by a different agent/task, so this is a
+    /// deliberate, documented duplication rather than a shared helper (see this feature's
+    /// completion report for the suggested follow-up: lifting a public ComputeOverlayBox
+    /// helper into TextOverlayRenderer itself). The animation scale/translate envelope is
+    /// intentionally NOT applied here, matching how <see cref="TextSlideRenderer.ComputeTextRect"/>
+    /// also ignores it for slides — the edit region tracks the box's resting position, not
+    /// its momentary entrance/exit transform.
+    /// </summary>
+    private static Rect ComputeOverlayTextRect(TextOverlaySegment overlay, int width, int height)
+    {
+        if (width <= 0 || height <= 0) return default;
+
+        const double ReferenceHeight = 1080.0; // TextOverlayRenderer.ReferenceHeight
+        float fontScale = (float)(height / ReferenceHeight);
+        float scaledFontSize = (float)Math.Max(1.0, overlay.FontSize * fontScale);
+
+        var hAlign = overlay.TextAlignment switch
+        {
+            SlideTextAlignment.Left => CanvasHorizontalAlignment.Left,
+            SlideTextAlignment.Right => CanvasHorizontalAlignment.Right,
+            _ => CanvasHorizontalAlignment.Center,
+        };
+
+        using var format = new CanvasTextFormat
+        {
+            FontFamily = overlay.FontFamily,
+            FontSize = scaledFontSize,
+            FontWeight = overlay.IsBold
+                ? new Windows.UI.Text.FontWeight { Weight = 700 } : new Windows.UI.Text.FontWeight { Weight = 400 },
+            FontStyle = overlay.IsItalic ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal,
+            HorizontalAlignment = hAlign,
+            VerticalAlignment = CanvasVerticalAlignment.Top,
+            WordWrapping = CanvasWordWrapping.WholeWord,
+        };
+
+        double maxWidth = Math.Max(1.0, overlay.WidthFraction * width);
+        using var layout = new CanvasTextLayout(
+            CanvasDevice.GetSharedDevice(), overlay.Text, format, (float)maxWidth, (float)height);
+
+        double textW = Math.Max(1.0, layout.LayoutBounds.Width);
+        double textH = Math.Max(1.0, layout.LayoutBounds.Height);
+
+        double padding = overlay.PaddingScale * scaledFontSize;
+        double boxW = textW + padding * 2;
+        double boxH = textH + padding * 2;
+
+        var (nx, ny) = TextOverlaySegment.ResolveCenter(
+            overlay.Anchor, overlay.X, overlay.Y, overlay.MarginFraction, boxW / width, boxH / height);
+
+        double left = nx * width - boxW / 2;
+        double top = ny * height - boxH / 2;
+        left = Math.Clamp(left, 0.0, Math.Max(0.0, width - boxW));
+        top = Math.Clamp(top, 0.0, Math.Max(0.0, height - boxH));
+
+        return new Rect(left, top, boxW, boxH);
+    }
+
+    /// <summary>
+    /// Unifies <see cref="TextSlideSegment"/> and <see cref="TextOverlaySegment"/> behind
+    /// one shape so the shared drag/double-click-to-edit gesture code above (originally
+    /// written only for slides) works for both without duplicating it. Implementations
+    /// resolve the live segment by <see cref="Id"/> on every access rather than caching the
+    /// record itself, since undo/redo and property-pane edits replace/mutate segments out
+    /// from under any snapshot reference.
+    /// </summary>
+    private interface ITextEditTarget
+    {
+        string Id { get; }
+
+        /// <summary>The segment's text. The setter is a live, non-undoable mutation used to
+        /// preview keystrokes as they happen; see <see cref="CommitText"/> for the one-shot
+        /// persisted change.</summary>
+        string Text { get; set; }
+
+        /// <summary>Normalized (0..1) centre of the text box. The setter is a live,
+        /// non-undoable mutation used to preview a drag as it happens; see
+        /// <see cref="CommitPosition"/> for the one-shot persisted change.</summary>
+        (double X, double Y) Center { get; set; }
+
+        string FontFamily { get; }
+        double FontSize { get; }
+        bool IsBold { get; }
+        bool IsItalic { get; }
+        string TextColor { get; }
+        SlideTextAlignment TextAlignment { get; }
+
+        /// <summary>The text box, in frame pixels, for a canvas of the given size.</summary>
+        Rect ComputeRect(int frameWidth, int frameHeight);
+
+        /// <summary>Called once when WYSIWYG editing begins (after <see cref="Text"/> has
+        /// been read into the edit box, before any keystroke).</summary>
+        void BeginTextEdit();
+
+        /// <summary>Called after every keystroke, once <see cref="Text"/> has already been
+        /// live-mutated, so implementations can nudge whatever preview needs it.</summary>
+        void OnLiveTextChanged();
+
+        /// <summary>Called after every drag tick, once <see cref="Center"/> has already been
+        /// live-mutated, so implementations can repaint immediately (a drag must feel live).</summary>
+        void OnLivePositionChanged();
+
+        /// <summary>Persists <paramref name="newText"/> as the final value of a finished
+        /// edit session (Enter/Esc/focus loss).</summary>
+        void CommitText(string newText);
+
+        /// <summary>Persists <paramref name="x"/>/<paramref name="y"/> as the final value of
+        /// a finished drag.</summary>
+        void CommitPosition(double x, double y);
+    }
+
+    /// <summary>
+    /// Adapts a <see cref="TextSlideSegment"/> to <see cref="ITextEditTarget"/>. Slides have
+    /// no undo path for in-place edits today (see <see cref="SlideTextBox_TextChanged"/> et
+    /// al., which all mutate the live segment directly) — every Commit* here is a plain
+    /// assignment plus the same <see cref="RefreshSlidePreview"/> call the pre-refactor code
+    /// used, so slide behaviour is unchanged by this abstraction.
+    /// </summary>
+    private sealed class SlideTextEditTarget : ITextEditTarget
+    {
+        private readonly EditorPage _page;
+        public string Id { get; }
+
+        public SlideTextEditTarget(EditorPage page, string id)
+        {
+            _page = page;
+            Id = id;
+        }
+
+        private TextSlideSegment? Segment => _page.ViewModel.Model.Segments
+            .OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == Id);
+
+        public string Text
+        {
+            get => Segment?.Text ?? string.Empty;
+            set { if (Segment is { } s) s.Text = value; }
+        }
+
+        public (double X, double Y) Center
+        {
+            get => Segment is { } s ? (s.TextX, s.TextY) : (0.5, 0.5);
+            set { if (Segment is { } s) { s.TextX = value.X; s.TextY = value.Y; } }
+        }
+
+        public string FontFamily => Segment?.FontFamily ?? "Segoe UI";
+        public double FontSize => Segment?.FontSize ?? 72;
+        public bool IsBold => Segment?.IsBold ?? false;
+        public bool IsItalic => Segment?.IsItalic ?? false;
+        public string TextColor => Segment?.TextColor ?? "#FFFFFF";
+        public SlideTextAlignment TextAlignment => Segment?.TextAlignment ?? SlideTextAlignment.Center;
+
+        public Rect ComputeRect(int frameWidth, int frameHeight) =>
+            Segment is { } s ? TextSlideRenderer.ComputeTextRect(s, frameWidth, frameHeight) : default;
+
+        public void BeginTextEdit() => _page.RefreshSlidePreview();
+
+        // Slides render text directly onto the preview bitmap themselves (see
+        // RenderTextSlidePreviewAsync's drawText suppression while _editingTextId is set),
+        // so nothing further is needed per keystroke — matches pre-refactor behaviour.
+        public void OnLiveTextChanged() { }
+
+        public void OnLivePositionChanged() => _page.RefreshSlidePreview();
+
+        public void CommitText(string newText)
+        {
+            if (Segment is { } s) s.Text = newText;
+            _page.RefreshSlidePreview(); // switches drawText back on for the finished text
+        }
+
+        public void CommitPosition(double x, double y)
+        {
+            // Already fully persisted and repainted by the last PointerMoved tick (see
+            // OnLivePositionChanged) — nothing more to do, matching the pre-refactor
+            // PointerReleased handler, which did nothing beyond cursor/capture cleanup.
+            if (Segment is { } s) { s.TextX = x; s.TextY = y; }
+        }
+    }
+
+    /// <summary>
+    /// Adapts a <see cref="TextOverlaySegment"/> to <see cref="ITextEditTarget"/>. Unlike
+    /// slides, every persisted change here goes through a single
+    /// <see cref="UpdateTextOverlayPropertiesOperation"/> so drags and text edits are each
+    /// exactly one undo step, even though the live <see cref="Text"/>/<see cref="Center"/>
+    /// setters mutate the model on every keystroke/mouse-move tick for a live preview.
+    /// </summary>
+    private sealed class OverlayTextEditTarget : ITextEditTarget
+    {
+        private readonly EditorPage _page;
+        public string Id { get; }
+
+        // Captured once at construction — i.e. when a gesture begins, since
+        // GetActiveEditTarget() is called fresh at TextEditRegion_PointerPressed and
+        // EnterTextEdit, and the resulting instance is then pinned in _dragTarget/_editTarget
+        // for the rest of that gesture — so Commit* can restore the model to its pre-gesture
+        // state right before executing the single undoable operation, regardless of how many
+        // live in-between mutations Center/Text made.
+        private readonly (double X, double Y) _originalCenter;
+        private readonly string _originalText;
+
+        public OverlayTextEditTarget(EditorPage page, string id)
+        {
+            _page = page;
+            Id = id;
+            var seg = Segment;
+            _originalCenter = seg is { } s ? (s.X, s.Y) : (0.5, 0.85);
+            _originalText = seg?.Text ?? string.Empty;
+        }
+
+        private TextOverlaySegment? Segment => _page.ViewModel.Model.TextOverlays.FirstOrDefault(o => o.Id == Id);
+
+        public string Text
+        {
+            get => Segment?.Text ?? string.Empty;
+            set { if (Segment is { } o) o.Text = value; } // live typing preview; see CommitText
+        }
+
+        public (double X, double Y) Center
+        {
+            get => Segment is { } o ? (o.X, o.Y) : (0.5, 0.85);
+            set { if (Segment is { } o) { o.X = value.X; o.Y = value.Y; } } // live drag preview; see CommitPosition
+        }
+
+        public string FontFamily => Segment?.FontFamily ?? "Segoe UI";
+        public double FontSize => Segment?.FontSize ?? 42;
+        public bool IsBold => Segment?.IsBold ?? false;
+        public bool IsItalic => Segment?.IsItalic ?? false;
+        public string TextColor => Segment?.TextColor ?? "#FFFFFF";
+        public SlideTextAlignment TextAlignment => Segment?.TextAlignment ?? SlideTextAlignment.Center;
+
+        public Rect ComputeRect(int frameWidth, int frameHeight) =>
+            Segment is { } o ? ComputeOverlayTextRect(o, frameWidth, frameHeight) : default;
+
+        // Overlays render via the always-on compositor, which has no drawText-suppression
+        // switch the way slides do — see this feature's completion report for the known
+        // cosmetic follow-up (the rendered overlay text can show through under the edit box
+        // while WYSIWYG editing). Nothing to do here.
+        public void BeginTextEdit() { }
+
+        public void OnLiveTextChanged() => _page.ScheduleOverlayPreviewRefresh();
+        public void OnLivePositionChanged() => _page.RefreshOverlayPreview();
+
+        public void CommitText(string newText)
+        {
+            if (Segment is not { } o) return;
+
+            // Restore-then-execute: the model currently holds whatever the last live
+            // keystroke left behind (see Text's setter above); reset it to what it was
+            // before the edit session started so UpdateTextOverlayPropertiesOperation's own
+            // "before" snapshot (taken inside Execute) captures the true original rather
+            // than an intermediate keystroke — giving one clean undo entry for the whole
+            // edit instead of one per character typed.
+            o.Text = _originalText;
+            _page.ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                Id, ov => ov.Text = newText, "Change Overlay Text"));
+
+            _page.SyncTextOverlayUI(Id);
+            _page.RefreshOverlayPreview();
+        }
+
+        public void CommitPosition(double x, double y)
+        {
+            if (Segment is not { } o) return;
+
+            // Same restore-then-execute trick as CommitText, for the drag case: put the
+            // model back to where the drag started before Execute() takes its "before"
+            // snapshot, giving one clean undo entry for the whole drag instead of one per
+            // PointerMoved tick. A free drag is no longer edge-anchored, so this also flips
+            // the overlay to Custom placement (mirrors OverlayAnchor_Checked's own comment
+            // about Custom being the "the user positioned this by hand" state).
+            o.X = _originalCenter.X;
+            o.Y = _originalCenter.Y;
+            _page.ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                Id, ov => { ov.X = x; ov.Y = y; ov.Anchor = TextOverlayAnchor.Custom; }, "Move Text Overlay"));
+
+            _page.SyncTextOverlayUI(Id);
+            _page.RefreshOverlayPreview();
+        }
     }
 }

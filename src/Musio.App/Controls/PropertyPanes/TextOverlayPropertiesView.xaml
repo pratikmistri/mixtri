@@ -1,0 +1,591 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Musio_App.Controls.PropertyPanes.TextOverlayPropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <!-- Anchor cell: a flat fill-on-check RadioButton with no border or padding so 9 of
+             them can tile into a single rectangle. Copied from ScenePropertiesView's
+             CropCellRadioStyle (that style is scoped to its own file, not shared). -->
+        <Style x:Key="OverlayAnchorCellStyle" TargetType="RadioButton">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="VerticalAlignment" Value="Stretch" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid x:Name="CellRoot" Background="{TemplateBinding Background}">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CombinedStates">
+                                    <VisualState x:Name="UncheckedNormal" />
+                                    <VisualState x:Name="UncheckedPointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="UncheckedPressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="UncheckedDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedNormal">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Background"
+                                                    Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Background"
+                                                    Value="{ThemeResource AccentFillColorSecondaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedPressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Background"
+                                                    Value="{ThemeResource AccentFillColorTertiaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="CheckedDisabled">
+                                        <VisualState.Setters>
+                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Indeterminate" />
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <!-- Presets -->
+        <StackPanel Spacing="10">
+            <TextBlock Text="Presets" Style="{StaticResource PropertyLabelStyle}" />
+            <!-- Grows to fit its tiles; the pane's ScrollViewer owns the overflow so the
+                 user never gets a second scrollbar nested inside the pane (see
+                 TextSlidePropertiesView.SlideGradientPresets for the same rule). -->
+            <GridView
+                x:Name="OverlayPresets"
+                x:FieldModifier="public"
+                Padding="0"
+                ScrollViewer.VerticalScrollMode="Disabled"
+                ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                ScrollViewer.HorizontalScrollMode="Disabled"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                SelectionMode="Single"
+                AutomationProperties.Name="Overlay presets" />
+        </StackPanel>
+
+        <!-- Text -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Text" Style="{StaticResource PropertyLabelStyle}" />
+            <TextBox
+                x:Name="OverlayTextBox"
+                x:FieldModifier="public"
+                AcceptsReturn="True"
+                TextWrapping="Wrap"
+                MinHeight="60"
+                PlaceholderText="Overlay text..."
+                AutomationProperties.Name="Overlay text" />
+        </StackPanel>
+
+        <!-- Animation -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Animation" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="OverlayAnimationCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.Name="Overlay animation">
+                <ComboBoxItem Content="None" Tag="None" />
+                <ComboBoxItem Content="Fade In" Tag="FadeIn" />
+                <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
+                <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
+                <ComboBoxItem Content="Slide Left" Tag="SlideLeft" />
+                <ComboBoxItem Content="Slide Right" Tag="SlideRight" />
+                <ComboBoxItem Content="Scale Pop" Tag="ScalePop" />
+                <ComboBoxItem Content="Zoom Blur In" Tag="ZoomBlurIn" />
+                <ComboBoxItem Content="Reveal (Wipe)" Tag="Reveal" />
+                <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
+                <ComboBoxItem Content="Typewriter + Caret" Tag="TypewriterCaret" />
+                <ComboBoxItem Content="Cascade Fade Up" Tag="CascadeFadeUp" />
+                <ComboBoxItem Content="Cascade Pop" Tag="CascadePop" />
+                <ComboBoxItem Content="Wave" Tag="Wave" />
+                <ComboBoxItem Content="Tracking In" Tag="TrackingIn" />
+                <ComboBoxItem Content="Rotate In" Tag="RotateIn" />
+                <ComboBoxItem Content="Bounce In" Tag="BounceIn" />
+            </ComboBox>
+        </StackPanel>
+
+        <!-- Font -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Font" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="OverlayFontCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.Name="Overlay font">
+                <ComboBoxItem Content="Segoe UI" Tag="Segoe UI" FontFamily="Segoe UI" />
+                <ComboBoxItem Content="Segoe UI Variable" Tag="Segoe UI Variable" FontFamily="Segoe UI Variable" />
+                <ComboBoxItem Content="Arial" Tag="Arial" FontFamily="Arial" />
+                <ComboBoxItem Content="Calibri" Tag="Calibri" FontFamily="Calibri" />
+                <ComboBoxItem Content="Cambria" Tag="Cambria" FontFamily="Cambria" />
+                <ComboBoxItem Content="Georgia" Tag="Georgia" FontFamily="Georgia" />
+                <ComboBoxItem Content="Times New Roman" Tag="Times New Roman" FontFamily="Times New Roman" />
+                <ComboBoxItem Content="Verdana" Tag="Verdana" FontFamily="Verdana" />
+                <ComboBoxItem Content="Tahoma" Tag="Tahoma" FontFamily="Tahoma" />
+                <ComboBoxItem Content="Trebuchet MS" Tag="Trebuchet MS" FontFamily="Trebuchet MS" />
+                <ComboBoxItem Content="Consolas" Tag="Consolas" FontFamily="Consolas" />
+                <ComboBoxItem Content="Courier New" Tag="Courier New" FontFamily="Courier New" />
+                <ComboBoxItem Content="Comic Sans MS" Tag="Comic Sans MS" FontFamily="Comic Sans MS" />
+                <ComboBoxItem Content="Impact" Tag="Impact" FontFamily="Impact" />
+            </ComboBox>
+        </StackPanel>
+
+        <!-- Duration + Font size -->
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Spacing="6">
+                <TextBlock Text="Duration (s)" Style="{StaticResource PropertyLabelStyle}" />
+                <NumberBox
+                    x:Name="OverlayDurationBox"
+                    x:FieldModifier="public"
+                    Minimum="0.5"
+                    Maximum="60"
+                    SpinButtonPlacementMode="Inline"
+                    SmallChange="0.5"
+                    AutomationProperties.Name="Overlay duration" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="6">
+                <TextBlock Text="Font Size" Style="{StaticResource PropertyLabelStyle}" />
+                <NumberBox
+                    x:Name="OverlayFontSizeBox"
+                    x:FieldModifier="public"
+                    Minimum="12"
+                    Maximum="200"
+                    SpinButtonPlacementMode="Inline"
+                    SmallChange="2"
+                    AutomationProperties.Name="Overlay font size" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Text color -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Text Color" Style="{StaticResource PropertyLabelStyle}" />
+            <DropDownButton HorizontalAlignment="Stretch" AutomationProperties.Name="Overlay text color">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border
+                        x:Name="OverlayTextColorSwatch"
+                        x:FieldModifier="public"
+                        Width="20" Height="20"
+                        CornerRadius="4"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" />
+                    <TextBlock x:Name="OverlayTextColorText" x:FieldModifier="public" Text="#FFFFFF" VerticalAlignment="Center" />
+                </StackPanel>
+                <DropDownButton.Flyout>
+                    <Flyout>
+                        <ColorPicker
+                            x:Name="OverlayTextColorPicker"
+                            x:FieldModifier="public"
+                            IsAlphaEnabled="False"
+                            IsHexInputVisible="True" />
+                    </Flyout>
+                </DropDownButton.Flyout>
+            </DropDownButton>
+        </StackPanel>
+
+        <!-- Formatting: bold / italic / alignment -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Formatting" Style="{StaticResource PropertyLabelStyle}" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <ToggleButton x:Name="OverlayBoldToggle" x:FieldModifier="public" Padding="8,6"
+                              ToolTipService.ToolTip="Bold"
+                              AutomationProperties.Name="Overlay bold">
+                    <FontIcon FontSize="14" Glyph="&#xE8DD;" />
+                </ToggleButton>
+                <ToggleButton x:Name="OverlayItalicToggle" x:FieldModifier="public" Padding="8,6"
+                              ToolTipService.ToolTip="Italic"
+                              AutomationProperties.Name="Overlay italic">
+                    <FontIcon FontSize="14" Glyph="&#xE8DB;" />
+                </ToggleButton>
+                <ctk:Segmented x:Name="OverlayAlignSegmented" x:FieldModifier="public"
+                               VerticalAlignment="Stretch"
+                               AutomationProperties.Name="Overlay text alignment">
+                    <ctk:SegmentedItem Tag="Left" ToolTipService.ToolTip="Align left">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E4;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Tag="Center" ToolTipService.ToolTip="Align center">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E3;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Tag="Right" ToolTipService.ToolTip="Align right">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E2;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                </ctk:Segmented>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Placement: 9-point anchor picker, custom-position hint, width/margin -->
+        <StackPanel Spacing="8">
+            <TextBlock Text="Placement" Style="{StaticResource PropertyLabelStyle}" />
+            <Border HorizontalAlignment="Left"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="4">
+                <Grid x:Name="OverlayAnchorGrid" x:FieldModifier="public"
+                      AutomationProperties.Name="Overlay anchor position"
+                      AutomationProperties.HelpText="Choose which edge or corner the overlay hugs">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="44" />
+                        <ColumnDefinition Width="1" />
+                        <ColumnDefinition Width="44" />
+                        <ColumnDefinition Width="1" />
+                        <ColumnDefinition Width="44" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="34" />
+                        <RowDefinition Height="1" />
+                        <RowDefinition Height="34" />
+                        <RowDefinition Height="1" />
+                        <RowDefinition Height="34" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Vertical dividers -->
+                    <Border Grid.Column="1" Grid.RowSpan="5"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                    <Border Grid.Column="3" Grid.RowSpan="5"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                    <!-- Horizontal dividers -->
+                    <Border Grid.Row="1" Grid.ColumnSpan="5"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                    <Border Grid.Row="3" Grid.ColumnSpan="5"
+                            Background="{ThemeResource ControlStrokeColorDefaultBrush}" />
+
+                    <RadioButton GroupName="OverlayAnchor" Tag="TopLeft"
+                                 AutomationProperties.Name="Overlay anchor TopLeft"
+                                 ToolTipService.ToolTip="Top left"
+                                 Grid.Row="0" Grid.Column="0"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="TopCenter"
+                                 AutomationProperties.Name="Overlay anchor TopCenter"
+                                 ToolTipService.ToolTip="Top center"
+                                 Grid.Row="0" Grid.Column="2"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="TopRight"
+                                 AutomationProperties.Name="Overlay anchor TopRight"
+                                 ToolTipService.ToolTip="Top right"
+                                 Grid.Row="0" Grid.Column="4"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="MiddleLeft"
+                                 AutomationProperties.Name="Overlay anchor MiddleLeft"
+                                 ToolTipService.ToolTip="Middle left"
+                                 Grid.Row="2" Grid.Column="0"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="MiddleCenter"
+                                 AutomationProperties.Name="Overlay anchor MiddleCenter"
+                                 ToolTipService.ToolTip="Middle center"
+                                 Grid.Row="2" Grid.Column="2"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="MiddleRight"
+                                 AutomationProperties.Name="Overlay anchor MiddleRight"
+                                 ToolTipService.ToolTip="Middle right"
+                                 Grid.Row="2" Grid.Column="4"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton x:Name="OverlayAnchorBottomCenter" x:FieldModifier="public" GroupName="OverlayAnchor" Tag="BottomCenter"
+                                 AutomationProperties.Name="Overlay anchor BottomCenter"
+                                 ToolTipService.ToolTip="Bottom center"
+                                 Grid.Row="4" Grid.Column="2" IsChecked="True"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="BottomLeft"
+                                 AutomationProperties.Name="Overlay anchor BottomLeft"
+                                 ToolTipService.ToolTip="Bottom left"
+                                 Grid.Row="4" Grid.Column="0"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                    <RadioButton GroupName="OverlayAnchor" Tag="BottomRight"
+                                 AutomationProperties.Name="Overlay anchor BottomRight"
+                                 ToolTipService.ToolTip="Bottom right"
+                                 Grid.Row="4" Grid.Column="4"
+                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                </Grid>
+            </Border>
+
+            <TextBlock
+                x:Name="OverlayCustomPositionHint"
+                x:FieldModifier="public"
+                Style="{StaticResource PropertyHintStyle}"
+                Visibility="Collapsed"
+                Text="Position is custom because the overlay was dragged on the preview. Picking an anchor above will snap it back." />
+
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayWidthSlider"
+                x:FieldModifier="public"
+                Header="Width"
+                Minimum="20" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay width" />
+
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayMarginSlider"
+                x:FieldModifier="public"
+                Header="Margin"
+                Minimum="0" Maximum="25"
+                StepFrequency="1"
+                AutomationProperties.Name="Overlay margin" />
+        </StackPanel>
+
+        <!-- Background type -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Background" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="OverlayBgTypeCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.Name="Overlay background type">
+                <ComboBoxItem Content="None" Tag="None" />
+                <ComboBoxItem Content="Solid" Tag="Solid" />
+                <ComboBoxItem Content="Frosted Blur" Tag="Blur" />
+                <ComboBoxItem Content="Gradient Scrim" Tag="GradientScrim" />
+                <ComboBoxItem Content="Outline &amp; Shadow" Tag="OutlineShadow" />
+                <ComboBoxItem Content="Accent Bar" Tag="AccentBar" />
+            </ComboBox>
+        </StackPanel>
+
+        <!-- Shared box panel: color / opacity / corner radius / padding. These four
+             properties (BackgroundColor, BackgroundOpacity, CornerRadius, PaddingScale)
+             back a filled box, so this one panel is shown for Solid, Blur AND AccentBar
+             instead of duplicating it into per-type panels (only their own extra controls
+             live below in OverlayBlurPanel / OverlayAccentPanel). GradientScrim and
+             OutlineShadow draw no box, so they don't use this panel at all. -->
+        <StackPanel x:Name="OverlayBoxPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <StackPanel Spacing="6">
+                <TextBlock Text="Background Color" Style="{StaticResource PropertyLabelStyle}" />
+                <DropDownButton HorizontalAlignment="Stretch" AutomationProperties.Name="Overlay background color">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Border
+                            x:Name="OverlayBgColorSwatch"
+                            x:FieldModifier="public"
+                            Width="20" Height="20"
+                            CornerRadius="4"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" />
+                        <TextBlock x:Name="OverlayBgColorText" x:FieldModifier="public" Text="#000000" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <Flyout>
+                            <ColorPicker
+                                x:Name="OverlayBgColorPicker"
+                                x:FieldModifier="public"
+                                IsAlphaEnabled="False"
+                                IsHexInputVisible="True" />
+                        </Flyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayBgOpacitySlider"
+                x:FieldModifier="public"
+                Header="Opacity"
+                Minimum="0" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay background opacity" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayCornerRadiusSlider"
+                x:FieldModifier="public"
+                Header="Corner Radius"
+                Minimum="0" Maximum="40"
+                StepFrequency="1"
+                AutomationProperties.Name="Overlay corner radius" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayPaddingSlider"
+                x:FieldModifier="public"
+                Header="Padding"
+                Minimum="0" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay padding" />
+        </StackPanel>
+
+        <!-- Blur-only extras (in addition to OverlayBoxPanel above) -->
+        <StackPanel x:Name="OverlayBlurPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayBlurAmountSlider"
+                x:FieldModifier="public"
+                Header="Blur Amount"
+                Minimum="0" Maximum="40"
+                StepFrequency="1"
+                AutomationProperties.Name="Overlay blur amount" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayBlurTintSlider"
+                x:FieldModifier="public"
+                Header="Tint Strength"
+                Minimum="0" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay blur tint strength" />
+            <TextBlock
+                Style="{StaticResource PropertyHintStyle}"
+                Text="Frosted blur costs extra GPU time per frame." />
+        </StackPanel>
+
+        <!-- Gradient scrim -->
+        <StackPanel x:Name="OverlayScrimPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <StackPanel Spacing="6">
+                <TextBlock Text="Direction" Style="{StaticResource PropertyLabelStyle}" />
+                <ComboBox
+                    x:Name="OverlayScrimDirectionCombo"
+                    x:FieldModifier="public"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="Overlay scrim direction">
+                    <ComboBoxItem Content="Bottom" Tag="Bottom" />
+                    <ComboBoxItem Content="Top" Tag="Top" />
+                    <ComboBoxItem Content="Left" Tag="Left" />
+                    <ComboBoxItem Content="Right" Tag="Right" />
+                </ComboBox>
+            </StackPanel>
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayScrimStrengthSlider"
+                x:FieldModifier="public"
+                Header="Strength"
+                Minimum="0" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay scrim strength" />
+        </StackPanel>
+
+        <!-- Outline & shadow -->
+        <StackPanel x:Name="OverlayOutlinePanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayOutlineWidthSlider"
+                x:FieldModifier="public"
+                Header="Outline Width"
+                Minimum="0" Maximum="10"
+                StepFrequency="0.5"
+                AutomationProperties.Name="Overlay outline width" />
+            <StackPanel Spacing="6">
+                <TextBlock Text="Outline Color" Style="{StaticResource PropertyLabelStyle}" />
+                <DropDownButton HorizontalAlignment="Stretch" AutomationProperties.Name="Overlay outline color">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Border
+                            x:Name="OverlayOutlineColorSwatch"
+                            x:FieldModifier="public"
+                            Width="20" Height="20"
+                            CornerRadius="4"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" />
+                        <TextBlock x:Name="OverlayOutlineColorText" x:FieldModifier="public" Text="#000000" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <Flyout>
+                            <ColorPicker
+                                x:Name="OverlayOutlineColorPicker"
+                                x:FieldModifier="public"
+                                IsAlphaEnabled="False"
+                                IsHexInputVisible="True" />
+                        </Flyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayShadowStrengthSlider"
+                x:FieldModifier="public"
+                Header="Shadow Strength"
+                Minimum="0" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay shadow strength" />
+        </StackPanel>
+
+        <!-- Accent bar-only extras (in addition to OverlayBoxPanel above) -->
+        <StackPanel x:Name="OverlayAccentPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <StackPanel Spacing="6">
+                <TextBlock Text="Accent Color" Style="{StaticResource PropertyLabelStyle}" />
+                <DropDownButton HorizontalAlignment="Stretch" AutomationProperties.Name="Overlay accent color">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Border
+                            x:Name="OverlayAccentColorSwatch"
+                            x:FieldModifier="public"
+                            Width="20" Height="20"
+                            CornerRadius="4"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" />
+                        <TextBlock x:Name="OverlayAccentColorText" x:FieldModifier="public" Text="#0078D4" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <Flyout>
+                            <ColorPicker
+                                x:Name="OverlayAccentColorPicker"
+                                x:FieldModifier="public"
+                                IsAlphaEnabled="False"
+                                IsHexInputVisible="True" />
+                        </Flyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayAccentThicknessSlider"
+                x:FieldModifier="public"
+                Header="Thickness"
+                Minimum="1" Maximum="20"
+                StepFrequency="1"
+                AutomationProperties.Name="Overlay accent thickness" />
+            <StackPanel Spacing="6">
+                <TextBlock Text="Side" Style="{StaticResource PropertyLabelStyle}" />
+                <ComboBox
+                    x:Name="OverlayAccentSideCombo"
+                    x:FieldModifier="public"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="Overlay accent side">
+                    <ComboBoxItem Content="Left" Tag="Left" />
+                    <ComboBoxItem Content="Right" Tag="Right" />
+                    <ComboBoxItem Content="Top" Tag="Top" />
+                    <ComboBoxItem Content="Bottom" Tag="Bottom" />
+                </ComboBox>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Enabled toggle -->
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="OverlayEnabledToggle"
+            x:FieldModifier="public"
+            Header="Enabled"
+            AutomationProperties.Name="Overlay enabled" />
+
+        <Button
+            x:Name="RemoveOverlayButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Remove selected text overlay"
+            AutomationProperties.Name="Remove overlay">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                <TextBlock Text="Remove Overlay" />
+            </StackPanel>
+        </Button>
+    </StackPanel>
+</UserControl>

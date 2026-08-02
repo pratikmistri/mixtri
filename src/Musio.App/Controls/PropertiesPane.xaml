@@ -174,6 +174,7 @@
                         <panes:TextSlidePropertiesView x:Name="TextSlideView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:CursorPropertiesView x:Name="CursorView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:TextOverlayPropertiesView x:Name="TextOverlayView" x:FieldModifier="public" Visibility="Collapsed" />
                     </Grid>
                 </ScrollViewer>
 
@@ -254,6 +255,21 @@
                         <Canvas HorizontalAlignment="Center">
                             <TextBlock Style="{StaticResource PaneTabLabelStyle}"
                                        Text="VIDEO"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="TextOverlayTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Text overlay"
+                              AutomationProperties.Name="Text overlay properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE7C8;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="TEXT OVERLAY"
                                        SizeChanged="PaneTabLabel_SizeChanged" />
                         </Canvas>
                     </StackPanel>

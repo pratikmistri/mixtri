@@ -27,6 +27,8 @@
             <!-- Zoom segments track -->
             <RowDefinition Height="44" />
             <!-- Camera track -->
+            <RowDefinition Height="44" />
+            <!-- Text overlay track -->
             <RowDefinition Height="40" />
             <!-- System audio track -->
             <RowDefinition Height="40" />
@@ -47,7 +49,10 @@
         <Border Grid.Row="4" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
             <TextBlock Text="Camera" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
+        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+            <TextBlock Text="Text" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
+        </Border>
+        <Border Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="AudioMuteButton"
                         Click="AudioMuteButton_Click"
@@ -60,7 +65,7 @@
                 <TextBlock Text="Audio" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
-        <Border Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
+        <Border Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="MicMuteButton"
                         Click="MicMuteButton_Click"
@@ -119,15 +124,27 @@
             RightTapped="CameraTrack_RightTapped" />
 
         <canvas:CanvasControl
-            x:Name="AudioTrackCanvas"
+            x:Name="TextTrackCanvas"
             Grid.Row="5"
+            Grid.Column="1"
+            Draw="TextTrackCanvas_Draw"
+            PointerPressed="TextTrack_PointerPressed"
+            PointerMoved="TextTrack_PointerMoved"
+            PointerReleased="TextTrack_PointerReleased"
+            RightTapped="TextTrack_RightTapped"
+            DoubleTapped="TextTrack_DoubleTapped"
+            AutomationProperties.Name="Text overlay track" />
+
+        <canvas:CanvasControl
+            x:Name="AudioTrackCanvas"
+            Grid.Row="6"
             Grid.Column="1"
             Draw="AudioTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
 
         <canvas:CanvasControl
             x:Name="MicTrackCanvas"
-            Grid.Row="6"
+            Grid.Row="7"
             Grid.Column="1"
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
@@ -138,7 +155,7 @@
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="7"
+            Grid.RowSpan="8"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

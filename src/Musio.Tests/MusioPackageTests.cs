@@ -603,4 +603,139 @@ public class MusioPackageTests
         Assert.IsFalse(MusioPackage.IsPackagePath(null));
         Assert.IsFalse(MusioPackage.IsPackagePath("   "));
     }
+
+    // ── Text overlays ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Extends <see cref="BuildProject"/> with an appended (secondary) recording and two
+    /// text overlays: one authored against the primary recording (<c>SourceVideoFilePath
+    /// == null</c>) and one authored against the appended recording, exercising the same
+    /// per-recording source-time ownership as <c>ZoomKeyframe.SourceVideoFilePath</c>.
+    /// </summary>
+    private (Project Project, TimelineModel Timeline, string AppendedVideoPath) BuildProjectWithTextOverlays()
+    {
+        var (project, timeline) = BuildProject();
+        var appendedVideo = WriteFile("appended.mp4", 2048, 0x09);
+
+        project.Sources.Add(new RecordingSource
+        {
+            VideoFilePath = appendedVideo,
+            CursorDataFilePath = WriteFile("appended_cursor.mcur", 128, 0x0A),
+            Duration = TimeSpan.FromSeconds(6),
+            Width = 1920,
+            Height = 1080,
+            Fps = 30,
+        });
+
+        timeline.TextOverlays.Add(new TextOverlaySegment
+        {
+            Text = "Primary Caption",
+            Start = TimeSpan.FromSeconds(1),
+            Duration = TimeSpan.FromSeconds(3),
+            Animation = TextSlideAnimation.CascadePop,
+            Anchor = TextOverlayAnchor.TopLeft,
+            Background = TextOverlayBackground.GradientScrim,
+            ScrimDirection = ScrimDirection.Left,
+            ScrimStrength = 0.42,
+            FontFamily = "Consolas",
+            FontSize = 51,
+            IsBold = true,
+            TextColor = "#00FF00",
+        });
+
+        timeline.TextOverlays.Add(new TextOverlaySegment
+        {
+            Text = "Secondary Callout",
+            Start = TimeSpan.FromSeconds(2),
+            Duration = TimeSpan.FromSeconds(2),
+            SourceVideoFilePath = appendedVideo,
+            Animation = TextSlideAnimation.BounceIn,
+            Anchor = TextOverlayAnchor.Custom,
+            X = 0.2,
+            Y = 0.3,
+            Background = TextOverlayBackground.AccentBar,
+            AccentColor = "#FF00AA",
+            AccentThickness = 9,
+            AccentSide = AccentSide.Bottom,
+        });
+
+        return (project, timeline, appendedVideo);
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_PreservesTextOverlayProperties()
+    {
+        var (project, timeline, appendedVideo) = BuildProjectWithTextOverlays();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.AreEqual(2, opened.Timeline.TextOverlays.Count);
+
+        var primary = opened.Timeline.TextOverlays.Single(o => o.Text == "Primary Caption");
+        Assert.AreEqual(TimeSpan.FromSeconds(1), primary.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(3), primary.Duration);
+        Assert.AreEqual(TextSlideAnimation.CascadePop, primary.Animation);
+        Assert.AreEqual(TextOverlayAnchor.TopLeft, primary.Anchor);
+        Assert.AreEqual(TextOverlayBackground.GradientScrim, primary.Background);
+        Assert.AreEqual(ScrimDirection.Left, primary.ScrimDirection);
+        Assert.AreEqual(0.42, primary.ScrimStrength);
+        Assert.AreEqual("Consolas", primary.FontFamily);
+        Assert.AreEqual(51, primary.FontSize);
+        Assert.IsTrue(primary.IsBold);
+        Assert.AreEqual("#00FF00", primary.TextColor);
+        Assert.IsNull(primary.SourceVideoFilePath);
+
+        var secondary = opened.Timeline.TextOverlays.Single(o => o.Text == "Secondary Callout");
+        Assert.AreEqual(TimeSpan.FromSeconds(2), secondary.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), secondary.Duration);
+        Assert.AreEqual(TextSlideAnimation.BounceIn, secondary.Animation);
+        Assert.AreEqual(TextOverlayAnchor.Custom, secondary.Anchor);
+        Assert.AreEqual(0.2, secondary.X);
+        Assert.AreEqual(0.3, secondary.Y);
+        Assert.AreEqual(TextOverlayBackground.AccentBar, secondary.Background);
+        Assert.AreEqual("#FF00AA", secondary.AccentColor);
+        Assert.AreEqual(9, secondary.AccentThickness);
+        Assert.AreEqual(AccentSide.Bottom, secondary.AccentSide);
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_RewritesTextOverlaySourceVideoFilePath()
+    {
+        var (project, timeline, appendedVideo) = BuildProjectWithTextOverlays();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        var secondary = opened.Timeline.TextOverlays.Single(o => o.Text == "Secondary Callout");
+        Assert.IsNotNull(secondary.SourceVideoFilePath);
+        Assert.IsTrue(File.Exists(secondary.SourceVideoFilePath), "the appended recording must travel with the package");
+        Assert.IsFalse(
+            secondary.SourceVideoFilePath!.StartsWith(_sourceFolder, StringComparison.OrdinalIgnoreCase),
+            "the restored path must not point back at the machine that saved it");
+        Assert.AreNotEqual(appendedVideo, secondary.SourceVideoFilePath);
+
+        // It resolves to the same appended recording that was extracted for the source itself.
+        var restoredSource = opened.Project.Sources.Single();
+        Assert.AreEqual(restoredSource.VideoFilePath, secondary.SourceVideoFilePath);
+
+        // The primary-authored overlay stays null through the round trip.
+        var primary = opened.Timeline.TextOverlays.Single(o => o.Text == "Primary Caption");
+        Assert.IsNull(primary.SourceVideoFilePath);
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_TextOverlay_KindDiscriminatorRoundTrips()
+    {
+        var (project, timeline, _) = BuildProjectWithTextOverlays();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        foreach (var overlay in opened.Timeline.TextOverlays)
+            Assert.IsInstanceOfType<TextOverlaySegment>(overlay);
+    }
 }
