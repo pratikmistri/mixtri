@@ -25,10 +25,12 @@ public record MotionBlurSettings
     public bool Enabled { get; init; } = true;
 
     /// <summary>
-    /// Master strength in <c>[0,1]</c>, scaling the shutter interval. <c>0.5</c>
-    /// with the default 180° shutter gives a natural, film-like amount.
+    /// Master strength in <c>[0,1]</c>, scaling the shutter interval. Tuned low: with
+    /// the 180° shutter this lands well under a full film shutter, which is
+    /// deliberate — screen recordings are mostly high-contrast text and UI, where
+    /// smear becomes objectionable far sooner than it does on filmed footage.
     /// </summary>
-    public float Strength { get; init; } = 0.5f;
+    public float Strength { get; init; } = 0.3f;
 
     /// <summary>Per-channel multiplier for blur of the cursor's own movement.</summary>
     public float CursorStrength { get; init; } = 1.0f;

@@ -14,12 +14,14 @@ public sealed class MotionBlurSettingsTests
     #region ShutterFraction
 
     [TestMethod]
-    public void ShutterFraction_WithCinemaDefaults_IsHalfAFrameScaledByStrength()
+    public void ShutterFraction_WithDefaults_IsTunedBelowAFullFilmShutter()
     {
-        // 180 degrees = shutter open half the frame; the 0.5 default strength halves it again.
+        // 180 degrees = shutter open half the frame; the 0.3 default strength scales
+        // that down again, because screen recordings show smear far more readily than
+        // filmed footage does.
         var settings = new MotionBlurSettings();
 
-        Assert.AreEqual(0.25f, settings.ShutterFraction, 1e-6f);
+        Assert.AreEqual(0.15f, settings.ShutterFraction, 1e-6f);
     }
 
     [TestMethod]
