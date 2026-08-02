@@ -1934,3 +1934,11 @@ Verification: VS MSBuild x64 (Core+Tests+App) clean; suite 374 green.
 - Seeds stay `(int)Math.Round(startSeconds * 1000)`. **Never use `string.GetHashCode` for anything that must match between preview and export** — .NET randomises it per process.
 
 - **Verified**: Musio.Core ARM64 + x64, Musio.App Release ARM64, **643 tests pass** (2 skipped), deployed and launched cleanly with no new `crash.log` entries.
+
+## PR #70 review: unused `timeSeconds` parameter on `ApplyCameraDrift`
+
+- **Feature/area**: `src/Musio.Core/Processing/FrameCompositor.cs` — camera drift layering.
+- **Approaches tried**: Copilot review flagged `ApplyCameraDrift(ZoomState, double timeSeconds)` as taking a parameter it never reads. Verified by inspection: drift is derived entirely from `zoomState.SegmentProgress`/heading and the viewport slack, never from wall-clock time.
+- **What worked**: Dropped the parameter and updated the single call site in `ResolveZoomState`. Purely mechanical; no behaviour change. `ResolveZoomState` remains a pure function of `timeSeconds`, so the shutter-blur sub-frame sampling contract is untouched.
+- **What did not work**: `dotnet build` still fails with the PriGen MSB4062 error — used `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\arm64\MSBuild.exe" src\Musio.Tests\Musio.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=ARM64` then `dotnet vstest ... /Platform:ARM64` instead.
+- **Verified**: 648 tests pass (2 skipped).

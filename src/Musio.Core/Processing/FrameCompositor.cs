@@ -529,7 +529,7 @@ public class FrameCompositor : IDisposable
             zoomState = recentred;
         }
 
-        return ApplyCameraDrift(zoomState, timeSeconds);
+        return ApplyCameraDrift(zoomState);
     }
 
     /// <summary>
@@ -539,7 +539,7 @@ public class FrameCompositor : IDisposable
     /// outside a zoom segment and a segment always returns to its exact original
     /// framing as the zoom releases.
     /// </summary>
-    private ZoomState ApplyCameraDrift(ZoomState zoomState, double timeSeconds)
+    private ZoomState ApplyCameraDrift(ZoomState zoomState)
     {
         if (!_config.CameraDrift.Enabled || zoomState.ZoomLevel <= 1f || !zoomState.HasSegment)
             return zoomState;
