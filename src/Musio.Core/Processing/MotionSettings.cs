@@ -86,15 +86,23 @@ public record MotionBlurSettings
     /// Resolves how many sub-frame samples to average for a camera that travels
     /// <paramref name="travelPixels"/> output pixels across the shutter interval.
     /// Returns <c>1</c> (meaning "draw once, no blur") whenever the travel is below
-    /// <see cref="MinBlurPixels"/>.
+    /// <see cref="MinBlurPixels"/>, or whenever <see cref="MaxSamples"/> leaves no
+    /// room for a blur at all.
     /// </summary>
     public int ResolveSampleCount(float travelPixels)
     {
         if (!Enabled || ShutterFraction <= 0f) return 1;
         if (!float.IsFinite(travelPixels) || travelPixels < MinBlurPixels) return 1;
 
+        // A blur needs at least two samples, so anything less means "no blur". This
+        // is also a hard guard, not just semantics: MaxSamples is deserialized
+        // straight from the .musio manifest with no validation, and passing a cap
+        // below the minimum to Math.Clamp throws rather than widening the range —
+        // which would take down the whole render path on a hand-edited project file.
+        int cap = Math.Min(MaxSamples, 64);
+        if (cap < 2) return 1;
+
         float spacing = Math.Max(0.25f, SampleSpacingPixels);
-        int cap = Math.Clamp(MaxSamples, 1, 64);
         int samples = (int)Math.Ceiling(travelPixels / spacing) + 1;
         return Math.Clamp(samples, 2, cap);
     }

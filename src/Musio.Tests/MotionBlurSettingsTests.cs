@@ -104,6 +104,31 @@ public sealed class MotionBlurSettingsTests
     }
 
     [TestMethod]
+    public void ResolveSampleCount_WithDegenerateMaxSamples_DisablesBlurInsteadOfThrowing()
+    {
+        // MaxSamples is deserialized straight from the .musio manifest with no
+        // validation, so a hand-edited or third-party file can supply 0, 1, or a
+        // negative value. Math.Clamp throws when its min exceeds its max, so an
+        // unguarded cap here would crash the entire render/export path on the first
+        // frame where the camera moved far enough to want blur.
+        foreach (int maxSamples in new[] { int.MinValue, -5, 0, 1 })
+        {
+            var settings = new MotionBlurSettings { MaxSamples = maxSamples };
+
+            Assert.AreEqual(1, settings.ResolveSampleCount(500f),
+                $"MaxSamples={maxSamples} should mean 'no blur', not a crash.");
+        }
+    }
+
+    [TestMethod]
+    public void ResolveSampleCount_WithMaxSamplesOfTwo_StillBlurs()
+    {
+        var settings = new MotionBlurSettings { MaxSamples = 2 };
+
+        Assert.AreEqual(2, settings.ResolveSampleCount(500f));
+    }
+
+    [TestMethod]
     public void ResolveSampleCount_NeverExceedsMaxSamples()
     {
         var settings = new MotionBlurSettings { MaxSamples = 8 };
