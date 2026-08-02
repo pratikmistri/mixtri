@@ -339,6 +339,48 @@ public sealed class CameraDriftTests
     }
 
     [TestMethod]
+    public void Evaluate_ScalesLinearlyWithStrengthAcrossTheFullSliderRange()
+    {
+        // The UI slider maps 0..200 onto Strength 0..4. If Evaluate clamped lower than
+        // 4 the top half of the slider would silently do nothing.
+        var atOne = EvaluateAt(0.7f, settings: new CameraDriftSettings { Strength = 1f });
+        var atTwo = EvaluateAt(0.7f, settings: new CameraDriftSettings { Strength = 2f });
+        var atFour = EvaluateAt(0.7f, settings: new CameraDriftSettings { Strength = 4f });
+
+        Assert.AreEqual(2.0f, atTwo.OffsetX / atOne.OffsetX, 0.01f);
+        Assert.AreEqual(4.0f, atFour.OffsetX / atOne.OffsetX, 0.01f);
+        Assert.AreEqual(
+            4.0f, (atFour.ZoomFactor - 1f) / (atOne.ZoomFactor - 1f), 0.01f);
+    }
+
+    [TestMethod]
+    public void Evaluate_ClampsStrengthAboveTheSupportedMaximum()
+    {
+        var atMax = EvaluateAt(0.7f, settings: new CameraDriftSettings { Strength = 4f });
+        var beyondMax = EvaluateAt(0.7f, settings: new CameraDriftSettings { Strength = 25f });
+
+        Assert.AreEqual(atMax, beyondMax);
+    }
+
+    [TestMethod]
+    public void Evaluate_AtMaximumStrength_StillRespectsTheSlackBound()
+    {
+        // Turning the slider up must not let the pan reach the source edge, where the
+        // viewport clamp would stall the motion.
+        var settings = new CameraDriftSettings { Strength = 4f };
+        const float slack = 12f;
+        float limit = slack * settings.MaxSlackFraction;
+
+        for (int i = 0; i <= 20; i++)
+        {
+            var result = EvaluateAt(i / 20f, settings: settings, slackX: slack, slackY: slack);
+            Assert.IsTrue(Math.Abs(result.OffsetX) <= limit + 1e-4f
+                && Math.Abs(result.OffsetY) <= limit + 1e-4f,
+                $"Max-strength drift broke the slack bound at progress {i / 20f}.");
+        }
+    }
+
+    [TestMethod]
     public void Evaluate_WithNoSlack_ProducesNoPan()
     {
         // Against a source edge there is nowhere to pan. Panning anyway would be

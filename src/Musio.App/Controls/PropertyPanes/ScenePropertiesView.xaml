@@ -595,7 +595,7 @@
             x:Name="CameraDriftSlider"
             x:FieldModifier="public"
             Header="Drift Amount"
-            Minimum="0" Maximum="100"
+            Minimum="0" Maximum="200"
             StepFrequency="5" />
     </StackPanel>
 </UserControl>

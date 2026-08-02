@@ -124,7 +124,12 @@ public record CameraDriftSettings
     /// <summary>Master switch for continuous drift during zoom segments.</summary>
     public bool Enabled { get; init; } = true;
 
-    /// <summary>Overall multiplier in <c>[0,2]</c> applied to both drift layers.</summary>
+    /// <summary>
+    /// Overall multiplier applied to both drift layers. <c>1</c> is the tuned
+    /// default; the UI exposes up to <c>4</c> so a deliberately theatrical push is
+    /// available without having to edit the project file. Values above roughly 2
+    /// stop being subtle, which is the point of the upper half of the range.
+    /// </summary>
     public float Strength { get; init; } = 1.0f;
 
     /// <summary>

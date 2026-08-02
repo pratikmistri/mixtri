@@ -124,7 +124,7 @@ public static class CameraDrift
         float window = Window(zoomLevel);
         if (window <= 0f) return CameraDriftResult.None;
 
-        float amount = Math.Clamp(settings.Strength, 0f, 2f) * window;
+        float amount = Math.Clamp(settings.Strength, 0f, 4f) * window;
         if (amount <= 0f) return CameraDriftResult.None;
 
         float p = Math.Clamp(segmentProgress, 0f, 1f);
