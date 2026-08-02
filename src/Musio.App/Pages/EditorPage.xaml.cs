@@ -4075,40 +4075,34 @@ public sealed partial class EditorPage : Page
     {
         if (_suppressStyleEvents) return;
 
-        // Keep the paired slider's enabled state in sync with its toggle immediately;
-        // the model update itself still goes through the debounce below.
+        // Keep the paired slider's enabled state in sync with its toggle immediately.
         if (ReferenceEquals(sender, MotionBlurToggle))
             MotionBlurSlider.IsEnabled = MotionBlurToggle.IsOn;
         else if (ReferenceEquals(sender, CameraDriftToggle))
             CameraDriftSlider.IsEnabled = CameraDriftToggle.IsOn;
 
-        ScheduleMotionUpdate();
+        CommitMotionSettings();
+        ScheduleMotionPreviewRebuild();
     }
 
     private void MotionSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_suppressStyleEvents) return;
-        ScheduleMotionUpdate();
+        CommitMotionSettings();
+        ScheduleMotionPreviewRebuild();
     }
 
-    private void ScheduleMotionUpdate()
-    {
-        // Separate timer/instance from _styleDebounceTimer so a motion slider drag never
-        // races or gets coalesced with an in-flight background-style update.
-        if (_motionDebounceTimer is null)
-        {
-            _motionDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _motionDebounceTimer.Tick += (_, _) =>
-            {
-                _motionDebounceTimer.Stop();
-                ApplyMotionSettings();
-            };
-        }
-        _motionDebounceTimer.Stop();
-        _motionDebounceTimer.Start();
-    }
-
-    private void ApplyMotionSettings()
+    /// <summary>
+    /// Writes the motion controls straight into the live composition. This is
+    /// deliberately NOT debounced: the model must be current the instant the user
+    /// lets go of a control, because saving, exporting, and re-syncing the pane on
+    /// segment selection all read <see cref="ProjectService.CurrentComposition"/>
+    /// directly. Deferring the write means a save or export landing inside the
+    /// debounce window silently uses the previous settings, and a segment selection
+    /// re-syncs the controls from the stale model and visually reverts the edit.
+    /// Only the expensive part — rebuilding the preview renderer — is debounced.
+    /// </summary>
+    private void CommitMotionSettings()
     {
         var config = ProjectService.Instance.CurrentComposition;
         if (config is null) return;
@@ -4116,9 +4110,9 @@ public sealed partial class EditorPage : Page
         // Motion blur / camera drift are global (CompositionConfig-only) settings, mirroring
         // ZoomScope/AspectRatio/FitMode/CropAnchor — there is no per-project field to mirror
         // them onto. Rebuild `with` the existing sub-record so tuned values (shutter angle,
-        // per-channel strengths, drift frequencies, etc.) survive; a `new` record would reset
+        // per-channel strengths, sample caps, etc.) survive; a `new` record would reset
         // them to their Musio.Core defaults.
-        config = config with
+        ProjectService.Instance.CurrentComposition = config with
         {
             MotionBlur = config.MotionBlur with
             {
@@ -4131,7 +4125,31 @@ public sealed partial class EditorPage : Page
                 Strength = (float)(CameraDriftSlider.Value / 50.0),
             },
         };
-        ProjectService.Instance.CurrentComposition = config;
+    }
+
+    private void ScheduleMotionPreviewRebuild()
+    {
+        // Separate timer/instance from _styleDebounceTimer so a motion slider drag never
+        // races or gets coalesced with an in-flight background-style update.
+        if (_motionDebounceTimer is null)
+        {
+            _motionDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+            _motionDebounceTimer.Tick += (_, _) =>
+            {
+                _motionDebounceTimer.Stop();
+                RefreshPreviewForMotionSettings();
+            };
+        }
+        _motionDebounceTimer.Stop();
+        _motionDebounceTimer.Start();
+    }
+
+    private void RefreshPreviewForMotionSettings()
+    {
+        // Re-read rather than capturing at schedule time, so this always rebuilds from
+        // the newest committed settings even if several edits coalesced into one tick.
+        var config = ProjectService.Instance.CurrentComposition;
+        if (config is null) return;
 
         InvalidateSegmentPreviews();
         _ = RebuildPreviewRendererAsync(config);
