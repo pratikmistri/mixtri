@@ -12,6 +12,17 @@ using Windows.Foundation;
 /// <remarks>
 /// The <c>$kind</c> discriminators are part of the on-disk <c>.musio</c> format. Renaming
 /// one silently breaks every project file already saved with it.
+/// <para>
+/// A retired <c>VideoSegment.TextOverlays</c> property (and its <c>TextOverlay</c> record)
+/// once existed here and was removed when text overlays moved to
+/// <see cref="TimelineModel.TextOverlays"/>. That was safe to drop outright rather than
+/// migrate: nothing in the app ever wrote to it — no producer, and its renderer entry point
+/// had no call sites — so no saved project can carry overlay data in that shape. Old files
+/// do still contain the serialized empty array, which deserialization ignores as an unknown
+/// member; <c>MusioPackageTests.Open_ToleratesLegacyPerSegmentTextOverlays</c> pins that,
+/// so opting <see cref="MusioPackage.JsonOptions"/> into strict member handling would fail
+/// there first rather than in the field.
+/// </para>
 /// </remarks>
 [JsonDerivedType(typeof(VideoSegment), "video")]
 [JsonDerivedType(typeof(TextSlideSegment), "textSlide")]

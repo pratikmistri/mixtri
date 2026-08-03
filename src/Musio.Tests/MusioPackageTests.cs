@@ -738,4 +738,58 @@ public class MusioPackageTests
         foreach (var overlay in opened.Timeline.TextOverlays)
             Assert.IsInstanceOfType<TextOverlaySegment>(overlay);
     }
+
+    /// <summary>
+    /// A pre-existing <c>.musio</c> written before the per-segment text overlay model was
+    /// removed still opens. Nothing in the app ever populated <c>VideoSegment.TextOverlays</c>
+    /// (the type and property were dead code with no producer and no renderer call site), so
+    /// no real project can carry overlay data there — but old files DO contain the serialized
+    /// empty <c>"TextOverlays": []</c> property, and a future switch to strict member handling
+    /// on <see cref="MusioPackage.JsonOptions"/> would start throwing on every one of them.
+    /// This pins the "old files keep opening" guarantee, injecting a populated legacy array to
+    /// prove even the strongest form of the old shape is tolerated.
+    /// </summary>
+    [TestMethod]
+    public async Task Open_ToleratesLegacyPerSegmentTextOverlays()
+    {
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "legacy-overlays.musio");
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        // Rewrite the packaged manifest so its video segment carries the retired
+        // per-segment overlay shape, exactly as a build from before this change would.
+        RewriteManifest(packagePath, json =>
+            json.Replace("\"$kind\": \"video\"",
+                "\"$kind\": \"video\",\n      \"TextOverlays\": [ { \"Id\": \"legacy1\", \"Text\": \"Old overlay\", \"X\": 0.5, \"Y\": 0.5 } ]"));
+
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        // Opens cleanly, and everything that IS still modelled survives untouched.
+        Assert.AreEqual(project.Id, opened.Project.Id);
+        var segment = opened.Timeline.Segments.OfType<VideoSegment>().Single();
+        Assert.IsTrue(File.Exists(segment.VideoFilePath), "the segment's media should still resolve");
+        Assert.AreEqual(0, opened.Timeline.TextOverlays.Count, "the retired per-segment shape carries no overlays forward");
+    }
+
+    /// <summary>Rewrites <c>manifest.json</c> inside a saved package.</summary>
+    private static void RewriteManifest(string packagePath, Func<string, string> transform)
+    {
+        string json;
+        using (var read = ZipFile.OpenRead(packagePath))
+        {
+            var entry = read.GetEntry("manifest.json")
+                ?? throw new InvalidOperationException("manifest.json missing from package");
+            using var reader = new StreamReader(entry.Open());
+            json = reader.ReadToEnd();
+        }
+
+        json = transform(json);
+
+        using var archive = ZipFile.Open(packagePath, ZipArchiveMode.Update);
+        archive.GetEntry("manifest.json")!.Delete();
+        var replacement = archive.CreateEntry("manifest.json");
+        using var writer = new StreamWriter(replacement.Open());
+        writer.Write(json);
+    }
 }
