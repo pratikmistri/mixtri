@@ -346,6 +346,8 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public void InvalidateAllCanvases()
     {
+        UpdateTrackVisibility();
+
         TimeRulerCanvas?.Invalidate();
         VideoTrackCanvas?.Invalidate();
         CursorTrackCanvas?.Invalidate();
@@ -357,6 +359,74 @@ public sealed partial class TimelineControl : UserControl
         // Durations / zoom / scroll may have changed with the tracks, which moves the
         // playhead's pixel position even when the time itself is unchanged.
         UpdatePlayheadVisual();
+    }
+
+    // --- Adaptive track visibility ---
+
+    // Natural heights of the tracks that are only shown when the recording actually has
+    // data for them. Kept here rather than read back from the RowDefinition because a
+    // collapsed row's height is zeroed, so the original value would be lost.
+    private const double CursorRowHeight = 40;
+    private const double CameraRowHeight = 44;
+    private const double AudioRowHeight = 40;
+    private const double MicRowHeight = 40;
+
+    /// <summary>
+    /// Collapses the tracks that visualise recorded media the current project does not
+    /// have — cursor, camera, system audio and microphone — so the timeline only spends
+    /// vertical space on tracks with something to show. Video, zoom and text always stay
+    /// visible: those are authoring surfaces the user creates content on (you drag on the
+    /// zoom track to make a zoom), so hiding them when empty would hide the feature.
+    /// A collapsed row is zero-height <em>and</em> its label/canvas are collapsed, so it
+    /// cannot be hit-tested or draw a sliver.
+    /// </summary>
+    private void UpdateTrackVisibility()
+    {
+        // The XAML may not be realised yet when the model is assigned during construction.
+        if (CursorRow is null || AudioRow is null) return;
+
+        var model = Model;
+
+        bool hasCursor = model is not null &&
+            (model.CursorData?.Samples.Count > 0 ||
+             _trackVisualsByFile.Values.Any(v => v.Cursor?.Samples.Count > 0));
+
+        bool hasCamera = model is not null &&
+            (model.CameraSegments.Count > 0 ||
+             model.Segments.OfType<VideoSegment>().Any(s => !string.IsNullOrEmpty(s.WebcamFilePath)) ||
+             _trackVisualsByFile.Values.Any(v => v.HasCamera));
+
+        bool hasSystemAudio = model is not null &&
+            (model.SystemAudioWaveformSamples is { Length: > 0 } ||
+             _trackVisualsByFile.Values.Any(v => v.SystemWaveform is { Length: > 0 }));
+
+        bool hasMicAudio = model is not null &&
+            (model.MicAudioWaveformSamples is { Length: > 0 } ||
+             _trackVisualsByFile.Values.Any(v => v.MicWaveform is { Length: > 0 }));
+
+        ApplyTrackVisibility(CursorRow, CursorTrackLabel, CursorTrackCanvas, hasCursor, CursorRowHeight);
+        ApplyTrackVisibility(CameraRow, CameraTrackLabel, CameraTrackCanvas, hasCamera, CameraRowHeight);
+        ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
+        ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
+    }
+
+    /// <summary>
+    /// Shows or collapses one optional track. Writing the row height unconditionally would
+    /// dirty layout on every repaint, so this only touches the tree when the state actually
+    /// changes.
+    /// </summary>
+    private static void ApplyTrackVisibility(
+        RowDefinition row, FrameworkElement? label, FrameworkElement? canvas, bool visible, double height)
+    {
+        var target = visible ? new GridLength(height) : new GridLength(0);
+        if (row.Height != target)
+            row.Height = target;
+
+        var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (label is not null && label.Visibility != visibility)
+            label.Visibility = visibility;
+        if (canvas is not null && canvas.Visibility != visibility)
+            canvas.Visibility = visibility;
     }
 
     // --- Filmstrip Thumbnail Management ---

@@ -4158,6 +4158,12 @@ public sealed partial class EditorPage : Page
             if (micWaveform is { Length: > 0 })
                 ViewModel.Model.MicAudioWaveformSamples = micWaveform;
 
+            // The audio/mic tracks are only shown once their waveform exists, and this
+            // build runs in the background well after the timeline first drew — so the
+            // tracks have to be told the samples arrived or they would stay collapsed.
+            if (systemWaveform is { Length: > 0 } || micWaveform is { Length: > 0 })
+                DispatcherQueue.TryEnqueue(() => Timeline?.Refresh());
+
             // The waveform build above is a multi-second background pass; if the page
             // unloaded or a newer preview init took over meanwhile, publishing a player
             // here would strand it (nothing disposes it again) or clobber the new run's.
