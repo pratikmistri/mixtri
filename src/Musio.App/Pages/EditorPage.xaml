@@ -182,36 +182,67 @@
                     </Border.Background>
                 </Border>
 
-                <!-- Width handles. The overlay's box width is what decides where its text
-                     wraps, so it is draggable directly on the preview; text slides have a
-                     fixed box and hide these. -->
-                <Border x:Name="TextEditLeftHandle"
-                        AutomationProperties.Name="Text width handle left"
-                        Tag="Left"
-                        Visibility="Collapsed"
-                        Width="8"
-                        CornerRadius="4"
+                <!-- Resize grabbers: 4 corners + 4 edge midpoints, matching
+                     RegionSelectorOverlay's TL/T/TR/L/R/BL/B/BR handle convention (same
+                     Tag values, hit-test names and cursor mapping) so the box can be
+                     resized on any edge/corner independently. The overlay's box decides
+                     where its text wraps, so it is draggable directly on the preview;
+                     text slides have a fixed box and hide these. -->
+                <Border x:Name="TextEditHandleTL" Tag="TL" AutomationProperties.Name="Text box handle top-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
                         Background="{ThemeResource AccentFillColorDefaultBrush}"
-                        PointerEntered="TextEditHandle_PointerEntered"
-                        PointerExited="TextEditHandle_PointerExited"
-                        PointerPressed="TextEditHandle_PointerPressed"
-                        PointerMoved="TextEditHandle_PointerMoved"
-                        PointerReleased="TextEditHandle_PointerReleased"
-                        PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
                         PointerCanceled="TextEditHandle_PointerCanceled" />
-                <Border x:Name="TextEditRightHandle"
-                        AutomationProperties.Name="Text width handle right"
-                        Tag="Right"
-                        Visibility="Collapsed"
-                        Width="8"
-                        CornerRadius="4"
+                <Border x:Name="TextEditHandleT" Tag="T" AutomationProperties.Name="Text box handle top"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
                         Background="{ThemeResource AccentFillColorDefaultBrush}"
-                        PointerEntered="TextEditHandle_PointerEntered"
-                        PointerExited="TextEditHandle_PointerExited"
-                        PointerPressed="TextEditHandle_PointerPressed"
-                        PointerMoved="TextEditHandle_PointerMoved"
-                        PointerReleased="TextEditHandle_PointerReleased"
-                        PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleTR" Tag="TR" AutomationProperties.Name="Text box handle top-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleL" Tag="L" AutomationProperties.Name="Text box handle left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleR" Tag="R" AutomationProperties.Name="Text box handle right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBL" Tag="BL" AutomationProperties.Name="Text box handle bottom-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleB" Tag="B" AutomationProperties.Name="Text box handle bottom"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBR" Tag="BR" AutomationProperties.Name="Text box handle bottom-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
                         PointerCanceled="TextEditHandle_PointerCanceled" />
                 <TextBox x:Name="TextEditBox"
                          AutomationProperties.Name="Text edit box"

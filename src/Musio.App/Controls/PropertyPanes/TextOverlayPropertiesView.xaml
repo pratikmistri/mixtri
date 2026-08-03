@@ -355,6 +355,14 @@
                 AutomationProperties.Name="Overlay width" />
 
             <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="OverlayHeightSlider"
+                x:FieldModifier="public"
+                Header="Height"
+                Minimum="5" Maximum="100"
+                StepFrequency="5"
+                AutomationProperties.Name="Overlay height" />
+
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
                 x:Name="OverlayMarginSlider"
                 x:FieldModifier="public"
                 Header="Margin"

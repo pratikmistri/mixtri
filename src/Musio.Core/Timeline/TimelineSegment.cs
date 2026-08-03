@@ -2,6 +2,7 @@ namespace Musio.Core.Timeline;
 
 using System.Text.Json.Serialization;
 using Musio.Core.Processing;
+using Windows.Foundation;
 
 /// <summary>
 /// Base class for all segments on the output timeline.
@@ -410,8 +411,22 @@ public record TextOverlaySegment : TimelineSegment
     /// <summary>Normalized vertical centre (0..1). Authoritative only when <see cref="Anchor"/> is <see cref="TextOverlayAnchor.Custom"/>.</summary>
     public double Y { get; set; } = 0.85;
 
-    /// <summary>Maximum text box width as a fraction of the output width.</summary>
+    /// <summary>
+    /// Width of the overlay's box as a fraction of the output width. The box is an explicit
+    /// rectangle rather than something that hugs the measured text: that makes wrapping and
+    /// overflow predictable, lets the box be resized directly on the preview, and — because
+    /// the geometry is then pure arithmetic — guarantees the editor's drag/resize region and
+    /// the renderer's box agree exactly instead of drifting apart through two separate text
+    /// measurements.
+    /// </summary>
     public double WidthFraction { get; set; } = 0.6;
+
+    /// <summary>
+    /// Height of the overlay's box as a fraction of the output height. See
+    /// <see cref="WidthFraction"/> for why the box is explicit. Text is wrapped to the box
+    /// width and centred vertically within this height.
+    /// </summary>
+    public double HeightFraction { get; set; } = 0.14;
 
     /// <summary>Inset from the frame edge used by every non-<see cref="TextOverlayAnchor.Custom"/> anchor.</summary>
     public double MarginFraction { get; set; } = 0.06;
@@ -461,6 +476,32 @@ public record TextOverlaySegment : TimelineSegment
     public string AccentColor { get; set; } = "#0078D4";
     public double AccentThickness { get; set; } = 5;
     public AccentSide AccentSide { get; set; } = AccentSide.Left;
+
+    /// <summary>
+    /// The overlay's box in output pixels: the single source of truth for its geometry,
+    /// shared by the renderer (which draws the background and lays the text out inside it)
+    /// and by the editor (which positions the drag/resize region over it). Both callers go
+    /// through here so the on-screen box and the interactive handles cannot drift apart —
+    /// they previously each measured the text themselves and disagreed.
+    /// The box is clamped to stay inside the frame.
+    /// </summary>
+    public Rect ComputeBox(int frameWidth, int frameHeight)
+    {
+        if (frameWidth <= 0 || frameHeight <= 0) return default;
+
+        double wf = Math.Clamp(WidthFraction, 0.02, 1.0);
+        double hf = Math.Clamp(HeightFraction, 0.02, 1.0);
+
+        double boxW = wf * frameWidth;
+        double boxH = hf * frameHeight;
+
+        var (nx, ny) = ResolveCenter(Anchor, X, Y, MarginFraction, wf, hf);
+
+        double left = Math.Clamp(nx * frameWidth - boxW / 2, 0, Math.Max(0, frameWidth - boxW));
+        double top = Math.Clamp(ny * frameHeight - boxH / 2, 0, Math.Max(0, frameHeight - boxH));
+
+        return new Rect(left, top, boxW, boxH);
+    }
 
     /// <summary>
     /// Resolves the normalized (0..1) centre of the overlay's text box for a given anchor.

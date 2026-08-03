@@ -205,30 +205,28 @@ public class TextOverlayRenderer : IDisposable
         double scaledBlurAmount = Math.Max(0.01, overlay.BlurAmount * fontScale);
 
         var hAlign = ToCanvasAlignment(overlay.TextAlignment);
-        double maxWidth = Math.Max(1.0, overlay.WidthFraction * width);
 
-        var cache = GetOrCreateOverlayCache(overlay, hAlign, scaledFontSize, maxWidth, width, height);
-        double textW = cache.TextW;
-        double textH = cache.TextH;
+        // The box is an explicit rectangle (see TextOverlaySegment.ComputeBox) rather than
+        // something sized to the measured text: the user sets it directly with the preview's
+        // resize handles, so wrapping and overflow are predictable — and because the geometry
+        // is pure arithmetic, the editor's interactive region is guaranteed to line up with
+        // what is drawn here instead of drifting apart through a second text measurement.
+        var box = overlay.ComputeBox(width, height);
+        if (box.Width <= 0 || box.Height <= 0)
+            return;
 
         double padding = overlay.PaddingScale * scaledFontSize;
-        double boxW = textW + padding * 2;
-        double boxH = textH + padding * 2;
+        // Never let padding eat the whole box when it is small relative to the font.
+        padding = Math.Min(padding, Math.Min(box.Width, box.Height) / 3.0);
 
-        var (nx, ny) = TextOverlaySegment.ResolveCenter(
-            overlay.Anchor, overlay.X, overlay.Y, overlay.MarginFraction, boxW / width, boxH / height);
+        var textRect = new Rect(
+            box.X + padding, box.Y + padding,
+            Math.Max(1.0, box.Width - padding * 2),
+            Math.Max(1.0, box.Height - padding * 2));
 
-        double left = nx * width - boxW / 2;
-        double top = ny * height - boxH / 2;
+        var cache = GetOrCreateOverlayCache(overlay, hAlign, scaledFontSize, textRect.Width, width, height);
 
-        // Clamp fully inside the frame. When the box is larger than the frame this pins
-        // it to the top-left rather than letting it hang off both edges at once.
-        left = Math.Clamp(left, 0.0, Math.Max(0.0, width - boxW));
-        top = Math.Clamp(top, 0.0, Math.Max(0.0, height - boxH));
-
-        var box = new Rect(left, top, boxW, boxH);
-        var textRect = new Rect(left + padding, top + padding, textW, textH);
-        var boxCenter = new Vector2((float)(left + boxW / 2), (float)(top + boxH / 2));
+        var boxCenter = new Vector2((float)(box.X + box.Width / 2), (float)(box.Y + box.Height / 2));
 
         DrawOverlay(
             target, overlay, box, textRect, boxCenter, cache.DrawFormat,
