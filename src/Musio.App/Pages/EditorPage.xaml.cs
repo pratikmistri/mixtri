@@ -895,6 +895,15 @@ public sealed partial class EditorPage : Page
 
             _previewRenderer = renderer;
             _compositorReady = true;
+
+            // Push the model's zoom keyframes/suppressed-clicks AND text overlays onto the
+            // freshly published renderer before the first frame draws — mirrors the same
+            // call in RebuildPreviewRendererAsync. The timeline model is already fully
+            // loaded by this point (project/ViewModel.Model set above), so this is safe.
+            // Without this, opening an existing project shows no overlays in the preview
+            // (though export still renders them, since export builds its own renderer
+            // through SegmentFrameComposer) until some other edit happens to trigger a sync.
+            SyncZoomStateToRenderer();
         }
         catch (Exception ex)
         {
@@ -1346,6 +1355,27 @@ public sealed partial class EditorPage : Page
     private bool _textRegionDragging;
     private Point _textDragStart;
     private double _textDragStartX, _textDragStartY;
+
+    // Whether the pointer has moved past TextDragThreshold since PointerPressed. A plain
+    // click (no real movement) must be a total no-op — see FinalizeTextDrag/AbortDrag.
+    private bool _textDragMoved;
+
+    // Pixel threshold before a press is treated as an actual drag rather than a click,
+    // mirroring TimelineControl's ZoomCreateDragThreshold convention.
+    private const double TextDragThreshold = 5.0;
+
+    // Per-frame positioning cache for GetActiveEditTarget (Preview.FrameLayoutChanged /
+    // ShowTextEditOverlay run every drawn frame) — reused across frames as long as the
+    // previewed slide/overlay id hasn't changed, to avoid allocating a new
+    // SlideTextEditTarget/OverlayTextEditTarget and re-running the PreviewSlide()/
+    // PreviewOverlay() LINQ lookups on every Win2D draw callback. NEVER reused for a
+    // gesture that is just starting (PointerPressed/EnterTextEdit use
+    // GetActiveEditTargetForNewGesture instead) — OverlayTextEditTarget captures its
+    // pre-gesture original text/position/anchor at construction time, so reusing a cached
+    // instance from an earlier frame could restore a stale "original" if anything (e.g. the
+    // properties pane) changed the overlay since the cache was last built.
+    private ITextEditTarget? _cachedEditTarget;
+    private string? _cachedEditTargetId;
 
     /// <summary>
     /// Canvas size the preview composes to: the scene's aspect ratio, not the raw capture size.
@@ -2513,6 +2543,55 @@ public sealed partial class EditorPage : Page
         // Selection is tracked by the control; property editing is via the model/ops.
         _selectedTextOverlayId = overlayId;
         SyncTextOverlayUI(overlayId);
+
+        // Finalize any in-flight drag/edit against whatever overlay WAS selected before
+        // switching the shared edit canvas to the new selection — FinalizeTextDrag/
+        // CommitActiveTextEditIfAny both act on the OLD _dragTarget/_editTarget reference
+        // captured when that gesture began, so this is safe to call before the active edit
+        // target below is recomputed for the new selection.
+        FinalizeTextDrag();
+        CommitActiveTextEditIfAny();
+
+        // Recompute which overlay (if any) the shared edit canvas should track RIGHT NOW,
+        // rather than waiting for the next rendered frame (UpdateOverlayEditPreview
+        // otherwise only runs from RenderFrameAtAsync) — otherwise the PREVIOUSLY selected
+        // overlay stays draggable/double-click-editable on the preview until playback or a
+        // seek happens to trigger a re-render.
+        RefreshOverlayEditPreviewForCurrentPlayhead();
+    }
+
+    /// <summary>
+    /// Resolves the video source + source-time under the current playhead the same way
+    /// <see cref="RenderFrameAtAsync"/> does, then calls <see cref="UpdateOverlayEditPreview"/>
+    /// with it — reusing (rather than duplicating) that method's decision of whether the
+    /// selected overlay is actually active there. Used by <see cref="OnTextOverlaySelected"/>
+    /// so a selection change updates the shared edit canvas immediately instead of waiting
+    /// for the next rendered frame. A segment kind other than <see cref="VideoSegment"/>
+    /// (e.g. a text slide) has no video — and therefore no overlay — underneath it.
+    /// </summary>
+    private void RefreshOverlayEditPreviewForCurrentPlayhead()
+    {
+        var position = Preview.PlayheadPosition;
+        var model = ViewModel.Model;
+
+        if (model.Segments.Count > 0)
+        {
+            var (segment, localOffset) = model.GetSegmentAtTime(position);
+            if (segment is VideoSegment videoSeg)
+            {
+                var sourceInSeg = videoSeg.SourceStart +
+                    TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
+                UpdateOverlayEditPreview(videoSeg.VideoFilePath, sourceInSeg);
+            }
+            else
+            {
+                _previewOverlayId = null;
+                ShowTextEditOverlay();
+            }
+            return;
+        }
+
+        UpdateOverlayEditPreview(PrimaryVideoPath, MapToSourceTime(position));
     }
 
     private TextOverlaySegment? SelectedTextOverlay() =>
@@ -2661,9 +2740,9 @@ public sealed partial class EditorPage : Page
         OverlayAccentPanel.Visibility = background == TextOverlayBackground.AccentBar ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void OnTextOverlayCreated(object? sender, (TimeSpan Start, TimeSpan End) e)
+    private void OnTextOverlayCreated(object? sender, (TimeSpan Start, TimeSpan End, string? SourceVideoFilePath) e)
     {
-        var operation = new AddTextOverlayOperation(e.Start, e.End - e.Start);
+        var operation = new AddTextOverlayOperation(e.Start, e.End - e.Start, sourceVideoFilePath: e.SourceVideoFilePath);
         ViewModel.UndoRedoManager.Execute(operation);
         Timeline.SelectedTextOverlayId = operation.CreatedId;
         _selectedTextOverlayId = operation.CreatedId;
@@ -6547,8 +6626,50 @@ public sealed partial class EditorPage : Page
     /// wins — the render pipeline never sets both _previewSlideId and _previewOverlayId at
     /// once (see RenderFrameAtAsync/RenderTextSlidePreviewAsync/UpdateOverlayEditPreview),
     /// but the priority keeps the two concerns cleanly separated regardless.
+    ///
+    /// Called every drawn frame (Preview.FrameLayoutChanged / ShowTextEditOverlay), so this
+    /// reuses the cached target instance (see _cachedEditTarget) instead of re-running the
+    /// PreviewSlide()/PreviewOverlay() LINQ lookups and allocating a fresh adapter each
+    /// time — it trusts _previewSlideId/_previewOverlayId directly (both are recomputed
+    /// every render, see RenderFrameAtAsync/UpdateOverlayEditPreview) and only rebuilds the
+    /// cached instance when the id (or slide-vs-overlay kind) actually changes. A gesture
+    /// that is just starting must NOT use this cached instance — see
+    /// GetActiveEditTargetForNewGesture.
     /// </summary>
     private ITextEditTarget? GetActiveEditTarget()
+    {
+        if (_previewSlideId is { } slideId)
+        {
+            if (_cachedEditTarget is not SlideTextEditTarget || _cachedEditTargetId != slideId)
+                _cachedEditTarget = new SlideTextEditTarget(this, slideId);
+            _cachedEditTargetId = slideId;
+            return _cachedEditTarget;
+        }
+
+        if (_previewOverlayId is { } overlayId)
+        {
+            if (_cachedEditTarget is not OverlayTextEditTarget || _cachedEditTargetId != overlayId)
+                _cachedEditTarget = new OverlayTextEditTarget(this, overlayId);
+            _cachedEditTargetId = overlayId;
+            return _cachedEditTarget;
+        }
+
+        _cachedEditTarget = null;
+        _cachedEditTargetId = null;
+        return null;
+    }
+
+    /// <summary>
+    /// Constructs a brand-new edit-target adapter for whatever <see cref="GetActiveEditTarget"/>
+    /// currently resolves to, WITHOUT touching the per-frame cache above. Used only at the
+    /// moment a gesture begins (<see cref="TextEditRegion_PointerPressed"/>/
+    /// <see cref="EnterTextEdit"/>) — <see cref="OverlayTextEditTarget"/> captures its
+    /// pre-gesture original text/position/anchor at construction time, so reusing the
+    /// per-frame cached instance here could restore a stale "original" (e.g. if the
+    /// properties pane changed the overlay's position/anchor since the cache was last
+    /// (re)built) instead of what is actually in effect right now.
+    /// </summary>
+    private ITextEditTarget? GetActiveEditTargetForNewGesture()
     {
         if (PreviewSlide() is { } slide) return new SlideTextEditTarget(this, slide.Id);
         if (PreviewOverlay() is { } overlay) return new OverlayTextEditTarget(this, overlay.Id);
@@ -6695,12 +6816,22 @@ public sealed partial class EditorPage : Page
     private void TextEditRegion_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
         if (_editingTextId is not null) return; // editing — let the textbox handle it
-        var target = GetActiveEditTarget();
+        // A gesture is starting: always build a FRESH target rather than reusing the
+        // per-frame cache — see GetActiveEditTargetForNewGesture's remarks.
+        var target = GetActiveEditTargetForNewGesture();
         if (target is null) return;
 
         _textRegionDragging = true;
+        _textDragMoved = false;
         _dragTarget = target; // pins the target (and, for overlays, its captured pre-drag
                                // original) for the whole gesture — see OverlayTextEditTarget
+
+        // For an anchored overlay, snap it to Custom at its CURRENT on-screen centre
+        // without visually moving it, so a live drag actually follows the pointer and a
+        // plain click's release path never flips the anchor using stale raw X/Y — see
+        // OverlayTextEditTarget.PrepareForDrag. A no-op for slides (they have no anchor).
+        target.PrepareForDrag();
+
         _textDragStart = e.GetCurrentPoint(TextEditCanvas).Position;
         (_textDragStartX, _textDragStartY) = target.Center;
         TextEditRegion.CapturePointer(e.Pointer);
@@ -6714,6 +6845,17 @@ public sealed partial class EditorPage : Page
         if (layout.Width <= 0) return;
 
         var pos = e.GetCurrentPoint(TextEditCanvas).Position;
+
+        // Only a real drag (past TextDragThreshold) is ever committed/undoable — see
+        // FinalizeTextDrag. Sticky once set so a jittery pointer that crosses the
+        // threshold and comes back still counts as a drag, not a click.
+        if (!_textDragMoved &&
+            (Math.Abs(pos.X - _textDragStart.X) >= TextDragThreshold ||
+             Math.Abs(pos.Y - _textDragStart.Y) >= TextDragThreshold))
+        {
+            _textDragMoved = true;
+        }
+
         double dx = (pos.X - _textDragStart.X) / layout.Width;
         double dy = (pos.Y - _textDragStart.Y) / layout.Height;
 
@@ -6734,17 +6876,57 @@ public sealed partial class EditorPage : Page
     private void TextEditRegion_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
         if (!_textRegionDragging) return;
-        _textRegionDragging = false;
         TextEditRegion.ReleasePointerCapture(e.Pointer);
+        FinalizeTextDrag();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Pointer capture can be lost without a matching PointerReleased — another window
+    /// steals focus, a touch/pen gesture is cancelled by the system, or the preview
+    /// re-layouts under the pointer. Without this handler the live model mutations made
+    /// during PointerMoved would stay applied with no undo entry and a stale properties
+    /// pane. Routes through the same idempotent <see cref="FinalizeTextDrag"/> as a normal
+    /// release.
+    /// </summary>
+    private void TextEditRegion_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        => FinalizeTextDrag();
+
+    /// <summary>Touch/pen gestures can be cancelled outright (distinct from capture loss);
+    /// finalize the same way so an interrupted drag is never left uncommitted.</summary>
+    private void TextEditRegion_PointerCanceled(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        => FinalizeTextDrag();
+
+    /// <summary>
+    /// Ends the in-progress text-region drag exactly once, whether it finished normally
+    /// (PointerReleased) or was interrupted (PointerCaptureLost/PointerCanceled). Guarded by
+    /// <see cref="_textRegionDragging"/>, so it is safe to call from more than one of those
+    /// event handlers for the same gesture — only the first call does anything. A real
+    /// drag (pointer moved past <see cref="TextDragThreshold"/>) is committed as one undo
+    /// step; anything else — a plain click, or an interrupted gesture that never moved — is
+    /// aborted, restoring the model to its exact pre-gesture state, so only a genuine move
+    /// ever becomes an undo entry or a persisted change.
+    /// </summary>
+    private void FinalizeTextDrag()
+    {
+        if (!_textRegionDragging) return;
+        _textRegionDragging = false;
         ProtectedCursor = null;
 
         if (_dragTarget is { } target)
         {
-            var (finalX, finalY) = target.Center;
-            target.CommitPosition(finalX, finalY);
+            if (_textDragMoved)
+            {
+                var (finalX, finalY) = target.Center;
+                target.CommitPosition(finalX, finalY);
+            }
+            else
+            {
+                target.AbortDrag();
+            }
         }
         _dragTarget = null;
-        e.Handled = true;
+        _textDragMoved = false;
     }
 
     private void TextEditRegion_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
@@ -6755,17 +6937,20 @@ public sealed partial class EditorPage : Page
 
     private void EnterTextEdit()
     {
-        var target = GetActiveEditTarget();
-        if (target is null) return;
-
-        // The taps that opened the editor may have started a region drag (and
-        // captured the pointer) without a matching PointerReleased, because the
-        // region gets collapsed below. Clear that state so the box doesn't follow
-        // the mouse after editing finishes.
-        _textRegionDragging = false;
-        _dragTarget = null;
+        // The taps that opened the editor may have started a region drag (and captured
+        // the pointer) without a matching PointerReleased, because the region gets
+        // collapsed below. Finalize that gesture first — via the same idempotent path a
+        // normal release or an interrupted drag uses — so any live PrepareForDrag mutation
+        // (e.g. an anchored overlay flipped to Custom by the opening press) is committed or
+        // reverted instead of silently left in place, then release any capture outright.
+        FinalizeTextDrag();
         TextEditRegion.ReleasePointerCaptures();
         ProtectedCursor = null;
+
+        // A gesture is starting: always build a FRESH target rather than reusing the
+        // per-frame cache — see GetActiveEditTargetForNewGesture's remarks.
+        var target = GetActiveEditTargetForNewGesture();
+        if (target is null) return;
 
         _editingTextId = target.Id;
         _editTarget = target; // pins the target (and, for overlays, its captured
@@ -6945,6 +7130,15 @@ public sealed partial class EditorPage : Page
         /// been read into the edit box, before any keystroke).</summary>
         void BeginTextEdit();
 
+        /// <summary>Called once when a drag gesture begins, before <see cref="Center"/> is
+        /// first read as the drag origin. A no-op for targets whose rendered position always
+        /// matches <see cref="Center"/> (e.g. slides); for an anchored text overlay this
+        /// snaps it to <see cref="Musio.Core.Timeline.TextOverlayAnchor.Custom"/> at its
+        /// current on-screen centre WITHOUT visually moving it, so the subsequent live drag
+        /// actually follows the pointer instead of being silently overridden by anchor-based
+        /// rendering — see <see cref="OverlayTextEditTarget.PrepareForDrag"/>.</summary>
+        void PrepareForDrag();
+
         /// <summary>Called after every keystroke, once <see cref="Text"/> has already been
         /// live-mutated, so implementations can nudge whatever preview needs it.</summary>
         void OnLiveTextChanged();
@@ -6958,8 +7152,14 @@ public sealed partial class EditorPage : Page
         void CommitText(string newText);
 
         /// <summary>Persists <paramref name="x"/>/<paramref name="y"/> as the final value of
-        /// a finished drag.</summary>
+        /// a finished drag that actually moved past the drag threshold.</summary>
         void CommitPosition(double x, double y);
+
+        /// <summary>Ends a drag gesture that never moved past the drag threshold (e.g. a
+        /// plain click) by restoring the model to its exact pre-gesture state — undoing
+        /// whatever <see cref="PrepareForDrag"/>/<see cref="Center"/>'s setter mutated live,
+        /// with no undo entry recorded. A no-op for targets that had nothing to restore.</summary>
+        void AbortDrag();
     }
 
     /// <summary>
@@ -7007,6 +7207,10 @@ public sealed partial class EditorPage : Page
 
         public void BeginTextEdit() => _page.RefreshSlidePreview();
 
+        // Slides have no anchor concept — Center is always authoritative, so there is
+        // nothing to snap/restore around a drag.
+        public void PrepareForDrag() { }
+
         // Slides render text directly onto the preview bitmap themselves (see
         // RenderTextSlidePreviewAsync's drawText suppression while _editingTextId is set),
         // so nothing further is needed per keystroke — matches pre-refactor behaviour.
@@ -7027,6 +7231,12 @@ public sealed partial class EditorPage : Page
             // PointerReleased handler, which did nothing beyond cursor/capture cleanup.
             if (Segment is { } s) { s.TextX = x; s.TextY = y; }
         }
+
+        // Slides mutate TextX/TextY directly and undoably-never — a sub-threshold move is
+        // already the final, persisted value (same as the pre-refactor PointerReleased
+        // handler, which always applied whatever the last live tick left behind). Nothing
+        // to restore here, matching pre-existing behaviour exactly.
+        public void AbortDrag() { }
     }
 
     /// <summary>
@@ -7042,13 +7252,16 @@ public sealed partial class EditorPage : Page
         public string Id { get; }
 
         // Captured once at construction — i.e. when a gesture begins, since
-        // GetActiveEditTarget() is called fresh at TextEditRegion_PointerPressed and
-        // EnterTextEdit, and the resulting instance is then pinned in _dragTarget/_editTarget
-        // for the rest of that gesture — so Commit* can restore the model to its pre-gesture
-        // state right before executing the single undoable operation, regardless of how many
-        // live in-between mutations Center/Text made.
+        // GetActiveEditTargetForNewGesture() is called fresh at TextEditRegion_PointerPressed
+        // and EnterTextEdit, and the resulting instance is then pinned in
+        // _dragTarget/_editTarget for the rest of that gesture — so Commit*/AbortDrag can
+        // restore the model to its exact pre-gesture state (including the anchor, which
+        // PrepareForDrag may live-flip to Custom) right before executing the single
+        // undoable operation, regardless of how many live in-between mutations
+        // Center/Text/PrepareForDrag made.
         private readonly (double X, double Y) _originalCenter;
         private readonly string _originalText;
+        private readonly TextOverlayAnchor _originalAnchor;
 
         public OverlayTextEditTarget(EditorPage page, string id)
         {
@@ -7057,6 +7270,7 @@ public sealed partial class EditorPage : Page
             var seg = Segment;
             _originalCenter = seg is { } s ? (s.X, s.Y) : (0.5, 0.85);
             _originalText = seg?.Text ?? string.Empty;
+            _originalAnchor = seg?.Anchor ?? TextOverlayAnchor.BottomCenter;
         }
 
         private TextOverlaySegment? Segment => _page.ViewModel.Model.TextOverlays.FirstOrDefault(o => o.Id == Id);
@@ -7089,6 +7303,33 @@ public sealed partial class EditorPage : Page
         // while WYSIWYG editing). Nothing to do here.
         public void BeginTextEdit() { }
 
+        public void PrepareForDrag()
+        {
+            if (Segment is not { } o) return;
+            if (o.Anchor == TextOverlayAnchor.Custom) return; // X/Y already authoritative
+
+            // An anchored overlay renders at TextOverlaySegment.ResolveCenter(...), not its
+            // raw X/Y, so a drag must first snap it to Custom at its CURRENT on-screen
+            // centre (computed exactly like the renderer/hit-region do — see
+            // ComputeOverlayTextRect) before it can move at all. Skipping this would mean
+            // (a) a plain click's release path flips Anchor to Custom using the stale raw
+            // X/Y, visibly jumping the overlay, and (b) every drag tick's Center-setter
+            // mutation is silently overridden by ResolveCenter re-deriving the centre from
+            // the (still non-Custom) anchor instead of the live X/Y. This mutation is live/
+            // non-undoable, exactly like every other live-preview mutation in this class —
+            // CommitPosition/AbortDrag below decide whether it (and any further movement)
+            // becomes permanent or is reverted.
+            var rect = ComputeOverlayTextRect(o, _page._previewFrameW, _page._previewFrameH);
+            if (rect.Width <= 0 || rect.Height <= 0) return;
+
+            double cx = (rect.X + rect.Width / 2.0) / _page._previewFrameW;
+            double cy = (rect.Y + rect.Height / 2.0) / _page._previewFrameH;
+
+            o.Anchor = TextOverlayAnchor.Custom;
+            o.X = Math.Clamp(cx, 0.0, 1.0);
+            o.Y = Math.Clamp(cy, 0.0, 1.0);
+        }
+
         public void OnLiveTextChanged() => _page.ScheduleOverlayPreviewRefresh();
         public void OnLivePositionChanged() => _page.RefreshOverlayPreview();
 
@@ -7115,11 +7356,14 @@ public sealed partial class EditorPage : Page
             if (Segment is not { } o) return;
 
             // Same restore-then-execute trick as CommitText, for the drag case: put the
-            // model back to where the drag started before Execute() takes its "before"
-            // snapshot, giving one clean undo entry for the whole drag instead of one per
-            // PointerMoved tick. A free drag is no longer edge-anchored, so this also flips
-            // the overlay to Custom placement (mirrors OverlayAnchor_Checked's own comment
-            // about Custom being the "the user positioned this by hand" state).
+            // model back to exactly where it was before the gesture began — including the
+            // anchor, which PrepareForDrag may have live-flipped to Custom — before
+            // Execute() takes its "before" snapshot, giving one clean undo entry for the
+            // whole drag instead of one per PointerMoved tick / the PrepareForDrag
+            // mutation. A real drag is no longer edge-anchored, so this also flips the
+            // overlay to Custom placement (mirrors OverlayAnchor_Checked's own comment
+            // about Custom being "the user positioned this by hand").
+            o.Anchor = _originalAnchor;
             o.X = _originalCenter.X;
             o.Y = _originalCenter.Y;
             _page.ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
@@ -7128,5 +7372,20 @@ public sealed partial class EditorPage : Page
             _page.SyncTextOverlayUI(Id);
             _page.RefreshOverlayPreview();
         }
+
+        public void AbortDrag()
+        {
+            if (Segment is not { } o) return;
+
+            // No real movement happened (e.g. a plain click) — restore the exact
+            // pre-gesture state, undoing whatever PrepareForDrag/Center's setter mutated
+            // live, with NO undo entry. This is what keeps a plain click on an anchored
+            // overlay from silently flipping it to Custom.
+            o.Anchor = _originalAnchor;
+            o.X = _originalCenter.X;
+            o.Y = _originalCenter.Y;
+            _page.RefreshOverlayPreview();
+        }
     }
 }
+

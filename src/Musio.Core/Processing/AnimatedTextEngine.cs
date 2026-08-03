@@ -18,9 +18,10 @@ namespace Musio.Core.Processing;
 /// progress (0..1) over a constant wall-clock duration, with a static hold in the
 /// middle for slides/overlays long enough to have one.
 /// </summary>
-public class AnimatedTextEngine
+public class AnimatedTextEngine : IDisposable
 {
     private readonly CanvasDevice _device;
+    private bool _disposed;
 
     // Entrance and exit run for a CONSTANT wall-clock duration (in seconds), so the
     // motion always feels the same regardless of how long the slide is held or how
@@ -34,6 +35,19 @@ public class AnimatedTextEngine
     private const double TypewriterEraseCharsPerSecond = 38.0;
     private const double WaveHz = 0.8;            // vertical bob cycles per second
     private const double WaveFadeSeconds = 0.18;  // quick fade at each end
+
+    // Reusable scratch target for DrawBlurredText (the ZoomBlurIn whole-text path).
+    // A DrawAnimatedText call sequence for one overlay/slide frame can invoke this
+    // several times in a row (e.g. TextOverlayRenderer's OutlineShadow background draws
+    // a shadow pass, up to 8 outline passes, and a fill pass — all through this engine),
+    // and each call used to allocate a brand-new full-frame CanvasRenderTarget. Caching
+    // one target here (allocate-then-swap, keyed on device+size) turns that into a single
+    // allocation that is reused both within a frame and across frames, which is the fix
+    // for the render-target churn described in the "OutlineShadow x blurred animations"
+    // review finding. Every call fully overwrites the target (Clear then Draw) before
+    // reading it back, so reuse across passes/frames is safe.
+    private CanvasRenderTarget? _blurScratch;
+    private (int W, int H) _blurScratchKey;
 
     public AnimatedTextEngine(CanvasDevice? device = null)
     {
@@ -109,6 +123,7 @@ public class AnimatedTextEngine
         Color baseColor, TextSlideAnimation anim, double progress,
         int canvasWidth, int canvasHeight, float fontSize, double durationSeconds)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (string.IsNullOrEmpty(text)) return;
 
         double elapsedSeconds = Math.Clamp(progress, 0, 1) * Math.Max(0.001, durationSeconds);
@@ -373,7 +388,11 @@ public class AnimatedTextEngine
         Color color, float blurAmount, float scale, float cx, float cy,
         int width, int height)
     {
-        using var rt = new CanvasRenderTarget(_device, width, height, 96);
+        // Reuse the cached scratch target instead of allocating a fresh full-frame
+        // CanvasRenderTarget on every call — see the field doc comment on
+        // _blurScratch for why this matters (OutlineShadow can invoke this engine up
+        // to 10 times per frame for a ZoomBlurIn-animated overlay/slide).
+        var rt = EnsureBlurScratch(width, height);
         using (var rds = rt.CreateDrawingSession())
         {
             rds.Clear(Color.FromArgb(0, 0, 0, 0));
@@ -391,6 +410,43 @@ public class AnimatedTextEngine
         ds.Transform = Matrix3x2.CreateScale(scale, new Vector2(cx, cy));
         ds.DrawImage(blur);
         ds.Transform = saved;
+    }
+
+    /// <summary>
+    /// Returns the cached blur-scratch target, (re)allocating it via allocate-then-swap
+    /// only when the size or device has changed (or it doesn't exist yet) — the normal
+    /// case for a stable preview/export resolution is zero allocations after the first
+    /// call. A failed allocation never leaves <see cref="_blurScratch"/> pointing at a
+    /// disposed target, matching the pattern already used by
+    /// <c>TextOverlayRenderer.EnsureBlurScratch</c>.
+    /// </summary>
+    private CanvasRenderTarget EnsureBlurScratch(int width, int height)
+    {
+        if (_blurScratch is null || _blurScratch.Device != _device || _blurScratchKey != (width, height))
+        {
+            var next = new CanvasRenderTarget(_device, width, height, 96);
+            _blurScratch?.Dispose();
+            _blurScratch = next;
+            _blurScratchKey = (width, height);
+        }
+        return _blurScratch;
+    }
+
+    /// <summary>
+    /// Disposes the cached blur-scratch target. <see cref="AnimatedTextEngine"/> is a
+    /// shared helper used by both <see cref="TextOverlayRenderer"/> (which now disposes
+    /// its instance) and <c>TextSlideRenderer</c> (which currently does not — see that
+    /// type's own review follow-up). Disposal here is intentionally idempotent and the
+    /// only disposable state is this one bounded, keyed cache entry, so even an owner
+    /// that never calls <see cref="Dispose"/> only leaks a single render target sized to
+    /// its last-used resolution rather than growing unboundedly.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _blurScratch?.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     private void DrawCaret(

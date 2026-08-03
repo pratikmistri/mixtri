@@ -2973,8 +2973,16 @@ public sealed partial class TimelineControl : UserControl
     }
 
     // ─────────────────────────── Text Overlay Track ───────────────────────────
-    // Text overlays are positioned in SOURCE time (like zoom/camera), mapped to X via
-    // SourceTimeToX so they stay aligned with the recording after reorder/trim.
+    // Unlike the camera track — whose CameraSegment ranges are always primary source
+    // time (see XToPrimarySourceTime) — a TextOverlaySegment explicitly supports
+    // per-recording ownership via SourceVideoFilePath (null = primary, otherwise an
+    // appended/imported recording), exactly like ZoomKeyframe. Export
+    // (SegmentFrameComposer.SelectTextOverlays) and preview (TimelineModel
+    // .GetActiveTextOverlays) already honour that per-recording scoping, so this track
+    // must too: every draw/hit-test/move/resize/create below routes through the owning
+    // VideoSegment via OwningSegmentForTextOverlay/TextOverlayTimeToX, mirroring the
+    // zoom track's OwningSegmentForKeyframe/ZoomKeyframeTimeToX rather than the camera
+    // track's SourceTimeToX/XToPrimarySourceTime.
 
     private const float TextOverlayVerticalPadding = 6f;
 
@@ -2986,6 +2994,11 @@ public sealed partial class TimelineControl : UserControl
     private bool _textOverlayCreateActive;
     private TimeSpan _textOverlayCreateStart;
     private TimeSpan _textOverlayCreateEnd;
+
+    /// <summary>Source file a text overlay is being drag-to-created against, set once at
+    /// press-time by <see cref="XToSegmentVideoTime"/> (null = primary). Mirrors
+    /// <see cref="_zoomCreateFile"/>.</summary>
+    private string? _textOverlayCreateFile;
 
     /// <summary>Id of the selected text overlay, or null.</summary>
     public string? SelectedTextOverlayId
@@ -3005,10 +3018,20 @@ public sealed partial class TimelineControl : UserControl
     }
 
     public event EventHandler<string?>? TextOverlaySelected;
-    public event EventHandler<(TimeSpan Start, TimeSpan End)>? TextOverlayCreated;
+    /// <summary>
+    /// Raised when a new overlay is created, reporting the source file it was created
+    /// against (null = primary), so it's tagged against the correct recording just like
+    /// <see cref="ZoomSegmentCreated"/>.
+    /// </summary>
+    public event EventHandler<(TimeSpan Start, TimeSpan End, string? SourceVideoFilePath)>? TextOverlayCreated;
     public event EventHandler<(string Id, TimeSpan NewStart)>? TextOverlayMoved;
     public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? TextOverlayResized;
     public event EventHandler<string>? TextOverlayRemoveRequested;
+
+    /// <summary>Source file of the currently selected text overlay (null = primary).
+    /// Mirrors <see cref="SelectedZoomKeyframeFile"/>.</summary>
+    private string? SelectedTextOverlaySourceFile =>
+        Model?.TextOverlays.FirstOrDefault(o => o.Id == _selectedTextOverlayId)?.SourceVideoFilePath;
 
     private void TextTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
@@ -3036,6 +3059,7 @@ public sealed partial class TimelineControl : UserControl
         {
             float x1 = (float)GetTextOverlayStartX(seg);
             float x2 = (float)GetTextOverlayEndX(seg);
+            if (float.IsNaN(x1) || float.IsNaN(x2)) continue; // overlay's recording isn't on the timeline
             if (x2 < 0 || x1 > w) continue;
 
             float segW = Math.Max(2, x2 - x1);
@@ -3078,8 +3102,8 @@ public sealed partial class TimelineControl : UserControl
         // Create preview
         if (_textOverlayCreateActive && _dragMode == DragMode.TextOverlayCreate)
         {
-            float cx1 = (float)SourceTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd);
-            float cx2 = (float)SourceTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart);
+            float cx1 = (float)TextOverlayCreateTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd);
+            float cx2 = (float)TextOverlayCreateTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart);
             float cw = Math.Max(2, cx2 - cx1);
             float cy = TextOverlayVerticalPadding;
             float ch = h - TextOverlayVerticalPadding * 2;
@@ -3089,16 +3113,77 @@ public sealed partial class TimelineControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Finds the video segment that owns a text overlay: the segment matching the
+    /// overlay's source file whose source range contains its Start (falling back to the
+    /// first file-matching segment). Mirrors <see cref="OwningSegmentForKeyframe"/>
+    /// exactly, using Start as the anchor since a <see cref="TextOverlaySegment"/> (unlike
+    /// a <see cref="ZoomKeyframe"/>) has no single Timestamp to anchor on.
+    /// </summary>
+    private VideoSegment? OwningSegmentForTextOverlay(TextOverlaySegment overlay)
+    {
+        var model = Model;
+        if (model is null) return null;
+
+        VideoSegment? firstMatch = null;
+        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        {
+            bool match = overlay.SourceVideoFilePath is null
+                ? (model.PrimaryVideoFilePath is null ||
+                   string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase))
+                : string.Equals(seg.VideoFilePath, overlay.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+            if (!match) continue;
+
+            firstMatch ??= seg;
+            var local = overlay.Start - seg.SourceStart;
+            if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
+                return seg;
+        }
+        return firstMatch;
+    }
+
+    /// <summary>
+    /// Maps a text overlay's source time to an output X by routing through the video
+    /// segment that owns it (primary or appended), mirroring
+    /// <see cref="ZoomKeyframeTimeToX"/>. Both edges of an overlay map through the same
+    /// owning segment so the block renders at its true width. Returns NaN when no
+    /// segment owns the overlay (its recording isn't on the timeline — the block should
+    /// not be drawn); falls back to the legacy whole-timeline mapping when the timeline
+    /// has no segments.
+    /// </summary>
+    private double TextOverlayTimeToX(TextOverlaySegment overlay, TimeSpan sourceTime)
+    {
+        var model = Model;
+        if (model is null) return double.NaN;
+        if (model.Segments.Count == 0) return TimeToX(sourceTime);
+
+        var seg = OwningSegmentForTextOverlay(overlay);
+        if (seg is null) return double.NaN;
+
+        var local = sourceTime - seg.SourceStart;
+        var outLocal = seg.SpeedFactor != 0
+            ? TimeSpan.FromTicks((long)(local.Ticks / seg.SpeedFactor))
+            : local;
+        return TimeToX(seg.Start + outLocal);
+    }
+
+    /// <summary>Maps a create-time (in <see cref="_textOverlayCreateFile"/>'s source
+    /// space) to X, mirroring <see cref="ZoomCreateTimeToX"/>.</summary>
+    private double TextOverlayCreateTimeToX(TimeSpan sourceTime)
+        => TextOverlayTimeToX(
+            new TextOverlaySegment { SourceVideoFilePath = _textOverlayCreateFile, Start = _textOverlayCreateStart },
+            sourceTime);
+
     private double GetTextOverlayStartX(TextOverlaySegment seg)
     {
         if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
         {
             if (_dragMode == DragMode.TextOverlayBody)
-                return SourceTimeToX(_textOverlayDragOriginalStart) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+                return TextOverlayTimeToX(seg, _textOverlayDragOriginalStart) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
             if (_dragMode == DragMode.TextOverlayLeftEdge)
                 return _textOverlayDragCurrentX;
         }
-        return SourceTimeToX(seg.Start);
+        return TextOverlayTimeToX(seg, seg.Start);
     }
 
     private double GetTextOverlayEndX(TextOverlaySegment seg)
@@ -3106,11 +3191,11 @@ public sealed partial class TimelineControl : UserControl
         if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
         {
             if (_dragMode == DragMode.TextOverlayBody)
-                return SourceTimeToX(_textOverlayDragOriginalEnd) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+                return TextOverlayTimeToX(seg, _textOverlayDragOriginalEnd) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
             if (_dragMode == DragMode.TextOverlayRightEdge)
                 return _textOverlayDragCurrentX;
         }
-        return SourceTimeToX(seg.End);
+        return TextOverlayTimeToX(seg, seg.End);
     }
 
     private (string? Id, SegmentHitTarget Target) HitTestTextOverlay(double posX, double posY)
@@ -3126,8 +3211,9 @@ public sealed partial class TimelineControl : UserControl
         for (int i = model.TextOverlays.Count - 1; i >= 0; i--)
         {
             var seg = model.TextOverlays[i];
-            float x1 = (float)SourceTimeToX(seg.Start);
-            float x2 = (float)SourceTimeToX(seg.End);
+            float x1 = (float)TextOverlayTimeToX(seg, seg.Start);
+            float x2 = (float)TextOverlayTimeToX(seg, seg.End);
+            if (float.IsNaN(x1) || float.IsNaN(x2)) continue; // overlay's recording isn't on the timeline
             if (posX < x1 || posX > x2) continue;
 
             if (posX - x1 <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.LeftEdge);
@@ -3175,11 +3261,15 @@ public sealed partial class TimelineControl : UserControl
             }
             PlayheadPosition = XToTime(pos.X);
 
-            var start = XToPrimarySourceTime(pos.X);
+            // Capture the source file under the cursor (like _zoomCreateFile) so an
+            // overlay created over an appended clip belongs to that clip, not the
+            // primary recording.
+            var start = XToSegmentVideoTime(pos.X, out _textOverlayCreateFile);
             if (start is null)
             {
-                // No primary video on the timeline — nothing to attach a text overlay
-                // to. Reject the gesture, leaving no transient drag state.
+                // No video segment anywhere to attach a text overlay to. Reject the
+                // gesture, leaving no transient drag state.
+                _textOverlayCreateFile = null;
                 _dragMode = DragMode.None;
                 return;
             }
@@ -3214,13 +3304,20 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.TextOverlayCreate:
                 if (Math.Abs(pos.X - _textOverlayDragStartX) >= ZoomCreateDragThreshold)
                 {
-                    var end = XToPrimarySourceTime(pos.X);
+                    // Stay anchored to _textOverlayCreateFile's source domain (set once
+                    // at press-time), same rationale as the zoom track's
+                    // ZoomSegmentCreate case — re-resolving whatever segment is under
+                    // the pointer now would mix a different recording's timestamp into
+                    // this (still file-tagged) overlay.
+                    var end = XToKeyframeFileTime(pos.X, _textOverlayCreateFile);
                     if (end is not null)
                     {
                         _textOverlayCreateActive = true;
                         _textOverlayCreateEnd = end.Value;
                         InvalidateAll();
                     }
+                    // else: pointer is outside every segment for _textOverlayCreateFile
+                    // with none to clamp to — keep the previous _textOverlayCreateEnd.
                 }
                 else
                 {
@@ -3250,28 +3347,35 @@ public sealed partial class TimelineControl : UserControl
                 double deltaX = _textOverlayDragCurrentX - _textOverlayDragStartX;
                 if (Math.Abs(deltaX) > 1)
                 {
-                    var startTime = XToPrimarySourceTime(_textOverlayDragStartX);
-                    var movedTime = XToPrimarySourceTime(_textOverlayDragStartX + deltaX);
+                    // Convert the dragged X back to a source time in the OWNING
+                    // overlay's own recording's domain, not the primary's — mirrors the
+                    // zoom track's ZoomSegmentBody case exactly.
+                    var file = SelectedTextOverlaySourceFile;
+                    var startTime = XToKeyframeFileTime(_textOverlayDragStartX, file);
+                    var movedTime = XToKeyframeFileTime(_textOverlayDragStartX + deltaX, file);
                     if (startTime is not null && movedTime is not null)
                     {
                         var newStart = _textOverlayDragOriginalStart + (movedTime.Value - startTime.Value);
                         if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
                         TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
                     }
-                    // else: unmappable — reject the move, leave the segment in place.
+                    // else: unmappable in this overlay's recording's domain (e.g.
+                    // dragged over a different clip or a text slide) — reject the move,
+                    // leaving the overlay in place, rather than silently writing a time
+                    // from the wrong recording's domain into it.
                 }
                 break;
             }
             case DragMode.TextOverlayLeftEdge when _selectedTextOverlayId is not null:
             {
-                var newEdge = XToPrimarySourceTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth));
+                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
                 if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalStart)
                     TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, true, newEdge.Value));
                 break;
             }
             case DragMode.TextOverlayRightEdge when _selectedTextOverlayId is not null:
             {
-                var newEdge = XToPrimarySourceTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth));
+                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
                 if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalEnd)
                     TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, false, newEdge.Value));
                 break;
@@ -3281,7 +3385,7 @@ public sealed partial class TimelineControl : UserControl
                 var start = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd;
                 var end = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart;
                 if ((end - start) >= TrimTextOverlayOperation.MinDuration)
-                    TextOverlayCreated?.Invoke(this, (start, end));
+                    TextOverlayCreated?.Invoke(this, (start, end, _textOverlayCreateFile));
                 _textOverlayCreateActive = false;
                 break;
             }
@@ -3323,7 +3427,10 @@ public sealed partial class TimelineControl : UserControl
         var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
         if (hitId is not null) return;
 
-        var start = XToPrimarySourceTime(pos.X);
+        // Capture the source file under the cursor (like the drag-to-create gesture)
+        // so a double-click over an appended clip creates an overlay owned by that
+        // clip, not the primary recording.
+        var start = XToSegmentVideoTime(pos.X, out var sourceFile);
         if (start is null) return;
 
         var clampedStart = start.Value < TimeSpan.Zero ? TimeSpan.Zero : start.Value;
@@ -3331,7 +3438,7 @@ public sealed partial class TimelineControl : UserControl
         if (duration < TrimTextOverlayOperation.MinDuration)
             duration = TrimTextOverlayOperation.MinDuration;
 
-        TextOverlayCreated?.Invoke(this, (clampedStart, clampedStart + duration));
+        TextOverlayCreated?.Invoke(this, (clampedStart, clampedStart + duration, sourceFile));
     }
 
     private void Grid_PointerWheelChanged(object sender, PointerRoutedEventArgs e)

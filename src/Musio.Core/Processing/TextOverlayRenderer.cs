@@ -49,6 +49,44 @@ public class TextOverlayRenderer : IDisposable
     private CanvasRenderTarget? _blurScratch;
     private (int W, int H) _blurScratchKey;
 
+    // Cached Blur effect graph (BorderEffect -> GaussianBlurEffect), rebuilt only when the
+    // scratch target it reads from has been reallocated (a resize — see EnsureBlurScratch).
+    // The common frame-to-frame case (same size, only BlurAmount potentially changing) just
+    // updates the cheap BlurAmount property on the cached GaussianBlurEffect instead of
+    // rebuilding the graph. Also fixes a real leak: the previous code constructed a fresh
+    // BorderEffect/GaussianBlurEffect pair inline as a `using` local's initializer — if
+    // CopyFrameIntoBlurScratch (GPU work) or a setter inside the initializer threw, the
+    // partially-built effect was never captured by the `using` and never disposed. Because
+    // these are now renderer-owned fields built in a separate step (not inline in a `using`
+    // initializer) and disposed unconditionally in Dispose(), there is no such exception path.
+    private BorderEffect? _blurBorderEffect;
+    private GaussianBlurEffect? _blurGaussianEffect;
+
+    /// <summary>
+    /// Per-overlay cache of the Win2D text-measurement/draw resources that <see cref="Render"/>
+    /// would otherwise allocate fresh on every single frame for every active overlay (this
+    /// method runs once per preview/export frame). Keyed by <see cref="TimelineSegment.Id"/>
+    /// and invalidated (allocate-then-swap, disposing the stale entry) whenever any property
+    /// that affects measurement or drawing actually changes, so editing an overlay's text or
+    /// font mid-session is still picked up immediately.
+    /// </summary>
+    private sealed class OverlayCache : IDisposable
+    {
+        public OverlayCacheKey Key;
+        public required CanvasTextFormat DrawFormat;
+        public double TextW;
+        public double TextH;
+
+        public void Dispose() => DrawFormat.Dispose();
+    }
+
+    /// <summary>Everything that affects the measured size and the draw format for an overlay.</summary>
+    private readonly record struct OverlayCacheKey(
+        string FontFamily, float FontSize, bool IsBold, bool IsItalic,
+        SlideTextAlignment TextAlignment, string Text, double MaxWidth, int Width, int Height, CanvasDevice Device);
+
+    private readonly Dictionary<string, OverlayCache> _overlayCache = new();
+
     public TextOverlayRenderer(CanvasDevice? device = null)
     {
         _device = device ?? CanvasDevice.GetSharedDevice();
@@ -87,10 +125,47 @@ public class TextOverlayRenderer : IDisposable
         if (!anyActive)
             return;
 
+        // Only touch the cache-eviction path once there is actual overlay work to do this
+        // frame, so a timeline with overlays that are all currently inactive (or none at
+        // all) still returns above with zero allocations, matching Render's documented
+        // fast path.
+        EvictStaleCacheEntries(overlays);
+
         foreach (var overlay in overlays)
         {
             if (IsActive(overlay, sourceTime))
                 RenderOverlay(target, overlay, sourceTime, width, height);
+        }
+    }
+
+    /// <summary>
+    /// Removes cache entries for overlay ids no longer present in <paramref name="overlays"/>
+    /// (e.g. an overlay was deleted from the timeline) so a long editing session doesn't grow
+    /// the cache unboundedly. Allocates nothing unless an entry actually needs removing.
+    /// </summary>
+    private void EvictStaleCacheEntries(IReadOnlyList<TextOverlaySegment> overlays)
+    {
+        if (_overlayCache.Count == 0)
+            return;
+
+        List<string>? staleKeys = null;
+        foreach (var id in _overlayCache.Keys)
+        {
+            bool stillPresent = false;
+            for (int i = 0; i < overlays.Count; i++)
+            {
+                if (overlays[i].Id == id) { stillPresent = true; break; }
+            }
+            if (!stillPresent)
+                (staleKeys ??= new List<string>()).Add(id);
+        }
+        if (staleKeys is null)
+            return;
+
+        foreach (var id in staleKeys)
+        {
+            _overlayCache[id].Dispose();
+            _overlayCache.Remove(id);
         }
     }
 
@@ -130,19 +205,11 @@ public class TextOverlayRenderer : IDisposable
         double scaledBlurAmount = Math.Max(0.01, overlay.BlurAmount * fontScale);
 
         var hAlign = ToCanvasAlignment(overlay.TextAlignment);
-
-        // Measure with a Top-aligned format so LayoutBounds reflects the text's true ink
-        // extents (matches TextSlideRenderer.MeasureTextHeight's approach) — the actual
-        // draw pass below uses a separately-built Center-aligned format.
-        using var measureFormat = AnimatedTextEngine.CreateFormat(
-            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
-            hAlign, CanvasVerticalAlignment.Top, wrap: true);
-
         double maxWidth = Math.Max(1.0, overlay.WidthFraction * width);
-        using var layout = new CanvasTextLayout(_device, overlay.Text, measureFormat, (float)maxWidth, (float)height);
 
-        double textW = Math.Max(1.0, layout.LayoutBounds.Width);
-        double textH = Math.Max(1.0, layout.LayoutBounds.Height);
+        var cache = GetOrCreateOverlayCache(overlay, hAlign, scaledFontSize, maxWidth, width, height);
+        double textW = cache.TextW;
+        double textH = cache.TextH;
 
         double padding = overlay.PaddingScale * scaledFontSize;
         double boxW = textW + padding * 2;
@@ -163,15 +230,53 @@ public class TextOverlayRenderer : IDisposable
         var textRect = new Rect(left + padding, top + padding, textW, textH);
         var boxCenter = new Vector2((float)(left + boxW / 2), (float)(top + boxH / 2));
 
-        using var drawFormat = AnimatedTextEngine.CreateFormat(
-            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
-            hAlign, CanvasVerticalAlignment.Center, wrap: true);
-
         DrawOverlay(
-            target, overlay, box, textRect, boxCenter, drawFormat,
+            target, overlay, box, textRect, boxCenter, cache.DrawFormat,
             scale, tx, ty, envelopeOpacity, progress, durationSeconds, scaledFontSize,
             scaledCornerRadius, scaledOutlineWidth, scaledAccentThickness, scaledBlurAmount,
             width, height);
+    }
+
+    /// <summary>
+    /// Returns the cached measurement/draw resources for <paramref name="overlay"/>,
+    /// rebuilding them (allocate-then-swap, disposing the stale entry) only when the
+    /// computed <see cref="OverlayCacheKey"/> no longer matches what's cached — i.e. only
+    /// when something that actually affects measurement or drawing changed since the last
+    /// frame this overlay was rendered. This is what removes the per-frame
+    /// <see cref="CanvasTextFormat"/>/<see cref="CanvasTextLayout"/> allocations from the
+    /// hot path described in the "per-frame Win2D allocations" review finding.
+    /// </summary>
+    private OverlayCache GetOrCreateOverlayCache(
+        TextOverlaySegment overlay, CanvasHorizontalAlignment hAlign, float scaledFontSize,
+        double maxWidth, int width, int height)
+    {
+        var key = new OverlayCacheKey(
+            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
+            overlay.TextAlignment, overlay.Text, maxWidth, width, height, _device);
+
+        if (_overlayCache.TryGetValue(overlay.Id, out var existing) && existing.Key.Equals(key))
+            return existing;
+
+        // Measure with a Top-aligned format so LayoutBounds reflects the text's true ink
+        // extents (matches TextSlideRenderer.MeasureTextHeight's approach) — the actual
+        // draw pass uses a separately-built Center-aligned format that is what gets cached
+        // (the measure format itself is only ever needed transiently, right here).
+        using var measureFormat = AnimatedTextEngine.CreateFormat(
+            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
+            hAlign, CanvasVerticalAlignment.Top, wrap: true);
+        using var layout = new CanvasTextLayout(_device, overlay.Text, measureFormat, (float)maxWidth, (float)height);
+
+        double textW = Math.Max(1.0, layout.LayoutBounds.Width);
+        double textH = Math.Max(1.0, layout.LayoutBounds.Height);
+
+        var drawFormat = AnimatedTextEngine.CreateFormat(
+            overlay.FontFamily, scaledFontSize, overlay.IsBold, overlay.IsItalic,
+            hAlign, CanvasVerticalAlignment.Center, wrap: true);
+
+        var next = new OverlayCache { Key = key, DrawFormat = drawFormat, TextW = textW, TextH = textH };
+        existing?.Dispose();
+        _overlayCache[overlay.Id] = next;
+        return next;
     }
 
     private static CanvasHorizontalAlignment ToCanvasAlignment(SlideTextAlignment a) => a switch
@@ -192,19 +297,17 @@ public class TextOverlayRenderer : IDisposable
     {
         // Blur must sample `target`'s current pixels *before* a drawing session is opened
         // on it — Win2D forbids reading from and drawing into the same render target in
-        // one pass. Copy into the cached scratch target and build the blur effect graph
-        // first; every other background mode only ever draws into `target`.
-        using var borderEffect = overlay.Background == TextOverlayBackground.Blur
-            ? new BorderEffect
-            {
-                Source = CopyFrameIntoBlurScratch(target, width, height),
-                ExtendX = CanvasEdgeBehavior.Clamp,
-                ExtendY = CanvasEdgeBehavior.Clamp,
-            }
-            : null;
-        using var blurEffect = borderEffect is not null
-            ? new GaussianBlurEffect { Source = borderEffect, BlurAmount = (float)scaledBlurAmount }
-            : null;
+        // one pass. Copy into the cached scratch target and (re)point the cached blur
+        // effect graph at it first; every other background mode only ever draws into
+        // `target`. Building the graph in a separate step (rather than inline as a
+        // `using` local's object initializer) means a throw from CopyFrameIntoBlurScratch
+        // (real GPU work) can never leave a partially-built effect ungoverned by Dispose().
+        GaussianBlurEffect? blurEffect = null;
+        if (overlay.Background == TextOverlayBackground.Blur)
+        {
+            var scratch = CopyFrameIntoBlurScratch(target, width, height);
+            blurEffect = EnsureBlurEffectGraph(scratch, (float)scaledBlurAmount);
+        }
 
         using var ds = target.CreateDrawingSession();
 
@@ -228,7 +331,10 @@ public class TextOverlayRenderer : IDisposable
                         DrawSolidBackground(ds, overlay, box, scaledCornerRadius, envelopeOpacity);
                         break;
                     case TextOverlayBackground.Blur:
-                        DrawBlurBackground(ds, blurEffect!, overlay, box, scaledCornerRadius, envelopeOpacity);
+                        // Blur needs the raw envelope components (not just the already-applied
+                        // ds.Transform) so it can transform the clip geometry alone and draw the
+                        // blurred frame with an identity transform — see the method doc comment.
+                        DrawBlurBackground(ds, blurEffect!, overlay, box, scaledCornerRadius, envelopeOpacity, scale, boxCenter, tx, ty);
                         break;
                     case TextOverlayBackground.GradientScrim:
                         DrawGradientScrim(ds, overlay, box, envelopeOpacity, width, height);
@@ -279,6 +385,39 @@ public class TextOverlayRenderer : IDisposable
         return _blurScratch;
     }
 
+    /// <summary>
+    /// Returns the cached Blur effect graph (<see cref="BorderEffect"/> feeding a
+    /// <see cref="GaussianBlurEffect"/>), rebuilding it only when <paramref name="scratch"/>
+    /// is a different instance than what the graph currently reads from — which only
+    /// happens when <see cref="EnsureBlurScratch"/> reallocated it for a resize. The normal
+    /// per-frame case reuses the same graph and just updates <see cref="GaussianBlurEffect.BlurAmount"/>,
+    /// a cheap property set, instead of rebuilding two effect objects every frame.
+    /// </summary>
+    private GaussianBlurEffect EnsureBlurEffectGraph(CanvasRenderTarget scratch, float blurAmount)
+    {
+        if (_blurBorderEffect is null || _blurGaussianEffect is null || !ReferenceEquals(_blurBorderEffect.Source, scratch))
+        {
+            var nextBorder = new BorderEffect
+            {
+                Source = scratch,
+                ExtendX = CanvasEdgeBehavior.Clamp,
+                ExtendY = CanvasEdgeBehavior.Clamp,
+            };
+            var nextGaussian = new GaussianBlurEffect { Source = nextBorder, BlurAmount = blurAmount };
+
+            _blurGaussianEffect?.Dispose();
+            _blurBorderEffect?.Dispose();
+            _blurBorderEffect = nextBorder;
+            _blurGaussianEffect = nextGaussian;
+        }
+        else
+        {
+            _blurGaussianEffect.BlurAmount = blurAmount;
+        }
+
+        return _blurGaussianEffect;
+    }
+
     // ─────────────────────────── Backgrounds ───────────────────────────
 
     private static void DrawSolidBackground(
@@ -294,14 +433,42 @@ public class TextOverlayRenderer : IDisposable
     /// text, clipped to the rounded-rect box via a layer (so nothing bleeds outside it),
     /// then a flat legibility tint on top.
     /// </summary>
+    /// <remarks>
+    /// The caller has already set <c>ds.Transform</c> to the whole-overlay animation
+    /// envelope (scale/translate around the box's own centre) so that every other
+    /// background type slides/scales in exactly like the box does. That is correct for
+    /// the clip shape and the tint — both are conceptually part of the box — but it must
+    /// <em>not</em> apply to <paramref name="blurredFrame"/> itself: that image is a
+    /// snapshot of the whole already-composited frame, and dragging/scaling it along with
+    /// the envelope would sample pixels from where the box *used to be* instead of what is
+    /// actually behind it right now (visible as a smeared, mis-registered "frosted glass"
+    /// during a slide/scale-in animation). The fix is to bake the envelope into the clip
+    /// geometry explicitly via <see cref="CanvasGeometry.Transform"/>, then switch to an
+    /// identity transform just for the <see cref="CanvasDrawingSession.DrawImage(ICanvasImage)"/>
+    /// call, restoring the envelope transform immediately after for the tint fill.
+    /// </remarks>
     private static void DrawBlurBackground(
         CanvasDrawingSession ds, ICanvasImage blurredFrame,
-        TextOverlaySegment overlay, Rect box, double cornerRadius, double envelopeOpacity)
+        TextOverlaySegment overlay, Rect box, double cornerRadius, double envelopeOpacity,
+        float scale, Vector2 boxCenter, float tx, float ty)
     {
-        using var clip = CanvasGeometry.CreateRoundedRectangle(ds, box, (float)cornerRadius, (float)cornerRadius);
-        using (ds.CreateLayer((float)envelopeOpacity, clip))
+        var envelopeTransform = Matrix3x2.CreateScale(scale, boxCenter) * Matrix3x2.CreateTranslation(tx, ty);
+
+        using var rectGeometry = CanvasGeometry.CreateRoundedRectangle(ds, box, (float)cornerRadius, (float)cornerRadius);
+        using var clip = rectGeometry.Transform(envelopeTransform);
+
+        var envelopeDs = ds.Transform;
+        ds.Transform = Matrix3x2.Identity;
+        try
         {
-            ds.DrawImage(blurredFrame);
+            using (ds.CreateLayer((float)envelopeOpacity, clip))
+            {
+                ds.DrawImage(blurredFrame);
+            }
+        }
+        finally
+        {
+            ds.Transform = envelopeDs;
         }
 
         var tint = AnimatedTextEngine.ParseColor(overlay.BackgroundColor);
@@ -417,6 +584,12 @@ public class TextOverlayRenderer : IDisposable
         if (_disposed) return;
         _disposed = true;
         _blurScratch?.Dispose();
+        _blurGaussianEffect?.Dispose();
+        _blurBorderEffect?.Dispose();
+        foreach (var entry in _overlayCache.Values)
+            entry.Dispose();
+        _overlayCache.Clear();
+        _textEngine.Dispose();
         GC.SuppressFinalize(this);
     }
 }

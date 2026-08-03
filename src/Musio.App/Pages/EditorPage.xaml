@@ -174,7 +174,9 @@
                         PointerExited="TextEditRegion_PointerExited"
                         PointerPressed="TextEditRegion_PointerPressed"
                         PointerMoved="TextEditRegion_PointerMoved"
-                        PointerReleased="TextEditRegion_PointerReleased">
+                        PointerReleased="TextEditRegion_PointerReleased"
+                        PointerCaptureLost="TextEditRegion_PointerCaptureLost"
+                        PointerCanceled="TextEditRegion_PointerCanceled">
                     <Border.Background>
                         <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
                     </Border.Background>

@@ -366,6 +366,9 @@ public class TextSlideRenderer : IDisposable
         _disposed = true;
         _bgImage?.Dispose();
         _gradientCache?.Dispose();
+        // The engine owns a cached scratch render target for its blurred-text passes,
+        // so it has to be released with the renderer that created it.
+        _textEngine.Dispose();
         GC.SuppressFinalize(this);
     }
 }
