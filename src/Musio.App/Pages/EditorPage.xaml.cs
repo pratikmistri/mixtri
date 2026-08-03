@@ -2547,6 +2547,7 @@ public sealed partial class EditorPage : Page
         // while the NEW one is selected — and the next property edit would then write
         // those stale values onto the new overlay.
         FinalizeTextDrag();
+        FinalizeTextWidthResize();
         CommitActiveTextEditIfAny();
 
         // Selection is tracked by the control; property editing is via the model/ops.
@@ -2782,6 +2783,7 @@ public sealed partial class EditorPage : Page
         // already-mutated object, so undoing the delete would bring back an overlay at a
         // position or text the user never committed.
         FinalizeTextDrag();
+        FinalizeTextWidthResize();
         CommitActiveTextEditIfAny();
 
         ViewModel.UndoRedoManager.Execute(new RemoveTextOverlayOperation(overlayId));
@@ -6822,6 +6824,7 @@ public sealed partial class EditorPage : Page
             return;
         }
         CommitActiveTextEditIfAny();
+        FinalizeTextWidthResize();
         TextEditCanvas.Visibility = Visibility.Collapsed;
     }
 
@@ -6856,6 +6859,8 @@ public sealed partial class EditorPage : Page
         TextEditBox.Width = w;
         TextEditBox.Height = h;
 
+        PositionTextWidthHandles(target, left, top, w, h);
+
         // Match the target's text styling so editing looks WYSIWYG.
         double fontSize = Math.Max(8, target.FontSize * scaleY);
         var style = (target.FontFamily, fontSize, target.IsBold, target.IsItalic,
@@ -6877,6 +6882,137 @@ public sealed partial class EditorPage : Page
             SlideTextAlignment.Right => TextAlignment.Right,
             _ => TextAlignment.Center,
         };
+    }
+
+    /// <summary>
+    /// Places the two width handles on the vertical edges of the text box, centred on its
+    /// height, and hides them for targets with no user-definable width (text slides) or
+    /// while the text is being edited in place — a handle overlapping the edit box would
+    /// steal the pointer from text selection.
+    /// </summary>
+    private void PositionTextWidthHandles(ITextEditTarget target, double left, double top, double w, double h)
+    {
+        bool show = target.CanResizeWidth && _editingTextId is null;
+        var visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (TextEditLeftHandle.Visibility != visibility) TextEditLeftHandle.Visibility = visibility;
+        if (TextEditRightHandle.Visibility != visibility) TextEditRightHandle.Visibility = visibility;
+        if (!show) return;
+
+        // Keep the grab area usable on a short box, but never taller than the box itself.
+        double handleH = Math.Max(16, Math.Min(h, 48));
+        double handleTop = top + (h - handleH) / 2;
+
+        TextEditLeftHandle.Height = handleH;
+        Canvas.SetLeft(TextEditLeftHandle, left - TextEditLeftHandle.Width / 2);
+        Canvas.SetTop(TextEditLeftHandle, handleTop);
+
+        TextEditRightHandle.Height = handleH;
+        Canvas.SetLeft(TextEditRightHandle, left + w - TextEditRightHandle.Width / 2);
+        Canvas.SetTop(TextEditRightHandle, handleTop);
+    }
+
+    // ── Width resize gesture ──
+
+    private bool _textWidthResizing;
+    private bool _textWidthMoved;
+    private ITextEditTarget? _resizeTarget;
+
+    private void TextEditHandle_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingTextId is null)
+            ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeWestEast);
+    }
+
+    private void TextEditHandle_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_textWidthResizing)
+            ProtectedCursor = null;
+    }
+
+    private void TextEditHandle_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_editingTextId is not null) return;
+        if (sender is not Border handle) return;
+
+        // A gesture is starting: build a FRESH target so its pre-gesture snapshot is the
+        // state as of right now — the per-frame cached instance may predate other edits.
+        var target = GetActiveEditTargetForNewGesture();
+        if (target is null || !target.CanResizeWidth) return;
+
+        _resizeTarget = target;
+        _textWidthResizing = true;
+        _textWidthMoved = false;
+        handle.CapturePointer(e.Pointer);
+        ProtectedCursor = Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeWestEast);
+        e.Handled = true;
+    }
+
+    private void TextEditHandle_PointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_textWidthResizing || _resizeTarget is null) return;
+
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || _previewFrameW <= 0) return;
+
+        var pos = e.GetCurrentPoint(TextEditCanvas).Position;
+
+        // The box is drawn centred on its resolved centre, so a handle tracks the pointer
+        // when the half-width follows the pointer's distance from that centre. Resizing
+        // symmetrically also leaves the anchor meaningful: an edge-anchored overlay keeps
+        // hugging its edge (the renderer re-resolves the centre from the new width) instead
+        // of drifting away from it, which is what moving a single edge would cause.
+        double centreX = layout.X + _resizeTarget.Center.X * layout.Width;
+        double halfWidthPx = Math.Abs(pos.X - centreX);
+        double fraction = Math.Clamp(halfWidthPx * 2 / layout.Width, MinTextWidthFraction, 1.0);
+
+        if (Math.Abs(fraction - _resizeTarget.WidthFraction) > 0.001)
+            _textWidthMoved = true;
+
+        _resizeTarget.WidthFraction = fraction;
+        _resizeTarget.OnLivePositionChanged();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Floor for a dragged box width. Below roughly a tenth of the frame the text wraps to
+    /// one character per line and the handles collide, leaving no way to drag back out.
+    /// </summary>
+    private const double MinTextWidthFraction = 0.08;
+
+    private void TextEditHandle_PointerReleased(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (sender is Border handle) handle.ReleasePointerCapture(e.Pointer);
+        FinalizeTextWidthResize();
+        e.Handled = true;
+    }
+
+    private void TextEditHandle_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        => FinalizeTextWidthResize();
+
+    private void TextEditHandle_PointerCanceled(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        => FinalizeTextWidthResize();
+
+    /// <summary>
+    /// Ends a width resize exactly once, however it ended (release, capture loss or
+    /// cancellation), committing a single undo entry only when the box actually changed
+    /// size and otherwise restoring the pre-gesture width.
+    /// </summary>
+    private void FinalizeTextWidthResize()
+    {
+        if (!_textWidthResizing) return;
+        _textWidthResizing = false;
+        ProtectedCursor = null;
+
+        var target = _resizeTarget;
+        _resizeTarget = null;
+        if (target is null) return;
+
+        if (_textWidthMoved)
+            target.CommitWidth(target.WidthFraction);
+        else
+            target.AbortResize();
+
+        _textWidthMoved = false;
     }
 
     private void TextEditRegion_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
@@ -7022,6 +7158,7 @@ public sealed partial class EditorPage : Page
         // (e.g. an anchored overlay flipped to Custom by the opening press) is committed or
         // reverted instead of silently left in place, then release any capture outright.
         FinalizeTextDrag();
+        FinalizeTextWidthResize();
         TextEditRegion.ReleasePointerCaptures();
         ProtectedCursor = null;
 
@@ -7034,6 +7171,8 @@ public sealed partial class EditorPage : Page
         _editTarget = target; // pins the target (and, for overlays, its captured
                                // pre-edit original text) for the whole edit session
         TextEditRegion.Visibility = Visibility.Collapsed;
+        TextEditLeftHandle.Visibility = Visibility.Collapsed;
+        TextEditRightHandle.Visibility = Visibility.Collapsed;
         TextEditBox.Visibility = Visibility.Visible;
         TextEditBox.Text = target.Text;
         TextEditBox.Focus(FocusState.Programmatic);
@@ -7233,6 +7372,28 @@ public sealed partial class EditorPage : Page
         /// a finished drag that actually moved past the drag threshold.</summary>
         void CommitPosition(double x, double y);
 
+        /// <summary>
+        /// Whether the target's text box has a user-definable width, i.e. whether the
+        /// preview should offer resize handles. False for text slides, whose box width is a
+        /// fixed fraction of the slide.
+        /// </summary>
+        bool CanResizeWidth { get; }
+
+        /// <summary>
+        /// Normalized (0..1) width of the text box against the frame. The setter is a live,
+        /// non-undoable mutation used to preview a resize as it happens; see
+        /// <see cref="CommitWidth"/> for the one-shot persisted change.
+        /// </summary>
+        double WidthFraction { get; set; }
+
+        /// <summary>Persists <paramref name="widthFraction"/> as the final value of a
+        /// finished resize that actually moved past the drag threshold.</summary>
+        void CommitWidth(double widthFraction);
+
+        /// <summary>Ends a resize gesture that never moved past the drag threshold by
+        /// restoring the pre-gesture width, with no undo entry recorded.</summary>
+        void AbortResize();
+
         /// <summary>Ends a drag gesture that never moved past the drag threshold (e.g. a
         /// plain click) by restoring the model to its exact pre-gesture state — undoing
         /// whatever <see cref="PrepareForDrag"/>/<see cref="Center"/>'s setter mutated live,
@@ -7284,6 +7445,14 @@ public sealed partial class EditorPage : Page
             Segment is { } s ? TextSlideRenderer.ComputeTextRect(s, frameWidth, frameHeight) : default;
 
         public void BeginTextEdit() => _page.RefreshSlidePreview();
+
+        // A slide's text box is always a fixed fraction of the slide (see
+        // TextSlideRenderer.ComputeTextRect), so there is no width for the user to define
+        // and no resize handles are offered.
+        public bool CanResizeWidth => false;
+        public double WidthFraction { get => 1.0; set { } }
+        public void CommitWidth(double widthFraction) { }
+        public void AbortResize() { }
 
         // Slides have no anchor concept — Center is always authoritative, so there is
         // nothing to snap/restore around a drag.
@@ -7339,6 +7508,7 @@ public sealed partial class EditorPage : Page
         // Center/Text/PrepareForDrag made.
         private readonly (double X, double Y) _originalCenter;
         private readonly string _originalText;
+        private readonly double _originalWidthFraction;
         private readonly TextOverlayAnchor _originalAnchor;
 
         public OverlayTextEditTarget(EditorPage page, string id)
@@ -7348,6 +7518,7 @@ public sealed partial class EditorPage : Page
             var seg = Segment;
             _originalCenter = seg is { } s ? (s.X, s.Y) : (0.5, 0.85);
             _originalText = seg?.Text ?? string.Empty;
+            _originalWidthFraction = seg?.WidthFraction ?? 0.6;
             _originalAnchor = seg?.Anchor ?? TextOverlayAnchor.BottomCenter;
         }
 
@@ -7448,6 +7619,37 @@ public sealed partial class EditorPage : Page
                 Id, ov => { ov.X = x; ov.Y = y; ov.Anchor = TextOverlayAnchor.Custom; }, "Move Text Overlay"));
 
             _page.SyncTextOverlayUI(Id);
+            _page.RefreshOverlayPreview();
+        }
+
+        // The overlay's box width is what decides where its text wraps, so it is worth
+        // dragging directly on the preview rather than guessing with the pane's slider.
+        public bool CanResizeWidth => true;
+
+        public double WidthFraction
+        {
+            get => Segment?.WidthFraction ?? _originalWidthFraction;
+            set { if (Segment is { } o) o.WidthFraction = value; } // live resize preview
+        }
+
+        public void CommitWidth(double widthFraction)
+        {
+            if (Segment is not { } o) return;
+
+            // Restore-then-execute, exactly as CommitPosition/CommitText do, so the whole
+            // resize is one undo entry rather than one per PointerMoved tick.
+            o.WidthFraction = _originalWidthFraction;
+            _page.ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                Id, ov => ov.WidthFraction = widthFraction, "Resize Text Overlay"));
+
+            _page.SyncTextOverlayUI(Id);
+            _page.RefreshOverlayPreview();
+        }
+
+        public void AbortResize()
+        {
+            if (Segment is not { } o) return;
+            o.WidthFraction = _originalWidthFraction;
             _page.RefreshOverlayPreview();
         }
 
