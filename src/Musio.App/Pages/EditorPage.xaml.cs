@@ -2747,6 +2747,11 @@ public sealed partial class EditorPage : Page
         Timeline.SelectedTextOverlayId = operation.CreatedId;
         _selectedTextOverlayId = operation.CreatedId;
         SyncTextOverlayUI(operation.CreatedId);
+
+        // Same reason as the Insert-menu path: an overlay is invisible on its first frame,
+        // so drop the playhead into the middle of the range the user just marked out.
+        SeekPastOverlayEntrance(e.End - e.Start);
+
         RefreshOverlayPreview();
     }
 
@@ -5938,14 +5943,61 @@ public sealed partial class EditorPage : Page
         if (GetPlayheadSourceTimeForOverlay() is not { } mapped) return;
 
         var operation = new AddTextOverlayOperation(
-            mapped.SourceTime, TimeSpan.FromSeconds(3), sourceVideoFilePath: mapped.VideoFilePath);
+            mapped.SourceTime, TextOverlayDefaultDuration, sourceVideoFilePath: mapped.VideoFilePath);
         ViewModel.UndoRedoManager.Execute(operation);
 
         Timeline.SelectedTextOverlayId = operation.CreatedId;
         _selectedTextOverlayId = operation.CreatedId;
         SyncTextOverlayUI(operation.CreatedId);
         Timeline.InvalidateAllCanvases();
+
+        // The overlay starts at the playhead, and every animation is fully transparent on
+        // its very first frame - so the thing the user just inserted would render as
+        // nothing at all until they scrubbed into it, which reads as "insert is broken".
+        // Park the playhead past the entrance so the new overlay is visible, selected and
+        // directly editable on the preview the moment it appears.
+        SeekPastOverlayEntrance(TextOverlayDefaultDuration);
+
         RefreshOverlayPreview();
+    }
+
+    /// <summary>Duration a newly inserted text overlay is created with.</summary>
+    private static readonly TimeSpan TextOverlayDefaultDuration = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Moves the playhead from a new overlay's start to its middle, which is past the
+    /// entrance animation and before the exit, so the overlay renders at full opacity.
+    /// <paramref name="sourceDuration"/> is the overlay's source-time length; the offset is
+    /// applied in output time, because a sped-up segment covers that source range in
+    /// proportionally less output time.
+    /// </summary>
+    private void SeekPastOverlayEntrance(TimeSpan sourceDuration)
+    {
+        var model = ViewModel.Model;
+        double speed = 1.0;
+
+        if (model.Segments.Count > 0 &&
+            model.GetSegmentAtTime(Timeline.PlayheadPosition).Segment is VideoSegment seg &&
+            seg.SpeedFactor > 0)
+        {
+            speed = seg.SpeedFactor;
+        }
+
+        var offset = TimeSpan.FromTicks((long)(sourceDuration.Ticks / 2 / speed));
+        var target = Timeline.PlayheadPosition + offset;
+
+        // Never run past the end of the timeline; the overlay is still partly visible
+        // wherever we land, and seeking beyond the content would blank the preview.
+        var end = model.TotalSegmentsDuration;
+        if (end > TimeSpan.Zero && target > end)
+            target = end;
+        if (target < TimeSpan.Zero) target = TimeSpan.Zero;
+
+        Preview.Pause();
+        Timeline.PlayheadPosition = target;
+        Preview.PlayheadPosition = target;
+        model.PlayheadPosition = target;
+        _ = UpdatePreviewFrameAsync(target, force: true);
     }
 
     /// <summary>
