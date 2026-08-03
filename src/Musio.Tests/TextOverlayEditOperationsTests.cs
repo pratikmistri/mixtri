@@ -434,4 +434,88 @@ public sealed class TextOverlayEditOperationsTests
     {
         Assert.ThrowsException<ArgumentNullException>(() => new AddTextOverlayOperation((TextOverlaySegment)null!));
     }
+
+    // ── Undo restores every editable property ───────────────────────────
+
+    /// <summary>
+    /// Guards the whole restore list in UpdateTextOverlayPropertiesOperation.Undo. It copies
+    /// each field back one by one, so a property added to TextOverlaySegment without a
+    /// matching line there is silently not undoable - which is exactly how HeightFraction
+    /// was missed when the box became an explicit rectangle. Reflection means any future
+    /// field is covered automatically instead of relying on someone remembering.
+    /// </summary>
+    [TestMethod]
+    public void Update_Undo_RestoresEveryEditableProperty()
+    {
+        var model = new TimelineModel();
+        var overlay = Overlay(0, 5);
+        model.TextOverlays.Add(overlay);
+
+        // Identity and timing are the operation's own concern, not style state. "End" is
+        // computed. Init-only properties are excluded too: they are set at construction and
+        // no editing path can change them afterwards (only reflection can), so there is
+        // nothing for Undo to put back.
+        var skip = new HashSet<string> { nameof(TextOverlaySegment.Id), nameof(TextOverlaySegment.Start), nameof(TextOverlaySegment.Duration), "End" };
+
+        var props = typeof(TextOverlaySegment).GetProperties()
+            .Where(p => p.CanRead && p.CanWrite && !skip.Contains(p.Name) && !IsInitOnly(p))
+            .ToList();
+
+        Assert.IsTrue(props.Count > 10, "Expected the overlay to expose a broad set of editable properties.");
+
+        var original = props.ToDictionary(p => p.Name, p => p.GetValue(overlay));
+
+        // Move every property to a value that differs from its current one.
+        var op = new UpdateTextOverlayPropertiesOperation(overlay.Id, o =>
+        {
+            foreach (var p in props)
+                p.SetValue(o, MutatedValue(p.PropertyType, p.GetValue(o)));
+        });
+
+        op.Execute(model);
+
+        foreach (var p in props)
+            Assert.AreNotEqual(original[p.Name], p.GetValue(overlay), $"{p.Name} was not actually changed by the test.");
+
+        op.Undo(model);
+
+        foreach (var p in props)
+            Assert.AreEqual(original[p.Name], p.GetValue(overlay), $"{p.Name} was not restored by Undo.");
+    }
+
+    /// <summary>
+    /// True for an <c>init</c>-only property. The compiler marks such setters with the
+    /// <c>IsExternalInit</c> modreq, and reflection still reports <c>CanWrite</c> for them,
+    /// so this is the only reliable way to tell them apart from genuinely settable state.
+    /// </summary>
+    private static bool IsInitOnly(System.Reflection.PropertyInfo p) =>
+        p.SetMethod is { } setter &&
+        setter.ReturnParameter.GetRequiredCustomModifiers()
+            .Any(m => m.FullName == "System.Runtime.CompilerServices.IsExternalInit");
+
+    /// <summary>Returns a value of <paramref name="type"/> guaranteed to differ from <paramref name="current"/>.</summary>
+    private static object? MutatedValue(Type type, object? current)
+    {
+        if (type == typeof(string)) return (current as string) + "_changed";
+        if (type == typeof(bool)) return !(bool)(current ?? false);
+        if (type == typeof(double)) return (double)(current ?? 0.0) + 0.123;
+        if (type == typeof(int)) return (int)(current ?? 0) + 1;
+        if (type == typeof(TimeSpan)) return (TimeSpan)(current ?? TimeSpan.Zero) + TimeSpan.FromSeconds(1);
+        if (type == typeof(TransitionConfig))
+        {
+            var existing = current as TransitionConfig;
+            return new TransitionConfig
+            {
+                Type = existing?.Type == TransitionType.Fade ? TransitionType.Wipe : TransitionType.Fade,
+                Duration = (existing?.Duration ?? TimeSpan.Zero) + TimeSpan.FromMilliseconds(250),
+            };
+        }
+        if (type.IsEnum)
+        {
+            var values = Enum.GetValues(type).Cast<object>().ToList();
+            return values.First(v => !Equals(v, current));
+        }
+        throw new NotSupportedException($"Add a mutation rule for {type.Name} to keep this guard exhaustive.");
+    }
 }
+

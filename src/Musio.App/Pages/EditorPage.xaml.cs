@@ -2996,15 +2996,14 @@ public sealed partial class EditorPage : Page
         var overlay = SelectedTextOverlay();
         if (overlay is null) return;
 
-        // The renderer always recomputes each non-Custom anchor's true centre from its own
-        // measured text box at render/export time (ResolveCenter ignores the passed-in X/Y
-        // entirely for those anchors) — this stored X/Y only matters once the user drags the
-        // overlay to Custom, so it just needs a reasonable snapped starting point, approximated
-        // here from the authored width/typography rather than an exact glyph measurement.
-        double boxHeightFraction = Math.Clamp(
-            (overlay.FontSize * 1.6 + overlay.PaddingScale * overlay.FontSize * 2) / 1080.0, 0.02, 0.5);
+        // The box is an explicit rectangle now, so the anchor's true centre is exact
+        // arithmetic over the authored width/height — no glyph measurement or estimate
+        // needed. ResolveCenter ignores the passed-in X/Y for every non-Custom anchor, so
+        // this stored value only matters once the user drags the overlay back to Custom,
+        // where it gives it the right starting point.
         var (x, y) = TextOverlaySegment.ResolveCenter(
-            anchor, overlay.X, overlay.Y, overlay.MarginFraction, overlay.WidthFraction, boxHeightFraction);
+            anchor, overlay.X, overlay.Y, overlay.MarginFraction,
+            overlay.WidthFraction, overlay.HeightFraction);
 
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(id, o =>
         {

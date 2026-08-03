@@ -46,6 +46,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.SlideUp;
             overlay.Anchor = TextOverlayAnchor.BottomLeft;
             overlay.WidthFraction = 0.55;
+            overlay.HeightFraction = 0.12;
             overlay.MarginFraction = 0.06;
 
             overlay.FontFamily = "Segoe UI";
@@ -81,6 +82,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.FadeIn;
             overlay.Anchor = TextOverlayAnchor.BottomCenter;
             overlay.WidthFraction = 0.7;
+            overlay.HeightFraction = 0.10;
             overlay.MarginFraction = 0.05;
 
             overlay.FontFamily = "Segoe UI";
@@ -116,6 +118,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.ScalePop;
             overlay.Anchor = TextOverlayAnchor.TopRight;
             overlay.WidthFraction = 0.26;
+            overlay.HeightFraction = 0.11;
             overlay.MarginFraction = 0.05;
 
             overlay.FontFamily = "Segoe UI";
@@ -154,6 +157,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.ZoomBlurIn;
             overlay.Anchor = TextOverlayAnchor.MiddleCenter;
             overlay.WidthFraction = 0.82;
+            overlay.HeightFraction = 0.22;
             overlay.MarginFraction = 0.06;
 
             overlay.FontFamily = "Segoe UI";
@@ -189,6 +193,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.FadeIn;
             overlay.Anchor = TextOverlayAnchor.BottomCenter;
             overlay.WidthFraction = 0.5;
+            overlay.HeightFraction = 0.13;
             overlay.MarginFraction = 0.08;
 
             overlay.FontFamily = "Segoe UI";
@@ -224,6 +229,7 @@ public static class TextOverlayPresets
             overlay.Animation = TextSlideAnimation.TrackingIn;
             overlay.Anchor = TextOverlayAnchor.MiddleCenter;
             overlay.WidthFraction = 0.7;
+            overlay.HeightFraction = 0.14;
             overlay.MarginFraction = 0.06;
 
             overlay.FontFamily = "Segoe UI";

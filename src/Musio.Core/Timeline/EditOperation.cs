@@ -1828,11 +1828,16 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
         // itself and turn undo into a no-op (see the TrimSegmentEdgeOperation fix above).
         overlay.Text = _previous.Text;
         overlay.Enabled = _previous.Enabled;
+        // Inherited from TimelineSegment rather than overlay styling, but the apply action is
+        // free-form so it could have touched it — restoring it keeps "undo puts back exactly
+        // what Execute found" true with no exceptions to reason about.
+        overlay.InTransition = _previous.InTransition;
         overlay.Animation = _previous.Animation;
         overlay.Anchor = _previous.Anchor;
         overlay.X = _previous.X;
         overlay.Y = _previous.Y;
         overlay.WidthFraction = _previous.WidthFraction;
+        overlay.HeightFraction = _previous.HeightFraction;
         overlay.MarginFraction = _previous.MarginFraction;
         overlay.FontFamily = _previous.FontFamily;
         overlay.FontSize = _previous.FontSize;
