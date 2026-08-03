@@ -6917,6 +6917,14 @@ public sealed partial class EditorPage : Page
     private bool _textWidthMoved;
     private ITextEditTarget? _resizeTarget;
 
+    // Canvas-space X the resize is measured from, captured once when the gesture starts.
+    // It must be the box's RENDERED centre (via ComputeRect, which is what the renderer and
+    // the hit region use) rather than the target's raw Center, because an anchored overlay
+    // renders at ResolveCenter(...) and not at its stored X/Y. Capturing it once also keeps
+    // the gesture stable: the rendered centre of an edge-anchored box shifts as the box
+    // grows, so recomputing it every tick would feed back into the width being computed.
+    private double _resizeCentreX;
+
     private void TextEditHandle_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
         if (_editingTextId is null)
@@ -6938,6 +6946,13 @@ public sealed partial class EditorPage : Page
         // state as of right now — the per-frame cached instance may predate other edits.
         var target = GetActiveEditTargetForNewGesture();
         if (target is null || !target.CanResizeWidth) return;
+
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || _previewFrameW <= 0) return;
+
+        var rect = target.ComputeRect(_previewFrameW, _previewFrameH);
+        if (rect.Width <= 0) return;
+        _resizeCentreX = layout.X + (rect.X + rect.Width / 2.0) * (layout.Width / _previewFrameW);
 
         _resizeTarget = target;
         _textWidthResizing = true;
@@ -6961,8 +6976,7 @@ public sealed partial class EditorPage : Page
         // symmetrically also leaves the anchor meaningful: an edge-anchored overlay keeps
         // hugging its edge (the renderer re-resolves the centre from the new width) instead
         // of drifting away from it, which is what moving a single edge would cause.
-        double centreX = layout.X + _resizeTarget.Center.X * layout.Width;
-        double halfWidthPx = Math.Abs(pos.X - centreX);
+        double halfWidthPx = Math.Abs(pos.X - _resizeCentreX);
         double fraction = Math.Clamp(halfWidthPx * 2 / layout.Width, MinTextWidthFraction, 1.0);
 
         if (Math.Abs(fraction - _resizeTarget.WidthFraction) > 0.001)
