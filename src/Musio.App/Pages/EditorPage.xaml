@@ -160,32 +160,101 @@
                 </StackPanel>
             </Grid>
 
-            <!-- Text slide edit overlay (reposition + in-place editing) -->
-            <Canvas x:Name="SlideEditCanvas" Visibility="Collapsed">
-                <Border x:Name="SlideTextRegion"
+            <!-- Shared text edit overlay (reposition + in-place editing), used by both
+                 full-screen text slides and text overlays — see EditorPage.xaml.cs's
+                 ITextEditTarget abstraction. -->
+            <Canvas x:Name="TextEditCanvas" Visibility="Collapsed">
+                <Border x:Name="TextEditRegion"
+                        AutomationProperties.Name="Text edit region"
                         BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
                         BorderThickness="1.5"
                         CornerRadius="2"
-                        DoubleTapped="SlideTextRegion_DoubleTapped"
-                        PointerEntered="SlideTextRegion_PointerEntered"
-                        PointerExited="SlideTextRegion_PointerExited"
-                        PointerPressed="SlideTextRegion_PointerPressed"
-                        PointerMoved="SlideTextRegion_PointerMoved"
-                        PointerReleased="SlideTextRegion_PointerReleased">
+                        DoubleTapped="TextEditRegion_DoubleTapped"
+                        PointerEntered="TextEditRegion_PointerEntered"
+                        PointerExited="TextEditRegion_PointerExited"
+                        PointerPressed="TextEditRegion_PointerPressed"
+                        PointerMoved="TextEditRegion_PointerMoved"
+                        PointerReleased="TextEditRegion_PointerReleased"
+                        PointerCaptureLost="TextEditRegion_PointerCaptureLost"
+                        PointerCanceled="TextEditRegion_PointerCanceled">
                     <Border.Background>
                         <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
                     </Border.Background>
                 </Border>
-                <TextBox x:Name="SlideEditBox"
+
+                <!-- Resize grabbers: 4 corners + 4 edge midpoints, matching
+                     RegionSelectorOverlay's TL/T/TR/L/R/BL/B/BR handle convention (same
+                     Tag values, hit-test names and cursor mapping) so the box can be
+                     resized on any edge/corner independently. The overlay's box decides
+                     where its text wraps, so it is draggable directly on the preview;
+                     text slides have a fixed box and hide these. -->
+                <Border x:Name="TextEditHandleTL" Tag="TL" AutomationProperties.Name="Text box handle top-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleT" Tag="T" AutomationProperties.Name="Text box handle top"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleTR" Tag="TR" AutomationProperties.Name="Text box handle top-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleL" Tag="L" AutomationProperties.Name="Text box handle left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleR" Tag="R" AutomationProperties.Name="Text box handle right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBL" Tag="BL" AutomationProperties.Name="Text box handle bottom-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleB" Tag="B" AutomationProperties.Name="Text box handle bottom"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBR" Tag="BR" AutomationProperties.Name="Text box handle bottom-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <TextBox x:Name="TextEditBox"
+                         AutomationProperties.Name="Text edit box"
                          Visibility="Collapsed"
                          AcceptsReturn="True"
                          TextWrapping="Wrap"
                          Background="Transparent"
                          BorderThickness="0"
                          Padding="0"
-                         TextChanged="SlideEditBox_TextChanged"
-                         KeyDown="SlideEditBox_KeyDown"
-                         LostFocus="SlideEditBox_LostFocus" />
+                         TextChanged="TextEditBox_TextChanged"
+                         KeyDown="TextEditBox_KeyDown"
+                         LostFocus="TextEditBox_LostFocus" />
             </Canvas>
         </Grid>
 
@@ -265,6 +334,14 @@
                                 Click="AddTextSlide_Click">
                                 <MenuFlyoutItem.Icon>
                                     <FontIcon Glyph="&#xE8D2;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Text Overlay"
+                                Click="AddTextOverlay_Click"
+                                AutomationProperties.Name="Insert text overlay">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D3;" />
                                 </MenuFlyoutItem.Icon>
                             </MenuFlyoutItem>
                             <MenuFlyoutItem
@@ -482,10 +559,14 @@
              to whichever TimelineModel existed when the page was built. Opening a project
              into an already-constructed editor swaps the model, and a OneTime bind kept
              rendering the previous one - blank cursor/zoom/camera tracks. -->
+        <!-- The height is deliberately left unset so the Auto row sizes to the control's
+             own track rows. A fixed height silently clips whichever tracks fall past it
+             (the mic track was already cut off, and adding the text overlay track pushed
+             system audio off too), and it would have to be hand-edited every time a track
+             is added or resized. -->
         <controls:TimelineControl
             x:Name="Timeline"
             Grid.Row="3"
-            Height="280"
             Margin="0,4,0,0"
             Model="{x:Bind ViewModel.Model, Mode=OneWay}" />
 

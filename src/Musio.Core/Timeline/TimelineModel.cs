@@ -38,6 +38,55 @@ public class TimelineModel
     public List<CameraSegment> CameraSegments { get; } = [];
 
     /// <summary>
+    /// Animated text overlays drawn on top of the video on the independent text track.
+    /// Each segment's <see cref="TimelineSegment.Start"/>/<see cref="TimelineSegment.Duration"/>
+    /// are interpreted as a <b>source-video</b> time range (same convention as
+    /// <see cref="CameraSegments"/>), so they stay aligned with the recording (and survive
+    /// video reorder/trim) via the source↔output mapping. When empty, no overlays are drawn.
+    /// </summary>
+    public List<TextOverlaySegment> TextOverlays { get; } = [];
+
+    /// <summary>
+    /// Returns every enabled text overlay whose source range contains <paramref name="sourceTime"/>
+    /// and which belongs to <paramref name="videoFilePath"/>'s source-time space. Overlays are
+    /// returned in timeline order so stacking is deterministic.
+    /// </summary>
+    public List<TextOverlaySegment> GetActiveTextOverlays(TimeSpan sourceTime, string? videoFilePath)
+    {
+        var result = new List<TextOverlaySegment>();
+        foreach (var overlay in TextOverlays)
+        {
+            if (!overlay.Enabled) continue;
+            if (sourceTime < overlay.Start || sourceTime >= overlay.End) continue;
+
+            bool belongsToSource = overlay.SourceVideoFilePath is null
+                ? PrimaryVideoFilePath is null
+                  || string.Equals(videoFilePath, PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(videoFilePath, overlay.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+
+            if (belongsToSource)
+                result.Add(overlay);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Computes normalized progress (0..1) through <paramref name="overlay"/> at
+    /// <paramref name="sourceTime"/>, used to drive its entrance/exit animation.
+    /// Returns 0 for a zero-length overlay.
+    /// </summary>
+    public static double GetTextOverlayProgress(TextOverlaySegment overlay, TimeSpan sourceTime)
+    {
+        ArgumentNullException.ThrowIfNull(overlay);
+
+        double dur = overlay.Duration.TotalSeconds;
+        if (dur <= 0) return 0.0;
+
+        double t = (sourceTime - overlay.Start).TotalSeconds / dur;
+        return Math.Clamp(t, 0.0, 1.0);
+    }
+
+    /// <summary>
     /// Returns the enabled camera segment whose source range contains
     /// <paramref name="sourceTime"/>, or null when none is active.
     /// </summary>

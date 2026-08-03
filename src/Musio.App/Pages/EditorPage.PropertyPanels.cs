@@ -103,6 +103,54 @@ public sealed partial class EditorPage
     private TextBlock CameraFullscreenHint => PropertiesPanel.Video.CameraFullscreenHint;
     private Button CameraDeleteButton => PropertiesPanel.Video.CameraDeleteButton;
 
+    // ─── Text overlay panel ─────────────────────────────────────────────
+
+    private GridView OverlayPresets => PropertiesPanel.TextOverlay.OverlayPresets;
+    private TextBox OverlayTextBox => PropertiesPanel.TextOverlay.OverlayTextBox;
+    private ComboBox OverlayAnimationCombo => PropertiesPanel.TextOverlay.OverlayAnimationCombo;
+    private ComboBox OverlayFontCombo => PropertiesPanel.TextOverlay.OverlayFontCombo;
+    private NumberBox OverlayDurationBox => PropertiesPanel.TextOverlay.OverlayDurationBox;
+    private NumberBox OverlayFontSizeBox => PropertiesPanel.TextOverlay.OverlayFontSizeBox;
+    private Border OverlayTextColorSwatch => PropertiesPanel.TextOverlay.OverlayTextColorSwatch;
+    private TextBlock OverlayTextColorText => PropertiesPanel.TextOverlay.OverlayTextColorText;
+    private ColorPicker OverlayTextColorPicker => PropertiesPanel.TextOverlay.OverlayTextColorPicker;
+    private ToggleButton OverlayBoldToggle => PropertiesPanel.TextOverlay.OverlayBoldToggle;
+    private ToggleButton OverlayItalicToggle => PropertiesPanel.TextOverlay.OverlayItalicToggle;
+    private Segmented OverlayAlignSegmented => PropertiesPanel.TextOverlay.OverlayAlignSegmented;
+    private Grid OverlayAnchorGrid => PropertiesPanel.TextOverlay.OverlayAnchorGrid;
+    private RadioButton OverlayAnchorBottomCenter => PropertiesPanel.TextOverlay.OverlayAnchorBottomCenter;
+    private TextBlock OverlayCustomPositionHint => PropertiesPanel.TextOverlay.OverlayCustomPositionHint;
+    private Slider OverlayWidthSlider => PropertiesPanel.TextOverlay.OverlayWidthSlider;
+    private Slider OverlayMarginSlider => PropertiesPanel.TextOverlay.OverlayMarginSlider;
+    private ComboBox OverlayBgTypeCombo => PropertiesPanel.TextOverlay.OverlayBgTypeCombo;
+    private StackPanel OverlayBoxPanel => PropertiesPanel.TextOverlay.OverlayBoxPanel;
+    private Border OverlayBgColorSwatch => PropertiesPanel.TextOverlay.OverlayBgColorSwatch;
+    private TextBlock OverlayBgColorText => PropertiesPanel.TextOverlay.OverlayBgColorText;
+    private ColorPicker OverlayBgColorPicker => PropertiesPanel.TextOverlay.OverlayBgColorPicker;
+    private Slider OverlayBgOpacitySlider => PropertiesPanel.TextOverlay.OverlayBgOpacitySlider;
+    private Slider OverlayCornerRadiusSlider => PropertiesPanel.TextOverlay.OverlayCornerRadiusSlider;
+    private Slider OverlayPaddingSlider => PropertiesPanel.TextOverlay.OverlayPaddingSlider;
+    private StackPanel OverlayBlurPanel => PropertiesPanel.TextOverlay.OverlayBlurPanel;
+    private Slider OverlayBlurAmountSlider => PropertiesPanel.TextOverlay.OverlayBlurAmountSlider;
+    private Slider OverlayBlurTintSlider => PropertiesPanel.TextOverlay.OverlayBlurTintSlider;
+    private StackPanel OverlayScrimPanel => PropertiesPanel.TextOverlay.OverlayScrimPanel;
+    private ComboBox OverlayScrimDirectionCombo => PropertiesPanel.TextOverlay.OverlayScrimDirectionCombo;
+    private Slider OverlayScrimStrengthSlider => PropertiesPanel.TextOverlay.OverlayScrimStrengthSlider;
+    private StackPanel OverlayOutlinePanel => PropertiesPanel.TextOverlay.OverlayOutlinePanel;
+    private Slider OverlayOutlineWidthSlider => PropertiesPanel.TextOverlay.OverlayOutlineWidthSlider;
+    private Border OverlayOutlineColorSwatch => PropertiesPanel.TextOverlay.OverlayOutlineColorSwatch;
+    private TextBlock OverlayOutlineColorText => PropertiesPanel.TextOverlay.OverlayOutlineColorText;
+    private ColorPicker OverlayOutlineColorPicker => PropertiesPanel.TextOverlay.OverlayOutlineColorPicker;
+    private Slider OverlayShadowStrengthSlider => PropertiesPanel.TextOverlay.OverlayShadowStrengthSlider;
+    private StackPanel OverlayAccentPanel => PropertiesPanel.TextOverlay.OverlayAccentPanel;
+    private Border OverlayAccentColorSwatch => PropertiesPanel.TextOverlay.OverlayAccentColorSwatch;
+    private TextBlock OverlayAccentColorText => PropertiesPanel.TextOverlay.OverlayAccentColorText;
+    private ColorPicker OverlayAccentColorPicker => PropertiesPanel.TextOverlay.OverlayAccentColorPicker;
+    private Slider OverlayAccentThicknessSlider => PropertiesPanel.TextOverlay.OverlayAccentThicknessSlider;
+    private ComboBox OverlayAccentSideCombo => PropertiesPanel.TextOverlay.OverlayAccentSideCombo;
+    private ToggleSwitch OverlayEnabledToggle => PropertiesPanel.TextOverlay.OverlayEnabledToggle;
+    private Button RemoveOverlayButton => PropertiesPanel.TextOverlay.RemoveOverlayButton;
+
     /// <summary>
     /// Attaches the page's editing handlers to the extracted property panel controls.
     /// The panels are plain markup, so this replaces the event attributes the controls
@@ -182,5 +230,52 @@ public sealed partial class EditorPage
         CameraFullscreenToggle.Toggled += CameraFullscreenToggle_Toggled;
         CameraFullscreenModeCombo.SelectionChanged += CameraFullscreenModeCombo_SelectionChanged;
         CameraDeleteButton.Click += CameraDeleteButton_Click;
+
+        // Text overlay
+        OverlayPresets.SelectionChanged += OverlayPreset_SelectionChanged;
+        OverlayTextBox.TextChanged += OverlayTextBox_TextChanged;
+        OverlayAnimationCombo.SelectionChanged += OverlayAnimationCombo_SelectionChanged;
+        OverlayFontCombo.SelectionChanged += OverlayFontCombo_SelectionChanged;
+        OverlayDurationBox.ValueChanged += OverlayDurationBox_ValueChanged;
+        OverlayFontSizeBox.ValueChanged += OverlayFontSizeBox_ValueChanged;
+        OverlayTextColorPicker.ColorChanged += OverlayTextColorPicker_ColorChanged;
+        OverlayBoldToggle.Click += OverlayBold_Click;
+        OverlayItalicToggle.Click += OverlayItalic_Click;
+        OverlayAlignSegmented.SelectionChanged += OverlayAlignSegmented_SelectionChanged;
+
+        foreach (var child in OverlayAnchorGrid.Children)
+        {
+            if (child is RadioButton cell)
+                cell.Checked += OverlayAnchor_Checked;
+        }
+
+        OverlayWidthSlider.ValueChanged += OverlayWidthSlider_ValueChanged;
+        OverlayMarginSlider.ValueChanged += OverlayMarginSlider_ValueChanged;
+        OverlayBgTypeCombo.SelectionChanged += OverlayBgTypeCombo_SelectionChanged;
+        OverlayBgColorPicker.ColorChanged += OverlayBgColorPicker_ColorChanged;
+
+        // OverlayBgOpacitySlider / OverlayCornerRadiusSlider / OverlayPaddingSlider all live
+        // in the shared OverlayBoxPanel (see its XAML comment) and drive the same "box"
+        // properties regardless of which background type is selected, so they share one
+        // handler — mirroring how Scene's GradAngleSlider/PaddingSlider/CornerRadiusSlider
+        // share StyleSlider_ValueChanged.
+        OverlayBgOpacitySlider.ValueChanged += OverlayBoxSlider_ValueChanged;
+        OverlayCornerRadiusSlider.ValueChanged += OverlayBoxSlider_ValueChanged;
+        OverlayPaddingSlider.ValueChanged += OverlayBoxSlider_ValueChanged;
+
+        // OverlayBlurAmountSlider / OverlayBlurTintSlider likewise share one handler.
+        OverlayBlurAmountSlider.ValueChanged += OverlayBlurSlider_ValueChanged;
+        OverlayBlurTintSlider.ValueChanged += OverlayBlurSlider_ValueChanged;
+
+        OverlayScrimDirectionCombo.SelectionChanged += OverlayScrimDirectionCombo_SelectionChanged;
+        OverlayScrimStrengthSlider.ValueChanged += OverlayScrimStrengthSlider_ValueChanged;
+        OverlayOutlineWidthSlider.ValueChanged += OverlayOutlineWidthSlider_ValueChanged;
+        OverlayOutlineColorPicker.ColorChanged += OverlayOutlineColorPicker_ColorChanged;
+        OverlayShadowStrengthSlider.ValueChanged += OverlayShadowStrengthSlider_ValueChanged;
+        OverlayAccentColorPicker.ColorChanged += OverlayAccentColorPicker_ColorChanged;
+        OverlayAccentThicknessSlider.ValueChanged += OverlayAccentThicknessSlider_ValueChanged;
+        OverlayAccentSideCombo.SelectionChanged += OverlayAccentSideCombo_SelectionChanged;
+        OverlayEnabledToggle.Toggled += OverlayEnabledToggle_Toggled;
+        RemoveOverlayButton.Click += RemoveTextOverlay_Click;
     }
 }

@@ -2,6 +2,7 @@ namespace Musio.Core.Timeline;
 
 using System.Text.Json.Serialization;
 using Musio.Core.Processing;
+using Windows.Foundation;
 
 /// <summary>
 /// Base class for all segments on the output timeline.
@@ -11,10 +12,22 @@ using Musio.Core.Processing;
 /// <remarks>
 /// The <c>$kind</c> discriminators are part of the on-disk <c>.musio</c> format. Renaming
 /// one silently breaks every project file already saved with it.
+/// <para>
+/// A retired <c>VideoSegment.TextOverlays</c> property (and its <c>TextOverlay</c> record)
+/// once existed here and was removed when text overlays moved to
+/// <see cref="TimelineModel.TextOverlays"/>. That was safe to drop outright rather than
+/// migrate: nothing in the app ever wrote to it — no producer, and its renderer entry point
+/// had no call sites — so no saved project can carry overlay data in that shape. Old files
+/// do still contain the serialized empty array, which deserialization ignores as an unknown
+/// member; <c>MusioPackageTests.Open_ToleratesLegacyPerSegmentTextOverlays</c> pins that,
+/// so opting <see cref="MusioPackage.JsonOptions"/> into strict member handling would fail
+/// there first rather than in the field.
+/// </para>
 /// </remarks>
 [JsonDerivedType(typeof(VideoSegment), "video")]
 [JsonDerivedType(typeof(TextSlideSegment), "textSlide")]
 [JsonDerivedType(typeof(CameraSegment), "camera")]
+[JsonDerivedType(typeof(TextOverlaySegment), "textOverlay")]
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "$kind")]
 public abstract record TimelineSegment
 {
@@ -86,9 +99,6 @@ public record VideoSegment : TimelineSegment
 
     /// <summary>Screen-absolute Y offset of the captured area.</summary>
     public int CropOffsetY { get; init; }
-
-    /// <summary>Text overlays rendered on top of this video segment.</summary>
-    public List<TextOverlay> TextOverlays { get; init; } = [];
 
     /// <summary>
     /// Per-segment frame style (background) override. When null, the global
@@ -322,29 +332,228 @@ public enum SlideTextAlignment
 }
 
 /// <summary>
-/// A text element overlaid on top of a <see cref="VideoSegment"/> for a time range.
-/// Positions are normalized (0..1) relative to the output canvas.
+/// Where a <see cref="TextOverlaySegment"/>'s text box is anchored on the output canvas.
+/// Every value except <see cref="Custom"/> hugs the named edge/corner (inset by
+/// <see cref="TextOverlaySegment.MarginFraction"/>) regardless of output size, so overlays
+/// stay put across different export resolutions. <see cref="Custom"/> is used once the
+/// user drags the overlay to a specific spot on the preview.
 /// </summary>
-public record TextOverlay
+public enum TextOverlayAnchor
 {
-    public string Id { get; init; } = Guid.NewGuid().ToString("N");
+    TopLeft, TopCenter, TopRight,
+    MiddleLeft, MiddleCenter, MiddleRight,
+    BottomLeft, BottomCenter, BottomRight,
+
+    /// <summary>Freely positioned via X/Y (set when the user drags on the preview).</summary>
+    Custom,
+}
+
+/// <summary>
+/// How a <see cref="TextOverlaySegment"/>'s background is drawn behind its text.
+/// Every mode is clipped to the text box itself (never the full frame) so the
+/// recording underneath continues to show through everywhere else.
+/// </summary>
+public enum TextOverlayBackground
+{
+    /// <summary>No background; the text is drawn directly over the video.</summary>
+    None,
+
+    /// <summary>A flat, semi-transparent fill behind the text.</summary>
+    Solid,
+
+    /// <summary>A blurred sample of the video behind the text, plus a legibility tint.</summary>
+    Blur,
+
+    /// <summary>A directional gradient scrim fading from the text box edge.</summary>
+    GradientScrim,
+
+    /// <summary>An outline/drop-shadow around the text glyphs instead of a filled box.</summary>
+    OutlineShadow,
+
+    /// <summary>A thin accent bar along one side of the text box.</summary>
+    AccentBar,
+}
+
+/// <summary>Direction a <see cref="TextOverlayBackground.GradientScrim"/> fades from.</summary>
+public enum ScrimDirection { Bottom, Top, Left, Right }
+
+/// <summary>Which side of the text box an <see cref="TextOverlayBackground.AccentBar"/> is drawn on.</summary>
+public enum AccentSide { Left, Right, Top, Bottom }
+
+/// <summary>
+/// A time-ranged animated text overlay segment living on its own track, drawn on top of
+/// the video rather than replacing it (unlike <see cref="TextSlideSegment"/>). Like
+/// <see cref="CameraSegment"/>, its range is expressed in <b>source-video time</b>
+/// (<see cref="TimelineSegment.Start"/>/<see cref="TimelineSegment.Duration"/> are reused
+/// as the source in/out range) so it stays aligned with the recording and survives video
+/// reorder/trim through the same source↔output mapping. The overlay is shown only while
+/// the playhead's source time is inside an <see cref="Enabled"/> segment. Its background is
+/// always clipped to the text box, so the recording continues to show through everywhere else.
+/// </summary>
+public record TextOverlaySegment : TimelineSegment
+{
     public string Text { get; set; } = "Text";
 
-    /// <summary>Horizontal position (0 = left, 0.5 = center, 1 = right).</summary>
+    /// <summary>Whether the overlay is shown for this segment's range.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Which recording's source-time space this overlay was authored against. Null means
+    /// the primary recording. Mirrors <c>ZoomKeyframe.SourceVideoFilePath</c> so the same
+    /// per-recording ownership rule (see <c>SegmentFrameComposer.BelongsToSource</c>)
+    /// applies to overlays.
+    /// </summary>
+    public string? SourceVideoFilePath { get; init; }
+
+    /// <summary>
+    /// Reuses the existing <see cref="TextSlideAnimation"/> enum; one animation drives both
+    /// the entrance and the matching exit (the renderer already works this way for slides).
+    /// </summary>
+    public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
+
+    // ── Placement ──
+
+    /// <summary>Which edge/corner (or <see cref="TextOverlayAnchor.Custom"/>) the text box hugs.</summary>
+    public TextOverlayAnchor Anchor { get; set; } = TextOverlayAnchor.BottomCenter;
+
+    /// <summary>Normalized horizontal centre (0..1). Authoritative only when <see cref="Anchor"/> is <see cref="TextOverlayAnchor.Custom"/>.</summary>
     public double X { get; set; } = 0.5;
 
-    /// <summary>Vertical position (0 = top, 0.5 = center, 1 = bottom).</summary>
-    public double Y { get; set; } = 0.5;
+    /// <summary>Normalized vertical centre (0..1). Authoritative only when <see cref="Anchor"/> is <see cref="TextOverlayAnchor.Custom"/>.</summary>
+    public double Y { get; set; } = 0.85;
 
+    /// <summary>
+    /// Width of the overlay's box as a fraction of the output width. The box is an explicit
+    /// rectangle rather than something that hugs the measured text: that makes wrapping and
+    /// overflow predictable, lets the box be resized directly on the preview, and — because
+    /// the geometry is then pure arithmetic — guarantees the editor's drag/resize region and
+    /// the renderer's box agree exactly instead of drifting apart through two separate text
+    /// measurements.
+    /// </summary>
+    public double WidthFraction { get; set; } = 0.6;
+
+    /// <summary>
+    /// Height of the overlay's box as a fraction of the output height. See
+    /// <see cref="WidthFraction"/> for why the box is explicit. Text is wrapped to the box
+    /// width and centred vertically within this height.
+    /// </summary>
+    public double HeightFraction { get; set; } = 0.14;
+
+    /// <summary>Inset from the frame edge used by every non-<see cref="TextOverlayAnchor.Custom"/> anchor.</summary>
+    public double MarginFraction { get; set; } = 0.06;
+
+    // ── Typography ──
     public string FontFamily { get; set; } = "Segoe UI";
-    public double FontSize { get; set; } = 48;
+    public double FontSize { get; set; } = 42;
     public bool IsBold { get; set; }
     public bool IsItalic { get; set; }
     public string TextColor { get; set; } = "#FFFFFF";
-    public string BackgroundColor { get; set; } = "#00000000"; // transparent default
-    public TimeSpan StartTime { get; set; }
-    public TimeSpan Duration { get; set; } = TimeSpan.FromSeconds(3);
-    public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.FadeIn;
+    public SlideTextAlignment TextAlignment { get; set; } = SlideTextAlignment.Center;
+
+    // ── Background (clipped to the text box so the video shows through) ──
+    public TextOverlayBackground Background { get; set; } = TextOverlayBackground.Solid;
+    public string BackgroundColor { get; set; } = "#000000";
+
+    /// <summary>Opacity of the background fill/tint, in 0..1.</summary>
+    public double BackgroundOpacity { get; set; } = 0.55;
+
+    /// <summary>Corner radius of the text box, in output px at 1080p-ish scale.</summary>
+    public double CornerRadius { get; set; } = 12;
+
+    /// <summary>Padding around the text as a fraction of <see cref="FontSize"/>.</summary>
+    public double PaddingScale { get; set; } = 0.35;
+
+    // Blur background
+    /// <summary>Gaussian blur sigma applied to the video sample behind the text.</summary>
+    public double BlurAmount { get; set; } = 12;
+
+    /// <summary>Legibility tint opacity drawn over the blur.</summary>
+    public double BlurTintOpacity { get; set; } = 0.25;
+
+    // Gradient scrim background
+    public ScrimDirection ScrimDirection { get; set; } = ScrimDirection.Bottom;
+
+    /// <summary>Strength of the gradient scrim, in 0..1.</summary>
+    public double ScrimStrength { get; set; } = 0.7;
+
+    // Outline / shadow background
+    public double OutlineWidth { get; set; } = 2;
+    public string OutlineColor { get; set; } = "#000000";
+
+    /// <summary>Strength of the drop shadow, in 0..1.</summary>
+    public double ShadowStrength { get; set; } = 0.6;
+
+    // Accent bar background
+    public string AccentColor { get; set; } = "#0078D4";
+    public double AccentThickness { get; set; } = 5;
+    public AccentSide AccentSide { get; set; } = AccentSide.Left;
+
+    /// <summary>
+    /// The overlay's box in output pixels: the single source of truth for its geometry,
+    /// shared by the renderer (which draws the background and lays the text out inside it)
+    /// and by the editor (which positions the drag/resize region over it). Both callers go
+    /// through here so the on-screen box and the interactive handles cannot drift apart —
+    /// they previously each measured the text themselves and disagreed.
+    /// The box is clamped to stay inside the frame.
+    /// </summary>
+    public Rect ComputeBox(int frameWidth, int frameHeight)
+    {
+        if (frameWidth <= 0 || frameHeight <= 0) return default;
+
+        double wf = Math.Clamp(WidthFraction, 0.02, 1.0);
+        double hf = Math.Clamp(HeightFraction, 0.02, 1.0);
+
+        double boxW = wf * frameWidth;
+        double boxH = hf * frameHeight;
+
+        var (nx, ny) = ResolveCenter(Anchor, X, Y, MarginFraction, wf, hf);
+
+        double left = Math.Clamp(nx * frameWidth - boxW / 2, 0, Math.Max(0, frameWidth - boxW));
+        double top = Math.Clamp(ny * frameHeight - boxH / 2, 0, Math.Max(0, frameHeight - boxH));
+
+        return new Rect(left, top, boxW, boxH);
+    }
+
+    /// <summary>
+    /// Resolves the normalized (0..1) centre of the overlay's text box for a given anchor.
+    /// For <see cref="TextOverlayAnchor.Custom"/> the stored X/Y are returned unchanged (clamped
+    /// into range); every other anchor is derived from <paramref name="margin"/> so the overlay
+    /// hugs the requested edge/corner regardless of output size. <paramref name="boxWidthFraction"/>/
+    /// <paramref name="boxHeightFraction"/> are the text box's normalized extents, needed so an
+    /// edge-anchored box is inset by half its own size plus the margin (otherwise the box would
+    /// hang off the frame). The result is always clamped into <c>[0,1]</c>, including when the box
+    /// is larger than the frame (which would otherwise produce a nonsensical centre).
+    /// </summary>
+    public static (double X, double Y) ResolveCenter(
+        TextOverlayAnchor anchor, double x, double y, double margin,
+        double boxWidthFraction, double boxHeightFraction)
+    {
+        if (anchor == TextOverlayAnchor.Custom)
+            return (Math.Clamp(x, 0.0, 1.0), Math.Clamp(y, 0.0, 1.0));
+
+        double halfW = boxWidthFraction / 2.0;
+        double halfH = boxHeightFraction / 2.0;
+
+        double resolvedX = anchor switch
+        {
+            TextOverlayAnchor.TopLeft or TextOverlayAnchor.MiddleLeft or TextOverlayAnchor.BottomLeft
+                => margin + halfW,
+            TextOverlayAnchor.TopRight or TextOverlayAnchor.MiddleRight or TextOverlayAnchor.BottomRight
+                => 1.0 - margin - halfW,
+            _ => 0.5,
+        };
+
+        double resolvedY = anchor switch
+        {
+            TextOverlayAnchor.TopLeft or TextOverlayAnchor.TopCenter or TextOverlayAnchor.TopRight
+                => margin + halfH,
+            TextOverlayAnchor.BottomLeft or TextOverlayAnchor.BottomCenter or TextOverlayAnchor.BottomRight
+                => 1.0 - margin - halfH,
+            _ => 0.5,
+        };
+
+        return (Math.Clamp(resolvedX, 0.0, 1.0), Math.Clamp(resolvedY, 0.0, 1.0));
+    }
 }
 
 /// <summary>

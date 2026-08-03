@@ -35,7 +35,7 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate }
     private DragMode _dragMode = DragMode.None;
 
     // ── Primary-track (video / text slide) segment drag state ──
@@ -346,16 +346,112 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public void InvalidateAllCanvases()
     {
+        UpdateTrackVisibility();
+
         TimeRulerCanvas?.Invalidate();
         VideoTrackCanvas?.Invalidate();
         CursorTrackCanvas?.Invalidate();
         ZoomTrackCanvas?.Invalidate();
         CameraTrackCanvas?.Invalidate();
+        TextTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
         // Durations / zoom / scroll may have changed with the tracks, which moves the
         // playhead's pixel position even when the time itself is unchanged.
         UpdatePlayheadVisual();
+    }
+
+    // --- Adaptive track visibility ---
+
+    // Natural heights of the tracks that are only shown when the recording actually has
+    // data for them. Kept here rather than read back from the RowDefinition because a
+    // collapsed row's height is zeroed, so the original value would be lost.
+    private const double CursorRowHeight = 40;
+    private const double CameraRowHeight = 44;
+    private const double AudioRowHeight = 40;
+    private const double MicRowHeight = 40;
+
+    /// <summary>
+    /// Collapses the tracks that visualise recorded media the current project does not
+    /// have — cursor, camera, system audio and microphone — so the timeline only spends
+    /// vertical space on tracks with something to show. Video, zoom and text always stay
+    /// visible: those are authoring surfaces the user creates content on (you drag on the
+    /// zoom track to make a zoom), so hiding them when empty would hide the feature.
+    /// A collapsed row is zero-height <em>and</em> its label/canvas are collapsed, so it
+    /// cannot be hit-tested or draw a sliver.
+    /// </summary>
+    private void UpdateTrackVisibility()
+    {
+        // The XAML may not be realised yet when the model is assigned during construction.
+        if (CursorRow is null || AudioRow is null) return;
+
+        var model = Model;
+
+        bool hasCursor = model is not null &&
+            (model.CursorData?.Samples.Count > 0 ||
+             _trackVisualsByFile.Values.Any(v => v.Cursor?.Samples.Count > 0));
+
+        bool hasCamera = model is not null &&
+            (model.CameraSegments.Count > 0 ||
+             model.Segments.OfType<VideoSegment>().Any(s => !string.IsNullOrEmpty(s.WebcamFilePath)) ||
+             _trackVisualsByFile.Values.Any(v => v.HasCamera));
+
+        bool hasSystemAudio = model is not null &&
+            (model.SystemAudioWaveformSamples is { Length: > 0 } ||
+             _trackVisualsByFile.Values.Any(v => v.SystemWaveform is { Length: > 0 }) ||
+             HasAudioFile(model, mic: false));
+
+        bool hasMicAudio = model is not null &&
+            (model.MicAudioWaveformSamples is { Length: > 0 } ||
+             _trackVisualsByFile.Values.Any(v => v.MicWaveform is { Length: > 0 }) ||
+             HasAudioFile(model, mic: true));
+
+        ApplyTrackVisibility(CursorRow, CursorTrackLabel, CursorTrackCanvas, hasCursor, CursorRowHeight);
+        ApplyTrackVisibility(CameraRow, CameraTrackLabel, CameraTrackCanvas, hasCamera, CameraRowHeight);
+        ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
+        ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
+    }
+
+    /// <summary>
+    /// Whether any segment carries an audio file of the requested kind. A waveform alone is
+    /// not a sufficient test for "this project has audio": waveform generation only
+    /// recognises the recorder's own <c>system_*</c>/<c>mic_*</c> files, so an imported
+    /// video — whose extracted track is just <c>audio.wav</c> — has real, audible audio but
+    /// no waveform. Keying visibility solely off the waveform would hide that audio and its
+    /// mute button entirely. Anything not named <c>mic_*</c> counts as system audio, which
+    /// matches how the editor classifies these files when it builds the waveforms.
+    /// </summary>
+    private static bool HasAudioFile(TimelineModel model, bool mic)
+    {
+        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        {
+            foreach (var path in seg.AudioFilePaths)
+            {
+                if (string.IsNullOrEmpty(path)) continue;
+                bool isMic = Path.GetFileName(path).StartsWith("mic_", StringComparison.OrdinalIgnoreCase);
+                if (isMic == mic) return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Shows or collapses one optional track. Writing the row height unconditionally would
+    /// dirty layout on every repaint, so this only touches the tree when the state actually
+    /// changes.
+    /// </summary>
+    private static void ApplyTrackVisibility(
+        RowDefinition row, FrameworkElement? label, FrameworkElement? canvas, bool visible, double height)
+    {
+        var target = visible ? new GridLength(height) : new GridLength(0);
+        if (row.Height != target)
+            row.Height = target;
+
+        var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (label is not null && label.Visibility != visibility)
+            label.Visibility = visibility;
+        if (canvas is not null && canvas.Visibility != visibility)
+            canvas.Visibility = visibility;
     }
 
     // --- Filmstrip Thumbnail Management ---
@@ -2969,6 +3065,477 @@ public sealed partial class TimelineControl : UserControl
             CameraSegmentSelected?.Invoke(this, hitId);
             CameraSegmentRemoveRequested?.Invoke(this, hitId);
         }
+    }
+
+    // ─────────────────────────── Text Overlay Track ───────────────────────────
+    // Unlike the camera track — whose CameraSegment ranges are always primary source
+    // time (see XToPrimarySourceTime) — a TextOverlaySegment explicitly supports
+    // per-recording ownership via SourceVideoFilePath (null = primary, otherwise an
+    // appended/imported recording), exactly like ZoomKeyframe. Export
+    // (SegmentFrameComposer.SelectTextOverlays) and preview (TimelineModel
+    // .GetActiveTextOverlays) already honour that per-recording scoping, so this track
+    // must too: every draw/hit-test/move/resize/create below routes through the owning
+    // VideoSegment via OwningSegmentForTextOverlay/TextOverlayTimeToX, mirroring the
+    // zoom track's OwningSegmentForKeyframe/ZoomKeyframeTimeToX rather than the camera
+    // track's SourceTimeToX/XToPrimarySourceTime.
+
+    private const float TextOverlayVerticalPadding = 6f;
+
+    private string? _selectedTextOverlayId;
+    private double _textOverlayDragStartX = double.NaN;
+    private double _textOverlayDragCurrentX = double.NaN;
+    private TimeSpan _textOverlayDragOriginalStart;
+    private TimeSpan _textOverlayDragOriginalEnd;
+    private bool _textOverlayCreateActive;
+    private TimeSpan _textOverlayCreateStart;
+    private TimeSpan _textOverlayCreateEnd;
+
+    /// <summary>Source file a text overlay is being drag-to-created against, set once at
+    /// press-time by <see cref="XToSegmentVideoTime"/> (null = primary). Mirrors
+    /// <see cref="_zoomCreateFile"/>.</summary>
+    private string? _textOverlayCreateFile;
+
+    /// <summary>Id of the selected text overlay, or null.</summary>
+    public string? SelectedTextOverlayId
+    {
+        get => _selectedTextOverlayId;
+        set { _selectedTextOverlayId = value; TextTrackCanvas?.Invalidate(); }
+    }
+
+    public void ClearTextOverlaySelection()
+    {
+        if (_selectedTextOverlayId is not null)
+        {
+            _selectedTextOverlayId = null;
+            TextOverlaySelected?.Invoke(this, null);
+            TextTrackCanvas?.Invalidate();
+        }
+    }
+
+    public event EventHandler<string?>? TextOverlaySelected;
+    /// <summary>
+    /// Raised when a new overlay is created, reporting the source file it was created
+    /// against (null = primary), so it's tagged against the correct recording just like
+    /// <see cref="ZoomSegmentCreated"/>.
+    /// </summary>
+    public event EventHandler<(TimeSpan Start, TimeSpan End, string? SourceVideoFilePath)>? TextOverlayCreated;
+    public event EventHandler<(string Id, TimeSpan NewStart)>? TextOverlayMoved;
+    public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? TextOverlayResized;
+    public event EventHandler<string>? TextOverlayRemoveRequested;
+
+    /// <summary>Source file of the currently selected text overlay (null = primary).
+    /// Mirrors <see cref="SelectedZoomKeyframeFile"/>.</summary>
+    private string? SelectedTextOverlaySourceFile =>
+        Model?.TextOverlays.FirstOrDefault(o => o.Id == _selectedTextOverlayId)?.SourceVideoFilePath;
+
+    private void TextTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        var ds = args.DrawingSession;
+        var model = Model;
+        float w = (float)sender.ActualWidth;
+        float h = (float)sender.ActualHeight;
+
+        ds.Clear(ZoomTrackBackground);
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0) return;
+
+        // ── Amber/orange palette — kept visually distinct from the green camera track ──
+        var fill = Color.FromArgb(230, 245, 166, 35);
+        var fillSelected = Color.FromArgb(245, 255, 196, 80);
+        var fillDisabled = Color.FromArgb(120, 130, 125, 115);
+        var border = Color.FromArgb(255, 196, 128, 20);
+        var borderSelected = Color.FromArgb(255, 255, 235, 190);
+        var handleColor = Color.FromArgb(255, 255, 255, 255);
+        var textColor = Color.FromArgb(255, 255, 255, 255);
+
+        // Unlike the camera track, there is no per-video-segment "presence" bar here —
+        // text overlays don't correspond to a source recording, only to user-created
+        // TextOverlaySegments — so we go straight to drawing the overlay blocks.
+        foreach (var seg in model.TextOverlays)
+        {
+            float x1 = (float)GetTextOverlayStartX(seg);
+            float x2 = (float)GetTextOverlayEndX(seg);
+            if (float.IsNaN(x1) || float.IsNaN(x2)) continue; // overlay's recording isn't on the timeline
+            if (x2 < 0 || x1 > w) continue;
+
+            float segW = Math.Max(2, x2 - x1);
+            float segY = TextOverlayVerticalPadding;
+            float segH = h - TextOverlayVerticalPadding * 2;
+            bool isSelected = seg.Id == _selectedTextOverlayId;
+
+            using var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, 4, 4);
+            ds.FillGeometry(rect, !seg.Enabled ? fillDisabled : isSelected ? fillSelected : fill);
+            ds.DrawGeometry(rect, isSelected ? borderSelected : border, isSelected ? 1.5f : 1f);
+
+            if (segW > 20)
+            {
+                // Label each block with the overlay's own text (single line, ellipsised
+                // when it doesn't fit) so the track is scannable without opening the
+                // property pane for every block, falling back to "Text" when empty.
+                string baseText = string.IsNullOrWhiteSpace(seg.Text) ? "Text" : seg.Text;
+                string label = seg.Enabled ? baseText : baseText + " (off)";
+                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                {
+                    FontSize = 11,
+                    FontFamily = "Segoe UI",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
+                };
+                ds.DrawText(label, new Rect(x1 + 6, segY, segW - 12, segH), textColor, fmt);
+            }
+
+            if (isSelected)
+            {
+                float handleW = 3, handleH = segH * 0.5f, handleY = segY + (segH - handleH) / 2;
+                ds.FillRoundedRectangle(x1 + 1, handleY, handleW, handleH, 1, 1, handleColor);
+                ds.FillRoundedRectangle(x2 - handleW - 1, handleY, handleW, handleH, 1, 1, handleColor);
+            }
+        }
+
+        // Create preview
+        if (_textOverlayCreateActive && _dragMode == DragMode.TextOverlayCreate)
+        {
+            float cx1 = (float)TextOverlayCreateTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd);
+            float cx2 = (float)TextOverlayCreateTimeToX(_textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart);
+            float cw = Math.Max(2, cx2 - cx1);
+            float cy = TextOverlayVerticalPadding;
+            float ch = h - TextOverlayVerticalPadding * 2;
+            using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
+            ds.FillGeometry(preview, Color.FromArgb(120, 245, 166, 35));
+            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+        }
+    }
+
+    /// <summary>
+    /// Finds the video segment that owns a text overlay: the segment matching the
+    /// overlay's source file whose source range contains its Start (falling back to the
+    /// first file-matching segment). Mirrors <see cref="OwningSegmentForKeyframe"/>
+    /// exactly, using Start as the anchor since a <see cref="TextOverlaySegment"/> (unlike
+    /// a <see cref="ZoomKeyframe"/>) has no single Timestamp to anchor on.
+    /// </summary>
+    private VideoSegment? OwningSegmentForTextOverlay(TextOverlaySegment overlay)
+    {
+        var model = Model;
+        if (model is null) return null;
+
+        VideoSegment? firstMatch = null;
+        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        {
+            bool match = overlay.SourceVideoFilePath is null
+                ? (model.PrimaryVideoFilePath is null ||
+                   string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase))
+                : string.Equals(seg.VideoFilePath, overlay.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+            if (!match) continue;
+
+            firstMatch ??= seg;
+            var local = overlay.Start - seg.SourceStart;
+            if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
+                return seg;
+        }
+        return firstMatch;
+    }
+
+    /// <summary>
+    /// Maps a text overlay's source time to an output X by routing through the video
+    /// segment that owns it (primary or appended), mirroring
+    /// <see cref="ZoomKeyframeTimeToX"/>. Both edges of an overlay map through the same
+    /// owning segment so the block renders at its true width. Returns NaN when no
+    /// segment owns the overlay (its recording isn't on the timeline — the block should
+    /// not be drawn); falls back to the legacy whole-timeline mapping when the timeline
+    /// has no segments.
+    /// </summary>
+    private double TextOverlayTimeToX(TextOverlaySegment overlay, TimeSpan sourceTime)
+    {
+        var model = Model;
+        if (model is null) return double.NaN;
+        if (model.Segments.Count == 0) return TimeToX(sourceTime);
+
+        var seg = OwningSegmentForTextOverlay(overlay);
+        if (seg is null) return double.NaN;
+
+        var local = sourceTime - seg.SourceStart;
+        var outLocal = seg.SpeedFactor != 0
+            ? TimeSpan.FromTicks((long)(local.Ticks / seg.SpeedFactor))
+            : local;
+        return TimeToX(seg.Start + outLocal);
+    }
+
+    /// <summary>Maps a create-time (in <see cref="_textOverlayCreateFile"/>'s source
+    /// space) to X, mirroring <see cref="ZoomCreateTimeToX"/>.</summary>
+    private double TextOverlayCreateTimeToX(TimeSpan sourceTime)
+        => TextOverlayTimeToX(
+            new TextOverlaySegment { SourceVideoFilePath = _textOverlayCreateFile, Start = _textOverlayCreateStart },
+            sourceTime);
+
+    private double GetTextOverlayStartX(TextOverlaySegment seg)
+    {
+        if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
+        {
+            if (_dragMode == DragMode.TextOverlayBody)
+                return TextOverlayTimeToX(seg, _textOverlayDragOriginalStart) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+            if (_dragMode == DragMode.TextOverlayLeftEdge)
+                return _textOverlayDragCurrentX;
+        }
+        return TextOverlayTimeToX(seg, seg.Start);
+    }
+
+    private double GetTextOverlayEndX(TextOverlaySegment seg)
+    {
+        if (seg.Id == _selectedTextOverlayId && !double.IsNaN(_textOverlayDragCurrentX))
+        {
+            if (_dragMode == DragMode.TextOverlayBody)
+                return TextOverlayTimeToX(seg, _textOverlayDragOriginalEnd) + (_textOverlayDragCurrentX - _textOverlayDragStartX);
+            if (_dragMode == DragMode.TextOverlayRightEdge)
+                return _textOverlayDragCurrentX;
+        }
+        return TextOverlayTimeToX(seg, seg.End);
+    }
+
+    private (string? Id, SegmentHitTarget Target) HitTestTextOverlay(double posX, double posY)
+    {
+        var model = Model;
+        if (model is null) return (null, SegmentHitTarget.None);
+
+        float h = (float)TextTrackCanvas.ActualHeight;
+        float segY = TextOverlayVerticalPadding;
+        float segH = h - TextOverlayVerticalPadding * 2;
+        if (posY < segY || posY > segY + segH) return (null, SegmentHitTarget.None);
+
+        for (int i = model.TextOverlays.Count - 1; i >= 0; i--)
+        {
+            var seg = model.TextOverlays[i];
+            float x1 = (float)TextOverlayTimeToX(seg, seg.Start);
+            float x2 = (float)TextOverlayTimeToX(seg, seg.End);
+            if (float.IsNaN(x1) || float.IsNaN(x2)) continue; // overlay's recording isn't on the timeline
+            if (posX < x1 || posX > x2) continue;
+
+            if (posX - x1 <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.RightEdge);
+            return (seg.Id, SegmentHitTarget.Body);
+        }
+        return (null, SegmentHitTarget.None);
+    }
+
+    private void TextTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+        var (hitId, target) = HitTestTextOverlay(pos.X, pos.Y);
+
+        if (hitId is not null)
+        {
+            SelectedTextOverlayId = hitId;
+            TextOverlaySelected?.Invoke(this, hitId);
+
+            var seg = Model?.TextOverlays.FirstOrDefault(s => s.Id == hitId);
+            if (seg is null) return;
+
+            _textOverlayDragStartX = pos.X;
+            _textOverlayDragCurrentX = pos.X;
+            _textOverlayDragOriginalStart = seg.Start;
+            _textOverlayDragOriginalEnd = seg.End;
+
+            _dragMode = target switch
+            {
+                SegmentHitTarget.LeftEdge => DragMode.TextOverlayLeftEdge,
+                SegmentHitTarget.RightEdge => DragMode.TextOverlayRightEdge,
+                _ => DragMode.TextOverlayBody,
+            };
+            SetCursor(target is SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge
+                ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeAll);
+            canvas.CapturePointer(e.Pointer);
+        }
+        else
+        {
+            if (_selectedTextOverlayId is not null)
+            {
+                SelectedTextOverlayId = null;
+                TextOverlaySelected?.Invoke(this, null);
+            }
+            PlayheadPosition = XToTime(pos.X);
+
+            // Capture the source file under the cursor (like _zoomCreateFile) so an
+            // overlay created over an appended clip belongs to that clip, not the
+            // primary recording.
+            var start = XToSegmentVideoTime(pos.X, out _textOverlayCreateFile);
+            if (start is null)
+            {
+                // No video segment anywhere to attach a text overlay to. Reject the
+                // gesture, leaving no transient drag state.
+                _textOverlayCreateFile = null;
+                _dragMode = DragMode.None;
+                return;
+            }
+
+            _textOverlayDragStartX = pos.X;
+            _textOverlayDragCurrentX = pos.X;
+            _textOverlayCreateActive = false;
+            _textOverlayCreateStart = start.Value;
+            _dragMode = DragMode.TextOverlayCreate;
+            canvas.CapturePointer(e.Pointer);
+        }
+    }
+
+    private void TextTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+
+        switch (_dragMode)
+        {
+            case DragMode.TextOverlayBody:
+                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeAll);
+                InvalidateAll();
+                break;
+            case DragMode.TextOverlayLeftEdge:
+            case DragMode.TextOverlayRightEdge:
+                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                InvalidateAll();
+                break;
+            case DragMode.TextOverlayCreate:
+                if (Math.Abs(pos.X - _textOverlayDragStartX) >= ZoomCreateDragThreshold)
+                {
+                    // Stay anchored to _textOverlayCreateFile's source domain (set once
+                    // at press-time), same rationale as the zoom track's
+                    // ZoomSegmentCreate case — re-resolving whatever segment is under
+                    // the pointer now would mix a different recording's timestamp into
+                    // this (still file-tagged) overlay.
+                    var end = XToKeyframeFileTime(pos.X, _textOverlayCreateFile);
+                    if (end is not null)
+                    {
+                        _textOverlayCreateActive = true;
+                        _textOverlayCreateEnd = end.Value;
+                        InvalidateAll();
+                    }
+                    // else: pointer is outside every segment for _textOverlayCreateFile
+                    // with none to clamp to — keep the previous _textOverlayCreateEnd.
+                }
+                else
+                {
+                    PlayheadPosition = XToTime(pos.X);
+                }
+                break;
+            case DragMode.None:
+                var (_, target) = HitTestTextOverlay(pos.X, pos.Y);
+                SetCursor(target switch
+                {
+                    SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge => InputSystemCursorShape.SizeWestEast,
+                    SegmentHitTarget.Body => InputSystemCursorShape.Hand,
+                    _ => InputSystemCursorShape.Arrow,
+                });
+                break;
+        }
+    }
+
+    private void TextTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        switch (_dragMode)
+        {
+            case DragMode.TextOverlayBody when _selectedTextOverlayId is not null:
+            {
+                double deltaX = _textOverlayDragCurrentX - _textOverlayDragStartX;
+                if (Math.Abs(deltaX) > 1)
+                {
+                    // Convert the dragged X back to a source time in the OWNING
+                    // overlay's own recording's domain, not the primary's — mirrors the
+                    // zoom track's ZoomSegmentBody case exactly.
+                    var file = SelectedTextOverlaySourceFile;
+                    var startTime = XToKeyframeFileTime(_textOverlayDragStartX, file);
+                    var movedTime = XToKeyframeFileTime(_textOverlayDragStartX + deltaX, file);
+                    if (startTime is not null && movedTime is not null)
+                    {
+                        var newStart = _textOverlayDragOriginalStart + (movedTime.Value - startTime.Value);
+                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                        TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
+                    }
+                    // else: this overlay's recording has no segment on the timeline at all
+                    // — reject the move rather than writing a time from another
+                    // recording's domain into it. (When the pointer merely strays over a
+                    // different clip or a text slide, XToKeyframeFileTime clamps to the
+                    // nearest edge of THIS overlay's own recording, so the move pins to
+                    // the clip boundary instead of jumping sources — same as zoom.)
+                }
+                break;
+            }
+            case DragMode.TextOverlayLeftEdge when _selectedTextOverlayId is not null:
+            {
+                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
+                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalStart)
+                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, true, newEdge.Value));
+                break;
+            }
+            case DragMode.TextOverlayRightEdge when _selectedTextOverlayId is not null:
+            {
+                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
+                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalEnd)
+                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, false, newEdge.Value));
+                break;
+            }
+            case DragMode.TextOverlayCreate when _textOverlayCreateActive:
+            {
+                var start = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd;
+                var end = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart;
+                if ((end - start) >= TrimTextOverlayOperation.MinDuration)
+                    TextOverlayCreated?.Invoke(this, (start, end, _textOverlayCreateFile));
+                _textOverlayCreateActive = false;
+                break;
+            }
+        }
+
+        _textOverlayDragStartX = double.NaN;
+        _textOverlayDragCurrentX = double.NaN;
+        _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
+        canvas.ReleasePointerCapture(e.Pointer);
+        InvalidateAll();
+    }
+
+    private void TextTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+        var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
+        if (hitId is not null)
+        {
+            SelectedTextOverlayId = hitId;
+            TextOverlaySelected?.Invoke(this, hitId);
+            TextOverlayRemoveRequested?.Invoke(this, hitId);
+        }
+    }
+
+    /// <summary>
+    /// Double-clicking empty track space creates a default 3-second overlay starting at
+    /// the clicked source time. The camera track only supports drag-to-create, but a text
+    /// overlay's whole point is its wording, so this gives users a one-click way to drop
+    /// a default block down and then edit its text in the property pane — the primary
+    /// discoverable way to add an overlay. Double-clicking an existing block is a no-op
+    /// here because selection already happened on the preceding pointer-press.
+    /// </summary>
+    private void TextTrack_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+        var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
+        if (hitId is not null) return;
+
+        // Capture the source file under the cursor (like the drag-to-create gesture)
+        // so a double-click over an appended clip creates an overlay owned by that
+        // clip, not the primary recording.
+        var start = XToSegmentVideoTime(pos.X, out var sourceFile);
+        if (start is null) return;
+
+        var clampedStart = start.Value < TimeSpan.Zero ? TimeSpan.Zero : start.Value;
+        var duration = TimeSpan.FromSeconds(3);
+        if (duration < TrimTextOverlayOperation.MinDuration)
+            duration = TrimTextOverlayOperation.MinDuration;
+
+        TextOverlayCreated?.Invoke(this, (clampedStart, clampedStart + duration, sourceFile));
     }
 
     private void Grid_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
