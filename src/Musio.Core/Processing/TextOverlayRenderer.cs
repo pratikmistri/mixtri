@@ -397,13 +397,27 @@ public class TextOverlayRenderer : IDisposable
     {
         if (_blurBorderEffect is null || _blurGaussianEffect is null || !ReferenceEquals(_blurBorderEffect.Source, scratch))
         {
-            var nextBorder = new BorderEffect
+            // Build both candidates before touching the fields, and dispose whichever one
+            // was already constructed if the other throws — otherwise a failure part-way
+            // through leaks the first effect, which is never reachable to dispose again.
+            BorderEffect? nextBorder = null;
+            GaussianBlurEffect? nextGaussian = null;
+            try
             {
-                Source = scratch,
-                ExtendX = CanvasEdgeBehavior.Clamp,
-                ExtendY = CanvasEdgeBehavior.Clamp,
-            };
-            var nextGaussian = new GaussianBlurEffect { Source = nextBorder, BlurAmount = blurAmount };
+                nextBorder = new BorderEffect
+                {
+                    Source = scratch,
+                    ExtendX = CanvasEdgeBehavior.Clamp,
+                    ExtendY = CanvasEdgeBehavior.Clamp,
+                };
+                nextGaussian = new GaussianBlurEffect { Source = nextBorder, BlurAmount = blurAmount };
+            }
+            catch
+            {
+                nextGaussian?.Dispose();
+                nextBorder?.Dispose();
+                throw;
+            }
 
             _blurGaussianEffect?.Dispose();
             _blurBorderEffect?.Dispose();

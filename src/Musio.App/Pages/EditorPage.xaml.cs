@@ -2540,17 +2540,18 @@ public sealed partial class EditorPage : Page
 
     private void OnTextOverlaySelected(object? sender, string? overlayId)
     {
+        // Finalize any in-flight drag/edit against whatever overlay WAS selected BEFORE
+        // adopting the new selection. Both CommitPosition and CommitText re-sync the
+        // properties pane for the overlay they belong to, so committing after the new
+        // selection had been synced would repaint the pane with the OLD overlay's values
+        // while the NEW one is selected — and the next property edit would then write
+        // those stale values onto the new overlay.
+        FinalizeTextDrag();
+        CommitActiveTextEditIfAny();
+
         // Selection is tracked by the control; property editing is via the model/ops.
         _selectedTextOverlayId = overlayId;
         SyncTextOverlayUI(overlayId);
-
-        // Finalize any in-flight drag/edit against whatever overlay WAS selected before
-        // switching the shared edit canvas to the new selection — FinalizeTextDrag/
-        // CommitActiveTextEditIfAny both act on the OLD _dragTarget/_editTarget reference
-        // captured when that gesture began, so this is safe to call before the active edit
-        // target below is recomputed for the new selection.
-        FinalizeTextDrag();
-        CommitActiveTextEditIfAny();
 
         // Recompute which overlay (if any) the shared edit canvas should track RIGHT NOW,
         // rather than waiting for the next rendered frame (UpdateOverlayEditPreview
@@ -2774,6 +2775,15 @@ public sealed partial class EditorPage : Page
 
     private void DeleteTextOverlay(string overlayId)
     {
+        // Finalize first: an in-flight drag or inline text edit has already mutated the
+        // live overlay and is holding a pre-gesture snapshot to restore before it commits.
+        // Removing the overlay out from under it would strand those mutations — the target
+        // can no longer find the segment, while RemoveTextOverlayOperation captures the
+        // already-mutated object, so undoing the delete would bring back an overlay at a
+        // position or text the user never committed.
+        FinalizeTextDrag();
+        CommitActiveTextEditIfAny();
+
         ViewModel.UndoRedoManager.Execute(new RemoveTextOverlayOperation(overlayId));
         Timeline.ClearTextOverlaySelection();
         _selectedTextOverlayId = null;
@@ -5975,22 +5985,32 @@ public sealed partial class EditorPage : Page
     {
         var model = ViewModel.Model;
         double speed = 1.0;
+        VideoSegment? owning = null;
 
         if (model.Segments.Count > 0 &&
-            model.GetSegmentAtTime(Timeline.PlayheadPosition).Segment is VideoSegment seg &&
-            seg.SpeedFactor > 0)
+            model.GetSegmentAtTime(Timeline.PlayheadPosition).Segment is VideoSegment seg)
         {
-            speed = seg.SpeedFactor;
+            owning = seg;
+            if (seg.SpeedFactor > 0) speed = seg.SpeedFactor;
         }
 
         var offset = TimeSpan.FromTicks((long)(sourceDuration.Ticks / 2 / speed));
         var target = Timeline.PlayheadPosition + offset;
+
+        // Stay inside the clip the overlay belongs to. The overlay is only active over its
+        // own recording, so a midpoint that spills past the clip boundary would land on the
+        // next segment (another recording, or a text slide) where it renders nothing at all
+        // — the very problem this seek exists to avoid. Back off just inside the end so the
+        // playhead is still within the clip rather than exactly on its exclusive edge.
+        if (owning is not null && target >= owning.End)
+            target = owning.End - TimeSpan.FromMilliseconds(1);
 
         // Never run past the end of the timeline; the overlay is still partly visible
         // wherever we land, and seeking beyond the content would blank the preview.
         var end = model.TotalSegmentsDuration;
         if (end > TimeSpan.Zero && target > end)
             target = end;
+        if (target < Timeline.PlayheadPosition) target = Timeline.PlayheadPosition;
         if (target < TimeSpan.Zero) target = TimeSpan.Zero;
 
         Preview.Pause();

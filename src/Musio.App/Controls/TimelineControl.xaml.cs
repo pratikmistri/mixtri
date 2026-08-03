@@ -398,16 +398,41 @@ public sealed partial class TimelineControl : UserControl
 
         bool hasSystemAudio = model is not null &&
             (model.SystemAudioWaveformSamples is { Length: > 0 } ||
-             _trackVisualsByFile.Values.Any(v => v.SystemWaveform is { Length: > 0 }));
+             _trackVisualsByFile.Values.Any(v => v.SystemWaveform is { Length: > 0 }) ||
+             HasAudioFile(model, mic: false));
 
         bool hasMicAudio = model is not null &&
             (model.MicAudioWaveformSamples is { Length: > 0 } ||
-             _trackVisualsByFile.Values.Any(v => v.MicWaveform is { Length: > 0 }));
+             _trackVisualsByFile.Values.Any(v => v.MicWaveform is { Length: > 0 }) ||
+             HasAudioFile(model, mic: true));
 
         ApplyTrackVisibility(CursorRow, CursorTrackLabel, CursorTrackCanvas, hasCursor, CursorRowHeight);
         ApplyTrackVisibility(CameraRow, CameraTrackLabel, CameraTrackCanvas, hasCamera, CameraRowHeight);
         ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
         ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
+    }
+
+    /// <summary>
+    /// Whether any segment carries an audio file of the requested kind. A waveform alone is
+    /// not a sufficient test for "this project has audio": waveform generation only
+    /// recognises the recorder's own <c>system_*</c>/<c>mic_*</c> files, so an imported
+    /// video — whose extracted track is just <c>audio.wav</c> — has real, audible audio but
+    /// no waveform. Keying visibility solely off the waveform would hide that audio and its
+    /// mute button entirely. Anything not named <c>mic_*</c> counts as system audio, which
+    /// matches how the editor classifies these files when it builds the waveforms.
+    /// </summary>
+    private static bool HasAudioFile(TimelineModel model, bool mic)
+    {
+        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        {
+            foreach (var path in seg.AudioFilePaths)
+            {
+                if (string.IsNullOrEmpty(path)) continue;
+                bool isMic = Path.GetFileName(path).StartsWith("mic_", StringComparison.OrdinalIgnoreCase);
+                if (isMic == mic) return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -3429,10 +3454,12 @@ public sealed partial class TimelineControl : UserControl
                         if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
                         TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
                     }
-                    // else: unmappable in this overlay's recording's domain (e.g.
-                    // dragged over a different clip or a text slide) — reject the move,
-                    // leaving the overlay in place, rather than silently writing a time
-                    // from the wrong recording's domain into it.
+                    // else: this overlay's recording has no segment on the timeline at all
+                    // — reject the move rather than writing a time from another
+                    // recording's domain into it. (When the pointer merely strays over a
+                    // different clip or a text slide, XToKeyframeFileTime clamps to the
+                    // nearest edge of THIS overlay's own recording, so the move pins to
+                    // the clip boundary instead of jumping sources — same as zoom.)
                 }
                 break;
             }
