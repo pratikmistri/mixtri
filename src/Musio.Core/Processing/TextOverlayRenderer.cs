@@ -101,8 +101,9 @@ public class TextOverlayRenderer : IDisposable
     /// Overlays are drawn in list order, so later entries stack on top of earlier ones.
     /// Disabled overlays and ones whose source range does not contain
     /// <paramref name="sourceTime"/> are skipped. This method is on the hot path for both
-    /// preview and export, so it does nothing at all (no allocations, no GPU work) when
-    /// <paramref name="overlays"/> is empty or none are currently active.
+    /// preview and export, so it does no drawing and no allocation when
+    /// <paramref name="overlays"/> is empty or none are currently active — it only releases
+    /// cache entries belonging to overlays that have since been deleted.
     /// </summary>
     public void Render(
         CanvasRenderTarget target,
@@ -114,7 +115,18 @@ public class TextOverlayRenderer : IDisposable
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(overlays);
 
-        if (overlays.Count == 0 || width <= 0 || height <= 0)
+        if (width <= 0 || height <= 0)
+            return;
+
+        // Evict before the early-outs below, not after: an overlay deleted while the
+        // playhead sits outside every overlay's range would otherwise never be seen by the
+        // eviction pass again, keeping its cached CanvasTextFormat alive for the rest of the
+        // session. EvictStaleCacheEntries returns immediately on an empty cache and
+        // allocates nothing unless an entry actually needs removing, so the common
+        // no-overlay path stays allocation-free.
+        EvictStaleCacheEntries(overlays);
+
+        if (overlays.Count == 0)
             return;
 
         bool anyActive = false;
@@ -124,12 +136,6 @@ public class TextOverlayRenderer : IDisposable
         }
         if (!anyActive)
             return;
-
-        // Only touch the cache-eviction path once there is actual overlay work to do this
-        // frame, so a timeline with overlays that are all currently inactive (or none at
-        // all) still returns above with zero allocations, matching Render's documented
-        // fast path.
-        EvictStaleCacheEntries(overlays);
 
         foreach (var overlay in overlays)
         {

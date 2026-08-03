@@ -11,9 +11,9 @@ namespace Musio.Core.Processing;
 
 /// <summary>
 /// The shared cinematic / After-Effects-style text animation engine used by every
-/// renderer that draws animated <see cref="TextSlideAnimation"/> text (full-screen
-/// text slides via <see cref="TextSlideRenderer"/>, and animated text overlays via
-/// a future <c>TextOverlayRenderer</c>). Every animation has a matching IN
+/// renderer that draws animated <see cref="TextSlideAnimation"/> text: full-screen
+/// text slides via <see cref="TextSlideRenderer"/>, and text drawn on top of the
+/// video via <see cref="TextOverlayRenderer"/>. Every animation has a matching IN
 /// (entrance) at the start and OUT (exit) at the end, driven by normalized
 /// progress (0..1) over a constant wall-clock duration, with a static hold in the
 /// middle for slides/overlays long enough to have one.
