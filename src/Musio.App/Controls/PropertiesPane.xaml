@@ -266,7 +266,9 @@
                               ToolTipService.ToolTip="Text overlay"
                               AutomationProperties.Name="Text overlay properties">
                     <StackPanel Style="{StaticResource PaneTabContentStyle}">
-                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE7C8;" />
+                        <!-- FontColor: styled text, so it reads as "text with a look applied"
+                             while staying distinct from the Text Slide tab's plain Font glyph. -->
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE8D3;" />
                         <Canvas HorizontalAlignment="Center">
                             <TextBlock Style="{StaticResource PaneTabLabelStyle}"
                                        Text="TEXT OVERLAY"
