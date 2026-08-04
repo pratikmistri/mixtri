@@ -130,6 +130,7 @@ public class VideoEncoder : IDisposable
             ExportAudioPlan.Build(project, timeline, timelineMapper));
         bool hasAudio = audioPlacements.Count > 0;
         WarnAboutSpeedAdjustedAudio(audioPlacements);
+        WarnAboutTransitionFadeAudio(audioPlacements);
 
         // Video-only output path (audio muxed in second pass if needed)
         string videoOnlyPath = hasAudio
@@ -434,7 +435,7 @@ public class VideoEncoder : IDisposable
         if (trimStart > originalDuration) trimStart = originalDuration;
         track.TrimTimeFromStart = trimStart;
 
-        if (placement.TakeDuration is { } take && take > TimeSpan.Zero)
+        if (ExportTakeDuration(placement) is { } take && take > TimeSpan.Zero)
         {
             var sourceEnd = trimStart + take;
             if (sourceEnd < originalDuration)
@@ -444,6 +445,160 @@ public class VideoEncoder : IDisposable
         // Place the audio at its segment's position on the output timeline so text
         // slides (and deleted ranges) become silent gaps instead of shifting audio.
         track.Delay = placement.Delay;
+    }
+
+    /// <summary>
+    /// The take duration actually muxed into the export — deliberately NOT always the same
+    /// as <see cref="AudioPlacement.TakeDuration"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why the two can differ.</b> <see cref="ExportAudioPlan"/> extends an
+    /// outgoing placement's <see cref="AudioPlacement.TakeDuration"/> by a transition's
+    /// duration so it COULD keep playing underneath the incoming segment's own audio
+    /// during a dissolve (see <see cref="AudioPlacement.FadeOutDuration"/>). That is only
+    /// safe to mux as-is if something also ramps this track's gain down (and the incoming
+    /// track's gain up) across the overlap — otherwise the two tracks simply sum at full
+    /// volume, an audible glitch strictly worse than the pre-existing hard cut.</para>
+    /// <para><b>Investigated: a custom <c>IBasicAudioEffect</c> gain ramp.</b>
+    /// <see cref="BackgroundAudioTrack.AudioEffectDefinitions"/> does exist and does accept
+    /// a custom effect by activatable-class name, so this was seriously considered.
+    /// It doesn't work in THIS pipeline because: (1) implementing
+    /// <c>Windows.Media.Effects.IBasicAudioEffect</c> so the WinRT activation system (the
+    /// same <c>RoGetActivationFactory</c> path <see cref="MediaComposition"/> itself uses)
+    /// can construct it by name requires the class live in a genuine Windows Runtime
+    /// Component project (producing a <c>.winmd</c>) — <c>Musio.Core</c> is a plain
+    /// <c>Microsoft.NET.Sdk</c> class library and cannot host a WinRT-activatable class
+    /// no matter how the interface is implemented in C#; and (2) even with such a project,
+    /// the class must be registered as an in-process server via a
+    /// <c>windows.activatableClass.inProcessServer</c> extension in
+    /// <c>Musio.App\Package.appxmanifest</c>. Both are structural, cross-project changes —
+    /// far outside this task's file scope, and (2) is a single shared file every other
+    /// concurrent task in this feature could also need to touch. No in-scope workaround
+    /// was found, so — per this feature's explicitly pre-approved fallback — export keeps
+    /// the pre-existing hard cut. Live preview (<see cref="Musio.Core.Audio.AudioPlaybackEngine"/>)
+    /// has a working ramp implementation too, but as of today nothing wires real fade
+    /// windows into it either (see <see cref="ExportAudioPlan"/>'s class remarks) — so
+    /// NEITHER pipeline actually crossfades yet; this is the export half of that honest
+    /// status, not a claim preview already differs.</para>
+    /// <para><b>How the hard cut is reproduced exactly.</b> Subtracting
+    /// <see cref="AudioPlacement.FadeOutDuration"/> back out of
+    /// <see cref="AudioPlacement.TakeDuration"/> exactly reconstructs the take
+    /// <see cref="ExportAudioPlan"/> would have produced with no active transition,
+    /// because the extension and the (duration-capped) fade are computed from the exact
+    /// same clamped transition duration — see <c>ExportAudioPlan.BuildPlacement</c>'s
+    /// remarks. This is skipped for
+    /// <see cref="AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment"/> placements:
+    /// their <see cref="AudioPlacement.TakeDuration"/> was never extended in the first
+    /// place (a speed-adjusted segment keeps its pre-existing native-rate cap), so
+    /// subtracting here would wrongly shorten an already-correct take.
+    /// <see cref="AudioPlacement.FadeInDuration"/> needs no equivalent correction: a
+    /// fade-in never changes <see cref="AudioPlacement.TrimFromStart"/> or
+    /// <see cref="AudioPlacement.Delay"/>, so ignoring it here already reproduces the hard
+    /// cut.</para>
+    /// <para><b>Marked <c>internal</c>, not <c>private</c>, deliberately.</b> This is the
+    /// single highest-consequence line in the whole feature: if it were ever bypassed (e.g.
+    /// a future refactor calls <see cref="ApplyPlacement"/> with the raw, un-corrected
+    /// <see cref="AudioPlacement.TakeDuration"/>), every export touching a transition
+    /// boundary would mux two full-volume, un-ramped, OVERLAPPING tracks — audibly worse
+    /// than the pre-existing hard cut it is meant to reproduce. It is exposed so
+    /// <c>Musio.Tests</c> (via this assembly's <c>InternalsVisibleTo</c>) can assert the
+    /// round trip directly against <see cref="ExportAudioPlan.Build"/> output, instead of
+    /// only indirectly through a full WinRT mux.</para>
+    /// </remarks>
+    internal static TimeSpan? ExportTakeDuration(AudioPlacement placement)
+    {
+        if (placement.TakeDuration is not { } take) return null;
+        if (placement.FadeOutDuration <= TimeSpan.Zero) return take;
+        if (placement.PlaysAtNativeRateOnSpeedAdjustedSegment) return take;
+
+        var hardCutTake = take - placement.FadeOutDuration;
+        return hardCutTake > TimeSpan.Zero ? hardCutTake : TimeSpan.Zero;
+    }
+
+    /// <summary>
+    /// Clamps a placement's trim/take/fade metadata against the SOURCE's real total
+    /// duration, now that <see cref="ResolveAvailableAudioAsync"/> has actually opened the
+    /// media to confirm it exists (or, for an embedded track, that it has audio).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ExportAudioPlan"/> is deliberately pure (no I/O — see its class remarks)
+    /// and therefore has no way to know a source's true remaining length past a segment's
+    /// own recorded metadata (<see cref="VideoSegment.SourceDuration"/> etc.). A transition's
+    /// extension (see <see cref="AudioPlacement.FadeOutDuration"/>) can therefore, in
+    /// principle, claim more tail than the file actually has — e.g. a segment trimmed to
+    /// end exactly at a 10s file's own EOF, with a 1s transition, plans an 11s take. Today
+    /// that particular case is harmless in practice because <see cref="ExportTakeDuration"/>
+    /// always subtracts the fade back out before muxing rather than trusting the extended
+    /// take directly. This clamp exists so that safety holds STRUCTURALLY, not by
+    /// accident: it runs before <em>either</em> <see cref="ExportTakeDuration"/>'s
+    /// subtraction or any hypothetical future consumer (e.g. a real gain-envelope effect)
+    /// ever sees this placement's fields, so none of them can be told to play/ramp past
+    /// what the file actually contains, without needing to independently remember to
+    /// re-derive that bound.
+    /// <para>
+    /// When <paramref name="sourceDuration"/> is <c>null</c> (the duration probe failed —
+    /// see <see cref="TryGetMediaDurationAsync"/>), this returns <paramref name="placement"/>
+    /// unchanged: without a known real length there is nothing safe to clamp against, so
+    /// the placement keeps whatever bound <see cref="ExportAudioPlan"/> itself computed.
+    /// </para>
+    /// </remarks>
+    internal static AudioPlacement ClampToSourceDuration(AudioPlacement placement, TimeSpan? sourceDuration)
+    {
+        if (sourceDuration is not { } duration || duration <= TimeSpan.Zero)
+            return placement;
+
+        var trimStart = placement.TrimFromStart;
+        if (trimStart < TimeSpan.Zero) trimStart = TimeSpan.Zero;
+        if (trimStart > duration) trimStart = duration;
+
+        var realAvailable = duration - trimStart;
+        var take = placement.TakeDuration is { } t && t < realAvailable ? t : realAvailable;
+
+        var fadeOut = placement.FadeOutDuration > take ? take : placement.FadeOutDuration;
+        var fadeIn = placement.FadeInDuration > take ? take : placement.FadeInDuration;
+
+        if (trimStart == placement.TrimFromStart
+            && placement.TakeDuration is { } existingTake && existingTake == take
+            && fadeOut == placement.FadeOutDuration
+            && fadeIn == placement.FadeInDuration)
+        {
+            return placement;
+        }
+
+        return placement with
+        {
+            TrimFromStart = trimStart,
+            TakeDuration = take,
+            FadeOutDuration = fadeOut,
+            FadeInDuration = fadeIn,
+        };
+    }
+
+    /// <summary>
+    /// Reports the transition-crossfade limitation this pipeline cannot fix: exported
+    /// audio at a transition boundary is muxed as the ORIGINAL hard cut (see
+    /// <see cref="ExportTakeDuration"/>'s remarks for exactly why). Live preview does not
+    /// crossfade either as of today (see <see cref="ExportAudioPlan"/>'s class remarks for
+    /// why — the ramp exists in <see cref="Musio.Core.Audio.AudioPlaybackEngine"/> but is
+    /// not yet wired up), so this is currently a hard cut everywhere, not a divergence from
+    /// a genuinely crossfaded preview. Logged rather than swallowed for the same reason
+    /// <see cref="WarnAboutSpeedAdjustedAudio"/> logs its sibling limitation: so this is
+    /// never mistaken for a working crossfade once preview alone eventually gains one.
+    /// </summary>
+    private static void WarnAboutTransitionFadeAudio(IReadOnlyList<AudioPlacement> placements)
+    {
+        int affected = placements.Count(
+            p => p.FadeOutDuration > TimeSpan.Zero || p.FadeInDuration > TimeSpan.Zero);
+        if (affected == 0) return;
+
+        Debug.WriteLine(
+            $"[VideoEncoder] {affected} audio track(s) touch a transition boundary. " +
+            "MediaComposition/BackgroundAudioTrack expose no gain-envelope API (a custom " +
+            "IBasicAudioEffect would need its own Windows Runtime Component project plus a " +
+            "Package.appxmanifest activation extension — out of scope here), so exported " +
+            "audio is hard-cut at these boundaries exactly as it was before this feature; " +
+            "live preview does not crossfade yet either (the ramp exists in " +
+            "AudioPlaybackEngine but nothing currently feeds it real fade windows).");
     }
 
     /// <summary>
@@ -469,52 +624,100 @@ public class VideoEncoder : IDisposable
 
     /// <summary>
     /// Drops planned placements whose media does not exist or carries no audio, so a
-    /// silent recording never triggers the (expensive) mux pass.
+    /// silent recording never triggers the (expensive) mux pass. Also probes each
+    /// surviving placement's real source duration and clamps its trim/take/fade metadata
+    /// against it via <see cref="ClampToSourceDuration"/> — see that method's remarks for
+    /// why that clamp belongs here rather than in the (deliberately pure)
+    /// <see cref="ExportAudioPlan"/>.
     /// </summary>
     private static async Task<List<AudioPlacement>> ResolveAvailableAudioAsync(
         IReadOnlyList<AudioPlacement> placements)
     {
         var available = new List<AudioPlacement>();
-        var embeddedAudioByPath = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var embeddedAudioByPath = new Dictionary<string, (bool HasAudio, TimeSpan? Duration)>(
+            StringComparer.OrdinalIgnoreCase);
+        var audioFileDurationByPath = new Dictionary<string, TimeSpan?>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var placement in placements)
         {
             if (placement.Kind == AudioSourceKind.AudioFile)
             {
-                if (File.Exists(placement.SourcePath))
-                    available.Add(placement);
+                if (!File.Exists(placement.SourcePath))
+                    continue;
+
+                if (!audioFileDurationByPath.TryGetValue(placement.SourcePath, out var duration))
+                {
+                    duration = await TryGetMediaDurationAsync(placement.SourcePath);
+                    audioFileDurationByPath[placement.SourcePath] = duration;
+                }
+
+                available.Add(ClampToSourceDuration(placement, duration));
                 continue;
             }
 
-            if (!embeddedAudioByPath.TryGetValue(placement.SourcePath, out bool hasEmbeddedAudio))
+            if (!embeddedAudioByPath.TryGetValue(placement.SourcePath, out var probe))
             {
-                hasEmbeddedAudio = await HasEmbeddedAudioAsync(placement.SourcePath);
-                embeddedAudioByPath[placement.SourcePath] = hasEmbeddedAudio;
+                probe = await ProbeEmbeddedAudioAsync(placement.SourcePath);
+                embeddedAudioByPath[placement.SourcePath] = probe;
             }
 
-            if (hasEmbeddedAudio)
-                available.Add(placement);
+            if (probe.HasAudio)
+                available.Add(ClampToSourceDuration(placement, probe.Duration));
         }
 
         return available;
     }
 
-    private static async Task<bool> HasEmbeddedAudioAsync(string videoPath)
+    /// <summary>
+    /// Opens <paramref name="videoPath"/> once to report both whether it has any embedded
+    /// audio track and its real <see cref="MediaClip.OriginalDuration"/> (used as the
+    /// embedded track's own duration — a screen recording's audio and video tracks start
+    /// and end together, so the whole clip's duration is a reasonable, cheap proxy for the
+    /// embedded audio track's own length without opening it as a separate
+    /// <see cref="BackgroundAudioTrack"/> just to ask).
+    /// </summary>
+    private static async Task<(bool HasAudio, TimeSpan? Duration)> ProbeEmbeddedAudioAsync(string videoPath)
     {
         if (string.IsNullOrWhiteSpace(videoPath) || !File.Exists(videoPath))
-            return false;
+            return (false, null);
 
         try
         {
             var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoPath));
             var clip = await MediaClip.CreateFromFileAsync(file);
-            return clip.EmbeddedAudioTracks.Count > 0;
+            return (clip.EmbeddedAudioTracks.Count > 0, clip.OriginalDuration);
         }
         catch (Exception ex)
         {
             Debug.WriteLine(
                 $"[VideoEncoder] Could not inspect audio tracks of '{videoPath}': {ex.Message}");
-            return false;
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a standalone audio file's real total duration for
+    /// <see cref="ClampToSourceDuration"/>. Returns <c>null</c> (rather than throwing) on
+    /// any failure, in which case the caller leaves the placement's planner-computed
+    /// metadata unclamped — see <see cref="ClampToSourceDuration"/>'s remarks for why that
+    /// is an acceptable, explicitly-handled degradation rather than a silent bug.
+    /// </summary>
+    private static async Task<TimeSpan?> TryGetMediaDurationAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return null;
+
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(path));
+            var clip = await MediaClip.CreateFromFileAsync(file);
+            return clip.OriginalDuration;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"[VideoEncoder] Could not resolve the duration of '{path}': {ex.Message}");
+            return null;
         }
     }
 

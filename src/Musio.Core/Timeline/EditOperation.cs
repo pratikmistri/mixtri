@@ -1100,6 +1100,10 @@ public class SplitAndInsertTextSlideOperation : IEditOperation
                 SourceStart = video.SourceStart + sourceOffset,
                 Duration = video.Duration - localOffset,
                 SourceDuration = video.SourceDuration - sourceOffset,
+                // See SplitSegmentAtTimeOperation's identical fix: the record `with` above
+                // otherwise copies the original video's InTransition onto this brand-new
+                // (slide -> secondHalf) boundary, which was never configured by the user.
+                InTransition = null,
             };
 
             model.Segments.RemoveAt(splitIndex);
@@ -1199,6 +1203,14 @@ public class SplitSegmentAtTimeOperation : IEditOperation
                 SourceStart = video.SourceStart + sourceOffset,
                 Duration = video.Duration - localOffset,
                 SourceDuration = video.SourceDuration - sourceOffset,
+                // The boundary this InTransition described (predecessor -> original segment)
+                // now belongs entirely to firstHalf, which correctly keeps it via the `with`
+                // above. The record `with` expression otherwise copies EVERY property it
+                // doesn't override -- including InTransition -- so secondHalf must explicitly
+                // null it out, or the brand-new, purely-mechanical firstHalf -> secondHalf
+                // boundary this split just created would incorrectly inherit and play the
+                // original config (see the T8 "known bug" report in learnings.md).
+                InTransition = null,
             };
         }
         else if (segment is TextSlideSegment slide)
@@ -1212,6 +1224,9 @@ public class SplitSegmentAtTimeOperation : IEditOperation
             {
                 Id = Guid.NewGuid().ToString("N"),
                 Duration = slide.Duration - localOffset,
+                // Same reasoning as the VideoSegment branch above: this is a new, unconfigured
+                // boundary, not the original one.
+                InTransition = null,
             };
         }
         else
@@ -1864,5 +1879,137 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
         overlay.Duration = _previous.Duration;
 
         model.TextOverlays.Sort((a, b) => a.Start.CompareTo(b.Start));
+    }
+}
+
+/// <summary>
+/// Sets (or clears) a single boundary's <see cref="TimelineSegment.InTransition"/>, identified
+/// by the incoming segment's Id — the same Id <see cref="TimelineControl"/>'s
+/// <c>TransitionSelected</c>/<c>TransitionRemoveRequested</c> events carry.
+/// </summary>
+/// <remarks>
+/// <paramref name="newConfig"/> is <c>null</c>-able because <c>null</c> and an explicit
+/// <see cref="TransitionConfig"/> with <see cref="TransitionType.None"/> are semantically
+/// different states (see <see cref="TimelineSegment.InTransition"/>'s remarks): the former means
+/// "not configured, use the legacy fallback", the latter is an explicit hard cut that suppresses
+/// even that fallback. Snapshotting the whole previous config (rather than diffing individual
+/// properties) is what lets <see cref="Undo"/> restore either state exactly, including going
+/// from a set value back to <c>null</c>.
+/// </remarks>
+public class UpdateTransitionOperation : IEditOperation
+{
+    private readonly string _incomingSegmentId;
+    private readonly TransitionConfig? _newConfig;
+    private readonly string? _description;
+
+    private TransitionConfig? _previous;
+    private bool _found;
+
+    public string Description => _description ?? "Update Transition";
+
+    /// <param name="incomingSegmentId">
+    /// Id of the incoming segment that owns the boundary (<see cref="TimelineSegment.InTransition"/>).
+    /// </param>
+    /// <param name="newConfig">The config to apply, or <c>null</c> to clear it back to "not configured".</param>
+    /// <param name="description">Optional undo-stack label; defaults to "Update Transition".</param>
+    public UpdateTransitionOperation(string incomingSegmentId, TransitionConfig? newConfig, string? description = null)
+    {
+        _incomingSegmentId = incomingSegmentId ?? throw new ArgumentNullException(nameof(incomingSegmentId));
+        _newConfig = newConfig;
+        _description = description;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        // Index <= 0 has no incoming boundary — matches TransitionResolver's and
+        // ApplyTransitionToAllBoundariesOperation's own "index <= 0 -> no transition" rule.
+        // Without this guard a config written to segment 0 lies dormant on InTransition and
+        // can activate later if that segment is ever reordered away from index 0.
+        var index = IndexOf(model, _incomingSegmentId);
+        if (index <= 0)
+        {
+            _found = false;
+            return;
+        }
+
+        var segment = model.Segments[index];
+        _found = true;
+        _previous = segment.InTransition;
+        segment.InTransition = _newConfig;
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (!_found) return;
+        var index = IndexOf(model, _incomingSegmentId);
+        if (index <= 0) return;
+        model.Segments[index].InTransition = _previous;
+    }
+
+    private static int IndexOf(TimelineModel model, string segmentId)
+    {
+        var segments = model.Segments;
+        for (var i = 0; i < segments.Count; i++)
+        {
+            if (segments[i].Id == segmentId) return i;
+        }
+
+        return -1;
+    }
+}
+
+/// <summary>
+/// Applies the same <see cref="TransitionConfig"/> (or <c>null</c>, clearing it) to every
+/// boundary on the timeline in one undo step — used by the properties pane's "Apply to all
+/// boundaries" action, which must not push one undo entry per boundary.
+/// </summary>
+/// <remarks>
+/// The first segment (index 0) has no leading boundary — <see cref="TimelineSegment.InTransition"/>
+/// describes the boundary between a segment and its predecessor, and the first segment has none
+/// — so it is always skipped, matching <see cref="Musio.Core.Timeline.TransitionResolver"/>'s own
+/// "index &lt;= 0 -&gt; no transition" rule.
+/// <para>
+/// Each boundary's own prior value is snapshotted individually (not one shared "previous"), so
+/// <see cref="Undo"/> restores boundaries that were <c>null</c> back to <c>null</c> and boundaries
+/// that carried a different config back to that different config — never to whatever the last
+/// boundary in the loop happened to have.
+/// </para>
+/// </remarks>
+public class ApplyTransitionToAllBoundariesOperation : IEditOperation
+{
+    private readonly TransitionConfig? _newConfig;
+    private readonly string? _description;
+
+    private List<(string SegmentId, TransitionConfig? Previous)>? _previous;
+
+    public string Description => _description ?? "Apply Transition to All Boundaries";
+
+    public ApplyTransitionToAllBoundariesOperation(TransitionConfig? newConfig, string? description = null)
+    {
+        _newConfig = newConfig;
+        _description = description;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        var snapshot = new List<(string, TransitionConfig?)>();
+        for (int i = 1; i < model.Segments.Count; i++)
+        {
+            var segment = model.Segments[i];
+            snapshot.Add((segment.Id, segment.InTransition));
+            segment.InTransition = _newConfig;
+        }
+        _previous = snapshot;
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (_previous is null) return;
+        foreach (var (segmentId, previous) in _previous)
+        {
+            var segment = model.Segments.FirstOrDefault(s => s.Id == segmentId);
+            if (segment is null) continue;
+            segment.InTransition = previous;
+        }
     }
 }

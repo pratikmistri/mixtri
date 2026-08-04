@@ -134,6 +134,15 @@ public sealed partial class TimelineControl : UserControl
     private Color MicEnvelopeColor;
     private Color PlayheadColor;
     private Color CutLineColor;
+    // ── Transition boundary chips — one fill per visual family (see GetTransitionChipVisual) ──
+    private Color TransitionChipDissolveColor;
+    private Color TransitionChipSlidePushColor;
+    private Color TransitionChipWipeColor;
+    private Color TransitionChipStylizedColor;
+    private Color TransitionChipGlyphColor;
+    private Color TransitionChipEmptyFill;
+    private Color TransitionChipEmptyBorder;
+    private Color TransitionChipEmptyGlyphColor;
     private Color CursorTrackBackground;
     private Color CursorPathXColor;
     private Color CursorPathYColor;
@@ -331,6 +340,20 @@ public sealed partial class TimelineControl : UserControl
         // ── Playhead & cut lines — semantic ──
         PlayheadColor         = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
         CutLineColor          = GetBrushColor("TimelineCutLineBrush", Color.FromArgb(200, 255, 255, 100));
+
+        // ── Transition chips — one family colour per visual grouping (see GetTransitionChipVisual) ──
+        var dissolveBase      = isDark ? Color.FromArgb(255, 255, 179, 0) : Color.FromArgb(255, 200, 130, 0);   // amber — matched the legacy marker colour
+        var slidePushBase     = isDark ? Color.FromArgb(255, 41, 121, 255) : Color.FromArgb(255, 25, 90, 200);  // blue
+        var wipeBase          = isDark ? Color.FromArgb(255, 156, 39, 176) : Color.FromArgb(255, 120, 30, 140); // purple
+        var stylizedBase      = isDark ? Color.FromArgb(255, 233, 30, 99) : Color.FromArgb(255, 190, 20, 80);   // pink/red
+        TransitionChipDissolveColor  = WithAlpha(dissolveBase, 235);
+        TransitionChipSlidePushColor = WithAlpha(slidePushBase, 235);
+        TransitionChipWipeColor      = WithAlpha(wipeBase, 235);
+        TransitionChipStylizedColor  = WithAlpha(stylizedBase, 235);
+        TransitionChipGlyphColor     = Color.FromArgb(255, 255, 255, 255); // white glyph text reads on every family fill above
+        TransitionChipEmptyFill      = GetSystemBrushColor("ControlFillColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
+        TransitionChipEmptyBorder    = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(90, 255, 255, 255));
+        TransitionChipEmptyGlyphColor = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(160, 255, 255, 255));
 
         // ── Text & lines — system ──
         SpeedLabelTextColor   = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
@@ -1007,37 +1030,20 @@ public sealed partial class TimelineControl : UserControl
     private void DrawVideoTrackFromSegments(
         CanvasDrawingSession ds, TimelineModel model, float w, float h, float pad, bool hasThumbnails)
     {
-        var transitionColor = Color.FromArgb(180, 255, 193, 7);  // Amber
         var textLabelColor = Color.FromArgb(255, 255, 255, 255);
         var snapGuideColor = Color.FromArgb(255, 255, 214, 10);  // Amber snap line
         float clipH = h - pad * 2;
 
+        // Collected alongside the main draw loop (post drag-preview x1/x2) so the
+        // boundary-chip pass below shares the exact on-screen geometry the segments
+        // were just painted at, rather than recomputing it a second time.
+        var segRects = new List<(TimelineSegment Segment, float X1, float X2)>(model.Segments.Count);
+
         foreach (var segment in model.Segments)
         {
-            float x1 = (float)TimeToX(segment.Start);
-            float x2 = (float)TimeToX(segment.End);
-
-            // Apply live drag preview to the segment being manipulated.
+            var (x1, x2) = GetSegmentDisplayX(segment);
             bool isDragged = segment.Id == _draggedSegmentId;
-            if (isDragged && !double.IsNaN(_segmentDragCurrentX))
-            {
-                switch (_dragMode)
-                {
-                    case DragMode.SegmentRightEdge:
-                        x2 = (float)_segmentDragCurrentX;
-                        if (x2 < x1 + 2) x2 = x1 + 2;
-                        break;
-                    case DragMode.SegmentLeftEdge:
-                        x1 = (float)_segmentDragCurrentX;
-                        if (x1 > x2 - 2) x1 = x2 - 2;
-                        break;
-                    case DragMode.SegmentBody when _segmentDragMoved:
-                        float dx = (float)(_segmentDragCurrentX - _segmentDragStartX);
-                        x1 += dx;
-                        x2 += dx;
-                        break;
-                }
-            }
+            segRects.Add((segment, x1, x2));
 
             if (x2 < 0 || x1 > w) continue;
             float segW = Math.Max(2, x2 - x1);
@@ -1101,17 +1107,22 @@ public sealed partial class TimelineControl : UserControl
                 ds.FillRoundedRectangle(x2 - handleW - 1.5f, handleY, handleW, handleH, 1.5f, 1.5f, VideoClipSelectedBorder);
             }
 
-            // Transition marker at segment start
-            if (segment.InTransition is { Type: not TransitionType.None } transition)
-            {
-                float transW = Math.Max(4, (float)TimeToX(segment.Start + transition.Duration) - x1);
-                transW = Math.Min(transW, segW);
-                ds.FillRoundedRectangle(x1, pad, transW, 4, 2, 2, transitionColor);
-            }
+            // Transition marker replaced by the selectable boundary chip drawn in the
+            // pass below (after every segment has its final on-screen rect), so the
+            // chip can be centred on the cut line rather than pinned to the segment
+            // start.
 
             // Boundary line between segments
             if (segment.Start > TimeSpan.Zero && !isDragged)
                 ds.DrawLine(x1, pad, x1, h - pad, CutLineColor, 1.5f);
+        }
+
+        // Transition boundary chips — drawn after every segment rect is known so each
+        // chip can be centred on the boundary and density-guarded against both
+        // neighbours, not just the incoming segment.
+        for (int i = 1; i < segRects.Count; i++)
+        {
+            DrawTransitionChipForBoundary(ds, segRects[i - 1], segRects[i], pad, clipH, w);
         }
 
         // Drop indicator (where a moved segment will land).
@@ -1122,6 +1133,204 @@ public sealed partial class TimelineControl : UserControl
         if (!double.IsNaN(_segmentSnapGuideX))
             ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
     }
+
+    /// <summary>
+    /// Computes a primary-track segment's on-screen X range, applying the live
+    /// trim/move drag preview when <paramref name="segment"/> is the one currently
+    /// being dragged. Shared by the segment draw pass, the transition-chip draw pass,
+    /// and <see cref="HitTestTransitionChip"/> so all three always agree on the same
+    /// geometry — a hit test computed from stale (pre-drag) positions could otherwise
+    /// select the wrong boundary mid-drag.
+    /// </summary>
+    private (float X1, float X2) GetSegmentDisplayX(TimelineSegment segment)
+    {
+        float x1 = (float)TimeToX(segment.Start);
+        float x2 = (float)TimeToX(segment.End);
+
+        if (segment.Id == _draggedSegmentId && !double.IsNaN(_segmentDragCurrentX))
+        {
+            switch (_dragMode)
+            {
+                case DragMode.SegmentRightEdge:
+                    x2 = (float)_segmentDragCurrentX;
+                    if (x2 < x1 + 2) x2 = x1 + 2;
+                    break;
+                case DragMode.SegmentLeftEdge:
+                    x1 = (float)_segmentDragCurrentX;
+                    if (x1 > x2 - 2) x1 = x2 - 2;
+                    break;
+                case DragMode.SegmentBody when _segmentDragMoved:
+                    float dx = (float)(_segmentDragCurrentX - _segmentDragStartX);
+                    x1 += dx;
+                    x2 += dx;
+                    break;
+            }
+        }
+
+        return (x1, x2);
+    }
+
+    // ── Transition boundary chip — the selectable affordance sitting on the cut line
+    // between two adjacent primary-track segments (segment[i].InTransition describes
+    // the boundary between segment[i-1] and segment[i], per TimelineSegment.InTransition).
+    // Sits centred on the same cut line the boundary line is drawn on, and straddles the
+    // incoming segment's leading trim handle — HitTestTransitionChip is therefore always
+    // consulted BEFORE HitTestSegment in the pointer handlers so the chip wins the click.
+
+    private const float TransitionChipWidth = 20f;
+    private const float TransitionChipHeight = 15f;
+
+    /// <summary>
+    /// Minimum on-screen width (px) BOTH neighbouring segments must have for a boundary
+    /// chip to be drawn/hit-tested. Mirrors the existing segW>20 / segW>10 density guards
+    /// used elsewhere in this file — without this, a dense timeline turns into a wall of
+    /// overlapping chips and the trim handles they sit on top of become unreachable.
+    /// </summary>
+    private const float TransitionChipMinAdjacentSegmentWidth = 24f;
+
+    /// <summary>Chip rect centred on <paramref name="boundaryX"/>, vertically centred in the clip band.</summary>
+    private static Rect GetTransitionChipRect(float boundaryX, float pad, float clipH)
+    {
+        double y = pad + (clipH - TransitionChipHeight) / 2.0;
+        return new Rect(boundaryX - TransitionChipWidth / 2.0, y, TransitionChipWidth, TransitionChipHeight);
+    }
+
+    /// <summary>
+    /// True when both segments flanking a boundary are wide enough on-screen for a chip
+    /// to be drawn/hit there without crowding the trim handles or neighbouring chips.
+    /// </summary>
+    private static bool IsTransitionChipEligible(float prevX1, float prevX2, float curX1, float curX2) =>
+        (prevX2 - prevX1) >= TransitionChipMinAdjacentSegmentWidth &&
+        (curX2 - curX1) >= TransitionChipMinAdjacentSegmentWidth;
+
+    /// <summary>
+    /// Maps a <see cref="TransitionType"/> to its visual family: a fill colour and a
+    /// short (1-2 char) glyph. Grouped rather than drawing 20 distinct icons — dissolve
+    /// (Fade/CrossFade/DipToWhite), slide/push (the 8 directional slide+push types),
+    /// wipe (the 4 wipe directions), and stylised (ZoomBlur/WhipPan/Glitch).
+    /// </summary>
+    private (Color Fill, string Glyph) GetTransitionChipVisual(TransitionType type) => type switch
+    {
+        TransitionType.Fade or TransitionType.CrossFade or TransitionType.DipToWhite
+            => (TransitionChipDissolveColor, "D"),
+        TransitionType.SlideLeft or TransitionType.SlideRight or TransitionType.SlideUp or TransitionType.SlideDown
+            or TransitionType.PushLeft or TransitionType.PushRight or TransitionType.PushUp or TransitionType.PushDown
+            => (TransitionChipSlidePushColor, "S"),
+        TransitionType.Wipe or TransitionType.WipeRight or TransitionType.WipeUp or TransitionType.WipeDown
+            => (TransitionChipWipeColor, "W"),
+        TransitionType.ZoomBlur or TransitionType.WhipPanLeft or TransitionType.WhipPanRight or TransitionType.Glitch
+            => (TransitionChipStylizedColor, "FX"),
+        _ => (TransitionChipEmptyFill, "+"),
+    };
+
+    /// <summary>
+    /// Draws the selectable boundary chip between two adjacent segments, if both are
+    /// wide enough on-screen (<see cref="IsTransitionChipEligible"/>). A configured
+    /// boundary (incoming.InTransition with a non-None type) gets a solid, family-
+    /// coloured pill; an unconfigured boundary gets a dimmed "+" affordance so the
+    /// transition surface is discoverable even before anything is set.
+    /// </summary>
+    private void DrawTransitionChipForBoundary(
+        CanvasDrawingSession ds,
+        (TimelineSegment Segment, float X1, float X2) prev,
+        (TimelineSegment Segment, float X1, float X2) cur,
+        float pad, float clipH, float w)
+    {
+        if (!IsTransitionChipEligible(prev.X1, prev.X2, cur.X1, cur.X2)) return;
+        // Geometry is unstable mid-drag for either flanking segment — skip rather than
+        // draw/hit a chip that would jump around under the pointer.
+        if (prev.Segment.Id == _draggedSegmentId || cur.Segment.Id == _draggedSegmentId) return;
+
+        float boundaryX = cur.X1;
+        if (boundaryX < -TransitionChipWidth || boundaryX > w + TransitionChipWidth) return;
+
+        var rect = GetTransitionChipRect(boundaryX, pad, clipH);
+        bool isSelected = cur.Segment.Id == _selectedTransitionId;
+        bool configured = cur.Segment.InTransition is { Type: not TransitionType.None };
+
+        using var chipGeom = CanvasGeometry.CreateRoundedRectangle(
+            ds, (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height,
+            (float)rect.Height / 2f, (float)rect.Height / 2f);
+
+        Color fill;
+        Color border;
+        Color glyphColor;
+        string glyph;
+        if (configured)
+        {
+            (fill, glyph) = GetTransitionChipVisual(cur.Segment.InTransition!.Type);
+            border = isSelected ? VideoClipSelectedBorder : fill;
+            glyphColor = TransitionChipGlyphColor;
+        }
+        else
+        {
+            fill = TransitionChipEmptyFill;
+            border = isSelected ? VideoClipSelectedBorder : TransitionChipEmptyBorder;
+            glyph = "+";
+            glyphColor = TransitionChipEmptyGlyphColor;
+        }
+
+        ds.FillGeometry(chipGeom, fill);
+        ds.DrawGeometry(chipGeom, border, isSelected ? 2f : 1f);
+
+        using var glyphFmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 10,
+            FontFamily = "Segoe UI",
+            FontWeight = configured ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+        };
+        ds.DrawText(glyph, rect, glyphColor, glyphFmt);
+    }
+
+    /// <summary>
+    /// Hit-tests the boundary chips on the primary track. Returns the incoming
+    /// segment's Id (the same Id <see cref="TimelineSegment.InTransition"/> lives on
+    /// for that boundary) when a chip is hit. Must be consulted BEFORE
+    /// <see cref="HitTestSegment"/> in every pointer handler on this track — the chip
+    /// physically overlaps the incoming segment's leading trim handle and the cut
+    /// line, so testing segments first would make chips unreachable.
+    /// </summary>
+    private (string? IncomingSegmentId, bool Hit) HitTestTransitionChip(double posX, double posY)
+    {
+        var model = Model;
+        if (model is null || model.Segments.Count < 2 || VideoTrackCanvas is null)
+            return (null, false);
+
+        const float pad = 14f; // matches VideoTrackCanvas_Draw's pad for the segment track
+        float h = (float)VideoTrackCanvas.ActualHeight;
+        float w = (float)VideoTrackCanvas.ActualWidth;
+        float clipH = h - pad * 2;
+
+        TimelineSegment? prevSegment = null;
+        float prevX1 = 0, prevX2 = 0;
+
+        foreach (var segment in model.Segments)
+        {
+            var (x1, x2) = GetSegmentDisplayX(segment);
+
+            if (prevSegment is not null &&
+                IsTransitionChipEligible(prevX1, prevX2, x1, x2) &&
+                prevSegment.Id != _draggedSegmentId && segment.Id != _draggedSegmentId)
+            {
+                float boundaryX = x1;
+                if (boundaryX >= -TransitionChipWidth && boundaryX <= w + TransitionChipWidth)
+                {
+                    var rect = GetTransitionChipRect(boundaryX, pad, clipH);
+                    if (rect.Contains(new Point(posX, posY)))
+                        return (segment.Id, true);
+                }
+            }
+
+            prevSegment = segment;
+            prevX1 = x1;
+            prevX2 = x2;
+        }
+
+        return (null, false);
+    }
+
 
     /// <summary>
     /// Draws a filmstrip for a <see cref="VideoSegment"/>, mapping the segment's
@@ -1186,18 +1395,130 @@ public sealed partial class TimelineControl : UserControl
             }
         }
     }
+
+    // ── Cross-track selection mutual exclusion ──
+    // The primary/zoom/camera/text-overlay/transition tracks each own an independent
+    // _selected*Id field and Clear*Selection() method. Any selection path that only
+    // clears a hand-picked subset of the others (as the transition chip's first cut
+    // did — clearing clip/segment but not zoom/camera/text-overlay) silently leaves
+    // two things looking selected at once. ClearOtherSelections is the single place
+    // that enforces "exactly one of these six is ever selected" — every selection AND
+    // deselection path below must route through it rather than re-deriving its own
+    // subset of Clear*Selection() calls.
+
+    /// <summary>The distinct selection surfaces this control exposes. See <see cref="ClearOtherSelections"/>.</summary>
+    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition }
+
+    /// <summary>
+    /// Re-entrancy guard for <see cref="ClearOtherSelections"/>. EditorPage's
+    /// *Selected event handlers can call back into this control (e.g. <see cref="SelectSegment"/>
+    /// to normalise state after committing an edit), which would otherwise start a
+    /// second clearing pass in the middle of the first and risk double-firing or
+    /// mis-ordering the null events consumers rely on.
+    /// </summary>
+    private bool _isClearingOtherSelections;
+
+    /// <summary>
+    /// Clears every selection kind except <paramref name="keep"/> (pass
+    /// <see cref="SelectionKind.None"/> to clear all six), raising each cleared kind's
+    /// "null" selection event — but only for kinds that were actually selected, so a
+    /// routine click doesn't fire a storm of redundant null events (EditorPage's
+    /// handlers may do real work, such as collapsing a property pane, on each one).
+    /// </summary>
+    private void ClearOtherSelections(SelectionKind keep)
+    {
+        if (_isClearingOtherSelections) return;
+        _isClearingOtherSelections = true;
+        try
+        {
+            if (keep != SelectionKind.Clip) ClearClipSelection();
+            if (keep != SelectionKind.Segment) ClearSegmentSelectionOnly();
+            if (keep != SelectionKind.Zoom) ClearZoomSelection();
+            if (keep != SelectionKind.Camera) ClearCameraSelection();
+            if (keep != SelectionKind.TextOverlay) ClearTextOverlaySelection();
+            if (keep != SelectionKind.Transition) ClearTransitionSelection();
+        }
+        finally
+        {
+            _isClearingOtherSelections = false;
+        }
+    }
+
+    /// <summary>
+    /// Clears the primary-track segment selection only, firing <see cref="SegmentSelected"/>
+    /// with null when it was actually selected. Factored out of what used to be an
+    /// inline pattern duplicated at every segment-track call site, so
+    /// <see cref="ClearOtherSelections"/> has a single symmetric Clear* to call here,
+    /// mirroring <see cref="ClearZoomSelection"/> / <see cref="ClearCameraSelection"/> /
+    /// <see cref="ClearTextOverlaySelection"/>.
+    /// </summary>
+    private void ClearSegmentSelectionOnly()
+    {
+        if (_selectedSegmentId is not null)
+        {
+            _selectedSegmentId = null;
+            SegmentSelected?.Invoke(this, null);
+            VideoTrackCanvas?.Invalidate();
+        }
+    }
+
     /// <summary>Currently selected segment ID for text slide highlighting.</summary>
     private string? _selectedSegmentId;
 
     /// <summary>Sets the selected segment ID (called from EditorPage).</summary>
     public void SelectSegment(string? segmentId)
     {
+        ClearOtherSelections(segmentId is null ? SelectionKind.None : SelectionKind.Segment);
         _selectedSegmentId = segmentId;
         VideoTrackCanvas?.Invalidate();
     }
 
     /// <summary>Raised when a text slide segment is clicked on the timeline.</summary>
     public event EventHandler<string?>? SegmentSelected;
+
+    /// <summary>
+    /// Id of the incoming segment whose boundary chip is selected (i.e. the boundary
+    /// between that segment and its predecessor — see <see cref="TimelineSegment.InTransition"/>),
+    /// or null when no boundary is selected. This is <em>this control's</em> selection
+    /// state; T6's properties pane reads <see cref="TransitionConfig"/> off
+    /// <c>model.Segments.First(s => s.Id == id).InTransition</c> using this Id.
+    /// </summary>
+    private string? _selectedTransitionId;
+
+    /// <summary>Sets the selected transition boundary by its incoming segment's Id (called from EditorPage).</summary>
+    public void SelectTransition(string? incomingSegmentId)
+    {
+        if (_selectedTransitionId == incomingSegmentId) return;
+        ClearOtherSelections(incomingSegmentId is null ? SelectionKind.None : SelectionKind.Transition);
+        _selectedTransitionId = incomingSegmentId;
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>Clears the selected transition boundary, mirroring <see cref="ClearZoomSelection"/> et al.</summary>
+    public void ClearTransitionSelection()
+    {
+        if (_selectedTransitionId is not null)
+        {
+            _selectedTransitionId = null;
+            TransitionSelected?.Invoke(this, null);
+            VideoTrackCanvas?.Invalidate();
+        }
+    }
+
+    /// <summary>
+    /// Raised when a transition boundary chip is selected or deselected. The payload is
+    /// the incoming segment's Id (null = deselected) — the same Id that carries the
+    /// boundary's <see cref="TransitionConfig"/> via <see cref="TimelineSegment.InTransition"/>.
+    /// </summary>
+    public event EventHandler<string?>? TransitionSelected;
+
+    /// <summary>
+    /// Raised when the user requests removal of a boundary's transition (right-click on
+    /// a configured chip). Carries the incoming segment's Id. This control never mutates
+    /// the model itself — the page owns the edit + undo, exactly as with
+    /// <see cref="ZoomSegmentRemoveRequested"/> / <see cref="TextOverlayRemoveRequested"/>.
+    /// </summary>
+    public event EventHandler<string>? TransitionRemoveRequested;
 
     private void DrawTrimHandle(CanvasDrawingSession ds, TimeSpan time, float trackHeight)
     {
@@ -1645,7 +1966,8 @@ public sealed partial class TimelineControl : UserControl
 
         if (hitId is not null)
         {
-            // Select the segment
+            // Select the segment — clears clip/segment/camera/text-overlay/transition.
+            ClearOtherSelections(SelectionKind.Zoom);
             SelectedZoomKeyframeId = hitId;
             ZoomSegmentSelected?.Invoke(this, hitId);
 
@@ -1678,12 +2000,8 @@ public sealed partial class TimelineControl : UserControl
         }
         else
         {
-            // Deselect any selected segment
-            if (_selectedZoomKeyframeId is not null)
-            {
-                SelectedZoomKeyframeId = null;
-                ZoomSegmentSelected?.Invoke(this, null);
-            }
+            // Deselect any selected segment (and every other selection kind).
+            ClearOtherSelections(SelectionKind.None);
 
             // Start potential drag-to-create or playhead scrub
             _zoomDragStartX = pos.X;
@@ -1850,6 +2168,7 @@ public sealed partial class TimelineControl : UserControl
         if (hitId is null) return;
 
         // Select the right-clicked segment
+        ClearOtherSelections(SelectionKind.Zoom);
         SelectedZoomKeyframeId = hitId;
         ZoomSegmentSelected?.Invoke(this, hitId);
 
@@ -2314,7 +2633,7 @@ public sealed partial class TimelineControl : UserControl
         // Segment-based timeline (video + text slides): select / move / ripple-trim.
         if (model.Segments.Count > 0)
         {
-            VideoTrack_SegmentPressed(model, canvas, pos.X, e);
+            VideoTrack_SegmentPressed(model, canvas, pos.X, pos.Y, e);
             return;
         }
 
@@ -2351,12 +2670,13 @@ public sealed partial class TimelineControl : UserControl
 
         if (hitClipIndex is not null)
         {
+            ClearOtherSelections(SelectionKind.Clip);
             SelectedClipIndex = hitClipIndex;
             VideoClipSelected?.Invoke(this, hitClipIndex);
         }
-        else if (_selectedClipIndex is not null)
+        else
         {
-            ClearClipSelection();
+            ClearOtherSelections(SelectionKind.None);
         }
 
         // Always move playhead on click
@@ -2369,19 +2689,34 @@ public sealed partial class TimelineControl : UserControl
     /// Handles a pointer press on the segment-based primary track: hit-tests the
     /// segment under the cursor and begins a select / move / trim gesture.
     /// </summary>
-    private void VideoTrack_SegmentPressed(TimelineModel model, CanvasControl canvas, double x, PointerRoutedEventArgs e)
+    private void VideoTrack_SegmentPressed(TimelineModel model, CanvasControl canvas, double x, double y, PointerRoutedEventArgs e)
     {
+        // Transition boundary chips sit on top of the incoming segment's leading trim
+        // handle and the cut line, so they MUST be tested before HitTestSegment below —
+        // otherwise a chip click would be swallowed as a trim-edge press instead. A chip
+        // hit is a discrete selection only: no drag, no pointer capture, no playhead move.
+        // ClearOtherSelections enforces that this is the ONLY thing selected afterwards —
+        // not just on this track (segment/clip) but across zoom/camera/text-overlay too.
+        var (chipIncomingId, chipHit) = HitTestTransitionChip(x, y);
+        if (chipHit)
+        {
+            ClearOtherSelections(SelectionKind.Transition);
+            if (_selectedTransitionId != chipIncomingId)
+            {
+                _selectedTransitionId = chipIncomingId;
+                TransitionSelected?.Invoke(this, chipIncomingId);
+            }
+            VideoTrackCanvas?.Invalidate();
+            return;
+        }
+
         var target = HitTestSegment(model, x, out var segId);
 
         if (segId is null)
         {
-            // Empty space → deselect and scrub the playhead.
-            if (_selectedSegmentId is not null)
-            {
-                _selectedSegmentId = null;
-                SegmentSelected?.Invoke(this, null);
-            }
-            ClearClipSelection();
+            // Empty space → deselect everything (including a transition selection, so
+            // it doesn't linger selected alongside nothing) and scrub the playhead.
+            ClearOtherSelections(SelectionKind.None);
             PlayheadPosition = XToTime(x);
             _dragMode = DragMode.Playhead;
             canvas.CapturePointer(e.Pointer);
@@ -2393,13 +2728,13 @@ public sealed partial class TimelineControl : UserControl
 
         var segment = model.Segments.First(s => s.Id == segId);
 
-        // Select the hit segment.
+        // Select the hit segment — clears clip/zoom/camera/text-overlay/transition.
+        ClearOtherSelections(SelectionKind.Segment);
         if (_selectedSegmentId != segId)
         {
             _selectedSegmentId = segId;
             SegmentSelected?.Invoke(this, segId);
         }
-        ClearClipSelection();
 
         _draggedSegmentId = segId;
         _segmentDragStartX = x;
@@ -2438,7 +2773,7 @@ public sealed partial class TimelineControl : UserControl
         // Segment-based timeline interactions.
         if (model.Segments.Count > 0)
         {
-            VideoTrack_SegmentMoved(model, canvas, pos.X);
+            VideoTrack_SegmentMoved(model, canvas, pos.X, pos.Y);
             return;
         }
 
@@ -2482,7 +2817,7 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>Handles pointer movement during a segment select / move / trim gesture.</summary>
-    private void VideoTrack_SegmentMoved(TimelineModel model, CanvasControl canvas, double x)
+    private void VideoTrack_SegmentMoved(TimelineModel model, CanvasControl canvas, double x, double y)
     {
         double clampedX = Math.Clamp(x, 0, canvas.ActualWidth);
         bool snap = !IsAltDown();
@@ -2517,6 +2852,15 @@ public sealed partial class TimelineControl : UserControl
                 break;
 
             case DragMode.None:
+                // A chip hovered over a trim handle must win the cursor feedback too —
+                // otherwise the resize cursor would suggest a drag that a click there
+                // can't actually start (see VideoTrack_SegmentPressed's chip-first order).
+                var (_, chipHit) = HitTestTransitionChip(x, y);
+                if (chipHit)
+                {
+                    SetCursor(InputSystemCursorShape.Hand);
+                    break;
+                }
                 var target = HitTestSegment(model, x, out _);
                 SetCursor(target switch
                 {
@@ -2599,6 +2943,36 @@ public sealed partial class TimelineControl : UserControl
                 break;
             }
         }
+    }
+
+    /// <summary>
+    /// Right-clicking a configured transition chip requests its removal (mirroring
+    /// <see cref="ZoomTrack_RightTapped"/> / <see cref="CameraTrack_RightTapped"/>).
+    /// Right-clicking an unconfigured "+" chip is a no-op — there is nothing to remove,
+    /// and this control must not create model state from a pointer event either.
+    /// </summary>
+    private void VideoTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+
+        var (hitId, chipHit) = HitTestTransitionChip(pos.X, pos.Y);
+        if (!chipHit || hitId is null) return;
+
+        var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
+        if (incoming?.InTransition is not { Type: not TransitionType.None }) return;
+
+        // Right-clicking a chip to remove its transition also SELECTS that boundary
+        // (matching the existing zoom/camera right-tap pattern below), so — like any
+        // other selection — it deliberately takes over from whatever else was selected
+        // (e.g. a text overlay) rather than leaving both looking selected.
+        ClearOtherSelections(SelectionKind.Transition);
+        if (_selectedTransitionId != hitId)
+        {
+            _selectedTransitionId = hitId;
+            TransitionSelected?.Invoke(this, hitId);
+        }
+        TransitionRemoveRequested?.Invoke(this, hitId);
     }
 
     /// <summary>
@@ -2904,6 +3278,7 @@ public sealed partial class TimelineControl : UserControl
 
         if (hitId is not null)
         {
+            ClearOtherSelections(SelectionKind.Camera);
             SelectedCameraSegmentId = hitId;
             CameraSegmentSelected?.Invoke(this, hitId);
 
@@ -2927,11 +3302,7 @@ public sealed partial class TimelineControl : UserControl
         }
         else
         {
-            if (_selectedCameraSegmentId is not null)
-            {
-                SelectedCameraSegmentId = null;
-                CameraSegmentSelected?.Invoke(this, null);
-            }
+            ClearOtherSelections(SelectionKind.None);
             PlayheadPosition = XToTime(pos.X);
 
             var start = XToPrimarySourceTime(pos.X);
@@ -3061,6 +3432,7 @@ public sealed partial class TimelineControl : UserControl
         var (hitId, _) = HitTestCameraSegment(pos.X, pos.Y);
         if (hitId is not null)
         {
+            ClearOtherSelections(SelectionKind.Camera);
             SelectedCameraSegmentId = hitId;
             CameraSegmentSelected?.Invoke(this, hitId);
             CameraSegmentRemoveRequested?.Invoke(this, hitId);
@@ -3326,6 +3698,7 @@ public sealed partial class TimelineControl : UserControl
 
         if (hitId is not null)
         {
+            ClearOtherSelections(SelectionKind.TextOverlay);
             SelectedTextOverlayId = hitId;
             TextOverlaySelected?.Invoke(this, hitId);
 
@@ -3349,11 +3722,7 @@ public sealed partial class TimelineControl : UserControl
         }
         else
         {
-            if (_selectedTextOverlayId is not null)
-            {
-                SelectedTextOverlayId = null;
-                TextOverlaySelected?.Invoke(this, null);
-            }
+            ClearOtherSelections(SelectionKind.None);
             PlayheadPosition = XToTime(pos.X);
 
             // Capture the source file under the cursor (like _zoomCreateFile) so an
@@ -3503,6 +3872,7 @@ public sealed partial class TimelineControl : UserControl
         var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
         if (hitId is not null)
         {
+            ClearOtherSelections(SelectionKind.TextOverlay);
             SelectedTextOverlayId = hitId;
             TextOverlaySelected?.Invoke(this, hitId);
             TextOverlayRemoveRequested?.Invoke(this, hitId);

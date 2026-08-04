@@ -94,7 +94,8 @@
             Draw="VideoTrackCanvas_Draw"
             PointerMoved="VideoTrack_PointerMoved"
             PointerPressed="VideoTrack_PointerPressed"
-            PointerReleased="VideoTrack_PointerReleased" />
+            PointerReleased="VideoTrack_PointerReleased"
+            RightTapped="VideoTrack_RightTapped" />
 
         <canvas:CanvasControl
             x:Name="CursorTrackCanvas"

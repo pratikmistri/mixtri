@@ -151,6 +151,17 @@ public sealed partial class EditorPage
     private ToggleSwitch OverlayEnabledToggle => PropertiesPanel.TextOverlay.OverlayEnabledToggle;
     private Button RemoveOverlayButton => PropertiesPanel.TextOverlay.RemoveOverlayButton;
 
+    // ─── Transition panel ───────────────────────────────────────────────
+
+    private ComboBox TransitionFamilyCombo => PropertiesPanel.Transition.TransitionFamilyCombo;
+    private ComboBox TransitionVariantCombo => PropertiesPanel.Transition.TransitionVariantCombo;
+    private TextBlock TransitionAutomaticHint => PropertiesPanel.Transition.TransitionAutomaticHint;
+    private Slider TransitionDurationSlider => PropertiesPanel.Transition.TransitionDurationSlider;
+    private TextBlock TransitionDurationClampHint => PropertiesPanel.Transition.TransitionDurationClampHint;
+    private ComboBox TransitionEasingCombo => PropertiesPanel.Transition.TransitionEasingCombo;
+    private Button ApplyTransitionToAllButton => PropertiesPanel.Transition.ApplyTransitionToAllButton;
+    private Button RemoveTransitionButton => PropertiesPanel.Transition.RemoveTransitionButton;
+
     /// <summary>
     /// Attaches the page's editing handlers to the extracted property panel controls.
     /// The panels are plain markup, so this replaces the event attributes the controls
@@ -277,5 +288,13 @@ public sealed partial class EditorPage
         OverlayAccentSideCombo.SelectionChanged += OverlayAccentSideCombo_SelectionChanged;
         OverlayEnabledToggle.Toggled += OverlayEnabledToggle_Toggled;
         RemoveOverlayButton.Click += RemoveTextOverlay_Click;
+
+        // Transition
+        TransitionFamilyCombo.SelectionChanged += TransitionFamilyCombo_SelectionChanged;
+        TransitionVariantCombo.SelectionChanged += TransitionVariantCombo_SelectionChanged;
+        TransitionDurationSlider.ValueChanged += TransitionDurationSlider_ValueChanged;
+        TransitionEasingCombo.SelectionChanged += TransitionEasingCombo_SelectionChanged;
+        ApplyTransitionToAllButton.Click += ApplyTransitionToAllButton_Click;
+        RemoveTransitionButton.Click += RemoveTransitionButton_Click;
     }
 }
