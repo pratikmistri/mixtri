@@ -696,52 +696,25 @@ public sealed partial class TimelineControl : UserControl
     }
 
     // --- Coordinate helpers ---
+    // Extracted to TimeCoordinateConverter (same namespace) so future per-track gesture
+    // handlers can share the conversions; these remain thin instance-state adapters.
 
     /// <summary>Horizontal inset so rounded clip edges aren't clipped at the canvas boundary.</summary>
-    private const double TrackContentInset = 4;
+    private const double TrackContentInset = TimeCoordinateConverter.TrackContentInset;
 
-    private double TimeToX(TimeSpan time)
-    {
-        var model = Model;
-        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
-            return TrackContentInset;
+    private double TimeToX(TimeSpan time) =>
+        TimeCoordinateConverter.TimeToX(Model, time, TimeRulerCanvas.ActualWidth, ActualWidth);
 
-        double totalSeconds = model.DisplayDuration.TotalSeconds;
-        double canvasWidth = TimeRulerCanvas.ActualWidth;
-        if (canvasWidth <= 0) canvasWidth = ActualWidth;
-        double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
-        return TrackContentInset + (time.TotalSeconds - model.ScrollOffset) * pixelsPerSecond;
-    }
-
-    private TimeSpan XToTime(double x)
-    {
-        var model = Model;
-        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
-            return TimeSpan.Zero;
-
-        double totalSeconds = model.DisplayDuration.TotalSeconds;
-        double canvasWidth = TimeRulerCanvas.ActualWidth;
-        if (canvasWidth <= 0) canvasWidth = ActualWidth;
-        double pixelsPerSecond = ((canvasWidth - TrackContentInset * 2) / totalSeconds) * model.ZoomLevel;
-        if (pixelsPerSecond <= 0) return TimeSpan.Zero;
-
-        double seconds = ((x - TrackContentInset) / pixelsPerSecond) + model.ScrollOffset;
-        seconds = Math.Clamp(seconds, 0, totalSeconds);
-        return TimeSpan.FromSeconds(seconds);
-    }
+    private TimeSpan XToTime(double x) =>
+        TimeCoordinateConverter.XToTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
 
     /// <summary>
     /// Converts a source-video time (zoom keyframe / cursor timestamp) to an X
     /// coordinate, mapping through segments so it stays aligned with the video
     /// after text slides shift later content.
     /// </summary>
-    private double SourceTimeToX(TimeSpan sourceTime)
-    {
-        var model = Model;
-        if (model is null || model.Segments.Count == 0)
-            return TimeToX(sourceTime);
-        return TimeToX(model.SourceToOutputTime(sourceTime));
-    }
+    private double SourceTimeToX(TimeSpan sourceTime) =>
+        TimeCoordinateConverter.SourceTimeToX(Model, sourceTime, TimeRulerCanvas.ActualWidth, ActualWidth);
 
     /// <summary>
     /// Converts an X coordinate to a source-video time in the PRIMARY recording's time
@@ -753,24 +726,8 @@ public sealed partial class TimelineControl : UserControl
     /// the primary source-time domain. Returns <c>null</c> only when the timeline has no
     /// primary video segment at all to clamp against.
     /// </summary>
-    private TimeSpan? XToPrimarySourceTime(double x)
-    {
-        var model = Model;
-        var outputTime = XToTime(x);
-        if (model is null || model.Segments.Count == 0)
-            return outputTime;
-
-        var mapped = model.OutputToSourceTime(outputTime);
-        if (mapped is not null)
-            return mapped.Value;
-
-        var primarySegments = model.Segments.OfType<VideoSegment>()
-            .Where(v => model.PrimaryVideoFilePath is null ||
-                string.Equals(v.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase));
-        var (nearest, atStart) = TimelineModel.NearestVideoSegmentEdge(primarySegments, outputTime);
-        if (nearest is null) return null;
-        return atStart ? nearest.SourceStart : nearest.SourceStart + nearest.SourceDuration;
-    }
+    private TimeSpan? XToPrimarySourceTime(double x) =>
+        TimeCoordinateConverter.XToPrimarySourceTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
 
     /// <summary>
     /// Internal alias for <see cref="InvalidateAllCanvases"/>, used by the drag/edit
