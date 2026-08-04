@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio.Core.Capture;
 using Musio.Core.Settings;
+using Musio_App.Helpers;
 
 namespace Musio_App.Pages;
 
@@ -24,38 +25,23 @@ public sealed partial class SettingsPage : Page
         SystemAudioToggle.IsOn = AppSettings.Instance.IsSystemAudioEnabled;
         MicToggle.IsOn = AppSettings.Instance.IsMicEnabled;
 
-        _suppressStartupModeEvents = true;
-        try
+        using (SuppressScope.Enter(ref _suppressStartupModeEvents))
         {
             SelectComboBoxByTag(StartupModeCombo, ShellSettings.Instance.StartupMode.ToString());
         }
-        finally
-        {
-            _suppressStartupModeEvents = false;
-        }
 
-        _suppressExportDefaultEvents = true;
-        try
+        using (SuppressScope.Enter(ref _suppressExportDefaultEvents))
         {
             SelectComboBoxByTag(ExportResolutionCombo,
                 AppSettings.Instance.DefaultExportResolution.ToString());
             SelectComboBoxByTag(ExportQualityCombo,
                 AppSettings.Instance.DefaultExportQuality.ToString());
         }
-        finally
-        {
-            _suppressExportDefaultEvents = false;
-        }
 
-        _suppressCaptureQualityEvents = true;
-        try
+        using (SuppressScope.Enter(ref _suppressCaptureQualityEvents))
         {
             SelectComboBoxByTag(CaptureQualityCombo,
                 AppSettings.Instance.CaptureQuality.ToString());
-        }
-        finally
-        {
-            _suppressCaptureQualityEvents = false;
         }
 
         _suppressWebcamEvents = true;

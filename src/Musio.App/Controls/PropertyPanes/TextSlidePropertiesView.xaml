@@ -106,7 +106,7 @@
                         x:Name="SlideTextColorSwatch"
                         x:FieldModifier="public"
                         Width="20" Height="20"
-                        CornerRadius="4"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1" />
                     <TextBlock x:Name="SlideTextColorText" x:FieldModifier="public" Text="#FFFFFF" VerticalAlignment="Center" />
@@ -178,7 +178,7 @@
                         x:Name="SlideBgColorSwatch"
                         x:FieldModifier="public"
                         Width="20" Height="20"
-                        CornerRadius="4"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1" />
                     <TextBlock x:Name="SlideBgColorText" x:FieldModifier="public" Text="#1E1E1E" VerticalAlignment="Center" />
@@ -217,7 +217,7 @@
                             x:Name="SlideGradEndColorSwatch"
                             x:FieldModifier="public"
                             Width="20" Height="20"
-                            CornerRadius="4"
+                            CornerRadius="{StaticResource SmallCornerRadius}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1" />
                         <TextBlock x:Name="SlideGradEndColorText" x:FieldModifier="public" Text="#16213E" VerticalAlignment="Center" />

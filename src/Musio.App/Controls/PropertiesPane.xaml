@@ -22,7 +22,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ToggleButton">
-                        <Grid x:Name="TabRoot" Background="{TemplateBinding Background}" CornerRadius="4">
+                        <Grid x:Name="TabRoot" Background="{TemplateBinding Background}" CornerRadius="{StaticResource SmallCornerRadius}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                             <Border x:Name="ActiveBar"
                                     Width="2"
