@@ -25,6 +25,24 @@ public static class AspectRatioHelper
     };
 
     /// <summary>
+    /// Returns the width/height ratio as a single <see langword="float"/> for the given
+    /// <see cref="AspectRatio"/>. For <see cref="AspectRatio.Auto"/> (or any unrecognized
+    /// value), returns <c>-1f</c> meaning "no constraint" — callers must check for this
+    /// sentinel rather than treating it as a real ratio.
+    /// </summary>
+    public static float GetRatioValue(AspectRatio ratio) => ratio switch
+    {
+        AspectRatio.Landscape16x9 => 16f / 9f,
+        AspectRatio.Portrait9x16 => 9f / 16f,
+        AspectRatio.Square1x1 => 1f,
+        AspectRatio.Classic4x3 => 4f / 3f,
+        AspectRatio.Tall3x4 => 3f / 4f,
+        AspectRatio.Cinematic21x9 => 21f / 9f,
+        AspectRatio.Instagram4x5 => 4f / 5f,
+        _ => -1f, // Auto — no constraint
+    };
+
+    /// <summary>
     /// Calculates the output pixel dimensions for a given source size, target aspect ratio,
     /// and target resolution. When the aspect ratio is <see cref="AspectRatio.Auto"/>,
     /// the output is sized to fit the resolution while preserving the source aspect ratio.

@@ -229,7 +229,7 @@ public class FrameCompositor : IDisposable
         // Mouse frame 0 = mouse start; video frame 0 = video start.
         // Video frame N needs the cursor at mouse time (N/fps + offset),
         // which is mouse frame (N + offset*fps).
-        _videoFrameOffset = (int)Math.Round(mouseToVideoOffsetSeconds * _config.OutputFps);
+        _videoFrameOffset = FrameTimeConverter.TimeToFrameRounded(mouseToVideoOffsetSeconds, _config.OutputFps);
 
         // Compute the tick corresponding to video time 0 for keyboard overlay alignment.
         // Video t=0 is mouseStart + offset in tick space.
@@ -242,7 +242,7 @@ public class FrameCompositor : IDisposable
         // Without the extra positions, the cursor freezes near the video end.
         if (duration.HasValue && duration.Value.TotalSeconds > 0)
         {
-            TotalFrames = (int)(duration.Value.TotalSeconds * _config.OutputFps);
+            TotalFrames = FrameTimeConverter.TimeToFrameFloor(duration.Value.TotalSeconds, _config.OutputFps);
             int requiredPositions = TotalFrames + Math.Max(0, _videoFrameOffset);
             AdjustSmoothedPositionsToFrameCount(requiredPositions);
         }
@@ -478,7 +478,7 @@ public class FrameCompositor : IDisposable
         if (frameIndex < 0 || frameIndex >= TotalFrames)
             throw new ArgumentOutOfRangeException(nameof(frameIndex));
 
-        double timeSeconds = (double)frameIndex / _config.OutputFps;
+        double timeSeconds = FrameTimeConverter.FrameToTime(frameIndex, _config.OutputFps);
         return ComposeFrame(sourceFrame, timeSeconds);
     }
 
@@ -499,9 +499,7 @@ public class FrameCompositor : IDisposable
 
         // Compute cursor index from source time directly, avoiding integer
         // frame-index truncation. Mouse frame = (videoTime + offset) * fps.
-        int cursorIndex = Math.Clamp(
-            (int)Math.Round((sourceTimeSeconds + _mouseTimeOffset) * _config.OutputFps),
-            0, _smoothedPositions.Count - 1);
+        int cursorIndex = ResolveCursorIndex(sourceTimeSeconds);
         var cursorPos = _smoothedPositions[cursorIndex];
 
         var zoomState = ResolveZoomState(timeSeconds);
@@ -519,6 +517,17 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Maps a point in timeline time to the index of the closest sample in
+    /// <see cref="_smoothedPositions"/>: mouse frame = (videoTime + offset) * fps, rounded
+    /// to the nearest sample and clamped to the smoothed path's bounds. Shared by
+    /// <see cref="ComposeFrame(CanvasBitmap, double)"/> and <see cref="ResolveZoomState"/>,
+    /// which must always agree on the cursor position for a given instant.
+    /// </summary>
+    private int ResolveCursorIndex(double timeSeconds) => Math.Clamp(
+        FrameTimeConverter.TimeToFrameRounded(timeSeconds + _mouseTimeOffset, _config.OutputFps),
+        0, _smoothedPositions.Count - 1);
+
+    /// <summary>
     /// Resolves the zoom/pan state for an arbitrary point in timeline time,
     /// including the cursor-center override and continuous camera drift.
     /// <para>
@@ -532,10 +541,8 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private ZoomState ResolveZoomState(double timeSeconds)
     {
-        // Same cursor-index formula as ComposeFrame: mouse frame = (videoTime + offset) * fps.
-        int cursorIndex = Math.Clamp(
-            (int)Math.Round((timeSeconds + _mouseTimeOffset) * _config.OutputFps),
-            0, _smoothedPositions.Count - 1);
+        // Same cursor-index formula as ComposeFrame.
+        int cursorIndex = ResolveCursorIndex(timeSeconds);
         var cursorPos = _smoothedPositions[cursorIndex];
 
         // Get zoom state — use smoothed cursor position as center hint
@@ -911,6 +918,28 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Runs the shared progressive-average shutter-sample loop used by both
+    /// <see cref="DrawCompositeWithMotionBlur"/> and
+    /// <see cref="CropSourceFrameWithMotionBlur"/>: <paramref name="sampleCount"/> samples
+    /// spread evenly across the shutter interval centered on <paramref name="timeSeconds"/>,
+    /// each handed to <paramref name="drawSample"/> at the exact sample time and the
+    /// progressive-averaging opacity <c>1/(i+1)</c> (see the callers' remarks for why that
+    /// opacity sequence — not a uniform <c>1/N</c> — yields an exact running mean). The two
+    /// callers differ only in what they draw per sample (a composite crop rect vs. a
+    /// direct source-crop sample), which is why this factors out the loop and sample-time
+    /// math but not the draw call itself.
+    /// </summary>
+    private static void DrawProgressiveShutterSamples(
+        int sampleCount, double timeSeconds, double shutterSeconds, Action<double, float> drawSample)
+    {
+        for (int i = 0; i < sampleCount; i++)
+        {
+            double sampleTime = timeSeconds + shutterSeconds * ((i + 0.5) / sampleCount - 0.5);
+            drawSample(sampleTime, 1f / (i + 1));
+        }
+    }
+
+    /// <summary>
     /// Draws the 1x composite buffer into <paramref name="ds"/>, cropped/scaled to
     /// <paramref name="frameCropRect"/>. When the camera travels far enough during
     /// the virtual shutter interval, this instead averages several sub-frame crop
@@ -963,14 +992,13 @@ public class FrameCompositor : IDisposable
         // result is being averaged into a smear, so the extra bandwidth of
         // HighQualityCubic buys nothing visible and multiplies the per-frame cost by
         // the sample count — which is what made playback stutter during zooms.
-        for (int i = 0; i < sampleCount; i++)
+        DrawProgressiveShutterSamples(sampleCount, timeSeconds, shutterSeconds, (sampleTime, opacity) =>
         {
-            double sampleTime = timeSeconds + shutterSeconds * ((i + 0.5) / sampleCount - 0.5);
             var sampleCrop = ComputeCompositeCropRect(ResolveZoomState(sampleTime), viewport1x);
             ds.DrawImage(_compositeBuffer,
-                new Rect(0, 0, OutputWidth, OutputHeight), sampleCrop, 1f / (i + 1),
+                new Rect(0, 0, OutputWidth, OutputHeight), sampleCrop, opacity,
                 CanvasImageInterpolation.Linear);
-        }
+        });
     }
 
     /// <summary>
@@ -1046,7 +1074,7 @@ public class FrameCompositor : IDisposable
 
     private void ComputeContentDimensions()
     {
-        float targetRatio = GetAspectRatioValue(_config.AspectRatio);
+        float targetRatio = AspectRatioHelper.GetRatioValue(_config.AspectRatio);
 
         // Step 1: compute the output canvas at the target aspect ratio, sized to fit
         // within the source bounds. Independent of padding.
@@ -1119,18 +1147,6 @@ public class FrameCompositor : IDisposable
         _sourceAreaOffsetY = (_contentHeight - _sourceAreaHeight) / 2;
     }
 
-    private static float GetAspectRatioValue(AspectRatio ratio) => ratio switch
-    {
-        AspectRatio.Landscape16x9 => 16f / 9f,
-        AspectRatio.Portrait9x16 => 9f / 16f,
-        AspectRatio.Square1x1 => 1f,
-        AspectRatio.Classic4x3 => 4f / 3f,
-        AspectRatio.Tall3x4 => 3f / 4f,
-        AspectRatio.Cinematic21x9 => 21f / 9f,
-        AspectRatio.Instagram4x5 => 4f / 5f,
-        _ => -1f, // Auto — no constraint
-    };
-
     /// <summary>
     /// Adjusts the zoom viewport to match the target aspect ratio.
     /// For <see cref="FitMode.Cover"/> the viewport is narrowed to the target ratio
@@ -1149,7 +1165,7 @@ public class FrameCompositor : IDisposable
             return new Rect(vpX, vpY, vpW, vpH);
 
         // Cover: narrow the zoom viewport to the target ratio using the configured anchor.
-        float targetRatio = GetAspectRatioValue(_config.AspectRatio);
+        float targetRatio = AspectRatioHelper.GetRatioValue(_config.AspectRatio);
         float vpRatio = vpW / vpH;
 
         float newW, newH;
@@ -1238,12 +1254,11 @@ public class FrameCompositor : IDisposable
         // (not a uniform 1/N) opacity gives an exact running mean. Samples use Linear
         // rather than the sharp-path interpolation for the same reason as there: the
         // result is a smear, so the cost of HighQualityCubic per sample buys nothing.
-        for (int i = 0; i < sampleCount; i++)
+        DrawProgressiveShutterSamples(sampleCount, timeSeconds, shutterSeconds, (sampleTime, opacity) =>
         {
-            double sampleTime = timeSeconds + shutterSeconds * ((i + 0.5) / sampleCount - 0.5);
             var sampleViewport = ComputeEffectiveViewport(ResolveZoomState(sampleTime));
-            DrawSourceCropSample(ds, source, sampleViewport, CanvasImageInterpolation.Linear, 1f / (i + 1));
-        }
+            DrawSourceCropSample(ds, source, sampleViewport, CanvasImageInterpolation.Linear, opacity);
+        });
 
         return _croppedBuffer;
     }

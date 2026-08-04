@@ -106,7 +106,7 @@ public class VideoEncoder : IDisposable
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).
         int totalFrames = timelineMapper?.TotalOutputFrames
-            ?? (int)(project.Duration.TotalSeconds * _settings.Fps);
+            ?? FrameTimeConverter.TimeToFrameFloor(project.Duration.TotalSeconds, _settings.Fps);
         int compositorWidth = composer.OutputWidth;
         int compositorHeight = composer.OutputHeight;
 
@@ -164,7 +164,7 @@ public class VideoEncoder : IDisposable
             var videoDesc = new VideoStreamDescriptor(videoProps);
 
             var streamSource = new MediaStreamSource(videoDesc);
-            streamSource.Duration = TimeSpan.FromSeconds((double)totalFrames / _settings.Fps);
+            streamSource.Duration = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(totalFrames, _settings.Fps));
             streamSource.BufferTime = TimeSpan.Zero;
 
             streamSource.Starting += (MediaStreamSource sender, MediaStreamSourceStartingEventArgs args) =>
@@ -372,7 +372,7 @@ public class VideoEncoder : IDisposable
 
             // Give the D3D11 surface directly to the encoder — bypasses all
             // pixel extraction and stride alignment issues entirely.
-            var timestamp = TimeSpan.FromSeconds((double)frameIndex / _settings.Fps);
+            var timestamp = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _settings.Fps));
             var sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
             sample.Duration = frameDuration;
 
