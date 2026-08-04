@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
 using Musio.Core.Processing;
@@ -45,8 +44,7 @@ public class VideoEncoder : IDisposable
 {
     private readonly ExportSettings _settings;
     private bool _disposed;
-    private volatile bool _deviceLost;
-    private CanvasDevice? _deviceWithDeviceLostHandler;
+    private DeviceLostGuard? _deviceLostGuard;
 
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
     private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
@@ -89,10 +87,10 @@ public class VideoEncoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var stopwatch = Stopwatch.StartNew();
-        var device = CanvasDevice.GetSharedDevice();
-        _deviceLost = false;
-        device.DeviceLost += OnCanvasDeviceLost;
-        _deviceWithDeviceLostHandler = device;
+        var device = GpuContext.GetSharedDevice();
+        _deviceLostGuard = new DeviceLostGuard(
+            device,
+            "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
 
         try
         {
@@ -305,9 +303,8 @@ public class VideoEncoder : IDisposable
         }
         finally
         {
-            device.DeviceLost -= OnCanvasDeviceLost;
-            if (ReferenceEquals(_deviceWithDeviceLostHandler, device))
-                _deviceWithDeviceLostHandler = null;
+            _deviceLostGuard?.Dispose();
+            _deviceLostGuard = null;
         }
     }
 
@@ -919,29 +916,10 @@ public class VideoEncoder : IDisposable
     private CanvasRenderTarget CreateRenderTarget(CanvasDevice device, int width, int height, string purpose)
     {
         ThrowIfDeviceLost();
-        try
-        {
-            return new CanvasRenderTarget(device, width, height, 96);
-        }
-        catch (Exception ex) when (ex is OutOfMemoryException or COMException)
-        {
-            throw new InvalidOperationException(
-                $"Failed to allocate {purpose} render target ({width}x{height}). " +
-                "Reduce export resolution or close other GPU-heavy applications.", ex);
-        }
+        return Win2DUtils.CreateRenderTarget(device, width, height, 96, purpose);
     }
 
-    private void OnCanvasDeviceLost(CanvasDevice sender, object args)
-    {
-        _deviceLost = true;
-    }
-
-    private void ThrowIfDeviceLost()
-    {
-        if (_deviceLost)
-            throw new RecoverableDeviceLostException(
-                "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
-    }
+    private void ThrowIfDeviceLost() => _deviceLostGuard?.ThrowIfLost();
 
     private static long EstimateBgraBytes(int width, int height, int surfaceCount)
     {
@@ -1008,23 +986,12 @@ public class VideoEncoder : IDisposable
     {
         if (!_disposed)
         {
-            if (_deviceWithDeviceLostHandler is not null)
-            {
-                _deviceWithDeviceLostHandler.DeviceLost -= OnCanvasDeviceLost;
-                _deviceWithDeviceLostHandler = null;
-            }
+            _deviceLostGuard?.Dispose();
+            _deviceLostGuard = null;
 
             _frameSemaphore.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
         }
-    }
-}
-
-internal sealed class RecoverableDeviceLostException : Exception
-{
-    public RecoverableDeviceLostException(string message)
-        : base(message)
-    {
     }
 }

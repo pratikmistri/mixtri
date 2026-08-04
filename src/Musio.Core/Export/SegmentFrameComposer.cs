@@ -108,7 +108,7 @@ public sealed class SegmentFrameComposer : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        var device = CanvasDevice.GetSharedDevice();
+        var device = GpuContext.GetSharedDevice();
 
         // The key is built from the *unmodified* composition styles so that primary
         // segments without an override resolve back to this same context.
@@ -743,7 +743,7 @@ public sealed class SegmentFrameComposer : IDisposable
             if (sourceWidth <= 0 || sourceHeight <= 0)
                 throw new InvalidOperationException("Composed frame has no pixels.");
 
-            var target = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+            var target = Win2DUtils.CreateRenderTarget(_device, OutputWidth, OutputHeight, 96, "canonical-size letterbox frame");
             try
             {
                 double scale = Math.Min(OutputWidth / sourceWidth, OutputHeight / sourceHeight);

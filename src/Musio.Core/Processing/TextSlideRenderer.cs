@@ -47,7 +47,7 @@ public class TextSlideRenderer : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var target = new CanvasRenderTarget(_device, width, height, 96);
+        var target = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text slide frame");
         using var ds = target.CreateDrawingSession();
 
         DrawSlideBackground(ds, slide, progress, width, height);
@@ -162,7 +162,7 @@ public class TextSlideRenderer : IDisposable
         {
             // Allocate-then-swap so a failed allocation never leaves _gradientCache
             // pointing at a disposed render target.
-            var next = new CanvasRenderTarget(_device, width, height, 96);
+            var next = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text slide gradient cache");
             using (var gds = next.CreateDrawingSession())
             using (var brush = new CanvasLinearGradientBrush(
                 gds, AnimatedTextEngine.ParseColor(slide.BackgroundColor), AnimatedTextEngine.ParseColor(slide.GradientEndColor))

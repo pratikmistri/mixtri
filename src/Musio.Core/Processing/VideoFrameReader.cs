@@ -283,11 +283,12 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     private static CanvasBitmap Clone(CanvasBitmap source)
     {
-        var copy = new CanvasRenderTarget(
-            CanvasDevice.GetSharedDevice(),
+        var copy = Win2DUtils.CreateRenderTarget(
+            GpuContext.GetSharedDevice(),
             source.SizeInPixels.Width,
             source.SizeInPixels.Height,
-            96);
+            96,
+            "video frame cache clone");
 
         using (var ds = copy.CreateDrawingSession())
             ds.DrawImage(source);

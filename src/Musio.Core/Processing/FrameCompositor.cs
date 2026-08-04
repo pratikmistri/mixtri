@@ -1,5 +1,4 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.AI;
 using Musio.Core.Capture;
@@ -51,7 +50,7 @@ public class FrameCompositor : IDisposable
     private readonly AutoZoomEngine _zoomEngine;
     private readonly CursorSmoother _smoother;
     private readonly CompositionConfig _config;
-    private volatile bool _deviceLost;
+    private readonly DeviceLostGuard _deviceLostGuard;
 
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
 
@@ -94,10 +93,12 @@ public class FrameCompositor : IDisposable
     private double _mouseTimeOffset;
 
     // Reusable scratch buffer for CropSourceFrame to avoid per-frame GPU allocation
-    private CanvasRenderTarget? _croppedBuffer;
+    private readonly GrowOnlyBuffer _croppedBufferHolder = new();
+    private CanvasRenderTarget? _croppedBuffer => _croppedBufferHolder.Current;
 
     // Reusable buffer for post-composite zoom (used when padding > 0)
-    private CanvasRenderTarget? _compositeBuffer;
+    private readonly GrowOnlyBuffer _compositeBufferHolder = new();
+    private CanvasRenderTarget? _compositeBuffer => _compositeBufferHolder.Current;
 
     // Tick value corresponding to video time 0, for rebasing keyboard events.
     private long _videoStartTick;
@@ -114,9 +115,15 @@ public class FrameCompositor : IDisposable
     public FrameCompositor(CompositionConfig config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        _device = CanvasDevice.GetSharedDevice();
-        _device.DeviceLost += OnCanvasDeviceLost;
+        _device = GpuContext.GetSharedDevice();
         _bgCompositor = new BackgroundCompositor();
+        _deviceLostGuard = new DeviceLostGuard(
+            _device,
+            "The graphics device was lost while compositing frames. Retry the export after closing other GPU-heavy applications.",
+            // Cached GPU resources belong to the lost device — drop them so a rebuilt
+            // compositor reloads the wallpaper on the new device instead of drawing
+            // (or disposing) a dead surface.
+            onLost: () => _bgCompositor.InvalidateImageCache());
         _cursorRenderer = new CursorRenderer(config.Cursor);
         _zoomEngine = new AutoZoomEngine(config.Zoom);
         _smoother = new CursorSmoother
@@ -774,13 +781,14 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private void EnsureCompositeBuffer()
     {
-        if (_compositeBuffer is null
-            || _compositeBuffer.SizeInPixels.Width != (uint)OutputWidth
-            || _compositeBuffer.SizeInPixels.Height != (uint)OutputHeight)
+        try
         {
-            _compositeBuffer?.Dispose();
-            _compositeBuffer = null;
-            _compositeBuffer = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom buffer");
+            _compositeBufferHolder.Ensure(_device, OutputWidth, OutputHeight, "post-composite zoom buffer");
+        }
+        catch (InvalidOperationException)
+        {
+            ReleaseCachedRenderTargets();
+            throw;
         }
     }
 
@@ -1005,40 +1013,22 @@ public class FrameCompositor : IDisposable
         ThrowIfDeviceLost();
         try
         {
-            return new CanvasRenderTarget(_device, width, height, 96);
+            return Win2DUtils.CreateRenderTarget(_device, width, height, 96, purpose);
         }
-        catch (Exception ex) when (ex is OutOfMemoryException or COMException)
+        catch (InvalidOperationException)
         {
             ReleaseCachedRenderTargets();
-            throw new InvalidOperationException(
-                $"Failed to allocate {purpose} render target ({width}x{height}). " +
-                "Reduce export resolution or close other GPU-heavy applications.", ex);
+            throw;
         }
     }
 
     private void ReleaseCachedRenderTargets()
     {
-        _croppedBuffer?.Dispose();
-        _croppedBuffer = null;
-        _compositeBuffer?.Dispose();
-        _compositeBuffer = null;
+        _croppedBufferHolder.Clear();
+        _compositeBufferHolder.Clear();
     }
 
-    private void OnCanvasDeviceLost(CanvasDevice sender, object args)
-    {
-        _deviceLost = true;
-        // Cached GPU resources belong to the lost device — drop them so a rebuilt
-        // compositor reloads the wallpaper on the new device instead of drawing
-        // (or disposing) a dead surface.
-        _bgCompositor.InvalidateImageCache();
-    }
-
-    private void ThrowIfDeviceLost()
-    {
-        if (_deviceLost)
-            throw new RecoverableDeviceLostException(
-                "The graphics device was lost while compositing frames. Retry the export after closing other GPU-heavy applications.");
-    }
+    private void ThrowIfDeviceLost() => _deviceLostGuard.ThrowIfLost();
 
     private static long EstimateBgraBytes(int width, int height, int surfaceCount)
     {
@@ -1264,13 +1254,14 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private void EnsureCroppedBuffer()
     {
-        if (_croppedBuffer is null
-            || _croppedBuffer.SizeInPixels.Width != (uint)_sourceAreaWidth
-            || _croppedBuffer.SizeInPixels.Height != (uint)_sourceAreaHeight)
+        try
         {
-            _croppedBuffer?.Dispose();
-            _croppedBuffer = null;
-            _croppedBuffer = CreateRenderTarget(_sourceAreaWidth, _sourceAreaHeight, "source crop buffer");
+            _croppedBufferHolder.Ensure(_device, _sourceAreaWidth, _sourceAreaHeight, "source crop buffer");
+        }
+        catch (InvalidOperationException)
+        {
+            ReleaseCachedRenderTargets();
+            throw;
         }
     }
 
@@ -1462,7 +1453,7 @@ public class FrameCompositor : IDisposable
     {
         if (!_disposed)
         {
-            _device.DeviceLost -= OnCanvasDeviceLost;
+            _deviceLostGuard.Dispose();
             ReleaseCachedRenderTargets();
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
@@ -1477,10 +1468,3 @@ public class FrameCompositor : IDisposable
     }
 }
 
-internal sealed class RecoverableDeviceLostException : Exception
-{
-    public RecoverableDeviceLostException(string message)
-        : base(message)
-    {
-    }
-}

@@ -100,7 +100,7 @@ public sealed class Mp4FrameSource : IFrameSource
         Height = height;
         FrameCount = frameCount;
 
-        _surface = new CanvasRenderTarget(device, width, height, 96);
+        _surface = Win2DUtils.CreateRenderTarget(device, width, height, 96, "MP4 frame-server surface");
         _player.VideoFrameAvailable += OnVideoFrameAvailable;
     }
 
@@ -286,7 +286,7 @@ public sealed class Mp4FrameSource : IFrameSource
 
             // _surface is reused across calls, so hand back an independent copy the
             // caller can hold and dispose on its own schedule.
-            var copy = new CanvasRenderTarget(_device, Width, Height, 96);
+            var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
             using (var ds = copy.CreateDrawingSession())
             {
                 // Legacy recordings are stored upside down; correcting it here keeps the

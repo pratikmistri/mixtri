@@ -985,8 +985,8 @@ public sealed partial class EditorPage
                 else
                 {
                     var device = CanvasDevice.GetSharedDevice();
-                    var rt = new CanvasRenderTarget(device,
-                        bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+                    var rt = Win2DUtils.CreateRenderTarget(device,
+                        bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "preview fallback frame");
                     using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
                     return rt;
                 }
@@ -1043,8 +1043,8 @@ public sealed partial class EditorPage
             }
 
             var dev = CanvasDevice.GetSharedDevice();
-            var fallback = new CanvasRenderTarget(dev,
-                segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96);
+            var fallback = Win2DUtils.CreateRenderTarget(dev,
+                segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96, "segment preview fallback frame");
             using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
             return fallback;
         }
@@ -1282,8 +1282,8 @@ public sealed partial class EditorPage
 
             // Fallback: show raw frame without effects
             var device = CanvasDevice.GetSharedDevice();
-            var renderTarget = new CanvasRenderTarget(device,
-                bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+            var renderTarget = Win2DUtils.CreateRenderTarget(device,
+                bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
             using (var ds = renderTarget.CreateDrawingSession())
             {
                 ds.DrawImage(bitmap);
@@ -1362,7 +1362,7 @@ public sealed partial class EditorPage
 
             // Fallback: raw frame
             var device = CanvasDevice.GetSharedDevice();
-            var rt = new CanvasRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+            var rt = Win2DUtils.CreateRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
             using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
             bitmap.Dispose();
             _lastRenderedFrameIndex = frameIndex;

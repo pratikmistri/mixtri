@@ -424,7 +424,7 @@ public class AnimatedTextEngine : IDisposable
     {
         if (_blurScratch is null || _blurScratch.Device != _device || _blurScratchKey != (width, height))
         {
-            var next = new CanvasRenderTarget(_device, width, height, 96);
+            var next = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text-slide blur scratch");
             _blurScratch?.Dispose();
             _blurScratch = next;
             _blurScratchKey = (width, height);

@@ -3,7 +3,6 @@ using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Geometry;
 using Musio.Core.Models;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Windows.Foundation;
 using Windows.UI;
 
@@ -59,7 +58,7 @@ public class CursorRenderer : IDisposable
 
     // Scratch render target for shutter-based cursor blur (progressive-average
     // compositing). Cached and grown-only, like FrameCompositor's buffers.
-    private CanvasRenderTarget? _shutterBlurScratch;
+    private readonly GrowOnlyBuffer _shutterBlurScratchHolder = new();
     private const int ShutterBlurMaxDimension = 2048;
     private const long ShutterBlurMaxArea = (long)ShutterBlurMaxDimension * ShutterBlurMaxDimension;
     private const float ShutterBlurSizeQuantum = 64f; // round scratch target up to reduce reallocation churn
@@ -559,27 +558,16 @@ public class CursorRenderer : IDisposable
             return false;
         }
 
-        if (_shutterBlurScratch is null
-            || _shutterBlurScratch.SizeInPixels.Width < (uint)targetWidth
-            || _shutterBlurScratch.SizeInPixels.Height < (uint)targetHeight)
+        if (!_shutterBlurScratchHolder.TryEnsureAtLeast(
+                session.Device, targetWidth, targetHeight, "cursor shutter blur scratch", out var shutterBlurScratch))
         {
-            _shutterBlurScratch?.Dispose();
-            _shutterBlurScratch = null;
-            try
-            {
-                _shutterBlurScratch = new CanvasRenderTarget(session.Device, targetWidth, targetHeight, 96);
-            }
-            catch (Exception ex) when (ex is OutOfMemoryException or COMException)
-            {
-                _shutterBlurScratch = null;
-                return false;
-            }
+            return false;
         }
 
-        uint bufferWidth = _shutterBlurScratch.SizeInPixels.Width;
-        uint bufferHeight = _shutterBlurScratch.SizeInPixels.Height;
+        uint bufferWidth = shutterBlurScratch!.SizeInPixels.Width;
+        uint bufferHeight = shutterBlurScratch.SizeInPixels.Height;
 
-        using (var scratchSession = _shutterBlurScratch.CreateDrawingSession())
+        using (var scratchSession = shutterBlurScratch.CreateDrawingSession())
         {
             scratchSession.Clear(Color.FromArgb(0, 0, 0, 0));
 
@@ -602,7 +590,7 @@ public class CursorRenderer : IDisposable
         }
 
         session.DrawImage(
-            _shutterBlurScratch,
+            shutterBlurScratch,
             new Rect(left, top, bufferWidth, bufferHeight),
             new Rect(0, 0, bufferWidth, bufferHeight),
             opacity);
@@ -846,7 +834,6 @@ public class CursorRenderer : IDisposable
         _defaultCursorGeometry?.Dispose();
         _defaultCursorGeometry = null;
         DisposeGlyphs();
-        _shutterBlurScratch?.Dispose();
-        _shutterBlurScratch = null;
+        _shutterBlurScratchHolder.Dispose();
     }
 }

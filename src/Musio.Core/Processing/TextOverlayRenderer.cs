@@ -46,8 +46,7 @@ public class TextOverlayRenderer : IDisposable
     // overlay actually uses Blur — and resized via allocate-then-swap after that so a
     // failed allocation never leaves the field pointing at a disposed target, and normal
     // frames with no Blur overlay never touch the GPU for it at all.
-    private CanvasRenderTarget? _blurScratch;
-    private (int W, int H) _blurScratchKey;
+    private readonly GrowOnlyBuffer _blurScratchHolder = new();
 
     // Cached Blur effect graph (BorderEffect -> GaussianBlurEffect), rebuilt only when the
     // scratch target it reads from has been reallocated (a resize — see EnsureBlurScratch).
@@ -378,16 +377,7 @@ public class TextOverlayRenderer : IDisposable
     }
 
     private CanvasRenderTarget EnsureBlurScratch(int width, int height)
-    {
-        if (_blurScratch is null || _blurScratch.Device != _device || _blurScratchKey != (width, height))
-        {
-            var next = new CanvasRenderTarget(_device, width, height, 96);
-            _blurScratch?.Dispose();
-            _blurScratch = next;
-            _blurScratchKey = (width, height);
-        }
-        return _blurScratch;
-    }
+        => _blurScratchHolder.Ensure(_device, width, height, "text-overlay blur scratch");
 
     /// <summary>
     /// Returns the cached Blur effect graph (<see cref="BorderEffect"/> feeding a
@@ -601,7 +591,7 @@ public class TextOverlayRenderer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _blurScratch?.Dispose();
+        _blurScratchHolder.Dispose();
         _blurGaussianEffect?.Dispose();
         _blurBorderEffect?.Dispose();
         foreach (var entry in _overlayCache.Values)
