@@ -246,6 +246,29 @@ public sealed class AudioPlaybackEngine : IDisposable
     }
 
     /// <summary>
+    /// Where the loaded streams are currently reading from, or <c>null</c> when nothing is
+    /// loaded. Reported from the first reader — <see cref="SeekCore"/> moves every reader to
+    /// the same position, so they stay in lockstep.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so the editor can detect DRIFT between where the audio actually is and where
+    /// the edited timeline says it should be. Preview audio is played as one continuous pass
+    /// through each source file, but the output timeline can trim, delete, reorder, speed-shift
+    /// and interleave text slides — so linear playback diverges from the timeline the moment
+    /// any of those exist, and the caller has to notice and re-seek.
+    /// </remarks>
+    public TimeSpan? CurrentPosition
+    {
+        get
+        {
+            lock (_transportLock)
+            {
+                return _readers.Count > 0 ? _readers[0].CurrentTime : null;
+            }
+        }
+    }
+
+    /// <summary>
     /// Plays a short burst of audio at the given position for scrub feedback.
     /// Automatically stops after a brief silence gap (no new scrub events).
     /// </summary>

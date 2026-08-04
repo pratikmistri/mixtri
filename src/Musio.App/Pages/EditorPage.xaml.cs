@@ -314,8 +314,7 @@ public sealed partial class EditorPage : Page
                 // Play short audio burst at scrub position for editing feedback
                 if (!Preview.IsPlaying)
                 {
-                    var audioPos = AudioPositionForVideo(Timeline.PlayheadPosition);
-                    if (audioPos >= TimeSpan.Zero)
+                    if (AudioPositionForVideo(Timeline.PlayheadPosition) is { } audioPos)
                         _audioPlayer?.ScrubTo(audioPos);
                 }
             });
@@ -335,18 +334,11 @@ public sealed partial class EditorPage : Page
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
 
-            // Start audio when playhead reaches audio start point
-            // (handles negative offset where audio started after video)
-            if (_audioPlayer is not null && _audioPlayer.IsLoaded
-                && Preview.IsPlaying && !_audioPlayer.IsPlaying)
-            {
-                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
-                if (audioPos >= TimeSpan.Zero)
-                {
-                    _audioPlayer.Seek(audioPos);
-                    _audioPlayer.Play();
-                }
-            }
+            // Keep the audio aligned with the edited timeline on every tick: start it when the
+            // playhead enters footage that has audio, pause it over slides/gaps, and correct
+            // drift once linear file playback diverges from where the segments say it should be.
+            if (Preview.IsPlaying)
+                SyncAudioToPlayhead(Preview.PlayheadPosition);
         };
 
         // Sync audio play/pause with preview
@@ -355,13 +347,9 @@ public sealed partial class EditorPage : Page
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
             if (isPlaying)
             {
-                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
-                if (audioPos >= TimeSpan.Zero)
-                {
-                    _audioPlayer.Seek(audioPos);
-                    _audioPlayer.Play();
-                }
-                // else: audio hasn't started yet; PlaybackTick will start it
+                // Seeks, starts, or leaves it paused if the playhead is somewhere with no
+                // audio behind it (a title slide, say) — PlaybackTick picks it up on entry.
+                SyncAudioToPlayhead(Preview.PlayheadPosition);
             }
             else
             {
@@ -373,18 +361,7 @@ public sealed partial class EditorPage : Page
         Preview.PlaybackLooped += (_, _) =>
         {
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
-            var audioPos = AudioPositionForVideo(TimeSpan.Zero);
-            if (audioPos >= TimeSpan.Zero)
-            {
-                _audioPlayer.Seek(audioPos);
-                if (!_audioPlayer.IsPlaying)
-                    _audioPlayer.Play();
-            }
-            else
-            {
-                // Audio starts later in the video — stop and let tick restart it
-                _audioPlayer.Pause();
-            }
+            SyncAudioToPlayhead(TimeSpan.Zero);
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -4977,15 +4954,89 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Converts a video playhead position to the corresponding audio file position.
-    /// Positive _audioOffsetSeconds = pre-roll (skip into WAV).
-    /// Negative _audioOffsetSeconds = audio started late (silence before audio).
-    /// Returns negative TimeSpan when video is before audio start — callers
-    /// must treat negative results as silence (no audio to play).
+    /// Converts an OUTPUT-timeline playhead position to the corresponding position in the
+    /// primary recording's audio files, or <c>null</c> when there is no audio to play there.
     /// </summary>
-    private TimeSpan AudioPositionForVideo(TimeSpan videoPosition)
+    /// <remarks>
+    /// <para>
+    /// This must be segment-aware. The output timeline is not the recording's own timeline:
+    /// inserting a text slide shifts every later segment, and trims, deletes, reorders and
+    /// speed changes all remap it further. Mapping output time to file time with a single
+    /// constant offset (which is what this did originally, from before segments existed) meant
+    /// the audio played wherever the playhead happened to be rather than where the footage it
+    /// belongs to actually sits — e.g. with a 3s title slide in front, the mic track was
+    /// audible immediately at 0s instead of starting at 3s, even though the waveform drew in
+    /// the right place because <c>TimelineControl.DrawSegmentWaveform</c> already mapped
+    /// through the segments. The exporter was likewise already correct
+    /// (<see cref="ExportAudioPlan.BuildFromSegments"/>), so this was preview-only.
+    /// </para>
+    /// <para>
+    /// Returns <c>null</c> for anything with no primary-recording audio behind it: a text
+    /// slide, a gap, an appended clip (only the primary recording's files are loaded into the
+    /// preview engine), or a position that lands before the audio recording started. Callers
+    /// treat <c>null</c> as "silence" and pause.
+    /// </para>
+    /// </remarks>
+    private TimeSpan? AudioPositionForVideo(TimeSpan videoPosition)
     {
-        return videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+        var model = ViewModel.Model;
+
+        // Legacy, pre-segment projects: output time IS the recording's own video time.
+        if (model.Segments.Count == 0)
+        {
+            var legacy = videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+            return legacy >= TimeSpan.Zero ? legacy : null;
+        }
+
+        var (segment, localOffset) = model.GetSegmentAtTime(videoPosition);
+        if (segment is not VideoSegment video)
+            return null;
+
+        // Appended recordings carry their own audio files, which the preview engine never
+        // loads (it only opens the primary recording's tracks) — so there is nothing to
+        // position for them, and playing the primary's audio there would be plainly wrong.
+        if (!string.Equals(video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        var sourceTime = video.SourceStart + TimeSpan.FromTicks((long)(localOffset.Ticks * speed));
+        var position = sourceTime + TimeSpan.FromSeconds(_audioOffsetSeconds);
+        return position >= TimeSpan.Zero ? position : null;
+    }
+
+    /// <summary>
+    /// How far the audio may drift from its mapped position before it is re-seeked during
+    /// playback. Preview audio plays as one continuous pass per file while the output timeline
+    /// may cut, reorder or speed-shift underneath it, so drift is expected and has to be
+    /// corrected — but correcting it every tick would stutter, and correcting it never would
+    /// desynchronise. Roughly two frames at 30fps: past the ~50-100ms mark it reads as out of
+    /// sync, below it the correction is inaudible.
+    /// </summary>
+    private static readonly TimeSpan AudioDriftTolerance = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>
+    /// Re-aligns preview audio with <paramref name="videoPosition"/>: seeks when it has drifted
+    /// (or when the playhead has jumped to unrelated footage), starts it when the playhead
+    /// enters footage that has audio, and pauses it over slides, gaps and appended clips.
+    /// </summary>
+    private void SyncAudioToPlayhead(TimeSpan videoPosition)
+    {
+        if (_audioPlayer is not { IsLoaded: true } player) return;
+
+        if (AudioPositionForVideo(videoPosition) is not { } target)
+        {
+            // Nothing to play here (text slide, gap, appended clip, or before the audio
+            // recording began). Pausing rather than letting it run on is the whole point:
+            // otherwise the mic track is audible over a title card.
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        var actual = player.CurrentPosition;
+        bool drifted = actual is null || (actual.Value - target).Duration() > AudioDriftTolerance;
+
+        if (drifted) player.Seek(target);
+        if (!player.IsPlaying) player.Play();
     }
 
     /// <summary>
