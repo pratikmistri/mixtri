@@ -537,7 +537,7 @@ public class VideoEncoder : IDisposable
     /// re-derive that bound.
     /// <para>
     /// When <paramref name="sourceDuration"/> is <c>null</c> (the duration probe failed —
-    /// see <see cref="TryGetMediaDurationAsync"/>), this returns <paramref name="placement"/>
+    /// see <see cref="TryGetAudioFileDurationAsync"/>), this returns <paramref name="placement"/>
     /// unchanged: without a known real length there is nothing safe to clamp against, so
     /// the placement keeps whatever bound <see cref="ExportAudioPlan"/> itself computed.
     /// </para>
@@ -670,7 +670,7 @@ public class VideoEncoder : IDisposable
 
                 if (!audioFileDurationByPath.TryGetValue(placement.SourcePath, out var duration))
                 {
-                    duration = await TryGetMediaDurationAsync(placement.SourcePath);
+                    duration = await TryGetAudioFileDurationAsync(placement.SourcePath);
                     audioFileDurationByPath[placement.SourcePath] = duration;
                 }
 
@@ -725,7 +725,32 @@ public class VideoEncoder : IDisposable
     /// metadata unclamped — see <see cref="ClampToSourceDuration"/>'s remarks for why that
     /// is an acceptable, explicitly-handled degradation rather than a silent bug.
     /// </summary>
-    private static async Task<TimeSpan?> TryGetMediaDurationAsync(string path)
+    /// <remarks>
+    /// Probes via <see cref="BackgroundAudioTrack.CreateFromFileAsync"/> — deliberately the
+    /// SAME API <see cref="MuxAudioAsync"/> uses to open an
+    /// <see cref="AudioSourceKind.AudioFile"/> placement, so the duration clamped against
+    /// here is exactly the <see cref="BackgroundAudioTrack.OriginalDuration"/>
+    /// <see cref="ApplyPlacement"/> will later trim against, with no second decoder's
+    /// interpretation to disagree with.
+    /// <para>
+    /// This previously went through <see cref="MediaClip.CreateFromFileAsync"/>, which is
+    /// the API for VIDEO files — a review flagged that it may reject audio-only inputs, in
+    /// which case this probe's <c>catch</c> would return <c>null</c> and silently turn
+    /// <see cref="ClampToSourceDuration"/> into a no-op for every standalone audio file.
+    /// Measured on current Windows it does NOT actually reject them (wav/mp3/m4a/wma all
+    /// opened, reporting durations identical to <see cref="BackgroundAudioTrack"/>'s to the
+    /// tick), so this is not a fix for an observed failure. It is kept because relying on
+    /// an undocumented capability of the video-clip API for the audio-only path — where
+    /// the failure mode is silent (a swallowed exception, an unclamped placement, no error
+    /// surfaced anywhere) — buys nothing over calling the audio API the mux already uses.
+    /// </para>
+    /// <para><b>Marked <c>internal</c>, not <c>private</c>, deliberately.</b> So
+    /// <c>Musio.Tests</c> (via this assembly's <c>InternalsVisibleTo</c>) can assert
+    /// against a real, generated audio-only file that this probe resolves a duration at
+    /// all — the one property <see cref="ClampToSourceDuration"/> silently depends on, and
+    /// which no pure test can cover.</para>
+    /// </remarks>
+    internal static async Task<TimeSpan?> TryGetAudioFileDurationAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             return null;
@@ -733,8 +758,9 @@ public class VideoEncoder : IDisposable
         try
         {
             var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(path));
-            var clip = await MediaClip.CreateFromFileAsync(file);
-            return clip.OriginalDuration;
+            var track = await BackgroundAudioTrack.CreateFromFileAsync(file);
+            var duration = track.OriginalDuration;
+            return duration > TimeSpan.Zero ? duration : null;
         }
         catch (Exception ex)
         {
