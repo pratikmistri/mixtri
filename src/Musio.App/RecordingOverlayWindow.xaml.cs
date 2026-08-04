@@ -76,14 +76,7 @@ public sealed partial class RecordingOverlayWindow : Window
 
         // Remove title bar and border for a compact floating overlay
         ExtendsContentIntoTitleBar = true;
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
-        {
-            presenter.SetBorderAndTitleBar(false, false);
-            presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = false;
-            presenter.IsMaximizable = false;
-            presenter.IsMinimizable = false;
-        }
+        Controls.OverlayWindowBase.ConfigureBorderlessAlwaysOnTopPresenter(AppWindow);
 
         // Exclude overlay from screen capture
         NativeMethods.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
