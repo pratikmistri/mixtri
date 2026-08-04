@@ -199,7 +199,10 @@ public static class TransitionResolver
         if (local < TimeSpan.Zero || local >= duration)
             return TransitionResolution.None;
 
-        double rawProgress = Math.Clamp(local.TotalSeconds / duration.TotalSeconds, 0, 1);
+        // Computed as an exact tick ratio rather than dividing TotalSeconds: both operands are
+        // integer tick counts, so this avoids the double-rounding of converting each to seconds
+        // first, and keeps the window's exclusive upper bound exact at its final tick.
+        double rawProgress = Math.Clamp((double)local.Ticks / duration.Ticks, 0, 1);
         double easedProgress = Ease(config.Easing, rawProgress);
 
         // An EXPLICITLY configured transition rolls the outgoing segment past its own cut point

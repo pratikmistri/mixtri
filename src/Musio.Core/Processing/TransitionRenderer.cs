@@ -251,13 +251,16 @@ public class TransitionRenderer : IDisposable
         CanvasDrawingSession ds, CanvasBitmap? outgoing, CanvasBitmap incoming,
         double progress, int width, int height, int dirX, int dirY)
     {
-        // `progress` is already eased by the caller (see the doc comment on Render) — treat it
-        // as final motion progress. This helper used to run it through an internal SmoothStep
-        // on top of that, which double-eased the motion. Removed: verified safe because neither
-        // SlideLeft/Right/Up/Down nor Wipe is reachable from any existing call site today (both
-        // TransitionRenderer.Render call sites — SegmentFrameComposer.cs and EditorPage.xaml.cs —
-        // only ever pass TransitionType.CrossFade), so no saved project's rendered output can
-        // regress from this change.
+        // `progress` arrives ALREADY EASED from TransitionResolver.EasedProgress (see the doc
+        // comment on Render), so it is the final motion progress and is used as-is. This helper
+        // previously ran it through an internal SmoothStep as well, which applied a second curve
+        // on top of the user's configured easing and distorted the motion.
+        //
+        // (An earlier revision of this comment justified the removal by claiming Slide/Wipe were
+        // unreachable because every call site passed CrossFade. That was true only before the
+        // export and preview paths were wired to pass resolution.Type — they now pass whatever
+        // the user configured, so these effects are very much reachable. Avoiding the
+        // double-easing is the reason on its own; no reachability argument is needed or valid.)
         double t = progress;
 
         double offsetX = dirX * width * (1.0 - t);

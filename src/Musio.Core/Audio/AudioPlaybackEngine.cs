@@ -466,49 +466,10 @@ public sealed class AudioPlaybackEngine : IDisposable
         }
 
         /// <summary>
-        /// Indexed <c>for</c> loop deliberately, not <c>foreach</c>: <paramref name="windows"/>
-        /// is typed as the interface <see cref="IReadOnlyList{T}"/>, and <c>foreach</c> over
-        /// an interface-typed sequence allocates a boxed enumerator every call — this method
-        /// runs once per audio FRAME (tens of thousands of times per second at typical
-        /// sample rates), on the real-time audio thread, so that allocation is not
-        /// acceptable here.
+        /// Delegates to <see cref="EqualPowerCrossfade.GainAt"/> — the window-combination rules
+        /// live there so they are directly unit-testable, rather than being sealed inside this
+        /// private nested provider where nothing could reach them.
         /// </summary>
-        private double GainAt(double timeSeconds)
-        {
-            double gain = 1.0;
-            for (int i = 0; i < windows.Count; i++)
-            {
-                var window = windows[i];
-                double start = window.Start.TotalSeconds;
-                double end = window.End.TotalSeconds;
-
-                if (timeSeconds < start)
-                {
-                    // Before this window starts, it does not affect gain at all — this
-                    // is unrelated (earlier) content in the same continuously-played file,
-                    // not something this specific window governs.
-                    continue;
-                }
-
-                if (timeSeconds >= end)
-                {
-                    // At/after this window's end: a fade-IN has completed, so it no longer
-                    // affects gain (matches EqualPowerCrossfade.InGain(1)==1, i.e. leaving
-                    // `gain` untouched is already correct). A fade-OUT, however, has
-                    // finished dropping to silence by this instant and MUST STAY silent —
-                    // the placement it represents has conceptually stopped playing here
-                    // (mirroring how VideoEncoder truncates TakeDuration at exactly this
-                    // same duration on export) — rather than snapping back to full volume,
-                    // which would be an audible "pop" immediately after every crossfade.
-                    if (!window.IsFadeIn) gain = 0.0;
-                    continue;
-                }
-
-                double t = (timeSeconds - start) / window.Duration.TotalSeconds;
-                gain *= window.IsFadeIn ? EqualPowerCrossfade.InGain(t) : EqualPowerCrossfade.OutGain(t);
-            }
-
-            return gain;
-        }
+        private double GainAt(double timeSeconds) => EqualPowerCrossfade.GainAt(windows, timeSeconds);
     }
 }
