@@ -351,9 +351,15 @@ public sealed partial class TimelineControl : UserControl
         TransitionChipWipeColor      = WithAlpha(wipeBase, 235);
         TransitionChipStylizedColor  = WithAlpha(stylizedBase, 235);
         TransitionChipGlyphColor     = Color.FromArgb(255, 255, 255, 255); // white glyph text reads on every family fill above
-        TransitionChipEmptyFill      = GetSystemBrushColor("ControlFillColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
-        TransitionChipEmptyBorder    = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(90, 255, 255, 255));
-        TransitionChipEmptyGlyphColor = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(160, 255, 255, 255));
+        // The unconfigured ("Automatic") chip is a real, clickable affordance, so it gets a
+        // solid neutral slate fill rather than the near-invisible ControlFill/TextTertiary
+        // treatment it used to have — that read as decorative and users did not discover it.
+        // It stays deliberately desaturated so a configured boundary's family colour still
+        // reads as "this one is set", but it is now plainly present against the filmstrip.
+        var autoBase                 = isDark ? Color.FromArgb(255, 96, 104, 120) : Color.FromArgb(255, 118, 126, 142);
+        TransitionChipEmptyFill      = WithAlpha(autoBase, 235);
+        TransitionChipEmptyBorder    = isDark ? Color.FromArgb(255, 168, 178, 198) : Color.FromArgb(255, 74, 82, 96);
+        TransitionChipEmptyGlyphColor = Color.FromArgb(255, 255, 255, 255);
 
         // ── Text & lines — system ──
         SpeedLabelTextColor   = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
@@ -1220,15 +1226,68 @@ public sealed partial class TimelineControl : UserControl
             => (TransitionChipWipeColor, "W"),
         TransitionType.ZoomBlur or TransitionType.WhipPanLeft or TransitionType.WhipPanRight or TransitionType.Glitch
             => (TransitionChipStylizedColor, "FX"),
-        _ => (TransitionChipEmptyFill, "+"),
+        _ => (TransitionChipEmptyFill, "A"),
+    };
+
+    /// <summary>
+    /// Human-readable description of a boundary's transition, shown in the hover tooltip so the
+    /// chip's 1-2 character glyph is discoverable rather than something to be decoded.
+    /// </summary>
+    private static string DescribeTransitionForTooltip(TransitionConfig? config)
+    {
+        if (config is null)
+        {
+            return "Transition: Automatic\n" +
+                   "Cross dissolves next to a text slide, hard cut elsewhere.\n" +
+                   "Click to choose an effect.";
+        }
+
+        if (config.Type == TransitionType.None)
+            return "Transition: None (hard cut)\nClick to choose an effect.";
+
+        return $"Transition: {DescribeTransitionType(config.Type)}\n" +
+               $"{config.Duration.TotalSeconds:0.00}s · {DescribeEasing(config.Easing)}\n" +
+               "Click to edit · right-click to remove.";
+    }
+
+    private static string DescribeTransitionType(TransitionType type) => type switch
+    {
+        TransitionType.Fade => "Fade (through black)",
+        TransitionType.CrossFade => "Cross dissolve",
+        TransitionType.DipToWhite => "Dip to white",
+        TransitionType.SlideLeft => "Slide left",
+        TransitionType.SlideRight => "Slide right",
+        TransitionType.SlideUp => "Slide up",
+        TransitionType.SlideDown => "Slide down",
+        TransitionType.PushLeft => "Push left",
+        TransitionType.PushRight => "Push right",
+        TransitionType.PushUp => "Push up",
+        TransitionType.PushDown => "Push down",
+        TransitionType.Wipe => "Wipe left \u2192 right",
+        TransitionType.WipeRight => "Wipe right \u2192 left",
+        TransitionType.WipeUp => "Wipe bottom \u2192 top",
+        TransitionType.WipeDown => "Wipe top \u2192 bottom",
+        TransitionType.ZoomBlur => "Zoom blur",
+        TransitionType.WhipPanLeft => "Whip pan left",
+        TransitionType.WhipPanRight => "Whip pan right",
+        TransitionType.Glitch => "Glitch",
+        _ => type.ToString(),
+    };
+
+    private static string DescribeEasing(TransitionEasing easing) => easing switch
+    {
+        TransitionEasing.Linear => "linear",
+        TransitionEasing.EaseIn => "ease in",
+        TransitionEasing.EaseOut => "ease out",
+        _ => "ease in-out",
     };
 
     /// <summary>
     /// Draws the selectable boundary chip between two adjacent segments, if both are
     /// wide enough on-screen (<see cref="IsTransitionChipEligible"/>). A configured
     /// boundary (incoming.InTransition with a non-None type) gets a solid, family-
-    /// coloured pill; an unconfigured boundary gets a dimmed "+" affordance so the
-    /// transition surface is discoverable even before anything is set.
+    /// coloured pill; an unconfigured boundary gets an equally solid neutral "A"
+    /// (Automatic) pill, so the transition surface is discoverable before anything is set.
     /// </summary>
     private void DrawTransitionChipForBoundary(
         CanvasDrawingSession ds,
@@ -1266,7 +1325,7 @@ public sealed partial class TimelineControl : UserControl
         {
             fill = TransitionChipEmptyFill;
             border = isSelected ? VideoClipSelectedBorder : TransitionChipEmptyBorder;
-            glyph = "+";
+            glyph = "A";
             glyphColor = TransitionChipEmptyGlyphColor;
         }
 
@@ -1277,7 +1336,9 @@ public sealed partial class TimelineControl : UserControl
         {
             FontSize = 10,
             FontFamily = "Segoe UI",
-            FontWeight = configured ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+            // The unconfigured chip is weighted the same as a configured one: it is an equally
+            // clickable affordance, and rendering it lighter is what made it read as decorative.
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
             VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
         };
@@ -1293,7 +1354,15 @@ public sealed partial class TimelineControl : UserControl
     /// line, so testing segments first would make chips unreachable.
     /// </summary>
     private (string? IncomingSegmentId, bool Hit) HitTestTransitionChip(double posX, double posY)
+        => HitTestTransitionChip(posX, posY, out _);
+
+    /// <summary>
+    /// As <see cref="HitTestTransitionChip(double, double)"/>, additionally reporting the hit
+    /// chip's rectangle so the hover tooltip can be anchored to it.
+    /// </summary>
+    private (string? IncomingSegmentId, bool Hit) HitTestTransitionChip(double posX, double posY, out Rect chipRect)
     {
+        chipRect = default;
         var model = Model;
         if (model is null || model.Segments.Count < 2 || VideoTrackCanvas is null)
             return (null, false);
@@ -1319,7 +1388,10 @@ public sealed partial class TimelineControl : UserControl
                 {
                     var rect = GetTransitionChipRect(boundaryX, pad, clipH);
                     if (rect.Contains(new Point(posX, posY)))
+                    {
+                        chipRect = rect;
                         return (segment.Id, true);
+                    }
                 }
             }
 
@@ -1329,6 +1401,95 @@ public sealed partial class TimelineControl : UserControl
         }
 
         return (null, false);
+    }
+
+    // ── Transition chip hover tooltip ────────────────────────────────────────────────
+
+    /// <summary>How long the pointer must linger on a chip before its tooltip appears.</summary>
+    private static readonly TimeSpan TransitionChipHoverDelay = TimeSpan.FromMilliseconds(450);
+
+    private ToolTip? _transitionChipToolTip;
+    private DispatcherTimer? _transitionChipHoverTimer;
+    private string? _hoveredTransitionChipId;
+    private Rect _hoveredTransitionChipRect;
+
+    /// <summary>
+    /// Tracks which chip (if any) the pointer is over and schedules its tooltip.
+    /// </summary>
+    /// <remarks>
+    /// The track is a <c>CanvasControl</c>, so chips are drawn pixels rather than elements and
+    /// cannot carry an attached <c>ToolTipService.ToolTip</c> of their own — the linger delay
+    /// and placement are therefore driven manually from hit-testing. Re-scheduling only when
+    /// the hovered chip actually <em>changes</em> keeps the timer from restarting on every
+    /// pointer move, which would mean the tooltip never fired while the pointer drifted a pixel.
+    /// </remarks>
+    private void UpdateTransitionChipHover(string? incomingSegmentId, Rect chipRect)
+    {
+        if (incomingSegmentId == _hoveredTransitionChipId)
+        {
+            _hoveredTransitionChipRect = chipRect;
+            return;
+        }
+
+        _hoveredTransitionChipId = incomingSegmentId;
+        _hoveredTransitionChipRect = chipRect;
+        HideTransitionChipToolTip();
+
+        if (incomingSegmentId is null)
+            return;
+
+        if (_transitionChipHoverTimer is null)
+        {
+            _transitionChipHoverTimer = new DispatcherTimer { Interval = TransitionChipHoverDelay };
+            _transitionChipHoverTimer.Tick += (_, _) => ShowTransitionChipToolTip();
+        }
+
+        _transitionChipHoverTimer.Stop();
+        _transitionChipHoverTimer.Start();
+    }
+
+    private void ShowTransitionChipToolTip()
+    {
+        _transitionChipHoverTimer?.Stop();
+
+        if (_hoveredTransitionChipId is not { } id || VideoTrackCanvas is null)
+            return;
+
+        var segment = Model?.Segments.FirstOrDefault(s => s.Id == id);
+        if (segment is null)
+            return;
+
+        _transitionChipToolTip ??= new ToolTip
+        {
+            Placement = Microsoft.UI.Xaml.Controls.Primitives.PlacementMode.Top,
+        };
+        _transitionChipToolTip.Content = DescribeTransitionForTooltip(segment.InTransition);
+        _transitionChipToolTip.PlacementTarget = VideoTrackCanvas;
+        _transitionChipToolTip.PlacementRect = _hoveredTransitionChipRect;
+
+        // Rooting it through ToolTipService keeps the popup owned by the canvas, so it is torn
+        // down with the control rather than leaking if the page is navigated away mid-hover.
+        ToolTipService.SetToolTip(VideoTrackCanvas, _transitionChipToolTip);
+        _transitionChipToolTip.IsOpen = true;
+    }
+
+    private void HideTransitionChipToolTip()
+    {
+        _transitionChipHoverTimer?.Stop();
+
+        if (_transitionChipToolTip is not null)
+            _transitionChipToolTip.IsOpen = false;
+
+        // Detached whenever the pointer is not on a chip, so the framework's own hover handling
+        // can never surface this tooltip over unrelated parts of the track.
+        if (VideoTrackCanvas is not null)
+            ToolTipService.SetToolTip(VideoTrackCanvas, null);
+    }
+
+    private void VideoTrack_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _hoveredTransitionChipId = null;
+        HideTransitionChipToolTip();
     }
 
 
@@ -2700,6 +2861,9 @@ public sealed partial class TimelineControl : UserControl
         var (chipIncomingId, chipHit) = HitTestTransitionChip(x, y);
         if (chipHit)
         {
+            // The hover tooltip has served its purpose once the chip is actually clicked, and
+            // leaving it up would obscure the properties pane opening behind it.
+            HideTransitionChipToolTip();
             ClearOtherSelections(SelectionKind.Transition);
             if (_selectedTransitionId != chipIncomingId)
             {
@@ -2855,7 +3019,8 @@ public sealed partial class TimelineControl : UserControl
                 // A chip hovered over a trim handle must win the cursor feedback too —
                 // otherwise the resize cursor would suggest a drag that a click there
                 // can't actually start (see VideoTrack_SegmentPressed's chip-first order).
-                var (_, chipHit) = HitTestTransitionChip(x, y);
+                var (hoverChipId, chipHit) = HitTestTransitionChip(x, y, out var hoverChipRect);
+                UpdateTransitionChipHover(chipHit ? hoverChipId : null, hoverChipRect);
                 if (chipHit)
                 {
                     SetCursor(InputSystemCursorShape.Hand);

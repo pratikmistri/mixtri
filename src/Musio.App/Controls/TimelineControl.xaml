@@ -93,6 +93,7 @@
             Grid.Column="1"
             Draw="VideoTrackCanvas_Draw"
             PointerMoved="VideoTrack_PointerMoved"
+            PointerExited="VideoTrack_PointerExited"
             PointerPressed="VideoTrack_PointerPressed"
             PointerReleased="VideoTrack_PointerReleased"
             RightTapped="VideoTrack_RightTapped" />
