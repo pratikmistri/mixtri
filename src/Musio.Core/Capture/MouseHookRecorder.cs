@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 using Musio.Core.Models;
 
 namespace Musio.Core.Capture;
@@ -25,8 +26,6 @@ public sealed class MouseHookRecorder : IDisposable
     private const int WM_MOUSEWHEEL     = 0x020A;
     private const int WM_MOUSEHWHEEL    = 0x020E;
 
-    private const int WM_QUIT           = 0x0012;
-
     [StructLayout(LayoutKind.Sequential)]
     private struct MSLLHOOKSTRUCT
     {
@@ -37,56 +36,15 @@ public sealed class MouseHookRecorder : IDisposable
         public nint dwExtraInfo;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSG
-    {
-        public nint hwnd;
-        public uint message;
-        public nint wParam;
-        public nint lParam;
-        public uint time;
-        public POINT pt;
-    }
-
-    private delegate nint LowLevelMouseProc(int nCode, nint wParam, nint lParam);
-
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern nint SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, nint hMod, uint dwThreadId);
+    private static extern nint SetWindowsHookEx(int idHook, HookInterop.LowLevelMouseProc lpfn, nint hMod, uint dwThreadId);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool UnhookWindowsHookEx(nint hhk);
 
-    [DllImport("user32.dll")]
-    private static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint GetModuleHandle(string? lpModuleName);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool TranslateMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll")]
-    private static extern nint DispatchMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostThreadMessage(uint idThread, uint Msg, nint wParam, nint lParam);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
 
     #endregion
 
@@ -106,7 +64,7 @@ public sealed class MouseHookRecorder : IDisposable
     private const int FileFormatVersion = 2;
 
     private nint _hookId;
-    private LowLevelMouseProc? _hookProc; // prevent GC collection of the delegate
+    private HookInterop.LowLevelMouseProc? _hookProc; // prevent GC collection of the delegate
     private readonly CursorShapeResolver _shapeResolver = new();
 
     // The active cursor shape is tracked by a dedicated polling thread (see
@@ -215,7 +173,7 @@ public sealed class MouseHookRecorder : IDisposable
         StopShapeThread();
 
         // Tell the hook thread's message loop to exit.
-        PostThreadMessage(_hookThreadId, WM_QUIT, 0, 0);
+        HookInterop.PostThreadMessage(_hookThreadId, HookInterop.WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
     }
@@ -278,7 +236,7 @@ public sealed class MouseHookRecorder : IDisposable
 
     private void HookThreadProc()
     {
-        _hookThreadId = GetCurrentThreadId();
+        _hookThreadId = HookInterop.GetCurrentThreadId();
         _hookProc = HookCallback;
 
         nint hMod = GetModuleHandle(null);
@@ -291,10 +249,10 @@ public sealed class MouseHookRecorder : IDisposable
             return;
 
         // Standard Win32 message pump — required for WH_MOUSE_LL delivery.
-        while (GetMessage(out MSG msg, nint.Zero, 0, 0))
+        while (HookInterop.GetMessage(out HookInterop.MSG msg, nint.Zero, 0, 0))
         {
-            TranslateMessage(ref msg);
-            DispatchMessage(ref msg);
+            HookInterop.TranslateMessage(ref msg);
+            HookInterop.DispatchMessage(ref msg);
         }
 
         // Clean up the hook on this thread before exiting.
@@ -445,7 +403,7 @@ public sealed class MouseHookRecorder : IDisposable
             Debug.WriteLine($"[MouseHookRecorder] HookCallback error: {ex.Message}");
         }
 
-        return CallNextHookEx(_hookId, nCode, wParam, lParam);
+        return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
     private static void ClassifyEvent(int msg, MSLLHOOKSTRUCT hookData, long ticks,

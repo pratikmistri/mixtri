@@ -6,6 +6,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Musio.Core.Interop;
 using Musio_App.ViewModels;
 using Windows.Graphics;
 using Windows.UI.ViewManagement;
@@ -110,7 +111,7 @@ public sealed partial class MiniWindow : Window
 
         // Keep the pill out of any recording that a picker overlay might be
         // staged over, and out of other apps' captures.
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        NativeMethods.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
         if (DesktopAcrylicController.IsSupported())
             SystemBackdrop = new DesktopAcrylicBackdrop();
@@ -119,16 +120,16 @@ public sealed partial class MiniWindow : Window
 
         // Strip the DWM border/caption so only the rounded acrylic pill shows.
         uint colorNone = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
         uint captionNone = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref captionNone, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref captionNone, sizeof(uint));
 
         long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
         style &= ~(WS_BORDER | WS_DLGFRAME);
         SetWindowLongPtr(hwnd, GWL_STYLE, new nint(style));
 
         uint roundPreference = DWMWCP_ROUND;
-        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
 
         // Alt+F4 / programmatic close should park the pill in the tray, not tear
         // down the process — the tray icon is how the user gets it back.
@@ -174,7 +175,7 @@ public sealed partial class MiniWindow : Window
             if (desired.Width <= 0 || desired.Height <= 0) return;
 
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            double scale = GetDpiForWindow(hwnd) / 96.0;
+            double scale = MonitorInterop.GetDpiForWindow(hwnd) / 96.0;
 
             // Grow to fit, but never shrink: switching from Window/Region back to
             // Full Screen removes the picker button, and rather than snapping the
@@ -281,10 +282,10 @@ public sealed partial class MiniWindow : Window
         else
             StopRevealAnimation(hwnd, restoreFinalPosition: true);
 
-        ShowWindow(hwnd, SW_SHOW);
+        NativeMethods.ShowWindow(hwnd, SW_SHOW);
         IsVisible = true;
         Activate();
-        SetForegroundWindow(hwnd);
+        NativeMethods.SetForegroundWindow(hwnd);
 
         if (shouldAnimate)
         {
@@ -330,7 +331,7 @@ public sealed partial class MiniWindow : Window
         IsVisible = false;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         StopRevealAnimation(hwnd, restoreFinalPosition: true);
-        ShowWindow(hwnd, SW_HIDE);
+        NativeMethods.ShowWindow(hwnd, SW_HIDE);
 
         // Drop the width high-water mark so a re-summoned pill fits itself tightly
         // again instead of inheriting the widest layout from a previous session.
@@ -343,7 +344,7 @@ public sealed partial class MiniWindow : Window
         StopRevealAnimation(hwnd, restoreFinalPosition: true);
 
         _revealFinalPosition = AppWindow.Position;
-        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        int offset = (int)Math.Round(RevealOffsetDips * MonitorInterop.GetDpiForWindow(hwnd) / 96.0);
         _revealOriginalExStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
         _revealAddedLayeredStyle =
             (_revealOriginalExStyle.ToInt64() & WS_EX_LAYERED) == 0;
@@ -396,7 +397,7 @@ public sealed partial class MiniWindow : Window
     private void RebaseRevealPosition(nint hwnd)
     {
         _revealFinalPosition = AppWindow.Position;
-        int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+        int offset = (int)Math.Round(RevealOffsetDips * MonitorInterop.GetDpiForWindow(hwnd) / 96.0);
         AppWindow.Move(new PointInt32(
             _revealFinalPosition.X,
             _revealFinalPosition.Y + offset));
@@ -412,7 +413,7 @@ public sealed partial class MiniWindow : Window
             double elapsed = _revealStopwatch?.Elapsed.TotalMilliseconds ?? RevealDurationMs;
             double progress = Math.Clamp(elapsed / RevealDurationMs, 0, 1);
             double eased = 1 - Math.Pow(1 - progress, 3);
-            int offset = (int)Math.Round(RevealOffsetDips * GetDpiForWindow(hwnd) / 96.0);
+            int offset = (int)Math.Round(RevealOffsetDips * MonitorInterop.GetDpiForWindow(hwnd) / 96.0);
 
             AppWindow.Move(new PointInt32(
                 _revealFinalPosition.X,
@@ -593,21 +594,6 @@ public sealed partial class MiniWindow : Window
     private const long WS_DLGFRAME = 0x00400000L;
     private const long WS_EX_LAYERED = 0x00080000L;
     private const uint LWA_ALPHA = 0x00000002;
-
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
-
-    [DllImport("user32.dll")]
-    private static extern int GetDpiForWindow(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hwnd);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern nint GetWindowLongPtr(nint hwnd, int nIndex);

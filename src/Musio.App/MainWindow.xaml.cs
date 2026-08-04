@@ -2,6 +2,7 @@ using System;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Musio.Core.Interop;
 using Musio_App.Pages;
 using Windows.Graphics;
 
@@ -83,9 +84,6 @@ public sealed partial class MainWindow : Window
 
         return CallWindowProc(_originalWndProc, hwnd, msg, wParam, lParam);
     }
-
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-    private struct POINT { public int X; public int Y; }
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct MINMAXINFO

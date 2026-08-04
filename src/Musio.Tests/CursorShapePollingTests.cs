@@ -3,6 +3,7 @@ namespace Musio.Tests;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Musio.Core.Capture;
+using Musio.Core.Interop;
 using Musio.Core.Models;
 
 /// <summary>
@@ -12,13 +13,6 @@ using Musio.Core.Models;
 [TestClass]
 public sealed class CursorShapePollingTests
 {
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetCursorPos(out POINT lpPoint);

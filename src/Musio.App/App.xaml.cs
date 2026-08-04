@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio_App.Pages;
 using Musio_App.Services;
 using Musio.Core.Diagnostics;
+using Musio.Core.Interop;
 using Musio.Core.Projects;
 using Musio.Core.Services;
 using Musio.Core.Settings;
@@ -484,9 +485,9 @@ public partial class App : Application
         _shell?.ShowFullWindow();
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-        ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+        NativeMethods.ShowWindow(hwnd, NativeMethods.IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
         _window.Activate();
-        SetForegroundWindow(hwnd);
+        NativeMethods.SetForegroundWindow(hwnd);
     }
 
     /// <summary>
@@ -658,7 +659,7 @@ public partial class App : Application
 
         if (_window is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-        ShowWindow(hwnd, SW_SHOW);
+        NativeMethods.ShowWindow(hwnd, SW_SHOW);
         _window.Activate();
         ReleaseExtendedExecution();
     }
@@ -811,7 +812,7 @@ public partial class App : Application
         // User clicked the window's X — minimize to tray.
         args.Cancel = true;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-        ShowWindow(hwnd, SW_HIDE);
+        NativeMethods.ShowWindow(hwnd, SW_HIDE);
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
@@ -832,13 +833,4 @@ public partial class App : Application
     private const int SW_HIDE = 0;
     private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsIconic(IntPtr hWnd);
 }

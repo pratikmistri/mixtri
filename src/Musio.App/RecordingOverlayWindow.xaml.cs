@@ -4,6 +4,7 @@ using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
+using Musio.Core.Interop;
 using Musio_App.ViewModels;
 using Windows.Graphics;
 
@@ -85,13 +86,13 @@ public sealed partial class RecordingOverlayWindow : Window
         }
 
         // Exclude overlay from screen capture
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        NativeMethods.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
         // Remove DWM-drawn border and caption
         uint colorNone = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref colorNone, sizeof(uint));
         uint colorCaption = DWMWA_COLOR_NONE;
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref colorCaption, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref colorCaption, sizeof(uint));
 
         // Strip WS_BORDER and WS_DLGFRAME from the window style
         var style = GetWindowLong(hwnd, GWL_STYLE);
@@ -100,10 +101,10 @@ public sealed partial class RecordingOverlayWindow : Window
 
         // Round the window corners at the OS level for a pill shape
         uint roundPreference = DWMWCP_ROUND;
-        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
+        NativeMethods.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPreference, sizeof(uint));
 
         // Size the overlay(device pixels, scaled for DPI)
-        var dpi = GetDpiForWindow(hwnd);
+        var dpi = MonitorInterop.GetDpiForWindow(hwnd);
         var scale = dpi / 96.0;
         int width = (int)(200 * scale);
         int height = (int)(52 * scale);
@@ -313,15 +314,6 @@ public sealed partial class RecordingOverlayWindow : Window
     private const int GWL_STYLE = -16;
     private const int WS_BORDER = 0x00800000;
     private const int WS_DLGFRAME = 0x00400000;
-
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
-
-    [DllImport("user32.dll")]
-    private static extern int GetDpiForWindow(IntPtr hwnd);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern int GetWindowLong(IntPtr hwnd, int nIndex);
