@@ -21,12 +21,12 @@ public class MoveZoomKeyframeOperation : IEditOperation
         if (index < 0) return;
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
+        var sourceClickTicks = model.ZoomKeyframes[index].SourceClickTicks;
         model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp, IsManual = true };
 
         // When converting an auto-generated keyframe to manual, suppress the
         // original auto-zoom click so it doesn't double-fire.
-        if (!_previousIsManual && model.ZoomKeyframes[index].SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Add(ticks);
+        ZoomOperationHelpers.SuppressClickIfAutoToManual(model, _previousIsManual, sourceClickTicks);
     }
 
     public void Undo(TimelineModel model)
@@ -35,8 +35,7 @@ public class MoveZoomKeyframeOperation : IEditOperation
         if (index < 0) return;
 
         // Restore suppression state before reverting the keyframe
-        if (!_previousIsManual && model.ZoomKeyframes[index].SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Remove(ticks);
+        ZoomOperationHelpers.RestoreClickSuppression(model, _previousIsManual, model.ZoomKeyframes[index].SourceClickTicks);
 
         model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp, IsManual = _previousIsManual };
     }
@@ -64,8 +63,7 @@ public class RemoveZoomKeyframeOperation : IEditOperation
 
         // Suppress the underlying auto-zoom click so the engine no longer
         // generates a zoom segment for it during preview or export.
-        if (!_removedKeyframe.IsManual && _removedKeyframe.SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Add(ticks);
+        ZoomOperationHelpers.SuppressClickIfAutoToManual(model, _removedKeyframe.IsManual, _removedKeyframe.SourceClickTicks);
     }
 
     public void Undo(TimelineModel model)
@@ -76,8 +74,7 @@ public class RemoveZoomKeyframeOperation : IEditOperation
             model.ZoomKeyframes.Insert(insertIdx, _removedKeyframe);
 
             // Restore the auto-zoom click suppression
-            if (!_removedKeyframe.IsManual && _removedKeyframe.SourceClickTicks is long ticks)
-                model.SuppressedClickTicks.Remove(ticks);
+            ZoomOperationHelpers.RestoreClickSuppression(model, _removedKeyframe.IsManual, _removedKeyframe.SourceClickTicks);
         }
     }
 }
@@ -139,8 +136,7 @@ public class ResizeZoomSegmentOperation : IEditOperation
         var kf = _previousKeyframe;
 
         // Suppress the auto-zoom click when converting auto→manual via resize
-        if (!kf.IsManual && kf.SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Add(ticks);
+        ZoomOperationHelpers.SuppressClickIfAutoToManual(model, kf.IsManual, kf.SourceClickTicks);
 
         if (_resizeStart)
         {
@@ -205,8 +201,7 @@ public class ResizeZoomSegmentOperation : IEditOperation
         if (index < 0) return;
 
         // Restore suppression state
-        if (!_previousKeyframe.IsManual && _previousKeyframe.SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Remove(ticks);
+        ZoomOperationHelpers.RestoreClickSuppression(model, _previousKeyframe.IsManual, _previousKeyframe.SourceClickTicks);
 
         model.ZoomKeyframes[index] = _previousKeyframe;
     }
@@ -240,8 +235,7 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         var kf = _previousKeyframe;
 
         // Suppress the auto-zoom click when converting auto→manual via property edit
-        if (!kf.IsManual && kf.SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Add(ticks);
+        ZoomOperationHelpers.SuppressClickIfAutoToManual(model, kf.IsManual, kf.SourceClickTicks);
 
         model.ZoomKeyframes[index] = kf with
         {
@@ -259,8 +253,7 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         if (index < 0) return;
 
         // Restore suppression state
-        if (!_previousKeyframe.IsManual && _previousKeyframe.SourceClickTicks is long ticks)
-            model.SuppressedClickTicks.Remove(ticks);
+        ZoomOperationHelpers.RestoreClickSuppression(model, _previousKeyframe.IsManual, _previousKeyframe.SourceClickTicks);
 
         model.ZoomKeyframes[index] = _previousKeyframe;
     }
