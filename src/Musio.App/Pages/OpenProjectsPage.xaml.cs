@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Projects;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Windows.Storage.Streams;
 
@@ -305,22 +306,11 @@ public sealed partial class OpenProjectsPage : Page
 
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-        };
-        picker.FileTypeFilter.Add(MusioPackage.FileExtension);
-
-        var window = App.Current.MainAppWindow;
-        if (window is not null)
-        {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        }
-
         try
         {
-            var file = await picker.PickSingleFileAsync();
+            var file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+                new[] { MusioPackage.FileExtension });
             if (file is not null)
                 await OpenAsync(file.Path);
         }
@@ -347,14 +337,7 @@ public sealed partial class OpenProjectsPage : Page
 
             try
             {
-                var dialog = new ContentDialog
-                {
-                    Title = "Could not open project",
-                    Content = ex.Message,
-                    CloseButtonText = "OK",
-                    XamlRoot = XamlRoot,
-                };
-                await dialog.ShowAsync();
+                await DialogHelper.ShowErrorAsync(XamlRoot, "Could not open project", ex.Message);
             }
             catch { }
 

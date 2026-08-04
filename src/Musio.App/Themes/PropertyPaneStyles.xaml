@@ -3,6 +3,16 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
+        Dominant CornerRadius literals used across the property panes and settings cards,
+        pulled out so the design token is named once instead of repeated as a bare number
+        at each call site.
+    -->
+    <!-- Small rounding: color-swatch borders, anchor-grid containers, tab-style toggle buttons. -->
+    <CornerRadius x:Key="SmallCornerRadius">4</CornerRadius>
+    <!-- Card rounding: SettingsPage's bordered section cards. -->
+    <CornerRadius x:Key="SectionCardCornerRadius">8</CornerRadius>
+
+    <!--
         Shared typography for the editor property panes.
 
         Controls in the panes label themselves two different ways: some sit under a
@@ -52,5 +62,74 @@
     <DataTemplate x:Key="PropertyHeaderTemplate">
         <TextBlock Text="{Binding}" Style="{StaticResource PropertyLabelStyle}" />
     </DataTemplate>
+
+    <!-- Anchor/crop-position cell: a flat fill-on-check RadioButton with no border or
+         padding so 9 of them can tile into a single rectangle. Shared by the scene crop
+         grid (ScenePropertiesView) and the text-overlay anchor grid
+         (TextOverlayPropertiesView) — the two were letter-for-letter identical local
+         copies. -->
+    <Style x:Key="AnchorGridCellStyle" TargetType="RadioButton">
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="MinWidth" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="VerticalAlignment" Value="Stretch" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Grid x:Name="CellRoot" Background="{TemplateBinding Background}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CombinedStates">
+                                <VisualState x:Name="UncheckedNormal" />
+                                <VisualState x:Name="UncheckedPointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Background"
+                                                Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="UncheckedPressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Background"
+                                                Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="UncheckedDisabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedNormal">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Background"
+                                                Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedPointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Background"
+                                                Value="{ThemeResource AccentFillColorSecondaryBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedPressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Background"
+                                                Value="{ThemeResource AccentFillColorTertiaryBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedDisabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="CellRoot.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Indeterminate" />
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
 
 </ResourceDictionary>

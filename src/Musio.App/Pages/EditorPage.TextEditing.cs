@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -590,17 +591,8 @@ public sealed partial class EditorPage
     /// </summary>
     private void ScheduleOverlayPreviewRefresh()
     {
-        if (_overlayPreviewDebounceTimer is null)
-        {
-            _overlayPreviewDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _overlayPreviewDebounceTimer.Tick += (_, _) =>
-            {
-                _overlayPreviewDebounceTimer.Stop();
-                RefreshOverlayPreview();
-            };
-        }
-        _overlayPreviewDebounceTimer.Stop();
-        _overlayPreviewDebounceTimer.Start();
+        _overlayPreviewDebouncer ??= new Debouncer(RefreshOverlayPreview);
+        _overlayPreviewDebouncer.Schedule();
     }
 
     private void OverlayPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1433,34 +1425,20 @@ public sealed partial class EditorPage
         var slide = SelectedSlide();
         if (slide is null) return;
 
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
-            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
-        };
-        picker.FileTypeFilter.Add(".jpg");
-        picker.FileTypeFilter.Add(".jpeg");
-        picker.FileTypeFilter.Add(".png");
-        picker.FileTypeFilter.Add(".bmp");
-        InitializePicker(picker);
-
         Windows.Storage.StorageFile? file = null;
-        try { file = await picker.PickSingleFileAsync(); } catch { }
+        try
+        {
+            file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+                new[] { ".jpg", ".jpeg", ".png", ".bmp" },
+                Windows.Storage.Pickers.PickerViewMode.Thumbnail);
+        }
+        catch { }
         if (file is null) return;
 
         slide.BackgroundImagePath = file.Path;
         SlideImagePathText.Text = System.IO.Path.GetFileName(file.Path);
         RefreshSlidePreview();
-    }
-
-    private static void InitializePicker(Windows.Storage.Pickers.FileOpenPicker picker)
-    {
-        var window = App.Current.MainAppWindow;
-        if (window is not null)
-        {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        }
     }
 
     // ─── In-preview text editing & repositioning ────────────────────────
@@ -2122,9 +2100,8 @@ public sealed partial class EditorPage
         {
             if (OverlayTextBox is not null && OverlayTextBox.Text != TextEditBox.Text)
             {
-                _suppressOverlayEvents = true;
-                try { OverlayTextBox.Text = TextEditBox.Text; }
-                finally { _suppressOverlayEvents = false; }
+                using (SuppressScope.Enter(ref _suppressOverlayEvents))
+                    OverlayTextBox.Text = TextEditBox.Text;
             }
         }
 

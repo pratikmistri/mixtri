@@ -191,8 +191,8 @@ public sealed partial class EditorPage
         DisposeOffUiThread(_frameReader);
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
-        _styleDebounceTimer?.Stop();
-        _motionDebounceTimer?.Stop();
+        _styleDebouncer?.Stop();
+        _motionDebouncer?.Stop();
         _frameReader = null;
         _previewRenderer = null;
         _audioPlayer = null;
