@@ -175,6 +175,7 @@
                         <panes:CursorPropertiesView x:Name="CursorView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:TextOverlayPropertiesView x:Name="TextOverlayView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:TransitionPropertiesView x:Name="TransitionView" x:FieldModifier="public" Visibility="Collapsed" />
                     </Grid>
                 </ScrollViewer>
 
@@ -272,6 +273,21 @@
                         <Canvas HorizontalAlignment="Center">
                             <TextBlock Style="{StaticResource PaneTabLabelStyle}"
                                        Text="TEXT OVERLAY"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="TransitionTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Transition"
+                              AutomationProperties.Name="Transition properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE7AD;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="TRANSITION"
                                        SizeChanged="PaneTabLabel_SizeChanged" />
                         </Canvas>
                     </StackPanel>

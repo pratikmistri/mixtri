@@ -161,26 +161,56 @@ public sealed class SegmentFrameComposer : IDisposable
         if (_timeline is null || _timeline.Segments.Count == 0)
             return frame;
 
-        // Soft cut: dissolve a text slide into its neighbouring segment instead of
-        // hard-cutting. Identical resolution to the preview (SlideTransitions is the
-        // shared pure function), so both pipelines dissolve at the same instants.
+        // Soft cut: dissolve the outgoing segment into the incoming one instead of
+        // hard-cutting. TransitionResolver is the shared pure function the preview also
+        // calls, so both pipelines dissolve at the same instants with the same effect,
+        // duration and easing (configured, or the legacy 500ms slide-only fallback).
         var outputTime = TimeSpan.FromSeconds((double)frameIndex / _fps);
-        var crossfade = SlideTransitions.Resolve(_timeline, outputTime);
-        if (!crossfade.Active)
+        var resolution = TransitionResolver.Resolve(_timeline, outputTime);
+        if (!resolution.Active)
             return frame;
 
         try
         {
-            // Floor (not Round): the outgoing time is current.Start - 1 tick, and
-            // rounding would snap back onto the incoming segment's frame whenever the
-            // boundary is frame-aligned, blending the incoming frame with itself.
-            int outgoingIndex = (int)Math.Floor(crossfade.OutgoingTime.TotalSeconds * _fps);
-            outgoingIndex = Math.Clamp(outgoingIndex, 0, Math.Max(0, TotalFrames - 1));
+            // The outgoing side is composed straight from OutgoingLocalOffset, a TimeSpan
+            // that deliberately rolls past OutgoingSegment's own duration (see its doc
+            // comment on TransitionResolution) rather than being converted into an output
+            // frame index and re-resolved through the timeline. That supersedes the old
+            // Floor-not-Round frame-index dance this block used to need here: the previous
+            // legacy path derived a frame index from a frozen "current.Start - 1 tick"
+            // instant, and rounding it would have snapped onto the incoming segment's own
+            // frame and blended it with itself. There is no frame index to round anymore,
+            // so that particular failure mode cannot recur -- this note exists only so a
+            // future reader doesn't wonder whether it was overlooked. A *different* form of
+            // "blended with itself" can still occur -- a same-source contiguous split, where
+            // rolling and freezing land on the identical source instant -- which is why the
+            // incoming-side source time is resolved below and handed to
+            // ComposeSegmentAtOffsetAsync so it can apply the contiguous-boundary policy
+            // (see CollapseContiguousSourceBoundary).
+            string? incomingVideoFilePath = null;
+            double? incomingSourceTimeSeconds = null;
+            double incomingSourceStartSeconds = 0;
+            if (resolution.IncomingSegment is VideoSegment incomingVideo)
+            {
+                // The transition's elapsed local time, re-derived from OutgoingLocalOffset
+                // (== OutgoingSegment.Duration + local, per TransitionResolution's contract)
+                // rather than recomputed from outputTime, so this always agrees exactly with
+                // what the outgoing side is about to sample.
+                var local = resolution.OutgoingLocalOffset - resolution.OutgoingSegment!.Duration;
+                double incomingSpeed = incomingVideo.SpeedFactor > 0 ? incomingVideo.SpeedFactor : 1.0;
+                incomingVideoFilePath = incomingVideo.VideoFilePath;
+                incomingSourceStartSeconds = incomingVideo.SourceStart.TotalSeconds;
+                incomingSourceTimeSeconds = MapLocalOffsetToSourceTime(
+                    incomingVideo.SourceStart.TotalSeconds, local.TotalSeconds, incomingSpeed);
+            }
 
-            using var outgoing = await ComposeSegmentFrameAsync(outgoingIndex, ct);
+            using var outgoing = await ComposeSegmentAtOffsetAsync(
+                resolution.OutgoingSegment!, resolution.OutgoingLocalOffset, ct,
+                incomingVideoFilePath, incomingSourceTimeSeconds, incomingSourceStartSeconds);
+
             _transitionRenderer ??= new TransitionRenderer(_device);
             var blended = _transitionRenderer.Render(
-                outgoing, frame, TransitionType.CrossFade, crossfade.Progress,
+                outgoing, frame, resolution.Type, resolution.EasedProgress,
                 OutputWidth, OutputHeight);
             frame.Dispose();
             return blended;
@@ -271,6 +301,59 @@ public sealed class SegmentFrameComposer : IDisposable
         var outputTime = TimeSpan.FromSeconds((double)frameIndex / _fps);
         var (segment, localOffset) = _timeline.GetSegmentAtTime(outputTime);
 
+        // Only this (timeline-resolved) path can ever hand back a null segment -- the
+        // rolling transition path below always resolves a real OutgoingSegment/
+        // IncomingSegment pair, so ComposeSegmentAtOffsetAsync does not need to handle it.
+        if (segment is null)
+        {
+            throw new InvalidOperationException(
+                $"No timeline segment covers output frame {frameIndex} ({outputTime}).");
+        }
+
+        return await ComposeSegmentAtOffsetAsync(segment, localOffset, ct);
+    }
+
+    /// <summary>
+    /// Composes <paramref name="segment"/> at <paramref name="localOffset"/> into its own
+    /// local timeline -- the shared body behind both the normal per-frame path
+    /// (<see cref="ComposeSegmentFrameAsync"/>, where the offset always lies within the
+    /// segment) and the transition path (<see cref="ComposeFrameAsync"/>, where
+    /// <paramref name="localOffset"/> is a
+    /// <see cref="Timeline.TransitionResolution.OutgoingLocalOffset"/> that deliberately
+    /// EXCEEDS the segment's own <see cref="TimelineSegment.Duration"/> so the outgoing side
+    /// of a dissolve can keep rolling past its own cut point instead of freezing).
+    /// </summary>
+    /// <param name="incomingVideoFilePath">
+    /// Only meaningful (non-null) when composing the OUTGOING side of an active transition
+    /// AND the transition's incoming segment is itself a <see cref="VideoSegment"/>: that
+    /// segment's source file, used by the <see cref="VideoSegment"/> branch below to detect a
+    /// same-source contiguous boundary. Left null (the default) for the normal per-frame path,
+    /// where there is no "incoming side" to collide with.
+    /// </param>
+    /// <param name="incomingSourceTimeSeconds">
+    /// The incoming side's own mapped source-file time for this exact instant, alongside
+    /// <paramref name="incomingVideoFilePath"/> -- see
+    /// <see cref="CollapseContiguousSourceBoundary"/> for how the two are used together.
+    /// </param>
+    /// <remarks>
+    /// Each segment type is responsible for making an over-long offset degrade sensibly:
+    /// <see cref="TextSlideSegment"/> already clamps its animation progress to [0, 1], so it
+    /// naturally holds the slide's final animated frame. <see cref="VideoSegment"/> maps the
+    /// offset into an absolute source-file time, clamps THAT against whatever footage is
+    /// actually readable (see <see cref="ClampSourceTime"/>), and then -- only when
+    /// <paramref name="incomingSourceTimeSeconds"/> is supplied -- applies the
+    /// contiguous-boundary policy so a same-source split never blends a frame with itself.
+    /// </remarks>
+    private async Task<CanvasRenderTarget> ComposeSegmentAtOffsetAsync(
+        TimelineSegment segment,
+        TimeSpan localOffset,
+        CancellationToken ct,
+        string? incomingVideoFilePath = null,
+        double? incomingSourceTimeSeconds = null,
+        double incomingSourceStartSeconds = 0)
+    {
+        ct.ThrowIfCancellationRequested();
+
         switch (segment)
         {
             case TextSlideSegment slide:
@@ -285,20 +368,278 @@ public sealed class SegmentFrameComposer : IDisposable
             case VideoSegment video:
             {
                 double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
-                double sourceTime = video.SourceStart.TotalSeconds + localOffset.TotalSeconds * speed;
                 var context = await GetOrCreateContextAsync(video, ct);
                 bool isPrimary = IsPrimarySource(video.VideoFilePath);
+
+                double availableDuration = ResolveAvailableSourceDuration(context, video);
+                var (sourceTime, _) = ClampSourceTime(
+                    video.SourceStart.TotalSeconds, localOffset.TotalSeconds, speed, availableDuration);
+
+                sourceTime = CollapseContiguousSourceBoundary(
+                    sourceTime, video.VideoFilePath,
+                    incomingSourceTimeSeconds, incomingVideoFilePath, video.Fps,
+                    (video.SourceStart + video.SourceDuration).TotalSeconds,
+                    incomingSourceStartSeconds);
+
                 return await ComposeWithContextAsync(context, sourceTime, isPrimary, ct);
             }
 
-            case null:
-                throw new InvalidOperationException(
-                    $"No timeline segment covers output frame {frameIndex} ({outputTime}).");
-
             default:
                 throw new InvalidOperationException(
-                    $"Export does not support timeline segments of type '{segment?.GetType().Name}'.");
+                    $"Export does not support timeline segments of type '{segment.GetType().Name}'.");
         }
+    }
+
+    /// <summary>
+    /// The most reliable, cheaply-available bound on how much of <paramref name="video"/>'s
+    /// source FILE can actually be read -- used to clamp a rolling
+    /// <see cref="Timeline.TransitionResolution.OutgoingLocalOffset"/> once it dips past the
+    /// segment's own edited cut point (<c>SourceStart + SourceDuration</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Preferred bound: <see cref="VideoFrameReader.Duration"/>. It is derived from the
+    /// reader's actual frame count (captured JPEGs, or the decoded MP4) divided by its fps,
+    /// so it reflects footage that genuinely exists in the file -- independent of how far the
+    /// timeline happened to trim it. A segment cut well before end-of-file can therefore roll
+    /// into the real handle that exists past the cut, exactly as the transition model intends.
+    /// <see cref="VideoFrameReader.LoadFrameAtTimeAsync"/> already clamps its frame index to
+    /// <c>[0, FrameCount - 1]</c> (see <c>VideoFrameReader.cs</c>), so sampling exactly at (or
+    /// even fractionally past) this bound is always safe -- no back-off needed here.
+    /// </para>
+    /// <para>
+    /// Next preference: <see cref="SourceContext.SourceComposition"/>'s own
+    /// <c>MediaComposition.Duration</c> (used elsewhere in this file at frame-extraction time,
+    /// see <see cref="ExtractFrameFromCompositionAsync"/>) -- synchronously available with no
+    /// per-frame I/O, so it costs nothing to consult when <see cref="SourceContext.Reader"/>
+    /// is null (the rare composition-only fallback path built by <see cref="BuildContextAsync"/>
+    /// when neither captured frames nor an mp4 decoder were available). Unlike the reader
+    /// count, this duration is an EXCLUSIVE endpoint -- <c>GetThumbnailAsync</c> has no
+    /// clamping of its own for it -- so the bound is backed off by one source frame
+    /// (<see cref="VideoSegment.Fps"/>, or 30fps if that is ever non-positive) to land the
+    /// held sample just inside the valid range rather than exactly on its exclusive edge.
+    /// </para>
+    /// <para>
+    /// Only when NEITHER of those is available does this fall back to the segment's own
+    /// trimmed cut point, which reproduces today's frozen-on-last-frame behaviour for that
+    /// source -- never worse than the pre-existing status quo.
+    /// </para>
+    /// </remarks>
+    private static double ResolveAvailableSourceDuration(SourceContext context, VideoSegment video)
+    {
+        return SelectAvailableSourceDuration(
+            context.Reader?.Duration,
+            context.SourceComposition?.Duration,
+            video.SourceStart + video.SourceDuration,
+            video.Fps);
+    }
+
+    /// <summary>
+    /// Pure precedence rule behind <see cref="ResolveAvailableSourceDuration"/>, extracted so
+    /// it is directly unit-testable without a live <see cref="SourceContext"/> (which needs a
+    /// GPU <see cref="CanvasDevice"/> and real media to construct) -- see
+    /// <c>SegmentFrameComposerTransitionTests</c>.
+    /// </summary>
+    /// <param name="readerDuration">
+    /// <see cref="VideoFrameReader.Duration"/> from <see cref="SourceContext.Reader"/>, or
+    /// null when no reader is open. Preferred whenever present and non-zero -- see the
+    /// caller's remarks for why.
+    /// </param>
+    /// <param name="compositionDuration">
+    /// <c>MediaComposition.Duration</c> from <see cref="SourceContext.SourceComposition"/>, or
+    /// null when no composition is open. Used only when <paramref name="readerDuration"/>
+    /// is unavailable; backed off by one source frame since it is an exclusive endpoint.
+    /// </param>
+    /// <param name="cutPoint">
+    /// The segment's own trimmed cut point (<c>SourceStart + SourceDuration</c>) -- the final
+    /// fallback when neither of the above is available.
+    /// </param>
+    /// <param name="fps">The segment's recording fps, for the composition-duration back-off.</param>
+    internal static double SelectAvailableSourceDuration(
+        TimeSpan? readerDuration, TimeSpan? compositionDuration, TimeSpan cutPoint, int fps)
+    {
+        if (readerDuration is { } reader && reader > TimeSpan.Zero)
+            return reader.TotalSeconds;
+
+        if (compositionDuration is { } composition && composition > TimeSpan.Zero)
+        {
+            double frameStep = fps > 0 ? 1.0 / fps : 1.0 / 30;
+            return Math.Max(0, composition.TotalSeconds - frameStep);
+        }
+
+        return cutPoint.TotalSeconds;
+    }
+
+    /// <summary>
+    /// Maps a local segment offset (in output-time seconds) into an absolute source-file
+    /// time, applying the segment's own playback speed. Shared by <see cref="ClampSourceTime"/>
+    /// (for the outgoing side, which also clamps against available footage) and
+    /// <see cref="ComposeFrameAsync"/> (for the incoming side of an active transition, which
+    /// needs the same raw mapping -- unclamped, since the incoming side is never past its own
+    /// cut point -- to feed <see cref="CollapseContiguousSourceBoundary"/>).
+    /// </summary>
+    internal static double MapLocalOffsetToSourceTime(
+        double sourceStartSeconds, double localOffsetSeconds, double speed)
+        => sourceStartSeconds + localOffsetSeconds * speed;
+
+    /// <summary>
+    /// Pure arithmetic behind the <see cref="VideoSegment"/> branch of
+    /// <see cref="ComposeSegmentAtOffsetAsync"/>: maps a (possibly past-cut) local segment
+    /// offset into an absolute source-file time, then clamps it to whatever footage is
+    /// actually readable so a transition can never seek negative or past the end of the file.
+    /// Extracted as pure, static, internal-visible arithmetic so it is directly unit-testable
+    /// without a GPU device or real media (see <c>SegmentFrameComposerTransitionTests</c>).
+    /// </summary>
+    /// <param name="sourceStartSeconds">
+    /// <see cref="VideoSegment.SourceStart"/> in seconds -- the absolute source-file time the
+    /// segment's own local time zero maps to.
+    /// </param>
+    /// <param name="localOffsetSeconds">
+    /// Offset into the segment's own local timeline, in output-time seconds (not yet
+    /// speed-adjusted). May exceed the segment's own duration -- see
+    /// <see cref="Timeline.TransitionResolution.OutgoingLocalOffset"/>.
+    /// </param>
+    /// <param name="speed">
+    /// Playback speed multiplier. Callers must already resolve this to a positive value
+    /// (matching the existing <c>SpeedFactor &gt; 0 ? SpeedFactor : 1.0</c> convention).
+    /// </param>
+    /// <param name="availableDurationSeconds">
+    /// The best known bound on readable source-file footage -- see
+    /// <see cref="ResolveAvailableSourceDuration"/> for how call sites choose it. A value
+    /// &lt;= 0 means "unknown": only the zero floor applies below, with no upper clamp.
+    /// </param>
+    /// <returns>
+    /// The clamped absolute source-file time to sample, and whether it was held at
+    /// <paramref name="availableDurationSeconds"/> because the raw mapped time ran past the
+    /// available footage (i.e. this instant is showing a frozen last frame rather than truly
+    /// rolling footage).
+    /// </returns>
+    internal static (double SourceTimeSeconds, bool Held) ClampSourceTime(
+        double sourceStartSeconds, double localOffsetSeconds, double speed, double availableDurationSeconds)
+    {
+        double raw = MapLocalOffsetToSourceTime(sourceStartSeconds, localOffsetSeconds, speed);
+        double floored = Math.Max(0, raw);
+
+        if (availableDurationSeconds > 0 && floored > availableDurationSeconds)
+            return (availableDurationSeconds, true);
+
+        return (floored, false);
+    }
+
+    /// <summary>
+    /// Same-source contiguous-boundary policy: when a transition's OUTGOING and INCOMING
+    /// sides read the <b>same</b> source file, and the outgoing side's rolled/footage-clamped
+    /// source time would land at or past the incoming side's own source time for this exact
+    /// instant, there is no independent footage left to roll into -- the "roll" would
+    /// definitionally be sampling the same frames the incoming side already shows.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the split-boundary hazard: a plain (untrimmed) split of one recording into two
+    /// segments sets <c>incoming.SourceStart == outgoing.SourceStart + outgoing.SourceDuration</c>,
+    /// so <c>OutgoingLocalOffset = outgoing.Duration + local</c> maps to EXACTLY the same
+    /// source instant the incoming side maps to for every instant of the transition window
+    /// (when both sides share one <see cref="VideoSegment.SpeedFactor"/>; even when they
+    /// don't, the two curves still cross at the shared cut point and immediately invert past
+    /// it). Left unhandled, the outgoing frame and the incoming frame are pixel-identical (or
+    /// momentarily backwards) for the whole dissolve -- CrossFade renders as a static, unmoving
+    /// frame, and directional effects (Push/Slide/Wipe) show identical content sliding past
+    /// itself. Neither looks like a transition at all.
+    /// </para>
+    /// <para>
+    /// Freezing loses nothing in exactly this situation: there is no "independent outgoing
+    /// content" the incoming side isn't already about to show, so this collapses back to the
+    /// legacy semantics -- freeze the outgoing side one source frame short of the incoming's
+    /// instant -- which renders a real, visible dissolve instead of a silent no-op.
+    /// </para>
+    /// <para>
+    /// A <b>trimmed</b> split (the user cut a gap out of the incoming side, or the two sides
+    /// run at different <see cref="VideoSegment.SpeedFactor"/>s) can leave a genuine gap
+    /// between the two source times for some or all of the window; rolling is entirely
+    /// legitimate there; and the two sources must simply be different files.
+    /// </para>
+    /// </remarks>
+    /// <param name="outgoingSourceTimeSeconds">
+    /// The outgoing side's already-mapped, already footage-clamped (via
+    /// <see cref="ClampSourceTime"/>) source-file time for this instant.
+    /// </param>
+    /// <param name="outgoingVideoFilePath">The outgoing segment's source file.</param>
+    /// <param name="incomingSourceTimeSeconds">
+    /// The incoming side's mapped source-file time for the SAME instant (via
+    /// <see cref="MapLocalOffsetToSourceTime"/>), or null when the incoming segment is not a
+    /// <see cref="VideoSegment"/> (e.g. a text slide) -- there is no shared source-time space
+    /// to collide in, so this method is then a no-op.
+    /// </param>
+    /// <param name="incomingVideoFilePath">
+    /// The incoming segment's source file, or null alongside
+    /// <paramref name="incomingSourceTimeSeconds"/>.
+    /// </param>
+    /// <param name="fps">
+    /// The outgoing segment's own recording fps (<see cref="VideoSegment.Fps"/>), used to
+    /// compute one frame's worth of time to back off by. Values &lt;= 0 (should not happen --
+    /// <see cref="VideoSegment.Fps"/> defaults to 30 -- but guarded defensively since a
+    /// division by a bad value here would otherwise corrupt the result) fall back to a 30fps
+    /// step.
+    /// </param>
+    /// <param name="outgoingCutPointSeconds">
+    /// The outgoing segment's own cut point in source time
+    /// (<c>SourceStart + SourceDuration</c>). Together with
+    /// <paramref name="incomingSourceStartSeconds"/> this proves whether the two ranges
+    /// actually MEET, which is what makes a boundary a contiguous split rather than merely
+    /// two clips that happen to share a file.
+    /// </param>
+    /// <param name="incomingSourceStartSeconds">The incoming segment's <c>SourceStart</c>.</param>
+    /// <returns>
+    /// <paramref name="outgoingSourceTimeSeconds"/> unchanged when the two sides read
+    /// different files, when their source ranges do not meet at the boundary (reordered or
+    /// unrelated ranges), or when there is a genuine gap between the two mapped source times;
+    /// otherwise the incoming source time minus one frame step (floored at zero), so the two
+    /// sides can never sample identical -- or momentarily reversed -- footage.
+    /// </returns>
+    /// <remarks>
+    /// <b>Public (promoted from <c>internal</c> in T8, the transitions-feature integration
+    /// pass):</b> this is the ONE part of the export/preview outgoing-side arithmetic that
+    /// genuinely had no substitute elsewhere in <c>Musio.App</c> -- unlike
+    /// <see cref="ClampSourceTime"/>, whose footage-availability clamp is already reproduced
+    /// for free by <see cref="VideoFrameReader.GetFrameIndex"/>'s own
+    /// <c>[0, FrameCount - 1]</c> clamp (see that method's remarks) -- so
+    /// <c>EditorPage.xaml.cs</c> (the live-preview pipeline, T3) had re-implemented an
+    /// identical private copy rather than leave the same-source-contiguous-split bug fixed on
+    /// export only. T8 verified the two copies were byte-for-byte identical and deleted the
+    /// preview-side duplicate in favour of this shared, testable implementation, so preview
+    /// and export now provably call the exact same code for this policy.
+    /// </remarks>
+    public static double CollapseContiguousSourceBoundary(
+        double outgoingSourceTimeSeconds,
+        string outgoingVideoFilePath,
+        double? incomingSourceTimeSeconds,
+        string? incomingVideoFilePath,
+        int fps,
+        double outgoingCutPointSeconds,
+        double incomingSourceStartSeconds)
+    {
+        if (incomingSourceTimeSeconds is not { } incomingTime)
+            return outgoingSourceTimeSeconds;
+
+        if (!string.Equals(outgoingVideoFilePath, incomingVideoFilePath, StringComparison.OrdinalIgnoreCase))
+            return outgoingSourceTimeSeconds;
+
+        double frameStep = fps > 0 ? 1.0 / fps : 1.0 / 30;
+
+        // Sharing a file is NOT enough to prove the two sides are a split of one continuous
+        // run. Reordered clips read the same file from unrelated ranges -- e.g. [10s,14s]
+        // followed by [2s,6s] -- and there the outgoing frame at 14s is entirely legitimate
+        // even though it sits "after" the incoming's 2s. Collapsing on the timestamp
+        // comparison alone would yank the outgoing image backwards by twelve seconds at the
+        // start of the dissolve. Only a boundary whose ranges actually MEET (the outgoing's
+        // cut point is the incoming's in-point) is a contiguous split.
+        if (Math.Abs(outgoingCutPointSeconds - incomingSourceStartSeconds) > frameStep)
+            return outgoingSourceTimeSeconds;
+
+        if (outgoingSourceTimeSeconds < incomingTime)
+            return outgoingSourceTimeSeconds; // Genuine trimmed gap: rolling is legitimate.
+
+        return Math.Max(0, incomingTime - frameStep);
     }
 
     /// <summary>

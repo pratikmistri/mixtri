@@ -36,7 +36,9 @@ public sealed partial class EditorPage : Page
     // Text slide rendering for segment-based preview
     private TextSlideRenderer? _textSlideRenderer;
 
-    // Blends slide↔neighbour crossfades in the preview (lazily created).
+    // Blends the outgoing/incoming pair at every configured segment-boundary transition in
+    // the preview (not just slide↔neighbour boundaries — see TransitionResolver), lazily
+    // created.
     private TransitionRenderer? _transitionRenderer;
 
     // Per-appended-recording preview contexts (frame reader + compositor + webcam),
@@ -77,6 +79,65 @@ public sealed partial class EditorPage : Page
     private const int MaxCachedSegmentPreviews = 2;
     private const long PrimaryPreviewCacheBudgetBytes = 96L * 1024 * 1024;
     private const long SegmentPreviewCacheBudgetBytes = 32L * 1024 * 1024;
+
+    /// <summary>
+    /// One alternate-style compositor for a PRIMARY-file segment, cached by its EFFECTIVE
+    /// (<see cref="BackgroundStyle"/>, <see cref="CursorStyle"/>) pair. Exists solely so
+    /// composing a transition's two sides (see
+    /// <see cref="GetPrimaryTransitionCompositorAsync"/>) never mutates the singleton
+    /// <see cref="_previewRenderer"/> that ordinary playback owns — see that method's
+    /// remarks for the alternation-freeze this replaces.
+    /// </summary>
+    private sealed class PrimaryStyleRenderer : IDisposable
+    {
+        public required PreviewRenderer Renderer { get; init; }
+        public long LastUsed;
+        public void Dispose() => TryDispose(Renderer);
+    }
+
+    private readonly Dictionary<(BackgroundStyle Background, CursorStyle Cursor), PrimaryStyleRenderer>
+        _primaryStyleRenderers = new();
+    private long _primaryStyleRendererUseCounter;
+    private const int MaxCachedPrimaryStyleRenderers = 3;
+
+    /// <summary>
+    /// Generation guard for primary-recording preview state (<see cref="_previewRenderer"/>
+    /// and <see cref="_frameReader"/>) that a transition compose might be using across an
+    /// await. Bumped everywhere either is disposed or replaced (page unload, graphics
+    /// recovery, a full re-init, a style rebuild, or an adaptive-quality resolution swap).
+    /// Composing a transition's outgoing/incoming side awaits a frame decode (and,
+    /// on the singleton, a webcam extraction) with that state read beforehand; any of the
+    /// above can run to completion on the UI thread while that await is in flight (this is
+    /// single-threaded interleaving, not true parallelism, but the effect is the same for
+    /// a resumed continuation). Re-checking this value after the await — see
+    /// <see cref="ComposePreviewFrameAtOffsetAsync"/> — is what lets the continuation
+    /// detect that and bail out instead of touching a disposed compositor/reader or
+    /// silently compositing against a replacement built for different state.
+    /// </summary>
+    private int _primaryPreviewStateGeneration;
+
+    /// <summary>
+    /// Disposes and clears every cached primary alternate-style compositor.
+    /// </summary>
+    private void DisposePrimaryStyleRenderers()
+    {
+        _primaryPreviewStateGeneration++;
+        foreach (var entry in _primaryStyleRenderers.Values)
+            entry.Dispose();
+        _primaryStyleRenderers.Clear();
+    }
+
+    private void TrimPrimaryStyleRendererCache()
+    {
+        while (_primaryStyleRenderers.Count >= MaxCachedPrimaryStyleRenderers)
+        {
+            var oldest = _primaryStyleRenderers.MinBy(pair => pair.Value.LastUsed);
+            if (oldest.Value is null) return;
+
+            _primaryStyleRenderers.Remove(oldest.Key);
+            oldest.Value.Dispose();
+        }
+    }
 
     /// <summary>
     /// Disposes and clears every cached appended-segment preview.
@@ -253,8 +314,7 @@ public sealed partial class EditorPage : Page
                 // Play short audio burst at scrub position for editing feedback
                 if (!Preview.IsPlaying)
                 {
-                    var audioPos = AudioPositionForVideo(Timeline.PlayheadPosition);
-                    if (audioPos >= TimeSpan.Zero)
+                    if (AudioPositionForVideo(Timeline.PlayheadPosition) is { } audioPos)
                         _audioPlayer?.ScrubTo(audioPos);
                 }
             });
@@ -274,18 +334,11 @@ public sealed partial class EditorPage : Page
             ViewModel.Model.PlayheadPosition = Preview.PlayheadPosition;
             _ = UpdatePreviewFrameAsync(Preview.PlayheadPosition);
 
-            // Start audio when playhead reaches audio start point
-            // (handles negative offset where audio started after video)
-            if (_audioPlayer is not null && _audioPlayer.IsLoaded
-                && Preview.IsPlaying && !_audioPlayer.IsPlaying)
-            {
-                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
-                if (audioPos >= TimeSpan.Zero)
-                {
-                    _audioPlayer.Seek(audioPos);
-                    _audioPlayer.Play();
-                }
-            }
+            // Keep the audio aligned with the edited timeline on every tick: start it when the
+            // playhead enters footage that has audio, pause it over slides/gaps, and correct
+            // drift once linear file playback diverges from where the segments say it should be.
+            if (Preview.IsPlaying)
+                SyncAudioToPlayhead(Preview.PlayheadPosition);
         };
 
         // Sync audio play/pause with preview
@@ -294,13 +347,9 @@ public sealed partial class EditorPage : Page
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
             if (isPlaying)
             {
-                var audioPos = AudioPositionForVideo(Preview.PlayheadPosition);
-                if (audioPos >= TimeSpan.Zero)
-                {
-                    _audioPlayer.Seek(audioPos);
-                    _audioPlayer.Play();
-                }
-                // else: audio hasn't started yet; PlaybackTick will start it
+                // Seeks, starts, or leaves it paused if the playhead is somewhere with no
+                // audio behind it (a title slide, say) — PlaybackTick picks it up on entry.
+                SyncAudioToPlayhead(Preview.PlayheadPosition);
             }
             else
             {
@@ -312,18 +361,7 @@ public sealed partial class EditorPage : Page
         Preview.PlaybackLooped += (_, _) =>
         {
             if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
-            var audioPos = AudioPositionForVideo(TimeSpan.Zero);
-            if (audioPos >= TimeSpan.Zero)
-            {
-                _audioPlayer.Seek(audioPos);
-                if (!_audioPlayer.IsPlaying)
-                    _audioPlayer.Play();
-            }
-            else
-            {
-                // Audio starts later in the video — stop and let tick restart it
-                _audioPlayer.Pause();
-            }
+            SyncAudioToPlayhead(TimeSpan.Zero);
         };
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -348,6 +386,7 @@ public sealed partial class EditorPage : Page
                 _timelineMapper = null;
                 Timeline.ClearZoomSelection();
                 Timeline.ClearClipSelection();
+                Timeline.ClearTransitionSelection();
                 UpdateSpeedPanelVisibility();
                 Preview.Duration = GetMappedDuration();
                 Timeline.Refresh();
@@ -387,6 +426,10 @@ public sealed partial class EditorPage : Page
         Timeline.TextOverlayResized += OnTextOverlayResized;
         Timeline.TextOverlayRemoveRequested += OnTextOverlayRemoveRequested;
 
+        // Transition boundary events
+        Timeline.TransitionSelected += OnTransitionSelected;
+        Timeline.TransitionRemoveRequested += OnTransitionRemoveRequested;
+
         // Export flyout state management
         ExportFlyout.Opened += ExportFlyout_Opened;
         ExportFlyout.Closed += ExportFlyout_Closed;
@@ -422,8 +465,8 @@ public sealed partial class EditorPage : Page
             _textSlideRenderer = null;
             _transitionRenderer?.Dispose();
             _transitionRenderer = null;
-            ReleaseCrossfadeOutgoing();
             DisposeSegmentPreviews();
+            DisposePrimaryStyleRenderers();
             _audioPlayer?.Dispose();
             _audioPlayer = null;
             _webcamComposition?.Clips.Clear();
@@ -547,8 +590,8 @@ public sealed partial class EditorPage : Page
             _textSlideRenderer = null;
             TryDispose(_transitionRenderer);
             _transitionRenderer = null;
-            ReleaseCrossfadeOutgoing();
             DisposeSegmentPreviews();
+            DisposePrimaryStyleRenderers();
             TryDispose(_lastWebcamFrame);
             _lastWebcamFrame = null;
             try { _webcamComposition?.Clips.Clear(); } catch { }
@@ -639,7 +682,6 @@ public sealed partial class EditorPage : Page
         _audioPlayer?.Dispose();
         _styleDebounceTimer?.Stop();
         _motionDebounceTimer?.Stop();
-        ReleaseCrossfadeOutgoing();
         _frameReader = null;
         _previewRenderer = null;
         _audioPlayer = null;
@@ -647,6 +689,7 @@ public sealed partial class EditorPage : Page
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
         DisposeSegmentPreviews();
+        DisposePrimaryStyleRenderers();
         Timeline.ClearSegmentTrackVisuals();
 
         var project = ProjectService.Instance.CurrentProject;
@@ -1007,11 +1050,33 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    /// <summary>
+    /// Whether rendering <paramref name="position"/> costs video-decode work, for the
+    /// adaptive-quality feedback loop (<see cref="UpdatePreviewFrameAsync"/>): the loop only
+    /// samples elapsed time as a "video" data point when this is true, since a text slide by
+    /// itself renders far more cheaply and would otherwise pull the observed average down.
+    /// </summary>
+    /// <remarks>
+    /// An ACTIVE transition composes BOTH sides every tick regardless of which one the
+    /// playhead nominally sits over (see <see cref="RenderFrameAtAsync"/>) — a video→slide
+    /// dissolve therefore still recomposes a full, uniquely-offset video frame for its
+    /// OUTGOING side (the rolling model, T1) even though <c>GetSegmentAtTime(position)</c>
+    /// resolves to the (cheap) incoming slide. That per-tick video cost is new: the legacy
+    /// crossfade cache composed that same outgoing side only ONCE per dissolve, so it was
+    /// never expensive enough to need adaptive downgrading. Checking only the per-position
+    /// segment made this the one case the feedback loop could never observe, however heavy
+    /// the transition got — treat either transition side being a <see cref="VideoSegment"/>
+    /// as video load too, so a slow video-involved dissolve still triggers a downgrade.
+    /// </remarks>
     private bool IsVideoPosition(TimeSpan position)
     {
         var model = ViewModel.Model;
-        return model.Segments.Count == 0
-            || model.GetSegmentAtTime(position).Segment is VideoSegment;
+        if (model.Segments.Count == 0) return true;
+        if (model.GetSegmentAtTime(position).Segment is VideoSegment) return true;
+
+        var resolution = TransitionResolver.Resolve(model, position);
+        return resolution.Active
+            && (resolution.IncomingSegment is VideoSegment || resolution.OutgoingSegment is VideoSegment);
     }
 
     private async Task<bool> ApplyPreviewResolutionAsync(PreviewResolution resolution)
@@ -1062,6 +1127,13 @@ public sealed partial class EditorPage : Page
             project.Height);
         DisposeOffUiThread(oldReader);
         DisposeSegmentPreviews();
+
+        // _frameReader just changed identity: a transition compose that read the OLD
+        // reader before this ran and is still awaiting a decode on it (see the remarks on
+        // _primaryPreviewStateGeneration) must not go on to composite that stale bitmap
+        // against state resolved for the new one.
+        _primaryPreviewStateGeneration++;
+
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
         return true;
@@ -1076,14 +1148,19 @@ public sealed partial class EditorPage : Page
         var model = ViewModel.Model;
         if (model.Segments.Count > 0)
         {
-            // Soft cut: when the playhead is within the dissolve window on the
-            // leading edge of a boundary that touches a text slide, cross-dissolve
-            // the outgoing neighbour into the incoming segment instead of hard
-            // cutting. Fully guarded — any failure falls back to the normal render.
-            var crossfade = Musio.Core.Timeline.SlideTransitions.Resolve(model, position);
-            if (crossfade.Active)
+            // Soft cut: when the playhead is within a transition window on the leading
+            // edge of a boundary, cross-dissolve (or apply whatever effect is configured
+            // for) the outgoing neighbour into the incoming segment instead of hard
+            // cutting. TransitionResolver is the single shared source of truth for "what
+            // transition is active right now" — the exporter (SegmentFrameComposer, T2)
+            // calls the exact same function, so both pipelines dissolve at identical
+            // instants with identical effect/duration/easing. Fully guarded — any failure
+            // falls back to the normal render.
+            var resolution = TransitionResolver.Resolve(model, position);
+            if (resolution.Active)
             {
                 CanvasRenderTarget? incoming = null;
+                CanvasRenderTarget? outgoing = null;
                 try
                 {
                     incoming = await ComposePreviewFrameAsync(position);
@@ -1093,17 +1170,59 @@ public sealed partial class EditorPage : Page
 
                         // Must run BEFORE composing the outgoing frame: committing an
                         // in-place text edit changes the slide the outgoing frame is
-                        // composed from, and it releases the crossfade cache — doing it
-                        // afterwards would dispose the frame still referenced below.
+                        // composed from. (There is no longer a crossfade cache for this to
+                        // race with — see the remarks on why one isn't needed below — but
+                        // the edit must still be committed first regardless.)
                         HideTextEditOverlay();
 
-                        // The outgoing side is held at a FIXED instant for the whole
-                        // dissolve (SlideTransitions pins it to current.Start - 1 tick), so
-                        // it composes to the identical image on every tick. Re-rendering it
-                        // meant a full-resolution text-slide pass (gradient + turbulence, or
-                        // a decoded neighbour frame) ~15 times per 500 ms dissolve, on the
-                        // UI thread, competing with the incoming decode. Compose once.
-                        var outgoing = await GetCrossfadeOutgoingAsync(crossfade.OutgoingTime, w, h);
+                        // Rolling model (T1): the outgoing segment keeps playing past its
+                        // own cut point instead of freezing on a fixed instant (see
+                        // TransitionResolution.OutgoingLocalOffset), so — unlike the legacy
+                        // SlideTransitions crossfade this replaced — it composes to a
+                        // DIFFERENT image on nearly every tick. That voids the premise a
+                        // page-owned cache here relied on (compose once, reuse for ~15
+                        // ticks per dissolve), so the cache was retired rather than
+                        // rekeyed: composing fresh every tick is exactly what the incoming
+                        // side already does, and the two remaining places that used to make
+                        // repeated identical composes cheap still apply without it —
+                        // VideoFrameReader's own decode LRU (keyed by frame index) hits
+                        // whenever the offset holds at the reader's last frame because the
+                        // available footage ran out before the (now possibly
+                        // longer/configurable) dissolve did, and TextSlideRenderer's own
+                        // render pass is cheap enough on its own (~1.5 ms/frame, measured
+                        // and documented in learnings.md) not to need caching either.
+                        //
+                        // Same-source contiguous split: a plain split of one recording adds
+                        // a transition at the existing cut without changing any footage, so
+                        // the outgoing side's rolled offset can map to the exact source
+                        // instant the incoming side already shows. Resolve the incoming
+                        // side's own mapped source time (mirroring
+                        // SegmentFrameComposer.ComposeFrameAsync in the exporter) so the
+                        // outgoing compose can detect and collapse that case — see
+                        // SegmentFrameComposer.CollapseContiguousSourceBoundary's remarks
+                        // (shared with the exporter since T8's consolidation pass).
+                        string? incomingVideoFilePath = null;
+                        double? incomingSourceTimeSeconds = null;
+                        double incomingSourceStartSeconds = 0;
+                        if (resolution.IncomingSegment is VideoSegment incomingVideo
+                            && resolution.OutgoingSegment is not null)
+                        {
+                            var incomingLocal = resolution.OutgoingLocalOffset
+                                - resolution.OutgoingSegment.Duration;
+                            double incomingSpeed = incomingVideo.SpeedFactor > 0
+                                ? incomingVideo.SpeedFactor : 1.0;
+                            incomingVideoFilePath = incomingVideo.VideoFilePath;
+                            incomingSourceStartSeconds = incomingVideo.SourceStart.TotalSeconds;
+                            incomingSourceTimeSeconds = incomingVideo.SourceStart.TotalSeconds
+                                + incomingLocal.TotalSeconds * incomingSpeed;
+                        }
+
+                        outgoing = resolution.OutgoingSegment is { } outgoingSegment
+                            ? await ComposePreviewFrameAtOffsetAsync(
+                                outgoingSegment, resolution.OutgoingLocalOffset,
+                                incomingVideoFilePath, incomingSourceTimeSeconds,
+                                incomingSourceStartSeconds)
+                            : null;
 
                         // Force the normal path to fully redraw once the dissolve ends.
                         _lastRenderedFrameIndex = -1;
@@ -1113,10 +1232,13 @@ public sealed partial class EditorPage : Page
                         {
                             // Blend at the composed canvas size. Using the raw capture size
                             // here made the picture jump to the capture aspect ratio for the
-                            // length of the dissolve and snap back when it ended.
+                            // length of the dissolve and snap back when it ended. Pass the
+                            // resolved effect + eased progress (not a hardcoded CrossFade) so
+                            // configured transition types/easing are honoured; unimplemented
+                            // effect types degrade safely inside TransitionRenderer.
                             _transitionRenderer ??= new TransitionRenderer();
                             var blended = _transitionRenderer.Render(
-                                outgoing, incoming, TransitionType.CrossFade, crossfade.Progress, w, h);
+                                outgoing, incoming, resolution.Type, resolution.EasedProgress, w, h);
                             Preview.SetFrame(blended);
                         }
                         else
@@ -1145,12 +1267,9 @@ public sealed partial class EditorPage : Page
                 finally
                 {
                     incoming?.Dispose();
+                    outgoing?.Dispose();
                 }
                 // Fall through to the normal render on any miss/failure.
-            }
-            else
-            {
-                ReleaseCrossfadeOutgoing();
             }
 
             var (segment, localOffset) = model.GetSegmentAtTime(position);
@@ -1204,66 +1323,76 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Composes the held outgoing frame for a crossfade, reusing the previous result while
-    /// the dissolve stays on the same boundary and canvas size.
-    /// </summary>
-    /// <remarks>
-    /// The returned frame is owned by this page — callers must not dispose it or hand it to
-    /// <see cref="PreviewCanvas.SetFrame"/>, which takes ownership.
-    /// </remarks>
-    private async Task<CanvasRenderTarget?> GetCrossfadeOutgoingAsync(TimeSpan outgoingTime, int width, int height)
-    {
-        var key = (outgoingTime, width, height);
-        if (_crossfadeOutgoing is not null && _crossfadeOutgoingKey == key)
-            return _crossfadeOutgoing;
-
-        ReleaseCrossfadeOutgoing();
-
-        // Composing awaits an MP4 decode, during which a slide edit or a renderer rebuild
-        // can invalidate the cache. That invalidation sees an empty cache and clears
-        // nothing, so without this check the already-stale frame would be published
-        // afterwards and reused for the rest of the dissolve.
-        int generation = _crossfadeGeneration;
-        var frame = await ComposePreviewFrameAsync(outgoingTime);
-        if (frame is null)
-            return null;
-
-        if (generation != _crossfadeGeneration)
-        {
-            frame.Dispose();
-            return null;
-        }
-
-        _crossfadeOutgoing = frame;
-        _crossfadeOutgoingKey = key;
-        return frame;
-    }
-
-    private void ReleaseCrossfadeOutgoing()
-    {
-        _crossfadeGeneration++;
-        TryDispose(_crossfadeOutgoing);
-        _crossfadeOutgoing = null;
-        _crossfadeOutgoingKey = null;
-    }
-
-    private CanvasRenderTarget? _crossfadeOutgoing;
-    private (TimeSpan OutgoingTime, int Width, int Height)? _crossfadeOutgoingKey;
-    private int _crossfadeGeneration;
-
-    /// <summary>
     /// Renders a standalone preview frame for an arbitrary output position WITHOUT
-    /// presenting it or touching the frame cache. Used to obtain both sides of a
-    /// slide↔neighbour crossfade so they can be blended. Returns null on failure
-    /// (the caller falls back to the normal render path). Text slides render at
-    /// project resolution; video frames render at their source resolution and the
-    /// transition renderer scales both to the output rect when blending.
+    /// presenting it or touching the frame cache. Used to obtain the INCOMING side of a
+    /// transition (and, before the rolling model, both sides). Returns null on failure
+    /// (the caller falls back to the normal render path). Thin wrapper around
+    /// <see cref="ComposePreviewFrameAtOffsetAsync"/> that resolves the segment/local-offset
+    /// pair the normal way — via <see cref="TimelineModel.GetSegmentAtTime"/> — which is valid
+    /// for any INCOMING side or ordinary (non-transition) frame, but NOT for an outgoing
+    /// transition side once it rolls past its own segment's duration (see the other overload).
     /// </summary>
     private async Task<CanvasRenderTarget?> ComposePreviewFrameAsync(TimeSpan outputPos)
     {
         var model = ViewModel.Model;
         var (segment, localOffset) = model.GetSegmentAtTime(outputPos);
+        return await ComposePreviewFrameAtOffsetAsync(segment, localOffset);
+    }
 
+    /// <summary>
+    /// Composes <paramref name="segment"/> at <paramref name="localOffset"/> into its own
+    /// local timeline — the shared body behind both the normal per-position path
+    /// (<see cref="ComposePreviewFrameAsync(TimeSpan)"/>, where the offset always lies within
+    /// the segment) and the ROLLING transition path (<see cref="RenderFrameAtAsync"/>, where
+    /// <paramref name="localOffset"/> is a
+    /// <see cref="TransitionResolution.OutgoingLocalOffset"/> that deliberately EXCEEDS the
+    /// segment's own <see cref="TimelineSegment.Duration"/> so the outgoing side of a dissolve
+    /// keeps rolling past its own cut point instead of freezing — mirrors
+    /// <c>SegmentFrameComposer.ComposeSegmentAtOffsetAsync</c> in the exporter so both pipelines
+    /// dissolve the same footage). Text slides render at project resolution; video frames
+    /// render at their source resolution and the transition renderer scales both to the output
+    /// rect when blending.
+    /// </summary>
+    /// <param name="incomingVideoFilePath">
+    /// Only meaningful (non-null) when composing the OUTGOING side of an active transition AND
+    /// the transition's incoming segment is itself a <see cref="VideoSegment"/>: that segment's
+    /// source file, used by the <see cref="VideoSegment"/> branch below to detect a same-source
+    /// contiguous boundary (see <see cref="SegmentFrameComposer.CollapseContiguousSourceBoundary"/>).
+    /// Left null (the default) for the normal per-position path, where there is no "incoming
+    /// side" to collide with.
+    /// </param>
+    /// <param name="incomingSourceTimeSeconds">
+    /// The incoming side's own mapped source-file time for this exact instant, alongside
+    /// <paramref name="incomingVideoFilePath"/>.
+    /// </param>
+    /// <remarks>
+    /// Each segment type is responsible for making an over-long offset degrade sensibly.
+    /// <see cref="TextSlideSegment"/> already clamps its animation progress to [0, 1] below, so
+    /// it naturally holds the slide's last animated frame. <see cref="VideoSegment"/> maps the
+    /// offset into an absolute source-file time via <see cref="VideoFrameReader.LoadFrameAtTimeAsync"/>,
+    /// whose <see cref="VideoFrameReader.GetFrameIndex"/> already clamps the resulting frame
+    /// index to <c>[0, FrameCount - 1]</c> — i.e. holding the reader's own last decodable frame
+    /// once the offset runs past it. That is the exact same bound
+    /// <see cref="SegmentFrameComposer.ClampSourceTime"/> (T2) uses for the export side
+    /// (<c>VideoFrameReader.Duration</c>), so this method reaches an equivalent result WITHOUT
+    /// needing to call that helper -- which stayed <c>internal</c> to Musio.Core (only
+    /// <c>Musio.Tests</c> has <c>InternalsVisibleTo</c>) even after the T8 integration pass,
+    /// since this reader-clamp equivalence means there is no actual behavioural gap here to
+    /// close, only an implicit-vs-explicit-clamp divergence -- which is what this remark exists
+    /// to document prominently, per T8's own instructions, rather than leave unstated. The
+    /// same is NOT true of the same-source contiguous-boundary policy below: that one had no
+    /// equivalent already-existing safety net anywhere in this file, so a private copy of it
+    /// was originally kept here deliberately (not merely noted as a gap) to avoid a visible
+    /// preview/export divergence -- T8 has since PROMOTED that method to
+    /// <see cref="SegmentFrameComposer.CollapseContiguousSourceBoundary"/> (now `public`) and
+    /// deleted this file's copy, so both pipelines now call the exact same shared
+    /// implementation instead of two independently-maintained ones.
+    /// </remarks>
+    private async Task<CanvasRenderTarget?> ComposePreviewFrameAtOffsetAsync(
+        TimelineSegment? segment, TimeSpan localOffset,
+        string? incomingVideoFilePath = null, double? incomingSourceTimeSeconds = null,
+        double incomingSourceStartSeconds = 0)
+    {
         if (segment is TextSlideSegment slide)
         {
             _textSlideRenderer ??= new TextSlideRenderer();
@@ -1278,70 +1407,260 @@ public sealed partial class EditorPage : Page
         if (segment is not VideoSegment seg)
             return null;
 
-        var sourceTime = seg.SourceStart +
+        // Unchanged from before this task: tick-precision mapping (matches the ordinary,
+        // non-transition preview/export paths elsewhere in this file). Only converted to
+        // double seconds afterwards, for the collapse check below and to match
+        // incomingSourceTimeSeconds' own units — the conversion cannot change which frame
+        // index LoadFrameAtTimeAsync resolves to, since that only depends on
+        // TotalSeconds * fps rounded to an int.
+        var rawSourceTime = seg.SourceStart +
             TimeSpan.FromTicks((long)(localOffset.Ticks * seg.SpeedFactor));
+        double collapsedSourceSeconds = SegmentFrameComposer.CollapseContiguousSourceBoundary(
+            rawSourceTime.TotalSeconds, seg.VideoFilePath,
+            incomingSourceTimeSeconds, incomingVideoFilePath, seg.Fps,
+            (seg.SourceStart + seg.SourceDuration).TotalSeconds,
+            incomingSourceStartSeconds);
+        var sourceTime = collapsedSourceSeconds == rawSourceTime.TotalSeconds
+            ? rawSourceTime // No collapse applied: keep the tick-precision value as-is.
+            : TimeSpan.FromSeconds(collapsedSourceSeconds);
 
         // Primary-recording segment → main reader/compositor.
         if (string.Equals(seg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
         {
             if (_frameReader is null) return null;
-            await EnsurePrimaryRendererForSegmentAsync(seg);
-            var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourceTime);
+            var reader = _frameReader;
+
+            // Resolves (building/caching if needed) the compositor for THIS segment's
+            // effective style WITHOUT mutating the singleton _previewRenderer — see the
+            // method's remarks for why EnsurePrimaryRendererForSegmentAsync (which the
+            // ordinary, non-transition render path still uses) is unsafe to call from here.
+            var compositor = await GetPrimaryTransitionCompositorAsync(seg);
+
+            // Snapshot AFTER the awaits above (building an alt-style compositor can itself
+            // await a multi-frame compositor init) so both checks below reflect state as of
+            // right now, then re-validate after the frame decode await — see the remarks on
+            // _primaryPreviewStateGeneration for why a rebuild/teardown that completes
+            // during either await must not be silently composited past.
+            if (!ReferenceEquals(reader, _frameReader)) return null;
+            int stateGen = _primaryPreviewStateGeneration;
+
+            var bitmap = await reader.LoadFrameAtTimeAsync(sourceTime);
             if (bitmap is null) return null;
 
-            if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
+            try
             {
-                await SetWebcamFrameForPreviewAsync(sourceTime);
-                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourceTime);
-                bitmap.Dispose();
-                if (composed is not null) return composed;
+                if (stateGen != _primaryPreviewStateGeneration || !ReferenceEquals(reader, _frameReader))
+                    return null;
+
+                if (compositor is not null && !_zoomRegionEditMode)
+                {
+                    // The webcam overlay only follows the singleton today
+                    // (SetWebcamFrameForPreviewAsync always targets _previewRenderer): an
+                    // alt-style compositor built for a differently-styled transition side
+                    // therefore composes without a live webcam update for that one frame.
+                    // Rare (needs a webcam AND a per-segment style override AND an active
+                    // transition simultaneously) and never worse than before this cache
+                    // existed — this whole code path is new; the alternative was an
+                    // unbounded rebuild loop, not a correct webcam-carrying frame.
+                    if (ReferenceEquals(compositor, _previewRenderer))
+                    {
+                        await SetWebcamFrameForPreviewAsync(sourceTime);
+                        if (stateGen != _primaryPreviewStateGeneration) return null;
+                    }
+
+                    var composed = compositor.RenderPreviewFrame(bitmap, sourceTime);
+                    if (composed is not null) return composed;
+                }
+                else
+                {
+                    var device = CanvasDevice.GetSharedDevice();
+                    var rt = new CanvasRenderTarget(device,
+                        bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
+                    using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+                    return rt;
+                }
+                return null;
             }
-            else
+            finally
             {
-                var device = CanvasDevice.GetSharedDevice();
-                var rt = new CanvasRenderTarget(device,
-                    bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96);
-                using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
+                // Every path above either already returned a NEW render target (never the
+                // decoded bitmap itself) or fell through to null — the decoded bitmap is
+                // always this method's to release, on every path including an exception
+                // thrown while composing it.
                 bitmap.Dispose();
-                return rt;
             }
-            return null;
         }
 
         // Appended-recording segment → its own per-segment context.
         var ctx = await GetOrBuildSegmentPreviewAsync(seg);
         if (ctx?.Reader is null) return null;
-        var segBitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+
+        // Valid as of right now (GetOrBuildSegmentPreviewAsync only ever returns a context
+        // it has just confirmed is not abandoned) — re-checked after the awaits below, so a
+        // cache clear/eviction/style-rebuild that completes while this method is awaiting a
+        // decode or a webcam extraction is detected instead of used past.
+        int ctxGeneration = _segmentPreviewGeneration;
+        var segReader = ctx.Reader;
+
+        var segBitmap = await segReader.LoadFrameAtTimeAsync(sourceTime);
         if (segBitmap is null) return null;
 
-        if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+        try
         {
-            if (ctx.Webcam is not null)
+            if (ctxGeneration != _segmentPreviewGeneration) return null;
+
+            if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
             {
-                try
+                if (ctx.Webcam is not null)
                 {
-                    var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
-                    if (wf is not null)
+                    try
                     {
-                        ctx.LastWebcamFrame?.Dispose();
-                        ctx.LastWebcamFrame = wf;
-                        ctx.Renderer.SetWebcamFrame(wf);
+                        var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                        if (ctxGeneration != _segmentPreviewGeneration) return null;
+                        if (wf is not null)
+                        {
+                            ctx.LastWebcamFrame?.Dispose();
+                            ctx.LastWebcamFrame = wf;
+                            ctx.Renderer.SetWebcamFrame(wf);
+                        }
                     }
+                    catch { }
                 }
-                catch { }
+                var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
+                if (composed is not null) return composed;
+                return null;
             }
-            var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
+
+            var dev = CanvasDevice.GetSharedDevice();
+            var fallback = new CanvasRenderTarget(dev,
+                segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96);
+            using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
+            return fallback;
+        }
+        finally
+        {
             segBitmap.Dispose();
-            if (composed is not null) return composed;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the compositor to use for a PRIMARY-file segment while composing either
+    /// side of an active transition, WITHOUT mutating the singleton <see cref="_previewRenderer"/>
+    /// that ordinary (non-transition) playback owns via
+    /// <see cref="EnsurePrimaryRendererForSegmentAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Composing a dissolve calls this (via <see cref="ComposePreviewFrameAtOffsetAsync"/>)
+    /// twice per tick — once for the incoming segment, once for the outgoing one — and the
+    /// two can carry DIFFERENT per-segment frame-style/cursor overrides: a primary-file
+    /// split with a style change at the very cut a transition now sits on.
+    /// <see cref="EnsurePrimaryRendererForSegmentAsync"/> rebuilds the ONE singleton
+    /// compositor to match whichever segment last asked for it, so composing both sides
+    /// with THAT method alternated the singleton between the two segments' styles every
+    /// tick, forever: incoming's compose rebuilds it for B, outgoing's compose then sees a
+    /// mismatch and rebuilds it for A, incoming's NEXT compose sees a mismatch again and
+    /// rebuilds for B again — an unbounded rebuild loop. Each rebuild reopens cursor data
+    /// and reallocates render targets on the UI thread (the exact freeze
+    /// <see cref="EnsurePrimaryRendererForSegmentAsync"/>'s own remarks already warn about
+    /// for a single misbehaving caller), and the rolling model (T1) makes this happen on
+    /// EVERY tick of the dissolve rather than once, which is what turns it from merely slow
+    /// into an unbounded, UI-freezing loop.
+    /// </para>
+    /// <para>
+    /// Caching a compositor per EFFECTIVE (<see cref="BackgroundStyle"/>,
+    /// <see cref="CursorStyle"/>) pair — mirroring <c>SegmentFrameComposer</c>'s
+    /// <c>SourceKey</c>-keyed context cache in the exporter — lets both sides compose
+    /// without either clobbering shared state: composing outgoing never invalidates state
+    /// incoming depends on (or vice versa), because neither one is ever mutated by the
+    /// other's compose — each style gets its OWN compositor instance, looked up or built
+    /// once and reused after. The common case — neither side carries an override, or the
+    /// ordinary render path already left the singleton matching this segment's style — is
+    /// short-circuited straight to the singleton with no new allocation, so an unconfigured
+    /// project's transition costs exactly what it did before this cache existed.
+    /// </para>
+    /// </remarks>
+    private async Task<PreviewRenderer?> GetPrimaryTransitionCompositorAsync(VideoSegment seg)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return null;
+
+        var global = ProjectService.Instance.CurrentComposition;
+        var wantBg = seg.FrameStyleOverride ?? global.Background;
+        var wantCursor = seg.CursorStyleOverride ?? global.Cursor;
+
+        if (_compositorReady && _previewRenderer is not null
+            && Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
+        {
+            return _previewRenderer;
+        }
+
+        var key = (wantBg, wantCursor);
+        if (_primaryStyleRenderers.TryGetValue(key, out var cached))
+        {
+            cached.LastUsed = ++_primaryStyleRendererUseCounter;
+            return cached.Renderer;
+        }
+
+        int stateGen = _primaryPreviewStateGeneration;
+        TrimPrimaryStyleRendererCache();
+
+        MouseRecordingData? mouseData = null;
+        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
+        {
+            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
+            catch { /* no cursor data */ }
+        }
+        mouseData ??= new MouseRecordingData();
+
+        // Same style-layering RebuildPreviewRendererCoreAsync uses for the singleton, just
+        // not written onto _primaryRenderBackground/_primaryRenderCursor — those track ONLY
+        // what the singleton itself is currently built with.
+        var effective = global with { Background = wantBg, Cursor = wantCursor };
+        effective = HideCursorWhenNoSamples(effective, mouseData);
+
+        PreviewRenderer renderer;
+        try
+        {
+            renderer = new PreviewRenderer();
+            await renderer.InitializeAsync(
+                mouseData, effective,
+                project.Width > 0 ? project.Width : 1920,
+                project.Height > 0 ? project.Height : 1080,
+                project.Duration,
+                project.MouseToVideoOffsetSeconds,
+                project.CropOffsetX,
+                project.CropOffsetY,
+                project.DpiScale);
+
+            renderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
+            renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+            SyncTextOverlaysToRenderer(renderer, null);
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"transition alt-style compositor build failed for segment {seg.Id}: {ex.Message}");
             return null;
         }
 
-        var dev = CanvasDevice.GetSharedDevice();
-        var fallback = new CanvasRenderTarget(dev,
-            segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96);
-        using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
-        segBitmap.Dispose();
-        return fallback;
+        // A teardown/rebuild that ran to completion during InitializeAsync's await above
+        // already disposed (or is about to dispose) whatever this project's state used to
+        // be, and may have changed the dimensions/duration/mouse data this renderer was
+        // just built from. Abandon it rather than caching a build that no longer matches —
+        // the same principle GetOrBuildSegmentPreviewAsync's own Abandoned() check applies.
+        if (stateGen != _primaryPreviewStateGeneration)
+        {
+            TryDispose(renderer);
+            return null;
+        }
+
+        _primaryStyleRenderers[key] = new PrimaryStyleRenderer
+        {
+            Renderer = renderer,
+            LastUsed = ++_primaryStyleRendererUseCounter,
+        };
+        return renderer;
     }
 
     // In-preview text editing state, shared by full-screen text slides and text overlays
@@ -1581,6 +1900,31 @@ public sealed partial class EditorPage : Page
         }
     }
 
+    /// <summary>
+    /// Longest source extent used by <paramref name="videoFilePath"/> anywhere on the
+    /// timeline, so one segment's compositor timelines cover every OTHER segment cut from
+    /// the same source file too. Mirrors <c>SegmentFrameComposer.ResolveSourceDuration</c>
+    /// in the exporter exactly (see the call site in <see cref="GetOrBuildSegmentPreviewAsync"/>
+    /// for why this matters for the appended-recording preview). The PRIMARY recording
+    /// needs no equivalent here: its compositor is already initialized with
+    /// <c>project.Duration</c> (see <see cref="RebuildPreviewRendererCoreAsync"/>), which by
+    /// construction spans every primary-file segment.
+    /// </summary>
+    private static TimeSpan ResolveSegmentSourceDuration(
+        TimelineModel model, string videoFilePath, TimeSpan fallback)
+    {
+        var longest = fallback;
+        foreach (var candidate in model.Segments.OfType<VideoSegment>())
+        {
+            if (!string.Equals(candidate.VideoFilePath, videoFilePath, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var end = candidate.SourceStart + candidate.SourceDuration;
+            if (end > longest) longest = end;
+        }
+        return longest;
+    }
+
     private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
     {
         if (_segmentPreviews.TryGetValue(seg.Id, out var existing))
@@ -1677,10 +2021,19 @@ public sealed partial class EditorPage : Page
                 // (SourceStart + localOffset), so its timelines must span the end of
                 // the clip's source extent, not just the clip's length. Passing the
                 // bare SourceDuration would drop cursor samples and auto-zoom for the
-                // visible tail of any clip trimmed from the front. Mirrors
-                // SegmentFrameComposer.ResolveSourceDuration on the export path.
+                // visible tail of any clip trimmed from the front. This must also cover
+                // every OTHER segment cut from the same source file, not just this one:
+                // once a transition's rolled OutgoingLocalOffset (T1) can advance an
+                // outgoing segment past its own cut, a same-source split's outgoing side
+                // maps into the range the NEXT segment already trimmed off — passing only
+                // seg's own extent would truncate the compositor's cursor/auto-zoom
+                // timelines right at that cut, freezing them in preview while export (which
+                // already resolves the longest shared extent) keeps them going. Mirrors
+                // SegmentFrameComposer.ResolveSourceDuration on the export path exactly.
+                var sourceDuration = ResolveSegmentSourceDuration(
+                    ViewModel.Model, seg.VideoFilePath, seg.SourceStart + seg.SourceDuration);
                 await renderer.InitializeAsync(
-                    mouseData, config, w, h, seg.SourceStart + seg.SourceDuration,
+                    mouseData, config, w, h, sourceDuration,
                     seg.MouseToVideoOffsetSeconds, seg.CropOffsetX, seg.CropOffsetY, seg.DpiScale);
 
                 // Push this source's manual zooms onto its own compositor. Auto-zoom is rebuilt
@@ -2200,7 +2553,6 @@ public sealed partial class EditorPage : Page
     {
         _timelineMapper = null;
         _lastRenderedFrameIndex = -1;
-        ReleaseCrossfadeOutgoing();
 
         Preview.Duration = GetMappedDuration();
 
@@ -2319,6 +2671,22 @@ public sealed partial class EditorPage : Page
             }
 
             Timeline.ClearClipSelection();
+
+            // Re-sync the transition pane to whatever the model holds post-undo/redo — without
+            // this, Ctrl+Z after a transition edit leaves the pane showing the value that was
+            // just undone, and any further edit from the pane would be computed from a value
+            // the user isn't actually looking at. If the boundary itself no longer exists
+            // (e.g. undoing/redoing a segment add/remove/reorder), clear the selection instead
+            // of leaving the pane referencing a stale segment id.
+            if (_selectedTransitionId is { } transitionId)
+            {
+                var (incoming, outgoing) = GetTransitionBoundarySegments(transitionId);
+                if (incoming is null || outgoing is null)
+                    Timeline.ClearTransitionSelection();
+                else
+                    SyncTransitionUI(transitionId);
+            }
+
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
             Timeline.Refresh();
@@ -2803,6 +3171,374 @@ public sealed partial class EditorPage : Page
     {
         if (_selectedTextOverlayId is { } id)
             DeleteTextOverlay(id);
+    }
+
+    // ─── Transition boundary panel ──────────────────────────────────────
+
+    /// <summary>Incoming segment Id of the currently-selected boundary chip, or null.</summary>
+    private string? _selectedTransitionId;
+    private bool _suppressTransitionEvents;
+
+    private void OnTransitionSelected(object? sender, string? incomingSegmentId)
+    {
+        _selectedTransitionId = incomingSegmentId;
+        SyncTransitionUI(incomingSegmentId);
+    }
+
+    private void OnTransitionRemoveRequested(object? sender, string incomingSegmentId)
+    {
+        DeleteTransition(incomingSegmentId);
+    }
+
+    /// <summary>
+    /// Resolves the incoming/outgoing segments flanking the boundary owned by
+    /// <paramref name="incomingSegmentId"/>. The first segment (index 0) has no leading
+    /// boundary, matching <see cref="TransitionResolver"/>'s own "index &lt;= 0" rule.
+    /// </summary>
+    private (TimelineSegment? Incoming, TimelineSegment? Outgoing) GetTransitionBoundarySegments(string incomingSegmentId)
+    {
+        var segments = ViewModel.Model.Segments;
+        int index = segments.FindIndex(s => s.Id == incomingSegmentId);
+        if (index <= 0) return (null, null);
+        return (segments[index], segments[index - 1]);
+    }
+
+    /// <summary>
+    /// Maps a <see cref="TransitionType"/> to the pane's picker family, mirroring
+    /// <see cref="TimelineControl"/>'s chip colour grouping (dissolve / slide+push / wipe /
+    /// stylised) except that Slide and Push are kept as two separate families here — the pane
+    /// has room to be more specific than a 20px chip glyph does.
+    /// </summary>
+    private static string TransitionFamilyTagFor(TransitionType type) => type switch
+    {
+        TransitionType.None => "None",
+        TransitionType.Fade or TransitionType.CrossFade or TransitionType.DipToWhite => "Dissolve",
+        TransitionType.SlideLeft or TransitionType.SlideRight or TransitionType.SlideUp or TransitionType.SlideDown => "Slide",
+        TransitionType.PushLeft or TransitionType.PushRight or TransitionType.PushUp or TransitionType.PushDown => "Push",
+        TransitionType.Wipe or TransitionType.WipeRight or TransitionType.WipeUp or TransitionType.WipeDown => "Wipe",
+        TransitionType.ZoomBlur or TransitionType.WhipPanLeft or TransitionType.WhipPanRight or TransitionType.Glitch => "Stylised",
+        _ => "Dissolve",
+    };
+
+    private static readonly (TransitionType Type, string Label)[] TransitionDissolveVariants =
+    [
+        (TransitionType.Fade, "Fade"),
+        (TransitionType.CrossFade, "Cross Dissolve"),
+        (TransitionType.DipToWhite, "Dip to White"),
+    ];
+
+    private static readonly (TransitionType Type, string Label)[] TransitionSlideVariants =
+    [
+        (TransitionType.SlideLeft, "Slide Left"),
+        (TransitionType.SlideRight, "Slide Right"),
+        (TransitionType.SlideUp, "Slide Up"),
+        (TransitionType.SlideDown, "Slide Down"),
+    ];
+
+    private static readonly (TransitionType Type, string Label)[] TransitionPushVariants =
+    [
+        (TransitionType.PushLeft, "Push Left"),
+        (TransitionType.PushRight, "Push Right"),
+        (TransitionType.PushUp, "Push Up"),
+        (TransitionType.PushDown, "Push Down"),
+    ];
+
+    private static readonly (TransitionType Type, string Label)[] TransitionWipeVariants =
+    [
+        (TransitionType.Wipe, "Wipe Left \u2192 Right"),
+        (TransitionType.WipeRight, "Wipe Right \u2192 Left"),
+        (TransitionType.WipeUp, "Wipe Bottom \u2192 Top"),
+        (TransitionType.WipeDown, "Wipe Top \u2192 Bottom"),
+    ];
+
+    private static readonly (TransitionType Type, string Label)[] TransitionStylisedVariants =
+    [
+        (TransitionType.ZoomBlur, "Zoom Blur"),
+        (TransitionType.WhipPanLeft, "Whip Pan Left"),
+        (TransitionType.WhipPanRight, "Whip Pan Right"),
+        (TransitionType.Glitch, "Glitch"),
+    ];
+
+    private static (TransitionType Type, string Label)[] TransitionVariantsForFamily(string familyTag) => familyTag switch
+    {
+        "Dissolve" => TransitionDissolveVariants,
+        "Slide" => TransitionSlideVariants,
+        "Push" => TransitionPushVariants,
+        "Wipe" => TransitionWipeVariants,
+        "Stylised" => TransitionStylisedVariants,
+        _ => [],
+    };
+
+    private static void SelectComboItemByTag(ComboBox combo, string tag)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is ComboBoxItem item && item.Tag as string == tag)
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+        combo.SelectedIndex = -1;
+    }
+
+    /// <summary>
+    /// Ensures <see cref="TransitionVariantCombo"/> lists <paramref name="familyTag"/>'s variants
+    /// (its contents depend on which family is selected, so — unlike the other panes' static
+    /// XAML-declared combos — it is populated here) and selects <paramref name="selected"/>,
+    /// defaulting to the family's first variant if that type isn't a member of it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The item collection is only rebuilt when it actually differs, and this is load-bearing
+    /// rather than an optimisation.</b> Selecting a variant runs
+    /// <c>TransitionVariantCombo_SelectionChanged</c> -> <c>UndoRedoManager.Execute</c> ->
+    /// <c>OnUndoRedoStateChanged</c> -> <see cref="SyncTransitionUI"/> -> here, and that
+    /// dispatcher callback lands while this ComboBox's own dropdown is still open or mid-close
+    /// animation. Clearing and refilling <c>Items</c> in that state leaves WinUI unable to
+    /// reconcile the live popup against the mutated collection, and it fail-fasts the process
+    /// with a stowed <c>E_UNEXPECTED</c> (0x8000FFFF) inside <c>Microsoft.UI.Xaml.dll</c> —
+    /// observed as an APPCRASH with exception code 0xC000027B. Picking a *family* never hit it
+    /// because the popup that is open then belongs to the other combo.
+    /// <para>
+    /// So for the overwhelmingly common "same family, different variant" resync the collection
+    /// is left completely untouched and only the selection moves, which is safe with the popup
+    /// open. The destructive rebuild then only happens on a genuine family change, when this
+    /// combo's own dropdown is closed.
+    /// </para>
+    /// </remarks>
+    private void PopulateTransitionVariantCombo(string familyTag, TransitionType selected)
+    {
+        var variants = TransitionVariantsForFamily(familyTag);
+
+        if (!TransitionVariantComboAlreadyLists(variants))
+        {
+            TransitionVariantCombo.Items.Clear();
+            foreach (var (type, label) in variants)
+            {
+                // Selection is applied after the collection settles, never mid-population:
+                // assigning SelectedItem while Items is still being mutated is the same class
+                // of reconciliation hazard described above.
+                TransitionVariantCombo.Items.Add(new ComboBoxItem { Content = label, Tag = type.ToString() });
+            }
+        }
+
+        SelectComboItemByTag(TransitionVariantCombo, selected.ToString());
+        if (TransitionVariantCombo.SelectedIndex < 0 && TransitionVariantCombo.Items.Count > 0)
+            TransitionVariantCombo.SelectedIndex = 0;
+    }
+
+    /// <summary>
+    /// Whether <see cref="TransitionVariantCombo"/> already lists exactly <paramref name="variants"/>,
+    /// in order — i.e. whether a rebuild can be skipped. Compared by the items' <c>Tag</c>
+    /// (the <see cref="TransitionType"/> name), which is what selection is driven by.
+    /// </summary>
+    private bool TransitionVariantComboAlreadyLists((TransitionType Type, string Label)[] variants)
+    {
+        if (TransitionVariantCombo.Items.Count != variants.Length)
+            return false;
+
+        for (int i = 0; i < variants.Length; i++)
+        {
+            if (TransitionVariantCombo.Items[i] is not ComboBoxItem item ||
+                item.Tag as string != variants[i].Type.ToString())
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Pushes the boundary's current <see cref="TransitionConfig"/> (or the "Automatic"/unset
+    /// state) onto the pane controls, or hides the pane when there is no such boundary, then
+    /// reveals it. Mirrors <see cref="SyncTextOverlayUI"/>.
+    /// </summary>
+    /// <remarks>
+    /// Purely reads state onto the controls under <see cref="_suppressTransitionEvents"/> —
+    /// it must never itself call <see cref="UndoRedoManager.Execute"/>, or simply selecting an
+    /// unconfigured ("Automatic", <c>InTransition == null</c>) boundary would silently turn it
+    /// into an explicit config the first time the pane happened to redraw.
+    /// </remarks>
+    private void SyncTransitionUI(string? incomingSegmentId)
+    {
+        if (TransitionFamilyCombo is null) return;
+
+        TimelineSegment? incoming = null;
+        TimelineSegment? outgoing = null;
+        if (incomingSegmentId is not null)
+            (incoming, outgoing) = GetTransitionBoundarySegments(incomingSegmentId);
+
+        if (incoming is null || outgoing is null)
+        {
+            PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Transition, false);
+            return;
+        }
+
+        _suppressTransitionEvents = true;
+
+        var config = incoming.InTransition;
+        string familyTag = config is null ? "Unset" : TransitionFamilyTagFor(config.Type);
+        bool hasEffect = familyTag is not ("Unset" or "None");
+
+        SelectComboItemByTag(TransitionFamilyCombo, familyTag);
+        TransitionAutomaticHint.Visibility = familyTag == "Unset" ? Visibility.Visible : Visibility.Collapsed;
+
+        TransitionVariantCombo.Visibility = hasEffect ? Visibility.Visible : Visibility.Collapsed;
+        if (hasEffect)
+            PopulateTransitionVariantCombo(familyTag, config!.Type);
+
+        // Clamp the usable maximum LIVE to half of each neighbour's current duration, exactly
+        // as TransitionResolver will clamp the actual dissolve — so the slider can never be
+        // dragged to a value that would visibly lie about what will actually play.
+        double halfIncoming = incoming.Duration.TotalSeconds / 2.0;
+        double halfOutgoing = outgoing.Duration.TotalSeconds / 2.0;
+        double clampSeconds = Math.Min(halfIncoming, halfOutgoing);
+        double effectiveMax = Math.Min(2.0, clampSeconds);
+
+        // A very short neighbouring segment (TrimSegmentEdgeOperation's own 100ms floor halves
+        // to 50ms) can push effectiveMax below what the slider's Minimum can even express.
+        // Raising Slider.Maximum back up to Minimum in that case would let the user drag to,
+        // and persist, a value the resolver will silently shorten anyway — exactly the
+        // "dial lies about what will play" bug the clamp exists to prevent. Disable the
+        // slider instead and always state the true effectiveMax in the hint, never a
+        // substituted slider maximum.
+        bool tooShortForSlider = effectiveMax < TransitionDurationSlider.Minimum;
+        double sliderMax = tooShortForSlider ? TransitionDurationSlider.Minimum : effectiveMax;
+
+        TransitionDurationSlider.Maximum = sliderMax;
+        bool isClamped = effectiveMax < 2.0;
+        TransitionDurationClampHint.Visibility = isClamped ? Visibility.Visible : Visibility.Collapsed;
+        if (tooShortForSlider)
+        {
+            TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
+                "This boundary is too short for an adjustable transition — a neighbouring segment limits it to {0:0.00}s, and it will render at exactly that length regardless of the value shown above.",
+                effectiveMax);
+        }
+        else if (isClamped)
+        {
+            TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
+                "Limited to {0:0.00}s by a neighbouring segment's length — dragging further will not make the dissolve any longer.",
+                effectiveMax);
+        }
+
+        double durationSeconds = config?.Duration.TotalSeconds ?? 0.5;
+        TransitionDurationSlider.Value = Math.Clamp(durationSeconds, TransitionDurationSlider.Minimum, sliderMax);
+        TransitionDurationSlider.IsEnabled = hasEffect && !tooShortForSlider;
+
+        SelectComboItemByTag(TransitionEasingCombo, (config?.Easing ?? TransitionEasing.EaseInOut).ToString());
+        TransitionEasingCombo.IsEnabled = hasEffect;
+
+        RemoveTransitionButton.IsEnabled = config is not null;
+
+        _suppressTransitionEvents = false;
+
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Transition, true);
+        PropertiesPanel.ShowPane(PropertyPaneKind.Transition);
+    }
+
+    private void TransitionFamilyCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressTransitionEvents) return;
+        if (_selectedTransitionId is not { } id) return;
+        if (TransitionFamilyCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string familyTag) return;
+
+        var (incoming, _) = GetTransitionBoundarySegments(id);
+        if (incoming is null) return;
+
+        TransitionConfig? newConfig = familyTag switch
+        {
+            "Unset" => null,
+            "None" => (incoming.InTransition ?? new TransitionConfig()) with { Type = TransitionType.None },
+            _ => ApplyTransitionFamilyDefaultVariant(incoming.InTransition, familyTag),
+        };
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTransitionOperation(id, newConfig, "Change Transition Type"));
+        SyncTransitionUI(id);
+        InvalidatePreview();
+    }
+
+    private static TransitionConfig ApplyTransitionFamilyDefaultVariant(TransitionConfig? existing, string familyTag)
+    {
+        var variants = TransitionVariantsForFamily(familyTag);
+        var type = variants.Length > 0 ? variants[0].Type : TransitionType.None;
+        return existing is null ? new TransitionConfig { Type = type } : existing with { Type = type };
+    }
+
+    private void TransitionVariantCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressTransitionEvents) return;
+        if (_selectedTransitionId is not { } id) return;
+        if (TransitionVariantCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string typeName) return;
+        if (!Enum.TryParse<TransitionType>(typeName, out var type)) return;
+
+        var (incoming, _) = GetTransitionBoundarySegments(id);
+        if (incoming?.InTransition is null) return;
+
+        var newConfig = incoming.InTransition with { Type = type };
+        ViewModel.UndoRedoManager.Execute(new UpdateTransitionOperation(id, newConfig, "Change Transition Variant"));
+        InvalidatePreview();
+    }
+
+    private void TransitionDurationSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressTransitionEvents) return;
+        if (_selectedTransitionId is not { } id) return;
+
+        var (incoming, _) = GetTransitionBoundarySegments(id);
+        if (incoming?.InTransition is null) return;
+
+        var newConfig = incoming.InTransition with { Duration = TimeSpan.FromSeconds(e.NewValue) };
+        ViewModel.UndoRedoManager.Execute(new UpdateTransitionOperation(id, newConfig, "Change Transition Duration"));
+        InvalidatePreview();
+    }
+
+    private void TransitionEasingCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressTransitionEvents) return;
+        if (_selectedTransitionId is not { } id) return;
+        if (TransitionEasingCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string easingName) return;
+        if (!Enum.TryParse<TransitionEasing>(easingName, out var easing)) return;
+
+        var (incoming, _) = GetTransitionBoundarySegments(id);
+        if (incoming?.InTransition is null) return;
+
+        var newConfig = incoming.InTransition with { Easing = easing };
+        ViewModel.UndoRedoManager.Execute(new UpdateTransitionOperation(id, newConfig, "Change Transition Easing"));
+        InvalidatePreview();
+    }
+
+    /// <summary>
+    /// Applies the selected boundary's current config (which may legitimately be "Automatic" /
+    /// null, clearing every other boundary) to every boundary on the timeline, as a single undo
+    /// entry — see <see cref="ApplyTransitionToAllBoundariesOperation"/>.
+    /// </summary>
+    private void ApplyTransitionToAllButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedTransitionId is not { } id) return;
+        var (incoming, _) = GetTransitionBoundarySegments(id);
+        if (incoming is null) return;
+
+        var config = incoming.InTransition;
+        ViewModel.UndoRedoManager.Execute(
+            new ApplyTransitionToAllBoundariesOperation(config, "Apply Transition to All Boundaries"));
+        InvalidatePreview();
+    }
+
+    private void RemoveTransitionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedTransitionId is { } id)
+            DeleteTransition(id);
+    }
+
+    /// <summary>Clears a boundary's transition back to "Automatic" (null), keeping it selected
+    /// so the pane re-syncs to show the now-unconfigured state rather than closing.</summary>
+    private void DeleteTransition(string incomingSegmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new UpdateTransitionOperation(incomingSegmentId, null, "Remove Transition"));
+        if (_selectedTransitionId == incomingSegmentId)
+            SyncTransitionUI(incomingSegmentId);
+        InvalidatePreview();
     }
 
     /// <summary>
@@ -4206,6 +4942,9 @@ public sealed partial class EditorPage : Page
             _audioOffsetSeconds = audioOffset;
             _audioPlayer?.Dispose();
             _audioPlayer = new AudioPlaybackEngine();
+            // No fade windows: T9 confirmed transition crossfades can't be wired here
+            // without drifting once the timeline has real cuts — see
+            // AudioPlaybackEngine's class remarks for the full reasoning.
             _audioPlayer.Load(validPaths);
         }
         catch
@@ -4215,15 +4954,89 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Converts a video playhead position to the corresponding audio file position.
-    /// Positive _audioOffsetSeconds = pre-roll (skip into WAV).
-    /// Negative _audioOffsetSeconds = audio started late (silence before audio).
-    /// Returns negative TimeSpan when video is before audio start — callers
-    /// must treat negative results as silence (no audio to play).
+    /// Converts an OUTPUT-timeline playhead position to the corresponding position in the
+    /// primary recording's audio files, or <c>null</c> when there is no audio to play there.
     /// </summary>
-    private TimeSpan AudioPositionForVideo(TimeSpan videoPosition)
+    /// <remarks>
+    /// <para>
+    /// This must be segment-aware. The output timeline is not the recording's own timeline:
+    /// inserting a text slide shifts every later segment, and trims, deletes, reorders and
+    /// speed changes all remap it further. Mapping output time to file time with a single
+    /// constant offset (which is what this did originally, from before segments existed) meant
+    /// the audio played wherever the playhead happened to be rather than where the footage it
+    /// belongs to actually sits — e.g. with a 3s title slide in front, the mic track was
+    /// audible immediately at 0s instead of starting at 3s, even though the waveform drew in
+    /// the right place because <c>TimelineControl.DrawSegmentWaveform</c> already mapped
+    /// through the segments. The exporter was likewise already correct
+    /// (<see cref="ExportAudioPlan.BuildFromSegments"/>), so this was preview-only.
+    /// </para>
+    /// <para>
+    /// Returns <c>null</c> for anything with no primary-recording audio behind it: a text
+    /// slide, a gap, an appended clip (only the primary recording's files are loaded into the
+    /// preview engine), or a position that lands before the audio recording started. Callers
+    /// treat <c>null</c> as "silence" and pause.
+    /// </para>
+    /// </remarks>
+    private TimeSpan? AudioPositionForVideo(TimeSpan videoPosition)
     {
-        return videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+        var model = ViewModel.Model;
+
+        // Legacy, pre-segment projects: output time IS the recording's own video time.
+        if (model.Segments.Count == 0)
+        {
+            var legacy = videoPosition + TimeSpan.FromSeconds(_audioOffsetSeconds);
+            return legacy >= TimeSpan.Zero ? legacy : null;
+        }
+
+        var (segment, localOffset) = model.GetSegmentAtTime(videoPosition);
+        if (segment is not VideoSegment video)
+            return null;
+
+        // Appended recordings carry their own audio files, which the preview engine never
+        // loads (it only opens the primary recording's tracks) — so there is nothing to
+        // position for them, and playing the primary's audio there would be plainly wrong.
+        if (!string.Equals(video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        var sourceTime = video.SourceStart + TimeSpan.FromTicks((long)(localOffset.Ticks * speed));
+        var position = sourceTime + TimeSpan.FromSeconds(_audioOffsetSeconds);
+        return position >= TimeSpan.Zero ? position : null;
+    }
+
+    /// <summary>
+    /// How far the audio may drift from its mapped position before it is re-seeked during
+    /// playback. Preview audio plays as one continuous pass per file while the output timeline
+    /// may cut, reorder or speed-shift underneath it, so drift is expected and has to be
+    /// corrected — but correcting it every tick would stutter, and correcting it never would
+    /// desynchronise. Roughly two frames at 30fps: past the ~50-100ms mark it reads as out of
+    /// sync, below it the correction is inaudible.
+    /// </summary>
+    private static readonly TimeSpan AudioDriftTolerance = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>
+    /// Re-aligns preview audio with <paramref name="videoPosition"/>: seeks when it has drifted
+    /// (or when the playhead has jumped to unrelated footage), starts it when the playhead
+    /// enters footage that has audio, and pauses it over slides, gaps and appended clips.
+    /// </summary>
+    private void SyncAudioToPlayhead(TimeSpan videoPosition)
+    {
+        if (_audioPlayer is not { IsLoaded: true } player) return;
+
+        if (AudioPositionForVideo(videoPosition) is not { } target)
+        {
+            // Nothing to play here (text slide, gap, appended clip, or before the audio
+            // recording began). Pausing rather than letting it run on is the whole point:
+            // otherwise the mic track is audible over a title card.
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        var actual = player.CurrentPosition;
+        bool drifted = actual is null || (actual.Value - target).Duration() > AudioDriftTolerance;
+
+        if (drifted) player.Seek(target);
+        if (!player.IsPlaying) player.Play();
     }
 
     /// <summary>
@@ -4276,6 +5089,8 @@ public sealed partial class EditorPage : Page
 
         var paths = GetUnmutedAudioPaths(project);
         if (paths.Count > 0)
+            // No fade windows here either, for the same reason as the initial Load
+            // above — see AudioPlaybackEngine's class remarks (T9).
             _audioPlayer.Load(paths);
     }
 
@@ -5430,11 +6245,16 @@ public sealed partial class EditorPage : Page
         // hidden — same rule as the appended-segment and export paths.
         effective = HideCursorWhenNoSamples(effective, mouseData);
 
+        // Every cached alt-style compositor (see GetPrimaryTransitionCompositorAsync) was
+        // built by layering the OLD global config onto its own override, and this rebuild
+        // is precisely a global-config (or active-segment-style) change — reusing one past
+        // this point would composite against stale crop/zoom/aspect settings. Also bumps
+        // _primaryPreviewStateGeneration so any transition compose already in flight
+        // against the OLD singleton detects this rebuild instead of using it past disposal.
+        DisposePrimaryStyleRenderers();
+
         _compositorReady = false;
         _previewRenderer?.Dispose();
-
-        // Composed with the previous renderer/config — must not survive it.
-        ReleaseCrossfadeOutgoing();
 
         try
         {
@@ -6433,9 +7253,12 @@ public sealed partial class EditorPage : Page
 
     private void RefreshSlidePreview()
     {
-        // Slide content/style just changed, so any held crossfade frame composed from it
-        // is stale — a dissolve would otherwise keep showing the pre-edit slide.
-        ReleaseCrossfadeOutgoing();
+        // Slide content/style just changed. This used to also release a page-owned
+        // crossfade-outgoing cache composed from the pre-edit slide (T3 retired that cache:
+        // under the rolling transition model the outgoing side composes a different image on
+        // almost every tick, so a single cached frame no longer helps — see the remarks on
+        // ComposePreviewFrameAtOffsetAsync). There is nothing left to invalidate here; the next
+        // dissolve tick simply recomposes from the now-current slide state.
         Timeline.InvalidateAllCanvases();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }

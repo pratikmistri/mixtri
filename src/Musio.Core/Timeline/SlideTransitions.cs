@@ -11,6 +11,20 @@ namespace Musio.Core.Timeline;
 /// between the live preview and the exporter (the two rendering paths that
 /// otherwise diverge).
 /// </summary>
+/// <remarks>
+/// <b>This class is retained only until the preview (<c>EditorPage</c>) and export
+/// (<c>SegmentFrameComposer</c>) paths migrate to <see cref="TransitionResolver"/> directly.</b>
+/// Its logic is now a thin adapter over <see cref="TransitionResolver"/>: <see cref="Resolve"/>
+/// delegates there and translates the general result back into this type's legacy shape,
+/// including the frozen-outgoing-instant semantics those two call sites still depend on (as
+/// opposed to <see cref="TransitionResolver"/>'s newer "roll past the cut" offset). It resolves
+/// through <c>TransitionResolver.ResolveLegacyOnly</c>, which ignores
+/// <see cref="TimelineSegment.InTransition"/> outright, and it re-applies the "only slide-touching
+/// boundaries" filter explicitly — so this shim's behaviour cannot change even once other code
+/// starts setting <see cref="TimelineSegment.InTransition"/>. Do not add new callers of this type;
+/// use <see cref="TransitionResolver"/> instead.
+/// </remarks>
+[Obsolete("Use TransitionResolver. Retained until the preview and export paths migrate.")]
 public static class SlideTransitions
 {
     /// <summary>Default crossfade length when a boundary is adjacent to a slide.</summary>
@@ -41,53 +55,32 @@ public static class SlideTransitions
     /// </summary>
     public static Result Resolve(TimelineModel timeline, TimeSpan outputTime, TimeSpan maxDuration)
     {
-        var segments = timeline.Segments;
-
-        int index = -1;
-        for (int i = 0; i < segments.Count; i++)
-        {
-            if (outputTime >= segments[i].Start && outputTime < segments[i].End)
-            {
-                index = i;
-                break;
-            }
-        }
-
-        // No current segment, or it's the very first one (nothing to dissolve from).
-        if (index <= 0)
+        var resolution = TransitionResolver.ResolveLegacyOnly(timeline, outputTime, maxDuration);
+        if (!resolution.Active)
             return Result.None;
 
-        var current = segments[index];
-        var previous = segments[index - 1];
+        var incoming = resolution.IncomingSegment!;
+        var outgoing = resolution.OutgoingSegment!;
 
-        // Only soften boundaries that actually touch a text slide.
-        if (current is not TextSlideSegment && previous is not TextSlideSegment)
+        // This shim must keep responding only to boundaries that touch a text slide, exactly as
+        // it always has, and must stay completely inert to TimelineSegment.InTransition — which
+        // ResolveLegacyOnly guarantees by ignoring it. Both matter while the migration is
+        // half-finished: an explicit config set by the new UI must NOT be rendered through this
+        // legacy frozen-outgoing path, and video→video boundaries must keep hard-cutting here.
+        if (incoming is not TextSlideSegment && outgoing is not TextSlideSegment)
             return Result.None;
 
-        // Keep the window inside both neighbours so dissolves never overlap.
-        var duration = Min(maxDuration, Half(current.Duration), Half(previous.Duration));
-        if (duration <= TimeSpan.Zero)
-            return Result.None;
+        // Legacy semantics: hold the outgoing segment at its final instant for the whole
+        // dissolve, rather than TransitionResolver's newer "roll past the cut" offset. The two
+        // call sites still relying on this shim have not migrated to the rolling semantics yet.
+        var outgoingTime = incoming.Start - TimeSpan.FromTicks(1);
+        if (outgoingTime < outgoing.Start)
+            outgoingTime = outgoing.Start;
 
-        var local = outputTime - current.Start;
-        if (local < TimeSpan.Zero || local >= duration)
-            return Result.None;
-
-        double progress = local.TotalSeconds / duration.TotalSeconds;
-
-        // Hold the outgoing segment at its final instant for the whole dissolve.
-        var outgoingTime = current.Start - TimeSpan.FromTicks(1);
-        if (outgoingTime < previous.Start)
-            outgoingTime = previous.Start;
-
-        return new Result(true, Math.Clamp(progress, 0, 1), outgoingTime);
-    }
-
-    private static TimeSpan Half(TimeSpan value) => TimeSpan.FromTicks(value.Ticks / 2);
-
-    private static TimeSpan Min(TimeSpan a, TimeSpan b, TimeSpan c)
-    {
-        var m = a < b ? a : b;
-        return m < c ? m : c;
+        // Progress is explicitly the raw (un-eased) value: the legacy fallback configures Linear
+        // easing, so raw and eased are numerically equal here, but this shim's contract has
+        // always been "linear progress" and stays that way regardless of what
+        // TransitionResolver's easing defaults are.
+        return new Result(true, resolution.RawProgress, outgoingTime);
     }
 }

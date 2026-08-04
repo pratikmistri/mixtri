@@ -598,11 +598,26 @@ public record TransitionConfig
 {
     public TransitionType Type { get; init; } = TransitionType.None;
     public TimeSpan Duration { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// Easing curve applied to the raw linear progress before it is handed to the renderer.
+    /// Defaults to <see cref="TransitionEasing.EaseInOut"/> for new transitions. Note this has
+    /// no bearing on the legacy <see cref="SlideTransitions"/> crossfade fallback, which is
+    /// intentionally <see cref="TransitionEasing.Linear"/> to stay pixel-identical to the
+    /// pre-existing hardcoded behaviour (see <see cref="TransitionResolver"/>).
+    /// </summary>
+    public TransitionEasing Easing { get; init; } = TransitionEasing.EaseInOut;
 }
 
 /// <summary>
 /// Types of transition effects available between segments.
 /// </summary>
+/// <remarks>
+/// These values are serialized <em>by name</em> (see <c>Musio.Core.Projects.MusioPackage.JsonOptions</c>,
+/// which registers a <c>JsonStringEnumConverter</c>), so every value here is part of the on-disk
+/// <c>.musio</c> format. Existing members must never be reordered or renamed — doing so silently
+/// corrupts every saved project that references them. New members may only be appended at the end.
+/// </remarks>
 public enum TransitionType
 {
     None,
@@ -612,5 +627,46 @@ public enum TransitionType
     SlideRight,
     SlideUp,
     SlideDown,
+
+    /// <summary>Legacy name for a left-to-right wipe. Kept as-is (not renamed to "WipeLeft")
+    /// because the enum value is part of the on-disk format.</summary>
     Wipe,
+
+    // --- Appended members below. Keep appending; never reorder or rename anything above. ---
+
+    /// <summary>Right-to-left wipe.</summary>
+    WipeRight,
+    /// <summary>Bottom-to-top wipe.</summary>
+    WipeUp,
+    /// <summary>Top-to-bottom wipe.</summary>
+    WipeDown,
+    /// <summary>Like <see cref="Fade"/> but dissolves through white instead of black.</summary>
+    DipToWhite,
+    /// <summary>Scale + blur push-through effect.</summary>
+    ZoomBlur,
+    WhipPanLeft,
+    WhipPanRight,
+    PushLeft,
+    PushRight,
+    PushUp,
+    PushDown,
+    /// <summary>RGB channel split with slice displacement.</summary>
+    Glitch,
+}
+
+/// <summary>
+/// Easing curves available for transition progress. Determines how
+/// <see cref="TransitionResolver.RawProgress"/> (linear 0..1 through the transition window) maps
+/// to <see cref="TransitionResolver.EasedProgress"/> (what renderers should actually use).
+/// </summary>
+/// <remarks>
+/// Serialized by name for the same reason as <see cref="TransitionType"/> — append only, never
+/// reorder or rename existing members.
+/// </remarks>
+public enum TransitionEasing
+{
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
 }
