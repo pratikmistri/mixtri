@@ -49,6 +49,32 @@ public class AudioFileDurationProbeTests
     }
 
     [TestMethod]
+    public async Task TryGetAudioFileDurationAsync_DoesNotPinTheProbedFile()
+    {
+        // Review feedback asked whether the probe should close the BackgroundAudioTrack it
+        // creates, in case that pins a decoder or file handle. It projects no
+        // IClosable/IDisposable to close (a `using` would not compile), so the concern is
+        // pinned as an observable property instead: after probing, the file must still be
+        // exclusively openable and deletable. If a future WinRT version starts holding the
+        // source open, this fails here rather than as a locked file mid-export.
+        var path = Path.Combine(_tempDirectory!, "released.wav");
+        WriteSilentWav(path, TimeSpan.FromSeconds(1));
+
+        var duration = await VideoEncoder.TryGetAudioFileDurationAsync(path);
+
+        if (duration is null)
+            Assert.Inconclusive("Media Foundation audio decoding is unavailable on this host.");
+
+        using (var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.IsTrue(exclusive.CanRead, "The probed file must not be left open by the probe");
+        }
+
+        File.Delete(path);
+        Assert.IsFalse(File.Exists(path), "A probed file must remain deletable");
+    }
+
+    [TestMethod]
     public async Task TryGetAudioFileDurationAsync_ReturnsNull_ForAMissingFile()
     {
         var duration = await VideoEncoder.TryGetAudioFileDurationAsync(

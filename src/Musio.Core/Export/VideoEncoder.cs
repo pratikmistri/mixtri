@@ -744,6 +744,18 @@ public class VideoEncoder : IDisposable
     /// the failure mode is silent (a swallowed exception, an unclamped placement, no error
     /// surfaced anywhere) — buys nothing over calling the audio API the mux already uses.
     /// </para>
+    /// <para><b>Nothing to dispose, verified.</b> Review feedback suggested closing the
+    /// track in a <c>try/finally</c> in case it pins a decoder or file handle. It cannot
+    /// be done and does not need to be: neither <see cref="BackgroundAudioTrack"/> nor
+    /// <see cref="MediaClip"/> projects <c>IClosable</c>/<see cref="IDisposable"/> at all
+    /// (checked by reflection — a <c>using</c> here would not compile), and a probed file
+    /// is immediately deletable while the returned track is still alive, so no handle is
+    /// held to release. That last property is pinned by a test rather than left as a
+    /// comment, so a future WinRT change that DID start holding the file would fail loudly
+    /// here instead of surfacing as a mysterious locked export source.
+    /// <see cref="MuxAudioAsync"/>'s <c>BackgroundAudioTracks.Clear()</c> is not a
+    /// counter-example: it releases what <see cref="MediaComposition"/> pins once a track
+    /// is added to one, which is exactly what this probe never does.</para>
     /// <para><b>Marked <c>internal</c>, not <c>private</c>, deliberately.</b> So
     /// <c>Musio.Tests</c> (via this assembly's <c>InternalsVisibleTo</c>) can assert
     /// against a real, generated audio-only file that this probe resolves a duration at
