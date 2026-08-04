@@ -1,4 +1,5 @@
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -13,24 +14,10 @@ public sealed class SegmentEditOperationsTests
     private const string PrimaryPath = "primary.mp4";
 
     private static VideoSegment Video(double srcStartSec, double srcDurSec, double speed = 1.0)
-    {
-        return new VideoSegment
-        {
-            VideoFilePath = PrimaryPath,
-            SourceStart = TimeSpan.FromSeconds(srcStartSec),
-            SourceDuration = TimeSpan.FromSeconds(srcDurSec),
-            Duration = TimeSpan.FromSeconds(srcDurSec / speed),
-            SpeedFactor = speed,
-        };
-    }
+        => TestTimelineBuilder.Video(PrimaryPath, srcStartSec, srcDurSec, speed);
 
     private static TimelineModel ModelWith(params TimelineSegment[] segments)
-    {
-        var model = new TimelineModel { PrimaryVideoFilePath = PrimaryPath };
-        model.Segments.AddRange(segments);
-        model.RecalculateSegmentPositions();
-        return model;
-    }
+        => TestTimelineBuilder.ModelWithPrimaryPath(PrimaryPath, segments);
 
     // ── Move / reorder ──
 

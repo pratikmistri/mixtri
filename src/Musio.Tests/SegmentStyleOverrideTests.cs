@@ -1,5 +1,6 @@
 using Musio.Core.Processing;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -27,12 +28,7 @@ public sealed class SegmentStyleOverrideTests
         };
 
     private static TimelineModel ModelWith(params TimelineSegment[] segments)
-    {
-        var model = new TimelineModel { PrimaryVideoFilePath = PrimaryPath };
-        model.Segments.AddRange(segments);
-        model.RecalculateSegmentPositions();
-        return model;
-    }
+        => TestTimelineBuilder.ModelWithPrimaryPath(PrimaryPath, segments);
 
     [TestMethod]
     public void VideoSegment_DefaultOverrides_AreNull()

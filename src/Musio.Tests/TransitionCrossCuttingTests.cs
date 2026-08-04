@@ -1,6 +1,7 @@
 namespace Musio.Tests;
 
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 /// <summary>
 /// T8 (feature/segment-transitions integration pass) — cross-cutting edge cases across split,
@@ -12,23 +13,11 @@ using Musio.Core.Timeline;
 [TestClass]
 public sealed class TransitionCrossCuttingTests
 {
-    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null, double speedFactor = 1.0) => new()
-    {
-        VideoFilePath = "C:\\primary.mp4",
-        SourceStart = TimeSpan.Zero,
-        SourceDuration = TimeSpan.FromSeconds(durSec * speedFactor),
-        Duration = TimeSpan.FromSeconds(durSec),
-        SpeedFactor = speedFactor,
-        InTransition = inTransition,
-    };
+    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null, double speedFactor = 1.0)
+        => TestTimelineBuilder.TransitionVideo("C:\\primary.mp4", durSec, inTransition, speedFactor);
 
     private static TimelineModel ModelWith(params TimelineSegment[] segments)
-    {
-        var model = new TimelineModel();
-        model.Segments.AddRange(segments);
-        model.RecalculateSegmentPositions();
-        return model;
-    }
+        => TestTimelineBuilder.ModelWith(segments);
 
     // ── Reorder ─────────────────────────────────────────────────────────────
 

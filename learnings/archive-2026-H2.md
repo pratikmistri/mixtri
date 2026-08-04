@@ -886,6 +886,69 @@
   - Deleting an object out from under a live gesture strands the gesture's pre-gesture snapshot — the "restore-then-execute" undo trick can no longer find the object, while the remove operation captures the already-mutated one, so undoing the delete restores state the user never committed. **Finalize before removing.**
 - **A fix can reintroduce the bug it fixed.** `SeekPastOverlayEntrance` exists because an overlay is fully transparent at progress 0; but adding the midpoint offset in raw output time could overshoot the clip and land on the next segment, where the overlay is inactive and again renders nothing. Clamp such seeks to the owning segment's range, not just the timeline end.
 - **Declined finding, recorded so it isn't "fixed" later by mistake**: `XToKeyframeFileTime` clamps to the nearest edge of the *overlay's own* recording when the pointer strays over another clip, rather than returning null. That is intentional and shared with the zoom track — the clamped time stays in the correct source domain, so it pins to the clip boundary instead of writing a foreign timestamp. Making the text track reject instead would diverge from zoom for no correctness gain. The misleading code comment that claimed it rejected was corrected.
+
+## W2-2 — Shared test infrastructure (`src/Musio.Tests/TestSupport/`)
+
+- **Feature/area**: DRY-ing up copy-pasted test fixtures across `src/Musio.Tests` (66 files, zero
+  shared infrastructure beforehand). Created `TestSupport/TestTimelineBuilder.cs`,
+  `TestMouseRecordingBuilder.cs`, `TempDirectoryFixture.cs`, `CanvasBitmapTestHelpers.cs`. Touched
+  24 existing test files to delegate into them; left `Musio.App`/`Musio.Core` untouched (build
+  coordination with a concurrent sibling agent working on `Musio.App`/ARM64).
+- **Approaches tried / what worked**:
+  - **Keep the local private method with the SAME signature, and swap only its body for a
+    one-line delegation to the shared helper.** This meant zero changes at any call site (20+
+    call sites per file in some cases) — only the ~5-20 line implementation moved. Far lower risk
+    than rewriting every call site to reference `TestTimelineBuilder.X(...)` directly.
+  - **`ModelWith(params TimelineSegment[])` had EXACTLY two variants, never three** — variant A
+    (`PrimaryVideoFilePath = "primary.mp4"` always, byte-identical across all 4 files) and variant
+    B (no primary path set, byte-identical across all 4 files). Confirmed this before unifying by
+    diffing every call site; had there been a third divergent literal, the correct move would have
+    been a third named method, not a parameter default guessed to match a majority.
+  - **`Video(double durSec, ...)` in the 4 transition-boundary test files disagreed on the literal
+    VideoFilePath** (`"C:\clip.mp4"` in `TransitionEditOperationsTests`, `"C:\primary.mp4"`
+    elsewhere) — made `videoFilePath` a REQUIRED parameter (no default) on the shared
+    `TestTimelineBuilder.TransitionVideo`, forcing every call site to state its own literal
+    explicitly rather than silently inheriting a default that would erase the distinction.
+  - **Two "duplicate" mouse-recording builders were verified byte-identical before merging**
+    (`AutoZoomEngineTests.BuildRecordingWithClicks` vs `ZoomSegmentProgressTests.BuildRecordingWithClicks`)
+    by diffing line-by-line, not by eyeballing similarity — safe to fully unify into
+    `TestMouseRecordingBuilder.WithClicks`.
+  - **`TempDirectoryFixture` narrows the old bare `catch { }` in `Directory.Delete` teardown to
+    `catch (IOException) {} catch (UnauthorizedAccessException) {}`** — this IS a sanctioned,
+    intentional behavior change (the work item's own design note asked for it, to avoid
+    swallowing e.g. `NullReferenceException`), not an accidental one. Verified
+    `DirectoryNotFoundException : IOException`, so the narrower catch still covers "directory
+    already gone" cleanly.
+  - Files with an exotic/incompatible teardown shape were deliberately left unmigrated and
+    reported rather than forced into the fixture: `SessionCleanupServiceTests` (its
+    `[TestCleanup]` has NO catch at all — propagates delete failures on purpose, since it is
+    itself testing a cleanup service) and `BackgroundCompositorPreloadTests` (static
+    `AppContext.BaseDirectory`-based dir + `[ClassCleanup]`, not per-instance/per-test — forcing
+    it into a per-instance Guid-suffixed fixture would change its shared-across-methods semantics).
+  - Nested-folder temp dirs (`AudioFileDurationProbeTests` used
+    `Path.Combine(GetTempPath(), "MusioAudioProbeTests", guid)`, not the flat
+    `"prefix_" + guid` most files used) were preserved bit-for-bit by passing
+    `$"MusioAudioProbeTests{Path.DirectorySeparatorChar}"` as the fixture's `prefix` argument,
+    rather than normalizing to the flat pattern.
+  - Files using a *local variable* + inline `try/finally` instead of `[TestInitialize]`/
+    `[TestCleanup]` (`PreviewFrameReaderTests`, `SubtitleGeneratorTests`) were migrated by
+    constructing `TempDirectoryFixture` locally inside the test method and calling `.Dispose()`
+    once from the existing `finally` — this changes 2-3 lines without restructuring the test
+    method itself (no attribute shape changed).
+  - **Self-verification that mattered**: after every batch, ran
+    `git diff --unified=0 -- src/Musio.Tests | Select-String -Pattern "^[+-].*Assert\."` and the
+    equivalent for `[TestMethod]`/`[TestClass]`/`[TestInitialize]`/`[TestCleanup]` — zero hits in
+    the final diff confirms no assertion or test-structure line was ever touched, only fixture
+    bodies.
+- **What didn't work**: none of the migration approaches needed reverting — every batch (8
+  `ModelWith`/`Video` files, mouse-recording builders, `CanvasBitmapTestHelpers`, then 3 waves of
+  temp-dir files) stayed green at 953 total / 951 passed / 2 skipped / 0 failed on the first try,
+  because each batch was verified by full build + full suite run before moving to the next.
+- **Build/test (verified)**: `MSBuild src\Musio.Tests\Musio.Tests.csproj /restore /t:Build
+  /p:Configuration=Debug /p:Platform=x64` → 0 errors, only pre-existing `CS0618` warnings in files
+  untouched by this change; `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -c Debug
+  -p:Platform=x64` with `DOTNET_ROLL_FORWARD=Major` → 953 total, 951 passed, 2 skipped, 0 failed
+  (matches baseline exactly).
 - **Win2D**: object-initializer construction of a multi-effect graph still leaks if the *second* effect throws — the first is already constructed but not yet owned by a field. Build both into locals inside `try`, dispose both on failure, then swap into the fields.
 - **Build/test (verified)**: app x64 + ARM64 build clean; `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -c Debug -p:Platform=x64` with `DOTNET_ROLL_FORWARD=Major` → 715 passed, 0 failed, 2 skipped.
 

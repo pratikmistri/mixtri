@@ -2,6 +2,7 @@ namespace Musio.Tests;
 
 using Musio.Core.Processing;
 using Musio.Core.Models;
+using Musio.Tests.TestSupport;
 
 [TestClass]
 public sealed class CursorSmootherTests
@@ -15,33 +16,7 @@ public sealed class CursorSmootherTests
     /// </summary>
     private static MouseRecordingData BuildRecording(int sampleCount, double sampleRateHz,
         Func<int, (double x, double y)> positionFunc)
-    {
-        long startTick = 0;
-        double ticksPerSample = TickFrequency / sampleRateHz;
-        var samples = new List<MouseSample>(sampleCount);
-
-        for (int i = 0; i < sampleCount; i++)
-        {
-            var (x, y) = positionFunc(i);
-            samples.Add(new MouseSample
-            {
-                TimestampTicks = startTick + (long)(i * ticksPerSample),
-                X = (int)Math.Round(x),
-                Y = (int)Math.Round(y),
-                EventKind = MouseEventKind.Move,
-                Button = MouseButton.None,
-                ScrollDelta = 0,
-            });
-        }
-
-        return new MouseRecordingData
-        {
-            Samples = samples,
-            StartTimestampTicks = startTick,
-            EndTimestampTicks = samples[^1].TimestampTicks,
-            TickFrequency = TickFrequency,
-        };
-    }
+        => TestMouseRecordingBuilder.WithPositions(sampleCount, sampleRateHz, positionFunc, TickFrequency);
 
     #region None / Passthrough
 
@@ -322,48 +297,7 @@ public sealed class CursorSmootherTests
         double sampleRateHz,
         IReadOnlyList<(double t, double x, double y)> movePoints,
         IReadOnlyList<(double t, double x, double y)>? clickDowns = null)
-    {
-        var samples = new List<MouseSample>();
-        foreach (var (t, x, y) in movePoints)
-        {
-            samples.Add(new MouseSample
-            {
-                TimestampTicks = (long)(t * TickFrequency),
-                X = (int)Math.Round(x),
-                Y = (int)Math.Round(y),
-                EventKind = MouseEventKind.Move,
-                Button = MouseButton.None,
-            });
-        }
-
-        var clicks = new List<ClickEvent>();
-        if (clickDowns is not null)
-        {
-            foreach (var (t, x, y) in clickDowns)
-            {
-                long tick = (long)(t * TickFrequency);
-                samples.Add(new MouseSample
-                {
-                    TimestampTicks = tick,
-                    X = (int)Math.Round(x),
-                    Y = (int)Math.Round(y),
-                    EventKind = MouseEventKind.ButtonDown,
-                    Button = MouseButton.Left,
-                });
-                clicks.Add(new ClickEvent(tick, (int)Math.Round(x), (int)Math.Round(y), MouseButton.Left, true));
-            }
-            samples.Sort((p, q) => p.TimestampTicks.CompareTo(q.TimestampTicks));
-        }
-
-        return new MouseRecordingData
-        {
-            Samples = samples,
-            Clicks = clicks,
-            StartTimestampTicks = 0,
-            EndTimestampTicks = samples[^1].TimestampTicks,
-            TickFrequency = TickFrequency,
-        };
-    }
+        => TestMouseRecordingBuilder.WithMoveAndClickSamples(sampleRateHz, movePoints, clickDowns, TickFrequency);
 
     /// <summary>
     /// Generates a path: move right, stall, move right again. The stall is a

@@ -1,26 +1,16 @@
 namespace Musio.Tests;
 
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 [TestClass]
 public sealed class TransitionResolverTests
 {
     private static TimelineModel ModelWith(params TimelineSegment[] segments)
-    {
-        var model = new TimelineModel();
-        model.Segments.AddRange(segments);
-        model.RecalculateSegmentPositions();
-        return model;
-    }
+        => TestTimelineBuilder.ModelWith(segments);
 
-    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null) => new()
-    {
-        VideoFilePath = "C:\\primary.mp4",
-        SourceStart = TimeSpan.Zero,
-        SourceDuration = TimeSpan.FromSeconds(durSec),
-        Duration = TimeSpan.FromSeconds(durSec),
-        InTransition = inTransition,
-    };
+    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null)
+        => TestTimelineBuilder.TransitionVideo("C:\\primary.mp4", durSec, inTransition);
 
     private static TextSlideSegment Slide(double durSec, TransitionConfig? inTransition = null) =>
         new() { Duration = TimeSpan.FromSeconds(durSec), InTransition = inTransition };

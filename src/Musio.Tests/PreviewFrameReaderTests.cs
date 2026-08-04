@@ -1,6 +1,7 @@
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Processing;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 namespace Musio.Tests;
@@ -46,9 +47,8 @@ public class PreviewFrameReaderTests
     [TestMethod]
     public async Task PreviewSource_DecodesIntoReducedSurface()
     {
-        string root = Path.Combine(
-            Path.GetTempPath(), "musio_preview_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(root);
+        var tempDir = new TempDirectoryFixture("musio_preview_");
+        string root = tempDir.Path;
 
         try
         {
@@ -99,7 +99,7 @@ public class PreviewFrameReaderTests
         }
         finally
         {
-            try { Directory.Delete(root, recursive: true); } catch { }
+            tempDir.Dispose();
         }
     }
 
