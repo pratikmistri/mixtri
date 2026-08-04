@@ -1,5 +1,6 @@
 using Musio.Core.Models;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -54,13 +55,8 @@ public sealed class AppendedZoomRegenerationTests
         }
     }
 
-    private static MouseRecordingData MakeMouse(long startTicks, double tickFrequency, params (long Ticks, int X, int Y)[] clicks) => new()
-    {
-        StartTimestampTicks = startTicks,
-        EndTimestampTicks = startTicks + 100_000,
-        TickFrequency = tickFrequency,
-        Clicks = clicks.Select(c => new ClickEvent(c.Ticks, c.X, c.Y, MouseButton.Left, true)).ToList(),
-    };
+    private static MouseRecordingData MakeMouse(long startTicks, double tickFrequency, params (long Ticks, int X, int Y)[] clicks)
+        => TestMouseRecordingBuilder.WithClickTicks(startTicks, tickFrequency, clicks);
 
     [TestMethod]
     public void FirstGeneration_CreatesKeyframesTaggedWithSource()

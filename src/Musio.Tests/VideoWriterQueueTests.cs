@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 namespace Musio.Tests;
@@ -27,19 +28,19 @@ public class VideoWriterQueueTests
 
     private static readonly TimeSpan Quiescence = TimeSpan.FromSeconds(60);
 
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_queue_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_queue_");
     }
 
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private VideoWriter CreateWriter(string folder = "", int width = Width, int height = Height)

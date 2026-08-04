@@ -1,4 +1,5 @@
 using Musio.Core.AI;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -123,7 +124,8 @@ public sealed class SubtitleGeneratorTests
     public async Task SaveSrtAsync_WritesCorrectFile()
     {
         var transcription = BuildTranscription((0, 1, "Hello"), (1, 2, "World"));
-        string tempFile = Path.Combine(Path.GetTempPath(), $"test_{Guid.NewGuid():N}.srt");
+        using var tempDir = new TempDirectoryFixture("musio_srt_");
+        string tempFile = Path.Combine(tempDir.Path, $"test_{Guid.NewGuid():N}.srt");
 
         try
         {
@@ -145,7 +147,8 @@ public sealed class SubtitleGeneratorTests
     public async Task SaveVttAsync_WritesCorrectFile()
     {
         var transcription = BuildTranscription((0, 1, "Test subtitle"));
-        string tempFile = Path.Combine(Path.GetTempPath(), $"test_{Guid.NewGuid():N}.vtt");
+        using var tempDir = new TempDirectoryFixture("musio_vtt_");
+        string tempFile = Path.Combine(tempDir.Path, $"test_{Guid.NewGuid():N}.vtt");
 
         try
         {

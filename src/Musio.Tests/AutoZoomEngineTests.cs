@@ -3,6 +3,7 @@ namespace Musio.Tests;
 using Musio.Core.Processing;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 [TestClass]
 public sealed class AutoZoomEngineTests
@@ -12,43 +13,7 @@ public sealed class AutoZoomEngineTests
     private static MouseRecordingData BuildRecordingWithClicks(
         double durationSeconds,
         List<(double timeSeconds, int x, int y)> clicks)
-    {
-        long startTick = 0;
-        long endTick = (long)(durationSeconds * TickFrequency);
-        int sampleCount = Math.Max(2, (int)(durationSeconds * 100));
-
-        var samples = new List<MouseSample>();
-        for (int i = 0; i < sampleCount; i++)
-        {
-            double t = i * durationSeconds / (sampleCount - 1);
-            samples.Add(new MouseSample
-            {
-                TimestampTicks = (long)(t * TickFrequency),
-                X = 960,
-                Y = 540,
-                EventKind = MouseEventKind.Move,
-                Button = MouseButton.None,
-                ScrollDelta = 0,
-            });
-        }
-
-        var clickEvents = clicks.Select(c => new ClickEvent(
-            TimestampTicks: (long)(c.timeSeconds * TickFrequency),
-            X: c.x,
-            Y: c.y,
-            Button: MouseButton.Left,
-            IsDown: true
-        )).ToList();
-
-        return new MouseRecordingData
-        {
-            Samples = samples,
-            Clicks = clickEvents,
-            StartTimestampTicks = startTick,
-            EndTimestampTicks = endTick,
-            TickFrequency = TickFrequency,
-        };
-    }
+        => TestMouseRecordingBuilder.WithClicks(durationSeconds, clicks, TickFrequency);
 
     [TestMethod]
     public void GetZoomState_NoClicks_ReturnsNoZoom()

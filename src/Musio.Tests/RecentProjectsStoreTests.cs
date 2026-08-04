@@ -1,4 +1,5 @@
 using Musio.Core.Projects;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -11,13 +12,13 @@ namespace Musio.Tests;
 [DoNotParallelize]
 public class RecentProjectsStoreTests
 {
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_recent_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_recent_");
 
         // Each test gets its own index, so runs never collide or disturb the real one.
         RecentProjectsStore.SetIndexPathForTesting(Path.Combine(_root, "recent-projects.json"));
@@ -27,7 +28,7 @@ public class RecentProjectsStoreTests
     public void TearDown()
     {
         RecentProjectsStore.SetIndexPathForTesting(null);
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private string CreateProjectFile(string name)

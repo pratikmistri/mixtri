@@ -1,6 +1,7 @@
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Processing;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 namespace Musio.Tests;
@@ -46,19 +47,19 @@ public class Mp4FrameSourceSequentialTests
         Color.FromArgb(255, 230, 230, 230), // white
     ];
 
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_seq_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_seq_");
     }
 
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private static Color ExpectedColor(int frameIndex) => Cycle[frameIndex % Cycle.Length];

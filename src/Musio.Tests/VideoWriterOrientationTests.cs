@@ -1,6 +1,7 @@
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Processing;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 namespace Musio.Tests;
@@ -27,19 +28,19 @@ public class VideoWriterOrientationTests
     private static readonly Color Red = Color.FromArgb(255, 255, 0, 0);
     private static readonly Color Blue = Color.FromArgb(255, 0, 0, 255);
 
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_orient_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_orient_");
     }
 
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     /// <summary>

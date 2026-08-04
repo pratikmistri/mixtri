@@ -3,6 +3,7 @@ namespace Musio.Tests;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Processing;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 /// <summary>
@@ -29,11 +30,7 @@ public sealed class TransitionRendererTests
     }
 
     private static CanvasBitmap MakeBitmap(CanvasDevice device, Color color, int w = 8, int h = 8)
-    {
-        var colors = new Color[w * h];
-        Array.Fill(colors, color);
-        return CanvasBitmap.CreateFromColors(device, colors, w, h);
-    }
+        => CanvasBitmapTestHelpers.MakeBitmap(device, color, w, h);
 
     // ── GPU smoke tests: every TransitionType, both outgoing null/non-null, three progress points ──
 
