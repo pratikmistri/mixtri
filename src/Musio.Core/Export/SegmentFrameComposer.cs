@@ -189,6 +189,7 @@ public sealed class SegmentFrameComposer : IDisposable
             // (see CollapseContiguousSourceBoundary).
             string? incomingVideoFilePath = null;
             double? incomingSourceTimeSeconds = null;
+            double incomingSourceStartSeconds = 0;
             if (resolution.IncomingSegment is VideoSegment incomingVideo)
             {
                 // The transition's elapsed local time, re-derived from OutgoingLocalOffset
@@ -198,13 +199,14 @@ public sealed class SegmentFrameComposer : IDisposable
                 var local = resolution.OutgoingLocalOffset - resolution.OutgoingSegment!.Duration;
                 double incomingSpeed = incomingVideo.SpeedFactor > 0 ? incomingVideo.SpeedFactor : 1.0;
                 incomingVideoFilePath = incomingVideo.VideoFilePath;
+                incomingSourceStartSeconds = incomingVideo.SourceStart.TotalSeconds;
                 incomingSourceTimeSeconds = MapLocalOffsetToSourceTime(
                     incomingVideo.SourceStart.TotalSeconds, local.TotalSeconds, incomingSpeed);
             }
 
             using var outgoing = await ComposeSegmentAtOffsetAsync(
                 resolution.OutgoingSegment!, resolution.OutgoingLocalOffset, ct,
-                incomingVideoFilePath, incomingSourceTimeSeconds);
+                incomingVideoFilePath, incomingSourceTimeSeconds, incomingSourceStartSeconds);
 
             _transitionRenderer ??= new TransitionRenderer(_device);
             var blended = _transitionRenderer.Render(
@@ -347,7 +349,8 @@ public sealed class SegmentFrameComposer : IDisposable
         TimeSpan localOffset,
         CancellationToken ct,
         string? incomingVideoFilePath = null,
-        double? incomingSourceTimeSeconds = null)
+        double? incomingSourceTimeSeconds = null,
+        double incomingSourceStartSeconds = 0)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -374,7 +377,9 @@ public sealed class SegmentFrameComposer : IDisposable
 
                 sourceTime = CollapseContiguousSourceBoundary(
                     sourceTime, video.VideoFilePath,
-                    incomingSourceTimeSeconds, incomingVideoFilePath, video.Fps);
+                    incomingSourceTimeSeconds, incomingVideoFilePath, video.Fps,
+                    (video.SourceStart + video.SourceDuration).TotalSeconds,
+                    incomingSourceStartSeconds);
 
                 return await ComposeWithContextAsync(context, sourceTime, isPrimary, ct);
             }
@@ -576,9 +581,18 @@ public sealed class SegmentFrameComposer : IDisposable
     /// division by a bad value here would otherwise corrupt the result) fall back to a 30fps
     /// step.
     /// </param>
+    /// <param name="outgoingCutPointSeconds">
+    /// The outgoing segment's own cut point in source time
+    /// (<c>SourceStart + SourceDuration</c>). Together with
+    /// <paramref name="incomingSourceStartSeconds"/> this proves whether the two ranges
+    /// actually MEET, which is what makes a boundary a contiguous split rather than merely
+    /// two clips that happen to share a file.
+    /// </param>
+    /// <param name="incomingSourceStartSeconds">The incoming segment's <c>SourceStart</c>.</param>
     /// <returns>
     /// <paramref name="outgoingSourceTimeSeconds"/> unchanged when the two sides read
-    /// different files, or when there is a genuine gap between the two mapped source times;
+    /// different files, when their source ranges do not meet at the boundary (reordered or
+    /// unrelated ranges), or when there is a genuine gap between the two mapped source times;
     /// otherwise the incoming source time minus one frame step (floored at zero), so the two
     /// sides can never sample identical -- or momentarily reversed -- footage.
     /// </returns>
@@ -600,7 +614,9 @@ public sealed class SegmentFrameComposer : IDisposable
         string outgoingVideoFilePath,
         double? incomingSourceTimeSeconds,
         string? incomingVideoFilePath,
-        int fps)
+        int fps,
+        double outgoingCutPointSeconds,
+        double incomingSourceStartSeconds)
     {
         if (incomingSourceTimeSeconds is not { } incomingTime)
             return outgoingSourceTimeSeconds;
@@ -608,10 +624,21 @@ public sealed class SegmentFrameComposer : IDisposable
         if (!string.Equals(outgoingVideoFilePath, incomingVideoFilePath, StringComparison.OrdinalIgnoreCase))
             return outgoingSourceTimeSeconds;
 
+        double frameStep = fps > 0 ? 1.0 / fps : 1.0 / 30;
+
+        // Sharing a file is NOT enough to prove the two sides are a split of one continuous
+        // run. Reordered clips read the same file from unrelated ranges -- e.g. [10s,14s]
+        // followed by [2s,6s] -- and there the outgoing frame at 14s is entirely legitimate
+        // even though it sits "after" the incoming's 2s. Collapsing on the timestamp
+        // comparison alone would yank the outgoing image backwards by twelve seconds at the
+        // start of the dissolve. Only a boundary whose ranges actually MEET (the outgoing's
+        // cut point is the incoming's in-point) is a contiguous split.
+        if (Math.Abs(outgoingCutPointSeconds - incomingSourceStartSeconds) > frameStep)
+            return outgoingSourceTimeSeconds;
+
         if (outgoingSourceTimeSeconds < incomingTime)
             return outgoingSourceTimeSeconds; // Genuine trimmed gap: rolling is legitimate.
 
-        double frameStep = fps > 0 ? 1.0 / fps : 1.0 / 30;
         return Math.Max(0, incomingTime - frameStep);
     }
 

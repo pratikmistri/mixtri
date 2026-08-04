@@ -1941,8 +1941,15 @@ public class UpdateTransitionOperation : IEditOperation
     public void Undo(TimelineModel model)
     {
         if (!_found) return;
+
+        // Only a MISSING segment (index < 0) can be skipped here. Unlike Execute — which must
+        // refuse index 0 because a config written there would lie dormant and reactivate on a
+        // later reorder — Undo is restoring a value this operation itself captured, and it must
+        // land wherever the segment now lives. If an intervening reorder moved it to the front,
+        // refusing would strand the applied config in place: the undo would silently do nothing,
+        // and the config would come back to life the moment the segment moved off index 0 again.
         var index = IndexOf(model, _incomingSegmentId);
-        if (index <= 0) return;
+        if (index < 0) return;
         model.Segments[index].InTransition = _previous;
     }
 

@@ -106,26 +106,31 @@ public static class TransitionResolver
     /// against half of each neighbouring segment's duration.
     /// </summary>
     public static TransitionResolution Resolve(TimelineModel timeline, TimeSpan outputTime, TimeSpan? maxDurationOverride)
-        => Resolve(timeline, outputTime, maxDurationOverride, ignoreExplicitConfig: false);
+        => Resolve(timeline, outputTime, maxDurationOverride, ignoreExplicitConfig: false, legacyDuration: null);
 
     /// <summary>
-    /// Resolves using ONLY the legacy fallback rule (500&#160;ms linear crossfade at any boundary
-    /// touching a <see cref="TextSlideSegment"/>), ignoring <see cref="TimelineSegment.InTransition"/>
-    /// entirely.
+    /// Resolves using ONLY the legacy fallback rule (a linear crossfade at any boundary touching
+    /// a <see cref="TextSlideSegment"/>), ignoring <see cref="TimelineSegment.InTransition"/>
+    /// entirely. <paramref name="maxDuration"/> is the legacy <em>configured</em> length, still
+    /// clamped to half of each neighbour as always.
     /// </summary>
     /// <remarks>
-    /// Exists solely for the <see cref="SlideTransitions"/> shim. Its two remaining call sites (the
-    /// preview and the exporter) have not migrated to the configurable, rolling model yet, so they
-    /// must stay completely inert to transition configuration that later tasks start writing —
-    /// otherwise a half-migrated build would render explicit configs through the frozen-outgoing
-    /// legacy path. Delete this along with <see cref="SlideTransitions"/> once both have migrated.
+    /// Exists solely for the <see cref="SlideTransitions"/> shim, whose own duration overload has
+    /// always meant "use this as the crossfade length" — not "cap the 500&#160;ms default" — so it
+    /// is threaded in as the configured duration rather than as an extra upper bound. Anything
+    /// else would silently stop that overload from ever producing a window longer than the
+    /// default. Delete this along with <see cref="SlideTransitions"/> once nothing calls it.
     /// </remarks>
     internal static TransitionResolution ResolveLegacyOnly(
         TimelineModel timeline, TimeSpan outputTime, TimeSpan maxDuration)
-        => Resolve(timeline, outputTime, maxDuration, ignoreExplicitConfig: true);
+        => Resolve(timeline, outputTime, maxDurationOverride: null, ignoreExplicitConfig: true, legacyDuration: maxDuration);
 
     private static TransitionResolution Resolve(
-        TimelineModel timeline, TimeSpan outputTime, TimeSpan? maxDurationOverride, bool ignoreExplicitConfig)
+        TimelineModel timeline,
+        TimeSpan outputTime,
+        TimeSpan? maxDurationOverride,
+        bool ignoreExplicitConfig,
+        TimeSpan? legacyDuration)
     {
         var segments = timeline.Segments;
 
@@ -147,6 +152,7 @@ public static class TransitionResolver
         var outgoing = segments[index - 1];
 
         TransitionConfig config;
+        bool isLegacyFallback;
         if (!ignoreExplicitConfig && incoming.InTransition is { } explicitConfig)
         {
             // An explicit config always wins over the legacy fallback — including an explicit
@@ -155,6 +161,7 @@ public static class TransitionResolver
                 return TransitionResolution.None;
 
             config = explicitConfig;
+            isLegacyFallback = false;
         }
         else
         {
@@ -172,10 +179,11 @@ public static class TransitionResolver
                                 // SlideTransitions.DefaultDuration exactly, even though that type
                                 // is otherwise obsolete — this is the one place the dependency is
                                 // permanent, not a leftover from an unfinished migration.
-                Duration = SlideTransitions.DefaultDuration,
+                Duration = legacyDuration ?? SlideTransitions.DefaultDuration,
 #pragma warning restore CS0618
                 Easing = TransitionEasing.Linear,
             };
+            isLegacyFallback = true;
         }
 
         var duration = Half(incoming.Duration) < Half(outgoing.Duration)
@@ -194,10 +202,19 @@ public static class TransitionResolver
         double rawProgress = Math.Clamp(local.TotalSeconds / duration.TotalSeconds, 0, 1);
         double easedProgress = Ease(config.Easing, rawProgress);
 
-        // The outgoing segment keeps rolling past its own cut point for the duration of the
-        // dissolve rather than freezing — see the OutgoingLocalOffset doc comment for the
-        // contract callers must honour.
-        var outgoingLocalOffset = outgoing.Duration + local;
+        // An EXPLICITLY configured transition rolls the outgoing segment past its own cut point
+        // for the length of the dissolve — see the OutgoingLocalOffset doc comment.
+        //
+        // The LEGACY fallback must not. Before this feature existed, an unconfigured
+        // slide-adjacent boundary froze the outgoing side on its final frame
+        // (SlideTransitions pinned it to incoming.Start - 1 tick). Rolling it instead would
+        // sample at and past the cut, so a video the user had TRIMMED would start revealing
+        // the footage they trimmed away — silently changing how every already-saved project
+        // renders, which is exactly what the fallback exists to prevent. Handles are opt-in:
+        // you get them by choosing a transition, not by never having touched one.
+        var outgoingLocalOffset = isLegacyFallback
+            ? FrozenOutgoingOffset(outgoing)
+            : outgoing.Duration + local;
 
         return new TransitionResolution(
             Active: true,
@@ -208,6 +225,16 @@ public static class TransitionResolver
             IncomingSegment: incoming,
             OutgoingSegment: outgoing,
             OutgoingLocalOffset: outgoingLocalOffset);
+    }
+
+    /// <summary>
+    /// The outgoing segment's final instant, expressed as an offset from its own start — the
+    /// pre-feature "hold the last frame" sampling point, kept for the legacy fallback.
+    /// </summary>
+    private static TimeSpan FrozenOutgoingOffset(TimelineSegment outgoing)
+    {
+        var offset = outgoing.Duration - TimeSpan.FromTicks(1);
+        return offset < TimeSpan.Zero ? TimeSpan.Zero : offset;
     }
 
     /// <summary>

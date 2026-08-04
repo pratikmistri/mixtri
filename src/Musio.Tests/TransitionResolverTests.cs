@@ -138,10 +138,39 @@ public sealed class TransitionResolverTests
     }
 
     [TestMethod]
-    public void Resolve_OutgoingLocalOffset_RollsPastTheCutPoint()
+    public void Resolve_LegacyFallback_FreezesOutgoingInsteadOfRolling()
     {
         // slide [0,5) | video [5,9), legacy fallback active in [5, 5.5).
+        //
+        // Back-compat regression guard. Before this feature, an unconfigured slide-adjacent
+        // boundary held the outgoing side on its FINAL frame for the whole dissolve. Rolling
+        // it instead would sample at and past the cut, so a trimmed video would start showing
+        // footage the user had deliberately trimmed away — changing how already-saved
+        // projects render. Handles are opt-in: you get them by choosing a transition.
         var model = ModelWith(Slide(5), Video(4));
+        var frozen = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+
+        var atStart = TransitionResolver.Resolve(model, TimeSpan.FromSeconds(5));
+        Assert.IsTrue(atStart.Active);
+        Assert.AreEqual(frozen, atStart.OutgoingLocalOffset);
+
+        var partway = TransitionResolver.Resolve(model, TimeSpan.FromSeconds(5.2));
+        Assert.IsTrue(partway.Active);
+        Assert.AreEqual(frozen, partway.OutgoingLocalOffset,
+            "The legacy fallback must hold a FIXED instant for the whole dissolve.");
+    }
+
+    [TestMethod]
+    public void Resolve_ExplicitConfig_OutgoingLocalOffset_RollsPastTheCutPoint()
+    {
+        // An explicitly configured transition DOES roll: this is the feature's whole premise,
+        // and choosing a transition is the opt-in that authorises dipping into handles.
+        var config = new TransitionConfig
+        {
+            Type = TransitionType.CrossFade,
+            Duration = TimeSpan.FromMilliseconds(500),
+        };
+        var model = ModelWith(Video(5), Video(4, config));
         var outgoingDuration = TimeSpan.FromSeconds(5);
 
         var atStart = TransitionResolver.Resolve(model, TimeSpan.FromSeconds(5));

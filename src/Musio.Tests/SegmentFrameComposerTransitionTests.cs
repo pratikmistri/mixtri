@@ -181,7 +181,9 @@ public sealed class SegmentFrameComposerTransitionTests
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: 14.3,
             incomingVideoFilePath: @"C:\rec.mp4",
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 14.3,
+            incomingSourceStartSeconds: 14.3);
 
         Assert.AreEqual(14.3 - 1.0 / 30, result, 1e-9);
         Assert.IsTrue(result < 14.3, "Collapsed outgoing time must be strictly earlier than incoming's.");
@@ -192,13 +194,15 @@ public sealed class SegmentFrameComposerTransitionTests
     {
         // Not just exact equality -- an outgoing side that has rolled PAST the incoming's own
         // instant (e.g. differing speeds around the cut) must also collapse, not just the
-        // exact-equal case.
+        // exact-equal case. The ranges still meet at the cut, so this is a genuine split.
         double result = SegmentFrameComposer.CollapseContiguousSourceBoundary(
             outgoingSourceTimeSeconds: 20.0,
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: 14.3,
             incomingVideoFilePath: @"C:\rec.mp4",
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 14.3,
+            incomingSourceStartSeconds: 14.3);
 
         Assert.AreEqual(14.3 - 1.0 / 30, result, 1e-9);
     }
@@ -209,14 +213,40 @@ public sealed class SegmentFrameComposerTransitionTests
         // The user trimmed the incoming side so there IS a genuine gap in source time
         // (incoming's mapped instant, 20s, is well past the outgoing's rolled instant,
         // 14.3s) -- rolling is entirely legitimate here and must not be collapsed away.
+        // The ranges still MEET at the cut (outgoing's cut point == incoming's in-point),
+        // so this exercises the gap check specifically, not the contiguity check.
         double result = SegmentFrameComposer.CollapseContiguousSourceBoundary(
             outgoingSourceTimeSeconds: 14.3,
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: 20.0,
             incomingVideoFilePath: @"C:\rec.mp4",
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 20.0,
+            incomingSourceStartSeconds: 20.0);
 
         Assert.AreEqual(14.3, result, 1e-9);
+    }
+
+    [TestMethod]
+    public void CollapseContiguousSourceBoundary_ReorderedSameSourceRanges_PreservesOutgoingFrame()
+    {
+        // Regression: sharing a file is NOT proof of a contiguous split. Reordering one
+        // recording's clips so [10s,14s] plays before [2s,6s] means the outgoing side is
+        // legitimately at 14s while the incoming side is at 2s. The old timestamp-only test
+        // ("outgoing >= incoming") saw that as a collision and yanked the outgoing image back
+        // to ~1.967s -- a twelve-second jump backwards at the start of every such dissolve.
+        // The ranges do not meet at the boundary (cut point 14s vs in-point 2s), so nothing
+        // must be collapsed.
+        double result = SegmentFrameComposer.CollapseContiguousSourceBoundary(
+            outgoingSourceTimeSeconds: 14.0,
+            outgoingVideoFilePath: @"C:\rec.mp4",
+            incomingSourceTimeSeconds: 2.0,
+            incomingVideoFilePath: @"C:\rec.mp4",
+            fps: 30,
+            outgoingCutPointSeconds: 14.0,
+            incomingSourceStartSeconds: 2.0);
+
+        Assert.AreEqual(14.0, result, 1e-9);
     }
 
     [TestMethod]
@@ -231,7 +261,9 @@ public sealed class SegmentFrameComposerTransitionTests
             outgoingVideoFilePath: @"C:\a.mp4",
             incomingSourceTimeSeconds: 14.3,
             incomingVideoFilePath: @"C:\b.mp4",
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 14.3,
+            incomingSourceStartSeconds: 14.3);
 
         Assert.AreEqual(14.3, result, 1e-9);
     }
@@ -247,7 +279,9 @@ public sealed class SegmentFrameComposerTransitionTests
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: null,
             incomingVideoFilePath: null,
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 14.3,
+            incomingSourceStartSeconds: 14.3);
 
         Assert.AreEqual(14.3, result, 1e-9);
     }
@@ -270,7 +304,8 @@ public sealed class SegmentFrameComposerTransitionTests
         Assert.AreEqual(14.3, incomingMapped, 1e-9);
 
         double result = SegmentFrameComposer.CollapseContiguousSourceBoundary(
-            outgoingMapped, @"C:\rec.mp4", incomingMapped, @"C:\rec.mp4", fps: 30);
+            outgoingMapped, @"C:\rec.mp4", incomingMapped, @"C:\rec.mp4", fps: 30,
+            outgoingCutPointSeconds: 14.3, incomingSourceStartSeconds: 14.3);
 
         Assert.IsTrue(result < incomingMapped, "Collapsed result must stay strictly earlier than incoming.");
         Assert.AreEqual(incomingMapped - 1.0 / 30, result, 1e-9);
@@ -287,7 +322,9 @@ public sealed class SegmentFrameComposerTransitionTests
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: 14.3,
             incomingVideoFilePath: @"C:\rec.mp4",
-            fps: 0);
+            fps: 0,
+            outgoingCutPointSeconds: 14.3,
+            incomingSourceStartSeconds: 14.3);
 
         Assert.AreEqual(14.3 - 1.0 / 30, result, 1e-9);
     }
@@ -302,7 +339,9 @@ public sealed class SegmentFrameComposerTransitionTests
             outgoingVideoFilePath: @"C:\rec.mp4",
             incomingSourceTimeSeconds: 0.01,
             incomingVideoFilePath: @"C:\rec.mp4",
-            fps: 30);
+            fps: 30,
+            outgoingCutPointSeconds: 0.01,
+            incomingSourceStartSeconds: 0.01);
 
         Assert.AreEqual(0.0, result, 1e-9);
     }

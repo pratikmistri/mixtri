@@ -123,6 +123,20 @@ public sealed class AudioPlaybackEngine : IDisposable
         var validPaths = wavFilePaths.Where(File.Exists).ToList();
         if (validPaths.Count == 0) return;
 
+        // The caller's dictionary carries whatever comparer it was built with — typically the
+        // default ordinal one — so looking paths up directly would quietly miss on any casing
+        // difference and disable the fade rather than fail loudly. Re-key into an explicitly
+        // case-insensitive map so the documented matching behaviour is actually this method's,
+        // not the caller's to get right.
+        Dictionary<string, IReadOnlyList<AudioFadeWindow>>? fadeWindows = null;
+        if (fadeWindowsByPath is { Count: > 0 })
+        {
+            fadeWindows = new Dictionary<string, IReadOnlyList<AudioFadeWindow>>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var (path, windows) in fadeWindowsByPath)
+                fadeWindows[path] = windows;
+        }
+
         try
         {
             // Open all audio files
@@ -144,8 +158,8 @@ public sealed class AudioPlaybackEngine : IDisposable
             {
                 var reader = _readers[i];
                 IReadOnlyList<AudioFadeWindow>? windows = null;
-                bool hasFade = fadeWindowsByPath is not null
-                    && fadeWindowsByPath.TryGetValue(validPaths[i], out windows)
+                bool hasFade = fadeWindows is not null
+                    && fadeWindows.TryGetValue(validPaths[i], out windows)
                     && windows.Count > 0;
 
                 // `reader` doubles as both the sample source AND the position reference

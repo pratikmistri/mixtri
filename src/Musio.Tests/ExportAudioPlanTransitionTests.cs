@@ -487,7 +487,34 @@ public sealed class ExportAudioPlanTransitionTests
         var clamped = VideoEncoder.ClampToSourceDuration(placement, TimeSpan.FromSeconds(10));
 
         AssertSeconds(10, clamped.TakeDuration!.Value, "Take is capped to the file's real remaining length");
-        AssertSeconds(1, clamped.FadeOutDuration, "Fade-out still fits inside the (now-capped) take");
+
+        // The fade must shrink by however much of the EXTENSION the file could not satisfy.
+        // The whole 1s extension was clamped away here, so no extension survives.
+        AssertSeconds(0, clamped.FadeOutDuration,
+            "Fade-out must drop by the clamped-away extension, not survive at its planned length");
+
+        // The point of all of the above: the muxed hard cut must still be the original 10s.
+        // Leaving FadeOutDuration at 1s made ExportTakeDuration return 10 - 1 = 9s, silently
+        // truncating a second off the end of every export whose audio ended at EOF.
+        AssertSeconds(10, VideoEncoder.ExportTakeDuration(clamped)!.Value,
+            "Muxed duration must reproduce the original hard cut exactly");
+    }
+
+    [TestMethod]
+    public void ClampToSourceDuration_PartiallyClampedExtension_KeepsTheSurvivingRemainder()
+    {
+        // Only half of the 1s extension is available (file has 10.5s, plan wanted 11s), so
+        // half the extension survives and the hard cut is still exactly 10s.
+        var placement = new AudioPlacement(
+            Primary, AudioSourceKind.EmbeddedVideoTrack, TimeSpan.Zero, TimeSpan.FromSeconds(11),
+            TimeSpan.Zero, false, FadeOutDuration: TimeSpan.FromSeconds(1));
+
+        var clamped = VideoEncoder.ClampToSourceDuration(placement, TimeSpan.FromSeconds(10.5));
+
+        AssertSeconds(10.5, clamped.TakeDuration!.Value, "Take is capped to the real remaining length");
+        AssertSeconds(0.5, clamped.FadeOutDuration, "Half the planned extension survives");
+        AssertSeconds(10, VideoEncoder.ExportTakeDuration(clamped)!.Value,
+            "Muxed duration must still reproduce the original hard cut");
     }
 
     [TestMethod]
@@ -502,8 +529,15 @@ public sealed class ExportAudioPlanTransitionTests
         var clamped = VideoEncoder.ClampToSourceDuration(placement, TimeSpan.FromSeconds(2));
 
         AssertSeconds(2, clamped.TakeDuration!.Value, "Take cannot exceed the real duration");
-        AssertSeconds(2, clamped.FadeOutDuration, "Fade-out cannot exceed the (clamped) take either");
-        AssertSeconds(2, clamped.FadeInDuration, "Fade-in cannot exceed the (clamped) take either");
+
+        // 9s of the planned take was clamped away, which is more than the entire 3s extension,
+        // so nothing of the fade-out survives.
+        AssertSeconds(0, clamped.FadeOutDuration,
+            "Fade-out is consumed entirely by the clamped-away extension");
+
+        // A fade-IN does not extend the take (it lives at the placement's leading edge), so it
+        // is only ever capped to what is actually there to ramp over.
+        AssertSeconds(2, clamped.FadeInDuration, "Fade-in cannot exceed the (clamped) take");
     }
 
     [TestMethod]

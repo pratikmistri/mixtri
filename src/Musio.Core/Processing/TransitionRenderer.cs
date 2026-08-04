@@ -213,28 +213,30 @@ public class TransitionRenderer : IDisposable
         double progress, int width, int height)
     {
         var destRect = new Rect(0, 0, width, height);
-
-        // Clear to opaque black unconditionally, not only when outgoing is null. Two reasons:
-        // (1) fade-from-black contract (see Render's `outgoing` doc) when outgoing is absent;
-        // (2) even when outgoing IS present, layering two partial-opacity DrawImage calls
-        // (outgoing at 1-progress, incoming at progress) directly onto the render target's native
-        // transparent background composites to alpha = (1-progress) + progress*progress < 1 at
-        // any 0 < progress < 1 — a genuinely translucent output frame, not merely dimmed RGB.
-        // Pre-clearing to opaque black means every subsequent "over" blend lands on an already-
-        // opaque destination, which always composites back out to alpha 1 regardless of how many
-        // partial-opacity layers are stacked. RenderGlitch composites its base layer through this
-        // method, so this also fixes the same gap there — no separate handling needed in Glitch.
-        ds.Clear(Black);
-
-        if (outgoing is not null)
-        {
-            var srcRect = new Rect(0, 0,
-                outgoing.SizeInPixels.Width, outgoing.SizeInPixels.Height);
-            ds.DrawImage(outgoing, destRect, srcRect, (float)(1.0 - progress));
-        }
-
         var inSrcRect = new Rect(0, 0,
             incoming.SizeInPixels.Width, incoming.SizeInPixels.Height);
+
+        if (outgoing is null)
+        {
+            // Fade-from-black contract (see Render's `outgoing` doc): with nothing to dissolve
+            // from, black IS the outgoing side, so clearing to it and fading the incoming in over
+            // the top is the intended result rather than a dip.
+            ds.Clear(Black);
+            ds.DrawImage(incoming, destRect, inSrcRect, (float)progress);
+            return;
+        }
+
+        // Draw the outgoing frame FULLY OPAQUE and dissolve the incoming over it, rather than
+        // layering both at partial opacity. Source-over of two partial layers does not sum to an
+        // even blend: over an opaque black clear, progress 0.5 composites to
+        // 0.25*outgoing + 0.5*incoming + 0.25*black — the picture visibly dips dark through the
+        // middle of every dissolve. Drawing outgoing opaque makes the single "over" blend below
+        // resolve to exactly (1-progress)*outgoing + progress*incoming, and the destination is
+        // already fully opaque so the result stays alpha 1 without needing a clear at all.
+        // RenderGlitch composites its base layer through this method, so it inherits the fix.
+        var outSrcRect = new Rect(0, 0,
+            outgoing.SizeInPixels.Width, outgoing.SizeInPixels.Height);
+        ds.DrawImage(outgoing, destRect, outSrcRect, 1f);
         ds.DrawImage(incoming, destRect, inSrcRect, (float)progress);
     }
 

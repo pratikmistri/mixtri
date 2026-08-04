@@ -1226,6 +1226,7 @@ public sealed partial class EditorPage : Page
                         // (shared with the exporter since T8's consolidation pass).
                         string? incomingVideoFilePath = null;
                         double? incomingSourceTimeSeconds = null;
+                        double incomingSourceStartSeconds = 0;
                         if (resolution.IncomingSegment is VideoSegment incomingVideo
                             && resolution.OutgoingSegment is not null)
                         {
@@ -1234,6 +1235,7 @@ public sealed partial class EditorPage : Page
                             double incomingSpeed = incomingVideo.SpeedFactor > 0
                                 ? incomingVideo.SpeedFactor : 1.0;
                             incomingVideoFilePath = incomingVideo.VideoFilePath;
+                            incomingSourceStartSeconds = incomingVideo.SourceStart.TotalSeconds;
                             incomingSourceTimeSeconds = incomingVideo.SourceStart.TotalSeconds
                                 + incomingLocal.TotalSeconds * incomingSpeed;
                         }
@@ -1241,7 +1243,8 @@ public sealed partial class EditorPage : Page
                         outgoing = resolution.OutgoingSegment is { } outgoingSegment
                             ? await ComposePreviewFrameAtOffsetAsync(
                                 outgoingSegment, resolution.OutgoingLocalOffset,
-                                incomingVideoFilePath, incomingSourceTimeSeconds)
+                                incomingVideoFilePath, incomingSourceTimeSeconds,
+                                incomingSourceStartSeconds)
                             : null;
 
                         // Force the normal path to fully redraw once the dissolve ends.
@@ -1410,7 +1413,8 @@ public sealed partial class EditorPage : Page
     /// </remarks>
     private async Task<CanvasRenderTarget?> ComposePreviewFrameAtOffsetAsync(
         TimelineSegment? segment, TimeSpan localOffset,
-        string? incomingVideoFilePath = null, double? incomingSourceTimeSeconds = null)
+        string? incomingVideoFilePath = null, double? incomingSourceTimeSeconds = null,
+        double incomingSourceStartSeconds = 0)
     {
         if (segment is TextSlideSegment slide)
         {
@@ -1436,7 +1440,9 @@ public sealed partial class EditorPage : Page
             TimeSpan.FromTicks((long)(localOffset.Ticks * seg.SpeedFactor));
         double collapsedSourceSeconds = SegmentFrameComposer.CollapseContiguousSourceBoundary(
             rawSourceTime.TotalSeconds, seg.VideoFilePath,
-            incomingSourceTimeSeconds, incomingVideoFilePath, seg.Fps);
+            incomingSourceTimeSeconds, incomingVideoFilePath, seg.Fps,
+            (seg.SourceStart + seg.SourceDuration).TotalSeconds,
+            incomingSourceStartSeconds);
         var sourceTime = collapsedSourceSeconds == rawSourceTime.TotalSeconds
             ? rawSourceTime // No collapse applied: keep the tick-precision value as-is.
             : TimeSpan.FromSeconds(collapsedSourceSeconds);

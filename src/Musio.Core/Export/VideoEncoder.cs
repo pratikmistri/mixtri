@@ -552,13 +552,36 @@ public class VideoEncoder : IDisposable
         if (trimStart > duration) trimStart = duration;
 
         var realAvailable = duration - trimStart;
-        var take = placement.TakeDuration is { } t && t < realAvailable ? t : realAvailable;
 
-        var fadeOut = placement.FadeOutDuration > take ? take : placement.FadeOutDuration;
-        var fadeIn = placement.FadeInDuration > take ? take : placement.FadeInDuration;
+        // A null take already means "play to the end of the file", which the file itself
+        // bounds — materialising an explicit take here would only risk re-deriving that
+        // bound wrongly, and would hand ExportTakeDuration a value to subtract a fade from
+        // that it would otherwise have left alone.
+        TimeSpan? take = placement.TakeDuration;
+        var clampedAway = TimeSpan.Zero;
+        if (take is { } planned && planned > realAvailable)
+        {
+            clampedAway = planned - realAvailable;
+            take = realAvailable;
+        }
+
+        // The transition extension is the ONLY reason a planned take can overrun the file:
+        // ExportAudioPlan appends exactly FadeOutDuration of extra tail. So whatever the
+        // real file could not satisfy has to come off the fade as well. Without this,
+        // ExportTakeDuration subtracts a fade that is no longer present in the take and the
+        // muxed audio ends BEFORE the original hard cut — e.g. a 10s segment ending at a 10s
+        // file's EOF plans an 11s take with a 1s fade, clamps to 10s, and would then mux 9s,
+        // silently truncating a second of audio off the end of every such export.
+        var fadeOut = placement.FadeOutDuration > clampedAway
+            ? placement.FadeOutDuration - clampedAway
+            : TimeSpan.Zero;
+
+        var bound = take ?? realAvailable;
+        if (fadeOut > bound) fadeOut = bound;
+        var fadeIn = placement.FadeInDuration > bound ? bound : placement.FadeInDuration;
 
         if (trimStart == placement.TrimFromStart
-            && placement.TakeDuration is { } existingTake && existingTake == take
+            && take == placement.TakeDuration
             && fadeOut == placement.FadeOutDuration
             && fadeIn == placement.FadeInDuration)
         {

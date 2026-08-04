@@ -143,6 +143,9 @@ public sealed partial class TimelineControl : UserControl
     private Color TransitionChipEmptyFill;
     private Color TransitionChipEmptyBorder;
     private Color TransitionChipEmptyGlyphColor;
+    private Color TransitionChipHardCutFill;
+    private Color TransitionChipHardCutBorder;
+    private Color TransitionChipHardCutGlyphColor;
     private Color CursorTrackBackground;
     private Color CursorPathXColor;
     private Color CursorPathYColor;
@@ -238,6 +241,19 @@ public sealed partial class TimelineControl : UserControl
         // repaint themselves on resize — so a resize only needs the overlay repositioned.
         Loaded += (_, _) => UpdatePlayheadVisual();
         TimeRulerCanvas.SizeChanged += (_, _) => UpdatePlayheadVisual();
+
+        // The chip hover machinery owns a DispatcherTimer and a native text format; neither is
+        // tied to a canvas's own lifetime, so they are released explicitly when the control
+        // leaves the tree (e.g. navigating away from the editor mid-hover) rather than left
+        // ticking against a control that is no longer shown.
+        Unloaded += (_, _) =>
+        {
+            _hoveredTransitionChipId = null;
+            HideTransitionChipToolTip();
+            _transitionChipHoverTimer = null;
+            _transitionChipGlyphFormat?.Dispose();
+            _transitionChipGlyphFormat = null;
+        };
     }
 
     private Color GetBrushColor(string key, Color fallback)
@@ -360,6 +376,12 @@ public sealed partial class TimelineControl : UserControl
         TransitionChipEmptyFill      = WithAlpha(autoBase, 235);
         TransitionChipEmptyBorder    = isDark ? Color.FromArgb(255, 168, 178, 198) : Color.FromArgb(255, 74, 82, 96);
         TransitionChipEmptyGlyphColor = Color.FromArgb(255, 255, 255, 255);
+        // An explicit hard cut reads as deliberately "off": darker and flatter than Automatic,
+        // so the two are never mistaken for one another at a glance.
+        var hardCutBase              = isDark ? Color.FromArgb(255, 44, 48, 56) : Color.FromArgb(255, 74, 80, 92);
+        TransitionChipHardCutFill    = WithAlpha(hardCutBase, 235);
+        TransitionChipHardCutBorder  = isDark ? Color.FromArgb(255, 120, 128, 144) : Color.FromArgb(255, 52, 58, 68);
+        TransitionChipHardCutGlyphColor = isDark ? Color.FromArgb(255, 196, 204, 218) : Color.FromArgb(255, 244, 246, 250);
 
         // ── Text & lines — system ──
         SpeedLabelTextColor   = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
@@ -1243,7 +1265,7 @@ public sealed partial class TimelineControl : UserControl
         }
 
         if (config.Type == TransitionType.None)
-            return "Transition: None (hard cut)\nClick to choose an effect.";
+            return "Transition: None (hard cut)\nClick to choose an effect · right-click to reset to Automatic.";
 
         return $"Transition: {DescribeTransitionType(config.Type)}\n" +
                $"{config.Duration.TotalSeconds:0.00}s · {DescribeEasing(config.Easing)}\n" +
@@ -1305,34 +1327,61 @@ public sealed partial class TimelineControl : UserControl
 
         var rect = GetTransitionChipRect(boundaryX, pad, clipH);
         bool isSelected = cur.Segment.Id == _selectedTransitionId;
-        bool configured = cur.Segment.InTransition is { Type: not TransitionType.None };
-
-        using var chipGeom = CanvasGeometry.CreateRoundedRectangle(
-            ds, (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height,
-            (float)rect.Height / 2f, (float)rect.Height / 2f);
+        var config = cur.Segment.InTransition;
 
         Color fill;
         Color border;
         Color glyphColor;
         string glyph;
-        if (configured)
+        if (config is null)
         {
-            (fill, glyph) = GetTransitionChipVisual(cur.Segment.InTransition!.Type);
-            border = isSelected ? VideoClipSelectedBorder : fill;
-            glyphColor = TransitionChipGlyphColor;
-        }
-        else
-        {
+            // Automatic: no config at all. Falls back to the legacy crossfade next to a text
+            // slide and a hard cut elsewhere.
             fill = TransitionChipEmptyFill;
-            border = isSelected ? VideoClipSelectedBorder : TransitionChipEmptyBorder;
+            border = TransitionChipEmptyBorder;
             glyph = "A";
             glyphColor = TransitionChipEmptyGlyphColor;
         }
+        else if (config.Type == TransitionType.None)
+        {
+            // An EXPLICIT hard cut is a real, user-chosen setting and must not be drawn as
+            // "Automatic" — the two behave differently (an explicit None suppresses even the
+            // slide-adjacent legacy crossfade), so showing them identically would tell the user
+            // their choice hadn't taken.
+            fill = TransitionChipHardCutFill;
+            border = TransitionChipHardCutBorder;
+            glyph = "\u2015"; // horizontal bar — "straight through, no effect"
+            glyphColor = TransitionChipHardCutGlyphColor;
+        }
+        else
+        {
+            (fill, glyph) = GetTransitionChipVisual(config.Type);
+            border = fill;
+            glyphColor = TransitionChipGlyphColor;
+        }
 
-        ds.FillGeometry(chipGeom, fill);
-        ds.DrawGeometry(chipGeom, border, isSelected ? 2f : 1f);
+        if (isSelected) border = VideoClipSelectedBorder;
 
-        using var glyphFmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        float radius = (float)rect.Height / 2f;
+        // Drawn with the rounded-rectangle primitives rather than a CanvasGeometry: this runs for
+        // every visible boundary on every canvas invalidation (including each pointer-move frame
+        // of a drag), and allocating a native geometry per chip per frame was pure churn.
+        ds.FillRoundedRectangle(
+            (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height, radius, radius, fill);
+        ds.DrawRoundedRectangle(
+            (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height, radius, radius,
+            border, isSelected ? 2f : 1f);
+
+        ds.DrawText(glyph, rect, glyphColor, TransitionChipGlyphFormat);
+    }
+
+    /// <summary>
+    /// Shared text format for every chip glyph. Cached for the same reason the chip no longer
+    /// builds a <see cref="CanvasGeometry"/> per draw — it is otherwise re-created for every
+    /// boundary on every invalidation. Disposed with the control.
+    /// </summary>
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat TransitionChipGlyphFormat =>
+        _transitionChipGlyphFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
         {
             FontSize = 10,
             FontFamily = "Segoe UI",
@@ -1342,8 +1391,8 @@ public sealed partial class TimelineControl : UserControl
             HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
             VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
         };
-        ds.DrawText(glyph, rect, glyphColor, glyphFmt);
-    }
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _transitionChipGlyphFormat;
 
     /// <summary>
     /// Hit-tests the boundary chips on the primary track. Returns the incoming
@@ -3111,10 +3160,11 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Right-clicking a configured transition chip requests its removal (mirroring
+    /// Right-clicking a chip that carries ANY explicit config — an effect or an explicit hard
+    /// cut — requests its removal, resetting the boundary to Automatic (mirroring
     /// <see cref="ZoomTrack_RightTapped"/> / <see cref="CameraTrack_RightTapped"/>).
-    /// Right-clicking an unconfigured "+" chip is a no-op — there is nothing to remove,
-    /// and this control must not create model state from a pointer event either.
+    /// Right-clicking an already-Automatic chip is a no-op: there is nothing to remove, and
+    /// this control must not create model state from a pointer event either.
     /// </summary>
     private void VideoTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
@@ -3125,7 +3175,11 @@ public sealed partial class TimelineControl : UserControl
         if (!chipHit || hitId is null) return;
 
         var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
-        if (incoming?.InTransition is not { Type: not TransitionType.None }) return;
+        // Any non-null config is removable. An explicit Type=None is a real user choice that
+        // suppresses the slide-adjacent legacy crossfade, so it must be resettable back to
+        // Automatic through the same gesture — treating it as "nothing to remove" left the
+        // user with no way to undo that choice from the timeline.
+        if (incoming?.InTransition is null) return;
 
         // Right-clicking a chip to remove its transition also SELECTS that boundary
         // (matching the existing zoom/camera right-tap pattern below), so — like any
@@ -3636,7 +3690,20 @@ public sealed partial class TimelineControl : UserControl
     public string? SelectedTextOverlayId
     {
         get => _selectedTextOverlayId;
-        set { _selectedTextOverlayId = value; TextTrackCanvas?.Invalidate(); }
+        set
+        {
+            // Routed through the same mutual-exclusion helper the pointer paths use, because
+            // this setter is also how PROGRAMMATIC selection happens (e.g. the toolbar's "Add
+            // Text Overlay", which selects the overlay it just created). Assigning the field
+            // directly left whatever was previously selected — a transition, say — still
+            // selected and never raised its deselection event, so its properties pane stayed
+            // open showing state the user had moved on from.
+            if (value is not null)
+                ClearOtherSelections(SelectionKind.TextOverlay);
+
+            _selectedTextOverlayId = value;
+            TextTrackCanvas?.Invalidate();
+        }
     }
 
     public void ClearTextOverlaySelection()
@@ -4077,6 +4144,13 @@ public sealed partial class TimelineControl : UserControl
     {
         var model = Model;
         if (model is null) return;
+
+        // Zooming or scrolling moves every chip out from under the pointer. Both the pending
+        // linger timer and any already-open tooltip are anchored to a rectangle that is about to
+        // be wrong, so drop the hover entirely — the next PointerMoved re-hit-tests and starts a
+        // fresh linger against wherever the chips actually landed.
+        _hoveredTransitionChipId = null;
+        HideTransitionChipToolTip();
 
         var props = e.GetCurrentPoint(this).Properties;
         int delta = props.MouseWheelDelta;
