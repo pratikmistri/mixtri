@@ -239,8 +239,42 @@ public sealed class ExportAudioPlanTransitionTests
         AssertSeconds(5, embedded[0].TakeDuration!.Value,
             "Speed-adjusted segment's take is unchanged by the transition — same as with no transition");
         Assert.IsTrue(embedded[0].PlaysAtNativeRateOnSpeedAdjustedSegment);
-        Assert.IsTrue(embedded[0].FadeOutDuration <= embedded[0].TakeDuration!.Value,
-            "Any fade-out that is still applied must fit inside the existing (unextended) take");
+
+        // The metadata must describe the overlap that was ACTUALLY applied, and none was: the
+        // take could not be extended, so there is no extra tail to ramp down. Recording a
+        // fade-out anyway would tell a future gain-envelope consumer to ramp this segment's own
+        // real final second down to silence, cutting content that should still be heard.
+        Assert.AreEqual(TimeSpan.Zero, embedded[0].FadeOutDuration,
+            "No extension was applied, so no fade-out may be recorded");
+
+        // ...and with nothing fading out underneath it, the incoming side must not ramp up from
+        // silence either — that would be a dip through the boundary rather than a crossfade.
+        Assert.AreEqual(TimeSpan.Zero, embedded[1].FadeInDuration,
+            "The incoming side has no outgoing overlap to dissolve against, so it must not fade in");
+    }
+
+    [TestMethod]
+    public void SpeedAdjustedIncomingSegment_StillFadesIn_WhenTheOutgoingSideCanOverlap()
+    {
+        // The mirror case, to prove the suppression above is scoped to the OUTGOING side only.
+        // A native-rate outgoing segment can lend real overlap room, so the boundary is a
+        // genuine crossfade even though the incoming segment happens to be speed-adjusted —
+        // a fade-in lives at the placement's leading edge and needs no extension of its own.
+        var project = NewProject();
+        var model = ModelWith(
+            Video(Primary, sourceStartSec: 0, sourceDurationSec: 10),
+            Video(
+                Primary, sourceStartSec: 10, sourceDurationSec: 10, speed: 2.0,
+                inTransition: new TransitionConfig { Type = TransitionType.CrossFade, Duration = TimeSpan.FromSeconds(1) }));
+
+        var embedded = ExportAudioPlan.Build(project, model, null)
+            .Where(p => p.Kind == AudioSourceKind.EmbeddedVideoTrack)
+            .ToList();
+
+        AssertSeconds(1, embedded[0].FadeOutDuration,
+            "The native-rate outgoing segment can extend, so it fades out over the transition");
+        AssertSeconds(1, embedded[1].FadeInDuration,
+            "The incoming side dissolves against that real overlap, speed-adjusted or not");
     }
 
     #endregion

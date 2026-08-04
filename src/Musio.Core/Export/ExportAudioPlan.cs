@@ -185,6 +185,22 @@ public static class ExportAudioPlan
     private const double SpeedEpsilon = 0.001;
 
     /// <summary>
+    /// Whether <paramref name="segment"/> plays at anything other than its native rate, and so
+    /// cannot have its audio extended past the boundary (see
+    /// <see cref="AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment"/>).
+    /// </summary>
+    /// <remarks>
+    /// Shared by the transition-metadata pass and <see cref="BuildPlacement"/> deliberately: if
+    /// the two ever disagreed about what counts as speed-adjusted, the plan would record fade
+    /// metadata for an overlap that was never actually applied (or vice versa).
+    /// </remarks>
+    private static bool IsSpeedAdjusted(VideoSegment segment)
+    {
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        return Math.Abs(speed - 1.0) > SpeedEpsilon;
+    }
+
+    /// <summary>
     /// Builds the ordered audio placements for an export. Nothing here touches the file
     /// system: callers resolve which placements actually have media (see
     /// <see cref="VideoEncoder"/>) before muxing.
@@ -234,7 +250,22 @@ public static class ExportAudioPlan
             if (!resolution.Active || resolution.Duration <= TimeSpan.Zero)
                 continue;
 
-            if (resolution.OutgoingSegment is VideoSegment outgoingVideo
+            var outgoingVideo = resolution.OutgoingSegment as VideoSegment;
+
+            // A speed-adjusted OUTGOING segment cannot lend any overlap room: BuildPlacement
+            // refuses to extend its take (its audio has no reliable output/source time
+            // correspondence and keeps its existing hard cap at the boundary — see
+            // PlaysAtNativeRateOnSpeedAdjustedSegment). Recording fade metadata anyway would
+            // describe a crossfade that cannot exist: a future gain-envelope consumer would
+            // ramp the outgoing segment's OWN final audio down to silence rather than the
+            // extra tail it never got, and ramp the incoming side up from silence with
+            // nothing underneath it — a dip in the middle of the boundary instead of a
+            // dissolve. So neither side records anything for such a boundary, keeping the
+            // metadata an exact description of the overlap that was actually applied.
+            if (outgoingVideo is not null && IsSpeedAdjusted(outgoingVideo))
+                continue;
+
+            if (outgoingVideo is not null
                 && videoIndexByRef.TryGetValue(outgoingVideo, out int outIdx))
             {
                 trailingExtension[outIdx] = resolution.Duration;
@@ -386,7 +417,7 @@ public static class ExportAudioPlan
         if (segment.SourceDuration <= TimeSpan.Zero || segment.Duration <= TimeSpan.Zero) return null;
 
         double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
-        bool speedAdjusted = Math.Abs(speed - 1.0) > SpeedEpsilon;
+        bool speedAdjusted = IsSpeedAdjusted(segment);
 
         // Only apply the extension at native speed: a speed-adjusted segment has no
         // reliable output/source time correspondence to begin with (see
