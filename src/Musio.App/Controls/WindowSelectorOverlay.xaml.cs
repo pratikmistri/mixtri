@@ -1,15 +1,12 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
-using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
 using Musio.Core.Interop;
-using Windows.Graphics.Imaging;
 
 namespace Musio_App.Controls;
 
@@ -19,23 +16,18 @@ namespace Musio_App.Controls;
 /// </summary>
 public sealed partial class WindowSelectorOverlay : UserControl
 {
-    private Window? _hostWindow;
+    private readonly OverlayHost _overlayHost;
     private TaskCompletionSource<WindowInfo?>? _tcs;
     private List<WindowInfo> _windows = new();
     private WindowInfo? _hoveredWindow;
 
-    private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
-
     // Virtual desktop bounds (physical pixels)
     private int _vdLeft, _vdTop, _vdWidth, _vdHeight;
-
-    // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
-    private IntPtr _keyboardHook;
-    private HookInterop.LowLevelKeyboardProc? _hookProc;
 
     public WindowSelectorOverlay()
     {
         InitializeComponent();
+        _overlayHost = new OverlayHost(this);
         Loaded += OnLoaded;
         SizeChanged += OnSizeChanged;
         KeyDown += OnKeyDown;
@@ -65,101 +57,51 @@ public sealed partial class WindowSelectorOverlay : UserControl
         _tcs = new TaskCompletionSource<WindowInfo?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        bool didMinimize = false;
-        IntPtr mainHwnd = IntPtr.Zero;
-        var shell = Musio_App.Services.ShellCoordinator.Instance;
-        var mainWindow = Musio_App.App.Current.MainAppWindow;
+        return await _overlayHost.ShowOverlayAsync<WindowInfo>(
+            title: "Select Window",
+            shellHideDelayMs: 400,
+            includeScreenshotPixels: false,
+            awaitResult: () => _tcs.Task);
+    }
 
-        try
+    /// <summary>
+    /// Shared host-window/Escape-hook/shell-hide lifecycle (see
+    /// <see cref="OverlayWindowBase"/>). Nested rather than a base class so this
+    /// control's own XAML root type (<see cref="UserControl"/>) is untouched.
+    /// </summary>
+    private sealed class OverlayHost : OverlayWindowBase
+    {
+        private readonly WindowSelectorOverlay _owner;
+
+        public OverlayHost(WindowSelectorOverlay owner) => _owner = owner;
+
+        protected override UIElement Content => _owner;
+        protected override DispatcherQueue DispatcherQueue => _owner.DispatcherQueue;
+        protected override void OnEscapePressed() => _owner._tcs?.TrySetResult(null);
+
+        protected override Task OnBeforeScreenshotAsync()
         {
-            if (shell is not null)
-            {
-                // The shell knows whether the Mini pill or the full window is up.
-                shell.HideForPicker();
-                didMinimize = true;
-                await Task.Delay(400);
-            }
-            else if (mainWindow is not null)
-            {
-                mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-                NativeMethods.ShowWindow(mainHwnd, SW_MINIMIZE);
-                didMinimize = true;
-                await Task.Delay(400);
-            }
-
             // Enumerate visible windows (in Z-order) before the overlay appears
-            EnumerateWindows();
+            _owner.EnumerateWindows();
 
-            _vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
-            _vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
-            _vdWidth = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
-            _vdHeight = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
+            _owner._vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+            _owner._vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+            _owner._vdWidth = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+            _owner._vdHeight = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
+            return Task.CompletedTask;
+        }
 
-            var screenshotSource = await CaptureDesktopScreenshotAsync();
+        protected override void OnHostWindowReady(OverlayScreenshotResult screenshot)
+        {
+            if (screenshot.Source is not null)
+                _owner.ScreenshotImage.Source = screenshot.Source;
 
-            _hostWindow = new Window();
-            _hostWindow.Content = this;
-            _hostWindow.ExtendsContentIntoTitleBar = true;
-            _hostWindow.Title = "Select Window";
-
-            if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.SetBorderAndTitleBar(false, false);
-                presenter.IsAlwaysOnTop = true;
-                presenter.IsResizable = false;
-                presenter.IsMaximizable = false;
-                presenter.IsMinimizable = false;
-            }
-
-            if (_vdWidth > 0 && _vdHeight > 0)
-            {
-                _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
-                    _vdLeft, _vdTop, _vdWidth, _vdHeight));
-            }
-
-            if (screenshotSource is not null)
-                ScreenshotImage.Source = screenshotSource;
-
-            _hostWindow.Closed += (_, _) => _tcs.TrySetResult(null);
-            _hostWindow.Activated += (_, args) =>
+            HostWindow!.Closed += (_, _) => _owner._tcs?.TrySetResult(null);
+            HostWindow!.Activated += (_, args) =>
             {
                 if (args.WindowActivationState != WindowActivationState.Deactivated)
-                    DispatcherQueue.TryEnqueue(() => Focus(FocusState.Programmatic));
+                    _owner.DispatcherQueue.TryEnqueue(() => _owner.Focus(FocusState.Programmatic));
             };
-
-            // Install low-level keyboard hook so Escape works even without XAML focus
-            _hookProc = EscapeHookCallback;
-            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
-
-            _hostWindow.Activate();
-
-            return await _tcs.Task;
-        }
-        finally
-        {
-            if (_keyboardHook != IntPtr.Zero)
-            {
-                UnhookWindowsHookEx(_keyboardHook);
-                _keyboardHook = IntPtr.Zero;
-            }
-            _hookProc = null;
-
-            try { _hostWindow?.Close(); }
-            catch { /* already closed */ }
-            _hostWindow = null;
-
-            if (didMinimize)
-            {
-                if (shell is not null)
-                {
-                    shell.RestoreAfterPicker();
-                }
-                else if (mainHwnd != IntPtr.Zero)
-                {
-                    NativeMethods.ShowWindow(mainHwnd, SW_RESTORE);
-                    mainWindow?.Activate();
-                }
-            }
         }
     }
 
@@ -399,121 +341,6 @@ public sealed partial class WindowSelectorOverlay : UserControl
         }
     }
 
-    private IntPtr EscapeHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0 && wParam == WM_KEYDOWN)
-        {
-            int vkCode = Marshal.ReadInt32(lParam);
-            if (vkCode == VK_ESCAPE)
-            {
-                DispatcherQueue.TryEnqueue(() => _tcs?.TrySetResult(null));
-                return (IntPtr)1;
-            }
-        }
-        return HookInterop.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
-    }
-
-    #region Desktop Screenshot
-
-    /// <summary>
-    /// Captures the full virtual desktop as a SoftwareBitmapSource via GDI BitBlt.
-    /// </summary>
-    private static async Task<SoftwareBitmapSource?> CaptureDesktopScreenshotAsync()
-    {
-        IntPtr hdcScreen = IntPtr.Zero;
-        IntPtr hdcMem = IntPtr.Zero;
-        IntPtr hBitmap = IntPtr.Zero;
-        IntPtr oldObj = IntPtr.Zero;
-
-        try
-        {
-            int left = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
-            int top = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
-            int width = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
-            int height = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
-
-            if (width <= 0 || height <= 0 || width > 16384 || height > 16384)
-                return null;
-
-            long byteCount;
-            try
-            {
-                byteCount = checked((long)width * height * 4L);
-            }
-            catch (OverflowException)
-            {
-                return null;
-            }
-
-            if (byteCount > MaxScreenshotBytes)
-                return null;
-
-            hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
-            if (hdcScreen == IntPtr.Zero)
-                return null;
-
-            hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
-            if (hdcMem == IntPtr.Zero)
-                return null;
-
-            hBitmap = NativeMethods.CreateCompatibleBitmap(hdcScreen, width, height);
-            if (hBitmap == IntPtr.Zero)
-                return null;
-
-            oldObj = NativeMethods.SelectObject(hdcMem, hBitmap);
-            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
-                return null;
-
-            if (!NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
-                return null;
-
-            IntPtr restoredObj = NativeMethods.SelectObject(hdcMem, oldObj);
-            if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
-                return null;
-            oldObj = IntPtr.Zero;
-
-            var bmi = new BITMAPINFO
-            {
-                biSize = 40,
-                biWidth = width,
-                biHeight = -height, // top-down
-                biPlanes = 1,
-                biBitCount = 32,
-                biCompression = 0,
-            };
-
-            var pixelData = new byte[(int)byteCount];
-            int scanLines = NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
-            if (scanLines != height)
-                return null;
-
-            using var softwareBitmap = new SoftwareBitmap(
-                BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
-            softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
-
-            var source = new SoftwareBitmapSource();
-            await source.SetBitmapAsync(softwareBitmap);
-            return source;
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            if (oldObj != IntPtr.Zero)
-                NativeMethods.SelectObject(hdcMem, oldObj);
-            if (hBitmap != IntPtr.Zero)
-                NativeMethods.DeleteObject(hBitmap);
-            if (hdcMem != IntPtr.Zero)
-                NativeMethods.DeleteDC(hdcMem);
-            if (hdcScreen != IntPtr.Zero)
-                NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen);
-        }
-    }
-
-    #endregion
-
     /// <summary>
     /// Returns the window's visible bounds using DWM extended frame bounds when available,
     /// which excludes the invisible resize border that <see cref="GetWindowRect"/> includes.
@@ -532,16 +359,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     #region P/Invoke
 
-    private const int SW_MINIMIZE = 6;
-    private const int SW_RESTORE = 9;
-    private const uint SRCCOPY = 0x00CC0020;
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int DWMWA_CLOAKED = 14;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
-
-    private static readonly IntPtr WM_KEYDOWN = 0x0100;
-    private const int VK_ESCAPE = 0x1B;
 
     [DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr hwnd, int nIndex);
@@ -551,12 +372,6 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
     private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll")]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
     #endregion
 }
