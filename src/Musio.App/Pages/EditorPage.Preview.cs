@@ -494,7 +494,7 @@ public sealed partial class EditorPage
     private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
     {
         if (_frameReader is null) return;
-        if (_graphicsRecoveryInProgress)
+        if (_graphicsDeviceManager.IsRecoveryInProgress)
         {
             _pendingRenderPosition = position;
             _pendingRenderForce |= force;

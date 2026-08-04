@@ -114,10 +114,7 @@ public sealed partial class EditorPage : Page
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
     private bool _syncingTimelineFromPlayback;
-    private CanvasDevice? _graphicsDevice;
-    private int _graphicsRecoveryQueued;
-    private int _graphicsRecoveryRequested;
-    private bool _graphicsRecoveryInProgress;
+    private readonly EditorGraphicsDeviceManager _graphicsDeviceManager;
     private bool _pageUnloaded;
 
     // Background style editing state
@@ -142,11 +139,13 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         ExportVM = new ExportViewModel();
         InitializeComponent();
-        AttachGraphicsDevice();
+        _graphicsDeviceManager = new EditorGraphicsDeviceManager(
+            DispatcherQueue, RecoverGraphicsDeviceAsync, () => _pageUnloaded);
+        _graphicsDeviceManager.Attach();
         Loaded += (_, _) =>
         {
             _pageUnloaded = false;
-            AttachGraphicsDevice();
+            _graphicsDeviceManager.Attach();
         };
         WirePropertyPanels();
 
@@ -317,7 +316,7 @@ public sealed partial class EditorPage : Page
         Unloaded += (_, _) =>
         {
             _pageUnloaded = true;
-            DetachGraphicsDevice();
+            _graphicsDeviceManager.Detach();
             _styleDebouncer?.Stop();
             _styleDebouncer = null;
             _cursorDebouncer?.Stop();
@@ -370,128 +369,59 @@ public sealed partial class EditorPage : Page
     /// </summary>
     public void PausePlayback() => Preview.Pause();
 
-    private void AttachGraphicsDevice()
-    {
-        try
-        {
-            var device = CanvasDevice.GetSharedDevice();
-            if (ReferenceEquals(_graphicsDevice, device))
-                return;
-
-            DetachGraphicsDevice();
-            _graphicsDevice = device;
-            _graphicsDevice.DeviceLost += OnGraphicsDeviceLost;
-        }
-        catch (Exception ex)
-        {
-            Musio.Core.Diagnostics.DiagLog.Write(
-                "Editor", $"failed to attach graphics-device recovery: {ex.Message}");
-        }
-    }
-
-    private void DetachGraphicsDevice()
-    {
-        if (_graphicsDevice is null)
-            return;
-
-        _graphicsDevice.DeviceLost -= OnGraphicsDeviceLost;
-        _graphicsDevice = null;
-    }
-
-    private void OnGraphicsDeviceLost(CanvasDevice sender, object args)
-    {
-        Musio.Core.Diagnostics.DiagLog.Write(
-            "Editor", "shared CanvasDevice lost; scheduling editor graphics recovery");
-
-        Interlocked.Exchange(ref _graphicsRecoveryRequested, 1);
-        if (Interlocked.Exchange(ref _graphicsRecoveryQueued, 1) != 0)
-            return;
-
-        if (!DispatcherQueue.TryEnqueue(async () =>
-            {
-                try
-                {
-                    do
-                    {
-                        Interlocked.Exchange(ref _graphicsRecoveryRequested, 0);
-                        await RecoverGraphicsDeviceAsync();
-                    }
-                    while (!_pageUnloaded
-                        && Interlocked.CompareExchange(
-                            ref _graphicsRecoveryRequested, 0, 0) != 0);
-                }
-                catch (Exception ex)
-                {
-                    Musio.Core.Diagnostics.DiagLog.Write(
-                        "Editor", $"graphics recovery failed: {ex}");
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
-                }
-            }))
-        {
-            Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
-        }
-    }
-
+    /// <summary>
+    /// Recovery work run by <see cref="EditorGraphicsDeviceManager"/> after a
+    /// <see cref="CanvasDevice.DeviceLost"/> event: tears down and rebuilds the preview
+    /// pipeline, renderers, and timeline thumbnails against a freshly (re)attached shared
+    /// device. The manager owns the re-entrancy/unloaded guard around this method and the
+    /// queued-retry loop that calls it; this method only does the page-specific work.
+    /// </summary>
     private async Task RecoverGraphicsDeviceAsync()
     {
-        if (_pageUnloaded || _graphicsRecoveryInProgress)
+        TimeSpan position = Preview.PlayheadPosition;
+        Preview.Pause();
+        _pendingRenderPosition = null;
+        _pendingRenderForce = false;
+
+        while (_isRendering && !_pageUnloaded)
+            await Task.Delay(25);
+
+        if (_pageUnloaded)
             return;
 
-        _graphicsRecoveryInProgress = true;
-        TimeSpan position = Preview.PlayheadPosition;
-        try
-        {
-            Preview.Pause();
-            _pendingRenderPosition = null;
-            _pendingRenderForce = false;
+        _previewInitGeneration++;
+        _thumbnailGenerationId++;
+        _segmentPreviewGeneration++;
 
-            while (_isRendering && !_pageUnloaded)
-                await Task.Delay(25);
+        Preview.ClearFrame();
+        DisposeOffUiThread(_frameReader);
+        _frameReader = null;
+        TryDispose(_previewRenderer);
+        _previewRenderer = null;
+        _compositorReady = false;
+        TryDispose(_textSlideRenderer);
+        _textSlideRenderer = null;
+        TryDispose(_transitionRenderer);
+        _transitionRenderer = null;
+        DisposeSegmentPreviews();
+        DisposePrimaryStyleRenderers();
+        TryDispose(_lastWebcamFrame);
+        _lastWebcamFrame = null;
+        try { _webcamComposition?.Clips.Clear(); } catch { }
+        _webcamComposition = null;
 
-            if (_pageUnloaded)
-                return;
+        Timeline.ClearThumbnails();
+        Timeline.ClearSegmentTrackVisuals();
+        _thumbnailsCompletedForPath = null;
+        _thumbnailsInFlightForPath = null;
+        _thumbnailsDoneForFiles.Clear();
 
-            _previewInitGeneration++;
-            _thumbnailGenerationId++;
-            _segmentPreviewGeneration++;
-
-            Preview.ClearFrame();
-            DisposeOffUiThread(_frameReader);
-            _frameReader = null;
-            TryDispose(_previewRenderer);
-            _previewRenderer = null;
-            _compositorReady = false;
-            TryDispose(_textSlideRenderer);
-            _textSlideRenderer = null;
-            TryDispose(_transitionRenderer);
-            _transitionRenderer = null;
-            DisposeSegmentPreviews();
-            DisposePrimaryStyleRenderers();
-            TryDispose(_lastWebcamFrame);
-            _lastWebcamFrame = null;
-            try { _webcamComposition?.Clips.Clear(); } catch { }
-            _webcamComposition = null;
-
-            Timeline.ClearThumbnails();
-            Timeline.ClearSegmentTrackVisuals();
-            _thumbnailsCompletedForPath = null;
-            _thumbnailsInFlightForPath = null;
-            _thumbnailsDoneForFiles.Clear();
-
-            DetachGraphicsDevice();
-            AttachGraphicsDevice();
-            await InitializePreviewCoreAsync();
-            position = Preview.PlayheadPosition;
-            _pendingRenderPosition = null;
-            _pendingRenderForce = false;
-        }
-        finally
-        {
-            _graphicsRecoveryInProgress = false;
-        }
+        _graphicsDeviceManager.Detach();
+        _graphicsDeviceManager.Attach();
+        await InitializePreviewCoreAsync();
+        position = Preview.PlayheadPosition;
+        _pendingRenderPosition = null;
+        _pendingRenderForce = false;
 
         if (_pageUnloaded)
             return;
