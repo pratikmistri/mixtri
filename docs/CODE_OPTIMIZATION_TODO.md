@@ -161,6 +161,43 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 ---
 
+## M1 - Timeline gesture handling
+
+- [ ] **OPT-105: Wire `PointerCaptureLost`/`PointerCanceled` on the zoom, camera and
+      text-overlay tracks**
+  - **Evidence:** `src/Musio.App/Controls/TimelineControl.xaml.cs` — `ZoomTrack_*`,
+    `CameraTrack_*` and `TextTrack_*` each call `CapturePointer` in their
+    `*_PointerPressed` handler, but only `*_PointerReleased` releases it. None of the
+    three wires `PointerCaptureLost` or `PointerCanceled` (only `VideoTrack` wires
+    `PointerExited`).
+  - **This is a latent bug, not a cleanup item.** If a capture is interrupted before
+    `PointerReleased` — a system gesture, a shell switch, a touch cancellation — the
+    release never runs and the track is left mid-drag, which wedges timeline interaction
+    until the app restarts. Found while auditing pointer-capture pairing for the (declined)
+    `TrackGestureHandler` extraction; it is pre-existing and was deliberately left
+    untouched there rather than fixed as a drive-by.
+  - **Proposed fix:** wire both events on all three canvases to the same teardown path
+    `*_PointerReleased` uses (reset `_dragMode`, clear drag state, release capture), taking
+    care that the teardown is idempotent since a released capture can also raise
+    `PointerCaptureLost`.
+
+- [ ] **OPT-106: Reconsider `TrackGestureHandler<TSegment>` once the tracks converge**
+  - **Evidence:** the zoom/camera/text-overlay gesture stacks in
+    `src/Musio.App/Controls/TimelineControl.xaml.cs` are structurally parallel but diverge
+    behaviourally in five ways: zoom shows a `MenuFlyout` on right-tap while camera and text
+    remove immediately; zoom only permits an edge grab once the segment is already selected;
+    zoom and text resolve the create-domain across recordings while camera is primary-only;
+    each track has its own edge hit-width constant; and camera and text clamp a moved start
+    to `TimeSpan.Zero` where zoom does not.
+  - Attempted during Wave 4 and **deliberately abandoned**: generalising over those
+    differences would require threading nearly every step through per-track delegates, in a
+    file with no automated coverage, for very little genuine sharing. Only the shared
+    coordinate maths was extracted (`TimeCoordinateConverter`).
+  - **Proposed fix:** revisit only if the tracks' interaction models are intentionally
+    unified first (e.g. all three gaining a right-tap menu and consistent clamping). Unifying
+    the *behaviour* is the prerequisite; sharing the *code* is then trivial. Do not attempt
+    the code-sharing while the behaviours still differ.
+
 ## M1 - Filmstrip
 
 - [ ] **OPT-107: Primary filmstrip never generates when the opened project has no `VideoFilePath`**
