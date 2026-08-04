@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 
 namespace Musio.Core.Capture;
 
@@ -11,16 +12,16 @@ public static class MonitorEnumerator
     {
         var monitors = new List<CaptureTarget>();
 
-        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+        MonitorInterop.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
             (IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData) =>
             {
                 var info = new MONITORINFOEX();
                 info.cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>();
 
-                if (GetMonitorInfo(hMonitor, ref info))
+                if (MonitorInterop.GetMonitorInfo(hMonitor, ref info))
                 {
                     string deviceName = info.szDevice;
-                    bool isPrimary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+                    bool isPrimary = (info.dwFlags & MonitorInterop.MONITORINFOF_PRIMARY) != 0;
                     string displayName = isPrimary
                         ? $"{deviceName} (Primary)"
                         : deviceName;
@@ -37,44 +38,4 @@ public static class MonitorEnumerator
 
         return monitors;
     }
-
-    private const uint MONITORINFOF_PRIMARY = 1;
-
-    private delegate bool MonitorEnumProc(
-        IntPtr hMonitor,
-        IntPtr hdcMonitor,
-        ref RECT lprcMonitor,
-        IntPtr dwData);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct MONITORINFOEX
-    {
-        public uint cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        public string szDevice;
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumDisplayMonitors(
-        IntPtr hdc,
-        IntPtr lprcClip,
-        MonitorEnumProc lpfnEnum,
-        IntPtr dwData);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool GetMonitorInfo(
-        IntPtr hMonitor,
-        ref MONITORINFOEX lpmi);
 }

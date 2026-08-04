@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 using Musio.Core.Models;
 
 namespace Musio.Core.Capture;
@@ -25,22 +26,6 @@ public sealed class CursorShapeResolver
     private const int IDC_SIZEWE = 32644;
     private const int IDC_SIZENS = 32645;
     private const int IDC_HAND = 32649;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CURSORINFO
-    {
-        public int cbSize;
-        public int flags;
-        public nint hCursor;
-        public POINT ptScreenPos;
-    }
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

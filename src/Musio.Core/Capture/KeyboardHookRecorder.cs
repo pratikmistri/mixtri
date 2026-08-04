@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 
 namespace Musio.Core.Capture;
 
@@ -22,12 +23,10 @@ public sealed class KeyboardHookRecorder : IDisposable
 {
     #region Win32 interop
 
-    private const int WH_KEYBOARD_LL = 13;
     private const int WM_KEYDOWN    = 0x0100;
     private const int WM_KEYUP      = 0x0101;
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int WM_SYSKEYUP   = 0x0105;
-    private const int WM_QUIT       = 0x0012;
 
     // Virtual key codes for modifiers
     private const int VK_LSHIFT   = 0xA0;
@@ -52,56 +51,15 @@ public sealed class KeyboardHookRecorder : IDisposable
         public nint dwExtraInfo;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MSG
-    {
-        public nint hwnd;
-        public uint message;
-        public nint wParam;
-        public nint lParam;
-        public uint time;
-        public POINT pt;
-    }
-
-    private delegate nint LowLevelKeyboardProc(int nCode, nint wParam, nint lParam);
-
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern nint SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, nint hMod, uint dwThreadId);
+    private static extern nint SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, nint hMod, uint dwThreadId);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool UnhookWindowsHookEx(nint hhk);
 
-    [DllImport("user32.dll")]
-    private static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint GetModuleHandle(string? lpModuleName);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool TranslateMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll")]
-    private static extern nint DispatchMessage(ref MSG lpMsg);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostThreadMessage(uint idThread, uint Msg, nint wParam, nint lParam);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
@@ -111,7 +69,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     private const int DefaultCapacity = 10_000;
 
     private nint _hookId;
-    private LowLevelKeyboardProc? _hookProc;
+    private HookInterop.LowLevelKeyboardProc? _hookProc;
 
     private readonly List<KeyPressEvent> _events = new(DefaultCapacity);
     private readonly object _lock = new();
@@ -172,7 +130,7 @@ public sealed class KeyboardHookRecorder : IDisposable
 
         IsRecording = false;
 
-        PostThreadMessage(_hookThreadId, WM_QUIT, 0, 0);
+        HookInterop.PostThreadMessage(_hookThreadId, HookInterop.WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
     }
@@ -189,21 +147,21 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     private void HookThreadProc()
     {
-        _hookThreadId = GetCurrentThreadId();
+        _hookThreadId = HookInterop.GetCurrentThreadId();
         _hookProc = HookCallback;
 
         nint hMod = GetModuleHandle(null);
-        _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, hMod, 0);
+        _hookId = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, hMod, 0);
 
         _hookReady.Set();
 
         if (_hookId == nint.Zero)
             return;
 
-        while (GetMessage(out MSG msg, nint.Zero, 0, 0))
+        while (HookInterop.GetMessage(out HookInterop.MSG msg, nint.Zero, 0, 0))
         {
-            TranslateMessage(ref msg);
-            DispatchMessage(ref msg);
+            HookInterop.TranslateMessage(ref msg);
+            HookInterop.DispatchMessage(ref msg);
         }
 
         UnhookWindowsHookEx(_hookId);
@@ -250,7 +208,7 @@ public sealed class KeyboardHookRecorder : IDisposable
             Debug.WriteLine($"[KeyboardHookRecorder] HookCallback error: {ex.Message}");
         }
 
-        return CallNextHookEx(_hookId, nCode, wParam, lParam);
+        return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
     private void UpdateModifierState(int vk, bool isDown)

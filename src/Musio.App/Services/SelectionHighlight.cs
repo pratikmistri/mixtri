@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 
 namespace Musio_App.Services;
 
@@ -144,7 +145,7 @@ public sealed class SelectionHighlight : IDisposable
     {
         x = y = width = height = 0;
 
-        if (hwnd == IntPtr.Zero || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd))
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd) || !NativeMethods.IsWindowVisible(hwnd) || NativeMethods.IsIconic(hwnd))
             return false;
 
         // Prefer the DWM extended frame: GetWindowRect includes the invisible
@@ -153,7 +154,7 @@ public sealed class SelectionHighlight : IDisposable
         RECT rect;
         int hr = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
             out rect, Marshal.SizeOf<RECT>());
-        if (hr != 0 && !GetWindowRect(hwnd, out rect))
+        if (hr != 0 && !NativeMethods.GetWindowRect(hwnd, out rect))
             return false;
 
         x = rect.Left;
@@ -194,7 +195,7 @@ public sealed class SelectionHighlight : IDisposable
         var rect = new RECT { Left = x, Top = y, Right = x + width, Bottom = y + height };
         var monitor = MonitorFromRect(ref rect, MONITOR_DEFAULTTONEAREST);
         if (monitor != IntPtr.Zero
-            && GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0
+            && MonitorInterop.GetDpiForMonitor(monitor, MonitorInterop.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0
             && dpiX > 0)
         {
             scale = dpiX / 96.0;
@@ -245,7 +246,7 @@ public sealed class SelectionHighlight : IDisposable
             _radius * 2, _radius * 2);
 
         CombineRgn(ring, ring, inner, RGN_DIFF);
-        DeleteObject(inner);
+        NativeMethods.DeleteObject(inner);
 
         PunchDashGaps(ring, outerW, outerH);
 
@@ -292,7 +293,7 @@ public sealed class SelectionHighlight : IDisposable
     {
         var gap = CreateRectRgn(left, top, right, bottom);
         CombineRgn(region, region, gap, RGN_DIFF);
-        DeleteObject(gap);
+        NativeMethods.DeleteObject(gap);
     }
 
     /// <summary>
@@ -301,10 +302,10 @@ public sealed class SelectionHighlight : IDisposable
     /// </summary>
     private void UpdateSmoke(int x, int y, int width, int height)
     {
-        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        int vx = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+        int vy = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+        int vw = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+        int vh = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
         if (vw <= 0 || vh <= 0) return;
 
         if (_smokeHwnd == IntPtr.Zero)
@@ -331,7 +332,7 @@ public sealed class SelectionHighlight : IDisposable
             (_radius + _thickness) * 2, (_radius + _thickness) * 2);
 
         CombineRgn(full, full, hole, RGN_DIFF);
-        DeleteObject(hole);
+        NativeMethods.DeleteObject(hole);
 
         SetWindowRgn(_smokeHwnd, full, true);
         InvalidateRect(_smokeHwnd, IntPtr.Zero, true);
@@ -360,7 +361,7 @@ public sealed class SelectionHighlight : IDisposable
     private void ApplyKeepAbove()
     {
         if (_keepAboveHwnd == IntPtr.Zero || !IsShown) return;
-        if (!IsWindow(_keepAboveHwnd)) { _keepAboveHwnd = IntPtr.Zero; return; }
+        if (!NativeMethods.IsWindow(_keepAboveHwnd)) { _keepAboveHwnd = IntPtr.Zero; return; }
 
         SetWindowPos(_keepAboveHwnd, HWND_TOPMOST, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -374,7 +375,7 @@ public sealed class SelectionHighlight : IDisposable
 
         if (_borderBrush != IntPtr.Zero)
         {
-            DeleteObject(_borderBrush);
+            NativeMethods.DeleteObject(_borderBrush);
             _borderBrush = IntPtr.Zero;
             _borderColor = 0;
         }
@@ -408,7 +409,7 @@ public sealed class SelectionHighlight : IDisposable
             InvalidateRect(_borderHwnd, IntPtr.Zero, true);
         }
 
-        if (old != IntPtr.Zero) DeleteObject(old);
+        if (old != IntPtr.Zero) NativeMethods.DeleteObject(old);
     }
 
     /// <summary>
@@ -449,8 +450,8 @@ public sealed class SelectionHighlight : IDisposable
         _layerBrushes[hwnd] = brush;
 
         SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        NativeMethods.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        NativeMethods.ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         return hwnd;
     }
@@ -460,7 +461,7 @@ public sealed class SelectionHighlight : IDisposable
         if (hwnd != IntPtr.Zero)
         {
             _layerBrushes.Remove(hwnd);
-            DestroyWindow(hwnd);
+            NativeMethods.DestroyWindow(hwnd);
             hwnd = IntPtr.Zero;
         }
     }
@@ -521,14 +522,9 @@ public sealed class SelectionHighlight : IDisposable
     private const int RGN_DIFF = 4;
     private const int BLACK_BRUSH = 4;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const int MDT_EFFECTIVE_DPI = 0;
     private const uint SPI_GETHIGHCONTRAST = 0x0042;
     private const uint HCF_HIGHCONTRASTON = 0x00000001;
     private const int COLOR_HIGHLIGHT = 13;
-    private const int SM_XVIRTUALSCREEN = 76;
-    private const int SM_YVIRTUALSCREEN = 77;
-    private const int SM_CXVIRTUALSCREEN = 78;
-    private const int SM_CYVIRTUALSCREEN = 79;
     private static readonly IntPtr HWND_TOPMOST = new(-1);
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
@@ -545,9 +541,6 @@ public sealed class SelectionHighlight : IDisposable
         IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
 
     [DllImport("user32.dll")]
-    private static extern bool DestroyWindow(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hwnd, IntPtr hWndInsertAfter,
         int x, int y, int cx, int cy, uint flags);
 
@@ -558,9 +551,6 @@ public sealed class SelectionHighlight : IDisposable
     private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, byte dwFlags);
 
     [DllImport("user32.dll")]
-    private static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
-
-    [DllImport("user32.dll")]
     private static extern bool InvalidateRect(IntPtr hwnd, IntPtr lpRect, bool bErase);
 
     [DllImport("user32.dll")]
@@ -569,17 +559,11 @@ public sealed class SelectionHighlight : IDisposable
     [DllImport("user32.dll")]
     private static extern int FillRect(IntPtr hdc, ref RECT lprc, IntPtr hbr);
 
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern ushort RegisterClassEx(ref WNDCLASSEX lpWndClass);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr DefWindowProcW(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, ref HIGHCONTRAST pvParam, uint fWinIni);
@@ -589,21 +573,6 @@ public sealed class SelectionHighlight : IDisposable
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromRect(ref RECT lprc, uint dwFlags);
-
-    [DllImport("shcore.dll")]
-    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindow(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsIconic(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT pvAttribute, int cbAttribute);
@@ -625,12 +594,6 @@ public sealed class SelectionHighlight : IDisposable
 
     [DllImport("gdi32.dll")]
     private static extern int CombineRgn(IntPtr dest, IntPtr src1, IntPtr src2, int mode);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteObject(IntPtr hObject);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct HIGHCONTRAST

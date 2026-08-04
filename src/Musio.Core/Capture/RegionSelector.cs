@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 using Musio.Core.Settings;
 
 namespace Musio.Core.Capture;
@@ -38,16 +39,16 @@ public class RegionSelector
     {
         var monitors = new List<MonitorInfo>();
 
-        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+        MonitorInterop.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
             (IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData) =>
             {
                 var info = new MONITORINFOEX();
                 info.cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>();
 
-                if (GetMonitorInfo(hMonitor, ref info))
+                if (MonitorInterop.GetMonitorInfo(hMonitor, ref info))
                 {
                     string deviceName = info.szDevice;
-                    bool isPrimary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+                    bool isPrimary = (info.dwFlags & MonitorInterop.MONITORINFOF_PRIMARY) != 0;
 
                     monitors.Add(new MonitorInfo(
                         hMonitor,
@@ -82,12 +83,12 @@ public class RegionSelector
     {
         var windows = new List<WindowInfo>();
 
-        EnumWindows((IntPtr hwnd, IntPtr lParam) =>
+        NativeMethods.EnumWindows((IntPtr hwnd, IntPtr lParam) =>
         {
-            if (!IsWindowVisible(hwnd))
+            if (!NativeMethods.IsWindowVisible(hwnd))
                 return true;
 
-            if (GetWindowTextLength(hwnd) == 0)
+            if (NativeMethods.GetWindowTextLength(hwnd) == 0)
                 return true;
 
             var info = BuildWindowInfo(hwnd);
@@ -108,14 +109,14 @@ public class RegionSelector
                 return null;
 
             var titleBuffer = new char[256];
-            int titleLen = GetWindowText(hwnd, titleBuffer, titleBuffer.Length);
+            int titleLen = NativeMethods.GetWindowText(hwnd, titleBuffer, titleBuffer.Length);
             string title = titleLen > 0 ? new string(titleBuffer, 0, titleLen) : string.Empty;
 
             string processName = string.Empty;
             string? exePath = null;
             try
             {
-                GetWindowThreadProcessId(hwnd, out uint processId);
+                NativeMethods.GetWindowThreadProcessId(hwnd, out uint processId);
                 if (processId != 0)
                 {
                     using var process = Process.GetProcessById((int)processId);
@@ -157,63 +158,15 @@ public class RegionSelector
         {
             return true;
         }
-        return GetWindowRect(hwnd, out rect);
+        return NativeMethods.GetWindowRect(hwnd, out rect);
     }
 
     #region P/Invoke declarations
 
-    private const uint MONITORINFOF_PRIMARY = 1;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
-
-    private delegate bool MonitorEnumProc(
-        IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
-
-    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT { public int X; public int Y; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct MONITORINFOEX
-    {
-        public uint cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        public string szDevice;
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumDisplayMonitors(
-        IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
     [DllImport("user32.dll")]
     private static extern IntPtr WindowFromPoint(POINT point);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hwnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowText(IntPtr hwnd, char[] lpString, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    private static extern int GetWindowTextLength(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
     private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);

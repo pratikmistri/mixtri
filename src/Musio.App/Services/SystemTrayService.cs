@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using Musio.Core.Interop;
 
 namespace Musio_App.Services;
 
@@ -74,7 +75,7 @@ public sealed class SystemTrayService : IDisposable
 
         if (_messageWindowHwnd != IntPtr.Zero)
         {
-            DestroyWindow(_messageWindowHwnd);
+            NativeMethods.DestroyWindow(_messageWindowHwnd);
             _messageWindowHwnd = IntPtr.Zero;
         }
     }
@@ -183,7 +184,7 @@ public sealed class SystemTrayService : IDisposable
 
             GetCursorPos(out var pt);
             // Required so the menu dismisses when clicking outside it
-            SetForegroundWindow(_messageWindowHwnd);
+            NativeMethods.SetForegroundWindow(_messageWindowHwnd);
             TrackPopupMenuEx(hMenu, TPM_RIGHTBUTTON, pt.X, pt.Y, _messageWindowHwnd, IntPtr.Zero);
         }
         finally
@@ -246,13 +247,6 @@ public sealed class SystemTrayService : IDisposable
         public IntPtr hBalloonIcon;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
-    }
-
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASS
     {
@@ -292,17 +286,11 @@ public sealed class SystemTrayService : IDisposable
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out POINT lpPoint);
 
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateWindowExW(
         uint dwExStyle, string lpClassName, string lpWindowName,
         uint dwStyle, int x, int y, int nWidth, int nHeight,
         IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
-
-    [DllImport("user32.dll")]
-    private static extern bool DestroyWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
