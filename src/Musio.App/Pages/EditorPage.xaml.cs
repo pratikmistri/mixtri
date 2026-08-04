@@ -3300,23 +3300,70 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Rebuilds <see cref="TransitionVariantCombo"/>'s item list for <paramref name="familyTag"/>
+    /// Ensures <see cref="TransitionVariantCombo"/> lists <paramref name="familyTag"/>'s variants
     /// (its contents depend on which family is selected, so — unlike the other panes' static
     /// XAML-declared combos — it is populated here) and selects <paramref name="selected"/>,
     /// defaulting to the family's first variant if that type isn't a member of it.
     /// </summary>
+    /// <remarks>
+    /// <b>The item collection is only rebuilt when it actually differs, and this is load-bearing
+    /// rather than an optimisation.</b> Selecting a variant runs
+    /// <c>TransitionVariantCombo_SelectionChanged</c> -> <c>UndoRedoManager.Execute</c> ->
+    /// <c>OnUndoRedoStateChanged</c> -> <see cref="SyncTransitionUI"/> -> here, and that
+    /// dispatcher callback lands while this ComboBox's own dropdown is still open or mid-close
+    /// animation. Clearing and refilling <c>Items</c> in that state leaves WinUI unable to
+    /// reconcile the live popup against the mutated collection, and it fail-fasts the process
+    /// with a stowed <c>E_UNEXPECTED</c> (0x8000FFFF) inside <c>Microsoft.UI.Xaml.dll</c> —
+    /// observed as an APPCRASH with exception code 0xC000027B. Picking a *family* never hit it
+    /// because the popup that is open then belongs to the other combo.
+    /// <para>
+    /// So for the overwhelmingly common "same family, different variant" resync the collection
+    /// is left completely untouched and only the selection moves, which is safe with the popup
+    /// open. The destructive rebuild then only happens on a genuine family change, when this
+    /// combo's own dropdown is closed.
+    /// </para>
+    /// </remarks>
     private void PopulateTransitionVariantCombo(string familyTag, TransitionType selected)
     {
-        TransitionVariantCombo.Items.Clear();
-        foreach (var (type, label) in TransitionVariantsForFamily(familyTag))
+        var variants = TransitionVariantsForFamily(familyTag);
+
+        if (!TransitionVariantComboAlreadyLists(variants))
         {
-            var item = new ComboBoxItem { Content = label, Tag = type.ToString() };
-            TransitionVariantCombo.Items.Add(item);
-            if (type == selected)
-                TransitionVariantCombo.SelectedItem = item;
+            TransitionVariantCombo.Items.Clear();
+            foreach (var (type, label) in variants)
+            {
+                // Selection is applied after the collection settles, never mid-population:
+                // assigning SelectedItem while Items is still being mutated is the same class
+                // of reconciliation hazard described above.
+                TransitionVariantCombo.Items.Add(new ComboBoxItem { Content = label, Tag = type.ToString() });
+            }
         }
-        if (TransitionVariantCombo.SelectedItem is null && TransitionVariantCombo.Items.Count > 0)
+
+        SelectComboItemByTag(TransitionVariantCombo, selected.ToString());
+        if (TransitionVariantCombo.SelectedIndex < 0 && TransitionVariantCombo.Items.Count > 0)
             TransitionVariantCombo.SelectedIndex = 0;
+    }
+
+    /// <summary>
+    /// Whether <see cref="TransitionVariantCombo"/> already lists exactly <paramref name="variants"/>,
+    /// in order — i.e. whether a rebuild can be skipped. Compared by the items' <c>Tag</c>
+    /// (the <see cref="TransitionType"/> name), which is what selection is driven by.
+    /// </summary>
+    private bool TransitionVariantComboAlreadyLists((TransitionType Type, string Label)[] variants)
+    {
+        if (TransitionVariantCombo.Items.Count != variants.Length)
+            return false;
+
+        for (int i = 0; i < variants.Length; i++)
+        {
+            if (TransitionVariantCombo.Items[i] is not ComboBoxItem item ||
+                item.Tag as string != variants[i].Type.ToString())
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
