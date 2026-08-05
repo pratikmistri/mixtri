@@ -159,6 +159,37 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 ---
 
+## M1 - Filmstrip
+
+- [ ] **OPT-107: Primary filmstrip never generates when the opened project has no `VideoFilePath`**
+  - **Evidence:** `diag.log` reports
+    `[Filmstrip] no thumbnails for segment '...\OpenProjects\<id>\video.mp4' (primary '')`
+    on opening a saved project — the empty `primary ''` is
+    `TimelineControl._primaryThumbnailFilePath`, which is only set by
+    `TimelineControl.SetThumbnails(...)`, which is only called from
+    `EditorPage.Timeline.cs` on the `isPrimary: true` path. That path is gated behind
+    `if (!string.IsNullOrEmpty(primaryPath))` in `GenerateAllTimelineThumbnailsAsync`,
+    where `primaryPath` comes from `ProjectService.Instance.CurrentProject.VideoFilePath`.
+  - **This is a long-standing bug, not fallout from the optimization work** — confirmed by
+    A/B: a build of `master` logs the identical line for the same project. Recorded here so
+    it is not misattributed to the refactor.
+  - The segments themselves carry a correct `VideoFilePath` (the log prints it), so only the
+    `Project.VideoFilePath` field is empty; the likely gap is the package/session restore
+    path (`ProjectService.OpenPackageAsync` → `CurrentProject = result.Project`) not
+    repopulating it, while `MusioPathRewriter` does rewrite it when present.
+  - Diagnostics for this are in place: `GenerateAllTimelineThumbnailsAsync` logs
+    `primary pass skipped: the project has no VideoFilePath`, and
+    `GenerateTimelineThumbnailsAsync` distinguishes "extraction returned nothing" from
+    "discarded — superseded by a newer generation". Reproduce with a project open and the log
+    will state which of the three it is.
+  - **Proposed fix:** repopulate `Project.VideoFilePath` on the restore path from the
+    timeline's primary video segment when it is missing, rather than gating the filmstrip on
+    it. Falling back to `TimelineModel.PrimaryVideoFilePath`, or to the first primary
+    `VideoSegment.VideoFilePath`, would make the filmstrip independent of a field that is
+    only incidentally populated.
+
+---
+
 ## M2 - Core pipeline
 
 - [ ] **OPT-201: `TrackOperation<TSegment>` generic base**

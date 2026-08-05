@@ -205,6 +205,16 @@ public sealed partial class EditorPage
                     }
                 }
             }
+            else
+            {
+                // No primary path means the primary pass is skipped entirely, so
+                // TimelineControl never receives a primary strip and every segment cut from
+                // the primary recording draws as a flat colour block. That used to be silent,
+                // surfacing only as the downstream "no thumbnails ... (primary '')" miss.
+                Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                    "primary pass skipped: the project has no VideoFilePath, so only appended " +
+                    "sources can get a strip.");
+            }
 
             await GenerateAppendedThumbnailsAsync(primaryPath);
         }
@@ -212,6 +222,8 @@ public sealed partial class EditorPage
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Filmstrip generation failed for '{primaryPath}': {ex}");
+            Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                $"generation failed for '{primaryPath}': {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -252,6 +264,8 @@ public sealed partial class EditorPage
                 _thumbnailsDoneForFiles.Remove(file);
                 System.Diagnostics.Debug.WriteLine(
                     $"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
+                Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                    $"appended generation failed for '{file}': {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
@@ -289,6 +303,16 @@ public sealed partial class EditorPage
 
         if (strip is null || generationId != _thumbnailGenerationId)
         {
+            // Both outcomes leave the filmstrip empty, but for very different reasons:
+            // a null strip means extraction failed, whereas a generation mismatch means a
+            // newer pass superseded this one. Distinguishing them matters, because a
+            // repeating mismatch indicates a rebuild storm rather than a decode problem.
+            Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                strip is null
+                    ? $"extraction returned nothing for '{filePath}' (isPrimary={isPrimary})"
+                    : $"discarded {strip.Thumbnails.Length} tiles for '{filePath}': generation " +
+                      $"{generationId} superseded by {_thumbnailGenerationId}");
+
             if (strip is not null)
                 foreach (var t in strip.Thumbnails) t?.Dispose();
             return false;

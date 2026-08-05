@@ -1235,6 +1235,8 @@ public sealed partial class EditorPage
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Text slide preview error: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"text slide render failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         ShowTextEditOverlay();
@@ -1294,6 +1296,8 @@ public sealed partial class EditorPage
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"frame render failed at {sourcePosition}: {ex.GetType().Name}: {ex.Message}");
             bitmap.Dispose();
         }
     }
@@ -1367,6 +1371,8 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"appended segment render failed: {ex.GetType().Name}: {ex.Message}");
             bitmap.Dispose();
         }
     }
@@ -1527,6 +1533,8 @@ public sealed partial class EditorPage
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[EditorPage] Segment compositor init failed: {ex.Message}");
+                Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                    $"segment compositor init failed for '{seg.VideoFilePath}': {ex.GetType().Name}: {ex.Message}");
                 ctx.Renderer?.Dispose();
                 ctx.Renderer = null;
                 ctx.Ready = false;
@@ -1553,6 +1561,8 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[EditorPage] GetOrBuildSegmentPreview failed: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"GetOrBuildSegmentPreview failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         return Abandoned() ? Abandon() : ctx;
@@ -1598,6 +1608,8 @@ public sealed partial class EditorPage
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Failed to load webcam video: {ex.Message}");
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"webcam composition load failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
