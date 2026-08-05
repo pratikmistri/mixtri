@@ -46,7 +46,7 @@ public class TextOverlayRenderer : IDisposable
     // overlay actually uses Blur — and resized via allocate-then-swap after that so a
     // failed allocation never leaves the field pointing at a disposed target, and normal
     // frames with no Blur overlay never touch the GPU for it at all.
-    private readonly GrowOnlyBuffer _blurScratchHolder = new();
+    private readonly GrowOnlyBuffer _blurScratchHolder = new(BufferReplacePolicy.AllocateThenDispose);
 
     // Cached Blur effect graph (BorderEffect -> GaussianBlurEffect), rebuilt only when the
     // scratch target it reads from has been reallocated (a resize — see EnsureBlurScratch).

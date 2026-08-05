@@ -55,6 +55,9 @@ public sealed class DeviceLostGuard : IDisposable
     private void OnDeviceLost(CanvasDevice sender, object args)
     {
         _lost = true;
+        Musio.Core.Diagnostics.DiagLog.Write("Gpu",
+            $"CanvasDevice.DeviceLost raised; every guard on this device now fails until its " +
+            $"owner is rebuilt. Context: {_message}");
         _onLost?.Invoke();
     }
 
