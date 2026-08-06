@@ -130,9 +130,19 @@ internal abstract class OverlayWindowBase
 
             OnHostWindowReady(screenshot);
 
-            // Install low-level keyboard hook so Escape works even without XAML focus
+            // Install low-level keyboard hook so Escape works even without XAML focus.
+            // Pass the real module handle (as KeyboardHookRecorder does): SetWindowsHookEx
+            // can reject a NULL hMod, and a silent failure here costs the user Escape-to-cancel
+            // on a full-screen always-on-top overlay, so log it rather than fail quietly.
             _hookProc = EscapeHookCallback;
-            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, GetModuleHandle(null), 0);
+            if (_keyboardHook == IntPtr.Zero)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write(
+                    "Overlay",
+                    $"Escape keyboard hook could not be installed (error {Marshal.GetLastWin32Error()}); " +
+                    "Escape-to-cancel will only work while the overlay has XAML focus.");
+            }
 
             HostWindow.Activate();
 
@@ -203,9 +213,12 @@ internal abstract class OverlayWindowBase
         }
     }
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
     [DllImport("user32.dll")]
     private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 }
