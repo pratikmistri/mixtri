@@ -1,5 +1,7 @@
 namespace Musio.Core.Timeline;
 
+// ─── Segment-based edit operations ───────────────────────────────────
+
 public class AddTextSlideOperation : IEditOperation
 {
     private readonly int _insertIndex;
@@ -419,7 +421,13 @@ public class SplitSegmentAtTimeOperation : IEditOperation
         model.RecalculateSegmentPositions();
     }
 }
-/// mapping is driven by the segments' actual timeline order.
+
+/// <summary>
+/// Reorders a primary-track segment to a new index in <see cref="TimelineModel.Segments"/>.
+/// <c>targetIndex</c> is expressed against the pre-move list, so it is shifted left by one when
+/// the segment moves later in the list. <see cref="TimelineModel.RecalculateSegmentPositions"/>
+/// then re-derives every segment's timeline position, because segments hold no absolute start
+/// time of their own — output-time mapping is driven by the segments' actual timeline order.
 /// </summary>
 public class MoveSegmentOperation : IEditOperation
 {
@@ -571,10 +579,3 @@ public class TrimSegmentEdgeOperation : IEditOperation
         model.RecalculateSegmentPositions();
     }
 }
-
-// ── Camera (webcam) track operations ──
-// Camera segments live on their own track; their Start/Duration are source-video
-// time ranges (independent of the primary segment list), so these operations never
-// call RecalculateSegmentPositions.
-
-/// <summary>Adds a new camera overlay segment over a source-time range.</summary>

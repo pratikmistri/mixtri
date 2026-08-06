@@ -27,8 +27,10 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     (`public static AppSettings Instance => _instance.Value;`),
     `src/Musio.Core/Settings/ShellSettings.cs:12`
     (`public static ShellSettings Instance { get; } = new();`).
-    `ProjectService.Instance` is referenced **68** times in
-    `src/Musio.App/Pages/EditorPage.xaml.cs` alone, plus **7** in
+    `ProjectService.Instance` is referenced **68** times across the
+    `src/Musio.App/Pages/EditorPage*.cs` partials alone (`EditorPage.Style.cs` 37,
+    `EditorPage.Preview.cs` 16, `EditorPage.xaml.cs` 8, `EditorPage.Timeline.cs` 6,
+    `EditorPage.Shortcuts.cs` 1), plus **7** in
     `src/Musio.App/ViewModels/ExportViewModel.cs`, **4** in
     `src/Musio.App/ViewModels/EditorViewModel.cs`, and **1** in
     `src/Musio.App/Pages/OpenProjectsPage.xaml.cs`. There is no DI container anywhere in
@@ -42,49 +44,49 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     in tests.
 
 - [ ] **OPT-002: Extract `EditorPreviewController`**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.xaml.cs` — the async re-entrancy guards
-    `_previewInitGeneration` (declared line 190, ~11 check/increment sites including
-    lines 457, 579, 678, 765, 786, 938, 966, 1094, 4939),
-    `_primaryPreviewStateGeneration` (declared line 117, sites at 124, 1135, 1445, 1452,
-    1468, 1605, 1652), and `_segmentPreviewGeneration` (declared line 76, sites at 153,
-    581, 1502, 1510, 1519, 1939, 1945), plus adaptive-quality and graphics-device
-    recovery logic in the same file.
-  - As of this writing the Wave 1 partial-class split has **not yet relocated** this
-    logic into a separate file — everything above is still in the monolithic
-    `EditorPage.xaml.cs` (7,457 lines). The established naming convention for these
-    splits (see the already-extracted `src/Musio.App/Pages/EditorPage.PropertyPanels.cs`)
-    suggests the eventual file will be named `EditorPage.Preview.cs`; update this
-    citation once that split lands. This is the highest-risk extraction in the repo:
-    getting the generation-counter invariants wrong across an `await` boundary breaks
-    the whole preview pipeline.
+  - **Evidence:** the async re-entrancy guards are declared in
+    `src/Musio.App/Pages/EditorPage.xaml.cs` — `_segmentPreviewGeneration` (line 57),
+    `_primaryPreviewStateGeneration` (line 73), `_previewInitGeneration` (line 85) — and
+    are incremented from the conductor at lines 334, 456, 458. Their ~23 remaining
+    check/increment sites now live in `src/Musio.App/Pages/EditorPage.Preview.cs`
+    (`_previewInitGeneration`: 189, 276, 297, 449, 477, 605, 615, 625;
+    `_primaryPreviewStateGeneration`: 78, 646, 956, 963, 979, 1116, 1163;
+    `_segmentPreviewGeneration`: 107, 1013, 1021, 1030, 1416, 1422), with one further
+    cross-file read in `src/Musio.App/Pages/EditorPage.Timeline.cs:1129`. Adaptive-quality
+    and graphics-device recovery logic sits in the same `EditorPage.Preview.cs` partial.
+  - Wave 1 relocated this logic out of the monolith into the `EditorPage.Preview.cs`
+    partial, but a partial is still the *same class*: the fields remain `EditorPage`
+    instance state shared with six other partials, so nothing is encapsulated or testable
+    yet. This is the highest-risk extraction in the repo: getting the generation-counter
+    invariants wrong across an `await` boundary breaks the whole preview pipeline.
   - **Proposed fix:** once OPT-001 lands, move the preview generation/quality/recovery
     state and its methods into a dedicated controller class that owns the three
     generation counters, taking `EditorPage` (or a narrow interface over it) as a
     dependency rather than being a `partial class EditorPage` member.
 
 - [ ] **OPT-003: Extract `EditorStyleController`**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.xaml.cs` — `SyncStyleControlsToConfig`
-    is declared at line 5518 and called from lines 2760, 5389, and 5720. The method and
-    its callers are deeply coupled to XAML named elements (`BgTypeCombo`,
-    `WallpaperGrid`, `BgColorText`, and related controls declared in
-    `EditorPage.xaml`), which are code-generated fields — extracting this needs either
-    `x:FieldModifier="public"` on those elements or a ViewModel-first rework so the
-    controller does not need direct XAML element references. The async wallpaper load
-    (around line 5433) has ordering constraints against the synchronous
+  - **Evidence:** `src/Musio.App/Pages/EditorPage.Style.cs` — `SyncStyleControlsToConfig`
+    is declared at line 326 and called from lines 197 and 528, plus
+    `src/Musio.App/Pages/EditorPage.Timeline.cs:593`. The method and its callers are
+    deeply coupled to XAML named elements (`BgTypeCombo`, `WallpaperGrid`, `BgColorText`,
+    and related controls declared in `EditorPage.xaml`), which are code-generated fields —
+    extracting this needs either `x:FieldModifier="public"` on those elements or a
+    ViewModel-first rework so the controller does not need direct XAML element
+    references. The async wallpaper load (`LoadSystemWallpapersAsync`, declared line 200
+    and fired-and-forgotten at line 194) has ordering constraints against the synchronous
     `SyncStyleControlsToConfig` that must be preserved.
   - **Proposed fix:** same extraction approach as OPT-002 — defer until OPT-001 lands,
     then move style-sync logic into its own controller with an explicit dependency on
     the named XAML elements or a thin view-model wrapper around them.
 
 - [ ] **OPT-004: Extract `EditorTextEditController`**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.xaml.cs` — the `SlideTextEditTarget`
-    (declared line 8314) and `OverlayTextEditTarget` (declared line 8399) adapters
-    implement `ITextEditTarget` and hold a back-reference to the enclosing
-    `EditorPage page` (constructors at lines 8319 and 8418); they call back into the
-    page (e.g. `RefreshSlidePreview()`/`ScheduleOverlayPreviewRefresh()`-style methods
-    referenced in the surrounding comments at lines 7528-7593, 7999-8004, 8172-8256).
-    Converting `page` to an injected interface instead of the concrete `EditorPage` is
-    the main work item here.
+  - **Evidence:** `src/Musio.App/Pages/EditorPage.TextEditing.cs` — the
+    `SlideTextEditTarget` (declared line 2258) and `OverlayTextEditTarget` (declared line
+    2343) adapters implement `ITextEditTarget` and hold a back-reference to the enclosing
+    `EditorPage page` (constructors at lines 2263 and 2362); they call back into the page
+    (e.g. `RefreshSlidePreview()`/`ScheduleOverlayPreviewRefresh()`-style methods defined
+    earlier in the same partial). Converting `page` to an injected interface instead of
+    the concrete `EditorPage` is the main work item here.
   - **Proposed fix:** extract an `IEditorTextEditHost` interface covering the handful of
     members `SlideTextEditTarget`/`OverlayTextEditTarget` call back into, implement it on
     `EditorPage`, and move the two adapter classes plus their driving logic into a
@@ -254,11 +256,13 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-204: Investigate whether the zoom-sync sequence is duplicated instead of
       reusing `SegmentFrameComposer`'s private helper**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.xaml.cs` calls
+  - **Evidence:** the `EditorPage` partials call
     `renderer.UpdateZoomKeyframes(...)` followed by
     `renderer.UpdateSuppressedClickTicks(...)` (and, at one call site, also
-    `UpdateTextOverlays(...)`) at four separate places: lines 1636-1637, 2043-2044,
-    2590-2591 (plus `UpdateTextOverlays` at 2609), and 2640-2641. Each of
+    `UpdateTextOverlays(...)`) at four separate places:
+    `src/Musio.App/Pages/EditorPage.Preview.cs:1147-1148` and `1520-1521`, and
+    `src/Musio.App/Pages/EditorPage.Timeline.cs:425-426` (plus `UpdateTextOverlays` at
+    444) and `475-476`. Each of
     `PreviewRenderer.UpdateZoomKeyframes`/`UpdateTextOverlays`/`UpdateSuppressedClickTicks`
     (`src/Musio.Core/Processing/PreviewRenderer.cs:95-119`) is a thin wrapper that calls
     a single `FrameCompositor.Sync*` method. `src/Musio.Core/Export/SegmentFrameComposer.cs:1003`
