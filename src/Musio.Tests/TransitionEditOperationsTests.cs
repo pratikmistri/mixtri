@@ -4,6 +4,7 @@ using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Projects;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 /// <summary>
 /// Tests for <see cref="UpdateTransitionOperation"/> and
@@ -18,22 +19,11 @@ public sealed class TransitionEditOperationsTests
 {
     private static TimeSpan S(double sec) => TimeSpan.FromSeconds(sec);
 
-    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null) => new()
-    {
-        VideoFilePath = "C:\\clip.mp4",
-        SourceStart = TimeSpan.Zero,
-        SourceDuration = TimeSpan.FromSeconds(durSec),
-        Duration = TimeSpan.FromSeconds(durSec),
-        InTransition = inTransition,
-    };
+    private static VideoSegment Video(double durSec, TransitionConfig? inTransition = null)
+        => TestTimelineBuilder.TransitionVideo("C:\\clip.mp4", durSec, inTransition);
 
     private static TimelineModel ModelWith(params TimelineSegment[] segments)
-    {
-        var model = new TimelineModel();
-        model.Segments.AddRange(segments);
-        model.RecalculateSegmentPositions();
-        return model;
-    }
+        => TestTimelineBuilder.ModelWith(segments);
 
     private static TransitionConfig Config(
         TransitionType type = TransitionType.CrossFade,
@@ -307,16 +297,15 @@ public sealed class TransitionEditOperationsTests
 [TestClass]
 public sealed class TransitionPackageRoundTripTests
 {
-    private string _root = string.Empty;
-    private string _sourceFolder = string.Empty;
-    private string _workingRoot = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
+    private string _sourceFolder => Path.Combine(_root, "session");
+    private string _workingRoot => Path.Combine(_root, "working");
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_transition_pkg_" + Guid.NewGuid().ToString("N"));
-        _sourceFolder = Path.Combine(_root, "session");
-        _workingRoot = Path.Combine(_root, "working");
+        _tempDir = new TempDirectoryFixture("musio_transition_pkg_");
         Directory.CreateDirectory(_sourceFolder);
         Directory.CreateDirectory(_workingRoot);
     }
@@ -324,7 +313,7 @@ public sealed class TransitionPackageRoundTripTests
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private string WriteFile(string name, int sizeBytes, byte fill = 0xAB)

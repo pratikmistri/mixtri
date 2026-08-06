@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
+using Musio.Core.Interop;
 using Musio.Core.Settings;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
@@ -40,7 +41,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
     private IntPtr _keyboardHook;
-    private LowLevelKeyboardProc? _hookProc;
+    private HookInterop.LowLevelKeyboardProc? _hookProc;
 
     // Cached cursors to avoid allocating on every pointer-move
     private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
@@ -135,8 +136,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
         if (canvasW <= 0 || canvasH <= 0 || _screenshotWidth <= 0 || _screenshotHeight <= 0)
             return;
 
-        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+        int vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
         double scaleX = _screenshotWidth / canvasW; // phys-per-overlay-DIP
         double scaleY = _screenshotHeight / canvasH;
         if (scaleX <= 0 || scaleY <= 0)
@@ -209,7 +210,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         else if (mainWindow is not null)
         {
             mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-            ShowWindow(mainHwnd, SW_MINIMIZE);
+            NativeMethods.ShowWindow(mainHwnd, SW_MINIMIZE);
             didMinimize = true;
             await Task.Delay(300); // let the minimize animation complete
         }
@@ -243,10 +244,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
             // (all monitors) in physical pixels. This matches the dimensions of
             // the screenshot we captured above so the image displays 1:1 with
             // each monitor's physical pixels, even across mixed-DPI setups.
-            int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            int vdWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            int vdHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            int vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+            int vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+            int vdWidth = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+            int vdHeight = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
             if (vdWidth > 0 && vdHeight > 0)
             {
                 _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
@@ -269,7 +270,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
             // Install low-level keyboard hook so Escape works even without XAML focus
             _hookProc = EscapeHookCallback;
-            _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
             _hostWindow.Activate();
 
@@ -301,7 +302,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
                 }
                 else if (mainHwnd != IntPtr.Zero)
                 {
-                    ShowWindow(mainHwnd, SW_RESTORE);
+                    NativeMethods.ShowWindow(mainHwnd, SW_RESTORE);
                     mainWindow?.Activate();
                 }
             }
@@ -323,10 +324,10 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
         try
         {
-            int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            int left = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+            int top = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+            width = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+            height = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
 
             if (width <= 0 || height <= 0)
                 return (null, null, 0, 0);
@@ -346,26 +347,26 @@ public sealed partial class RegionSelectorOverlay : UserControl
             if (byteCount > MaxScreenshotBytes)
                 return (null, null, width, height);
 
-            hdcScreen = GetDC(IntPtr.Zero);
+            hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
             if (hdcScreen == IntPtr.Zero)
                 return (null, null, width, height);
 
-            hdcMem = CreateCompatibleDC(hdcScreen);
+            hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
             if (hdcMem == IntPtr.Zero)
                 return (null, null, width, height);
 
-            hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            hBitmap = NativeMethods.CreateCompatibleBitmap(hdcScreen, width, height);
             if (hBitmap == IntPtr.Zero)
                 return (null, null, width, height);
 
-            oldObj = SelectObject(hdcMem, hBitmap);
+            oldObj = NativeMethods.SelectObject(hdcMem, hBitmap);
             if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
                 return (null, null, width, height);
 
-            if (!BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
+            if (!NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
                 return (null, null, width, height);
 
-            IntPtr restoredObj = SelectObject(hdcMem, oldObj);
+            IntPtr restoredObj = NativeMethods.SelectObject(hdcMem, oldObj);
             if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
                 return (null, null, width, height);
             oldObj = IntPtr.Zero;
@@ -382,7 +383,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
             };
 
             var pixelData = new byte[(int)byteCount];
-            int scanLines = GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            int scanLines = NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
             if (scanLines != height)
                 return (null, null, width, height);
 
@@ -403,13 +404,13 @@ public sealed partial class RegionSelectorOverlay : UserControl
         {
             // Ensure GDI resources are always released
             if (oldObj != IntPtr.Zero)
-                SelectObject(hdcMem, oldObj);
+                NativeMethods.SelectObject(hdcMem, oldObj);
             if (hBitmap != IntPtr.Zero)
-                DeleteObject(hBitmap);
+                NativeMethods.DeleteObject(hBitmap);
             if (hdcMem != IntPtr.Zero)
-                DeleteDC(hdcMem);
+                NativeMethods.DeleteDC(hdcMem);
             if (hdcScreen != IntPtr.Zero)
-                ReleaseDC(IntPtr.Zero, hdcScreen);
+                NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen);
         }
     }
 
@@ -649,13 +650,13 @@ public sealed partial class RegionSelectorOverlay : UserControl
     {
         double canvasW = ActualWidth;
         double canvasH = ActualHeight;
-        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
         if (canvasW <= 0 || canvasH <= 0 || vdWidth <= 0 || vdHeight <= 0)
             return null;
 
-        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+        int vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
         double scaleX = canvasW / vdWidth;
         double scaleY = canvasH / vdHeight;
 
@@ -957,7 +958,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
                 return (IntPtr)1;
             }
         }
-        return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+        return HookInterop.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
 
     private void OnEnterPressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -975,8 +976,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
             return;
 
         // Overlay DIPs → virtual desktop physical pixels (screen-absolute).
-        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        int vdWidth = _screenshotWidth > 0 ? _screenshotWidth : VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+        int vdHeight = _screenshotHeight > 0 ? _screenshotHeight : VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
         if (vdWidth <= 0 || vdHeight <= 0)
         {
             CancelSelection();
@@ -985,8 +986,8 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
         double scaleX = ActualWidth > 0 ? vdWidth / ActualWidth : 1.0;
         double scaleY = ActualHeight > 0 ? vdHeight / ActualHeight : 1.0;
-        int vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        int vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+        int vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
 
         int physX = vdLeft + (int)Math.Round(_selX * scaleX);
         int physY = vdTop + (int)Math.Round(_selY * scaleY);
@@ -1052,7 +1053,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
         try
         {
             if (hMonitor == IntPtr.Zero) return 1.0f;
-            int hr = GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            int hr = MonitorInterop.GetDpiForMonitor(hMonitor, MonitorInterop.MDT_EFFECTIVE_DPI, out uint dpiX, out _);
             if (hr == 0 && dpiX > 0)
                 return dpiX / 96.0f;
         }
@@ -1079,80 +1080,16 @@ public sealed partial class RegionSelectorOverlay : UserControl
 
     private const int SW_MINIMIZE = 6;
     private const int SW_RESTORE = 9;
-    private const int SM_XVIRTUALSCREEN = 76;
-    private const int SM_YVIRTUALSCREEN = 77;
-    private const int SM_CXVIRTUALSCREEN = 78;
-    private const int SM_CYVIRTUALSCREEN = 79;
     private const uint SRCCOPY = 0x00CC0020;
 
-    private const int WH_KEYBOARD_LL = 13;
     private static readonly IntPtr WM_KEYDOWN = 0x0100;
     private const int VK_ESCAPE = 0x1B;
 
-    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO
-    {
-        public int biSize;
-        public int biWidth;
-        public int biHeight;
-        public short biPlanes;
-        public short biBitCount;
-        public int biCompression;
-        public int biSizeImage;
-        public int biXPelsPerMeter;
-        public int biYPelsPerMeter;
-        public int biClrUsed;
-        public int biClrImportant;
-    }
-
     [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetDC(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
-        IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteObject(IntPtr hObject);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint lines,
-        [Out] byte[] bits, ref BITMAPINFO bmi, uint usage);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+    private static extern IntPtr SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
     [DllImport("user32.dll")]
     private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("shcore.dll")]
-    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     #endregion
 }

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Musio.Core.Interop;
 using Musio.Core.Models;
 using Musio.Core.Settings;
 using Windows.Foundation;
@@ -1005,7 +1006,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     {
         try
         {
-            int hr = GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
+            int hr = MonitorInterop.GetDpiForMonitor(hMonitor, 0 /* MDT_EFFECTIVE_DPI */, out uint dpiX, out _);
             if (hr == 0 && dpiX > 0)
                 return dpiX / 96.0f;
         }
@@ -1073,7 +1074,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         {
             var info = new MONITORINFOEX();
             info.cbSize = (uint)Marshal.SizeOf<MONITORINFOEX>();
-            if (GetMonitorInfo(hMonitor, ref info))
+            if (MonitorInterop.GetMonitorInfo(hMonitor, ref info))
                 return (info.rcMonitor.Left, info.rcMonitor.Top);
         }
         catch { }
@@ -1102,7 +1103,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         // Fallback to GetWindowRect (may include shadow padding)
         try
         {
-            if (GetWindowRect(hwnd, out RECT rect))
+            if (NativeMethods.GetWindowRect(hwnd, out RECT rect))
                 return (rect.Left, rect.Top);
         }
         catch { }
@@ -1111,32 +1112,6 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     }
 
     // ── P/Invoke ──────────────────────────────────────────────────────
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left, Top, Right, Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct MONITORINFOEX
-    {
-        public uint cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        public string szDevice;
-    }
-
-    [DllImport("shcore.dll")]
-    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 

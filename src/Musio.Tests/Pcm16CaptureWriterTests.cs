@@ -1,4 +1,5 @@
 using Musio.Core.Capture;
+using Musio.Tests.TestSupport;
 using NAudio.Wave;
 
 namespace Musio.Tests;
@@ -6,19 +7,19 @@ namespace Musio.Tests;
 [TestClass]
 public class Pcm16CaptureWriterTests
 {
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_pcm_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_pcm_");
     }
 
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private string Path_(string name) => System.IO.Path.Combine(_root, name);

@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -434,17 +435,14 @@ public sealed partial class EditorPage
     /// </summary>
     private async void ImportVideo_Click(object sender, RoutedEventArgs e)
     {
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
-        };
-        foreach (var ext in VideoImportService.SupportedExtensions)
-            picker.FileTypeFilter.Add(ext);
-        InitializePicker(picker);
-
         Windows.Storage.StorageFile? file = null;
-        try { file = await picker.PickSingleFileAsync(); }
+        try
+        {
+            file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+                VideoImportService.SupportedExtensions,
+                Windows.Storage.Pickers.PickerViewMode.Thumbnail);
+        }
         catch (Exception ex)
         {
             Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Import picker failed: {ex.Message}");
@@ -454,7 +452,8 @@ public sealed partial class EditorPage
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();
-        var (dialog, bar) = BuildImportProgressDialog(cts);
+        var (dialog, bar) = DialogHelper.BuildProgressDialog(
+            XamlRoot, "Importing video", "Transcoding and importing the video…", cts);
         var progress = new Progress<double>(p =>
         {
             // Progress arrives on a background thread; marshal the bound update onto the UI.
@@ -495,40 +494,5 @@ public sealed partial class EditorPage
 
         if (errorMessage is not null)
             await ShowProjectDialogAsync("Could not import video", errorMessage);
-    }
-
-    /// <summary>
-    /// Builds the modal progress dialog shown while a video import runs, wiring its Cancel
-    /// button to the supplied token source. Returns the dialog and the progress bar so the
-    /// caller can drive it from an <see cref="IProgress{T}"/>.
-    /// </summary>
-    private (ContentDialog Dialog, ProgressBar Bar) BuildImportProgressDialog(CancellationTokenSource cts)
-    {
-        var bar = new ProgressBar
-        {
-            Minimum = 0,
-            Maximum = 100,
-            Value = 0,
-            Width = 260,
-        };
-        var panel = new StackPanel { Spacing = 12 };
-        panel.Children.Add(new TextBlock
-        {
-            Text = "Transcoding and importing the video…",
-            TextWrapping = TextWrapping.Wrap,
-        });
-        panel.Children.Add(bar);
-
-        var dialog = new ContentDialog
-        {
-            Title = "Importing video",
-            Content = panel,
-            CloseButtonText = "Cancel",
-            XamlRoot = XamlRoot,
-        };
-        // Closing (via the Cancel button or Esc) requests cancellation; ImportAsync observes
-        // the token and throws OperationCanceledException, which the handler swallows.
-        dialog.CloseButtonClick += (_, _) => cts.Cancel();
-        return (dialog, bar);
     }
 }

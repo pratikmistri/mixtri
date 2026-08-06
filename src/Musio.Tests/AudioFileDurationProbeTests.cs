@@ -1,5 +1,6 @@
 using System.Text;
 using Musio.Core.Export;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
@@ -14,22 +15,19 @@ namespace Musio.Tests;
 [TestClass]
 public class AudioFileDurationProbeTests
 {
-    private string? _tempDirectory;
+    private TempDirectoryFixture? _tempDir;
+    private string? _tempDirectory => _tempDir?.Path;
 
     [TestInitialize]
     public void CreateTempDirectory()
     {
-        _tempDirectory = Path.Combine(Path.GetTempPath(), "MusioAudioProbeTests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_tempDirectory);
+        _tempDir = new TempDirectoryFixture($"MusioAudioProbeTests{Path.DirectorySeparatorChar}");
     }
 
     [TestCleanup]
     public void DeleteTempDirectory()
     {
-        if (_tempDirectory is null || !Directory.Exists(_tempDirectory)) return;
-        try { Directory.Delete(_tempDirectory, recursive: true); }
-        catch (IOException) { /* a decoder may still hold the file; the temp dir is disposable */ }
-        catch (UnauthorizedAccessException) { }
+        _tempDir?.Dispose();
     }
 
     [TestMethod]

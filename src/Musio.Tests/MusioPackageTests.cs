@@ -4,22 +4,22 @@ using Musio.Core.Processing;
 using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 namespace Musio.Tests;
 
 [TestClass]
 public class MusioPackageTests
 {
-    private string _root = string.Empty;
-    private string _sourceFolder = string.Empty;
-    private string _workingRoot = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
+    private string _sourceFolder => Path.Combine(_root, "session");
+    private string _workingRoot => Path.Combine(_root, "working");
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_pkg_" + Guid.NewGuid().ToString("N"));
-        _sourceFolder = Path.Combine(_root, "session");
-        _workingRoot = Path.Combine(_root, "working");
+        _tempDir = new TempDirectoryFixture("musio_pkg_");
         Directory.CreateDirectory(_sourceFolder);
         Directory.CreateDirectory(_workingRoot);
     }
@@ -27,7 +27,7 @@ public class MusioPackageTests
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     private string WriteFile(string name, int sizeBytes, byte fill = 0xAB)

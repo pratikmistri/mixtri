@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
+using Musio.Core.Interop;
 using Windows.Graphics.Imaging;
 
 namespace Musio_App.Controls;
@@ -30,7 +31,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
     // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
     private IntPtr _keyboardHook;
-    private LowLevelKeyboardProc? _hookProc;
+    private HookInterop.LowLevelKeyboardProc? _hookProc;
 
     public WindowSelectorOverlay()
     {
@@ -81,7 +82,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
             else if (mainWindow is not null)
             {
                 mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-                ShowWindow(mainHwnd, SW_MINIMIZE);
+                NativeMethods.ShowWindow(mainHwnd, SW_MINIMIZE);
                 didMinimize = true;
                 await Task.Delay(400);
             }
@@ -89,10 +90,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
             // Enumerate visible windows (in Z-order) before the overlay appears
             EnumerateWindows();
 
-            _vdLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            _vdTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            _vdWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            _vdHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            _vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+            _vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+            _vdWidth = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+            _vdHeight = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
 
             var screenshotSource = await CaptureDesktopScreenshotAsync();
 
@@ -128,7 +129,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
             // Install low-level keyboard hook so Escape works even without XAML focus
             _hookProc = EscapeHookCallback;
-            _keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
+            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
 
             _hostWindow.Activate();
 
@@ -155,7 +156,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
                 }
                 else if (mainHwnd != IntPtr.Zero)
                 {
-                    ShowWindow(mainHwnd, SW_RESTORE);
+                    NativeMethods.ShowWindow(mainHwnd, SW_RESTORE);
                     mainWindow?.Activate();
                 }
             }
@@ -172,16 +173,16 @@ public sealed partial class WindowSelectorOverlay : UserControl
         var windows = new List<WindowInfo>();
         var currentPid = (uint)Process.GetCurrentProcess().Id;
 
-        EnumWindows((IntPtr hwnd, IntPtr lParam) =>
+        NativeMethods.EnumWindows((IntPtr hwnd, IntPtr lParam) =>
         {
-            if (!IsWindowVisible(hwnd)) return true;
-            if (IsIconic(hwnd)) return true;
-            if (GetWindowTextLength(hwnd) == 0) return true;
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+            if (NativeMethods.IsIconic(hwnd)) return true;
+            if (NativeMethods.GetWindowTextLength(hwnd) == 0) return true;
 
             int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
             if ((exStyle & WS_EX_TOOLWINDOW) != 0) return true;
 
-            GetWindowThreadProcessId(hwnd, out uint pid);
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
             if (pid == currentPid) return true;
 
             // Skip DWM-cloaked windows (hidden UWP apps, virtual desktops)
@@ -194,7 +195,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
             if (w <= 0 || h <= 0) return true;
 
             var titleBuffer = new char[256];
-            int titleLen = GetWindowText(hwnd, titleBuffer, titleBuffer.Length);
+            int titleLen = NativeMethods.GetWindowText(hwnd, titleBuffer, titleBuffer.Length);
             string title = titleLen > 0 ? new string(titleBuffer, 0, titleLen) : string.Empty;
 
             string processName = string.Empty;
@@ -373,7 +374,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
         if (_hoveredWindow is not null)
         {
             // Validate the window is still alive before returning it
-            if (IsWindow(_hoveredWindow.Handle) && IsWindowVisible(_hoveredWindow.Handle))
+            if (NativeMethods.IsWindow(_hoveredWindow.Handle) && NativeMethods.IsWindowVisible(_hoveredWindow.Handle))
             {
                 _tcs?.TrySetResult(_hoveredWindow);
             }
@@ -409,7 +410,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
                 return (IntPtr)1;
             }
         }
-        return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+        return HookInterop.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
 
     #region Desktop Screenshot
@@ -426,10 +427,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
 
         try
         {
-            int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            int left = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
+            int top = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
+            int width = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
+            int height = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
 
             if (width <= 0 || height <= 0 || width > 16384 || height > 16384)
                 return null;
@@ -447,26 +448,26 @@ public sealed partial class WindowSelectorOverlay : UserControl
             if (byteCount > MaxScreenshotBytes)
                 return null;
 
-            hdcScreen = GetDC(IntPtr.Zero);
+            hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
             if (hdcScreen == IntPtr.Zero)
                 return null;
 
-            hdcMem = CreateCompatibleDC(hdcScreen);
+            hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
             if (hdcMem == IntPtr.Zero)
                 return null;
 
-            hBitmap = CreateCompatibleBitmap(hdcScreen, width, height);
+            hBitmap = NativeMethods.CreateCompatibleBitmap(hdcScreen, width, height);
             if (hBitmap == IntPtr.Zero)
                 return null;
 
-            oldObj = SelectObject(hdcMem, hBitmap);
+            oldObj = NativeMethods.SelectObject(hdcMem, hBitmap);
             if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
                 return null;
 
-            if (!BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
+            if (!NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
                 return null;
 
-            IntPtr restoredObj = SelectObject(hdcMem, oldObj);
+            IntPtr restoredObj = NativeMethods.SelectObject(hdcMem, oldObj);
             if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
                 return null;
             oldObj = IntPtr.Zero;
@@ -482,7 +483,7 @@ public sealed partial class WindowSelectorOverlay : UserControl
             };
 
             var pixelData = new byte[(int)byteCount];
-            int scanLines = GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
+            int scanLines = NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
             if (scanLines != height)
                 return null;
 
@@ -501,13 +502,13 @@ public sealed partial class WindowSelectorOverlay : UserControl
         finally
         {
             if (oldObj != IntPtr.Zero)
-                SelectObject(hdcMem, oldObj);
+                NativeMethods.SelectObject(hdcMem, oldObj);
             if (hBitmap != IntPtr.Zero)
-                DeleteObject(hBitmap);
+                NativeMethods.DeleteObject(hBitmap);
             if (hdcMem != IntPtr.Zero)
-                DeleteDC(hdcMem);
+                NativeMethods.DeleteDC(hdcMem);
             if (hdcScreen != IntPtr.Zero)
-                ReleaseDC(IntPtr.Zero, hdcScreen);
+                NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen);
         }
     }
 
@@ -526,75 +527,21 @@ public sealed partial class WindowSelectorOverlay : UserControl
         {
             return true;
         }
-        return GetWindowRect(hwnd, out rect);
+        return NativeMethods.GetWindowRect(hwnd, out rect);
     }
 
     #region P/Invoke
 
     private const int SW_MINIMIZE = 6;
     private const int SW_RESTORE = 9;
-    private const int SM_XVIRTUALSCREEN = 76;
-    private const int SM_YVIRTUALSCREEN = 77;
-    private const int SM_CXVIRTUALSCREEN = 78;
-    private const int SM_CYVIRTUALSCREEN = 79;
     private const uint SRCCOPY = 0x00CC0020;
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int DWMWA_CLOAKED = 14;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
-    private const int WH_KEYBOARD_LL = 13;
     private static readonly IntPtr WM_KEYDOWN = 0x0100;
     private const int VK_ESCAPE = 0x1B;
-
-    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
-    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO
-    {
-        public int biSize;
-        public int biWidth;
-        public int biHeight;
-        public short biPlanes;
-        public short biBitCount;
-        public int biCompression;
-        public int biSizeImage;
-        public int biXPelsPerMeter;
-        public int biYPelsPerMeter;
-        public int biClrUsed;
-        public int biClrImportant;
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsIconic(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindow(IntPtr hwnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowText(IntPtr hwnd, char[] lpString, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    private static extern int GetWindowTextLength(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("user32.dll")]
     private static extern int GetWindowLong(IntPtr hwnd, int nIndex);
@@ -606,45 +553,10 @@ public sealed partial class WindowSelectorOverlay : UserControl
     private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr GetDC(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
-
-    [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
-
-    [DllImport("gdi32.dll")]
-    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
-        IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteObject(IntPtr hObject);
-
-    [DllImport("gdi32.dll")]
-    private static extern bool DeleteDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    private static extern int GetDIBits(IntPtr hdc, IntPtr hbmp, uint start, uint lines,
-        [Out] byte[] bits, ref BITMAPINFO bmi, uint usage);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+    private static extern IntPtr SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
     [DllImport("user32.dll")]
     private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     #endregion
 }

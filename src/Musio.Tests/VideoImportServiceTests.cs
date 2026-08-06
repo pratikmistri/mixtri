@@ -1,6 +1,7 @@
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Media;
+using Musio.Tests.TestSupport;
 using Windows.UI;
 
 namespace Musio.Tests;
@@ -38,19 +39,19 @@ public class VideoImportServiceTests
         Color.FromArgb(255, 230, 230, 230),
     ];
 
-    private string _root = string.Empty;
+    private TempDirectoryFixture? _tempDir;
+    private string _root => _tempDir!.Path;
 
     [TestInitialize]
     public void SetUp()
     {
-        _root = Path.Combine(Path.GetTempPath(), "musio_import_" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        _tempDir = new TempDirectoryFixture("musio_import_");
     }
 
     [TestCleanup]
     public void TearDown()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { }
+        _tempDir?.Dispose();
     }
 
     /// <summary>Writes a real, finalized, video-only MP4 to act as an "external" source file.</summary>

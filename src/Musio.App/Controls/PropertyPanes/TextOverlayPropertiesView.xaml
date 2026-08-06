@@ -8,75 +8,6 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <UserControl.Resources>
-        <!-- Anchor cell: a flat fill-on-check RadioButton with no border or padding so 9 of
-             them can tile into a single rectangle. Copied from ScenePropertiesView's
-             CropCellRadioStyle (that style is scoped to its own file, not shared). -->
-        <Style x:Key="OverlayAnchorCellStyle" TargetType="RadioButton">
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="MinWidth" Value="0" />
-            <Setter Property="MinHeight" Value="0" />
-            <Setter Property="HorizontalAlignment" Value="Stretch" />
-            <Setter Property="VerticalAlignment" Value="Stretch" />
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="UseSystemFocusVisuals" Value="True" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="RadioButton">
-                        <Grid x:Name="CellRoot" Background="{TemplateBinding Background}">
-                            <VisualStateManager.VisualStateGroups>
-                                <VisualStateGroup x:Name="CombinedStates">
-                                    <VisualState x:Name="UncheckedNormal" />
-                                    <VisualState x:Name="UncheckedPointerOver">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="UncheckedPressed">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="UncheckedDisabled">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedNormal">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorDefaultBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedPointerOver">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorSecondaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedPressed">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorTertiaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedDisabled">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="Indeterminate" />
-                                </VisualStateGroup>
-                            </VisualStateManager.VisualStateGroups>
-                        </Grid>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-    </UserControl.Resources>
-
     <StackPanel Spacing="20" Margin="0,14,0,18">
 
         <!-- Presets -->
@@ -202,7 +133,7 @@
                         x:Name="OverlayTextColorSwatch"
                         x:FieldModifier="public"
                         Width="20" Height="20"
-                        CornerRadius="4"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1" />
                     <TextBlock x:Name="OverlayTextColorText" x:FieldModifier="public" Text="#FFFFFF" VerticalAlignment="Center" />
@@ -261,7 +192,7 @@
             <Border HorizontalAlignment="Left"
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     BorderThickness="1"
-                    CornerRadius="4">
+                    CornerRadius="{StaticResource SmallCornerRadius}">
                 <Grid x:Name="OverlayAnchorGrid" x:FieldModifier="public"
                       AutomationProperties.Name="Overlay anchor position"
                       AutomationProperties.HelpText="Choose which edge or corner the overlay hugs">
@@ -295,47 +226,47 @@
                                  AutomationProperties.Name="Overlay anchor TopLeft"
                                  ToolTipService.ToolTip="Top left"
                                  Grid.Row="0" Grid.Column="0"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="TopCenter"
                                  AutomationProperties.Name="Overlay anchor TopCenter"
                                  ToolTipService.ToolTip="Top center"
                                  Grid.Row="0" Grid.Column="2"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="TopRight"
                                  AutomationProperties.Name="Overlay anchor TopRight"
                                  ToolTipService.ToolTip="Top right"
                                  Grid.Row="0" Grid.Column="4"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="MiddleLeft"
                                  AutomationProperties.Name="Overlay anchor MiddleLeft"
                                  ToolTipService.ToolTip="Middle left"
                                  Grid.Row="2" Grid.Column="0"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="MiddleCenter"
                                  AutomationProperties.Name="Overlay anchor MiddleCenter"
                                  ToolTipService.ToolTip="Middle center"
                                  Grid.Row="2" Grid.Column="2"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="MiddleRight"
                                  AutomationProperties.Name="Overlay anchor MiddleRight"
                                  ToolTipService.ToolTip="Middle right"
                                  Grid.Row="2" Grid.Column="4"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton x:Name="OverlayAnchorBottomCenter" x:FieldModifier="public" GroupName="OverlayAnchor" Tag="BottomCenter"
                                  AutomationProperties.Name="Overlay anchor BottomCenter"
                                  ToolTipService.ToolTip="Bottom center"
                                  Grid.Row="4" Grid.Column="2" IsChecked="True"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="BottomLeft"
                                  AutomationProperties.Name="Overlay anchor BottomLeft"
                                  ToolTipService.ToolTip="Bottom left"
                                  Grid.Row="4" Grid.Column="0"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="OverlayAnchor" Tag="BottomRight"
                                  AutomationProperties.Name="Overlay anchor BottomRight"
                                  ToolTipService.ToolTip="Bottom right"
                                  Grid.Row="4" Grid.Column="4"
-                                 Style="{StaticResource OverlayAnchorCellStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                 </Grid>
             </Border>
 
@@ -403,7 +334,7 @@
                             x:Name="OverlayBgColorSwatch"
                             x:FieldModifier="public"
                             Width="20" Height="20"
-                            CornerRadius="4"
+                            CornerRadius="{StaticResource SmallCornerRadius}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1" />
                         <TextBlock x:Name="OverlayBgColorText" x:FieldModifier="public" Text="#000000" VerticalAlignment="Center" />
@@ -504,7 +435,7 @@
                             x:Name="OverlayOutlineColorSwatch"
                             x:FieldModifier="public"
                             Width="20" Height="20"
-                            CornerRadius="4"
+                            CornerRadius="{StaticResource SmallCornerRadius}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1" />
                         <TextBlock x:Name="OverlayOutlineColorText" x:FieldModifier="public" Text="#000000" VerticalAlignment="Center" />
@@ -539,7 +470,7 @@
                             x:Name="OverlayAccentColorSwatch"
                             x:FieldModifier="public"
                             Width="20" Height="20"
-                            CornerRadius="4"
+                            CornerRadius="{StaticResource SmallCornerRadius}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1" />
                         <TextBlock x:Name="OverlayAccentColorText" x:FieldModifier="public" Text="#0078D4" VerticalAlignment="Center" />

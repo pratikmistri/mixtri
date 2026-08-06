@@ -12,72 +12,6 @@
     <UserControl.Resources>
         <conv:CheckedToBrushConverter x:Key="CheckedToBrush" />
 
-        <!-- Crop-position cell: a flat fill-on-check RadioButton with no border or
-             padding so 9 of them can tile into a single rectangle. -->
-        <Style x:Key="CropCellRadioStyle" TargetType="RadioButton">
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="MinWidth" Value="0" />
-            <Setter Property="MinHeight" Value="0" />
-            <Setter Property="HorizontalAlignment" Value="Stretch" />
-            <Setter Property="VerticalAlignment" Value="Stretch" />
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="UseSystemFocusVisuals" Value="True" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="RadioButton">
-                        <Grid x:Name="CellRoot" Background="{TemplateBinding Background}">
-                            <VisualStateManager.VisualStateGroups>
-                                <VisualStateGroup x:Name="CombinedStates">
-                                    <VisualState x:Name="UncheckedNormal" />
-                                    <VisualState x:Name="UncheckedPointerOver">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="UncheckedPressed">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="UncheckedDisabled">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedNormal">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorDefaultBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedPointerOver">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorSecondaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedPressed">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Background"
-                                                    Value="{ThemeResource AccentFillColorTertiaryBrush}" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="CheckedDisabled">
-                                        <VisualState.Setters>
-                                            <Setter Target="CellRoot.Opacity" Value="0.4" />
-                                        </VisualState.Setters>
-                                    </VisualState>
-                                    <VisualState x:Name="Indeterminate" />
-                                </VisualStateGroup>
-                            </VisualStateManager.VisualStateGroups>
-                        </Grid>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
         <!-- Aspect-ratio tile: bordered RadioButton hosting a proportional preview
              rectangle and label. Selected state lights up the border with the accent. -->
         <Style x:Key="AspectRatioTileStyle" TargetType="RadioButton">
@@ -328,7 +262,7 @@
             <Border HorizontalAlignment="Left"
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     BorderThickness="1"
-                    CornerRadius="4">
+                    CornerRadius="{StaticResource SmallCornerRadius}">
                 <Grid x:Name="CropAnchorGrid" x:FieldModifier="public"
                       AutomationProperties.Name="Crop anchor position"
                       AutomationProperties.HelpText="Choose where the crop is anchored within the source frame">
@@ -362,47 +296,47 @@
                                  AutomationProperties.Name="Top left"
                                  ToolTipService.ToolTip="Top left"
                                  Grid.Row="0" Grid.Column="0"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="0.5,0"
                                  AutomationProperties.Name="Top center"
                                  ToolTipService.ToolTip="Top center"
                                  Grid.Row="0" Grid.Column="2"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="1,0"
                                  AutomationProperties.Name="Top right"
                                  ToolTipService.ToolTip="Top right"
                                  Grid.Row="0" Grid.Column="4"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="0,0.5"
                                  AutomationProperties.Name="Middle left"
                                  ToolTipService.ToolTip="Middle left"
                                  Grid.Row="2" Grid.Column="0"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton x:Name="CropAnchorCenter" x:FieldModifier="public" GroupName="CropAnchor" Tag="0.5,0.5"
                                  AutomationProperties.Name="Center"
                                  ToolTipService.ToolTip="Center"
                                  Grid.Row="2" Grid.Column="2" IsChecked="True"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="1,0.5"
                                  AutomationProperties.Name="Middle right"
                                  ToolTipService.ToolTip="Middle right"
                                  Grid.Row="2" Grid.Column="4"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="0,1"
                                  AutomationProperties.Name="Bottom left"
                                  ToolTipService.ToolTip="Bottom left"
                                  Grid.Row="4" Grid.Column="0"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="0.5,1"
                                  AutomationProperties.Name="Bottom center"
                                  ToolTipService.ToolTip="Bottom center"
                                  Grid.Row="4" Grid.Column="2"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                     <RadioButton GroupName="CropAnchor" Tag="1,1"
                                  AutomationProperties.Name="Bottom right"
                                  ToolTipService.ToolTip="Bottom right"
                                  Grid.Row="4" Grid.Column="4"
-                                 Style="{StaticResource CropCellRadioStyle}" />
+                                 Style="{StaticResource AnchorGridCellStyle}" />
                 </Grid>
             </Border>
         </StackPanel>
@@ -442,7 +376,7 @@
                         x:Name="BgColorSwatch"
                         x:FieldModifier="public"
                         Width="20" Height="20"
-                        CornerRadius="4"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1" />
                     <TextBlock x:Name="BgColorText" x:FieldModifier="public" Text="#1a1a2e" VerticalAlignment="Center" />
@@ -468,7 +402,7 @@
                         x:Name="GradEndColorSwatch"
                         x:FieldModifier="public"
                         Width="20" Height="20"
-                        CornerRadius="4"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1" />
                     <TextBlock x:Name="GradEndColorText" x:FieldModifier="public" Text="#16213e" VerticalAlignment="Center" />

@@ -3,6 +3,7 @@ namespace Musio.Tests;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Timeline;
+using Musio.Tests.TestSupport;
 
 /// <summary>
 /// Covers the segment-identity fields <see cref="AutoZoomEngine"/> reports on
@@ -24,34 +25,7 @@ public sealed class ZoomSegmentProgressTests
 
     private static MouseRecordingData BuildRecordingWithClicks(
         double durationSeconds, List<(double timeSeconds, int x, int y)> clicks)
-    {
-        int sampleCount = Math.Max(2, (int)(durationSeconds * 100));
-        var samples = new List<MouseSample>();
-        for (int i = 0; i < sampleCount; i++)
-        {
-            double t = i * durationSeconds / (sampleCount - 1);
-            samples.Add(new MouseSample
-            {
-                TimestampTicks = (long)(t * TickFrequency),
-                X = 960,
-                Y = 540,
-                EventKind = MouseEventKind.Move,
-                Button = MouseButton.None,
-                ScrollDelta = 0,
-            });
-        }
-
-        return new MouseRecordingData
-        {
-            Samples = samples,
-            Clicks = [.. clicks.Select(c => new ClickEvent(
-                TimestampTicks: (long)(c.timeSeconds * TickFrequency),
-                X: c.x, Y: c.y, Button: MouseButton.Left, IsDown: true))],
-            StartTimestampTicks = 0,
-            EndTimestampTicks = (long)(durationSeconds * TickFrequency),
-            TickFrequency = TickFrequency,
-        };
-    }
+        => TestMouseRecordingBuilder.WithClicks(durationSeconds, clicks, TickFrequency);
 
     private static AutoZoomEngine EngineWithClickAt(double clickTime, double duration = 10.0)
     {

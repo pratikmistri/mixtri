@@ -37,7 +37,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
                     <ComboBox
                         x:Name="StartupModeCombo"
@@ -80,7 +80,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
                     <ComboBox
                         Header="Default FPS"
@@ -124,7 +124,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
                     <ComboBox
                         x:Name="ExportResolutionCombo"
@@ -163,7 +163,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
                     <ToggleSwitch
                         x:Name="SystemAudioToggle"
@@ -201,7 +201,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
                     <ToggleSwitch
                         x:Name="WebcamToggle"
@@ -231,7 +231,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="12">
                     <TextBlock
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -296,7 +296,7 @@
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="8">
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="4">
                     <TextBlock FontWeight="SemiBold" Text="Musio" />
                     <TextBlock

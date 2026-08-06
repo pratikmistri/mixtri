@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -120,20 +121,20 @@ public sealed partial class EditorPage : Page
     private bool _pageUnloaded;
 
     // Background style editing state
-    private DispatcherTimer? _styleDebounceTimer;
+    private Debouncer? _styleDebouncer;
 
     // Motion (motion blur / camera drift) editing state — separate debounce timer so a
     // slider drag on these controls doesn't interact with the background-style debounce.
-    private DispatcherTimer? _motionDebounceTimer;
+    private Debouncer? _motionDebouncer;
 
     // Cursor style editing state
-    private DispatcherTimer? _cursorDebounceTimer;
+    private Debouncer? _cursorDebouncer;
 
     // Text overlay editing state — separate debounce timer so a text-box keystroke never
     // interacts with the background-style / motion / cursor debounces above. The model is
     // still committed (through UndoRedoManager, for undo) on every keystroke; only the
     // (expensive) preview re-render is debounced.
-    private DispatcherTimer? _overlayPreviewDebounceTimer;
+    private Debouncer? _overlayPreviewDebouncer;
     private bool _hasWebcamOverlay;
 
     public EditorPage()
@@ -317,14 +318,14 @@ public sealed partial class EditorPage : Page
         {
             _pageUnloaded = true;
             DetachGraphicsDevice();
-            _styleDebounceTimer?.Stop();
-            _styleDebounceTimer = null;
-            _cursorDebounceTimer?.Stop();
-            _cursorDebounceTimer = null;
-            _motionDebounceTimer?.Stop();
-            _motionDebounceTimer = null;
-            _overlayPreviewDebounceTimer?.Stop();
-            _overlayPreviewDebounceTimer = null;
+            _styleDebouncer?.Stop();
+            _styleDebouncer = null;
+            _cursorDebouncer?.Stop();
+            _cursorDebouncer = null;
+            _motionDebouncer?.Stop();
+            _motionDebouncer = null;
+            _overlayPreviewDebouncer?.Stop();
+            _overlayPreviewDebouncer = null;
 
             // Stop playback to halt timer ticks
             Preview.Pause();
@@ -917,9 +918,8 @@ public sealed partial class EditorPage : Page
     {
         string text = zoom.ToString("0.##", CultureInfo.InvariantCulture) + "x";
         if (ZoomLevelCombo.Text == text) return;
-        _suppressZoomPropertyUpdate = true;
-        try { ZoomLevelCombo.Text = text; }
-        finally { _suppressZoomPropertyUpdate = false; }
+        using (SuppressScope.Enter(ref _suppressZoomPropertyUpdate))
+            ZoomLevelCombo.Text = text;
     }
 
     private void UpdateSnapGuides(bool snappedX, bool snappedY)
@@ -1100,14 +1100,7 @@ public sealed partial class EditorPage : Page
     {
         try
         {
-            var dialog = new ContentDialog
-            {
-                Title = title,
-                Content = message,
-                CloseButtonText = "OK",
-                XamlRoot = XamlRoot,
-            };
-            await dialog.ShowAsync();
+            await DialogHelper.ShowInfoAsync(XamlRoot, title, message);
         }
         catch (Exception ex)
         {

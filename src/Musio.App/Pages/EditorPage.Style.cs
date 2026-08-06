@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -54,40 +55,34 @@ public sealed partial class EditorPage
 
     private void SyncCursorControlsToConfig(CursorStyle cursor)
     {
-        _suppressCursorEvents = true;
-        try
+        using var _ = SuppressScope.Enter(ref _suppressCursorEvents);
+
+        // Cursor type
+        CursorTypeMouse.IsChecked = cursor.Type != CursorType.Touch;
+        CursorTypeTouch.IsChecked = cursor.Type == CursorType.Touch;
+
+        // Size
+        CursorSizeSlider.Value = cursor.Scale;
+
+        // Tilt
+        CursorTiltToggle.IsOn = cursor.TiltEnabled;
+        CursorTiltToggle.Visibility = cursor.Type != CursorType.Touch
+            ? Visibility.Visible : Visibility.Collapsed;
+
+        // Color — find matching radio button by Tag
+        string cursorColor = (cursor.Color ?? "#FFFFFF").ToUpperInvariant();
+        bool found = false;
+        foreach (var child in CursorColorPanel.Children)
         {
-            // Cursor type
-            CursorTypeMouse.IsChecked = cursor.Type != CursorType.Touch;
-            CursorTypeTouch.IsChecked = cursor.Type == CursorType.Touch;
-
-            // Size
-            CursorSizeSlider.Value = cursor.Scale;
-
-            // Tilt
-            CursorTiltToggle.IsOn = cursor.TiltEnabled;
-            CursorTiltToggle.Visibility = cursor.Type != CursorType.Touch
-                ? Visibility.Visible : Visibility.Collapsed;
-
-            // Color — find matching radio button by Tag
-            string cursorColor = (cursor.Color ?? "#FFFFFF").ToUpperInvariant();
-            bool found = false;
-            foreach (var child in CursorColorPanel.Children)
+            if (child is RadioButton rb && rb.Tag is string tag)
             {
-                if (child is RadioButton rb && rb.Tag is string tag)
-                {
-                    bool match = string.Equals(tag, cursorColor, StringComparison.OrdinalIgnoreCase);
-                    rb.IsChecked = match;
-                    if (match) found = true;
-                }
+                bool match = string.Equals(tag, cursorColor, StringComparison.OrdinalIgnoreCase);
+                rb.IsChecked = match;
+                if (match) found = true;
             }
-            if (!found && CursorColorPanel.Children.FirstOrDefault() is RadioButton first)
-                first.IsChecked = true;
         }
-        finally
-        {
-            _suppressCursorEvents = false;
-        }
+        if (!found && CursorColorPanel.Children.FirstOrDefault() is RadioButton first)
+            first.IsChecked = true;
     }
 
     private void CursorType_Checked(object sender, RoutedEventArgs e)
@@ -119,17 +114,8 @@ public sealed partial class EditorPage
 
     private void ScheduleCursorUpdate()
     {
-        if (_cursorDebounceTimer is null)
-        {
-            _cursorDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _cursorDebounceTimer.Tick += (_, _) =>
-            {
-                _cursorDebounceTimer.Stop();
-                ApplyCursorStyleFromControls();
-            };
-        }
-        _cursorDebounceTimer.Stop();
-        _cursorDebounceTimer.Start();
+        _cursorDebouncer ??= new Debouncer(ApplyCursorStyleFromControls);
+        _cursorDebouncer.Schedule();
     }
 
     private void ApplyCursorStyleFromControls()
@@ -253,9 +239,8 @@ public sealed partial class EditorPage
                 string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
-                _suppressStyleEvents = true;
-                try { WallpaperGrid.SelectedIndex = idx + 1; }
-                finally { _suppressStyleEvents = false; }
+                using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
+                WallpaperGrid.SelectedIndex = idx + 1;
             }
         }
     }
@@ -325,8 +310,7 @@ public sealed partial class EditorPage
 
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
     {
-        _suppressStyleEvents = true;
-        try
+        using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
         {
             // Background type combo
             int typeIndex = bg.Type switch
@@ -392,10 +376,6 @@ public sealed partial class EditorPage
 
             // Select matching preset or (Custom)
             PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
-        }
-        finally
-        {
-            _suppressStyleEvents = false;
         }
     }
 
@@ -643,19 +623,10 @@ public sealed partial class EditorPage
 
     private void ScheduleMotionPreviewRebuild()
     {
-        // Separate timer/instance from _styleDebounceTimer so a motion slider drag never
+        // Separate timer/instance from _styleDebouncer so a motion slider drag never
         // races or gets coalesced with an in-flight background-style update.
-        if (_motionDebounceTimer is null)
-        {
-            _motionDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _motionDebounceTimer.Tick += (_, _) =>
-            {
-                _motionDebounceTimer.Stop();
-                RefreshPreviewForMotionSettings();
-            };
-        }
-        _motionDebounceTimer.Stop();
-        _motionDebounceTimer.Start();
+        _motionDebouncer ??= new Debouncer(RefreshPreviewForMotionSettings);
+        _motionDebouncer.Schedule();
     }
 
     private void RefreshPreviewForMotionSettings()
@@ -690,35 +661,20 @@ public sealed partial class EditorPage
 
     private async Task PickCustomWallpaperAsync(int previousIndex)
     {
-        var picker = new Windows.Storage.Pickers.FileOpenPicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
-            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
-        };
-        picker.FileTypeFilter.Add(".jpg");
-        picker.FileTypeFilter.Add(".jpeg");
-        picker.FileTypeFilter.Add(".png");
-        picker.FileTypeFilter.Add(".bmp");
-
-        var window = App.Current.MainAppWindow;
-        if (window is not null)
-        {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        }
-
         Windows.Storage.StorageFile? file = null;
         try
         {
-            file = await picker.PickSingleFileAsync();
+            file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.PicturesLibrary,
+                new[] { ".jpg", ".jpeg", ".png", ".bmp" },
+                Windows.Storage.Pickers.PickerViewMode.Thumbnail);
         }
         catch
         {
             // Picker can throw on cancellation in some scenarios — treat as no-op.
         }
 
-        _suppressStyleEvents = true;
-        try
+        using (SuppressScope.Enter(ref _suppressStyleEvents))
         {
             if (file is null)
             {
@@ -744,10 +700,6 @@ public sealed partial class EditorPage
                 WallpaperGrid.SelectedIndex = existing + 1;
             }
         }
-        finally
-        {
-            _suppressStyleEvents = false;
-        }
 
         ScheduleStyleUpdate();
     }
@@ -755,18 +707,12 @@ public sealed partial class EditorPage
     private void ScheduleStyleUpdate()
     {
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
-        if (_styleDebounceTimer is null)
+        _styleDebouncer ??= new Debouncer(() =>
         {
-            _styleDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _styleDebounceTimer.Tick += (_, _) =>
-            {
-                _styleDebounceTimer.Stop();
-                var bg = BuildBackgroundStyleFromControls();
-                ApplyBackgroundStyle(bg);
-            };
-        }
-        _styleDebounceTimer.Stop();
-        _styleDebounceTimer.Start();
+            var bg = BuildBackgroundStyleFromControls();
+            ApplyBackgroundStyle(bg);
+        });
+        _styleDebouncer.Schedule();
     }
 
     private BackgroundStyle BuildBackgroundStyleFromControls()
@@ -1343,19 +1289,12 @@ public sealed partial class EditorPage
         var config = ProjectService.Instance.CurrentComposition;
         if (project is null || config is null) return;
 
-        _suppressAspectRatioEvents = true;
-        try
-        {
-            SelectRatioRadio(project.AspectRatio);
-            SelectFitModeRadio(project.FitMode);
-            SelectZoomScopeRadio(project.ZoomScope);
-            SelectCropAnchorRadio(project.CropAnchorX, project.CropAnchorY);
-            UpdateFitAndAnchorVisibility(project.AspectRatio);
-        }
-        finally
-        {
-            _suppressAspectRatioEvents = false;
-        }
+        using var _ = SuppressScope.Enter(ref _suppressAspectRatioEvents);
+        SelectRatioRadio(project.AspectRatio);
+        SelectFitModeRadio(project.FitMode);
+        SelectZoomScopeRadio(project.ZoomScope);
+        SelectCropAnchorRadio(project.CropAnchorX, project.CropAnchorY);
+        UpdateFitAndAnchorVisibility(project.AspectRatio);
     }
 
     private void SelectRatioRadio(AspectRatio ratio)
@@ -1499,9 +1438,8 @@ public sealed partial class EditorPage
             project.FitMode = FitMode.Contain;
             config = config with { FitMode = FitMode.Contain };
 
-            _suppressAspectRatioEvents = true;
-            try { SelectFitModeRadio(FitMode.Contain); }
-            finally { _suppressAspectRatioEvents = false; }
+            using (SuppressScope.Enter(ref _suppressAspectRatioEvents))
+                SelectFitModeRadio(FitMode.Contain);
         }
 
         ProjectService.Instance.CurrentComposition = config;

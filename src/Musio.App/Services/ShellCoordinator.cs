@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Musio.Core.Capture;
+using Musio.Core.Interop;
 using Musio.Core.Settings;
 using Musio.Core.Shell;
 using Musio_App.Pages;
@@ -241,8 +242,8 @@ public sealed class ShellCoordinator : IDisposable
         if (_mainWindow is null) return;
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
-        ShowWindow(hwnd, SW_SHOW);
-        ShowWindow(hwnd, SW_RESTORE);
+        NativeMethods.ShowWindow(hwnd, SW_SHOW);
+        NativeMethods.ShowWindow(hwnd, SW_RESTORE);
         _mainWindow.Activate();
     }
 
@@ -250,14 +251,14 @@ public sealed class ShellCoordinator : IDisposable
     {
         if (_mainWindow is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
-        ShowWindow(hwnd, SW_HIDE);
+        NativeMethods.ShowWindow(hwnd, SW_HIDE);
     }
 
     private void MinimizeMainWindow()
     {
         if (_mainWindow is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
-        ShowWindow(hwnd, SW_MINIMIZE);
+        NativeMethods.ShowWindow(hwnd, SW_MINIMIZE);
     }
 
     #endregion
@@ -569,9 +570,6 @@ public sealed class ShellCoordinator : IDisposable
     private const int SW_MINIMIZE = 6;
     private const int SW_RESTORE = 9;
 
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
-
     /// <summary>
     /// Resolves the origin and DPI scale of the monitor that owns
     /// <paramref name="region"/>, returning false when that display is no longer
@@ -602,29 +600,16 @@ public sealed class ShellCoordinator : IDisposable
         left = info.rcMonitor.Left;
         top = info.rcMonitor.Top;
 
-        if (GetDpiForMonitor(monitor.Handle, MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0 && dpiX > 0)
+        if (MonitorInterop.GetDpiForMonitor(monitor.Handle, MonitorInterop.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0 && dpiX > 0)
             dpiScale = dpiX / 96.0f;
 
         return true;
     }
 
-    private const int MDT_EFFECTIVE_DPI = 0;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO
-    {
-        public uint cbSize;
-        public RECT rcMonitor;
-        public RECT rcWork;
-        public uint dwFlags;
-    }
-
+    // Distinct, deliberately different marshalling of GetMonitorInfo from the
+    // MONITORINFOEX overload in Musio.Core.Interop.MonitorInterop: this one only
+    // needs the monitor rect (no device-name string), so it stays private here
+    // rather than being folded into the shared overload. See W2-1 report.
     [DllImport("user32.dll")]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
-
-    [DllImport("shcore.dll")]
-    private static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
 }
