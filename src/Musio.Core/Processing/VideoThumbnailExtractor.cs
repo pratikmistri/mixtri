@@ -183,7 +183,7 @@ public static class VideoThumbnailExtractor
             try
             {
                 int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
-                var scaled = new CanvasRenderTarget(device, width, targetHeight, 96);
+                var scaled = Win2DUtils.CreateRenderTarget(device, width, targetHeight, 96, "video thumbnail");
                 using (var ds = scaled.CreateDrawingSession())
                     ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
 
@@ -212,8 +212,8 @@ public static class VideoThumbnailExtractor
         try
         {
             float height = (float)source.Size.Height;
-            var flipped = new CanvasRenderTarget(
-                device, (float)source.Size.Width, height, source.Dpi);
+            var flipped = Win2DUtils.CreateRenderTarget(
+                device, (float)source.Size.Width, height, source.Dpi, "flipped video thumbnail");
 
             using (var ds = flipped.CreateDrawingSession())
             {

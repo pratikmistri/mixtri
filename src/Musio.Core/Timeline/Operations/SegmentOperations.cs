@@ -2,12 +2,12 @@ namespace Musio.Core.Timeline;
 
 // ─── Segment-based edit operations ───────────────────────────────────
 
-public class AddTextSlideOperation : IEditOperation
+public class AddTextSlideOperation : SegmentEditOperationBase
 {
     private readonly int _insertIndex;
     private readonly TextSlideSegment _slide;
 
-    public string Description => "Add Text Slide";
+    public override string Description => "Add Text Slide";
 
     /// <param name="insertIndex">
     /// Index in <see cref="TimelineModel.Segments"/> to insert at.
@@ -19,23 +19,23 @@ public class AddTextSlideOperation : IEditOperation
         _insertIndex = insertIndex;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         int idx = _insertIndex < 0 || _insertIndex > model.Segments.Count
             ? model.Segments.Count
             : _insertIndex;
         model.Segments.Insert(idx, _slide);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
         model.Segments.Remove(_slide);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 }
 
-public class UpdateTextSlideOperation : IEditOperation
+public class UpdateTextSlideOperation : SegmentEditOperationBase
 {
     private readonly string _segmentId;
     private readonly string _newText;
@@ -58,7 +58,7 @@ public class UpdateTextSlideOperation : IEditOperation
     private TimeSpan _oldDuration;
     private TextSlideAnimation _oldAnimation;
 
-    public string Description => "Update Text Slide";
+    public override string Description => "Update Text Slide";
 
     public UpdateTextSlideOperation(
         string segmentId,
@@ -79,10 +79,10 @@ public class UpdateTextSlideOperation : IEditOperation
         _newAnimation = animation;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
-        if (slide is null) return;
+        if (slide is null) return false;
 
         _oldText = slide.Text;
         _oldFontFamily = slide.FontFamily;
@@ -104,13 +104,13 @@ public class UpdateTextSlideOperation : IEditOperation
         slide.Duration = _newDuration;
         slide.Animation = _newAnimation;
 
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
         var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
-        if (slide is null) return;
+        if (slide is null) return false;
 
         slide.Text = _oldText;
         slide.FontFamily = _oldFontFamily;
@@ -122,47 +122,47 @@ public class UpdateTextSlideOperation : IEditOperation
         slide.Duration = _oldDuration;
         slide.Animation = _oldAnimation;
 
-        model.RecalculateSegmentPositions();
+        return true;
     }
 }
 
-public class RemoveSegmentOperation : IEditOperation
+public class RemoveSegmentOperation : SegmentEditOperationBase
 {
     private readonly string _segmentId;
     private TimelineSegment? _removedSegment;
     private int _removedIndex;
 
-    public string Description => "Remove Segment";
+    public override string Description => "Remove Segment";
 
     public RemoveSegmentOperation(string segmentId)
     {
         _segmentId = segmentId;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         _removedIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (_removedIndex < 0) return;
+        if (_removedIndex < 0) return false;
         _removedSegment = model.Segments[_removedIndex];
         model.Segments.RemoveAt(_removedIndex);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
-        if (_removedSegment is null) return;
+        if (_removedSegment is null) return false;
         model.Segments.Insert(_removedIndex, _removedSegment);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 }
 
-public class ReorderSegmentOperation : IEditOperation
+public class ReorderSegmentOperation : SegmentEditOperationBase
 {
     private readonly int _fromIndex;
     private readonly int _toIndex;
-    private List<TimelineSegment> _previousSegments = [];
+    private SegmentListSnapshot? _snapshot;
 
-    public string Description => "Reorder Segment";
+    public override string Description => "Reorder Segment";
 
     public ReorderSegmentOperation(int fromIndex, int toIndex)
     {
@@ -170,49 +170,49 @@ public class ReorderSegmentOperation : IEditOperation
         _toIndex = toIndex;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
-        if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return;
-        _previousSegments = [.. model.Segments];
+        if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return false;
+        _snapshot = SegmentListSnapshot.Capture(model);
         var segment = model.Segments[_fromIndex];
         model.Segments.RemoveAt(_fromIndex);
         var insertAt = Math.Min(_toIndex, model.Segments.Count);
         model.Segments.Insert(insertAt, segment);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
         // Snapshot/restore so undo is always exact, even when Execute clamped an
         // append-past-end target (where index arithmetic could not be reversed).
-        if (_previousSegments.Count == 0) return;
-        model.Segments.Clear();
-        model.Segments.AddRange(_previousSegments);
-        model.RecalculateSegmentPositions();
+        // SegmentListSnapshot.Restore already recalculates positions, so signal "no
+        // recalculate needed" here to avoid a redundant second call.
+        _snapshot?.Restore(model);
+        return false;
     }
 }
 
-public class AppendVideoSegmentOperation : IEditOperation
+public class AppendVideoSegmentOperation : SegmentEditOperationBase
 {
     private readonly VideoSegment _segment;
 
-    public string Description => "Append Recording";
+    public override string Description => "Append Recording";
 
     public AppendVideoSegmentOperation(VideoSegment segment)
     {
         _segment = segment ?? throw new ArgumentNullException(nameof(segment));
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         model.Segments.Add(_segment);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
         model.Segments.Remove(_segment);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 }
 
@@ -222,13 +222,13 @@ public class AppendVideoSegmentOperation : IEditOperation
 /// and audio in sync by creating two video segments whose source ranges
 /// correspond to the content before and after the split point.
 /// </summary>
-public class SplitAndInsertTextSlideOperation : IEditOperation
+public class SplitAndInsertTextSlideOperation : SegmentEditOperationBase
 {
     private readonly TimeSpan _splitTime;
     private readonly TextSlideSegment _slide;
-    private List<TimelineSegment> _previousSegments = [];
+    private SegmentListSnapshot? _snapshot;
 
-    public string Description => "Insert Text Slide";
+    public override string Description => "Insert Text Slide";
 
     public SplitAndInsertTextSlideOperation(TimeSpan splitTime, TextSlideSegment slide)
     {
@@ -236,9 +236,9 @@ public class SplitAndInsertTextSlideOperation : IEditOperation
         _splitTime = splitTime;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
-        _previousSegments = [.. model.Segments];
+        _snapshot = SegmentListSnapshot.Capture(model);
 
         // Find the segment at the split time
         int splitIndex = -1;
@@ -295,14 +295,15 @@ public class SplitAndInsertTextSlideOperation : IEditOperation
             model.Segments.Insert(insertAt, _slide);
         }
 
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
-        model.Segments.Clear();
-        model.Segments.AddRange(_previousSegments);
-        model.RecalculateSegmentPositions();
+        // SegmentListSnapshot.Restore already recalculates positions, so signal "no
+        // recalculate needed" here to avoid a redundant second call.
+        _snapshot?.Restore(model);
+        return false;
     }
 }
 
@@ -313,16 +314,16 @@ public class SplitAndInsertTextSlideOperation : IEditOperation
 /// <see cref="TextSlideSegment"/> (splitting the duration). Total timeline
 /// duration is unchanged, so nothing downstream shifts.
 /// </summary>
-public class SplitSegmentAtTimeOperation : IEditOperation
+public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
 {
     /// <summary>Minimum half duration so a split never produces a degenerate segment.</summary>
     public static readonly TimeSpan MinHalf = TimeSpan.FromMilliseconds(50);
 
     private readonly TimeSpan _splitTime;
-    private List<TimelineSegment> _previousSegments = [];
+    private SegmentListSnapshot? _snapshot;
     private bool _didSplit;
 
-    public string Description => "Split";
+    public override string Description => "Split";
 
     public SplitSegmentAtTimeOperation(TimeSpan splitTime)
     {
@@ -332,7 +333,7 @@ public class SplitSegmentAtTimeOperation : IEditOperation
     /// <summary>True when the split actually occurred (a segment was divided).</summary>
     public bool DidSplit => _didSplit;
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         _didSplit = false;
 
@@ -346,16 +347,16 @@ public class SplitSegmentAtTimeOperation : IEditOperation
                 break;
             }
         }
-        if (splitIndex < 0) return;
+        if (splitIndex < 0) return false;
 
         var segment = model.Segments[splitIndex];
         var localOffset = _splitTime - segment.Start;
 
         // Reject splits that would create a degenerate half.
         if (localOffset < MinHalf || segment.Duration - localOffset < MinHalf)
-            return;
+            return false;
 
-        _previousSegments = [.. model.Segments];
+        _snapshot = SegmentListSnapshot.Capture(model);
 
         TimelineSegment firstHalf;
         TimelineSegment secondHalf;
@@ -403,22 +404,23 @@ public class SplitSegmentAtTimeOperation : IEditOperation
         }
         else
         {
-            return;
+            return false;
         }
 
         model.Segments.RemoveAt(splitIndex);
         model.Segments.Insert(splitIndex, firstHalf);
         model.Segments.Insert(splitIndex + 1, secondHalf);
-        model.RecalculateSegmentPositions();
         _didSplit = true;
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
-        if (!_didSplit) return;
-        model.Segments.Clear();
-        model.Segments.AddRange(_previousSegments);
-        model.RecalculateSegmentPositions();
+        if (!_didSplit) return false;
+        // SegmentListSnapshot.Restore already recalculates positions, so signal "no
+        // recalculate needed" here to avoid a redundant second call.
+        _snapshot?.Restore(model);
+        return false;
     }
 }
 
@@ -429,13 +431,13 @@ public class SplitSegmentAtTimeOperation : IEditOperation
 /// then re-derives every segment's timeline position, because segments hold no absolute start
 /// time of their own — output-time mapping is driven by the segments' actual timeline order.
 /// </summary>
-public class MoveSegmentOperation : IEditOperation
+public class MoveSegmentOperation : SegmentEditOperationBase
 {
     private readonly string _segmentId;
     private readonly int _targetIndex;
-    private List<TimelineSegment> _previousSegments = [];
+    private SegmentListSnapshot? _snapshot;
 
-    public string Description => "Move Segment";
+    public override string Description => "Move Segment";
 
     public MoveSegmentOperation(string segmentId, int targetIndex)
     {
@@ -443,12 +445,12 @@ public class MoveSegmentOperation : IEditOperation
         _targetIndex = targetIndex;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
-        _previousSegments = [.. model.Segments];
+        _snapshot = SegmentListSnapshot.Capture(model);
 
         int fromIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (fromIndex < 0) return;
+        if (fromIndex < 0) return false;
 
         var segment = model.Segments[fromIndex];
         model.Segments.RemoveAt(fromIndex);
@@ -460,14 +462,15 @@ public class MoveSegmentOperation : IEditOperation
         insertAt = Math.Clamp(insertAt, 0, model.Segments.Count);
 
         model.Segments.Insert(insertAt, segment);
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
-        model.Segments.Clear();
-        model.Segments.AddRange(_previousSegments);
-        model.RecalculateSegmentPositions();
+        // SegmentListSnapshot.Restore already recalculates positions, so signal "no
+        // recalculate needed" here to avoid a redundant second call.
+        _snapshot?.Restore(model);
+        return false;
     }
 }
 
@@ -479,7 +482,7 @@ public class MoveSegmentOperation : IEditOperation
 /// <see cref="TextSlideSegment"/> only the duration changes. Following segments
 /// re-flow magnetically via <see cref="TimelineModel.RecalculateSegmentPositions"/>.
 /// </summary>
-public class TrimSegmentEdgeOperation : IEditOperation
+public class TrimSegmentEdgeOperation : SegmentEditOperationBase
 {
     /// <summary>Minimum segment duration to prevent degenerate (zero-width) segments.</summary>
     public static readonly TimeSpan MinDuration = TimeSpan.FromMilliseconds(100);
@@ -491,7 +494,7 @@ public class TrimSegmentEdgeOperation : IEditOperation
     private int _index = -1;
     private TimelineSegment? _previous;
 
-    public string Description => "Trim Segment";
+    public override string Description => "Trim Segment";
 
     /// <param name="segmentId">Id of the segment to trim.</param>
     /// <param name="fromStart">True to trim the left (in) edge, false for the right (out) edge.</param>
@@ -503,10 +506,10 @@ public class TrimSegmentEdgeOperation : IEditOperation
         _requestedDuration = newDuration;
     }
 
-    public void Execute(TimelineModel model)
+    protected override bool ExecuteCore(TimelineModel model)
     {
         _index = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (_index < 0) return;
+        if (_index < 0) return false;
 
         _previous = model.Segments[_index];
 
@@ -525,7 +528,7 @@ public class TrimSegmentEdgeOperation : IEditOperation
                 break;
         }
 
-        model.RecalculateSegmentPositions();
+        return true;
     }
 
     private VideoSegment TrimVideo(VideoSegment video)
@@ -571,11 +574,11 @@ public class TrimSegmentEdgeOperation : IEditOperation
     private static TimeSpan ClampDuration(TimeSpan requested) =>
         requested < MinDuration ? MinDuration : requested;
 
-    public void Undo(TimelineModel model)
+    protected override bool UndoCore(TimelineModel model)
     {
-        if (_previous is null || _index < 0) return;
-        if (_index >= model.Segments.Count) return;
+        if (_previous is null || _index < 0) return false;
+        if (_index >= model.Segments.Count) return false;
         model.Segments[_index] = _previous;
-        model.RecalculateSegmentPositions();
+        return true;
     }
 }

@@ -328,7 +328,7 @@ public sealed partial class EditorPage
             if (thumbnails[i] is not null || i == 0) continue;
             if (thumbnails[i - 1] is not { } previous) continue;
 
-            var repeat = new CanvasRenderTarget(device, thumbW, thumbH, 96);
+            var repeat = Win2DUtils.CreateRenderTarget(device, thumbW, thumbH, 96, "timeline thumbnail repeat");
             using (var session = repeat.CreateDrawingSession())
                 session.DrawImage(previous, new Rect(0, 0, thumbW, thumbH));
             thumbnails[i] = repeat;

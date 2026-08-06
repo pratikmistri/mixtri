@@ -176,7 +176,7 @@ public class WebcamCompositor : IDisposable
             float rtH = (float)dest.Y + (float)dest.Height + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
             rtW = Math.Max(rtW, (float)dest.Width + pad * 2);
             rtH = Math.Max(rtH, (float)dest.Height + pad * 2 + ShadowOffsetY);
-            _cachedShadow = new CanvasRenderTarget(device, rtW, rtH, 96);
+            _cachedShadow = Win2DUtils.CreateRenderTarget(device, rtW, rtH, 96, "webcam shadow");
 
             using var clipGeometry = CreateClipGeometry(device, dest, radius);
             using var commandList = new CanvasCommandList(device);

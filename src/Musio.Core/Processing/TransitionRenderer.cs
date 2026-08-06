@@ -17,11 +17,19 @@ public class TransitionRenderer : IDisposable
     private static readonly Color White = Color.FromArgb(255, 255, 255, 255);
 
     private readonly CanvasDevice _device;
+    private readonly DeviceLostGuard _deviceLostGuard;
     private bool _disposed;
 
     public TransitionRenderer(CanvasDevice? device = null)
     {
-        _device = device ?? CanvasDevice.GetSharedDevice();
+        _device = device ?? GpuContext.GetSharedDevice();
+        // [FIX 2] TransitionRenderer previously wired no DeviceLost guard at all, unlike
+        // FrameCompositor and VideoEncoder — a lost device would surface here as whatever
+        // raw exception Win2D happened to throw from the next draw call instead of the
+        // same recoverable, user-facing exception the rest of the pipeline uses.
+        _deviceLostGuard = new DeviceLostGuard(
+            _device,
+            "The graphics device was lost while rendering a transition. Retry after closing other GPU-heavy applications.");
     }
 
     /// <summary>
@@ -52,6 +60,7 @@ public class TransitionRenderer : IDisposable
         int height)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _deviceLostGuard.ThrowIfLost();
 
         progress = Math.Clamp(progress, 0, 1);
 
@@ -59,7 +68,7 @@ public class TransitionRenderer : IDisposable
         // body below completes successfully. If drawing-session creation or any helper/effect
         // throws, `target` must be disposed here — otherwise a failed render leaks a native GPU
         // resource, and the preview path retries a failing render every tick.
-        var target = new CanvasRenderTarget(_device, width, height, 96);
+        var target = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "transition output");
         try
         {
             RenderInto(target, outgoing, incoming, type, progress, width, height);
@@ -689,6 +698,7 @@ public class TransitionRenderer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _deviceLostGuard.Dispose();
         GC.SuppressFinalize(this);
     }
 }

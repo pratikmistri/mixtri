@@ -108,7 +108,7 @@ public sealed class SegmentFrameComposer : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        var device = CanvasDevice.GetSharedDevice();
+        var device = GpuContext.GetSharedDevice();
 
         // The key is built from the *unmodified* composition styles so that primary
         // segments without an override resolve back to this same context.
@@ -165,7 +165,7 @@ public sealed class SegmentFrameComposer : IDisposable
         // hard-cutting. TransitionResolver is the shared pure function the preview also
         // calls, so both pipelines dissolve at the same instants with the same effect,
         // duration and easing (configured, or the legacy 500ms slide-only fallback).
-        var outputTime = TimeSpan.FromSeconds((double)frameIndex / _fps);
+        var outputTime = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _fps));
         var resolution = TransitionResolver.Resolve(_timeline, outputTime);
         if (!resolution.Active)
             return frame;
@@ -294,11 +294,11 @@ public sealed class SegmentFrameComposer : IDisposable
             // Legacy (pre-segment) projects: the whole export is the primary recording,
             // mapped through trim/cut/speed by the timeline mapper.
             double legacyTime = _mapper?.GetSourceTimeForOutputFrame(frameIndex)
-                ?? (double)frameIndex / _fps;
+                ?? FrameTimeConverter.FrameToTime(frameIndex, _fps);
             return await ComposeWithContextAsync(_primaryContext, legacyTime, applyCameraSegments: true, ct);
         }
 
-        var outputTime = TimeSpan.FromSeconds((double)frameIndex / _fps);
+        var outputTime = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _fps));
         var (segment, localOffset) = _timeline.GetSegmentAtTime(outputTime);
 
         // Only this (timeline-resolved) path can ever hand back a null segment -- the
@@ -743,7 +743,7 @@ public sealed class SegmentFrameComposer : IDisposable
             if (sourceWidth <= 0 || sourceHeight <= 0)
                 throw new InvalidOperationException("Composed frame has no pixels.");
 
-            var target = new CanvasRenderTarget(_device, OutputWidth, OutputHeight, 96);
+            var target = Win2DUtils.CreateRenderTarget(_device, OutputWidth, OutputHeight, 96, "canonical-size letterbox frame");
             try
             {
                 double scale = Math.Min(OutputWidth / sourceWidth, OutputHeight / sourceHeight);

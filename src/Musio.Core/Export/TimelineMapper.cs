@@ -1,3 +1,4 @@
+using Musio.Core.Processing;
 using Musio.Core.Timeline;
 
 namespace Musio.Core.Export;
@@ -52,7 +53,7 @@ public class TimelineMapper
         if (outputFrame < 0) return _timeline.TrimStart.TotalSeconds;
         if (_outputSegments.Count == 0) return _timeline.TrimStart.TotalSeconds;
 
-        double outputTimeSeconds = (double)outputFrame / _fps;
+        double outputTimeSeconds = FrameTimeConverter.FrameToTime(outputFrame, _fps);
 
         double accumulatedOutputTime = 0;
         foreach (var segment in _outputSegments)
@@ -217,13 +218,13 @@ public class TimelineMapper
         // Segment-based timelines (with text slides) define their own total
         // duration that includes non-video segments.
         if (_timeline.Segments.Count > 0)
-            return Math.Max(1, (int)(_timeline.TotalSegmentsDuration.TotalSeconds * _fps));
+            return Math.Max(1, FrameTimeConverter.TimeToFrameFloor(_timeline.TotalSegmentsDuration.TotalSeconds, _fps));
 
         double totalOutputSeconds = 0;
         foreach (var seg in _outputSegments)
             totalOutputSeconds += seg.OutputDuration;
 
-        return Math.Max(1, (int)(totalOutputSeconds * _fps));
+        return Math.Max(1, FrameTimeConverter.TimeToFrameFloor(totalOutputSeconds, _fps));
     }
 
     private struct OutputSegment

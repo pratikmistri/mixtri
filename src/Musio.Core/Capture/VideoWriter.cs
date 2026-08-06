@@ -469,7 +469,7 @@ public sealed class VideoWriter : IDisposable
             }
         }
 
-        return new CanvasRenderTarget(_device, width, height, 96);
+        return Win2DUtils.CreateRenderTarget(_device, width, height, 96, "video writer target pool");
     }
 
     private void ReturnTarget(CanvasRenderTarget target)

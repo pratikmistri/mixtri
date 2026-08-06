@@ -38,11 +38,7 @@ public class CutOperation : IEditOperation
     private readonly TimeSpan _cutStart;
     private readonly TimeSpan _cutEnd;
 
-    private List<TimelineClip> _previousClips = [];
-    private List<ZoomKeyframe> _previousKeyframes = [];
-    private List<SpeedSegment> _previousSpeedSegments = [];
-    private TimeSpan _previousDuration;
-    private TimeSpan _previousTrimEnd;
+    private TimelineSnapshot? _snapshot;
 
     public string Description => "Cut";
 
@@ -56,12 +52,9 @@ public class CutOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
-        // Snapshot for undo
-        _previousClips = [.. model.Clips];
-        _previousKeyframes = [.. model.ZoomKeyframes];
-        _previousSpeedSegments = [.. model.SpeedSegments];
-        _previousDuration = model.Duration;
-        _previousTrimEnd = model.TrimEnd;
+        // Snapshot for undo. Unlike ApplyClipSpeedOperation/RippleDeleteOperation, Cut does not
+        // touch the playhead, so it does not snapshot/restore it.
+        _snapshot = TimelineSnapshot.Capture(model);
 
         var cutDuration = _cutEnd - _cutStart;
         var newClips = new List<TimelineClip>();
@@ -178,14 +171,7 @@ public class CutOperation : IEditOperation
 
     public void Undo(TimelineModel model)
     {
-        model.Clips.Clear();
-        model.Clips.AddRange(_previousClips);
-        model.ZoomKeyframes.Clear();
-        model.ZoomKeyframes.AddRange(_previousKeyframes);
-        model.SpeedSegments.Clear();
-        model.SpeedSegments.AddRange(_previousSpeedSegments);
-        model.Duration = _previousDuration;
-        model.TrimEnd = _previousTrimEnd;
+        _snapshot?.Restore(model);
     }
 }
 
@@ -349,12 +335,7 @@ public class ApplyClipSpeedOperation : IEditOperation
     private readonly int _clipIndex;
     private readonly double _newSpeed;
 
-    private List<TimelineClip> _previousClips = [];
-    private List<ZoomKeyframe> _previousKeyframes = [];
-    private List<SpeedSegment> _previousSpeedSegments = [];
-    private TimeSpan _previousDuration;
-    private TimeSpan _previousTrimEnd;
-    private TimeSpan _previousPlayhead;
+    private TimelineSnapshot? _snapshot;
 
     public string Description => "Change Speed";
 
@@ -366,13 +347,9 @@ public class ApplyClipSpeedOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
-        _previousClips = model.Clips.Select(c => new TimelineClip(c.Start, c.End, c.Label)
-            { SpeedFactor = c.SpeedFactor, SourceStart = c.SourceStart }).ToList();
-        _previousKeyframes = [.. model.ZoomKeyframes];
-        _previousSpeedSegments = [.. model.SpeedSegments];
-        _previousDuration = model.Duration;
-        _previousTrimEnd = model.TrimEnd;
-        _previousPlayhead = model.PlayheadPosition;
+        // Unlike CutOperation, this operation can move the playhead (see below), so it also
+        // snapshots/restores it.
+        _snapshot = TimelineSnapshot.Capture(model, includePlayhead: true);
 
         if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
 
@@ -454,15 +431,7 @@ public class ApplyClipSpeedOperation : IEditOperation
 
     public void Undo(TimelineModel model)
     {
-        model.Clips.Clear();
-        model.Clips.AddRange(_previousClips);
-        model.ZoomKeyframes.Clear();
-        model.ZoomKeyframes.AddRange(_previousKeyframes);
-        model.SpeedSegments.Clear();
-        model.SpeedSegments.AddRange(_previousSpeedSegments);
-        model.Duration = _previousDuration;
-        model.TrimEnd = _previousTrimEnd;
-        model.PlayheadPosition = _previousPlayhead;
+        _snapshot?.Restore(model);
     }
 }
 
@@ -470,12 +439,7 @@ public class RippleDeleteOperation : IEditOperation
 {
     private readonly int _clipIndex;
 
-    private List<TimelineClip> _previousClips = [];
-    private List<ZoomKeyframe> _previousKeyframes = [];
-    private List<SpeedSegment> _previousSpeedSegments = [];
-    private TimeSpan _previousDuration;
-    private TimeSpan _previousTrimEnd;
-    private TimeSpan _previousPlayhead;
+    private TimelineSnapshot? _snapshot;
 
     public string Description => "Cut";
 
@@ -486,13 +450,9 @@ public class RippleDeleteOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
-        _previousClips = model.Clips.Select(c => new TimelineClip(c.Start, c.End, c.Label)
-            { SpeedFactor = c.SpeedFactor, SourceStart = c.SourceStart }).ToList();
-        _previousKeyframes = [.. model.ZoomKeyframes];
-        _previousSpeedSegments = [.. model.SpeedSegments];
-        _previousDuration = model.Duration;
-        _previousTrimEnd = model.TrimEnd;
-        _previousPlayhead = model.PlayheadPosition;
+        // Unlike CutOperation, this operation can move the playhead (see below), so it also
+        // snapshots/restores it.
+        _snapshot = TimelineSnapshot.Capture(model, includePlayhead: true);
 
         if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
 
@@ -541,15 +501,7 @@ public class RippleDeleteOperation : IEditOperation
 
     public void Undo(TimelineModel model)
     {
-        model.Clips.Clear();
-        model.Clips.AddRange(_previousClips);
-        model.ZoomKeyframes.Clear();
-        model.ZoomKeyframes.AddRange(_previousKeyframes);
-        model.SpeedSegments.Clear();
-        model.SpeedSegments.AddRange(_previousSpeedSegments);
-        model.Duration = _previousDuration;
-        model.TrimEnd = _previousTrimEnd;
-        model.PlayheadPosition = _previousPlayhead;
+        _snapshot?.Restore(model);
     }
 }
 
