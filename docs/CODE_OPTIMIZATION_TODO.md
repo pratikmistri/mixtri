@@ -182,6 +182,11 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     `GenerateTimelineThumbnailsAsync` distinguishes "extraction returned nothing" from
     "discarded — superseded by a newer generation". Reproduce with a project open and the log
     will state which of the three it is.
+  - **Reading the log correctly:** the `no thumbnails ... (primary '')` line is *also* emitted
+    by the first draw, which legitimately happens before the asynchronous generation pass
+    finishes, and it is de-duplicated per path — so on its own it does **not** prove a failure.
+    A miss followed by `primary strip installed for '<path>'` is benign. A miss with **no**
+    matching install, and none of the three failure lines above, is the real bug.
   - **Proposed fix:** repopulate `Project.VideoFilePath` on the restore path from the
     timeline's primary video segment when it is missing, rather than gating the filmstrip on
     it. Falling back to `TimelineModel.PrimaryVideoFilePath`, or to the first primary
