@@ -344,6 +344,13 @@ public sealed partial class EditorPage
             // Only a pass that ran to completion may mark the strip done; a cancelled one
             // would otherwise pin a half-filled filmstrip permanently.
             _thumbnailsCompletedForPath = filePath;
+
+            // Logged so a "no thumbnails ... (primary '')" line can be told apart from a real
+            // failure: that miss is also emitted by the first draw, which legitimately happens
+            // before this asynchronous pass finishes. A miss followed by this line is benign;
+            // a miss with no matching install is the bug.
+            Musio.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                $"primary strip installed for '{filePath}' ({owned.Length} tiles)");
         }
         else
         {
