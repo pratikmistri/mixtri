@@ -582,6 +582,20 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
+    /// <see cref="RefreshOverlayPreview"/> plus a timeline canvas redraw, for edits that also
+    /// change what a track renders on the timeline itself (a preset swap, duration change, or
+    /// enabled/disabled toggle all alter the overlay's on-track label/extent). Most overlay
+    /// property edits (color, font, position, blur, etc.) do NOT affect the track's rendered
+    /// label, so they call <see cref="RefreshOverlayPreview"/> alone — do not add a timeline
+    /// redraw to those without confirming the track visual actually changed.
+    /// </summary>
+    private void RefreshOverlayPreviewAndTimeline()
+    {
+        Timeline.InvalidateAllCanvases();
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>
     /// Debounces <see cref="RefreshOverlayPreview"/> for the high-frequency
     /// <see cref="OverlayTextBox_TextChanged"/> handler: the model is committed on every
     /// keystroke (so undo/redo and export always see the latest text), but repainting the
@@ -612,8 +626,7 @@ public sealed partial class EditorPage
         // would have touched. SyncTextOverlayUI clears OverlayPresets.SelectedItem again,
         // which is why this handler must be re-entrancy-guarded above.
         SyncTextOverlayUI(id);
-        Timeline.InvalidateAllCanvases();
-        RefreshOverlayPreview();
+        RefreshOverlayPreviewAndTimeline();
     }
 
     private void OverlayTextBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -663,8 +676,7 @@ public sealed partial class EditorPage
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
             id, o => o.Duration = TimeSpan.FromSeconds(seconds), "Change Overlay Duration"));
 
-        Timeline.InvalidateAllCanvases();
-        RefreshOverlayPreview();
+        RefreshOverlayPreviewAndTimeline();
     }
 
     private void OverlayFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -984,8 +996,7 @@ public sealed partial class EditorPage
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
             id, o => o.Enabled = enabled, "Change Overlay Enabled"));
 
-        Timeline.InvalidateAllCanvases();
-        RefreshOverlayPreview();
+        RefreshOverlayPreviewAndTimeline();
     }
 
     /// <summary>
@@ -1081,8 +1092,7 @@ public sealed partial class EditorPage
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
         if (slide is null) return;
         slide.Text = SlideTextBox.Text;
-        Timeline.InvalidateAllCanvases();
-        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+        RefreshSlidePreview();
     }
 
     private void SlideAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1217,8 +1227,7 @@ public sealed partial class EditorPage
         slide.TextColor = ColorToHex(args.NewColor);
         SlideTextColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         SlideTextColorText.Text = slide.TextColor;
-        Timeline.InvalidateAllCanvases();
-        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+        RefreshSlidePreview();
     }
 
     private void SlideBgColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
@@ -1232,8 +1241,7 @@ public sealed partial class EditorPage
         slide.BackgroundColor = ColorToHex(args.NewColor);
         SlideBgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         SlideBgColorText.Text = slide.BackgroundColor;
-        Timeline.InvalidateAllCanvases();
-        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+        RefreshSlidePreview();
     }
 
     private TextSlideSegment? SelectedSlide() =>

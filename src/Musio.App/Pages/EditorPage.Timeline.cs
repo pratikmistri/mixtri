@@ -416,16 +416,8 @@ public sealed partial class EditorPage
     /// skipping the manual list (in particular when it is empty) leaves the previous zooms in
     /// place. Both show up as zoom happening in the preview with no matching timeline segment.
     /// </remarks>
-    private void SyncZoomStateToRenderer()
-    {
-        if (_previewRenderer is null) return;
-
-        // Only the PRIMARY recording's manual keyframes drive the primary renderer;
-        // appended recordings' keyframes belong to their own segment/source space.
-        _previewRenderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
-        _previewRenderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
-        SyncTextOverlaysToRenderer(_previewRenderer, null);
-    }
+    private void SyncZoomStateToRenderer() =>
+        EditorTimelineMediator.SyncZoomStateToRenderer(ViewModel.Model, _previewRenderer, PrimaryVideoPath);
 
     /// <summary>
     /// Pushes the text overlays that belong to <paramref name="sourceVideoFilePath"/>
@@ -436,13 +428,8 @@ public sealed partial class EditorPage
     /// per-segment renderer creation) since overlays need the identical refresh cadence.
     /// A no-op when there is no primary video to resolve the "primary" case against.
     /// </summary>
-    private void SyncTextOverlaysToRenderer(PreviewRenderer renderer, string? sourceVideoFilePath)
-    {
-        var videoFilePath = sourceVideoFilePath ?? PrimaryVideoPath;
-        if (string.IsNullOrEmpty(videoFilePath)) return;
-
-        renderer.UpdateTextOverlays(SegmentFrameComposer.SelectTextOverlays(ViewModel.Model, videoFilePath));
-    }
+    private void SyncTextOverlaysToRenderer(PreviewRenderer renderer, string? sourceVideoFilePath) =>
+        EditorTimelineMediator.SyncTextOverlaysToRenderer(ViewModel.Model, renderer, sourceVideoFilePath, PrimaryVideoPath);
 
     /// <summary>
     /// The manual zoom keyframes that belong to a single source: the primary recording when
@@ -452,9 +439,7 @@ public sealed partial class EditorPage
     /// leak onto another source's compositor.
     /// </summary>
     private List<ZoomKeyframe> ManualKeyframesForSource(string? sourceVideoFilePath) =>
-        [.. ViewModel.Model.ZoomKeyframes.Where(k =>
-            k.IsManual &&
-            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase))];
+        EditorTimelineMediator.ManualKeyframesForSource(ViewModel.Model, sourceVideoFilePath);
 
     /// <summary>
     /// Pushes each already-built appended/imported segment renderer its OWN source's manual
@@ -463,33 +448,19 @@ public sealed partial class EditorPage
     /// their own <see cref="PreviewRenderer"/>, so a zoom created or region-edited on one of
     /// them only shows in the preview once its keyframes reach that renderer.
     /// </summary>
-    private void SyncSegmentZoomStateToRenderers()
-    {
-        foreach (var (segmentId, ctx) in _segmentPreviews)
-        {
-            if (ctx.Renderer is null) continue;
-            var seg = ViewModel.Model.Segments.OfType<VideoSegment>()
-                .FirstOrDefault(v => v.Id == segmentId);
-            if (seg is null) continue;
-
-            ctx.Renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
-            ctx.Renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
-            SyncTextOverlaysToRenderer(ctx.Renderer, seg.VideoFilePath);
-        }
-    }
+    private void SyncSegmentZoomStateToRenderers() =>
+        EditorTimelineMediator.SyncSegmentZoomStateToRenderers(
+            ViewModel.Model,
+            _segmentPreviews.Select(kv => (kv.Key, kv.Value.Renderer)),
+            PrimaryVideoPath);
 
     /// <summary>
     /// Resolves the video segment that owns a zoom whose source path is
     /// <paramref name="sourceVideoFilePath"/> (null = the primary recording). Used to map a
     /// zoom's normalised centre against the correct source dimensions.
     /// </summary>
-    private VideoSegment? SegmentForSource(string? sourceVideoFilePath)
-    {
-        var target = sourceVideoFilePath ?? PrimaryVideoPath;
-        if (target is null) return null;
-        return ViewModel.Model.Segments.OfType<VideoSegment>()
-            .FirstOrDefault(v => string.Equals(v.VideoFilePath, target, StringComparison.OrdinalIgnoreCase));
-    }
+    private VideoSegment? SegmentForSource(string? sourceVideoFilePath) =>
+        EditorTimelineMediator.SegmentForSource(ViewModel.Model, sourceVideoFilePath, PrimaryVideoPath);
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
@@ -596,19 +567,11 @@ public sealed partial class EditorPage
         }
     }
 
-    private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e)
-    {
-        var operation = new MoveSegmentOperation(e.Id, e.TargetIndex);
-        ViewModel.UndoRedoManager.Execute(operation);
-        Timeline.SelectSegment(e.Id);
-    }
+    private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e) =>
+        EditorTimelineMediator.HandleSegmentMoveRequested(ViewModel, Timeline, e.Id, e.TargetIndex);
 
-    private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e)
-    {
-        var operation = new TrimSegmentEdgeOperation(e.Id, e.FromStart, e.NewDuration);
-        ViewModel.UndoRedoManager.Execute(operation);
-        Timeline.SelectSegment(e.Id);
-    }
+    private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
+        EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
 
     // ── Camera track handlers ──
 
@@ -706,15 +669,11 @@ public sealed partial class EditorPage
         SyncCameraSegmentUI(operation.CreatedId);
     }
 
-    private void OnCameraSegmentMoved(object? sender, (string Id, TimeSpan NewStart) e)
-    {
-        ViewModel.UndoRedoManager.Execute(new MoveCameraSegmentOperation(e.Id, e.NewStart));
-    }
+    private void OnCameraSegmentMoved(object? sender, (string Id, TimeSpan NewStart) e) =>
+        EditorTimelineMediator.HandleCameraSegmentMoved(ViewModel, e.Id, e.NewStart);
 
-    private void OnCameraSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
-    {
-        ViewModel.UndoRedoManager.Execute(new TrimCameraSegmentOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
-    }
+    private void OnCameraSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e) =>
+        EditorTimelineMediator.HandleCameraSegmentResized(ViewModel, e.Id, e.IsStartEdge, e.NewEdgeTime);
 
     private void OnCameraSegmentRemoveRequested(object? sender, string segmentId)
     {
@@ -809,17 +768,11 @@ public sealed partial class EditorPage
         RefreshOverlayPreview();
     }
 
-    private void OnTextOverlayMoved(object? sender, (string Id, TimeSpan NewStart) e)
-    {
-        ViewModel.UndoRedoManager.Execute(new MoveTextOverlayOperation(e.Id, e.NewStart));
-        RefreshOverlayPreview();
-    }
+    private void OnTextOverlayMoved(object? sender, (string Id, TimeSpan NewStart) e) =>
+        EditorTimelineMediator.HandleTextOverlayMoved(ViewModel, e.Id, e.NewStart, RefreshOverlayPreview);
 
-    private void OnTextOverlayResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
-    {
-        ViewModel.UndoRedoManager.Execute(new TrimTextOverlayOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
-        RefreshOverlayPreview();
-    }
+    private void OnTextOverlayResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e) =>
+        EditorTimelineMediator.HandleTextOverlayResized(ViewModel, e.Id, e.IsStartEdge, e.NewEdgeTime, RefreshOverlayPreview);
 
     private void OnTextOverlayRemoveRequested(object? sender, string overlayId)
     {
@@ -899,17 +852,11 @@ public sealed partial class EditorPage
         }
     }
 
-    private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e)
-    {
-        var operation = new MoveZoomKeyframeOperation(e.Id, e.NewTimestamp);
-        ViewModel.UndoRedoManager.Execute(operation);
-    }
+    private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e) =>
+        EditorTimelineMediator.HandleZoomSegmentMoved(ViewModel, e.Id, e.NewTimestamp);
 
-    private void OnZoomSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
-    {
-        var operation = new ResizeZoomSegmentOperation(e.Id, e.IsStartEdge, e.NewEdgeTime);
-        ViewModel.UndoRedoManager.Execute(operation);
-    }
+    private void OnZoomSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e) =>
+        EditorTimelineMediator.HandleZoomSegmentResized(ViewModel, e.Id, e.IsStartEdge, e.NewEdgeTime);
 
     private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
     {
@@ -972,23 +919,13 @@ public sealed partial class EditorPage
             EnterZoomRegionEditMode(operation.CreatedId, createdKf);
     }
 
-    private void OnZoomSegmentRemoveRequested(object? sender, string keyframeId)
-    {
-        var operation = new RemoveZoomKeyframeOperation(keyframeId);
-        ViewModel.UndoRedoManager.Execute(operation);
-        Timeline.ClearZoomSelection();
-        UpdateZoomPanelVisibility();
-    }
+    private void OnZoomSegmentRemoveRequested(object? sender, string keyframeId) =>
+        EditorTimelineMediator.HandleZoomSegmentRemoveRequested(ViewModel, Timeline, keyframeId, UpdateZoomPanelVisibility);
 
     private void RemoveZoomSegment_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
-        {
-            var operation = new RemoveZoomKeyframeOperation(selectedId);
-            ViewModel.UndoRedoManager.Execute(operation);
-            Timeline.ClearZoomSelection();
-            UpdateZoomPanelVisibility();
-        }
+            OnZoomSegmentRemoveRequested(sender, selectedId);
     }
 
     private void ZoomLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

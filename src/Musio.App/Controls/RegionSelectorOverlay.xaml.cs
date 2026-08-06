@@ -1,17 +1,13 @@
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
-using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Musio.Core.Capture;
 using Musio.Core.Interop;
 using Musio.Core.Settings;
 using Windows.Foundation;
-using Windows.Graphics.Imaging;
 
 namespace Musio_App.Controls;
 
@@ -20,7 +16,7 @@ namespace Musio_App.Controls;
 /// </summary>
 public sealed partial class RegionSelectorOverlay : UserControl
 {
-    private Window? _hostWindow;
+    private readonly OverlayHost _overlayHost;
     private TaskCompletionSource<CaptureRegion?>? _tcs;
     private readonly RegionSelector _regionSelector;
 
@@ -38,10 +34,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private byte[]? _screenshotPixels;
     private int _screenshotWidth;
     private int _screenshotHeight;
-
-    // Low-level keyboard hook for Escape (XAML focus isn't reliable before user clicks)
-    private IntPtr _keyboardHook;
-    private HookInterop.LowLevelKeyboardProc? _hookProc;
 
     // Cached cursors to avoid allocating on every pointer-move
     private InputSystemCursorShape _currentCursorShape = InputSystemCursorShape.Cross;
@@ -65,7 +57,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
     private const double MinSelectionSize = 10;
     private const int SnapRadius = 15;
     private const float SnapMinContrast = 12.0f;
-    private const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
 
     public event EventHandler<CaptureRegion>? RegionSelected;
     public event EventHandler? SelectionCancelled;
@@ -74,6 +65,7 @@ public sealed partial class RegionSelectorOverlay : UserControl
     {
         InitializeComponent();
         _regionSelector = new RegionSelector();
+        _overlayHost = new OverlayHost(this);
 
         Loaded += OnLoaded;
         SizeChanged += OnSizeChanged;
@@ -194,223 +186,47 @@ public sealed partial class RegionSelectorOverlay : UserControl
         _tcs = new TaskCompletionSource<CaptureRegion?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // Minimize Musio so it doesn't appear in the screenshot
-        bool didMinimize = false;
-        IntPtr mainHwnd = IntPtr.Zero;
-        var shell = Musio_App.Services.ShellCoordinator.Instance;
-        var mainWindow = Musio_App.App.Current.MainAppWindow;
+        return await _overlayHost.ShowOverlayAsync<CaptureRegion>(
+            title: "Select Region",
+            shellHideDelayMs: 300,
+            includeScreenshotPixels: true,
+            awaitResult: () => _tcs.Task);
+    }
 
-        if (shell is not null)
+    /// <summary>
+    /// Shared host-window/Escape-hook/shell-hide lifecycle (see
+    /// <see cref="OverlayWindowBase"/>). Nested rather than a base class so this
+    /// control's own XAML root type (<see cref="UserControl"/>) is untouched.
+    /// </summary>
+    private sealed class OverlayHost : OverlayWindowBase
+    {
+        private readonly RegionSelectorOverlay _owner;
+
+        public OverlayHost(RegionSelectorOverlay owner) => _owner = owner;
+
+        protected override UIElement Content => _owner;
+        protected override DispatcherQueue DispatcherQueue => _owner.DispatcherQueue;
+        protected override void OnEscapePressed() => _owner.CancelSelection();
+
+        protected override void OnHostWindowReady(OverlayScreenshotResult screenshot)
         {
-            // The shell knows whether the Mini pill or the full window is up.
-            shell.HideForPicker();
-            didMinimize = true;
-            await Task.Delay(300); // let the hide/minimize animation complete
-        }
-        else if (mainWindow is not null)
-        {
-            mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(mainWindow);
-            NativeMethods.ShowWindow(mainHwnd, SW_MINIMIZE);
-            didMinimize = true;
-            await Task.Delay(300); // let the minimize animation complete
-        }
-
-        // Capture the virtual desktop screenshot
-        try
-        {
-            var (screenshotSource, pixels, ssW, ssH) = await CaptureDesktopScreenshotAsync();
-            _screenshotPixels = pixels;
-            _screenshotWidth = ssW;
-            _screenshotHeight = ssH;
-
-            _hostWindow = new Window();
-            _hostWindow.Content = this;
-            _hostWindow.ExtendsContentIntoTitleBar = true;
-            _hostWindow.Title = "Select Region";
-
-            // Hide title bar chrome; do NOT maximize — Maximize() only covers a
-            // single monitor. We size the window manually to the full virtual
-            // desktop so the overlay covers every display.
-            if (_hostWindow.AppWindow.Presenter is OverlappedPresenter presenter)
-            {
-                presenter.SetBorderAndTitleBar(false, false);
-                presenter.IsAlwaysOnTop = true;
-                presenter.IsResizable = false;
-                presenter.IsMaximizable = false;
-                presenter.IsMinimizable = false;
-            }
-
-            // Position and size the window to span the entire virtual desktop
-            // (all monitors) in physical pixels. This matches the dimensions of
-            // the screenshot we captured above so the image displays 1:1 with
-            // each monitor's physical pixels, even across mixed-DPI setups.
-            int vdLeft = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
-            int vdTop = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
-            int vdWidth = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
-            int vdHeight = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
-            if (vdWidth > 0 && vdHeight > 0)
-            {
-                _hostWindow.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
-                    vdLeft, vdTop, vdWidth, vdHeight));
-            }
+            _owner._screenshotPixels = screenshot.Pixels;
+            _owner._screenshotWidth = screenshot.Width;
+            _owner._screenshotHeight = screenshot.Height;
 
             // Set the screenshot as background
-            if (screenshotSource is not null)
-                ScreenshotImage.Source = screenshotSource;
+            if (screenshot.Source is not null)
+                _owner.ScreenshotImage.Source = screenshot.Source;
 
-            _hostWindow.Closed += (_, _) =>
+            HostWindow!.Closed += (_, _) =>
             {
                 // System-close (Alt+F4, taskbar close, etc.) skips the explicit
                 // CancelSelection path, so flag it as a cancel so callers still
                 // get the "kept previous region" hint.
-                if (!_tcs.Task.IsCompleted)
-                    WasCancelled = true;
-                _tcs.TrySetResult(null);
+                if (!_owner._tcs!.Task.IsCompleted)
+                    _owner.WasCancelled = true;
+                _owner._tcs.TrySetResult(null);
             };
-
-            // Install low-level keyboard hook so Escape works even without XAML focus
-            _hookProc = EscapeHookCallback;
-            _keyboardHook = SetWindowsHookEx(HookInterop.WH_KEYBOARD_LL, _hookProc, IntPtr.Zero, 0);
-
-            _hostWindow.Activate();
-
-            return await _tcs.Task;
-        }
-        finally
-        {
-            // Must run even if the screenshot or host window fails: the shell hide
-            // is a latch that only this call releases, so skipping it would leave
-            // the Mini pill (or the minimised main window) hidden for good — and the
-            // pill isn't in Alt-Tab, so the user would have only the tray icon left.
-            if (_keyboardHook != IntPtr.Zero)
-            {
-                UnhookWindowsHookEx(_keyboardHook);
-                _keyboardHook = IntPtr.Zero;
-            }
-            _hookProc = null;
-
-            try { _hostWindow?.Close(); }
-            catch { /* already closed */ }
-            _hostWindow = null;
-
-            // Restore Musio if we minimized it
-            if (didMinimize)
-            {
-                if (shell is not null)
-                {
-                    shell.RestoreAfterPicker();
-                }
-                else if (mainHwnd != IntPtr.Zero)
-                {
-                    NativeMethods.ShowWindow(mainHwnd, SW_RESTORE);
-                    mainWindow?.Activate();
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Captures the full virtual desktop as a SoftwareBitmapSource via GDI BitBlt.
-    /// Also returns the raw BGRA pixel data for contrast analysis.
-    /// </summary>
-    private static async Task<(SoftwareBitmapSource? Source, byte[]? Pixels, int Width, int Height)> CaptureDesktopScreenshotAsync()
-    {
-        IntPtr hdcScreen = IntPtr.Zero;
-        IntPtr hdcMem = IntPtr.Zero;
-        IntPtr hBitmap = IntPtr.Zero;
-        IntPtr oldObj = IntPtr.Zero;
-        int width = 0;
-        int height = 0;
-
-        try
-        {
-            int left = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_XVIRTUALSCREEN);
-            int top = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_YVIRTUALSCREEN);
-            width = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CXVIRTUALSCREEN);
-            height = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
-
-            if (width <= 0 || height <= 0)
-                return (null, null, 0, 0);
-            if (width > 16384 || height > 16384)
-                return (null, null, width, height);
-
-            long byteCount;
-            try
-            {
-                byteCount = checked((long)width * height * 4L);
-            }
-            catch (OverflowException)
-            {
-                return (null, null, width, height);
-            }
-
-            if (byteCount > MaxScreenshotBytes)
-                return (null, null, width, height);
-
-            hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
-            if (hdcScreen == IntPtr.Zero)
-                return (null, null, width, height);
-
-            hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
-            if (hdcMem == IntPtr.Zero)
-                return (null, null, width, height);
-
-            hBitmap = NativeMethods.CreateCompatibleBitmap(hdcScreen, width, height);
-            if (hBitmap == IntPtr.Zero)
-                return (null, null, width, height);
-
-            oldObj = NativeMethods.SelectObject(hdcMem, hBitmap);
-            if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
-                return (null, null, width, height);
-
-            if (!NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
-                return (null, null, width, height);
-
-            IntPtr restoredObj = NativeMethods.SelectObject(hdcMem, oldObj);
-            if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
-                return (null, null, width, height);
-            oldObj = IntPtr.Zero;
-
-            // Read pixel data from the HBITMAP
-            var bmi = new BITMAPINFO
-            {
-                biSize = 40,
-                biWidth = width,
-                biHeight = -height, // top-down
-                biPlanes = 1,
-                biBitCount = 32,
-                biCompression = 0, // BI_RGB
-            };
-
-            var pixelData = new byte[(int)byteCount];
-            int scanLines = NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
-            if (scanLines != height)
-                return (null, null, width, height);
-
-            // Convert BGRA pixel data to SoftwareBitmap
-            using var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
-            softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
-
-            var source = new SoftwareBitmapSource();
-            await source.SetBitmapAsync(softwareBitmap);
-
-            return (source, pixelData, width, height);
-        }
-        catch
-        {
-            return width > 0 && height > 0 ? (null, null, width, height) : (null, null, 0, 0);
-        }
-        finally
-        {
-            // Ensure GDI resources are always released
-            if (oldObj != IntPtr.Zero)
-                NativeMethods.SelectObject(hdcMem, oldObj);
-            if (hBitmap != IntPtr.Zero)
-                NativeMethods.DeleteObject(hBitmap);
-            if (hdcMem != IntPtr.Zero)
-                NativeMethods.DeleteDC(hdcMem);
-            if (hdcScreen != IntPtr.Zero)
-                NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen);
         }
     }
 
@@ -947,20 +763,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
         args.Handled = true;
     }
 
-    private IntPtr EscapeHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        if (nCode >= 0 && wParam == WM_KEYDOWN)
-        {
-            int vkCode = Marshal.ReadInt32(lParam);
-            if (vkCode == VK_ESCAPE)
-            {
-                DispatcherQueue.TryEnqueue(CancelSelection);
-                return (IntPtr)1;
-            }
-        }
-        return HookInterop.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
-    }
-
     private void OnEnterPressed(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (_hasSelection)
@@ -1073,23 +875,6 @@ public sealed partial class RegionSelectorOverlay : UserControl
         SelectionCancelled?.Invoke(this, EventArgs.Empty);
         _tcs?.TrySetResult(null);
     }
-
-    #endregion
-
-    #region P/Invoke
-
-    private const int SW_MINIMIZE = 6;
-    private const int SW_RESTORE = 9;
-    private const uint SRCCOPY = 0x00CC0020;
-
-    private static readonly IntPtr WM_KEYDOWN = 0x0100;
-    private const int VK_ESCAPE = 0x1B;
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll")]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
     #endregion
 }

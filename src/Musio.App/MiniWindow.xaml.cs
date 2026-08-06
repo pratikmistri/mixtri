@@ -98,14 +98,7 @@ public sealed partial class MiniWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(DragGrip);
 
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
-        {
-            presenter.SetBorderAndTitleBar(false, false);
-            presenter.IsAlwaysOnTop = true;
-            presenter.IsResizable = false;
-            presenter.IsMaximizable = false;
-            presenter.IsMinimizable = false;
-        }
+        Controls.OverlayWindowBase.ConfigureBorderlessAlwaysOnTopPresenter(AppWindow);
 
         AppWindow.IsShownInSwitchers = false;
 
