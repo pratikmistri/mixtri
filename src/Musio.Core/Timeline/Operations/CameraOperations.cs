@@ -2,6 +2,12 @@ namespace Musio.Core.Timeline;
 
 using Musio.Core.Processing;
 
+// ── Camera (webcam) track operations ──
+// Camera segments live on their own track; their Start/Duration are source-video
+// time ranges (independent of the primary segment list), so these operations never
+// call RecalculateSegmentPositions.
+
+/// <summary>Adds a new camera overlay segment over a source-time range.</summary>
 public class AddCameraSegmentOperation : IEditOperation
 {
     private readonly CameraSegment _segment;
@@ -214,10 +220,3 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
         seg.StyleOverride = _previousStyle;
     }
 }
-
-// ── Text overlay track operations ──
-// Text overlays live on their own track; their Start/Duration are source-video time
-// ranges (independent of the primary segment list), so these operations never call
-// RecalculateSegmentPositions.
-
-/// <summary>Adds a new animated text overlay segment over a source-time range.</summary>

@@ -553,5 +553,3 @@ public class RippleDeleteOperation : IEditOperation
     }
 }
 
-// ─── Segment-based edit operations ───────────────────────────────────
-

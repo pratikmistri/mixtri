@@ -1,5 +1,19 @@
 namespace Musio.Core.Timeline;
 
+/// <summary>
+/// Sets (or clears) a single boundary's <see cref="TimelineSegment.InTransition"/>, identified
+/// by the incoming segment's Id — the same Id <see cref="TimelineControl"/>'s
+/// <c>TransitionSelected</c>/<c>TransitionRemoveRequested</c> events carry.
+/// </summary>
+/// <remarks>
+/// <paramref name="newConfig"/> is <c>null</c>-able because <c>null</c> and an explicit
+/// <see cref="TransitionConfig"/> with <see cref="TransitionType.None"/> are semantically
+/// different states (see <see cref="TimelineSegment.InTransition"/>'s remarks): the former means
+/// "not configured, use the legacy fallback", the latter is an explicit hard cut that suppresses
+/// even that fallback. Snapshotting the whole previous config (rather than diffing individual
+/// properties) is what lets <see cref="Undo"/> restore either state exactly, including going
+/// from a set value back to <c>null</c>.
+/// </remarks>
 public class UpdateTransitionOperation : IEditOperation
 {
     private readonly string _incomingSegmentId;
@@ -116,11 +130,14 @@ public class ApplyTransitionToAllBoundariesOperation : IEditOperation
     public void Undo(TimelineModel model)
     {
         if (_previous is null) return;
+        // Index once: a linear FirstOrDefault per stored boundary is O(n*m) on long timelines.
+        var byId = new Dictionary<string, TimelineSegment>(model.Segments.Count);
+        foreach (var segment in model.Segments) byId[segment.Id] = segment;
+
         foreach (var (segmentId, previous) in _previous)
         {
-            var segment = model.Segments.FirstOrDefault(s => s.Id == segmentId);
-            if (segment is null) continue;
-            segment.InTransition = previous;
+            if (byId.TryGetValue(segmentId, out var segment))
+                segment.InTransition = previous;
         }
     }
 }

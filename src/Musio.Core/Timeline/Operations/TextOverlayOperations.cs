@@ -1,5 +1,11 @@
 namespace Musio.Core.Timeline;
 
+// ── Text overlay track operations ──
+// Text overlays live on their own track; their Start/Duration are source-video time
+// ranges (independent of the primary segment list), so these operations never call
+// RecalculateSegmentPositions.
+
+/// <summary>Adds a new animated text overlay segment over a source-time range.</summary>
 public class AddTextOverlayOperation : IEditOperation
 {
     private readonly TextOverlaySegment _segment;
@@ -255,17 +261,3 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
     }
 }
 
-/// <summary>
-/// Sets (or clears) a single boundary's <see cref="TimelineSegment.InTransition"/>, identified
-/// by the incoming segment's Id — the same Id <see cref="TimelineControl"/>'s
-/// <c>TransitionSelected</c>/<c>TransitionRemoveRequested</c> events carry.
-/// </summary>
-/// <remarks>
-/// <paramref name="newConfig"/> is <c>null</c>-able because <c>null</c> and an explicit
-/// <see cref="TransitionConfig"/> with <see cref="TransitionType.None"/> are semantically
-/// different states (see <see cref="TimelineSegment.InTransition"/>'s remarks): the former means
-/// "not configured, use the legacy fallback", the latter is an explicit hard cut that suppresses
-/// even that fallback. Snapshotting the whole previous config (rather than diffing individual
-/// properties) is what lets <see cref="Undo"/> restore either state exactly, including going
-/// from a set value back to <c>null</c>.
-/// </remarks>
