@@ -110,6 +110,15 @@ internal static class OverlayScreenshotHelper
             if (scanLines != height)
                 return new OverlayScreenshotResult { Width = width, Height = height };
 
+            // GetDIBits with BI_RGB fills the 4th byte of each pixel with an UNDEFINED value
+            // (commonly 0). SoftwareBitmapSource requires Bgra8/Premultiplied, so an alpha of 0
+            // renders the whole screenshot invisible and the picker shows an empty overlay.
+            // Force opaque alpha; the BGR channels are already straight/opaque values, so with
+            // A = 255 the premultiplied interpretation is exact.
+            var span = pixelData.AsSpan();
+            for (int i = 3; i < span.Length; i += 4)
+                span[i] = 0xFF;
+
             // Convert BGRA pixel data to SoftwareBitmap
             using var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
             softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
