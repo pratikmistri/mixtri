@@ -1,0 +1,534 @@
+using System.ComponentModel;
+using System.Globalization;
+using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Text;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Musio.Core.Audio;
+using Musio.Core.Capture;
+using Musio.Core.Export;
+using Musio.Core.Media;
+using Musio.Core.Models;
+using Musio.Core.Processing;
+using Musio.Core.Projects;
+using Musio.Core.Settings;
+using Musio.Core.Timeline;
+using Musio_App.Controls;
+using Musio_App.Services;
+using Musio_App.ViewModels;
+using Windows.Foundation;
+using Windows.System;
+using Windows.UI;
+
+namespace Musio_App.Pages;
+
+public sealed partial class EditorPage
+{
+
+    private void UndoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        if (ViewModel.CanUndo)
+        {
+            ViewModel.UndoCommand.Execute(null);
+            args.Handled = true;
+        }
+    }
+
+    private void RedoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        if (ViewModel.CanRedo)
+        {
+            ViewModel.RedoCommand.Execute(null);
+            args.Handled = true;
+        }
+    }
+
+    private void SplitAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        ViewModel.SplitAtPlayheadCommand.Execute(null);
+        args.Handled = true;
+    }
+
+    private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        // If a camera segment is selected, remove it.
+        if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
+        {
+            DeleteCameraSegment(cameraSegId);
+            args.Handled = true;
+            return;
+        }
+
+        // If a text overlay is selected, remove it.
+        if (Timeline.SelectedTextOverlayId is { } overlayId)
+        {
+            DeleteTextOverlay(overlayId);
+            args.Handled = true;
+            return;
+        }
+
+        // If a zoom segment is selected, remove it instead of deleting a clip segment
+        if (Timeline.SelectedZoomKeyframeId is { } selectedId)
+        {
+            var operation = new RemoveZoomKeyframeOperation(selectedId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            Timeline.ClearZoomSelection();
+            UpdateZoomPanelVisibility();
+            args.Handled = true;
+            return;
+        }
+
+        // If a primary-track segment is selected, ripple-delete it.
+        if (_selectedPrimarySegmentId is { } segId &&
+            ViewModel.Model.Segments.Any(s => s.Id == segId))
+        {
+            var operation = new RemoveSegmentOperation(segId);
+            ViewModel.UndoRedoManager.Execute(operation);
+            _selectedPrimarySegmentId = null;
+            Timeline.SelectSegment(null);
+            HideTextSlidePanel();
+            args.Handled = true;
+            return;
+        }
+
+        ViewModel.DeleteSelectedCommand.Execute(null);
+        args.Handled = true;
+    }
+
+    private void CutAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        ViewModel.CutSelectionCommand.Execute(null);
+        args.Handled = true;
+    }
+
+    private async void SaveAccelerator_Invoked(
+        KeyboardAccelerator sender,
+        KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        await SaveProjectAsync(forcePrompt: false);
+    }
+
+    private async void SaveAsAccelerator_Invoked(
+        KeyboardAccelerator sender,
+        KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        await SaveProjectAsync(forcePrompt: true);
+    }
+
+    private void PlayPauseAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl())
+        {
+            return;
+        }
+
+        if (Preview.IsPlaying)
+        {
+            Preview.Pause();
+        }
+        else
+        {
+            Preview.Play();
+        }
+        args.Handled = true;
+    }
+
+    private bool IsFocusOnInteractiveControl()
+    {
+        DependencyObject? node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        while (node is not null)
+        {
+            switch (node)
+            {
+                case TextBox:
+                case PasswordBox:
+                case RichEditBox:
+                case AutoSuggestBox:
+                case ComboBox:
+                case NumberBox:
+                case Microsoft.UI.Xaml.Controls.Primitives.ButtonBase:
+                case ToggleSwitch:
+                case Slider:
+                case ColorPicker:
+                case FlyoutPresenter:
+                case MenuFlyoutPresenter:
+                    return true;
+            }
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    // --- Export flyout ---
+
+    private async void ExportFlyout_Opened(object? sender, object e)
+    {
+        if (ExportVM.IsExporting)
+        {
+            ShowExportingState();
+            return;
+        }
+
+        if (ExportVM.ExportSucceeded)
+        {
+            ShowExportedState();
+            return;
+        }
+
+        if (ExportVM.ExportFailed)
+        {
+            ShowErrorState();
+            return;
+        }
+
+        // Pause preview playback before export. The export pipeline composites
+        // frames on the shared Win2D device; running it concurrently with the
+        // preview's per-frame composition can corrupt output frames and crash
+        // the encoder when both pull from the same source files at once.
+        Preview.Pause();
+        try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
+
+        // Start new export
+        ExportVM.PrepareForExport();
+        if (!ExportVM.ExportCommand.CanExecute(null))
+        {
+            ExportFlyout.Hide();
+            EditorInfoBar.Message = "No recording available to export.";
+            EditorInfoBar.Severity = InfoBarSeverity.Warning;
+            EditorInfoBar.IsOpen = true;
+            return;
+        }
+
+        ShowExportingState();
+        await ExportVM.ExportCommand.ExecuteAsync(null);
+    }
+
+    private void ExportFlyout_Closed(object? sender, object e)
+    {
+        // Reset terminal state (Exported / Failed) so the next open starts a fresh
+        // export. Without this, dismissing the flyout via click-outside leaves
+        // ExportSucceeded=true; reopening the flyout would then short-circuit and
+        // show the prior result instead of running a new export — which makes
+        // subsequent style/edit changes appear to never apply to the output file.
+        if (ExportVM.IsExporting) return;
+        if (!ExportVM.ExportSucceeded && !ExportVM.ExportFailed) return;
+        ExportVM.PrepareForExport();
+        ShowExportingState();
+    }
+
+    private void ExportVM_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ExportViewModel.IsExporting) && !ExportVM.IsExporting)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (ExportVM.ExportSucceeded)
+                    ShowExportedState();
+                else if (ExportVM.ExportFailed)
+                    ShowErrorState();
+                else
+                    ExportFlyout.Hide(); // Cancelled
+            });
+        }
+    }
+
+    private void ShowExportingState()
+    {
+        ExportingPanel.Visibility = Visibility.Visible;
+        ExportedPanel.Visibility = Visibility.Collapsed;
+        ExportErrorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowExportedState()
+    {
+        ExportingPanel.Visibility = Visibility.Collapsed;
+        ExportedPanel.Visibility = Visibility.Visible;
+        ExportErrorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowErrorState()
+    {
+        ExportingPanel.Visibility = Visibility.Collapsed;
+        ExportedPanel.Visibility = Visibility.Collapsed;
+        ExportErrorPanel.Visibility = Visibility.Visible;
+    }
+
+    private void OpenFileLocation_Click(object sender, RoutedEventArgs e)
+    {
+        ExportVM.OpenOutputFolderCommand.Execute(null);
+    }
+
+    private void CancelExport_Click(object sender, RoutedEventArgs e)
+    {
+        ExportVM.CancelExportCommand.Execute(null);
+    }
+
+    private void CloseFlyout_Click(object sender, RoutedEventArgs e)
+    {
+        ExportFlyout.Hide();
+        // Reset state so next open starts a fresh export
+        ExportVM.PrepareForExport();
+        ShowExportingState();
+    }
+
+    private void AddTextSlide_Click(object sender, RoutedEventArgs e)
+    {
+        var slide = new TextSlideSegment
+        {
+            Text = "Title",
+            Duration = TimeSpan.FromSeconds(3),
+        };
+
+        var playhead = ViewModel.Model.PlayheadPosition;
+
+        // Use the split-and-insert operation which splits the video segment
+        // at the playhead, keeping audio in sync
+        var operation = new SplitAndInsertTextSlideOperation(playhead, slide);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        // Select the new slide and show properties
+        _selectedTextSlideId = slide.Id;
+        Timeline.SelectSegment(slide.Id);
+        ShowTextSlidePanel(slide);
+
+        Timeline.InvalidateAllCanvases();
+    }
+
+    /// <summary>
+    /// Creates a new text overlay at the playhead's current source time (mapping through
+    /// the same output→source logic the live preview uses) and selects it so its pane opens
+    /// immediately. A no-op when the playhead can't be mapped to any source (no primary
+    /// video loaded yet).
+    /// </summary>
+    private void AddTextOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (GetPlayheadSourceTimeForOverlay() is not { } mapped) return;
+
+        var operation = new AddTextOverlayOperation(
+            mapped.SourceTime, TextOverlayDefaultDuration, sourceVideoFilePath: mapped.VideoFilePath);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        Timeline.SelectedTextOverlayId = operation.CreatedId;
+        _selectedTextOverlayId = operation.CreatedId;
+        SyncTextOverlayUI(operation.CreatedId);
+        Timeline.InvalidateAllCanvases();
+
+        // The overlay starts at the playhead, and every animation is fully transparent on
+        // its very first frame - so the thing the user just inserted would render as
+        // nothing at all until they scrubbed into it, which reads as "insert is broken".
+        // Park the playhead past the entrance so the new overlay is visible, selected and
+        // directly editable on the preview the moment it appears.
+        SeekPastOverlayEntrance(TextOverlayDefaultDuration);
+
+        RefreshOverlayPreview();
+    }
+
+    /// <summary>Duration a newly inserted text overlay is created with.</summary>
+    private static readonly TimeSpan TextOverlayDefaultDuration = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Moves the playhead from a new overlay's start to its middle, which is past the
+    /// entrance animation and before the exit, so the overlay renders at full opacity.
+    /// <paramref name="sourceDuration"/> is the overlay's source-time length; the offset is
+    /// applied in output time, because a sped-up segment covers that source range in
+    /// proportionally less output time.
+    /// </summary>
+    private void SeekPastOverlayEntrance(TimeSpan sourceDuration)
+    {
+        var model = ViewModel.Model;
+        double speed = 1.0;
+        VideoSegment? owning = null;
+
+        if (model.Segments.Count > 0 &&
+            model.GetSegmentAtTime(Timeline.PlayheadPosition).Segment is VideoSegment seg)
+        {
+            owning = seg;
+            if (seg.SpeedFactor > 0) speed = seg.SpeedFactor;
+        }
+
+        var offset = TimeSpan.FromTicks((long)(sourceDuration.Ticks / 2 / speed));
+        var target = Timeline.PlayheadPosition + offset;
+
+        // Stay inside the clip the overlay belongs to. The overlay is only active over its
+        // own recording, so a midpoint that spills past the clip boundary would land on the
+        // next segment (another recording, or a text slide) where it renders nothing at all
+        // — the very problem this seek exists to avoid. Back off just inside the end so the
+        // playhead is still within the clip rather than exactly on its exclusive edge.
+        if (owning is not null && target >= owning.End)
+            target = owning.End - TimeSpan.FromMilliseconds(1);
+
+        // Never run past the end of the timeline; the overlay is still partly visible
+        // wherever we land, and seeking beyond the content would blank the preview.
+        var end = model.TotalSegmentsDuration;
+        if (end > TimeSpan.Zero && target > end)
+            target = end;
+        if (target < Timeline.PlayheadPosition) target = Timeline.PlayheadPosition;
+        if (target < TimeSpan.Zero) target = TimeSpan.Zero;
+
+        Preview.Pause();
+        Timeline.PlayheadPosition = target;
+        Preview.PlayheadPosition = target;
+        model.PlayheadPosition = target;
+        _ = UpdatePreviewFrameAsync(target, force: true);
+    }
+
+    /// <summary>
+    /// Maps the playhead's output-time position to the source time (and owning recording)
+    /// a newly-created text overlay should be authored against, mirroring the output→source
+    /// mapping the live preview renders with. Returns null when there is nothing to author
+    /// the overlay against (no primary video, or the playhead sits over a non-video segment
+    /// such as a text slide).
+    /// </summary>
+    private (string? VideoFilePath, TimeSpan SourceTime)? GetPlayheadSourceTimeForOverlay()
+    {
+        var model = ViewModel.Model;
+        var position = Timeline.PlayheadPosition;
+
+        if (model.Segments.Count > 0)
+        {
+            var (segment, localOffset) = model.GetSegmentAtTime(position);
+            if (segment is not VideoSegment videoSeg) return null;
+
+            var sourceInSeg = videoSeg.SourceStart +
+                TimeSpan.FromTicks((long)(localOffset.Ticks * videoSeg.SpeedFactor));
+
+            // null SourceVideoFilePath means "the primary recording" (mirrors
+            // ZoomKeyframe/TextOverlaySegment's convention), so map the primary video's own
+            // segments to null rather than storing its path explicitly.
+            bool isPrimary = string.Equals(videoSeg.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase);
+            return (isPrimary ? null : videoSeg.VideoFilePath, sourceInSeg);
+        }
+
+        // Legacy (pre-segment) projects: the whole timeline is the primary recording.
+        if (string.IsNullOrEmpty(PrimaryVideoPath)) return null;
+        return (null, MapToSourceTime(position));
+    }
+
+    private void RecordMore_Click(object sender, RoutedEventArgs e)
+    {
+        // Navigate to RecordingPage in append mode
+        Preview?.Pause();
+        _audioPlayer?.Stop();
+        Frame.Navigate(typeof(RecordingPage), "append");
+    }
+
+    /// <summary>
+    /// Lets the user pick an external video file and inserts it into the project. The file is
+    /// normalised by <see cref="VideoImportService"/> (transcoded to a constant-frame-rate
+    /// H.264 clip, its audio extracted to WAV) so the rest of the editor can treat it exactly
+    /// like an appended recording — the only difference being that it carries no cursor, click
+    /// or keystroke data.
+    /// </summary>
+    private async void ImportVideo_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new Windows.Storage.Pickers.FileOpenPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+            ViewMode = Windows.Storage.Pickers.PickerViewMode.Thumbnail,
+        };
+        foreach (var ext in VideoImportService.SupportedExtensions)
+            picker.FileTypeFilter.Add(ext);
+        InitializePicker(picker);
+
+        Windows.Storage.StorageFile? file = null;
+        try { file = await picker.PickSingleFileAsync(); }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Import picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        // Import transcodes the whole file, so it can run for many seconds; surface progress
+        // and a cancel path rather than freezing the UI on a silent await.
+        using var cts = new CancellationTokenSource();
+        var (dialog, bar) = BuildImportProgressDialog(cts);
+        var progress = new Progress<double>(p =>
+        {
+            // Progress arrives on a background thread; marshal the bound update onto the UI.
+            DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
+        });
+
+        var showTask = dialog.ShowAsync();
+        string? errorMessage = null;
+        try
+        {
+            var result = await VideoImportService.ImportAsync(file.Path, null, progress, cts.Token);
+
+            // The import staying on this page means the editor must be told to reload; appending
+            // fires ProjectService.ProjectChanged, which the EditorViewModel turns into a
+            // ModelReloaded the page already handles (timeline swap + preview re-init).
+            ProjectService.Instance.ImportVideo(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancelled — nothing to report.
+        }
+        catch (VideoImportException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Video import failed: {ex}");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            // Fully close the progress dialog before anything else opens one: only a single
+            // ContentDialog may be shown at a time, so the error dialog below must wait for it.
+            dialog.Hide();
+            try { await showTask; } catch { /* dialog dismissed */ }
+        }
+
+        if (errorMessage is not null)
+            await ShowProjectDialogAsync("Could not import video", errorMessage);
+    }
+
+    /// <summary>
+    /// Builds the modal progress dialog shown while a video import runs, wiring its Cancel
+    /// button to the supplied token source. Returns the dialog and the progress bar so the
+    /// caller can drive it from an <see cref="IProgress{T}"/>.
+    /// </summary>
+    private (ContentDialog Dialog, ProgressBar Bar) BuildImportProgressDialog(CancellationTokenSource cts)
+    {
+        var bar = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Width = 260,
+        };
+        var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Transcoding and importing the video…",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(bar);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Importing video",
+            Content = panel,
+            CloseButtonText = "Cancel",
+            XamlRoot = XamlRoot,
+        };
+        // Closing (via the Cancel button or Esc) requests cancellation; ImportAsync observes
+        // the token and throws OperationCanceledException, which the handler swallows.
+        dialog.CloseButtonClick += (_, _) => cts.Cancel();
+        return (dialog, bar);
+    }
+}
