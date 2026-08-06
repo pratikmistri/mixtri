@@ -41,7 +41,7 @@ public static class Win2DUtils
                 $"Failed to allocate {purpose} render target ({width}x{height}): {ex.Message}");
             throw new InvalidOperationException(
                 $"Failed to allocate {purpose} render target ({width}x{height}). " +
-                "Reduce export resolution or close other GPU-heavy applications.", ex);
+                "Try a lower resolution or close other GPU-heavy applications.", ex);
         }
     }
 }

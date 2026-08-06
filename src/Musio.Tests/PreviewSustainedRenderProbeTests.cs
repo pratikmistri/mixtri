@@ -11,6 +11,13 @@ namespace Musio.Tests;
 /// quality does and is the moment the reported corruption appeared.
 /// Set MUSIO_PROBE_VIDEO to a real .mp4 to run; skips otherwise.
 /// </summary>
+/// <remarks>
+/// This is an opt-in investigation harness, not a regression test: with MUSIO_PROBE_VIDEO unset
+/// it always reports Inconclusive (surfacing as one skipped test in a default run). It uses the
+/// repo's usual environment-gate convention (<c>Assert.Inconclusive</c>) rather than
+/// <c>[Ignore]</c>, which is reserved here for tests that fail against known defects, so the
+/// probe stays runnable by setting the variable instead of editing code.
+/// </remarks>
 [TestClass]
 public class PreviewSustainedRenderProbeTests
 {
