@@ -7,6 +7,7 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
 using Windows.Foundation;
@@ -2514,17 +2515,26 @@ public sealed partial class TimelineControl : UserControl
     /// <param name="Name">Label drawn on the block.</param>
     /// <param name="Start">Output-timeline start.</param>
     /// <param name="Duration">How long it sounds for.</param>
+    /// <param name="TrimStart">How far into the SOURCE FILE this block starts playing.</param>
     /// <param name="IsMusic">Which lane it belongs to.</param>
     /// <param name="IsMuted">Drawn dimmed, matching the recorded tracks' muted state.</param>
-    /// <param name="Waveform">Peaks spanning <paramref name="Duration"/>, or null while they build.</param>
+    /// <param name="Waveform">
+    /// Peaks spanning the WHOLE source file (not just this block's slice), or null while they
+    /// build. Whole-file deliberately: the block is a window onto the file, so trimming must
+    /// reveal a different part of the same peaks rather than rescale them — see
+    /// <see cref="DrawInsertedAudioLane"/>.
+    /// </param>
+    /// <param name="WaveformDurationSeconds">Source-time span <paramref name="Waveform"/> covers.</param>
     public readonly record struct InsertedAudioLaneItem(
         string Id,
         string Name,
         TimeSpan Start,
         TimeSpan Duration,
+        TimeSpan TrimStart,
         bool IsMusic,
         bool IsMuted,
-        float[]? Waveform);
+        float[]? Waveform,
+        double WaveformDurationSeconds);
 
     private IReadOnlyList<InsertedAudioLaneItem> _insertedAudioTracks = [];
 
@@ -2888,16 +2898,8 @@ public sealed partial class TimelineControl : UserControl
 
             if (item.Waveform is { Length: > 1 } waveform && !item.IsMuted)
             {
-                float barWidth = Math.Max(1f, blockW / waveform.Length);
-                for (int i = 0; i < waveform.Length; i++)
-                {
-                    float bx = x1 + (i * blockW / waveform.Length);
-                    if (bx > w || bx + barWidth < 0) continue;
-
-                    float amplitude = Math.Clamp(waveform[i], 0f, 1f);
-                    float barHeight = amplitude * (blockH * 0.42f);
-                    ds.FillRectangle(bx, centerY - barHeight, barWidth, barHeight * 2, borderColor);
-                }
+                DrawInsertedAudioWaveform(
+                    ds, item, waveform, rawX1, rawX2, x1, x2, blockH, centerY, borderColor);
             }
 
             if (blockW > 40)
@@ -2925,6 +2927,69 @@ public sealed partial class TimelineControl : UserControl
             // how the first version of this lane read.
             DrawTrimHandle(ds, x1, blockY, blockH, isSelected, clippedStart, atStart: true);
             DrawTrimHandle(ds, x2, blockY, blockH, isSelected, clippedEnd, atStart: false);
+        }
+    }
+
+    /// <summary>
+    /// Draws the portion of a track's whole-file waveform that its trim window actually
+    /// plays.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The waveform is a window onto the file, never a rescaling of it.</b> The first
+    /// version stretched the cached peak array across the block, so trimming appeared to
+    /// COMPRESS the whole track rather than cut a piece out of it — leaving no way to see
+    /// which part of the audio survived. Each peak is therefore positioned by its own source
+    /// time, exactly as <see cref="DrawSegmentWaveform"/> does for video segments.
+    /// </para>
+    /// <para>
+    /// Positions are computed against the block's UNCLAMPED geometry
+    /// (<paramref name="rawX1"/>/<paramref name="rawX2"/>) and only then filtered to the
+    /// visible span. Mapping onto the clamped width instead would squeeze the whole waveform
+    /// into whatever part of the block is on screen — the same distortion at viewport scale.
+    /// </para>
+    /// </remarks>
+    private static void DrawInsertedAudioWaveform(
+        CanvasDrawingSession ds, InsertedAudioLaneItem item, float[] waveform,
+        double rawX1, double rawX2, float visibleX1, float visibleX2,
+        float blockH, float centerY, Color color)
+    {
+        double fileSeconds = item.WaveformDurationSeconds;
+        double windowStart = item.TrimStart.TotalSeconds;
+        double windowDuration = item.Duration.TotalSeconds;
+        if (fileSeconds <= 0 || windowDuration <= 0) return;
+
+        double fullWidth = rawX2 - rawX1;
+        if (fullWidth <= 0) return;
+
+        var window = WaveformWindow.Resolve(
+            waveform.Length, fileSeconds, windowStart, windowDuration);
+        if (window.IsEmpty) return;
+
+        int count = Math.Max(1, window.LastIndex - window.FirstIndex);
+        float barWidth = Math.Max(1f, (float)(fullWidth / count));
+        float maxBar = blockH * 0.42f;
+
+        for (int i = window.FirstIndex; i <= window.LastIndex; i++)
+        {
+            // Where this peak sits inside the trim window, 0..1. Out-of-range values are the
+            // peaks straddling the window's edges, which belong to audio the trim cut away.
+            double fraction = window.FractionFor(i);
+            if (double.IsNaN(fraction) || fraction < 0 || fraction > 1) continue;
+
+            float bx = (float)(rawX1 + fraction * fullWidth);
+            if (bx + barWidth < visibleX1 || bx > visibleX2) continue;
+
+            float amplitude = Math.Clamp(waveform[i], 0f, 1f);
+            float barHeight = amplitude * maxBar;
+
+            // Clip the bar to the visible block so a partially scrolled-out waveform does
+            // not paint over the neighbouring lane content.
+            float left = Math.Max(bx, visibleX1);
+            float right = Math.Min(bx + barWidth, visibleX2);
+            if (right <= left) continue;
+
+            ds.FillRectangle(left, centerY - barHeight, right - left, barHeight * 2, color);
         }
     }
 

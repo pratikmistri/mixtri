@@ -3,6 +3,79 @@ using NAudio.Wave;
 namespace Musio.Core.Audio;
 
 /// <summary>
+/// Maps a whole-file peak array onto the slice of it a trimmed clip actually plays.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Waveforms for inserted audio are generated once per FILE and cached by path, because a
+/// per-clip array would be stale the moment the clip is trimmed. Drawing therefore has to
+/// pick out the window the clip plays — <b>positioning every peak by its own source time</b>
+/// — rather than stretching the array across the clip's width.
+/// </para>
+/// <para>
+/// Getting this wrong is not subtle but it IS silent: stretching makes a trim look like the
+/// whole track was COMPRESSED into the shorter block, so the waveform no longer tells you
+/// which part of the audio survived — the one job it has. That was a real shipped bug, which
+/// is why this arithmetic lives here, pure and tested, instead of inline in a draw handler.
+/// </para>
+/// </remarks>
+/// <param name="FirstIndex">First peak index touching the window.</param>
+/// <param name="LastIndex">Last peak index touching the window (inclusive).</param>
+/// <param name="PeakCount">Length of the peak array the indices refer to.</param>
+/// <param name="FileSeconds">Source-time span the whole peak array covers.</param>
+/// <param name="WindowStartSeconds">Where the clip starts inside the file.</param>
+/// <param name="WindowDurationSeconds">How much of the file the clip plays.</param>
+public readonly record struct WaveformWindow(
+    int FirstIndex,
+    int LastIndex,
+    int PeakCount,
+    double FileSeconds,
+    double WindowStartSeconds,
+    double WindowDurationSeconds)
+{
+    /// <summary>Whether this window contains anything to draw.</summary>
+    public bool IsEmpty => PeakCount <= 0 || WindowDurationSeconds <= 0 || FileSeconds <= 0;
+
+    /// <summary>
+    /// Resolves the peak-index range covering <paramref name="windowStartSeconds"/> ..
+    /// <c>+ windowDurationSeconds</c>. Returns an empty window for nonsensical inputs rather
+    /// than throwing — a waveform is decoration, and a bad probe must not break the timeline.
+    /// </summary>
+    public static WaveformWindow Resolve(
+        int peakCount, double fileSeconds, double windowStartSeconds, double windowDurationSeconds)
+    {
+        if (peakCount <= 0 || fileSeconds <= 0 || windowDurationSeconds <= 0)
+            return new WaveformWindow(0, -1, 0, 0, 0, 0);
+
+        if (windowStartSeconds < 0) windowStartSeconds = 0;
+
+        int first = (int)(windowStartSeconds / fileSeconds * peakCount);
+        // Ceiling on the far edge so the last partially covered peak is still drawn; without
+        // it a short window can round down to nothing and render blank.
+        int last = (int)Math.Ceiling(
+            (windowStartSeconds + windowDurationSeconds) / fileSeconds * peakCount);
+
+        first = Math.Clamp(first, 0, peakCount - 1);
+        last = Math.Clamp(last, first, peakCount - 1);
+
+        return new WaveformWindow(
+            first, last, peakCount, fileSeconds, windowStartSeconds, windowDurationSeconds);
+    }
+
+    /// <summary>
+    /// Where peak <paramref name="index"/> sits inside the window, as a 0..1 fraction of the
+    /// clip's width. Values outside 0..1 fall outside the played window and must be skipped —
+    /// they exist because the index range is inclusive of the peaks straddling both edges.
+    /// </summary>
+    public double FractionFor(int index)
+    {
+        if (IsEmpty) return double.NaN;
+        double peakSeconds = (double)index / PeakCount * FileSeconds;
+        return (peakSeconds - WindowStartSeconds) / WindowDurationSeconds;
+    }
+}
+
+/// <summary>
 /// Generates downsampled peak values from audio data for waveform visualization.
 /// </summary>
 public static class AudioWaveformGenerator

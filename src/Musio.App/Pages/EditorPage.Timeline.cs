@@ -1428,19 +1428,39 @@ public sealed partial class EditorPage
         Timeline?.ClearInsertedAudioSelection();
     }
 
-    /// <summary>Waveform peaks per inserted track file, keyed by path.</summary>    /// <remarks>
-    /// Cached across republishes because generating them decodes the whole WAV: without
-    /// this, every mute toggle or reload would re-read every inserted file from disk.
+    /// <summary>
+    /// Whole-file waveform peaks per inserted track file, keyed by path, with the source-time
+    /// span each array covers.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Whole-file, not per-block.</b> The first version generated peaks starting at the
+    /// track's trim point and let the lane stretch them across the block, which made a trim
+    /// look like the entire track had been squeezed rather than cut. It was also stale by
+    /// construction: keyed by path, it was never regenerated when the trim changed. A
+    /// whole-file array is trim-independent, so the cache is correct for the life of the
+    /// file and the lane simply draws the window it needs.
+    /// </para>
+    /// <para>
+    /// Cached because generating peaks decodes the entire WAV: without it, every mute toggle,
+    /// drag or undo would re-read every inserted file from disk.
+    /// </para>
     /// </remarks>
-    private readonly Dictionary<string, float[]> _insertedAudioWaveforms =
+    private readonly Dictionary<string, (float[] Peaks, double DurationSeconds)> _insertedAudioWaveforms =
         new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Number of waveform peaks generated per inserted track.</summary>
-    private const int InsertedAudioWaveformPeaks = 400;
+    /// <summary>
+    /// Waveform resolution. Scaled by duration rather than fixed, because a fixed budget
+    /// spread over a multi-minute music bed leaves only a handful of peaks once it is trimmed
+    /// down to a few seconds — precisely when the user most needs to see what remains.
+    /// </summary>
+    private const double InsertedAudioPeaksPerSecond = 20;
+    private const int InsertedAudioMinPeaks = 400;
+    private const int InsertedAudioMaxPeaks = 6000;
 
     /// <summary>
-    /// Projects the project's inserted audio tracks onto the timeline's lane, then fills in
-    /// any missing waveforms in the background and republishes when they arrive.
+    /// Projects the timeline's inserted audio tracks onto the lanes, then fills in any
+    /// missing waveforms in the background and republishes when they arrive.
     /// </summary>
     private void PublishInsertedAudioLane()
     {
@@ -1454,7 +1474,7 @@ public sealed partial class EditorPage
         }
 
         var items = new List<Controls.TimelineControl.InsertedAudioLaneItem>();
-        var missing = new List<(string Path, double StartSeconds, double DurationSeconds)>();
+        var missing = new List<string>();
 
         foreach (var track in tracks)
         {
@@ -1462,18 +1482,26 @@ public sealed partial class EditorPage
             var duration = track.EffectiveDuration;
             if (duration <= TimeSpan.Zero) continue;
 
-            _insertedAudioWaveforms.TryGetValue(track.FilePath, out var waveform);
-            if (waveform is null && File.Exists(track.FilePath))
-                missing.Add((track.FilePath, track.TrimStart.TotalSeconds, duration.TotalSeconds));
+            _insertedAudioWaveforms.TryGetValue(track.FilePath, out var cached);
+            if (cached.Peaks is null
+                && !missing.Contains(track.FilePath, StringComparer.OrdinalIgnoreCase)
+                && File.Exists(track.FilePath))
+            {
+                // One entry per FILE, not per track: after a split, both halves read the
+                // same file and must not decode it twice.
+                missing.Add(track.FilePath);
+            }
 
             items.Add(new Controls.TimelineControl.InsertedAudioLaneItem(
                 track.Id,
                 string.IsNullOrWhiteSpace(track.Name) ? "Audio" : track.Name,
                 track.StartTime,
                 duration,
+                track.TrimStart,
                 track.Kind == AudioTrackKind.Music,
                 track.IsMuted,
-                waveform));
+                cached.Peaks,
+                cached.DurationSeconds));
         }
 
         Timeline.InsertedAudioTracks = items;
@@ -1484,15 +1512,27 @@ public sealed partial class EditorPage
         // first and gains its waveform on the republish below.
         _ = Task.Run(() =>
         {
-            var built = new List<(string Path, float[] Waveform)>();
-            foreach (var (path, startSeconds, _) in missing)
+            var built = new List<(string Path, float[] Peaks, double DurationSeconds)>();
+            foreach (var path in missing)
             {
                 try
                 {
-                    var peaks = AudioWaveformGenerator.GenerateWaveform(
-                        path, InsertedAudioWaveformPeaks, startSeconds);
+                    // Measured from the file itself rather than taken from AudioTrack
+                    // .SourceDuration: the peaks are keyed by path and shared by every track
+                    // cut from it, so their span must describe the FILE, not any one track.
+                    double fileSeconds;
+                    using (var probe = new NAudio.Wave.AudioFileReader(path))
+                        fileSeconds = probe.TotalTime.TotalSeconds;
+                    if (fileSeconds <= 0) continue;
+
+                    int peakCount = (int)Math.Clamp(
+                        fileSeconds * InsertedAudioPeaksPerSecond,
+                        InsertedAudioMinPeaks,
+                        InsertedAudioMaxPeaks);
+
+                    var peaks = AudioWaveformGenerator.GenerateWaveform(path, peakCount);
                     if (peaks is { Length: > 0 })
-                        built.Add((path, peaks));
+                        built.Add((path, peaks, fileSeconds));
                 }
                 catch
                 {
@@ -1504,8 +1544,8 @@ public sealed partial class EditorPage
 
             DispatcherQueue.TryEnqueue(() =>
             {
-                foreach (var (path, peaks) in built)
-                    _insertedAudioWaveforms[path] = peaks;
+                foreach (var (path, peaks, seconds) in built)
+                    _insertedAudioWaveforms[path] = (peaks, seconds);
 
                 // Re-projects with the waveforms now cached. Guarded because this lands
                 // after an await boundary, by which time the page may have unloaded.

@@ -526,4 +526,98 @@ public sealed class InsertedAudioTrackTests
     }
 
     #endregion
+
+    #region Waveform windowing
+
+    // The bug these guard: the lane used to stretch a track's whole cached waveform across
+    // its block, so trimming looked like the entire track had been COMPRESSED rather than
+    // cut — leaving no way to see which part of the audio survived.
+
+    [TestMethod]
+    public void WaveformWindow_UntrimmedClip_CoversTheWholeArray()
+    {
+        var window = Musio.Core.Audio.WaveformWindow.Resolve(
+            peakCount: 100, fileSeconds: 10, windowStartSeconds: 0, windowDurationSeconds: 10);
+
+        Assert.AreEqual(0, window.FirstIndex);
+        Assert.AreEqual(99, window.LastIndex);
+        Assert.AreEqual(0.0, window.FractionFor(0), 0.001, "the first peak sits at the block's left");
+        Assert.AreEqual(1.0, window.FractionFor(100), 0.001, "and the end of the file at its right");
+    }
+
+    [TestMethod]
+    public void WaveformWindow_TrimmedClip_SelectsOnlyTheRemainingPeaks()
+    {
+        // A 10s file trimmed to play 4s..7s must select the middle 30% of the peaks, NOT
+        // rescale all of them into the block.
+        var window = Musio.Core.Audio.WaveformWindow.Resolve(
+            peakCount: 100, fileSeconds: 10, windowStartSeconds: 4, windowDurationSeconds: 3);
+
+        Assert.AreEqual(40, window.FirstIndex, "peaks before the trim point are excluded");
+        Assert.AreEqual(70, window.LastIndex, "as are peaks past the end of the window");
+
+        Assert.AreEqual(0.0, window.FractionFor(40), 0.001, "the first surviving peak is at the left edge");
+        Assert.AreEqual(1.0, window.FractionFor(70), 0.001, "and the last at the right edge");
+        Assert.AreEqual(0.5, window.FractionFor(55), 0.001, "with source time mapping linearly between");
+    }
+
+    [TestMethod]
+    public void WaveformWindow_PeaksOutsideTheWindow_AreReportedOutOfRange()
+    {
+        var window = Musio.Core.Audio.WaveformWindow.Resolve(
+            peakCount: 100, fileSeconds: 10, windowStartSeconds: 4, windowDurationSeconds: 3);
+
+        Assert.IsTrue(window.FractionFor(39) < 0, "audio before the trim must not be drawn");
+        Assert.IsTrue(window.FractionFor(71) > 1, "nor audio past the end of the clip");
+    }
+
+    [TestMethod]
+    public void WaveformWindow_ScalesWithTheWindow_NotWithTheFile()
+    {
+        // The heart of the fix: two clips cut from the SAME file at the same length select
+        // the same NUMBER of peaks, so a trim shows fewer peaks rather than squashed ones.
+        var early = Musio.Core.Audio.WaveformWindow.Resolve(1000, 100, 10, 5);
+        var late = Musio.Core.Audio.WaveformWindow.Resolve(1000, 100, 80, 5);
+
+        Assert.AreEqual(
+            early.LastIndex - early.FirstIndex,
+            late.LastIndex - late.FirstIndex,
+            "equal-length windows must cover an equal number of peaks wherever they sit");
+        Assert.AreNotEqual(early.FirstIndex, late.FirstIndex, "but start at different peaks");
+    }
+
+    [TestMethod]
+    public void WaveformWindow_VeryShortClip_StillDrawsAtLeastOnePeak()
+    {
+        // A 50ms window of a 3-minute file rounds down to zero peaks without the ceiling on
+        // the far edge, which rendered a blank block right after an aggressive trim.
+        var window = Musio.Core.Audio.WaveformWindow.Resolve(
+            peakCount: 3600, fileSeconds: 180, windowStartSeconds: 10, windowDurationSeconds: 0.05);
+
+        Assert.IsFalse(window.IsEmpty);
+        Assert.IsTrue(window.LastIndex >= window.FirstIndex, "a sliver of audio still has a peak");
+    }
+
+    [TestMethod]
+    public void WaveformWindow_IsEmptyForUnusableInput_RatherThanThrowing()
+    {
+        // A failed duration probe must degrade to "no waveform", never break the timeline.
+        Assert.IsTrue(Musio.Core.Audio.WaveformWindow.Resolve(100, 0, 0, 5).IsEmpty);
+        Assert.IsTrue(Musio.Core.Audio.WaveformWindow.Resolve(0, 10, 0, 5).IsEmpty);
+        Assert.IsTrue(Musio.Core.Audio.WaveformWindow.Resolve(100, 10, 0, 0).IsEmpty);
+    }
+
+    [TestMethod]
+    public void WaveformWindow_ClampsIndicesIntoTheArray()
+    {
+        // A window running past the end of the file (a duration probe that disagrees with
+        // the stored SourceDuration) must not index past the peak array.
+        var window = Musio.Core.Audio.WaveformWindow.Resolve(
+            peakCount: 100, fileSeconds: 10, windowStartSeconds: 9, windowDurationSeconds: 30);
+
+        Assert.IsTrue(window.FirstIndex >= 0 && window.FirstIndex < 100);
+        Assert.IsTrue(window.LastIndex >= window.FirstIndex && window.LastIndex < 100);
+    }
+
+    #endregion
 }
