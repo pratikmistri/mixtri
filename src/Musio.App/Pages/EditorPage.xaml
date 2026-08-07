@@ -9,6 +9,14 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <!-- Every accelerator below is page-scoped rather than owned by a button, so WinUI has
+         no sensible element to anchor its automatic "Ctrl+Z" key-combination tooltip to and
+         parks it against the page itself - it surfaced unprompted over the timeline. Hidden
+         suppresses only that framework tooltip; the shortcuts still work, and the ones worth
+         advertising are already spelled out in the toolbar buttons' own tooltips (see
+         ViewModel.UndoTooltip, "Undo: <action> (Ctrl+Z)"). -->
+    <Page.KeyboardAcceleratorPlacementMode>Hidden</Page.KeyboardAcceleratorPlacementMode>
+
     <Page.Resources>
         <!-- Shown explicitly via ShowAt after a save. It lives here rather than on the
              button because SplitButton already owns its Flyout property for the dropdown. -->

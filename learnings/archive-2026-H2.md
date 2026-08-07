@@ -1540,3 +1540,12 @@ ewStart to TimeSpan.Zero before raising *Moved; Zoom's does not clamp at all (re
   3. **The slider was indented relative to its own readout**, because it carried a fixed `Width = 170` inside a `MinWidth = 190` panel. A fader that does not line up with the label above it reads as broken. Fixed content width on the panel, `HorizontalAlignment.Stretch` on the slider, mute moved into a header `Grid` row beside the readout so the slider gets the full width.
 - **Generalisable**: when a label and its icon are both interactive-looking, make the label the button and the icon its content. Two adjacent controls where the user perceives one target is a hit-target bug waiting to be reported.
 - **Verification**: `Musio.App` + `Musio.Tests` x64 Debug 0 errors / 0 CS warnings; suite **1020 passed, 3 skipped, 0 failed** (unchanged — presentation only). ARM64 Release clean-rebuilt, re-registered, relaunched; responding.
+
+## Stray "Ctrl+Z" tooltip over the timeline
+
+- **Feature/area**: `EditorPage.xaml`, `RegionSelectorOverlay.xaml`, `WindowSelectorOverlay.xaml`.
+- **Cause**: WinUI automatically surfaces a `KeyboardAccelerator`'s key combination as a tooltip. `KeyboardAcceleratorPlacementMode` defaults to `Auto`, which anchors that tooltip to the accelerator's OWNER — and these accelerators are declared on `Page.KeyboardAccelerators`, not on a button. With a whole page as the anchor, the framework parked "Ctrl+Z" against the page's top-left, i.e. floating over the timeline for no apparent reason.
+- **Fix**: `KeyboardAcceleratorPlacementMode="Hidden"` on the owner. It suppresses only the framework's automatic tooltip — the accelerators still fire, and the shortcuts worth advertising are already spelled out in the toolbar buttons' own tooltips (`ViewModel.UndoTooltip` renders "Undo: <action> (Ctrl+Z)"), so nothing discoverable was lost.
+- **Note it is a property of the ELEMENT that owns the accelerator, not of the `KeyboardAccelerator` itself** — the natural first guess (setting it on the accelerator) does not compile.
+- Applied to the two selector overlays too, which own `Escape`/`Enter` accelerators on a bare `Grid`: the same stray tooltip there would land over the full-screen screenshot the user is trying to select a region or window from, which is a worse place for it than the timeline.
+- **Verification**: `Musio.App` x64 Debug 0 errors / 0 CS warnings (the MVVMTK0045 warnings are pre-existing and unrelated); suite unchanged at **1020 passed, 3 skipped, 0 failed**. ARM64 Release clean-rebuilt, re-registered, relaunched; responding.

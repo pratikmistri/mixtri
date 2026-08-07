@@ -11,9 +11,13 @@
     <Grid
         x:Name="RootGrid"
         Background="Transparent"
+        KeyboardAcceleratorPlacementMode="Hidden"
         PointerMoved="Grid_PointerMoved"
         PointerPressed="Grid_PointerPressed">
 
+        <!-- Hidden placement: the accelerator belongs to the grid, not to a button, so WinUI
+             would park its automatic key-combination tooltip over the screenshot the user is
+             trying to pick a window from. -->
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="Escape" Invoked="OnEscapePressed" />
         </Grid.KeyboardAccelerators>
