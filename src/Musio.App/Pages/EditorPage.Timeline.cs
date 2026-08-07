@@ -47,32 +47,44 @@ public sealed partial class EditorPage
 
         foreach (var seg in segs)
         {
-            var visual = new Musio_App.Controls.TimelineControl.SegmentTrackVisual
+            // Per-segment isolation: this runs fire-and-forget, so letting one unreadable
+            // recording throw used to abandon every remaining segment AND skip the Refresh
+            // below, leaving those tracks blank for the rest of the session with nothing
+            // logged and nothing retrying.
+            try
             {
-                MouseToVideoOffsetSeconds = seg.MouseToVideoOffsetSeconds,
-                HasCamera = !string.IsNullOrEmpty(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath!),
-            };
+                var visual = new Musio_App.Controls.TimelineControl.SegmentTrackVisual
+                {
+                    MouseToVideoOffsetSeconds = seg.MouseToVideoOffsetSeconds,
+                    HasCamera = !string.IsNullOrEmpty(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath!),
+                };
 
-            // Cursor + click data
-            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath!))
-            {
-                try { visual.Cursor = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath!); }
-                catch { /* no cursor data for this recording */ }
+                // Cursor + click data
+                if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath!))
+                {
+                    try { visual.Cursor = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath!); }
+                    catch { /* no cursor data for this recording */ }
+                }
+
+                // Auto-zoom keyframes from this recording's clicks, tagged with its file so
+                // they render on its segment and are available like the primary's.
+                GenerateAppendedZoomKeyframes(seg, visual.Cursor);
+
+                // Audio waveforms (system + mic), spanning the file's audio duration
+                var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+                visual.SystemWaveform = sys;
+                visual.MicWaveform = mic;
+                visual.WaveformDurationSeconds = durSec > 0
+                    ? durSec
+                    : (seg.SourceDuration.TotalSeconds > 0 ? seg.SourceDuration.TotalSeconds : seg.Duration.TotalSeconds);
+
+                Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
             }
-
-            // Auto-zoom keyframes from this recording's clicks, tagged with its file so
-            // they render on its segment and are available like the primary's.
-            GenerateAppendedZoomKeyframes(seg, visual.Cursor);
-
-            // Audio waveforms (system + mic), spanning the file's audio duration
-            var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
-            visual.SystemWaveform = sys;
-            visual.MicWaveform = mic;
-            visual.WaveformDurationSeconds = durSec > 0
-                ? durSec
-                : (seg.SourceDuration.TotalSeconds > 0 ? seg.SourceDuration.TotalSeconds : seg.Duration.TotalSeconds);
-
-            Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                    $"track visuals FAILED for '{seg.VideoFilePath}': {ex}");
+            }
         }
         Timeline.Refresh();
     }

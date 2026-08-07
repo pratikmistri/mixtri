@@ -184,6 +184,24 @@ public sealed partial class EditorPage
 
     private async Task InitializePreviewCoreAsync()
     {
+        // Resolved BEFORE any teardown. The teardown below is unconditional, so discovering
+        // only afterwards that there is nothing to rebuild the pipeline with used to leave
+        // the page permanently dead: _frameReader null (so every later UpdatePreviewFrameAsync
+        // returns at its first line), segment track visuals and thumbnails cleared, and no
+        // retry scheduled anywhere — all without writing a single line to the log. That is a
+        // blank preview plus blank timeline tracks with no diagnosable cause. Keeping whatever
+        // the editor already shows is strictly better than destroying it for nothing.
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                project is null
+                    ? "preview init skipped: no current project; existing preview left intact"
+                    : "preview init skipped: current project has no video file; existing preview left intact");
+            Preview.HideQualityIndicator();
+            return;
+        }
+
         // Every await below is a point where this page can be unloaded or a newer init can
         // start. Anything built after the generation moves on is disposed, never published.
         int initGeneration = ++_previewInitGeneration;
@@ -202,17 +220,6 @@ public sealed partial class EditorPage
         DisposeSegmentPreviews();
         DisposePrimaryStyleRenderers();
         Timeline.ClearSegmentTrackVisuals();
-
-        var project = ProjectService.Instance.CurrentProject;
-        if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
-        {
-            Preview.HideQualityIndicator();
-            _thumbnailGenerationId++;
-            Timeline.ClearThumbnails();
-            _thumbnailsCompletedForPath = null;
-            _thumbnailsDoneForFiles.Clear();
-            return;
-        }
 
         // This method re-runs on every ModelReloaded — which fires on project change AND
         // on every editor page reconstruction. Two overlapping runs used to cancel each

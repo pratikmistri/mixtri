@@ -140,8 +140,19 @@ public sealed partial class EditorPage : Page
         ExportVM = new ExportViewModel();
         InitializeComponent();
         _graphicsDeviceManager = new EditorGraphicsDeviceManager(
-            DispatcherQueue, RecoverGraphicsDeviceAsync, () => _pageUnloaded);
+            DispatcherQueue, RecoverGraphicsDeviceAsync, FlushPendingRenderAsync,
+            () => _pageUnloaded);
         _graphicsDeviceManager.Attach();
+
+        // A CanvasControl recovers from GPU device loss on its own, and need not raise
+        // DeviceLost on the shared device the manager watches. When that happens every
+        // bitmap and render target the editor cached is dead, and nothing else notices:
+        // the preview and all timeline tracks just stop drawing. These are the only
+        // notifications the app gets for that case.
+        Preview.DeviceRecreated += (_, _) =>
+            _graphicsDeviceManager.RequestRecovery("preview canvas device recreated");
+        Timeline.DeviceRecreated += (_, _) =>
+            _graphicsDeviceManager.RequestRecovery("timeline canvas device recreated");
         Loaded += (_, _) =>
         {
             _pageUnloaded = false;
@@ -257,17 +268,33 @@ public sealed partial class EditorPage : Page
         {
             DispatcherQueue.TryEnqueue(() =>
             {
-                // Assigned explicitly as well as bound: the timeline must never keep
-                // rendering a model the project has moved on from.
-                Timeline.Model = ViewModel.Model;
-                _timelineMapper = null;
-                Timeline.ClearZoomSelection();
-                Timeline.ClearClipSelection();
-                Timeline.ClearTransitionSelection();
-                UpdateSpeedPanelVisibility();
-                Preview.Duration = GetMappedDuration();
-                Timeline.Refresh();
-                ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
+                // Every statement here mutates live UI state, and the preview re-init at the
+                // end is what rebuilds it. A throw partway through used to escape into the
+                // XAML dispatcher with the timeline already re-pointed and its selections
+                // cleared but InitializePreviewAsync never reached — a blank editor whose
+                // cause depended entirely on how the app-level handler classified the
+                // exception. Log it and still re-init, so a failure in the timeline swap
+                // cannot cost the preview as well.
+                try
+                {
+                    // Assigned explicitly as well as bound: the timeline must never keep
+                    // rendering a model the project has moved on from.
+                    Timeline.Model = ViewModel.Model;
+                    _timelineMapper = null;
+                    Timeline.ClearZoomSelection();
+                    Timeline.ClearClipSelection();
+                    Timeline.ClearTransitionSelection();
+                    UpdateSpeedPanelVisibility();
+                    Preview.Duration = GetMappedDuration();
+                    Timeline.Refresh();
+                    ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
+                }
+                catch (Exception ex)
+                {
+                    Musio.Core.Diagnostics.DiagLog.Write(
+                        "Editor", $"model reload UI sync FAILED: {ex}");
+                }
+
                 _ = InitializePreviewAsync();
             });
         };
@@ -420,15 +447,43 @@ public sealed partial class EditorPage : Page
         _graphicsDeviceManager.Attach();
         await InitializePreviewCoreAsync();
         position = Preview.PlayheadPosition;
-        _pendingRenderPosition = null;
-        _pendingRenderForce = false;
 
         if (_pageUnloaded)
             return;
 
         Timeline.InvalidateAllCanvases();
         Preview.InvalidateSurface();
+
+        // Deliberately parked rather than drawn: this method runs inside the device
+        // manager's recovery scope, so UpdatePreviewFrameAsync would refuse to render
+        // and park the request anyway — but the position it parked would then be
+        // discarded, because only an already-running render loop drains pending
+        // requests. FlushPendingRenderAsync, which the manager invokes once the scope
+        // closes, is what actually repaints the surface this method just cleared.
+        _pendingRenderPosition = position;
+        _pendingRenderForce = true;
+        Musio.Core.Diagnostics.DiagLog.Write(
+            "Editor", "editor graphics recovery rebuilt; awaiting post-recovery repaint");
+    }
+
+    /// <summary>
+    /// Draws whatever render request was parked while the graphics device was recovering.
+    /// Invoked by <see cref="EditorGraphicsDeviceManager"/> after its recovery scope closes,
+    /// so <see cref="EditorGraphicsDeviceManager.IsRecoveryInProgress"/> is false and the
+    /// render actually reaches the canvas.
+    /// </summary>
+    private async Task FlushPendingRenderAsync()
+    {
+        if (_pageUnloaded) return;
+
+        var position = _pendingRenderPosition ?? Preview.PlayheadPosition;
+        _pendingRenderPosition = null;
+        _pendingRenderForce = false;
+
+        Timeline.InvalidateAllCanvases();
+        Preview.InvalidateSurface();
         await UpdatePreviewFrameAsync(position, force: true);
+
         Musio.Core.Diagnostics.DiagLog.Write(
             "Editor", "editor graphics recovery completed");
     }

@@ -23,6 +23,7 @@ public sealed class EditorGraphicsDeviceManager
 {
     private readonly DispatcherQueue _dispatcherQueue;
     private readonly Func<Task> _recoverAsync;
+    private readonly Func<Task> _flushPendingRenderAsync;
     private readonly Func<bool> _isUnloaded;
 
     private CanvasDevice? _graphicsDevice;
@@ -38,14 +39,27 @@ public sealed class EditorGraphicsDeviceManager
     /// Performs the actual device recovery (tearing down and rebuilding renderers/preview
     /// state). Always invoked on the UI thread.
     /// </param>
+    /// <param name="flushPendingRenderAsync">
+    /// Repaints the preview once recovery has fully finished. This CANNOT be folded into
+    /// <paramref name="recoverAsync"/>: that delegate runs inside the recovery scope, where
+    /// <see cref="IsRecoveryInProgress"/> is still true and the preview deliberately parks
+    /// render requests instead of drawing against a device that is mid-rebuild. Invoked on
+    /// the UI thread after the flag has cleared.
+    /// </param>
     /// <param name="isUnloaded">
     /// Returns true once the owning page has unloaded, so a queued or in-flight recovery does
     /// not keep retrying or touch torn-down page state.
     /// </param>
-    public EditorGraphicsDeviceManager(DispatcherQueue dispatcherQueue, Func<Task> recoverAsync, Func<bool> isUnloaded)
+    public EditorGraphicsDeviceManager(
+        DispatcherQueue dispatcherQueue,
+        Func<Task> recoverAsync,
+        Func<Task> flushPendingRenderAsync,
+        Func<bool> isUnloaded)
     {
         _dispatcherQueue = dispatcherQueue ?? throw new ArgumentNullException(nameof(dispatcherQueue));
         _recoverAsync = recoverAsync ?? throw new ArgumentNullException(nameof(recoverAsync));
+        _flushPendingRenderAsync = flushPendingRenderAsync
+            ?? throw new ArgumentNullException(nameof(flushPendingRenderAsync));
         _isUnloaded = isUnloaded ?? throw new ArgumentNullException(nameof(isUnloaded));
     }
 
@@ -82,8 +96,18 @@ public sealed class EditorGraphicsDeviceManager
     }
 
     private void OnGraphicsDeviceLost(CanvasDevice sender, object args)
+        => RequestRecovery("shared CanvasDevice lost");
+
+    /// <summary>
+    /// Schedules a full editor graphics rebuild. Also callable for losses the shared-device
+    /// subscription cannot see: a <c>CanvasControl</c> recovers from a device loss internally,
+    /// so a GPU reset can invalidate every cached bitmap without
+    /// <see cref="CanvasDevice.DeviceLost"/> ever firing here. Repeated requests coalesce into
+    /// a single recovery pass.
+    /// </summary>
+    public void RequestRecovery(string reason)
     {
-        DiagLog.Write("Editor", "shared CanvasDevice lost; scheduling editor graphics recovery");
+        DiagLog.Write("Editor", $"{reason}; scheduling editor graphics recovery");
 
         Interlocked.Exchange(ref _graphicsRecoveryRequested, 1);
         if (Interlocked.Exchange(ref _graphicsRecoveryQueued, 1) != 0)
@@ -97,6 +121,24 @@ public sealed class EditorGraphicsDeviceManager
                     {
                         Interlocked.Exchange(ref _graphicsRecoveryRequested, 0);
                         await RunRecoveryAsync();
+
+                        // Flushed INSIDE the loop so the while-condition below also covers
+                        // losses that arrive during the flush itself. A flush placed after
+                        // the loop would drop them: RequestRecovery sets the requested flag,
+                        // sees the queued flag still held by this lambda, and returns without
+                        // enqueueing anything — leaving the editor unrecovered until some
+                        // later, unrelated loss happened to queue a fresh pass.
+                        //
+                        // RunRecoveryAsync has cleared IsRecoveryInProgress by now, so a
+                        // repaint issued here actually draws. The recovery body cannot do
+                        // this itself: it runs inside the recovery scope, so its own repaint
+                        // call is parked as a pending request and — since pending requests
+                        // are only drained by an already-running render loop — nothing would
+                        // ever draw it. Recovery has already cleared the preview frame and
+                        // the track visuals, so skipping the flush leaves the editor blank
+                        // until the user happens to move the playhead.
+                        if (!_isUnloaded())
+                            await _flushPendingRenderAsync();
                     }
                     while (!_isUnloaded()
                         && Interlocked.CompareExchange(
@@ -109,6 +151,26 @@ public sealed class EditorGraphicsDeviceManager
                 finally
                 {
                     Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
+                }
+
+                // Ownership of the queue flag has just been released. A request that landed
+                // in the window between the last while-check and that release — or while the
+                // catch above was running — saw the flag still held and returned without
+                // enqueueing, so it would stay latched forever. Re-arm it here; this
+                // terminates because each pass clears the flag before doing its work.
+                // Guarded because this runs after the finally in an async void continuation,
+                // where an escaping exception would take the process down.
+                try
+                {
+                    if (!_isUnloaded()
+                        && Interlocked.CompareExchange(ref _graphicsRecoveryRequested, 0, 0) != 0)
+                    {
+                        RequestRecovery("recovery requested while the previous pass was finishing");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DiagLog.Write("Editor", $"graphics recovery re-arm failed: {ex}");
                 }
             }))
         {

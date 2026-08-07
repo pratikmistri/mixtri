@@ -1,6 +1,7 @@
 using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
+using Microsoft.Graphics.Canvas.UI;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -237,6 +238,17 @@ public sealed partial class TimelineControl : UserControl
         ResolveThemeColors();
         ActualThemeChanged += (_, _) => { ResolveThemeColors(); InvalidateAllCanvases(); };
 
+        // A track canvas recovers from a GPU device loss on its own — silently, with no
+        // exception and without necessarily raising DeviceLost on the shared device the
+        // editor watches. The thumbnails and waveform bitmaps cached here belong to the dead
+        // device once that happens, so without this subscription every track simply stops
+        // drawing and never comes back.
+        foreach (var canvas in TrackCanvases())
+        {
+            if (canvas is not null)
+                canvas.CreateResources += TrackCanvas_CreateResources;
+        }
+
         // The playhead offset is derived from the ruler canvas width, and the Win2D canvases
         // repaint themselves on resize — so a resize only needs the overlay repositioned.
         Loaded += (_, _) => UpdatePlayheadVisual();
@@ -254,6 +266,50 @@ public sealed partial class TimelineControl : UserControl
             _transitionChipGlyphFormat?.Dispose();
             _transitionChipGlyphFormat = null;
         };
+    }
+
+    /// <summary>
+    /// Raised when a track canvas recreated its device after a GPU device loss. Every cached
+    /// bitmap has already been dropped by the time this fires; the host is responsible for
+    /// regenerating them.
+    /// </summary>
+    public event EventHandler? DeviceRecreated;
+
+    private IEnumerable<CanvasControl?> TrackCanvases()
+    {
+        yield return TimeRulerCanvas;
+        yield return VideoTrackCanvas;
+        yield return CursorTrackCanvas;
+        yield return ZoomTrackCanvas;
+        yield return CameraTrackCanvas;
+        yield return TextTrackCanvas;
+        yield return AudioTrackCanvas;
+        yield return MicTrackCanvas;
+    }
+
+    private CanvasDevice? _lastRecoveredDevice;
+
+    private void TrackCanvas_CreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args)
+    {
+        if (args.Reason != CanvasCreateResourcesReason.NewDevice) return;
+
+        // All eight track canvases raise this for the same underlying loss when they share a
+        // device, so keying on the replacement collapses that batch into one rebuild request.
+        // When they each hold their own device the keying simply never matches and every
+        // canvas requests a rebuild — harmless, because the device manager coalesces
+        // concurrent requests into a single recovery pass either way.
+        var device = sender.Device;
+        if (device is not null && ReferenceEquals(device, _lastRecoveredDevice)) return;
+        _lastRecoveredDevice = device;
+
+        // These bitmaps were allocated on the dead device. They are cleared rather than
+        // redrawn because nothing can draw them any more; the host regenerates them as part
+        // of the recovery this request kicks off.
+        ClearThumbnails();
+        ClearSegmentTrackVisuals();
+        Musio.Core.Diagnostics.DiagLog.Write(
+            "Timeline", "track CanvasControl built a new device after loss; requesting rebuild");
+        DeviceRecreated?.Invoke(this, EventArgs.Empty);
     }
 
     private Color GetBrushColor(string key, Color fallback)
