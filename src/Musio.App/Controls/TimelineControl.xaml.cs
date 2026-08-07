@@ -2604,10 +2604,49 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>Vertical inset of a block within its lane.</summary>
     private const float InsertedAudioVerticalPadding = 4f;
 
+    /// <summary>
+    /// Grab zone for an inserted block's trim edges. Wider than
+    /// <see cref="SegmentEdgeHitWidth"/> because these blocks carry a drawn handle the user
+    /// aims at, and because an audio trim is the primary gesture on these lanes.
+    /// </summary>
+    private const double InsertedAudioEdgeHitWidth = 10.0;
+
+    /// <summary>Width of the drawn trim handle at each end of a block.</summary>
+    private const float InsertedAudioHandleWidth = 4f;
+
     private IEnumerable<InsertedAudioLaneItem> ItemsForLane(bool music)
         => _insertedAudioTracks.Where(t => t.IsMusic == music);
 
     private bool LaneIsMusic(CanvasControl canvas) => ReferenceEquals(canvas, MusicTrackCanvas);
+
+    /// <summary>
+    /// A block's on-screen extent, with each edge clamped into the visible canvas.
+    /// </summary>
+    /// <remarks>
+    /// <b>Clamping is what makes trimming possible at all for long audio.</b> The ruler spans
+    /// only <see cref="TimelineModel.DisplayDuration"/> — the VIDEO's length — so a music bed
+    /// or voice-over longer than the footage runs past the right edge of the canvas, and
+    /// (unlike a zoomed timeline) there is nowhere to scroll to reach it. Hit-testing the raw
+    /// coordinates therefore made that edge permanently ungrabbable: every press on the block
+    /// resolved to Body, so it could be moved but never trimmed. Clamping brings both handles
+    /// back onto the canvas, and <paramref name="clippedStart"/>/<paramref name="clippedEnd"/>
+    /// let the drawing code mark an edge that is really somewhere off-screen.
+    /// </remarks>
+    private (double X1, double X2, bool clippedStart, bool clippedEnd) VisibleExtent(
+        double rawX1, double rawX2, double canvasWidth)
+    {
+        double x1 = Math.Max(rawX1, 0);
+        double x2 = Math.Min(rawX2, canvasWidth);
+        return (x1, x2, rawX1 < 0, rawX2 > canvasWidth);
+    }
+
+    /// <summary>
+    /// Edge grab width for a block of <paramref name="blockWidth"/> pixels: narrowed for small
+    /// blocks so the two edge zones can never meet and swallow the body (which would make a
+    /// short block impossible to MOVE), and never smaller than a few pixels.
+    /// </summary>
+    private static double EdgeHitWidthFor(double blockWidth)
+        => Math.Clamp(blockWidth / 3.0, 3.0, InsertedAudioEdgeHitWidth);
 
     /// <summary>
     /// Left edge X of a block, showing the in-flight drag position while one is being
@@ -2650,12 +2689,14 @@ public sealed partial class TimelineControl : UserControl
         for (int i = items.Count - 1; i >= 0; i--)
         {
             var item = items[i];
-            double x1 = TimeToX(item.Start);
-            double x2 = TimeToX(item.Start + item.Duration);
+            var (x1, x2, _, _) = VisibleExtent(
+                TimeToX(item.Start), TimeToX(item.Start + item.Duration), canvas.ActualWidth);
+            if (x2 <= x1) continue;              // scrolled entirely out of view
             if (posX < x1 || posX > x2) continue;
 
-            if (posX - x1 <= SegmentEdgeHitWidth) return (item.Id, SegmentHitTarget.LeftEdge);
-            if (x2 - posX <= SegmentEdgeHitWidth) return (item.Id, SegmentHitTarget.RightEdge);
+            double edge = EdgeHitWidthFor(x2 - x1);
+            if (posX - x1 <= edge) return (item.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= edge) return (item.Id, SegmentHitTarget.RightEdge);
             return (item.Id, SegmentHitTarget.Body);
         }
         return (null, SegmentHitTarget.None);
@@ -2813,7 +2854,6 @@ public sealed partial class TimelineControl : UserControl
         var mutedFill = Color.FromArgb(110, 130, 130, 140);
         var borderColor = Color.FromArgb(255, 226, 216, 255);
         var borderSelected = Color.FromArgb(255, 255, 255, 255);
-        var handleColor = Color.FromArgb(255, 255, 255, 255);
         var textColor = Color.FromArgb(255, 255, 255, 255);
 
         float blockY = InsertedAudioVerticalPadding;
@@ -2824,10 +2864,21 @@ public sealed partial class TimelineControl : UserControl
         {
             // Positioned in OUTPUT time directly — no segment mapping, which is exactly what
             // keeps an inserted track where the user put it when the footage is re-cut.
-            float x1 = (float)GetInsertedAudioStartX(item);
-            float x2 = (float)GetInsertedAudioEndX(item);
-            if (x2 < 0 || x1 > w) continue;
+            // Clamped to the canvas so a block longer than the video still shows (and can be
+            // grabbed by) both of its trim handles — see VisibleExtent.
+            double rawX1 = GetInsertedAudioStartX(item);
+            double rawX2 = GetInsertedAudioEndX(item);
 
+            // An edge dragged past its opposite would otherwise invert the rectangle and make
+            // the block disappear mid-gesture; the operation clamps the value on release, so
+            // the preview just pins it to a sliver until then.
+            if (rawX1 > rawX2) (rawX1, rawX2) = (rawX2, rawX1);
+
+            var (x1d, x2d, clippedStart, clippedEnd) = VisibleExtent(rawX1, rawX2, w);
+            if (x2d <= x1d) continue;
+
+            float x1 = (float)x1d;
+            float x2 = (float)x2d;
             bool isSelected = item.Id == _selectedInsertedAudioTrackId;
             float blockW = Math.Max(2, x2 - x1);
 
@@ -2849,7 +2900,7 @@ public sealed partial class TimelineControl : UserControl
                 }
             }
 
-            if (blockW > 24)
+            if (blockW > 40)
             {
                 using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                 {
@@ -2862,15 +2913,52 @@ public sealed partial class TimelineControl : UserControl
                     TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
                 };
                 string label = item.IsMuted ? item.Name + " (muted)" : item.Name;
-                ds.DrawText(label, new Rect(x1 + 6, blockY, blockW - 12, blockH), textColor, fmt);
+                // Inset past both handles so the label never sits under a grab target.
+                float textInset = InsertedAudioHandleWidth + 4;
+                ds.DrawText(label,
+                    new Rect(x1 + textInset, blockY, Math.Max(1, blockW - textInset * 2), blockH),
+                    textColor, fmt);
             }
 
-            if (isSelected)
-            {
-                float handleW = 3, handleH = blockH * 0.5f, handleY = blockY + (blockH - handleH) / 2;
-                ds.FillRoundedRectangle(x1 + 1, handleY, handleW, handleH, 1, 1, handleColor);
-                ds.FillRoundedRectangle(x2 - handleW - 1, handleY, handleW, handleH, 1, 1, handleColor);
-            }
+            // Trim handles are drawn on EVERY block, not just the selected one: an invisible
+            // grab strip is indistinguishable from "you cannot trim this", which is exactly
+            // how the first version of this lane read.
+            DrawTrimHandle(ds, x1, blockY, blockH, isSelected, clippedStart, atStart: true);
+            DrawTrimHandle(ds, x2, blockY, blockH, isSelected, clippedEnd, atStart: false);
+        }
+    }
+
+    /// <summary>
+    /// Draws one trim handle. <paramref name="clipped"/> marks an edge whose real position is
+    /// off-canvas (the block continues beyond the visible timeline), so the handle reads as a
+    /// boundary rather than as the true end of the audio — while staying grabbable, which is
+    /// the only way to trim a track longer than the video.
+    /// </summary>
+    private static void DrawTrimHandle(
+        CanvasDrawingSession ds, float x, float blockY, float blockH,
+        bool isSelected, bool clipped, bool atStart)
+    {
+        float handleW = InsertedAudioHandleWidth;
+        float handleH = blockH * (isSelected ? 0.7f : 0.5f);
+        float handleY = blockY + (blockH - handleH) / 2;
+        float handleX = atStart ? x + 1 : x - handleW - 1;
+
+        var color = isSelected
+            ? Color.FromArgb(255, 255, 255, 255)
+            : Color.FromArgb(190, 245, 245, 255);
+
+        ds.FillRoundedRectangle(handleX, handleY, handleW, handleH, 2, 2, color);
+
+        if (!clipped) return;
+
+        // Two thin ticks past the handle: "this continues off-screen".
+        var tick = Color.FromArgb(160, 255, 255, 255);
+        float dir = atStart ? -1 : 1;
+        float baseX = atStart ? x + handleW + 3 : x - handleW - 3;
+        for (int i = 0; i < 2; i++)
+        {
+            float tx = baseX + (dir * i * 3);
+            ds.FillRectangle(tx, handleY + handleH * 0.25f, 1.5f, handleH * 0.5f, tick);
         }
     }
 

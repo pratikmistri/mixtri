@@ -441,6 +441,52 @@ public sealed class InsertedAudioTrackTests
         Assert.AreEqual(early.Id, model.AudioTracks[0].Id, "tracks must stay ordered by start time");
     }
 
+    [TestMethod]
+    public void TrimLeftEdge_ToAnInstantInsideTheBlock_MatchesTheTrimToPlayheadMenu()
+    {
+        // The context menu's "Trim start to playhead" passes the playhead straight through as
+        // the new edge, so its guard (playhead strictly inside the block, leaving at least
+        // MinDuration) has to agree with what the operation will actually do.
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+        var playhead = TimeSpan.FromSeconds(7);
+
+        Assert.IsTrue(playhead > track.StartTime && playhead <= track.End - AudioTrackEditing.MinDuration,
+            "the menu would enable the item here");
+
+        new TrimAudioTrackOperation(track.Id, fromStart: true, playhead).Execute(model);
+
+        AssertSeconds(7, track.StartTime, "the start lands exactly on the playhead");
+        AssertSeconds(5, track.TrimStart, "skipping the audio the playhead passed");
+        AssertSeconds(12, track.End, "and the tail is untouched");
+    }
+
+    [TestMethod]
+    public void TrimRightEdge_ToAnInstantInsideTheBlock_LeavesTheStartAlone()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(7)).Execute(model);
+
+        AssertSeconds(2, track.StartTime, "trimming the end must not move the block");
+        AssertSeconds(0, track.TrimStart, "nor change which audio it starts from");
+        AssertSeconds(7, track.End, "the end lands exactly on the requested instant");
+    }
+
+    [TestMethod]
+    public void TrimRightEdge_OnAnUntrimmedImport_MaterialisesADuration()
+    {
+        // A freshly imported track has Duration == null ("play to the end of the file"),
+        // which is the state a first right-edge trim has to convert into a real length —
+        // the case a long music bed always starts in.
+        var (model, track) = ModelWithTrack(startSec: 0, sourceDurationSec: 180);
+        Assert.IsNull(track.Duration, "a fresh import plays to the end of the file");
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(25)).Execute(model);
+
+        Assert.IsNotNull(track.Duration);
+        AssertSeconds(25, track.EffectiveDuration, "a 3-minute bed can be cut down to the video");
+    }
+
     #endregion
 
     #region Preview placement mapping

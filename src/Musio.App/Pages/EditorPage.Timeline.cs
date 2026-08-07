@@ -1350,6 +1350,30 @@ public sealed partial class EditorPage
         var menu = new MenuFlyout();
         var playhead = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
 
+        // Trim to the playhead: the precise, geometry-independent alternative to dragging an
+        // edge. This is the only way to trim an edge that sits outside the visible timeline
+        // by more than a drag can reach, and the only exact one at low zoom, where a pixel is
+        // worth a substantial slice of time.
+        var trimStartItem = new MenuFlyoutItem
+        {
+            Text = "Trim start to playhead",
+            IsEnabled = playhead > track.StartTime
+                        && playhead <= track.End - AudioTrackEditing.MinDuration,
+        };
+        trimStartItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(trackId, fromStart: true, playhead));
+        menu.Items.Add(trimStartItem);
+
+        var trimEndItem = new MenuFlyoutItem
+        {
+            Text = "Trim end to playhead",
+            IsEnabled = playhead >= track.StartTime + AudioTrackEditing.MinDuration
+                        && playhead < track.End,
+        };
+        trimEndItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(trackId, fromStart: false, playhead));
+        menu.Items.Add(trimEndItem);
+
         var splitItem = new MenuFlyoutItem
         {
             Text = "Split at playhead",
@@ -1360,6 +1384,8 @@ public sealed partial class EditorPage
         };
         splitItem.Click += (_, _) => SplitInsertedAudioTrack(trackId);
         menu.Items.Add(splitItem);
+
+        menu.Items.Add(new MenuFlyoutSeparator());
 
         var muteItem = new MenuFlyoutItem { Text = track.IsMuted ? "Unmute" : "Mute" };
         muteItem.Click += (_, _) => ExecuteAudioTrackOperation(
