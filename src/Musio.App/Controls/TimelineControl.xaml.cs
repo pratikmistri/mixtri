@@ -2535,7 +2535,12 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not FrameworkElement source) return;
         if (!Enum.TryParse<AudioMixChannel>(source.Tag as string, out var channel)) return;
 
-        var panel = new StackPanel { Spacing = 8, MinWidth = 190 };
+        // A fixed content width, with every child stretching to it. The slider previously
+        // carried its own smaller Width, which left it visibly indented relative to the
+        // labels above — a fader that does not line up with its own readout reads as broken.
+        const double ContentWidth = 220;
+
+        var panel = new StackPanel { Spacing = 6, Width = ContentWidth };
 
         panel.Children.Add(new TextBlock
         {
@@ -2543,54 +2548,83 @@ public sealed partial class TimelineControl : UserControl
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
         });
 
-        var muteToggle = new CheckBox { Content = "Mute", IsChecked = Model.IsMuted(channel) };
+        // Readout on the left, mute on the right — the compact mixer-strip layout, and it
+        // keeps the slider's full width free below.
+        var header = new Grid();
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var volumeLabel = new TextBlock
         {
             Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
             FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
         };
+        header.Children.Add(volumeLabel);
+
+        var muteIcon = new FontIcon { FontSize = 14 };
+        var muteButton = new Button
+        {
+            Content = muteIcon,
+            Padding = new Thickness(6, 2, 6, 2),
+            MinWidth = 0,
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+        };
+        Grid.SetColumn(muteButton, 1);
+        header.Children.Add(muteButton);
+        panel.Children.Add(header);
 
         var slider = new Slider
         {
             Minimum = 0,
             Maximum = 100,
             StepFrequency = 1,
-            Width = 170,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Margin = new Thickness(0),
             // Assigned BEFORE the handler is attached, so populating it cannot raise a change.
             Value = Math.Round(Math.Clamp(Model.GetVolume(channel), 0, 1) * 100),
             IsEnabled = !Model.IsMuted(channel),
         };
-        volumeLabel.Text = $"Volume  {slider.Value:F0}%";
+
+        void RefreshMuteVisual()
+        {
+            bool muted = Model!.IsMuted(channel);
+            // E74F = Mute, E767 = Volume3. The single control shows the CURRENT state and
+            // toggles it, rather than a checkbox that has to be read as a setting.
+            muteIcon.Glyph = muted ? "\uE74F" : "\uE767";
+            muteIcon.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources[
+                muted ? "TextFillColorDisabledBrush" : "TextFillColorPrimaryBrush"];
+            ToolTipService.SetToolTip(muteButton, muted ? "Unmute" : "Mute");
+            volumeLabel.Text = muted ? "Muted" : $"Volume  {slider.Value:F0}%";
+        }
+
+        RefreshMuteVisual();
 
         slider.ValueChanged += (_, args) =>
         {
             if (Model is null) return;
             Model.SetVolume(channel, args.NewValue / 100.0);
-            volumeLabel.Text = $"Volume  {args.NewValue:F0}%";
+            RefreshMuteVisual();
             AudioChannelMixChanged?.Invoke(this, channel);
         };
 
-        muteToggle.Checked += (_, _) => ApplyMute(channel, true, slider);
-        muteToggle.Unchecked += (_, _) => ApplyMute(channel, false, slider);
+        muteButton.Click += (_, _) =>
+        {
+            if (Model is null) return;
+            bool muted = !Model.IsMuted(channel);
+            Model.SetMuted(channel, muted);
+            // Disabled rather than zeroed, so unmuting restores the level the user set
+            // instead of coming back silent.
+            slider.IsEnabled = !muted;
+            RefreshMuteVisual();
+            SyncAudioMuteVisuals();
+            AudioChannelMixChanged?.Invoke(this, channel);
+        };
 
-        panel.Children.Add(volumeLabel);
         panel.Children.Add(slider);
-        panel.Children.Add(muteToggle);
 
         new Flyout { Content = panel }.ShowAt(source);
-    }
-
-    private void ApplyMute(AudioMixChannel channel, bool muted, Slider slider)
-    {
-        if (Model is null) return;
-
-        Model.SetMuted(channel, muted);
-        // A muted track's slider is disabled rather than zeroed, so unmuting restores the
-        // level the user had set instead of coming back silent.
-        slider.IsEnabled = !muted;
-        SyncAudioMuteVisuals();
-        AudioChannelMixChanged?.Invoke(this, channel);
     }
 
     private static string ChannelDisplayName(AudioMixChannel channel) => channel switch
