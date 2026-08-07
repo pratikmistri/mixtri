@@ -482,8 +482,9 @@ public sealed partial class TimelineControl : UserControl
     private const double CameraRowHeight = 44;
     private const double AudioRowHeight = 40;
     private const double MicRowHeight = 40;
-    private const double VoiceOverRowHeight = 40;
-    private const double MusicRowHeight = 40;
+
+    // The inserted-audio lanes size themselves from their stacked sub-row count instead of a
+    // fixed height — see LayoutInsertedAudioRows and InsertedAudioSubRowHeight.
 
     /// <summary>
     /// Collapses the tracks that visualise recorded media the current project does not
@@ -529,13 +530,16 @@ public sealed partial class TimelineControl : UserControl
         // was recorded, so they are keyed off the lane items the host publishes. Each kind
         // gets its own lane so a voice-over and a music bed that overlap in time are still
         // independently grabbable — and each starts collapsed, since a project with no
-        // audio of that kind must not pay a row for it.
+        // audio of that kind must not pay a row for it. The height grows with the number of
+        // stacked sub-rows the lane's blocks needed (see LayoutInsertedAudioRows).
         ApplyTrackVisibility(
             VoiceOverRow, VoiceOverTrackLabel, VoiceOverTrackCanvas,
-            _insertedAudioTracks.Any(t => !t.IsMusic), VoiceOverRowHeight);
+            _insertedAudioTracks.Any(t => !t.IsMusic),
+            _voiceSubRowCount * InsertedAudioSubRowHeight);
         ApplyTrackVisibility(
             MusicRow, MusicTrackLabel, MusicTrackCanvas,
-            _insertedAudioTracks.Any(t => t.IsMusic), MusicRowHeight);
+            _insertedAudioTracks.Any(t => t.IsMusic),
+            _musicSubRowCount * InsertedAudioSubRowHeight);
     }
 
     /// <summary>
@@ -2581,6 +2585,61 @@ public sealed partial class TimelineControl : UserControl
 
     private IReadOnlyList<InsertedAudioLaneItem> _insertedAudioTracks = [];
 
+    /// <summary>
+    /// Sub-row each inserted block is packed into within its lane, by track id.
+    /// </summary>
+    /// <remarks>
+    /// Two music beds that overlap in time drew on top of each other, which made both
+    /// unreadable and the lower one hard to grab. Overlapping blocks are therefore stacked
+    /// into sub-rows and the lane grows taller — the timeline's own grid row is
+    /// <c>Auto</c>-sized, so the control simply gets taller rather than clipping anything.
+    /// </remarks>
+    private readonly Dictionary<string, int> _insertedAudioRowByTrackId = new(StringComparer.Ordinal);
+    private int _voiceSubRowCount = 1;
+    private int _musicSubRowCount = 1;
+
+    /// <summary>Height of one stacked sub-row within an inserted-audio lane.</summary>
+    private const double InsertedAudioSubRowHeight = 30;
+
+    /// <summary>
+    /// Most sub-rows a lane will grow to. Past this, blocks share the last row again — an
+    /// unbounded stack would push the video track off the top of a small window, which is a
+    /// worse problem than two overlapping beds.
+    /// </summary>
+    private const int InsertedAudioMaxSubRows = 5;
+
+    /// <summary>
+    /// Packs each lane's blocks into sub-rows so no two that overlap in time share one.
+    /// </summary>
+    /// <remarks>
+    /// Packing uses the PLAYED range only — the dimmed full-file extent routinely overlaps
+    /// everything and would force every block onto its own row. The algorithm itself lives in
+    /// <see cref="AudioLaneLayout"/> so it can be tested: it decides what is CLICKABLE, not
+    /// merely what is pretty, since hit testing resolves a pointer to a row before it looks
+    /// at any block.
+    /// </remarks>
+    private void LayoutInsertedAudioRows()
+    {
+        _insertedAudioRowByTrackId.Clear();
+        _voiceSubRowCount = PackLane(music: false);
+        _musicSubRowCount = PackLane(music: true);
+    }
+
+    private int PackLane(bool music)
+    {
+        var blocks = ItemsForLane(music)
+            .Select(i => new LaneBlock(i.Id, i.Start, i.Start + i.Duration));
+
+        var rows = AudioLaneLayout.PackIntoRows(blocks, InsertedAudioMaxSubRows);
+        foreach (var (id, row) in rows)
+            _insertedAudioRowByTrackId[id] = row;
+
+        return AudioLaneLayout.RowCount(rows);
+    }
+
+    private int SubRowFor(string trackId)
+        => _insertedAudioRowByTrackId.TryGetValue(trackId, out int row) ? row : 0;
+
     /// <summary>Raised when an inserted audio block is selected, or null when deselected.</summary>
     public event EventHandler<string?>? InsertedAudioTrackSelected;
 
@@ -2620,6 +2679,9 @@ public sealed partial class TimelineControl : UserControl
             {
                 _selectedInsertedAudioTrackId = null;
             }
+
+            // Before UpdateTrackVisibility: the lane heights are derived from the row counts.
+            LayoutInsertedAudioRows();
 
             UpdateTrackVisibility();
             VoiceOverTrackCanvas?.Invalidate();
@@ -2754,13 +2816,19 @@ public sealed partial class TimelineControl : UserControl
     private (string? Id, SegmentHitTarget Target) HitTestInsertedAudio(
         CanvasControl canvas, double posX, double posY)
     {
-        float h = (float)canvas.ActualHeight;
-        float blockY = InsertedAudioVerticalPadding;
-        float blockH = h - InsertedAudioVerticalPadding * 2;
+        bool music = LaneIsMusic(canvas);
+        int rowCount = music ? _musicSubRowCount : _voiceSubRowCount;
+
+        // Which stacked sub-row the pointer is over. Blocks in other rows are ignored
+        // outright, which is what makes two overlapping beds independently grabbable.
+        int pointerRow = Math.Clamp(
+            (int)(posY / InsertedAudioSubRowHeight), 0, Math.Max(0, rowCount - 1));
+
+        var (blockY, blockH) = SubRowBounds(pointerRow);
         if (posY < blockY || posY > blockY + blockH) return (null, SegmentHitTarget.None);
 
         // Reverse order so the topmost (last-drawn) block wins where two overlap.
-        var items = ItemsForLane(LaneIsMusic(canvas)).ToList();
+        var items = ItemsForLane(music).Where(i => SubRowFor(i.Id) == pointerRow).ToList();
         for (int i = items.Count - 1; i >= 0; i--)
         {
             var item = items[i];
@@ -2782,6 +2850,14 @@ public sealed partial class TimelineControl : UserControl
             return (item.Id, SegmentHitTarget.Body);
         }
         return (null, SegmentHitTarget.None);
+    }
+
+    /// <summary>Top and height of one stacked sub-row's drawable band.</summary>
+    private static (float Y, float Height) SubRowBounds(int row)
+    {
+        float top = (float)(row * InsertedAudioSubRowHeight) + InsertedAudioVerticalPadding;
+        float height = (float)InsertedAudioSubRowHeight - InsertedAudioVerticalPadding * 2;
+        return (top, height);
     }
 
     private void AudioTrackLane_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -2965,10 +3041,6 @@ public sealed partial class TimelineControl : UserControl
         var trimmedWaveform = Color.FromArgb(90, 200, 200, 214);
         var trimmedBorder = Color.FromArgb(70, 200, 200, 214);
 
-        float blockY = InsertedAudioVerticalPadding;
-        float blockH = h - InsertedAudioVerticalPadding * 2;
-        float centerY = h / 2f;
-
         // Timeline scale, resolved once: the waveform positions every peak by its own source
         // time rather than by a fraction of the block, which is what keeps a trim preview a
         // clip instead of a rescale.
@@ -2976,6 +3048,10 @@ public sealed partial class TimelineControl : UserControl
 
         foreach (var item in ItemsForLane(music))
         {
+            // Each block sits in the sub-row it was packed into, so two that overlap in time
+            // are drawn (and hit-tested) on separate bands instead of on top of each other.
+            var (blockY, blockH) = SubRowBounds(SubRowFor(item.Id));
+            float centerY = blockY + blockH / 2f;
             // Positioned in OUTPUT time directly — no segment mapping, which is exactly what
             // keeps an inserted track where the user put it when the footage is re-cut.
             double rawX1 = GetInsertedAudioStartX(item);

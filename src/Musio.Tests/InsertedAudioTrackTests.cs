@@ -697,4 +697,107 @@ public sealed class InsertedAudioTrackTests
     }
 
     #endregion
+
+    #region Lane stacking
+
+    // The bug these guard: two music beds covering the same stretch of timeline drew into
+    // one band, making both waveforms unreadable and the lower one effectively unclickable.
+
+    private static Musio.Core.Audio.LaneBlock Block(string id, double startSec, double endSec)
+        => new(id, TimeSpan.FromSeconds(startSec), TimeSpan.FromSeconds(endSec));
+
+    [TestMethod]
+    public void Pack_NonOverlappingBlocks_AllShareOneRow()
+    {
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 5), Block("b", 6, 9), Block("c", 12, 20)], maxRows: 5);
+
+        CollectionAssert.AreEqual(new[] { 0, 0, 0 }, new[] { rows["a"], rows["b"], rows["c"] },
+            "a lane must not grow taller than it needs to");
+        Assert.AreEqual(1, Musio.Core.Audio.AudioLaneLayout.RowCount(rows));
+    }
+
+    [TestMethod]
+    public void Pack_TouchingBlocks_ShareARow()
+    {
+        // One ending exactly where the next starts is not an overlap; splitting these would
+        // double the height of the ordinary "clips laid end to end" case.
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 5), Block("b", 5, 10)], maxRows: 5);
+
+        Assert.AreEqual(rows["a"], rows["b"]);
+    }
+
+    [TestMethod]
+    public void Pack_OverlappingBlocks_GetSeparateRows()
+    {
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 10), Block("b", 5, 15)], maxRows: 5);
+
+        Assert.AreNotEqual(rows["a"], rows["b"], "overlapping blocks must never share a row");
+        Assert.AreEqual(2, Musio.Core.Audio.AudioLaneLayout.RowCount(rows));
+    }
+
+    [TestMethod]
+    public void Pack_UsesExactlyThePeakOverlapCount()
+    {
+        // Three blocks all covering t=6 need three rows; a fourth that starts after the
+        // first ends must reuse row 0 rather than adding a fourth.
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 8), Block("b", 2, 10), Block("c", 4, 12), Block("d", 8, 14)],
+            maxRows: 5);
+
+        Assert.AreEqual(3, Musio.Core.Audio.AudioLaneLayout.RowCount(rows),
+            "greedy packing uses exactly the peak simultaneous count, which is the lower bound");
+        Assert.AreEqual(rows["a"], rows["d"], "a freed row must be reused");
+    }
+
+    [TestMethod]
+    public void Pack_IsIndependentOfInputOrder()
+    {
+        var forward = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 10), Block("b", 5, 15), Block("c", 20, 25)], maxRows: 5);
+        var reversed = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("c", 20, 25), Block("b", 5, 15), Block("a", 0, 10)], maxRows: 5);
+
+        Assert.AreEqual(forward["a"], reversed["a"]);
+        Assert.AreEqual(forward["b"], reversed["b"]);
+        Assert.AreEqual(forward["c"], reversed["c"]);
+    }
+
+    [TestMethod]
+    public void Pack_RespectsTheRowCap()
+    {
+        // Past the cap blocks share the last row again: an unbounded stack would push the
+        // rest of the timeline off a small window.
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("a", 0, 10), Block("b", 1, 10), Block("c", 2, 10), Block("d", 3, 10)],
+            maxRows: 2);
+
+        Assert.AreEqual(2, Musio.Core.Audio.AudioLaneLayout.RowCount(rows));
+        Assert.IsTrue(rows.Values.All(r => r is 0 or 1));
+    }
+
+    [TestMethod]
+    public void Pack_AtTheCap_DoesNotLetAShortBlockFreeARowEarly()
+    {
+        // At the cap a row holds several blocks; a short one arriving later must not pull the
+        // row's end backwards and make it look available to a block that still overlaps.
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows(
+            [Block("long", 0, 100), Block("short", 1, 2), Block("later", 3, 50)],
+            maxRows: 1);
+
+        Assert.AreEqual(1, Musio.Core.Audio.AudioLaneLayout.RowCount(rows));
+        Assert.AreEqual(0, rows["later"]);
+    }
+
+    [TestMethod]
+    public void RowCount_IsAtLeastOne_ForAnEmptyLane()
+    {
+        var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows([], maxRows: 5);
+        Assert.AreEqual(1, Musio.Core.Audio.AudioLaneLayout.RowCount(rows),
+            "an empty lane still needs a band to draw in");
+    }
+
+    #endregion
 }
