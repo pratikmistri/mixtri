@@ -198,6 +198,19 @@ public class SplitAudioTrackOperation : IEditOperation
 {
     private readonly string _trackId;
     private readonly TimeSpan _splitAt;
+
+    /// <summary>
+    /// Id the right half will always be given, allocated once at construction.
+    /// </summary>
+    /// <remarks>
+    /// Minting it inside <see cref="Execute"/> would give the right half a DIFFERENT id on
+    /// every redo, so a selection (or anything else holding the id from the first split)
+    /// would silently stop resolving after undo/redo. Every sibling operation that creates
+    /// something — <see cref="AddAudioTrackOperation"/>, <c>AddCameraSegmentOperation</c> —
+    /// likewise fixes the created object's identity up front rather than per execution.
+    /// </remarks>
+    private readonly string _rightHalfId = Guid.NewGuid().ToString("N");
+
     private AudioTrack? _originalState;
     private AudioTrack? _createdRightHalf;
 
@@ -235,7 +248,7 @@ public class SplitAudioTrackOperation : IEditOperation
         var rightDuration = track.End - _splitAt;
 
         var right = track.Clone();
-        right.Id = Guid.NewGuid().ToString("N");
+        right.Id = _rightHalfId;
         right.StartTime = _splitAt;
         right.TrimStart = track.TrimStart + leftDuration;
         right.Duration = rightDuration;

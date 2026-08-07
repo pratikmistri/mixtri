@@ -520,6 +520,45 @@ public sealed class InsertedAudioTrackTests
         AssertSeconds(95, track.EffectiveDuration, "and the tail can be dragged back out");
     }
 
+    [TestMethod]
+    public void Split_KeepsTheRightHalfsId_AcrossUndoAndRedo()
+    {
+        // The right half's id is allocated once, not per Execute. Minting it inside Execute
+        // gave it a different id on every redo, so a selection (or anything else holding the
+        // id from the first split) silently stopped resolving after undo/redo.
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+        var op = new SplitAudioTrackOperation(track.Id, TimeSpan.FromSeconds(6));
+
+        op.Execute(model);
+        var firstId = op.CreatedId;
+        Assert.IsNotNull(firstId);
+
+        op.Undo(model);
+        op.Execute(model);   // redo
+
+        Assert.AreEqual(firstId, op.CreatedId, "redo must recreate the same right half, not a new one");
+        Assert.AreEqual(2, model.AudioTracks.Count);
+        Assert.IsTrue(model.AudioTracks.Any(t => t.Id == firstId));
+    }
+
+    [TestMethod]
+    public void Split_RepeatedUndoRedo_DoesNotAccumulateBlocks()
+    {
+        var (model, track) = ModelWithTrack(startSec: 0, sourceDurationSec: 12);
+        var op = new SplitAudioTrackOperation(track.Id, TimeSpan.FromSeconds(6));
+
+        for (int i = 0; i < 3; i++)
+        {
+            op.Execute(model);
+            Assert.AreEqual(2, model.AudioTracks.Count, "a split always yields exactly two blocks");
+            op.Undo(model);
+            Assert.AreEqual(1, model.AudioTracks.Count, "and undo always collapses back to one");
+        }
+
+        var restored = model.AudioTracks.Single();
+        AssertSeconds(12, restored.EffectiveDuration, "with its original length intact");
+    }
+
     #endregion
 
     #region Preview placement mapping

@@ -592,10 +592,24 @@ public sealed partial class EditorPage
             // is not lost — the lane draws it dimmed behind the block, so it can be dragged
             // back in from the right edge whenever there is room for it.
             var timelineEnd = ViewModel.Model.DisplayDuration;
-            TimeSpan? duration = null;
-            if (timelineEnd > startTime)
+            var start = startTime < TimeSpan.Zero ? TimeSpan.Zero : startTime;
+
+            // A playhead parked AT the end of the timeline (pressing End, or a clip that ends
+            // the project) leaves no room at all, and a block starting there maps to the
+            // canvas's right edge — so it draws as nothing, and the ruler cannot scroll past
+            // DisplayDuration to reach it. The insert would appear to do nothing at all. Back
+            // the start off just far enough for the clip to land somewhere it can be seen and
+            // grabbed; the audio is still anchored as late as it can be.
+            if (timelineEnd > TimeSpan.Zero && start >= timelineEnd)
             {
-                var room = timelineEnd - startTime;
+                var wanted = result.Duration < timelineEnd ? result.Duration : timelineEnd;
+                start = timelineEnd - wanted;
+            }
+
+            TimeSpan? duration = null;
+            if (timelineEnd > start)
+            {
+                var room = timelineEnd - start;
                 if (room < result.Duration)
                 {
                     // Never clamp below the minimum a block can be trimmed to, or inserting
@@ -612,7 +626,7 @@ public sealed partial class EditorPage
                 FilePath = result.AudioFilePath,
                 Name = string.IsNullOrWhiteSpace(name) ? (isMusic ? "Music" : "Voice over") : name,
                 Kind = kind,
-                StartTime = startTime < TimeSpan.Zero ? TimeSpan.Zero : startTime,
+                StartTime = start,
                 TrimStart = TimeSpan.Zero,
                 SourceDuration = result.Duration,
                 Duration = duration,
