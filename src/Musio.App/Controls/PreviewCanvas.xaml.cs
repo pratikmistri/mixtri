@@ -1,4 +1,5 @@
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.UI;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -94,12 +95,44 @@ public sealed partial class PreviewCanvas : UserControl
     }
     private int _previewFps = 30;
 
+    /// <summary>
+    /// Raised when the Win2D surface built a replacement device after a GPU device loss (TDR,
+    /// driver update, display change). <see cref="CanvasControl"/> handles that loss
+    /// internally and silently — no exception surfaces, and
+    /// <see cref="Microsoft.Graphics.Canvas.CanvasDevice.DeviceLost"/> on the shared device
+    /// need never fire. Everything the app cached on the old device is dead at this point,
+    /// so the host must rebuild it.
+    /// </summary>
+    public event EventHandler? DeviceRecreated;
+
     public PreviewCanvas()
     {
         InitializeComponent();
         ResolveThemeColors();
         ActualThemeChanged += (_, _) => { ResolveThemeColors(); PreviewSurface.Invalidate(); };
+        PreviewSurface.CreateResources += PreviewSurface_CreateResources;
         UpdateTimeDisplay();
+    }
+
+    private void PreviewSurface_CreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args)
+    {
+        if (args.Reason != CanvasCreateResourcesReason.NewDevice) return;
+
+        // The held frame was allocated on the device that just died. Dropping it here is what
+        // keeps PreviewSurface_Draw from handing a dead-device bitmap to the new device on the
+        // very next paint — which draws nothing and leaves the surface blank indefinitely,
+        // since nothing else in the app is watching this control's device.
+        var stale = _previewFrame;
+        _previewFrame = null;
+        if (stale is not null)
+        {
+            try { stale.Dispose(); }
+            catch { /* the frame belongs to the lost device */ }
+        }
+
+        Musio.Core.Diagnostics.DiagLog.Write(
+            "Editor", "preview CanvasControl recreated its device after loss; requesting rebuild");
+        DeviceRecreated?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>

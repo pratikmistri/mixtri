@@ -23,6 +23,7 @@ public sealed class EditorGraphicsDeviceManager
 {
     private readonly DispatcherQueue _dispatcherQueue;
     private readonly Func<Task> _recoverAsync;
+    private readonly Func<Task> _flushPendingRenderAsync;
     private readonly Func<bool> _isUnloaded;
 
     private CanvasDevice? _graphicsDevice;
@@ -38,14 +39,27 @@ public sealed class EditorGraphicsDeviceManager
     /// Performs the actual device recovery (tearing down and rebuilding renderers/preview
     /// state). Always invoked on the UI thread.
     /// </param>
+    /// <param name="flushPendingRenderAsync">
+    /// Repaints the preview once recovery has fully finished. This CANNOT be folded into
+    /// <paramref name="recoverAsync"/>: that delegate runs inside the recovery scope, where
+    /// <see cref="IsRecoveryInProgress"/> is still true and the preview deliberately parks
+    /// render requests instead of drawing against a device that is mid-rebuild. Invoked on
+    /// the UI thread after the flag has cleared.
+    /// </param>
     /// <param name="isUnloaded">
     /// Returns true once the owning page has unloaded, so a queued or in-flight recovery does
     /// not keep retrying or touch torn-down page state.
     /// </param>
-    public EditorGraphicsDeviceManager(DispatcherQueue dispatcherQueue, Func<Task> recoverAsync, Func<bool> isUnloaded)
+    public EditorGraphicsDeviceManager(
+        DispatcherQueue dispatcherQueue,
+        Func<Task> recoverAsync,
+        Func<Task> flushPendingRenderAsync,
+        Func<bool> isUnloaded)
     {
         _dispatcherQueue = dispatcherQueue ?? throw new ArgumentNullException(nameof(dispatcherQueue));
         _recoverAsync = recoverAsync ?? throw new ArgumentNullException(nameof(recoverAsync));
+        _flushPendingRenderAsync = flushPendingRenderAsync
+            ?? throw new ArgumentNullException(nameof(flushPendingRenderAsync));
         _isUnloaded = isUnloaded ?? throw new ArgumentNullException(nameof(isUnloaded));
     }
 
@@ -82,8 +96,18 @@ public sealed class EditorGraphicsDeviceManager
     }
 
     private void OnGraphicsDeviceLost(CanvasDevice sender, object args)
+        => RequestRecovery("shared CanvasDevice lost");
+
+    /// <summary>
+    /// Schedules a full editor graphics rebuild. Also callable for losses the shared-device
+    /// subscription cannot see: a <c>CanvasControl</c> recovers from a device loss internally,
+    /// so a GPU reset can invalidate every cached bitmap without
+    /// <see cref="CanvasDevice.DeviceLost"/> ever firing here. Repeated requests coalesce into
+    /// a single recovery pass.
+    /// </summary>
+    public void RequestRecovery(string reason)
     {
-        DiagLog.Write("Editor", "shared CanvasDevice lost; scheduling editor graphics recovery");
+        DiagLog.Write("Editor", $"{reason}; scheduling editor graphics recovery");
 
         Interlocked.Exchange(ref _graphicsRecoveryRequested, 1);
         if (Interlocked.Exchange(ref _graphicsRecoveryQueued, 1) != 0)
@@ -101,6 +125,17 @@ public sealed class EditorGraphicsDeviceManager
                     while (!_isUnloaded()
                         && Interlocked.CompareExchange(
                             ref _graphicsRecoveryRequested, 0, 0) != 0);
+
+                    // RunRecoveryAsync has cleared IsRecoveryInProgress by now, so a repaint
+                    // issued from here actually draws. The recovery body cannot do this
+                    // itself: it runs inside the recovery scope, so its own repaint call is
+                    // parked as a pending request and — since pending requests are only
+                    // drained by an already-running render loop — nothing would ever draw it.
+                    // Recovery has already cleared the preview frame and the track visuals,
+                    // so skipping this flush leaves the editor blank until the user happens
+                    // to move the playhead.
+                    if (!_isUnloaded())
+                        await _flushPendingRenderAsync();
                 }
                 catch (Exception ex)
                 {

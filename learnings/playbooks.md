@@ -136,6 +136,24 @@ The single most-churned area. The process is **PerMonitorV2**, which is the key 
 
 ## Playbook: Crash / freeze hardening invariants
 
+- **Every `CanvasControl` MUST subscribe `CreateResources` and rebuild on
+  `CanvasCreateResourcesReason.NewDevice`.** A `CanvasControl` recovers from GPU device loss
+  *internally and silently* — it builds a replacement device and raises `CreateResources`;
+  it does NOT necessarily raise `CanvasDevice.DeviceLost` on the shared device. Any bitmap or
+  render target the app cached externally (preview frame, filmstrip/waveform bitmaps) then
+  belongs to a dead device and every surface draws nothing, permanently, with **no exception,
+  no crash.log entry and no diag.log line**. Route these into
+  `EditorGraphicsDeviceManager.RequestRecovery(reason)`. Note the enum member is `NewDevice`
+  (`FirstTime` is the normal startup pass); there is no `...Reason.DeviceLost`.
+- **A flag that suppresses rendering for the duration of an operation needs an explicit flush
+  AFTER that operation** — never a repaint issued from inside it. `IsRecoveryInProgress` stays
+  true for the whole of `RecoverGraphicsDeviceAsync`, so a repaint called from within it is
+  parked, and `_pendingRenderPosition` is drained only by an already-running render loop. That
+  is why the manager takes a separate `flushPendingRenderAsync` delegate.
+- **Never tear down the preview pipeline before the guard that can abort the rebuild.** Resolve
+  `CurrentProject` (and anything else the rebuild needs) FIRST; disposing `_frameReader` and
+  clearing track visuals and only then discovering there is nothing to rebuild with leaves a
+  permanently blank editor that no later render can repair. Log every such bail-out.
 - **On `CanvasDevice.DeviceLost`, surface a recoverable exception — NEVER recreate the device
   mid-frame.** Let outer code restart cleanly. Check `D3D11CreateDevice` HRESULT and fall back to
   WARP (`D3D_DRIVER_TYPE_WARP`).
