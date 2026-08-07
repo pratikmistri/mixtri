@@ -224,8 +224,10 @@ public sealed partial class EditorPage
         // Inserted voice-over/music is rebuilt here rather than in LoadAudioWaveformAsync:
         // that pass returns immediately when the recording itself has no audio files, which
         // would leave a project whose ONLY audio is an inserted track permanently silent.
-        // Synchronous, and before the first await, so no generation check is needed.
-        ReloadInsertedAudioPlayer();
+        // Wrapped so it can never abort the rebuild below: everything after this point is
+        // the preview pipeline itself, and an exception here would leave a live but blank
+        // editor with nothing scheduled to retry it.
+        TryReloadInsertedAudioPlayer();
 
         // This method re-runs on every ModelReloaded — which fires on project change AND
         // on every editor page reconstruction. Two overlapping runs used to cancel each

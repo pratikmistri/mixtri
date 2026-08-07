@@ -1233,6 +1233,22 @@ public sealed partial class EditorPage
     /// are filtered by <see cref="AudioPlaybackEngine.LoadPlacements"/> itself, so this stays
     /// a straight projection of the project model.
     /// </remarks>
+    /// <summary>
+    /// (Re)builds the inserted-audio engine from the model's <see cref="AudioTrack"/>s.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The engine is built on a background thread.</b> <c>LoadPlacements</c> opens every
+    /// inserted WAV synchronously, and this runs during preview initialisation and on every
+    /// model reload — so doing it inline stalled the UI thread exactly when the decoder,
+    /// filmstrip and preview surfaces are all coming up, which is what made loading a project
+    /// with audio feel like it was glitching.
+    /// </para>
+    /// <para>
+    /// The lane projection stays synchronous: it is cheap (no I/O), and the timeline must
+    /// show the blocks immediately rather than a frame later.
+    /// </para>
+    /// </remarks>
     private void ReloadInsertedAudioPlayer()
     {
         _insertedAudioPlayer?.Dispose();
@@ -1258,9 +1274,68 @@ public sealed partial class EditorPage
 
         if (placements.Count == 0) return;
 
-        var player = new AudioPlaybackEngine();
-        player.LoadPlacements(placements);
-        _insertedAudioPlayer = player;
+        Musio.Core.Diagnostics.DiagLog.Write("Editor",
+            $"inserted audio: building engine for {placements.Count} placement(s)");
+
+        // Every rebuild invalidates the previous one: a reload can be triggered again while
+        // the last engine is still opening its files, and publishing a stale engine would
+        // play the pre-edit placements (and leak the one that superseded it).
+        int generation = ++_insertedAudioGeneration;
+
+        _ = Task.Run(() =>
+        {
+            AudioPlaybackEngine? player = null;
+            try
+            {
+                player = new AudioPlaybackEngine();
+                player.LoadPlacements(placements);
+            }
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                    $"inserted audio engine failed to load: {ex.Message}");
+                player?.Dispose();
+                return;
+            }
+
+            var built = player;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (generation != _insertedAudioGeneration || _pageUnloaded)
+                {
+                    built.Dispose();
+                    return;
+                }
+
+                _insertedAudioPlayer?.Dispose();
+                _insertedAudioPlayer = built;
+            });
+        });
+    }
+
+    /// <summary>Invalidates in-flight engine builds; see <see cref="ReloadInsertedAudioPlayer"/>.</summary>
+    private int _insertedAudioGeneration;
+
+    /// <summary>
+    /// <see cref="ReloadInsertedAudioPlayer"/>, guaranteed never to propagate a failure.
+    /// </summary>
+    /// <remarks>
+    /// Called from the preview-initialisation path, where an exception would abort the whole
+    /// rebuild and leave a live but blank editor with no retry — the failure mode the
+    /// crash-hardening playbook was written for. Inserted audio is strictly additive to the
+    /// editor, so it must degrade to "no inserted audio", never take the preview with it.
+    /// </remarks>
+    private void TryReloadInsertedAudioPlayer()
+    {
+        try
+        {
+            ReloadInsertedAudioPlayer();
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"inserted audio reload failed, continuing without it: {ex}");
+        }
     }
 
     /// <summary>
@@ -1282,7 +1357,7 @@ public sealed partial class EditorPage
     private void RefreshInsertedAudio()
     {
         _insertedAudioSignature = BuildInsertedAudioSignature();
-        ReloadInsertedAudioPlayer();
+        TryReloadInsertedAudioPlayer();
         Timeline?.Refresh();
     }
 
@@ -1459,6 +1534,12 @@ public sealed partial class EditorPage
     private const int InsertedAudioMaxPeaks = 6000;
 
     /// <summary>
+    /// How long the waveform decode waits before starting, so it never competes with preview
+    /// and filmstrip initialisation for I/O during a project load.
+    /// </summary>
+    private static readonly TimeSpan WaveformDecodeDelay = TimeSpan.FromMilliseconds(600);
+
+    /// <summary>
     /// Projects the timeline's inserted audio tracks onto the lanes, then fills in any
     /// missing waveforms in the background and republishes when they arrive.
     /// </summary>
@@ -1511,8 +1592,15 @@ public sealed partial class EditorPage
 
         // Decoding a WAV is far too slow for a draw pass, so the lane draws as a plain block
         // first and gains its waveform on the republish below.
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
+            // Deliberately yields first. This runs during project load, where the preview
+            // decoder, the filmstrip pass and the audio engine are all starting at once;
+            // decoding several minutes of WAV in that window competes with them for I/O and
+            // CPU and shows up as the editor stuttering while it opens. The waveform is
+            // decoration — it can afford to arrive a moment later than the blocks.
+            await Task.Delay(WaveformDecodeDelay);
+
             var built = new List<(string Path, float[] Peaks, double DurationSeconds)>();
             foreach (var path in missing)
             {
@@ -1545,13 +1633,14 @@ public sealed partial class EditorPage
 
             DispatcherQueue.TryEnqueue(() =>
             {
+                if (_pageUnloaded || Timeline is null) return;
+
                 foreach (var (path, peaks, seconds) in built)
                     _insertedAudioWaveforms[path] = (peaks, seconds);
 
                 // Re-projects with the waveforms now cached. Guarded because this lands
                 // after an await boundary, by which time the page may have unloaded.
-                if (Timeline is not null)
-                    PublishInsertedAudioLane();
+                PublishInsertedAudioLane();
             });
         });
     }

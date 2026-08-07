@@ -566,11 +566,18 @@ public sealed partial class TimelineControl : UserControl
     /// dirty layout on every repaint, so this only touches the tree when the state actually
     /// changes.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="row"/> is nullable like the other two: this runs from
+    /// <see cref="InsertedAudioTracks"/>'s setter, which the host can assign before the XAML
+    /// tree is fully realised. A null-deref here throws inside the editor's preview
+    /// initialisation, which aborts the whole rebuild and leaves a blank editor — the exact
+    /// failure class the crash-hardening playbook exists for.
+    /// </remarks>
     private static void ApplyTrackVisibility(
-        RowDefinition row, FrameworkElement? label, FrameworkElement? canvas, bool visible, double height)
+        RowDefinition? row, FrameworkElement? label, FrameworkElement? canvas, bool visible, double height)
     {
         var target = visible ? new GridLength(height) : new GridLength(0);
-        if (row.Height != target)
+        if (row is not null && row.Height != target)
             row.Height = target;
 
         var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
@@ -2780,6 +2787,22 @@ public sealed partial class TimelineControl : UserControl
         canvas.CapturePointer(e.Pointer);
     }
 
+    /// <summary>
+    /// Repaints only the two inserted-audio lanes.
+    /// </summary>
+    /// <remarks>
+    /// Used for the per-pointer-move repaints of an audio drag, instead of
+    /// <see cref="InvalidateAllCanvases"/>: nothing else on the timeline changes while an
+    /// audio block is being dragged, and repainting the filmstrip and every other track on
+    /// every pointer move is real GPU work on a machine that is already prone to device loss
+    /// under editor load.
+    /// </remarks>
+    private void InvalidateInsertedAudioLanes()
+    {
+        VoiceOverTrackCanvas?.Invalidate();
+        MusicTrackCanvas?.Invalidate();
+    }
+
     private void AudioTrackLane_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not CanvasControl canvas) return;
@@ -2790,13 +2813,13 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.InsertedAudioBody:
                 _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
                 SetCursor(InputSystemCursorShape.SizeAll);
-                InvalidateAll();
+                InvalidateInsertedAudioLanes();
                 break;
             case DragMode.InsertedAudioLeftEdge:
             case DragMode.InsertedAudioRightEdge:
                 _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
-                InvalidateAll();
+                InvalidateInsertedAudioLanes();
                 break;
             case DragMode.None:
                 var (_, target) = HitTestInsertedAudio(canvas, pos.X, pos.Y);
@@ -2852,7 +2875,7 @@ public sealed partial class TimelineControl : UserControl
         _dragMode = DragMode.None;
         SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
-        InvalidateAll();
+        InvalidateInsertedAudioLanes();
     }
 
     private void AudioTrackLane_RightTapped(object sender, RightTappedRoutedEventArgs e)
