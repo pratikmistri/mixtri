@@ -201,6 +201,7 @@ public sealed partial class EditorPage
         // the encoder when both pull from the same source files at once.
         Preview.Pause();
         try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
+        try { _insertedAudioPlayer?.Pause(); } catch { /* best-effort */ }
 
         // Start new export
         ExportVM.PrepareForExport();
@@ -423,6 +424,7 @@ public sealed partial class EditorPage
         // Navigate to RecordingPage in append mode
         Preview?.Pause();
         _audioPlayer?.Stop();
+        _insertedAudioPlayer?.Stop();
         Frame.Navigate(typeof(RecordingPage), "append");
     }
 
@@ -494,5 +496,110 @@ public sealed partial class EditorPage
 
         if (errorMessage is not null)
             await ShowProjectDialogAsync("Could not import video", errorMessage);
+    }
+
+    /// <summary>Inserts an external audio file as narration at the playhead.</summary>
+    private void ImportVoiceOver_Click(object sender, RoutedEventArgs e)
+        => _ = ImportAudioAsync(AudioTrackKind.VoiceOver);
+
+    /// <summary>Inserts an external audio file as a background music bed at the playhead.</summary>
+    private void ImportMusic_Click(object sender, RoutedEventArgs e)
+        => _ = ImportAudioAsync(AudioTrackKind.Music);
+
+    /// <summary>
+    /// Lets the user pick an external audio file and inserts it at the playhead as an
+    /// <see cref="AudioTrack"/>. The file is normalised by <see cref="AudioImportService"/>
+    /// into a PCM WAV, so preview (which seeks by byte offset) and export (which trims by
+    /// time) both land on the same sample.
+    /// </summary>
+    /// <remarks>
+    /// Anchored to the playhead, and to the OUTPUT timeline, deliberately: a voice-over
+    /// belongs to the moment in the finished video the user is looking at, and must stay
+    /// there when the footage beneath it is later trimmed or reordered — which is exactly
+    /// what separates an inserted track from the recording's own audio.
+    /// </remarks>
+    private async Task ImportAudioAsync(AudioTrackKind kind)
+    {
+        bool isMusic = kind == AudioTrackKind.Music;
+        string label = isMusic ? "music" : "voice over";
+
+        // An audio track has no frames, so unlike a video import it cannot start a project.
+        // Checked BEFORE the picker so the user is not made to choose a file first.
+        if (ProjectService.Instance.CurrentProject is null)
+        {
+            await ShowProjectDialogAsync(
+                $"Could not insert {label}",
+                "Open or record a project first — audio is inserted into an existing timeline.");
+            return;
+        }
+
+        Windows.Storage.StorageFile? file = null;
+        try
+        {
+            file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.MusicLibrary,
+                AudioImportService.SupportedExtensions,
+                Windows.Storage.Pickers.PickerViewMode.List);
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Audio import picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        // Captured before the transcode: the playhead can move while a multi-second import
+        // runs, and the track belongs where the user was when they asked for it.
+        var startTime = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
+        using var cts = new CancellationTokenSource();
+        var (dialog, bar) = DialogHelper.BuildProgressDialog(
+            XamlRoot, $"Importing {label}", "Converting and importing the audio…", cts);
+        var progress = new Progress<double>(p =>
+        {
+            DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
+        });
+
+        var showTask = dialog.ShowAsync();
+        string? errorMessage = null;
+        try
+        {
+            var result = await AudioImportService.ImportAsync(file.Path, null, progress, cts.Token);
+
+            if (ProjectService.Instance.ImportAudio(result, kind, startTime) is null)
+            {
+                errorMessage = "The project was closed while the audio was importing.";
+            }
+            else
+            {
+                // ProjectChanged does not rebuild the preview's audio (it is not a model
+                // reload), so the new track has to be published to the player explicitly or
+                // it stays silent until the editor is reopened.
+                ReloadInsertedAudioPlayer();
+                Timeline?.Refresh();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancelled — nothing to report.
+        }
+        catch (AudioImportException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Audio import failed: {ex}");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            // Only one ContentDialog may be shown at a time, so the error dialog below has
+            // to wait for this one to finish closing.
+            dialog.Hide();
+            try { await showTask; } catch { /* dialog dismissed */ }
+        }
+
+        if (errorMessage is not null)
+            await ShowProjectDialogAsync($"Could not insert {label}", errorMessage);
     }
 }

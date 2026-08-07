@@ -77,6 +77,20 @@ public enum AudioSourceKind
 /// <see cref="TrimFromStart"/> or <see cref="Delay"/> — the fade runs entirely inside audio
 /// that was already going to be placed there.
 /// </param>
+/// <param name="Volume">
+/// <para>
+/// Constant playback gain in the 0..1 range <c>BackgroundAudioTrack.Volume</c> accepts.
+/// <c>1.0</c> (the default) is every placement cut from a recording — recorded audio is
+/// muxed at the level it was captured, and the editor's per-source control is a mute, not
+/// a fader.
+/// </para>
+/// <para>
+/// Below 1.0 only for an inserted <see cref="Musio.Core.Models.AudioTrack"/> (voice-over
+/// or music bed), whose whole point is sitting under the recording. Unlike the fade fields
+/// above this IS actually applied on export: a CONSTANT gain needs no envelope API, which
+/// is exactly the capability <c>BackgroundAudioTrack</c> lacks.
+/// </para>
+/// </param>
 public readonly record struct AudioPlacement(
     string SourcePath,
     AudioSourceKind Kind,
@@ -85,7 +99,8 @@ public readonly record struct AudioPlacement(
     TimeSpan Delay,
     bool PlaysAtNativeRateOnSpeedAdjustedSegment = false,
     TimeSpan FadeOutDuration = default,
-    TimeSpan FadeInDuration = default);
+    TimeSpan FadeInDuration = default,
+    double Volume = 1.0);
 
 /// <summary>
 /// Pure mapping from a project + timeline to the set of audio tracks the exporter must
@@ -215,9 +230,52 @@ public static class ExportAudioPlan
             .OrderBy(s => s.Start)
             .ToList();
 
-        return videoSegments is { Count: > 0 }
+        var placements = videoSegments is { Count: > 0 }
             ? BuildFromSegments(project, timeline!, videoSegments)
             : BuildLegacy(project, mapper);
+
+        // Appended LAST and unconditionally: inserted tracks are anchored to the OUTPUT
+        // timeline the user positioned them on, so unlike everything above they are
+        // identical in both the segment and legacy paths and never depend on which one ran.
+        placements.AddRange(BuildInsertedTracks(project));
+
+        return placements;
+    }
+
+    /// <summary>
+    /// Placements for the project's inserted <see cref="AudioTrack"/>s (voice-over, music).
+    /// </summary>
+    /// <remarks>
+    /// These are the one kind of audio that is NOT derived from a segment: an inserted
+    /// track's <see cref="AudioTrack.StartTime"/> is already an output-timeline instant, so
+    /// it maps to <see cref="AudioPlacement.Delay"/> directly, with no trim/speed/transition
+    /// arithmetic. That is the entire point of the type — a voice-over must stay where the
+    /// user put it when the footage under it is re-cut, where recorded audio must follow its
+    /// segment. Muted, silenced and zero-length tracks are dropped here rather than muxed at
+    /// volume 0, so a disabled track costs nothing in the export.
+    /// </remarks>
+    private static List<AudioPlacement> BuildInsertedTracks(Project project)
+    {
+        var placements = new List<AudioPlacement>();
+        if (project.AudioTracks is not { Count: > 0 }) return placements;
+
+        foreach (var track in project.AudioTracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+
+            var trimStart = track.TrimStart < TimeSpan.Zero ? TimeSpan.Zero : track.TrimStart;
+            var delay = track.StartTime < TimeSpan.Zero ? TimeSpan.Zero : track.StartTime;
+
+            placements.Add(new AudioPlacement(
+                track.FilePath,
+                AudioSourceKind.AudioFile,
+                trimStart,
+                track.EffectiveDuration,
+                delay,
+                Volume: track.EffectiveVolume));
+        }
+
+        return placements;
     }
 
     private static List<AudioPlacement> BuildFromSegments(

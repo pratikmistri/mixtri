@@ -32,6 +32,18 @@ public sealed partial class EditorPage : Page
     private PreviewRenderer? _previewRenderer;
     private TimelineMapper? _timelineMapper;
     private AudioPlaybackEngine? _audioPlayer;
+
+    /// <summary>
+    /// Second engine, for inserted voice-over/music tracks only.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="_audioPlayer"/> because the two are seeked in different
+    /// clocks: recorded audio is positioned in the primary recording's own file time (via
+    /// <see cref="AudioPositionForVideo"/>, which maps through the segments), while inserted
+    /// tracks are anchored to OUTPUT time. A single engine seeks every reader from one
+    /// position, so it cannot serve both.
+    /// </remarks>
+    private AudioPlaybackEngine? _insertedAudioPlayer;
     private bool _compositorReady;
 
     // Text slide rendering for segment-based preview
@@ -204,6 +216,14 @@ public sealed partial class EditorPage : Page
                 {
                     if (AudioPositionForVideo(Timeline.PlayheadPosition) is { } audioPos)
                         _audioPlayer?.ScrubTo(audioPos);
+
+                    // Inserted tracks scrub in OUTPUT time, so the playhead position IS
+                    // their position — no segment mapping to apply.
+                    if (_insertedAudioPlayer is { IsLoaded: true } inserted
+                        && inserted.HasAudioAt(Timeline.PlayheadPosition))
+                    {
+                        inserted.ScrubTo(Timeline.PlayheadPosition);
+                    }
                 }
             });
 
@@ -232,7 +252,7 @@ public sealed partial class EditorPage : Page
         // Sync audio play/pause with preview
         Preview.IsPlayingChanged += (_, isPlaying) =>
         {
-            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            if (!HasPreviewAudio) return;
             if (isPlaying)
             {
                 // Seeks, starts, or leaves it paused if the playhead is somewhere with no
@@ -241,14 +261,15 @@ public sealed partial class EditorPage : Page
             }
             else
             {
-                _audioPlayer.Pause();
+                _audioPlayer?.Pause();
+                _insertedAudioPlayer?.Pause();
             }
         };
 
         // Re-seek audio when playback loops
         Preview.PlaybackLooped += (_, _) =>
         {
-            if (_audioPlayer is null || !_audioPlayer.IsLoaded) return;
+            if (!HasPreviewAudio) return;
             SyncAudioToPlayhead(TimeSpan.Zero);
         };
 
@@ -324,11 +345,13 @@ public sealed partial class EditorPage : Page
         Timeline.CameraSegmentRemoveRequested += OnCameraSegmentRemoveRequested;
 
         // Text overlay track events
-        Timeline.TextOverlaySelected += OnTextOverlaySelected;
-        Timeline.TextOverlayCreated += OnTextOverlayCreated;
+        Timeline.TextOverlaySelected += OnTextOverlaySelected;        Timeline.TextOverlayCreated += OnTextOverlayCreated;
         Timeline.TextOverlayMoved += OnTextOverlayMoved;
         Timeline.TextOverlayResized += OnTextOverlayResized;
         Timeline.TextOverlayRemoveRequested += OnTextOverlayRemoveRequested;
+
+        // Inserted voice-over / music track events
+        Timeline.InsertedAudioTrackContextRequested += OnInsertedAudioTrackContextRequested;
 
         // Transition boundary events
         Timeline.TransitionSelected += OnTransitionSelected;
@@ -373,6 +396,8 @@ public sealed partial class EditorPage : Page
             DisposePrimaryStyleRenderers();
             _audioPlayer?.Dispose();
             _audioPlayer = null;
+            _insertedAudioPlayer?.Dispose();
+            _insertedAudioPlayer = null;
             _webcamComposition?.Clips.Clear();
             _webcamComposition = null;
             _lastWebcamFrame?.Dispose();

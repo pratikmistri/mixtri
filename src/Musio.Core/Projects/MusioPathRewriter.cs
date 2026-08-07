@@ -133,6 +133,12 @@ public static class MusioPathRewriter
                 s.VideoFilePath, s.CursorDataFilePath, s.WebcamFilePath,
                 s.KeyboardDataFilePath, s.AudioFilePaths);
 
+        // Inserted voice-over/music is irreplaceable in exactly the way a style asset is
+        // not: the normalised WAV lives in an app-owned import folder the orphan sweep can
+        // reclaim, so dropping it from a package silently would lose the only copy.
+        foreach (var track in project.AudioTracks)
+            Add(track.FilePath, MediaReferenceKind.Recording);
+
         if (composition is not null)
         {
             Add(composition.Background?.BackgroundImagePath);
@@ -187,6 +193,9 @@ public static class MusioPathRewriter
         project.WebcamFilePath = ApplyOptional(project.WebcamFilePath, map);
         project.KeyboardDataFilePath = ApplyOptional(project.KeyboardDataFilePath, map);
         RewriteList(project.AudioFilePaths, map);
+
+        foreach (var track in project.AudioTracks)
+            track.FilePath = Apply(track.FilePath, map);
     }
 
     private static void RewriteSource(RecordingSource source, Func<string, string?> map)

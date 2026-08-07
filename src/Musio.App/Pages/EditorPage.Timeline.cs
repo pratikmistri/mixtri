@@ -1158,7 +1158,23 @@ public sealed partial class EditorPage
     /// (or when the playhead has jumped to unrelated footage), starts it when the playhead
     /// enters footage that has audio, and pauses it over slides, gaps and appended clips.
     /// </summary>
+    /// <remarks>
+    /// Drives the recorded and the inserted engines independently, because they are silent
+    /// in different places: the recorded one over a text slide, the inserted one wherever no
+    /// voice-over/music track covers the playhead. Neither may gate the other, or a project
+    /// whose only audio is an inserted track would play nothing at all.
+    /// </remarks>
     private void SyncAudioToPlayhead(TimeSpan videoPosition)
+    {
+        SyncRecordedAudioToPlayhead(videoPosition);
+        SyncInsertedAudioToPlayhead(videoPosition);
+    }
+
+    /// <summary>Whether either preview engine has anything loaded to play.</summary>
+    private bool HasPreviewAudio
+        => _audioPlayer is { IsLoaded: true } || _insertedAudioPlayer is { IsLoaded: true };
+
+    private void SyncRecordedAudioToPlayhead(TimeSpan videoPosition)
     {
         if (_audioPlayer is not { IsLoaded: true } player) return;
 
@@ -1176,6 +1192,193 @@ public sealed partial class EditorPage
 
         if (drifted) player.Seek(target);
         if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// Re-aligns the inserted voice-over/music engine, which is positioned in OUTPUT time
+    /// directly — the playhead IS its clock, so there is no segment mapping to apply and no
+    /// per-file offset to add.
+    /// </summary>
+    private void SyncInsertedAudioToPlayhead(TimeSpan videoPosition)
+    {
+        if (_insertedAudioPlayer is not { IsLoaded: true } player) return;
+
+        // One call both re-seeks the drifted tracks and reports whether any of them sound
+        // here; a stretch of timeline no inserted track covers pauses rather than running
+        // silent readers through the mixer.
+        bool audible = player.SyncTo(videoPosition, AudioDriftTolerance);
+
+        if (!audible)
+        {
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// (Re)builds the inserted-audio engine from the project's <see cref="AudioTrack"/>s.
+    /// </summary>
+    /// <remarks>
+    /// Called on preview init and after an insert. Muted, silenced and missing-file tracks
+    /// are filtered by <see cref="AudioPlaybackEngine.LoadPlacements"/> itself, so this stays
+    /// a straight projection of the project model.
+    /// </remarks>
+    private void ReloadInsertedAudioPlayer()
+    {
+        _insertedAudioPlayer?.Dispose();
+        _insertedAudioPlayer = null;
+
+        PublishInsertedAudioLane();
+
+        var project = ProjectService.Instance.CurrentProject;
+        if (project?.AudioTracks is not { Count: > 0 } tracks) return;
+
+        var placements = new List<AudioTimelinePlacement>();
+        foreach (var track in tracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+            placements.Add(new AudioTimelinePlacement(
+                track.FilePath,
+                track.StartTime,
+                track.TrimStart,
+                track.EffectiveDuration,
+                (float)track.EffectiveVolume));
+        }
+
+        if (placements.Count == 0) return;
+
+        var player = new AudioPlaybackEngine();
+        player.LoadPlacements(placements);
+        _insertedAudioPlayer = player;
+    }
+
+    /// <summary>
+    /// Shows the mute/remove menu for an inserted voice-over or music track.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately NOT routed through <c>UndoRedoManager</c>: those operations act on the
+    /// <c>TimelineModel</c>, and an inserted track lives on the <c>Project</c> instead — the
+    /// same reason it survives a re-cut of the footage. Removing one is therefore a direct
+    /// project edit, and the normalised WAV is left on disk so re-inserting is cheap.
+    /// </remarks>
+    private void OnInsertedAudioTrackContextRequested(object? sender, Guid trackId)
+    {
+        var track = ProjectService.Instance.CurrentProject?.AudioTracks
+            .FirstOrDefault(t => t.Id == trackId);
+        if (track is null) return;
+
+        var menu = new MenuFlyout();
+
+        var muteItem = new MenuFlyoutItem { Text = track.IsMuted ? "Unmute" : "Mute" };
+        muteItem.Click += (_, _) =>
+        {
+            track.IsMuted = !track.IsMuted;
+            ReloadInsertedAudioPlayer();
+            Timeline?.Refresh();
+        };
+        menu.Items.Add(muteItem);
+
+        var removeItem = new MenuFlyoutItem { Text = "Remove" };
+        removeItem.Click += (_, _) =>
+        {
+            if (ProjectService.Instance.RemoveAudioTrack(trackId))
+            {
+                ReloadInsertedAudioPlayer();
+                Timeline?.Refresh();
+            }
+        };
+        menu.Items.Add(removeItem);
+
+        menu.ShowAt(Timeline);
+    }
+
+    /// <summary>Waveform peaks per inserted track file, keyed by path.</summary>    /// <remarks>
+    /// Cached across republishes because generating them decodes the whole WAV: without
+    /// this, every mute toggle or reload would re-read every inserted file from disk.
+    /// </remarks>
+    private readonly Dictionary<string, float[]> _insertedAudioWaveforms =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Number of waveform peaks generated per inserted track.</summary>
+    private const int InsertedAudioWaveformPeaks = 400;
+
+    /// <summary>
+    /// Projects the project's inserted audio tracks onto the timeline's lane, then fills in
+    /// any missing waveforms in the background and republishes when they arrive.
+    /// </summary>
+    private void PublishInsertedAudioLane()
+    {
+        if (Timeline is null) return;
+
+        var tracks = ProjectService.Instance.CurrentProject?.AudioTracks;
+        if (tracks is not { Count: > 0 })
+        {
+            Timeline.InsertedAudioTracks = [];
+            return;
+        }
+
+        var items = new List<Controls.TimelineControl.InsertedAudioLaneItem>();
+        var missing = new List<(string Path, double StartSeconds, double DurationSeconds)>();
+
+        foreach (var track in tracks)
+        {
+            if (track is null || string.IsNullOrWhiteSpace(track.FilePath)) continue;
+            var duration = track.EffectiveDuration;
+            if (duration <= TimeSpan.Zero) continue;
+
+            _insertedAudioWaveforms.TryGetValue(track.FilePath, out var waveform);
+            if (waveform is null && File.Exists(track.FilePath))
+                missing.Add((track.FilePath, track.TrimStart.TotalSeconds, duration.TotalSeconds));
+
+            items.Add(new Controls.TimelineControl.InsertedAudioLaneItem(
+                track.Id,
+                string.IsNullOrWhiteSpace(track.Name) ? "Audio" : track.Name,
+                track.StartTime,
+                duration,
+                track.Kind == AudioTrackKind.Music,
+                track.IsMuted,
+                waveform));
+        }
+
+        Timeline.InsertedAudioTracks = items;
+
+        if (missing.Count == 0) return;
+
+        // Decoding a WAV is far too slow for a draw pass, so the lane draws as a plain block
+        // first and gains its waveform on the republish below.
+        _ = Task.Run(() =>
+        {
+            var built = new List<(string Path, float[] Waveform)>();
+            foreach (var (path, startSeconds, _) in missing)
+            {
+                try
+                {
+                    var peaks = AudioWaveformGenerator.GenerateWaveform(
+                        path, InsertedAudioWaveformPeaks, startSeconds);
+                    if (peaks is { Length: > 0 })
+                        built.Add((path, peaks));
+                }
+                catch
+                {
+                    // An unreadable file still draws as a block; it just never gets a waveform.
+                }
+            }
+
+            if (built.Count == 0) return;
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                foreach (var (path, peaks) in built)
+                    _insertedAudioWaveforms[path] = peaks;
+
+                // Re-projects with the waveforms now cached. Guarded because this lands
+                // after an await boundary, by which time the page may have unloaded.
+                if (Timeline is not null)
+                    PublishInsertedAudioLane();
+            });
+        });
     }
 
     /// <summary>

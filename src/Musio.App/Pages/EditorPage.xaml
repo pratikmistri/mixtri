@@ -358,6 +358,23 @@
                                     <FontIcon Glyph="&#xE898;" />
                                 </MenuFlyoutItem.Icon>
                             </MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem
+                                Text="Voice Over…"
+                                Click="ImportVoiceOver_Click"
+                                AutomationProperties.Name="Insert voice over audio">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE720;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Music…"
+                                Click="ImportMusic_Click"
+                                AutomationProperties.Name="Insert background music">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D6;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>

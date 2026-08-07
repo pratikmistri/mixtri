@@ -33,6 +33,8 @@
             <!-- System audio track -->
             <RowDefinition x:Name="MicRow" Height="40" />
             <!-- Mic audio track -->
+            <RowDefinition x:Name="InsertedAudioRow" Height="0" />
+            <!-- Inserted voice-over / music tracks -->
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
@@ -76,6 +78,14 @@
                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Button>
                 <TextBlock Text="Mic" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <Border x:Name="InsertedAudioTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                <FontIcon Glyph="&#xE8D6;" FontSize="12"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Text="Added" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
 
@@ -151,13 +161,23 @@
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
 
+        <canvas:CanvasControl
+            x:Name="InsertedAudioTrackCanvas"
+            Grid.Row="8"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="InsertedAudioTrackCanvas_Draw"
+            PointerPressed="Track_PointerPressed"
+            RightTapped="InsertedAudioTrack_RightTapped"
+            AutomationProperties.Name="Inserted audio track" />
+
         <!-- Playhead overlay line — the only visual moved on a playback tick / scrub
              (see UpdatePlayheadVisual). Purely decorative: not hit-testable, and kept out
              of the automation tree so it isn't announced while playing. -->
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="8"
+            Grid.RowSpan="9"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

@@ -285,6 +285,7 @@ public sealed partial class TimelineControl : UserControl
         yield return TextTrackCanvas;
         yield return AudioTrackCanvas;
         yield return MicTrackCanvas;
+        yield return InsertedAudioTrackCanvas;
     }
 
     private CanvasDevice? _lastRecoveredDevice;
@@ -463,6 +464,7 @@ public sealed partial class TimelineControl : UserControl
         TextTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
+        InsertedAudioTrackCanvas?.Invalidate();
         // Durations / zoom / scroll may have changed with the tracks, which moves the
         // playhead's pixel position even when the time itself is unchanged.
         UpdatePlayheadVisual();
@@ -477,6 +479,7 @@ public sealed partial class TimelineControl : UserControl
     private const double CameraRowHeight = 44;
     private const double AudioRowHeight = 40;
     private const double MicRowHeight = 40;
+    private const double InsertedAudioRowHeight = 40;
 
     /// <summary>
     /// Collapses the tracks that visualise recorded media the current project does not
@@ -517,6 +520,14 @@ public sealed partial class TimelineControl : UserControl
         ApplyTrackVisibility(CameraRow, CameraTrackLabel, CameraTrackCanvas, hasCamera, CameraRowHeight);
         ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
         ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
+
+        // Unlike the tracks above, this one visualises what the user INSERTED rather than
+        // what was recorded, so it is keyed off the lane items the host publishes rather
+        // than off the model — and it starts collapsed, since a project with no inserted
+        // audio must not pay a row for it.
+        ApplyTrackVisibility(
+            InsertedAudioRow, InsertedAudioTrackLabel, InsertedAudioTrackCanvas,
+            _insertedAudioTracks.Count > 0, InsertedAudioRowHeight);
     }
 
     /// <summary>
@@ -2479,6 +2490,142 @@ public sealed partial class TimelineControl : UserControl
     {
         DrawWaveformTrack(sender, args, isMic: true, MicWaveformColor, MicEnvelopeColor,
             Model?.IsMicAudioMuted == true);
+    }
+
+    /// <summary>
+    /// One inserted voice-over/music track as the timeline draws it: an output-timeline
+    /// block, optionally with a waveform the host generated for it.
+    /// </summary>
+    /// <param name="Id">The <c>AudioTrack.Id</c> this block came from.</param>
+    /// <param name="Name">Label drawn on the block.</param>
+    /// <param name="Start">Output-timeline start.</param>
+    /// <param name="Duration">How long it sounds for.</param>
+    /// <param name="IsMusic">Drives the block colour, so the two kinds are scannable apart.</param>
+    /// <param name="IsMuted">Drawn dimmed, matching the recorded tracks' muted state.</param>
+    /// <param name="Waveform">Peaks spanning <paramref name="Duration"/>, or null while they build.</param>
+    public readonly record struct InsertedAudioLaneItem(
+        Guid Id,
+        string Name,
+        TimeSpan Start,
+        TimeSpan Duration,
+        bool IsMusic,
+        bool IsMuted,
+        float[]? Waveform);
+
+    private IReadOnlyList<InsertedAudioLaneItem> _insertedAudioTracks = [];
+
+    /// <summary>Raised when the user right-clicks an inserted audio block, with its id.</summary>
+    public event EventHandler<Guid>? InsertedAudioTrackContextRequested;
+
+    /// <summary>
+    /// The inserted voice-over/music blocks to draw, published by the editor.
+    /// </summary>
+    /// <remarks>
+    /// A control-level property rather than something on <c>TimelineModel</c> on purpose:
+    /// these live on the <c>Project</c> (they are media references, not timeline structure),
+    /// and the model is serialised into the <c>.musio</c> manifest, where a UI lane
+    /// projection has no business being.
+    /// </remarks>
+    public IReadOnlyList<InsertedAudioLaneItem> InsertedAudioTracks
+    {
+        get => _insertedAudioTracks;
+        set
+        {
+            _insertedAudioTracks = value ?? [];
+            UpdateTrackVisibility();
+            InsertedAudioTrackCanvas?.Invalidate();
+        }
+    }
+
+    /// <summary>
+    /// Right-clicking an inserted block asks the host for its context menu (mute, remove).
+    /// </summary>
+    private void InsertedAudioTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetPosition(canvas);
+
+        // Reverse order so the topmost (last-drawn) block wins where two overlap.
+        for (int i = _insertedAudioTracks.Count - 1; i >= 0; i--)
+        {
+            var item = _insertedAudioTracks[i];
+            double x1 = TimeToX(item.Start);
+            double x2 = TimeToX(item.Start + item.Duration);
+            if (pos.X >= x1 && pos.X <= Math.Max(x1 + 2, x2))
+            {
+                InsertedAudioTrackContextRequested?.Invoke(this, item.Id);
+                return;
+            }
+        }
+    }
+
+    private void InsertedAudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        var ds = args.DrawingSession;
+        var model = Model;
+        float w = (float)sender.ActualWidth;
+        float h = (float)sender.ActualHeight;
+
+        ds.Clear(AudioTrackBackground);
+        if (model is null || model.DisplayDuration.TotalSeconds <= 0) return;
+        if (_insertedAudioTracks.Count == 0) return;
+
+        // Violet, deliberately unlike the recorded audio (blue) and mic (teal) tracks: an
+        // inserted track is not re-cut with the footage, so it must not read as one of them.
+        var voiceFill = Color.FromArgb(210, 138, 108, 224);
+        var musicFill = Color.FromArgb(210, 96, 138, 214);
+        var mutedFill = Color.FromArgb(110, 130, 130, 140);
+        var borderColor = Color.FromArgb(255, 226, 216, 255);
+        var textColor = Color.FromArgb(255, 255, 255, 255);
+
+        const float VerticalPadding = 4f;
+        float blockY = VerticalPadding;
+        float blockH = h - VerticalPadding * 2;
+        float centerY = h / 2f;
+
+        foreach (var item in _insertedAudioTracks)
+        {
+            // Positioned in OUTPUT time directly — no segment mapping, which is exactly what
+            // keeps an inserted track where the user put it when the footage is re-cut.
+            float x1 = (float)TimeToX(item.Start);
+            float x2 = (float)TimeToX(item.Start + item.Duration);
+            if (x2 < 0 || x1 > w) continue;
+
+            float blockW = Math.Max(2, x2 - x1);
+            using var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, blockY, blockW, blockH, 4, 4);
+            ds.FillGeometry(rect, item.IsMuted ? mutedFill : item.IsMusic ? musicFill : voiceFill);
+            ds.DrawGeometry(rect, borderColor, 1f);
+
+            if (item.Waveform is { Length: > 1 } waveform && !item.IsMuted)
+            {
+                float barWidth = Math.Max(1f, blockW / waveform.Length);
+                for (int i = 0; i < waveform.Length; i++)
+                {
+                    float bx = x1 + (i * blockW / waveform.Length);
+                    if (bx > w || bx + barWidth < 0) continue;
+
+                    float amplitude = Math.Clamp(waveform[i], 0f, 1f);
+                    float barHeight = amplitude * (blockH * 0.42f);
+                    ds.FillRectangle(bx, centerY - barHeight, barWidth, barHeight * 2, borderColor);
+                }
+            }
+
+            if (blockW > 24)
+            {
+                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                {
+                    FontSize = 10,
+                    FontFamily = "Segoe UI",
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
+                };
+                string label = item.IsMuted ? item.Name + " (muted)" : item.Name;
+                ds.DrawText(label, new Rect(x1 + 5, blockY, blockW - 10, blockH), textColor, fmt);
+            }
+        }
     }
 
     private void DrawWaveformTrack(CanvasControl sender, CanvasDrawEventArgs args,

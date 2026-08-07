@@ -772,6 +772,51 @@ public class MusioPackageTests
         Assert.AreEqual(0, opened.Timeline.TextOverlays.Count, "the retired per-segment shape carries no overlays forward");
     }
 
+    [TestMethod]
+    public async Task SaveThenOpen_PacksAndRepointsInsertedAudioTracks()
+    {
+        // An inserted voice-over lives in an app-owned import folder the orphan sweep can
+        // reclaim, so a package that dropped it would lose the only copy — and a path left
+        // pointing at that folder would break the moment it was swept.
+        var (project, timeline) = BuildProject();
+        var voicePath = WriteFile("voiceover.wav", 3072, 0x5A);
+
+        project.AudioTracks.Add(new AudioTrack
+        {
+            FilePath = voicePath,
+            Name = "Take 1",
+            Kind = AudioTrackKind.VoiceOver,
+            StartTime = TimeSpan.FromSeconds(2),
+            TrimStart = TimeSpan.FromSeconds(1),
+            SourceDuration = TimeSpan.FromSeconds(9),
+            Duration = TimeSpan.FromSeconds(5),
+            Volume = 0.4,
+            IsMuted = true,
+        });
+
+        var packagePath = Path.Combine(_root, "voiceover.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        var track = opened.Project.AudioTracks.Single();
+        Assert.IsTrue(File.Exists(track.FilePath), "the inserted audio should be packed and extracted");
+        Assert.IsFalse(
+            track.FilePath.StartsWith(_sourceFolder, StringComparison.OrdinalIgnoreCase),
+            "the restored track must not still point at the import folder");
+        CollectionAssert.AreEqual(
+            File.ReadAllBytes(voicePath), File.ReadAllBytes(track.FilePath),
+            "the audio bytes must survive the round trip");
+
+        Assert.AreEqual("Take 1", track.Name);
+        Assert.AreEqual(AudioTrackKind.VoiceOver, track.Kind);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), track.StartTime);
+        Assert.AreEqual(TimeSpan.FromSeconds(1), track.TrimStart);
+        Assert.AreEqual(TimeSpan.FromSeconds(9), track.SourceDuration);
+        Assert.AreEqual(TimeSpan.FromSeconds(5), track.Duration);
+        Assert.AreEqual(0.4, track.Volume);
+        Assert.IsTrue(track.IsMuted, "mute state must survive so a disabled track stays disabled");
+    }
+
     /// <summary>Rewrites <c>manifest.json</c> inside a saved package.</summary>
     private static void RewriteManifest(string packagePath, Func<string, string> transform)
     {
