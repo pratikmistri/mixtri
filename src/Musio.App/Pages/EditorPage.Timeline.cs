@@ -83,7 +83,7 @@ public sealed partial class EditorPage
             catch (Exception ex)
             {
                 Musio.Core.Diagnostics.DiagLog.Write("Editor",
-                    $"track visuals FAILED for '{seg.VideoFilePath}': {ex.Message}");
+                    $"track visuals FAILED for '{seg.VideoFilePath}': {ex}");
             }
         }
         Timeline.Refresh();

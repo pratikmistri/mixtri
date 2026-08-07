@@ -121,21 +121,28 @@ public sealed class EditorGraphicsDeviceManager
                     {
                         Interlocked.Exchange(ref _graphicsRecoveryRequested, 0);
                         await RunRecoveryAsync();
+
+                        // Flushed INSIDE the loop so the while-condition below also covers
+                        // losses that arrive during the flush itself. A flush placed after
+                        // the loop would drop them: RequestRecovery sets the requested flag,
+                        // sees the queued flag still held by this lambda, and returns without
+                        // enqueueing anything — leaving the editor unrecovered until some
+                        // later, unrelated loss happened to queue a fresh pass.
+                        //
+                        // RunRecoveryAsync has cleared IsRecoveryInProgress by now, so a
+                        // repaint issued here actually draws. The recovery body cannot do
+                        // this itself: it runs inside the recovery scope, so its own repaint
+                        // call is parked as a pending request and — since pending requests
+                        // are only drained by an already-running render loop — nothing would
+                        // ever draw it. Recovery has already cleared the preview frame and
+                        // the track visuals, so skipping the flush leaves the editor blank
+                        // until the user happens to move the playhead.
+                        if (!_isUnloaded())
+                            await _flushPendingRenderAsync();
                     }
                     while (!_isUnloaded()
                         && Interlocked.CompareExchange(
                             ref _graphicsRecoveryRequested, 0, 0) != 0);
-
-                    // RunRecoveryAsync has cleared IsRecoveryInProgress by now, so a repaint
-                    // issued from here actually draws. The recovery body cannot do this
-                    // itself: it runs inside the recovery scope, so its own repaint call is
-                    // parked as a pending request and — since pending requests are only
-                    // drained by an already-running render loop — nothing would ever draw it.
-                    // Recovery has already cleared the preview frame and the track visuals,
-                    // so skipping this flush leaves the editor blank until the user happens
-                    // to move the playhead.
-                    if (!_isUnloaded())
-                        await _flushPendingRenderAsync();
                 }
                 catch (Exception ex)
                 {
@@ -144,6 +151,26 @@ public sealed class EditorGraphicsDeviceManager
                 finally
                 {
                     Interlocked.Exchange(ref _graphicsRecoveryQueued, 0);
+                }
+
+                // Ownership of the queue flag has just been released. A request that landed
+                // in the window between the last while-check and that release — or while the
+                // catch above was running — saw the flag still held and returned without
+                // enqueueing, so it would stay latched forever. Re-arm it here; this
+                // terminates because each pass clears the flag before doing its work.
+                // Guarded because this runs after the finally in an async void continuation,
+                // where an escaping exception would take the process down.
+                try
+                {
+                    if (!_isUnloaded()
+                        && Interlocked.CompareExchange(ref _graphicsRecoveryRequested, 0, 0) != 0)
+                    {
+                        RequestRecovery("recovery requested while the previous pass was finishing");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DiagLog.Write("Editor", $"graphics recovery re-arm failed: {ex}");
                 }
             }))
         {
