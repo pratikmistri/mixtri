@@ -487,6 +487,39 @@ public sealed class InsertedAudioTrackTests
         AssertSeconds(25, track.EffectiveDuration, "a 3-minute bed can be cut down to the video");
     }
 
+    [TestMethod]
+    public void TrimRightEdge_CanExtendBackIntoTheTrimmedTail()
+    {
+        // The After Effects model the lane draws: the dimmed region past the block is audio
+        // that is still available, so dragging the right edge outward must reclaim it rather
+        // than stop at the current length.
+        var (model, track) = ModelWithTrack(startSec: 0, sourceDurationSec: 60, durationSec: 10);
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(25)).Execute(model);
+
+        AssertSeconds(25, track.EffectiveDuration, "a shortened block can be pulled back out again");
+        AssertSeconds(60, track.AvailableAfterTrim, "the rest of the file is still there to reclaim");
+    }
+
+    [TestMethod]
+    public void InsertClampedToTimeline_LeavesTheRestOfTheFileReclaimable()
+    {
+        // Insert clamps a long bed to the room left on the timeline so its trim handle is
+        // never off-screen; the remainder must stay available, not be discarded.
+        var model = ModelWith(Video(0, 30));
+        var track = Track(startSec: 5, sourceDurationSec: 180);
+        track.Duration = TimeSpan.FromSeconds(25);   // what the insert path computes
+        model.AudioTracks.Add(track);
+
+        AssertSeconds(25, track.EffectiveDuration, "the block fits the timeline");
+        AssertSeconds(30, track.End, "and ends exactly at the timeline's end");
+        AssertSeconds(180, track.AvailableAfterTrim, "with the whole file still reclaimable");
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(100))
+            .Execute(model);
+        AssertSeconds(95, track.EffectiveDuration, "and the tail can be dragged back out");
+    }
+
     #endregion
 
     #region Preview placement mapping

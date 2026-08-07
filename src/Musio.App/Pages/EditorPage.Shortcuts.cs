@@ -585,6 +585,28 @@ public sealed partial class EditorPage
             // Executed through the undo manager, like every other timeline edit: an inserted
             // track lives on TimelineModel.AudioTracks precisely so Ctrl+Z can take it back.
             var name = Path.GetFileNameWithoutExtension(result.SourceFileName);
+
+            // Clamped to what is left of the timeline. A music bed is routinely far longer
+            // than the footage, and a block running past the end of the ruler puts its own
+            // trim handle somewhere the user cannot reach or scroll to. The rest of the file
+            // is not lost — the lane draws it dimmed behind the block, so it can be dragged
+            // back in from the right edge whenever there is room for it.
+            var timelineEnd = ViewModel.Model.DisplayDuration;
+            TimeSpan? duration = null;
+            if (timelineEnd > startTime)
+            {
+                var room = timelineEnd - startTime;
+                if (room < result.Duration)
+                {
+                    // Never clamp below the minimum a block can be trimmed to, or inserting
+                    // at the very end of the timeline would produce something too small to
+                    // grab and drag back out.
+                    duration = room >= AudioTrackEditing.MinDuration
+                        ? room
+                        : AudioTrackEditing.MinDuration;
+                }
+            }
+
             var operation = new AddAudioTrackOperation(new AudioTrack
             {
                 FilePath = result.AudioFilePath,
@@ -593,7 +615,7 @@ public sealed partial class EditorPage
                 StartTime = startTime < TimeSpan.Zero ? TimeSpan.Zero : startTime,
                 TrimStart = TimeSpan.Zero,
                 SourceDuration = result.Duration,
-                Duration = null,
+                Duration = duration,
                 Volume = AudioTrack.DefaultVolumeFor(kind),
             });
 

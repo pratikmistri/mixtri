@@ -1444,8 +1444,10 @@ public sealed partial class EditorPage
     /// <summary>
     /// Shows the split/mute/remove menu for an inserted voice-over or music track.
     /// </summary>
-    private void OnInsertedAudioTrackContextRequested(object? sender, string trackId)
+    private void OnInsertedAudioTrackContextRequested(
+        object? sender, (string Id, FrameworkElement Target, Windows.Foundation.Point Position) e)
     {
+        var trackId = e.Id;
         var track = ViewModel.Model.AudioTracks.FirstOrDefault(t => t.Id == trackId);
         if (track is null) return;
 
@@ -1500,7 +1502,13 @@ public sealed partial class EditorPage
         removeItem.Click += (_, _) => DeleteInsertedAudioTrack(trackId);
         menu.Items.Add(removeItem);
 
-        menu.ShowAt(Timeline);
+        // Anchored to the lane canvas at the click point. Showing it at `Timeline` opened the
+        // flyout against the control's own bounds, which put it up by the preview instead of
+        // at the block the user actually right-clicked.
+        menu.ShowAt(e.Target, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions
+        {
+            Position = e.Position,
+        });
     }
 
     /// <summary>Splits the given track at the playhead, selecting the right half.</summary>
