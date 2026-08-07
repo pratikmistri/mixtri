@@ -1499,3 +1499,12 @@ ewStart to TimeSpan.Zero before raising *Moved; Zoom's does not clamp at all (re
 - **Extracted to Core rather than left in the draw handler because packing decides what is CLICKABLE, not merely what is pretty** — hit testing resolves the pointer to a sub-row *before* it looks at any block, so a wrong row assignment makes a block untouchable in a band it is not drawn in. Same reasoning as `WaveformWindow` two rounds earlier.
 - **Row height dropped 40 -> 30 per sub-row.** The user explicitly accepted a taller track area in exchange for legibility, so the lane grows rather than compressing its blocks.
 - **Verification**: `Musio.App` + `Musio.Tests` x64 Debug 0 errors / 0 CS warnings; suite **1010 passed, 3 skipped, 0 failed** (8 new packing tests). ARM64 Release clean-rebuilt, re-registered, relaunched; responding.
+
+## Dimmed trim headroom: selection-only, and drawn as a background layer
+
+- **Feature/area**: `TimelineControl.DrawInsertedAudioLane`, new `InsertedAudioFileOriginX` helper.
+- **Feedback**: with the dimmed full-file extent drawn for EVERY block, two clips cut from the same long file washed the lane in overlapping grey — each file's extent runs under its neighbours, so it was no longer clear which headroom belonged to which clip.
+- **Fix: draw it only for the SELECTED block.** The headroom is only ever actionable on the clip whose edges you can drag, and dragging requires selection, so nothing is lost by hiding it elsewhere. This is the general principle worth keeping: **a visual that exists to support a gesture should be scoped to whatever the gesture is scoped to** — showing it everywhere is not more informative, it is noise.
+- **Ordering matters as much as the condition.** Drawing the extent inline with its own block would paint headroom OVER a real clip whenever the selected block sat earlier in the same sub-row, because the extent is wider than the block. It is now a background pass over the whole lane before any block is drawn, so a real clip always wins.
+- Extracted `InsertedAudioFileOriginX` because the background pass and the per-block waveform now both need the same anchor, and its drag-dependent rule (committed start for an edge drag so the peaks stay stationary; previewed start for a body drag) is subtle enough that two copies would drift.
+- **Verification**: `Musio.App` + `Musio.Tests` x64 Debug 0 errors / 0 CS warnings; suite **1010 passed, 3 skipped, 0 failed** (unchanged — this round is presentation only). ARM64 Release clean-rebuilt, re-registered, relaunched; responding.

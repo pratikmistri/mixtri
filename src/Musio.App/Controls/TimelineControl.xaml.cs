@@ -3008,6 +3008,26 @@ public sealed partial class TimelineControl : UserControl
     private void VoiceOverTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
         => DrawInsertedAudioLane(sender, args, music: false);
 
+    /// <summary>
+    /// Canvas x at which the source file's second 0 would sit, for a given block.
+    /// </summary>
+    /// <remarks>
+    /// For an EDGE drag this is derived from the COMMITTED start, so the peaks stay
+    /// physically stationary and the dragged edge sweeps over them — a left trim moves
+    /// <c>StartTime</c> and <c>TrimStart</c> by the same delta, so the file's origin genuinely
+    /// does not move. For a BODY drag the audio really is travelling, so the anchor rides the
+    /// previewed block instead.
+    /// </remarks>
+    private double InsertedAudioFileOriginX(InsertedAudioLaneItem item, double pixelsPerSecond)
+    {
+        bool bodyDrag = item.Id == _selectedInsertedAudioTrackId
+            && _dragMode == DragMode.InsertedAudioBody
+            && !double.IsNaN(_audioTrackDragCurrentX);
+
+        double anchorLeftX = bodyDrag ? GetInsertedAudioStartX(item) : TimeToX(item.Start);
+        return anchorLeftX - (item.TrimStart.TotalSeconds * pixelsPerSecond);
+    }
+
     private void MusicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
         => DrawInsertedAudioLane(sender, args, music: true);
 
@@ -3046,6 +3066,36 @@ public sealed partial class TimelineControl : UserControl
         // clip instead of a rescale.
         double pixelsPerSecond = TimeToX(TimeSpan.FromSeconds(1)) - TimeToX(TimeSpan.Zero);
 
+        // ── Background layer: the selected block's dimmed full-file extent ──
+        // Drawn BEFORE every block, not inline with its own, because a file's extent is
+        // wider than the block and runs under its neighbours in the same sub-row. Drawn
+        // inline it would paint headroom over a real clip whenever the selected block sat
+        // earlier in the row.
+        foreach (var item in ItemsForLane(music))
+        {
+            if (item.Id != _selectedInsertedAudioTrackId) continue;
+            if (item.SourceDuration <= TimeSpan.Zero || pixelsPerSecond <= 0) continue;
+
+            var (bandY, bandH) = SubRowBounds(SubRowFor(item.Id));
+            double originX = InsertedAudioFileOriginX(item, pixelsPerSecond);
+            double fullX2 = originX + (item.SourceDuration.TotalSeconds * pixelsPerSecond);
+            var (fx1, fx2, _, _) = VisibleExtent(originX, fullX2, w);
+            if (fx2 <= fx1) continue;
+
+            float fillX = (float)fx1;
+            float fillW = (float)(fx2 - fx1);
+            ds.FillRectangle(fillX, bandY, fillW, bandH, trimmedFill);
+
+            if (item.Waveform is { Length: > 1 } fullWave)
+            {
+                DrawInsertedAudioWaveform(
+                    ds, item, fullWave, originX, pixelsPerSecond,
+                    fillX, (float)fx2, bandH, bandY + bandH / 2f, trimmedWaveform);
+            }
+
+            ds.DrawRectangle(fillX, bandY, fillW, bandH, trimmedBorder, 1f);
+        }
+
         foreach (var item in ItemsForLane(music))
         {
             // Each block sits in the sub-row it was packed into, so two that overlap in time
@@ -3070,42 +3120,7 @@ public sealed partial class TimelineControl : UserControl
             bool isSelected = item.Id == _selectedInsertedAudioTrackId;
             float blockW = Math.Max(2, x2 - x1);
 
-            bool bodyDrag = item.Id == _selectedInsertedAudioTrackId
-                && _dragMode == DragMode.InsertedAudioBody
-                && !double.IsNaN(_audioTrackDragCurrentX);
-
-            // Where the source file's second 0 sits on the output timeline. For an EDGE
-            // drag this is derived from the COMMITTED start, so the peaks stay physically
-            // stationary and the dragged edge sweeps over them (a left trim moves
-            // StartTime and TrimStart by the same delta, so the file's origin genuinely
-            // does not move). For a BODY drag the audio really is travelling, so the
-            // anchor rides the previewed block instead.
-            double anchorLeftX = bodyDrag ? rawX1 : TimeToX(item.Start);
-            double fileOriginX = anchorLeftX - (item.TrimStart.TotalSeconds * pixelsPerSecond);
-
-            // ── The whole source file, dimmed: everything the user could still drag in ──
-            if (item.SourceDuration > TimeSpan.Zero && pixelsPerSecond > 0)
-            {
-                double fullX1 = fileOriginX;
-                double fullX2 = fileOriginX + (item.SourceDuration.TotalSeconds * pixelsPerSecond);
-                var (fx1, fx2, _, _) = VisibleExtent(fullX1, fullX2, w);
-
-                if (fx2 > fx1)
-                {
-                    float fillX = (float)fx1;
-                    float fillW = (float)(fx2 - fx1);
-                    ds.FillRectangle(fillX, blockY, fillW, blockH, trimmedFill);
-
-                    if (item.Waveform is { Length: > 1 } fullWave)
-                    {
-                        DrawInsertedAudioWaveform(
-                            ds, item, fullWave, fileOriginX, pixelsPerSecond,
-                            (float)fx1, (float)fx2, blockH, centerY, trimmedWaveform);
-                    }
-
-                    ds.DrawRectangle(fillX, blockY, fillW, blockH, trimmedBorder, 1f);
-                }
-            }
+            double fileOriginX = InsertedAudioFileOriginX(item, pixelsPerSecond);
 
             // ── The part that actually plays, at full strength ──
             using var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, blockY, blockW, blockH, 4, 4);
