@@ -47,6 +47,19 @@ public class TimelineModel
     public List<TextOverlaySegment> TextOverlays { get; } = [];
 
     /// <summary>
+    /// Inserted voice-over and music tracks (see <see cref="AudioTrack"/>) on the two
+    /// independent audio lanes.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="CameraSegments"/> and <see cref="TextOverlays"/>, whose ranges are
+    /// SOURCE-video times, an inserted track's <see cref="AudioTrack.StartTime"/> is an
+    /// OUTPUT-timeline time. That difference is the feature: a camera overlay decorates the
+    /// footage and must follow it through trims and reorders, where a voice-over is pinned
+    /// to a moment in the finished video and must NOT move when the footage under it changes.
+    /// </remarks>
+    public List<AudioTrack> AudioTracks { get; } = [];
+
+    /// <summary>
     /// Returns every enabled text overlay whose source range contains <paramref name="sourceTime"/>
     /// and which belongs to <paramref name="videoFilePath"/>'s source-time space. Overlays are
     /// returned in timeline order so stacking is deterministic.

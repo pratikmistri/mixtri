@@ -781,7 +781,7 @@ public class MusioPackageTests
         var (project, timeline) = BuildProject();
         var voicePath = WriteFile("voiceover.wav", 3072, 0x5A);
 
-        project.AudioTracks.Add(new AudioTrack
+        timeline.AudioTracks.Add(new AudioTrack
         {
             FilePath = voicePath,
             Name = "Take 1",
@@ -798,7 +798,7 @@ public class MusioPackageTests
         await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
         var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
 
-        var track = opened.Project.AudioTracks.Single();
+        var track = opened.Timeline.AudioTracks.Single();
         Assert.IsTrue(File.Exists(track.FilePath), "the inserted audio should be packed and extracted");
         Assert.IsFalse(
             track.FilePath.StartsWith(_sourceFolder, StringComparison.OrdinalIgnoreCase),

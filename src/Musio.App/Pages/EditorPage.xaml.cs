@@ -351,6 +351,9 @@ public sealed partial class EditorPage : Page
         Timeline.TextOverlayRemoveRequested += OnTextOverlayRemoveRequested;
 
         // Inserted voice-over / music track events
+        Timeline.InsertedAudioTrackSelected += OnInsertedAudioTrackSelected;
+        Timeline.InsertedAudioTrackMoved += OnInsertedAudioTrackMoved;
+        Timeline.InsertedAudioTrackResized += OnInsertedAudioTrackResized;
         Timeline.InsertedAudioTrackContextRequested += OnInsertedAudioTrackContextRequested;
 
         // Transition boundary events

@@ -507,6 +507,14 @@ public sealed partial class EditorPage
 
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
+
+            // Undo/redo mutates the model directly, so the inserted-audio preview engine and
+            // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
+            // rebuilt too, or Ctrl+Z after an audio edit would keep playing (and drawing) the
+            // placement that was just undone. Guarded, because this handler fires on every
+            // edit of any kind and rebuilding reopens every inserted WAV.
+            RefreshInsertedAudioIfChanged();
+
             Timeline.Refresh();
             InvalidatePreview();
         });
@@ -1229,11 +1237,12 @@ public sealed partial class EditorPage
     {
         _insertedAudioPlayer?.Dispose();
         _insertedAudioPlayer = null;
+        _insertedAudioSignature = BuildInsertedAudioSignature();
 
         PublishInsertedAudioLane();
 
-        var project = ProjectService.Instance.CurrentProject;
-        if (project?.AudioTracks is not { Count: > 0 } tracks) return;
+        var tracks = ViewModel.Model.AudioTracks;
+        if (tracks is not { Count: > 0 }) return;
 
         var placements = new List<AudioTimelinePlacement>();
         foreach (var track in tracks)
@@ -1255,43 +1264,142 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// Shows the mute/remove menu for an inserted voice-over or music track.
+    /// Applies an inserted-audio edit and republishes everything that depends on it.
     /// </summary>
     /// <remarks>
-    /// Deliberately NOT routed through <c>UndoRedoManager</c>: those operations act on the
-    /// <c>TimelineModel</c>, and an inserted track lives on the <c>Project</c> instead — the
-    /// same reason it survives a re-cut of the footage. Removing one is therefore a direct
-    /// project edit, and the normalised WAV is left on disk so re-inserting is cheap.
+    /// The single funnel for every audio-track mutation. The preview engine and the lane
+    /// projection are both derived state rebuilt from <c>TimelineModel.AudioTracks</c>, and
+    /// neither is refreshed by <c>UndoRedoManager</c> (which only mutates the model), so an
+    /// edit that skipped this would appear to do nothing until the editor was reopened.
     /// </remarks>
-    private void OnInsertedAudioTrackContextRequested(object? sender, Guid trackId)
+    private void ExecuteAudioTrackOperation(IEditOperation operation)
     {
-        var track = ProjectService.Instance.CurrentProject?.AudioTracks
-            .FirstOrDefault(t => t.Id == trackId);
+        ViewModel.UndoRedoManager.Execute(operation);
+        RefreshInsertedAudio();
+    }
+
+    /// <summary>Rebuilds the inserted-audio preview engine and timeline lane from the model.</summary>
+    private void RefreshInsertedAudio()
+    {
+        _insertedAudioSignature = BuildInsertedAudioSignature();
+        ReloadInsertedAudioPlayer();
+        Timeline?.Refresh();
+    }
+
+    /// <summary>
+    /// State of the inserted tracks as of the last rebuild, so an undo/redo of an unrelated
+    /// edit does not needlessly reopen every inserted WAV.
+    /// </summary>
+    private string? _insertedAudioSignature;
+
+    /// <summary>
+    /// Everything the preview engine and the lane are derived from, flattened. Deliberately
+    /// includes the fields an EDIT changes (position, trim, length, level) rather than just
+    /// the track ids: a move or trim leaves the set of tracks identical while changing every
+    /// placement in it.
+    /// </summary>
+    private string BuildInsertedAudioSignature()
+    {
+        var tracks = ViewModel.Model.AudioTracks;
+        if (tracks is not { Count: > 0 }) return string.Empty;
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var t in tracks)
+        {
+            sb.Append(t.Id).Append('|')
+              .Append(t.FilePath).Append('|')
+              .Append(t.StartTime.Ticks).Append('|')
+              .Append(t.TrimStart.Ticks).Append('|')
+              .Append(t.EffectiveDuration.Ticks).Append('|')
+              .Append(t.EffectiveVolume).Append(';');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Rebuilds the inserted-audio derived state only when it actually changed.</summary>
+    private void RefreshInsertedAudioIfChanged()
+    {
+        if (BuildInsertedAudioSignature() == _insertedAudioSignature) return;
+        RefreshInsertedAudio();
+    }
+
+    private void OnInsertedAudioTrackSelected(object? sender, string? trackId)
+    {
+        // Selecting an inserted block collapses any panel bound to another selection kind,
+        // matching what the other tracks do — the control already cleared their selections.
+        if (trackId is not null)
+            HideTextSlidePanel();
+    }
+
+    private void OnInsertedAudioTrackMoved(object? sender, (string Id, TimeSpan NewStart) e)
+        => ExecuteAudioTrackOperation(new MoveAudioTrackOperation(e.Id, e.NewStart));
+
+    private void OnInsertedAudioTrackResized(
+        object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+        => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
+
+    /// <summary>
+    /// Shows the split/mute/remove menu for an inserted voice-over or music track.
+    /// </summary>
+    private void OnInsertedAudioTrackContextRequested(object? sender, string trackId)
+    {
+        var track = ViewModel.Model.AudioTracks.FirstOrDefault(t => t.Id == trackId);
         if (track is null) return;
 
         var menu = new MenuFlyout();
+        var playhead = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
+        var splitItem = new MenuFlyoutItem
+        {
+            Text = "Split at playhead",
+            // Disabled rather than hidden when the playhead is outside the block (or too
+            // close to an edge for both halves to survive), so the action stays discoverable
+            // and its precondition is visible.
+            IsEnabled = SplitAudioTrackOperation.CanSplit(track, playhead),
+        };
+        splitItem.Click += (_, _) => SplitInsertedAudioTrack(trackId);
+        menu.Items.Add(splitItem);
 
         var muteItem = new MenuFlyoutItem { Text = track.IsMuted ? "Unmute" : "Mute" };
-        muteItem.Click += (_, _) =>
-        {
-            track.IsMuted = !track.IsMuted;
-            ReloadInsertedAudioPlayer();
-            Timeline?.Refresh();
-        };
+        muteItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new UpdateAudioTrackPropertiesOperation(trackId, isMuted: !track.IsMuted));
         menu.Items.Add(muteItem);
 
+        menu.Items.Add(new MenuFlyoutSeparator());
+
         var removeItem = new MenuFlyoutItem { Text = "Remove" };
-        removeItem.Click += (_, _) =>
-        {
-            if (ProjectService.Instance.RemoveAudioTrack(trackId))
-            {
-                ReloadInsertedAudioPlayer();
-                Timeline?.Refresh();
-            }
-        };
+        removeItem.Click += (_, _) => DeleteInsertedAudioTrack(trackId);
         menu.Items.Add(removeItem);
 
         menu.ShowAt(Timeline);
+    }
+
+    /// <summary>Splits the given track at the playhead, selecting the right half.</summary>
+    private void SplitInsertedAudioTrack(string trackId)
+    {
+        var track = ViewModel.Model.AudioTracks.FirstOrDefault(t => t.Id == trackId);
+        if (track is null) return;
+
+        var playhead = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+        if (!SplitAudioTrackOperation.CanSplit(track, playhead)) return;
+
+        var operation = new SplitAudioTrackOperation(trackId, playhead);
+        ExecuteAudioTrackOperation(operation);
+
+        // Selecting the right half matches the primary track's split behaviour and is what
+        // makes "split, then drag the tail away" a two-step gesture rather than three.
+        if (operation.CreatedId is { } createdId && Timeline is not null)
+        {
+            Timeline.SelectedInsertedAudioTrackId = createdId;
+        }
+    }
+
+    /// <summary>Removes the given inserted track and clears the selection.</summary>
+    private void DeleteInsertedAudioTrack(string trackId)
+    {
+        ExecuteAudioTrackOperation(new RemoveAudioTrackOperation(trackId));
+        Timeline?.ClearInsertedAudioSelection();
     }
 
     /// <summary>Waveform peaks per inserted track file, keyed by path.</summary>    /// <remarks>
@@ -1312,7 +1420,7 @@ public sealed partial class EditorPage
     {
         if (Timeline is null) return;
 
-        var tracks = ProjectService.Instance.CurrentProject?.AudioTracks;
+        var tracks = ViewModel.Model.AudioTracks;
         if (tracks is not { Count: > 0 })
         {
             Timeline.InsertedAudioTracks = [];

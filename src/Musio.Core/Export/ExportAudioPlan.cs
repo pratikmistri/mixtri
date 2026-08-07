@@ -234,16 +234,17 @@ public static class ExportAudioPlan
             ? BuildFromSegments(project, timeline!, videoSegments)
             : BuildLegacy(project, mapper);
 
-        // Appended LAST and unconditionally: inserted tracks are anchored to the OUTPUT
-        // timeline the user positioned them on, so unlike everything above they are
-        // identical in both the segment and legacy paths and never depend on which one ran.
-        placements.AddRange(BuildInsertedTracks(project));
+        // Appended LAST and independently of which branch ran above: inserted tracks are
+        // anchored to the OUTPUT timeline the user positioned them on, so unlike everything
+        // above they need no segment, speed or transition arithmetic at all.
+        if (timeline is not null)
+            placements.AddRange(BuildInsertedTracks(timeline));
 
         return placements;
     }
 
     /// <summary>
-    /// Placements for the project's inserted <see cref="AudioTrack"/>s (voice-over, music).
+    /// Placements for the timeline's inserted <see cref="AudioTrack"/>s (voice-over, music).
     /// </summary>
     /// <remarks>
     /// These are the one kind of audio that is NOT derived from a segment: an inserted
@@ -254,12 +255,12 @@ public static class ExportAudioPlan
     /// segment. Muted, silenced and zero-length tracks are dropped here rather than muxed at
     /// volume 0, so a disabled track costs nothing in the export.
     /// </remarks>
-    private static List<AudioPlacement> BuildInsertedTracks(Project project)
+    private static List<AudioPlacement> BuildInsertedTracks(TimelineModel timeline)
     {
         var placements = new List<AudioPlacement>();
-        if (project.AudioTracks is not { Count: > 0 }) return placements;
+        if (timeline.AudioTracks is not { Count: > 0 }) return placements;
 
-        foreach (var track in project.AudioTracks)
+        foreach (var track in timeline.AudioTracks)
         {
             if (track is null || !track.IsAudible) continue;
 

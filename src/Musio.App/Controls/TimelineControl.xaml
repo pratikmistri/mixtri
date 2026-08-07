@@ -33,8 +33,10 @@
             <!-- System audio track -->
             <RowDefinition x:Name="MicRow" Height="40" />
             <!-- Mic audio track -->
-            <RowDefinition x:Name="InsertedAudioRow" Height="0" />
-            <!-- Inserted voice-over / music tracks -->
+            <RowDefinition x:Name="VoiceOverRow" Height="0" />
+            <!-- Inserted voice-over track -->
+            <RowDefinition x:Name="MusicRow" Height="0" />
+            <!-- Inserted music track -->
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
@@ -81,11 +83,18 @@
             </StackPanel>
         </Border>
 
-        <Border x:Name="InsertedAudioTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
+        <Border x:Name="VoiceOverTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                <FontIcon Glyph="&#xE720;" FontSize="12"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Text="Voice" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+        <Border x:Name="MusicTrackLabel" Grid.Row="9" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <FontIcon Glyph="&#xE8D6;" FontSize="12"
                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <TextBlock Text="Added" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                <TextBlock Text="Music" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
 
@@ -162,14 +171,28 @@
             PointerPressed="Track_PointerPressed" />
 
         <canvas:CanvasControl
-            x:Name="InsertedAudioTrackCanvas"
+            x:Name="VoiceOverTrackCanvas"
             Grid.Row="8"
             Grid.Column="1"
             Visibility="Collapsed"
-            Draw="InsertedAudioTrackCanvas_Draw"
-            PointerPressed="Track_PointerPressed"
-            RightTapped="InsertedAudioTrack_RightTapped"
-            AutomationProperties.Name="Inserted audio track" />
+            Draw="VoiceOverTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Voice over track" />
+
+        <canvas:CanvasControl
+            x:Name="MusicTrackCanvas"
+            Grid.Row="9"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="MusicTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Music track" />
 
         <!-- Playhead overlay line — the only visual moved on a playback tick / scrub
              (see UpdatePlayheadVisual). Purely decorative: not hit-testable, and kept out
@@ -177,7 +200,7 @@
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="9"
+            Grid.RowSpan="10"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

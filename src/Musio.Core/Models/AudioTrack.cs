@@ -1,8 +1,8 @@
 namespace Musio.Core.Models;
 
 /// <summary>
-/// What an <see cref="AudioTrack"/> was inserted as. Purely descriptive — it drives the
-/// track's default volume, its label and its colour, never how the audio is decoded or
+/// What an <see cref="AudioTrack"/> was inserted as. Drives which timeline lane it lives
+/// on, its default volume, its label and its colour — never how the audio is decoded or
 /// muxed (both kinds take exactly the same path through the exporter and the preview
 /// engine).
 /// </summary>
@@ -20,6 +20,13 @@ public enum AudioTrackKind
 /// </summary>
 /// <remarks>
 /// <para>
+/// Lives on <see cref="Timeline.TimelineModel.AudioTracks"/>, alongside
+/// <see cref="Timeline.CameraSegment"/> and <see cref="Timeline.TextOverlaySegment"/> — it is
+/// editable timeline content, so it belongs where the undo system
+/// (<see cref="Timeline.IEditOperation"/> acts on a <see cref="Timeline.TimelineModel"/>) can
+/// reach it.
+/// </para>
+/// <para>
 /// Deliberately NOT another entry in <see cref="Project.AudioFilePaths"/>. Those are the
 /// recording's own system/mic captures: every consumer assumes they start at the recording's
 /// frame 0 (offset only by the single project-wide
@@ -31,7 +38,10 @@ public enum AudioTrackKind
 /// <para>
 /// <b>Times are output-timeline times.</b> <see cref="StartTime"/> is measured on the
 /// exported/previewed timeline, not in any source recording's own clock, which is what makes
-/// this type independent of segment mapping.
+/// this type independent of segment mapping. Note this differs from
+/// <see cref="Timeline.CameraSegment"/>/<see cref="Timeline.TextOverlaySegment"/>, whose
+/// ranges are SOURCE-video times — those decorate the footage and must follow it, where this
+/// must not.
 /// </para>
 /// <para>
 /// <b>Why there are no fade fields.</b> Export muxes through
@@ -45,8 +55,12 @@ public enum AudioTrackKind
 /// </remarks>
 public class AudioTrack
 {
-    /// <summary>Stable identity, used by the editor to select and update a track.</summary>
-    public Guid Id { get; set; } = Guid.NewGuid();
+    /// <summary>
+    /// Stable identity. A string in the same format every other timeline object uses
+    /// (<c>Guid.NewGuid().ToString("N")</c>), so it drops straight into the control's
+    /// <c>string?</c> selection plumbing and the operations' id parameters.
+    /// </summary>
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
 
     /// <summary>Absolute path of the normalised WAV produced by <c>AudioImportService</c>.</summary>
     public string FilePath { get; set; } = string.Empty;
@@ -114,6 +128,34 @@ public class AudioTrack
 
     /// <summary>Where this track stops sounding on the OUTPUT timeline.</summary>
     public TimeSpan End => StartTime + EffectiveDuration;
+
+    /// <summary>
+    /// How much of the source remains after <see cref="TrimStart"/> — the ceiling the right
+    /// edge can be dragged to, and <see cref="TimeSpan.Zero"/> when the length is unknown.
+    /// </summary>
+    public TimeSpan AvailableAfterTrim
+    {
+        get
+        {
+            var trim = TrimStart < TimeSpan.Zero ? TimeSpan.Zero : TrimStart;
+            return SourceDuration > trim ? SourceDuration - trim : TimeSpan.Zero;
+        }
+    }
+
+    /// <summary>Deep copy, used by the undo operations to restore an exact prior state.</summary>
+    public AudioTrack Clone() => new()
+    {
+        Id = Id,
+        FilePath = FilePath,
+        Name = Name,
+        Kind = Kind,
+        StartTime = StartTime,
+        TrimStart = TrimStart,
+        SourceDuration = SourceDuration,
+        Duration = Duration,
+        Volume = Volume,
+        IsMuted = IsMuted,
+    };
 
     /// <summary>
     /// The gain to actually apply, with mute folded in and the stored value clamped to the

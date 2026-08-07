@@ -132,8 +132,8 @@ public sealed class InsertedAudioTrackTests
     public void InsertedTrack_IsPlacedAtItsOwnOutputTime()
     {
         var project = NewProject(PrimaryMic);
-        project.AudioTracks.Add(Track(startSec: 4, sourceDurationSec: 3));
         var model = ModelWith(Video(sourceStartSec: 0, sourceDurationSec: 10));
+        model.AudioTracks.Add(Track(startSec: 4, sourceDurationSec: 3));
 
         var plan = ExportAudioPlan.Build(project, model, null);
         var placement = plan.Single(p => p.SourcePath == VoicePath);
@@ -151,8 +151,8 @@ public sealed class InsertedAudioTrackTests
         // The whole point of the type: the user trimmed the recording to source 2s..5s, and
         // the voice-over they placed at output 1s must still be at output 1s.
         var project = NewProject(PrimaryMic);
-        project.AudioTracks.Add(Track(startSec: 1, sourceDurationSec: 2));
         var model = ModelWith(Video(sourceStartSec: 2, sourceDurationSec: 3));
+        model.AudioTracks.Add(Track(startSec: 1, sourceDurationSec: 2));
 
         var plan = ExportAudioPlan.Build(project, model, null);
         var placement = plan.Single(p => p.SourcePath == VoicePath);
@@ -165,13 +165,14 @@ public sealed class InsertedAudioTrackTests
     public void InsertedTrack_CarriesItsTrimAndVolume()
     {
         var project = NewProject();
+        var model = ModelWith(Video(0, 10));
         var music = Track(MusicPath, startSec: 2, sourceDurationSec: 30, kind: AudioTrackKind.Music);
         music.TrimStart = TimeSpan.FromSeconds(5);
         music.Duration = TimeSpan.FromSeconds(6);
         music.Volume = 0.25;
-        project.AudioTracks.Add(music);
+        model.AudioTracks.Add(music);
 
-        var plan = ExportAudioPlan.Build(project, ModelWith(Video(0, 10)), null);
+        var plan = ExportAudioPlan.Build(project, model, null);
         var placement = plan.Single(p => p.SourcePath == MusicPath);
 
         AssertSeconds(5, placement.TrimFromStart, "playback starts inside the file");
@@ -184,14 +185,15 @@ public sealed class InsertedAudioTrackTests
     public void MutedOrSilentTracks_AreNotPlanned()
     {
         var project = NewProject();
+        var model = ModelWith(Video(0, 10));
         var muted = Track(VoicePath);
         muted.IsMuted = true;
         var silent = Track(MusicPath, kind: AudioTrackKind.Music);
         silent.Volume = 0;
-        project.AudioTracks.Add(muted);
-        project.AudioTracks.Add(silent);
+        model.AudioTracks.Add(muted);
+        model.AudioTracks.Add(silent);
 
-        var plan = ExportAudioPlan.Build(project, ModelWith(Video(0, 10)), null);
+        var plan = ExportAudioPlan.Build(project, model, null);
 
         Assert.IsFalse(plan.Any(p => p.SourcePath == VoicePath), "a muted track must not be muxed");
         Assert.IsFalse(plan.Any(p => p.SourcePath == MusicPath), "nor a silenced one");
@@ -200,12 +202,13 @@ public sealed class InsertedAudioTrackTests
     [TestMethod]
     public void InsertedTracks_ArePlanned_OnLegacyTimelinesToo()
     {
-        // A project with no segments takes ExportAudioPlan's legacy path; an inserted track
-        // is identical in both, because it never depended on segments in the first place.
+        // A timeline with no video segments takes ExportAudioPlan's legacy path; an inserted
+        // track is identical there, because it never depended on segments in the first place.
         var project = NewProject(PrimaryMic);
-        project.AudioTracks.Add(Track(startSec: 3, sourceDurationSec: 2));
+        var model = new TimelineModel { PrimaryVideoFilePath = Primary };
+        model.AudioTracks.Add(Track(startSec: 3, sourceDurationSec: 2));
 
-        var plan = ExportAudioPlan.Build(project, timeline: null, mapper: null);
+        var plan = ExportAudioPlan.Build(project, model, null);
         var placement = plan.Single(p => p.SourcePath == VoicePath);
 
         AssertSeconds(3, placement.Delay);
@@ -229,12 +232,213 @@ public sealed class InsertedAudioTrackTests
     public void NegativeStartTime_IsPlacedAtTheStartOfTheOutput()
     {
         var project = NewProject();
-        project.AudioTracks.Add(Track(startSec: -5, sourceDurationSec: 4));
+        var model = ModelWith(Video(0, 10));
+        model.AudioTracks.Add(Track(startSec: -5, sourceDurationSec: 4));
 
-        var plan = ExportAudioPlan.Build(project, ModelWith(Video(0, 10)), null);
+        var plan = ExportAudioPlan.Build(project, model, null);
         var placement = plan.Single(p => p.SourcePath == VoicePath);
 
         AssertSeconds(0, placement.Delay, "BackgroundAudioTrack.Delay cannot be negative");
+    }
+
+    #endregion
+
+    #region Edit operations
+
+    private static (TimelineModel Model, AudioTrack Track) ModelWithTrack(
+        double startSec = 2, double sourceDurationSec = 10, double? durationSec = null)
+    {
+        var model = ModelWith(Video(0, 20));
+        var track = Track(startSec: startSec, sourceDurationSec: sourceDurationSec);
+        if (durationSec is { } d) track.Duration = TimeSpan.FromSeconds(d);
+        model.AudioTracks.Add(track);
+        return (model, track);
+    }
+
+    [TestMethod]
+    public void Move_ShiftsOnlyTheStart_AndUndoesExactly()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 6);
+        var op = new MoveAudioTrackOperation(track.Id, TimeSpan.FromSeconds(9));
+
+        op.Execute(model);
+        AssertSeconds(9, track.StartTime, "the block moves to where it was dropped");
+        AssertSeconds(0, track.TrimStart, "a move must not change which audio plays");
+        AssertSeconds(6, track.EffectiveDuration, "nor how much of it plays");
+
+        op.Undo(model);
+        AssertSeconds(2, track.StartTime, "undo restores the original position");
+    }
+
+    [TestMethod]
+    public void Move_ClampsToTheStartOfTheTimeline()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2);
+        new MoveAudioTrackOperation(track.Id, TimeSpan.FromSeconds(-5)).Execute(model);
+
+        AssertSeconds(0, track.StartTime, "a block cannot start before the output does");
+    }
+
+    [TestMethod]
+    public void TrimLeftEdge_AdvancesTheTrimByTheSameAmount_SoTheAudioDoesNotShift()
+    {
+        // The defining behaviour of a left trim: dragging the edge right must reveal LATER
+        // audio, leaving every surviving sample at the timeline instant it was already at.
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+
+        new TrimAudioTrackOperation(track.Id, fromStart: true, TimeSpan.FromSeconds(5)).Execute(model);
+
+        AssertSeconds(5, track.StartTime, "the block now starts at the dragged edge");
+        AssertSeconds(3, track.TrimStart, "and skips exactly the audio that was cut away");
+        AssertSeconds(7, track.EffectiveDuration, "the tail is untouched");
+        AssertSeconds(12, track.End, "so the right edge has not moved");
+    }
+
+    [TestMethod]
+    public void TrimLeftEdge_CannotUncoverAudioThatWasNeverThere()
+    {
+        var (model, track) = ModelWithTrack(startSec: 4, sourceDurationSec: 10);
+        track.TrimStart = TimeSpan.FromSeconds(1);
+
+        // Dragging left can only give back the 1s already trimmed off; there is no earlier
+        // audio in the file to reveal, so the edge stops at output 3s.
+        new TrimAudioTrackOperation(track.Id, fromStart: true, TimeSpan.FromSeconds(0)).Execute(model);
+
+        AssertSeconds(3, track.StartTime, "the edge stops where the file itself starts");
+        AssertSeconds(0, track.TrimStart, "with nothing trimmed away any more");
+    }
+
+    [TestMethod]
+    public void TrimRightEdge_ShortensTheDuration_AndCannotExceedTheFile()
+    {
+        var (model, track) = ModelWithTrack(startSec: 0, sourceDurationSec: 8);
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(3)).Execute(model);
+        AssertSeconds(3, track.EffectiveDuration, "the right edge sets the duration");
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(50)).Execute(model);
+        AssertSeconds(8, track.EffectiveDuration, "there is no more file to extend into");
+    }
+
+    [TestMethod]
+    public void Trim_NeverProducesABlockTooSmallToGrabAgain()
+    {
+        var (model, track) = ModelWithTrack(startSec: 0, sourceDurationSec: 8);
+
+        new TrimAudioTrackOperation(track.Id, fromStart: false, TimeSpan.FromSeconds(-10)).Execute(model);
+        Assert.IsTrue(track.EffectiveDuration >= AudioTrackEditing.MinDuration,
+            "a block trimmed to nothing could never be grabbed to undo the trim");
+    }
+
+    [TestMethod]
+    public void Trim_UndoRestoresStartTrimAndDurationTogether()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+        var op = new TrimAudioTrackOperation(track.Id, fromStart: true, TimeSpan.FromSeconds(6));
+
+        op.Execute(model);
+        op.Undo(model);
+
+        AssertSeconds(2, track.StartTime);
+        AssertSeconds(0, track.TrimStart, "undoing a left trim must restore the trim, not just the start");
+        AssertSeconds(10, track.EffectiveDuration);
+    }
+
+    [TestMethod]
+    public void Split_ProducesTwoHalvesThatTogetherPlayTheOriginalAudio()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+        var op = new SplitAudioTrackOperation(track.Id, TimeSpan.FromSeconds(6));
+
+        op.Execute(model);
+
+        Assert.AreEqual(2, model.AudioTracks.Count, "a split produces exactly two blocks");
+        var left = model.AudioTracks.Single(t => t.Id == track.Id);
+        var right = model.AudioTracks.Single(t => t.Id == op.CreatedId);
+
+        AssertSeconds(2, left.StartTime);
+        AssertSeconds(4, left.EffectiveDuration, "the left half ends at the split point");
+        AssertSeconds(6, right.StartTime, "and the right half starts there");
+        AssertSeconds(4, right.TrimStart, "skipping exactly the audio the left half played");
+        AssertSeconds(6, right.EffectiveDuration, "the two halves together are the original");
+        Assert.AreEqual(left.FilePath, right.FilePath, "both halves read the same file");
+        Assert.AreEqual(left.Kind, right.Kind, "and stay on the same lane");
+    }
+
+    [TestMethod]
+    public void Split_IsRejectedOutsideTheBlock_RatherThanCuttingSomewhereElse()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+
+        Assert.IsFalse(SplitAudioTrackOperation.CanSplit(track, TimeSpan.FromSeconds(20)));
+        Assert.IsFalse(SplitAudioTrackOperation.CanSplit(track, TimeSpan.FromSeconds(0)));
+        Assert.IsFalse(SplitAudioTrackOperation.CanSplit(track, track.StartTime),
+            "splitting exactly at the edge would leave a zero-length half");
+
+        var op = new SplitAudioTrackOperation(track.Id, TimeSpan.FromSeconds(20));
+        op.Execute(model);
+
+        Assert.AreEqual(1, model.AudioTracks.Count, "an out-of-range split must do nothing");
+        Assert.IsNull(op.CreatedId);
+    }
+
+    [TestMethod]
+    public void Split_UndoRestoresTheSingleOriginalBlock()
+    {
+        var (model, track) = ModelWithTrack(startSec: 2, sourceDurationSec: 10);
+        var op = new SplitAudioTrackOperation(track.Id, TimeSpan.FromSeconds(6));
+
+        op.Execute(model);
+        op.Undo(model);
+
+        var restored = model.AudioTracks.Single();
+        Assert.AreEqual(track.Id, restored.Id);
+        AssertSeconds(2, restored.StartTime);
+        AssertSeconds(0, restored.TrimStart);
+        AssertSeconds(10, restored.EffectiveDuration, "the original length comes back");
+    }
+
+    [TestMethod]
+    public void Remove_TakesTheBlockOut_AndUndoBringsItBackIntact()
+    {
+        var (model, track) = ModelWithTrack(startSec: 3, sourceDurationSec: 5);
+        track.Volume = 0.6;
+        var op = new RemoveAudioTrackOperation(track.Id);
+
+        op.Execute(model);
+        Assert.AreEqual(0, model.AudioTracks.Count);
+
+        op.Undo(model);
+        var restored = model.AudioTracks.Single();
+        Assert.AreEqual(track.Id, restored.Id);
+        AssertSeconds(3, restored.StartTime);
+        Assert.AreEqual(0.6, restored.Volume, "undo must restore the whole block, not a fresh one");
+    }
+
+    [TestMethod]
+    public void UpdateProperties_TogglesMuteAndVolume_Reversibly()
+    {
+        var (model, track) = ModelWithTrack();
+        var op = new UpdateAudioTrackPropertiesOperation(track.Id, isMuted: true, volume: 0.2);
+
+        op.Execute(model);
+        Assert.IsTrue(track.IsMuted);
+        Assert.AreEqual(0.2, track.Volume);
+
+        op.Undo(model);
+        Assert.IsFalse(track.IsMuted);
+        Assert.AreEqual(AudioTrack.DefaultVolumeFor(AudioTrackKind.VoiceOver), track.Volume);
+    }
+
+    [TestMethod]
+    public void Add_InsertsInStartOrder_SoLanesDrawAndHitTestLeftToRight()
+    {
+        var model = ModelWith(Video(0, 20));
+        new AddAudioTrackOperation(Track(VoicePath, startSec: 8)).Execute(model);
+        var early = Track(MusicPath, startSec: 1);
+        new AddAudioTrackOperation(early).Execute(model);
+
+        Assert.AreEqual(early.Id, model.AudioTracks[0].Id, "tracks must stay ordered by start time");
     }
 
     #endregion

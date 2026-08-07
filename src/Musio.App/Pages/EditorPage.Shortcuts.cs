@@ -53,6 +53,15 @@ public sealed partial class EditorPage
     {
         if (IsFocusOnInteractiveControl()) return;
 
+        // A selected inserted audio block claims the split, so the same key cuts whichever
+        // track the user is actually working on rather than always the primary video.
+        if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
+        {
+            SplitInsertedAudioTrack(audioTrackId);
+            args.Handled = true;
+            return;
+        }
+
         ViewModel.SplitAtPlayheadCommand.Execute(null);
         args.Handled = true;
     }
@@ -60,6 +69,14 @@ public sealed partial class EditorPage
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (IsFocusOnInteractiveControl()) return;
+
+        // If an inserted voice-over/music block is selected, remove it.
+        if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
+        {
+            DeleteInsertedAudioTrack(audioTrackId);
+            args.Handled = true;
+            return;
+        }
 
         // If a camera segment is selected, remove it.
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
@@ -565,17 +582,30 @@ public sealed partial class EditorPage
         {
             var result = await AudioImportService.ImportAsync(file.Path, null, progress, cts.Token);
 
-            if (ProjectService.Instance.ImportAudio(result, kind, startTime) is null)
+            // Executed through the undo manager, like every other timeline edit: an inserted
+            // track lives on TimelineModel.AudioTracks precisely so Ctrl+Z can take it back.
+            var name = Path.GetFileNameWithoutExtension(result.SourceFileName);
+            var operation = new AddAudioTrackOperation(new AudioTrack
             {
-                errorMessage = "The project was closed while the audio was importing.";
-            }
-            else
+                FilePath = result.AudioFilePath,
+                Name = string.IsNullOrWhiteSpace(name) ? (isMusic ? "Music" : "Voice over") : name,
+                Kind = kind,
+                StartTime = startTime < TimeSpan.Zero ? TimeSpan.Zero : startTime,
+                TrimStart = TimeSpan.Zero,
+                SourceDuration = result.Duration,
+                Duration = null,
+                Volume = AudioTrack.DefaultVolumeFor(kind),
+            });
+
+            ViewModel.UndoRedoManager.Execute(operation);
+
+            // The import can run for many seconds, during which the page may have been
+            // unloaded — the model edit above still stands (it is the shared timeline), but
+            // there may no longer be a control to select in or a preview to rebuild.
+            if (Timeline is not null)
             {
-                // ProjectChanged does not rebuild the preview's audio (it is not a model
-                // reload), so the new track has to be published to the player explicitly or
-                // it stays silent until the editor is reopened.
-                ReloadInsertedAudioPlayer();
-                Timeline?.Refresh();
+                Timeline.SelectedInsertedAudioTrackId = operation.CreatedId;
+                RefreshInsertedAudio();
             }
         }
         catch (OperationCanceledException)

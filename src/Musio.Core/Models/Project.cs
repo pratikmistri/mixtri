@@ -52,17 +52,6 @@ public class Project
     public List<RecordingSource> Sources { get; set; } = [];
 
     /// <summary>
-    /// Externally inserted audio (voice-overs, music beds), each anchored to its own
-    /// position on the OUTPUT timeline.
-    /// </summary>
-    /// <remarks>
-    /// Kept separate from <see cref="AudioFilePaths"/> on purpose — see
-    /// <see cref="AudioTrack"/>'s remarks. These are never re-cut when the timeline is
-    /// edited, where recorded audio always follows its segments.
-    /// </remarks>
-    public List<AudioTrack> AudioTracks { get; set; } = [];
-
-    /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.
     /// Positive means mouse started before video. Subtract from mouse timestamps
     /// to align with video frames.

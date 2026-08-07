@@ -36,7 +36,7 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge }
     private DragMode _dragMode = DragMode.None;
 
     // ── Primary-track (video / text slide) segment drag state ──
@@ -285,7 +285,8 @@ public sealed partial class TimelineControl : UserControl
         yield return TextTrackCanvas;
         yield return AudioTrackCanvas;
         yield return MicTrackCanvas;
-        yield return InsertedAudioTrackCanvas;
+        yield return VoiceOverTrackCanvas;
+        yield return MusicTrackCanvas;
     }
 
     private CanvasDevice? _lastRecoveredDevice;
@@ -464,7 +465,8 @@ public sealed partial class TimelineControl : UserControl
         TextTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
-        InsertedAudioTrackCanvas?.Invalidate();
+        VoiceOverTrackCanvas?.Invalidate();
+        MusicTrackCanvas?.Invalidate();
         // Durations / zoom / scroll may have changed with the tracks, which moves the
         // playhead's pixel position even when the time itself is unchanged.
         UpdatePlayheadVisual();
@@ -479,7 +481,8 @@ public sealed partial class TimelineControl : UserControl
     private const double CameraRowHeight = 44;
     private const double AudioRowHeight = 40;
     private const double MicRowHeight = 40;
-    private const double InsertedAudioRowHeight = 40;
+    private const double VoiceOverRowHeight = 40;
+    private const double MusicRowHeight = 40;
 
     /// <summary>
     /// Collapses the tracks that visualise recorded media the current project does not
@@ -521,13 +524,17 @@ public sealed partial class TimelineControl : UserControl
         ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
         ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
 
-        // Unlike the tracks above, this one visualises what the user INSERTED rather than
-        // what was recorded, so it is keyed off the lane items the host publishes rather
-        // than off the model — and it starts collapsed, since a project with no inserted
-        // audio must not pay a row for it.
+        // Unlike the tracks above, these visualise what the user INSERTED rather than what
+        // was recorded, so they are keyed off the lane items the host publishes. Each kind
+        // gets its own lane so a voice-over and a music bed that overlap in time are still
+        // independently grabbable — and each starts collapsed, since a project with no
+        // audio of that kind must not pay a row for it.
         ApplyTrackVisibility(
-            InsertedAudioRow, InsertedAudioTrackLabel, InsertedAudioTrackCanvas,
-            _insertedAudioTracks.Count > 0, InsertedAudioRowHeight);
+            VoiceOverRow, VoiceOverTrackLabel, VoiceOverTrackCanvas,
+            _insertedAudioTracks.Any(t => !t.IsMusic), VoiceOverRowHeight);
+        ApplyTrackVisibility(
+            MusicRow, MusicTrackLabel, MusicTrackCanvas,
+            _insertedAudioTracks.Any(t => t.IsMusic), MusicRowHeight);
     }
 
     /// <summary>
@@ -1641,7 +1648,7 @@ public sealed partial class TimelineControl : UserControl
     // subset of Clear*Selection() calls.
 
     /// <summary>The distinct selection surfaces this control exposes. See <see cref="ClearOtherSelections"/>.</summary>
-    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition }
+    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio }
 
     /// <summary>
     /// Re-entrancy guard for <see cref="ClearOtherSelections"/>. EditorPage's
@@ -1671,6 +1678,7 @@ public sealed partial class TimelineControl : UserControl
             if (keep != SelectionKind.Camera) ClearCameraSelection();
             if (keep != SelectionKind.TextOverlay) ClearTextOverlaySelection();
             if (keep != SelectionKind.Transition) ClearTransitionSelection();
+            if (keep != SelectionKind.InsertedAudio) ClearInsertedAudioSelection();
         }
         finally
         {
@@ -2492,6 +2500,12 @@ public sealed partial class TimelineControl : UserControl
             Model?.IsMicAudioMuted == true);
     }
 
+    // ─────────────────────── Inserted audio lanes (voice / music) ───────────────────────
+    // Two lanes, one per AudioTrackKind, so a voice-over and a music bed that overlap in
+    // time are still independently grabbable. Unlike every other track here, these are
+    // positioned in OUTPUT time (TimeToX/XToTime directly, never SourceTimeToX) — an
+    // inserted track is pinned to the finished timeline, not to the footage.
+
     /// <summary>
     /// One inserted voice-over/music track as the timeline draws it: an output-timeline
     /// block, optionally with a waveform the host generated for it.
@@ -2500,11 +2514,11 @@ public sealed partial class TimelineControl : UserControl
     /// <param name="Name">Label drawn on the block.</param>
     /// <param name="Start">Output-timeline start.</param>
     /// <param name="Duration">How long it sounds for.</param>
-    /// <param name="IsMusic">Drives the block colour, so the two kinds are scannable apart.</param>
+    /// <param name="IsMusic">Which lane it belongs to.</param>
     /// <param name="IsMuted">Drawn dimmed, matching the recorded tracks' muted state.</param>
     /// <param name="Waveform">Peaks spanning <paramref name="Duration"/>, or null while they build.</param>
     public readonly record struct InsertedAudioLaneItem(
-        Guid Id,
+        string Id,
         string Name,
         TimeSpan Start,
         TimeSpan Duration,
@@ -2514,17 +2528,26 @@ public sealed partial class TimelineControl : UserControl
 
     private IReadOnlyList<InsertedAudioLaneItem> _insertedAudioTracks = [];
 
-    /// <summary>Raised when the user right-clicks an inserted audio block, with its id.</summary>
-    public event EventHandler<Guid>? InsertedAudioTrackContextRequested;
+    /// <summary>Raised when an inserted audio block is selected, or null when deselected.</summary>
+    public event EventHandler<string?>? InsertedAudioTrackSelected;
+
+    /// <summary>Raised when a block is dragged to a new OUTPUT-timeline start.</summary>
+    public event EventHandler<(string Id, TimeSpan NewStart)>? InsertedAudioTrackMoved;
+
+    /// <summary>Raised when an edge is dragged. <c>IsStartEdge</c> distinguishes left from right.</summary>
+    public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? InsertedAudioTrackResized;
+
+    /// <summary>Raised on right-click, so the host can offer split/mute/remove.</summary>
+    public event EventHandler<string>? InsertedAudioTrackContextRequested;
 
     /// <summary>
     /// The inserted voice-over/music blocks to draw, published by the editor.
     /// </summary>
     /// <remarks>
-    /// A control-level property rather than something on <c>TimelineModel</c> on purpose:
-    /// these live on the <c>Project</c> (they are media references, not timeline structure),
-    /// and the model is serialised into the <c>.musio</c> manifest, where a UI lane
-    /// projection has no business being.
+    /// A control-level projection rather than reading <c>TimelineModel.AudioTracks</c>
+    /// directly, because it also carries the decoded waveform peaks — which are a UI
+    /// artefact the host generates in the background, not model state that belongs in the
+    /// serialised <c>.musio</c> manifest.
     /// </remarks>
     public IReadOnlyList<InsertedAudioLaneItem> InsertedAudioTracks
     {
@@ -2532,34 +2555,244 @@ public sealed partial class TimelineControl : UserControl
         set
         {
             _insertedAudioTracks = value ?? [];
+
+            // A block the host just removed (or undid) must not stay selected, or a later
+            // Delete would act on an id that no longer exists.
+            if (_selectedInsertedAudioTrackId is not null
+                && !_insertedAudioTracks.Any(t => t.Id == _selectedInsertedAudioTrackId))
+            {
+                _selectedInsertedAudioTrackId = null;
+            }
+
             UpdateTrackVisibility();
-            InsertedAudioTrackCanvas?.Invalidate();
+            VoiceOverTrackCanvas?.Invalidate();
+            MusicTrackCanvas?.Invalidate();
         }
     }
 
+    private string? _selectedInsertedAudioTrackId;
+
+    /// <summary>Currently selected inserted audio block, or null.</summary>
+    public string? SelectedInsertedAudioTrackId
+    {
+        get => _selectedInsertedAudioTrackId;
+        set
+        {
+            if (_selectedInsertedAudioTrackId == value) return;
+            _selectedInsertedAudioTrackId = value;
+            VoiceOverTrackCanvas?.Invalidate();
+            MusicTrackCanvas?.Invalidate();
+        }
+    }
+
+    /// <summary>Clears the inserted-audio selection, firing the null event when there was one.</summary>
+    public void ClearInsertedAudioSelection()
+    {
+        if (_selectedInsertedAudioTrackId is null) return;
+        _selectedInsertedAudioTrackId = null;
+        InsertedAudioTrackSelected?.Invoke(this, null);
+        VoiceOverTrackCanvas?.Invalidate();
+        MusicTrackCanvas?.Invalidate();
+    }
+
+    // ── Drag state (shared by both lanes: only one block can be dragged at a time) ──
+    private double _audioTrackDragStartX = double.NaN;
+    private double _audioTrackDragCurrentX = double.NaN;
+    private TimeSpan _audioTrackDragOriginalStart;
+    private TimeSpan _audioTrackDragOriginalEnd;
+
+    /// <summary>Vertical inset of a block within its lane.</summary>
+    private const float InsertedAudioVerticalPadding = 4f;
+
+    private IEnumerable<InsertedAudioLaneItem> ItemsForLane(bool music)
+        => _insertedAudioTracks.Where(t => t.IsMusic == music);
+
+    private bool LaneIsMusic(CanvasControl canvas) => ReferenceEquals(canvas, MusicTrackCanvas);
+
     /// <summary>
-    /// Right-clicking an inserted block asks the host for its context menu (mute, remove).
+    /// Left edge X of a block, showing the in-flight drag position while one is being
+    /// dragged so the block tracks the pointer before the edit is committed on release.
     /// </summary>
-    private void InsertedAudioTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    private double GetInsertedAudioStartX(InsertedAudioLaneItem item)
+    {
+        if (item.Id == _selectedInsertedAudioTrackId && !double.IsNaN(_audioTrackDragCurrentX))
+        {
+            if (_dragMode == DragMode.InsertedAudioBody)
+                return TimeToX(_audioTrackDragOriginalStart) + (_audioTrackDragCurrentX - _audioTrackDragStartX);
+            if (_dragMode == DragMode.InsertedAudioLeftEdge)
+                return _audioTrackDragCurrentX;
+        }
+        return TimeToX(item.Start);
+    }
+
+    private double GetInsertedAudioEndX(InsertedAudioLaneItem item)
+    {
+        if (item.Id == _selectedInsertedAudioTrackId && !double.IsNaN(_audioTrackDragCurrentX))
+        {
+            if (_dragMode == DragMode.InsertedAudioBody)
+                return TimeToX(_audioTrackDragOriginalEnd) + (_audioTrackDragCurrentX - _audioTrackDragStartX);
+            if (_dragMode == DragMode.InsertedAudioRightEdge)
+                return _audioTrackDragCurrentX;
+        }
+        return TimeToX(item.Start + item.Duration);
+    }
+
+    private (string? Id, SegmentHitTarget Target) HitTestInsertedAudio(
+        CanvasControl canvas, double posX, double posY)
+    {
+        float h = (float)canvas.ActualHeight;
+        float blockY = InsertedAudioVerticalPadding;
+        float blockH = h - InsertedAudioVerticalPadding * 2;
+        if (posY < blockY || posY > blockY + blockH) return (null, SegmentHitTarget.None);
+
+        // Reverse order so the topmost (last-drawn) block wins where two overlap.
+        var items = ItemsForLane(LaneIsMusic(canvas)).ToList();
+        for (int i = items.Count - 1; i >= 0; i--)
+        {
+            var item = items[i];
+            double x1 = TimeToX(item.Start);
+            double x2 = TimeToX(item.Start + item.Duration);
+            if (posX < x1 || posX > x2) continue;
+
+            if (posX - x1 <= SegmentEdgeHitWidth) return (item.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= SegmentEdgeHitWidth) return (item.Id, SegmentHitTarget.RightEdge);
+            return (item.Id, SegmentHitTarget.Body);
+        }
+        return (null, SegmentHitTarget.None);
+    }
+
+    private void AudioTrackLane_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+        var (hitId, target) = HitTestInsertedAudio(canvas, pos.X, pos.Y);
+
+        if (hitId is null)
+        {
+            // Empty lane space behaves like every other read-only track: move the playhead.
+            ClearOtherSelections(SelectionKind.None);
+            PlayheadPosition = XToTime(pos.X);
+            return;
+        }
+
+        ClearOtherSelections(SelectionKind.InsertedAudio);
+        SelectedInsertedAudioTrackId = hitId;
+        InsertedAudioTrackSelected?.Invoke(this, hitId);
+
+        var item = _insertedAudioTracks.FirstOrDefault(t => t.Id == hitId);
+        if (item.Id != hitId) return;
+
+        _audioTrackDragStartX = pos.X;
+        _audioTrackDragCurrentX = pos.X;
+        _audioTrackDragOriginalStart = item.Start;
+        _audioTrackDragOriginalEnd = item.Start + item.Duration;
+
+        _dragMode = target switch
+        {
+            SegmentHitTarget.LeftEdge => DragMode.InsertedAudioLeftEdge,
+            SegmentHitTarget.RightEdge => DragMode.InsertedAudioRightEdge,
+            _ => DragMode.InsertedAudioBody,
+        };
+        SetCursor(target is SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge
+            ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeAll);
+        canvas.CapturePointer(e.Pointer);
+    }
+
+    private void AudioTrackLane_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+
+        switch (_dragMode)
+        {
+            case DragMode.InsertedAudioBody:
+                _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeAll);
+                InvalidateAll();
+                break;
+            case DragMode.InsertedAudioLeftEdge:
+            case DragMode.InsertedAudioRightEdge:
+                _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                InvalidateAll();
+                break;
+            case DragMode.None:
+                var (_, target) = HitTestInsertedAudio(canvas, pos.X, pos.Y);
+                SetCursor(target switch
+                {
+                    SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge => InputSystemCursorShape.SizeWestEast,
+                    SegmentHitTarget.Body => InputSystemCursorShape.Hand,
+                    _ => InputSystemCursorShape.Arrow,
+                });
+                break;
+        }
+    }
+
+    private void AudioTrackLane_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        switch (_dragMode)
+        {
+            case DragMode.InsertedAudioBody when _selectedInsertedAudioTrackId is not null:
+            {
+                double deltaX = _audioTrackDragCurrentX - _audioTrackDragStartX;
+                if (Math.Abs(deltaX) > 1)
+                {
+                    // Both endpoints go through XToTime so the delta is measured in the
+                    // same (zoom/scroll-dependent) mapping the block was drawn with.
+                    var grabbed = XToTime(_audioTrackDragStartX);
+                    var dropped = XToTime(_audioTrackDragStartX + deltaX);
+                    var newStart = _audioTrackDragOriginalStart + (dropped - grabbed);
+                    if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                    InsertedAudioTrackMoved?.Invoke(this, (_selectedInsertedAudioTrackId, newStart));
+                }
+                break;
+            }
+            case DragMode.InsertedAudioLeftEdge when _selectedInsertedAudioTrackId is not null:
+            {
+                var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge != _audioTrackDragOriginalStart)
+                    InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, true, newEdge));
+                break;
+            }
+            case DragMode.InsertedAudioRightEdge when _selectedInsertedAudioTrackId is not null:
+            {
+                var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
+                if (newEdge != _audioTrackDragOriginalEnd)
+                    InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, false, newEdge));
+                break;
+            }
+        }
+
+        _audioTrackDragStartX = double.NaN;
+        _audioTrackDragCurrentX = double.NaN;
+        _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
+        canvas.ReleasePointerCapture(e.Pointer);
+        InvalidateAll();
+    }
+
+    private void AudioTrackLane_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetPosition(canvas);
+        var (hitId, _) = HitTestInsertedAudio(canvas, pos.X, pos.Y);
+        if (hitId is null) return;
 
-        // Reverse order so the topmost (last-drawn) block wins where two overlap.
-        for (int i = _insertedAudioTracks.Count - 1; i >= 0; i--)
-        {
-            var item = _insertedAudioTracks[i];
-            double x1 = TimeToX(item.Start);
-            double x2 = TimeToX(item.Start + item.Duration);
-            if (pos.X >= x1 && pos.X <= Math.Max(x1 + 2, x2))
-            {
-                InsertedAudioTrackContextRequested?.Invoke(this, item.Id);
-                return;
-            }
-        }
+        ClearOtherSelections(SelectionKind.InsertedAudio);
+        SelectedInsertedAudioTrackId = hitId;
+        InsertedAudioTrackSelected?.Invoke(this, hitId);
+        InsertedAudioTrackContextRequested?.Invoke(this, hitId);
     }
 
-    private void InsertedAudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    private void VoiceOverTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+        => DrawInsertedAudioLane(sender, args, music: false);
+
+    private void MusicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+        => DrawInsertedAudioLane(sender, args, music: true);
+
+    private void DrawInsertedAudioLane(CanvasControl sender, CanvasDrawEventArgs args, bool music)
     {
         var ds = args.DrawingSession;
         var model = Model;
@@ -2568,33 +2801,39 @@ public sealed partial class TimelineControl : UserControl
 
         ds.Clear(AudioTrackBackground);
         if (model is null || model.DisplayDuration.TotalSeconds <= 0) return;
-        if (_insertedAudioTracks.Count == 0) return;
 
-        // Violet, deliberately unlike the recorded audio (blue) and mic (teal) tracks: an
-        // inserted track is not re-cut with the footage, so it must not read as one of them.
-        var voiceFill = Color.FromArgb(210, 138, 108, 224);
-        var musicFill = Color.FromArgb(210, 96, 138, 214);
+        // Violet/blue, deliberately unlike the recorded audio and mic tracks: an inserted
+        // track is not re-cut with the footage, so it must not read as one of them.
+        var fill = music
+            ? Color.FromArgb(210, 96, 138, 214)
+            : Color.FromArgb(210, 138, 108, 224);
+        var fillSelected = music
+            ? Color.FromArgb(245, 138, 180, 250)
+            : Color.FromArgb(245, 180, 156, 250);
         var mutedFill = Color.FromArgb(110, 130, 130, 140);
         var borderColor = Color.FromArgb(255, 226, 216, 255);
+        var borderSelected = Color.FromArgb(255, 255, 255, 255);
+        var handleColor = Color.FromArgb(255, 255, 255, 255);
         var textColor = Color.FromArgb(255, 255, 255, 255);
 
-        const float VerticalPadding = 4f;
-        float blockY = VerticalPadding;
-        float blockH = h - VerticalPadding * 2;
+        float blockY = InsertedAudioVerticalPadding;
+        float blockH = h - InsertedAudioVerticalPadding * 2;
         float centerY = h / 2f;
 
-        foreach (var item in _insertedAudioTracks)
+        foreach (var item in ItemsForLane(music))
         {
             // Positioned in OUTPUT time directly — no segment mapping, which is exactly what
             // keeps an inserted track where the user put it when the footage is re-cut.
-            float x1 = (float)TimeToX(item.Start);
-            float x2 = (float)TimeToX(item.Start + item.Duration);
+            float x1 = (float)GetInsertedAudioStartX(item);
+            float x2 = (float)GetInsertedAudioEndX(item);
             if (x2 < 0 || x1 > w) continue;
 
+            bool isSelected = item.Id == _selectedInsertedAudioTrackId;
             float blockW = Math.Max(2, x2 - x1);
+
             using var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, blockY, blockW, blockH, 4, 4);
-            ds.FillGeometry(rect, item.IsMuted ? mutedFill : item.IsMusic ? musicFill : voiceFill);
-            ds.DrawGeometry(rect, borderColor, 1f);
+            ds.FillGeometry(rect, item.IsMuted ? mutedFill : isSelected ? fillSelected : fill);
+            ds.DrawGeometry(rect, isSelected ? borderSelected : borderColor, isSelected ? 1.5f : 1f);
 
             if (item.Waveform is { Length: > 1 } waveform && !item.IsMuted)
             {
@@ -2623,7 +2862,14 @@ public sealed partial class TimelineControl : UserControl
                     TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
                 };
                 string label = item.IsMuted ? item.Name + " (muted)" : item.Name;
-                ds.DrawText(label, new Rect(x1 + 5, blockY, blockW - 10, blockH), textColor, fmt);
+                ds.DrawText(label, new Rect(x1 + 6, blockY, blockW - 12, blockH), textColor, fmt);
+            }
+
+            if (isSelected)
+            {
+                float handleW = 3, handleH = blockH * 0.5f, handleY = blockY + (blockH - handleH) / 2;
+                ds.FillRoundedRectangle(x1 + 1, handleY, handleW, handleH, 1, 1, handleColor);
+                ds.FillRoundedRectangle(x2 - handleW - 1, handleY, handleW, handleH, 1, 1, handleColor);
             }
         }
     }
