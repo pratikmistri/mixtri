@@ -2516,6 +2516,10 @@ public sealed partial class TimelineControl : UserControl
     /// <param name="Start">Output-timeline start.</param>
     /// <param name="Duration">How long it sounds for.</param>
     /// <param name="TrimStart">How far into the SOURCE FILE this block starts playing.</param>
+    /// <param name="SourceDuration">
+    /// Full length of the source file, so a drag preview can stop exactly where the
+    /// operation will clamp it instead of showing an edit that will not survive release.
+    /// </param>
     /// <param name="IsMusic">Which lane it belongs to.</param>
     /// <param name="IsMuted">Drawn dimmed, matching the recorded tracks' muted state.</param>
     /// <param name="Waveform">
@@ -2531,10 +2535,19 @@ public sealed partial class TimelineControl : UserControl
         TimeSpan Start,
         TimeSpan Duration,
         TimeSpan TrimStart,
+        TimeSpan SourceDuration,
         bool IsMusic,
         bool IsMuted,
         float[]? Waveform,
-        double WaveformDurationSeconds);
+        double WaveformDurationSeconds)
+    {
+        /// <summary>Output-timeline instant at which this file's second 0 would sit.</summary>
+        public TimeSpan FileOriginTime => Start - TrimStart;
+
+        /// <summary>Output-timeline instant at which the file runs out, or null when unknown.</summary>
+        public TimeSpan? FileEndTime =>
+            SourceDuration > TimeSpan.Zero ? FileOriginTime + SourceDuration : null;
+    }
 
     private IReadOnlyList<InsertedAudioLaneItem> _insertedAudioTracks = [];
 
@@ -2662,14 +2675,25 @@ public sealed partial class TimelineControl : UserControl
     /// Left edge X of a block, showing the in-flight drag position while one is being
     /// dragged so the block tracks the pointer before the edit is committed on release.
     /// </summary>
+    /// <remarks>
+    /// An edge preview is clamped to the same bounds
+    /// <see cref="TrimAudioTrackOperation"/> will apply, so the block stops where the trim
+    /// really stops: dragging the left edge further left than the file's own start would
+    /// otherwise preview audio that does not exist and then snap back on release.
+    /// </remarks>
     private double GetInsertedAudioStartX(InsertedAudioLaneItem item)
     {
         if (item.Id == _selectedInsertedAudioTrackId && !double.IsNaN(_audioTrackDragCurrentX))
         {
             if (_dragMode == DragMode.InsertedAudioBody)
                 return TimeToX(_audioTrackDragOriginalStart) + (_audioTrackDragCurrentX - _audioTrackDragStartX);
+
             if (_dragMode == DragMode.InsertedAudioLeftEdge)
-                return _audioTrackDragCurrentX;
+            {
+                double min = TimeToX(item.FileOriginTime);
+                double max = TimeToX(item.Start + item.Duration - AudioTrackEditing.MinDuration);
+                return Math.Clamp(_audioTrackDragCurrentX, Math.Min(min, max), max);
+            }
         }
         return TimeToX(item.Start);
     }
@@ -2680,8 +2704,15 @@ public sealed partial class TimelineControl : UserControl
         {
             if (_dragMode == DragMode.InsertedAudioBody)
                 return TimeToX(_audioTrackDragOriginalEnd) + (_audioTrackDragCurrentX - _audioTrackDragStartX);
+
             if (_dragMode == DragMode.InsertedAudioRightEdge)
-                return _audioTrackDragCurrentX;
+            {
+                double min = TimeToX(item.Start + AudioTrackEditing.MinDuration);
+                double max = item.FileEndTime is { } fileEnd
+                    ? TimeToX(fileEnd)
+                    : double.MaxValue;
+                return Math.Clamp(_audioTrackDragCurrentX, min, Math.Max(min, max));
+            }
         }
         return TimeToX(item.Start + item.Duration);
     }
@@ -2870,6 +2901,11 @@ public sealed partial class TimelineControl : UserControl
         float blockH = h - InsertedAudioVerticalPadding * 2;
         float centerY = h / 2f;
 
+        // Timeline scale, resolved once: the waveform positions every peak by its own source
+        // time rather than by a fraction of the block, which is what keeps a trim preview a
+        // clip instead of a rescale.
+        double pixelsPerSecond = TimeToX(TimeSpan.FromSeconds(1)) - TimeToX(TimeSpan.Zero);
+
         foreach (var item in ItemsForLane(music))
         {
             // Positioned in OUTPUT time directly — no segment mapping, which is exactly what
@@ -2898,8 +2934,22 @@ public sealed partial class TimelineControl : UserControl
 
             if (item.Waveform is { Length: > 1 } waveform && !item.IsMuted)
             {
+                // Where the source file's second 0 sits on the output timeline. For an EDGE
+                // drag this is derived from the COMMITTED start, so the peaks stay physically
+                // stationary and the dragged edge sweeps over them (a left trim moves
+                // StartTime and TrimStart by the same delta, so the file's origin genuinely
+                // does not move). For a BODY drag the audio really is travelling, so the
+                // anchor rides the previewed block instead.
+                bool bodyDrag = item.Id == _selectedInsertedAudioTrackId
+                    && _dragMode == DragMode.InsertedAudioBody
+                    && !double.IsNaN(_audioTrackDragCurrentX);
+
+                double anchorLeftX = bodyDrag ? rawX1 : TimeToX(item.Start);
+                double fileOriginX = anchorLeftX - (item.TrimStart.TotalSeconds * pixelsPerSecond);
+
                 DrawInsertedAudioWaveform(
-                    ds, item, waveform, rawX1, rawX2, x1, x2, blockH, centerY, borderColor);
+                    ds, item, waveform, fileOriginX, pixelsPerSecond,
+                    x1, x2, blockH, centerY, borderColor);
             }
 
             if (blockW > 40)
@@ -2932,63 +2982,63 @@ public sealed partial class TimelineControl : UserControl
 
     /// <summary>
     /// Draws the portion of a track's whole-file waveform that its trim window actually
-    /// plays.
+    /// plays, with every peak pinned to its own position on the output timeline.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The waveform is a window onto the file, never a rescaling of it.</b> The first
-    /// version stretched the cached peak array across the block, so trimming appeared to
-    /// COMPRESS the whole track rather than cut a piece out of it — leaving no way to see
-    /// which part of the audio survived. Each peak is therefore positioned by its own source
-    /// time, exactly as <see cref="DrawSegmentWaveform"/> does for video segments.
+    /// <b>Peaks are positioned absolutely, never as a fraction of the block's width.</b> The
+    /// fraction form is correct at rest and wrong during a drag: while an edge is being
+    /// dragged the block's width is the PREVIEW width but the trim window is still the
+    /// committed one, so the old window gets rescaled into the changing width — the waveform
+    /// visibly slides and squashes instead of being clipped. Anchoring to
+    /// <paramref name="fileOriginX"/> (the x at which the source file's second 0 would sit)
+    /// makes the peaks physically stationary, so a trim edge simply sweeps over them and
+    /// reveals or hides audio, which is what a trim IS.
     /// </para>
     /// <para>
-    /// Positions are computed against the block's UNCLAMPED geometry
-    /// (<paramref name="rawX1"/>/<paramref name="rawX2"/>) and only then filtered to the
-    /// visible span. Mapping onto the clamped width instead would squeeze the whole waveform
-    /// into whatever part of the block is on screen — the same distortion at viewport scale.
+    /// The caller keeps <paramref name="fileOriginX"/> fixed for an edge drag (it derives it
+    /// from the committed start, since a left trim moves <c>StartTime</c> and
+    /// <c>TrimStart</c> by the same delta, leaving the file's origin exactly where it was) and
+    /// moves it with the block for a body drag, where the audio really does travel.
     /// </para>
     /// </remarks>
+    /// <param name="fileOriginX">Canvas x at which the source file's second 0 would sit.</param>
+    /// <param name="pixelsPerSecond">Timeline scale, so a peak's source time becomes an x.</param>
+    /// <param name="clipLeft">Left bound to draw within (the block's visible left edge).</param>
+    /// <param name="clipRight">Right bound to draw within (the block's visible right edge).</param>
     private static void DrawInsertedAudioWaveform(
         CanvasDrawingSession ds, InsertedAudioLaneItem item, float[] waveform,
-        double rawX1, double rawX2, float visibleX1, float visibleX2,
-        float blockH, float centerY, Color color)
+        double fileOriginX, double pixelsPerSecond,
+        float clipLeft, float clipRight, float blockH, float centerY, Color color)
     {
         double fileSeconds = item.WaveformDurationSeconds;
-        double windowStart = item.TrimStart.TotalSeconds;
-        double windowDuration = item.Duration.TotalSeconds;
-        if (fileSeconds <= 0 || windowDuration <= 0) return;
+        if (fileSeconds <= 0 || pixelsPerSecond <= 0 || clipRight <= clipLeft) return;
 
-        double fullWidth = rawX2 - rawX1;
-        if (fullWidth <= 0) return;
+        // Only the peaks that fall inside the drawn rectangle matter; deriving the range from
+        // the rectangle (rather than from the trim window) is what makes the preview correct,
+        // because the rectangle is already the previewed one.
+        double startSeconds = (clipLeft - fileOriginX) / pixelsPerSecond;
+        double endSeconds = (clipRight - fileOriginX) / pixelsPerSecond;
 
         var window = WaveformWindow.Resolve(
-            waveform.Length, fileSeconds, windowStart, windowDuration);
+            waveform.Length, fileSeconds, startSeconds, endSeconds - startSeconds);
         if (window.IsEmpty) return;
 
-        int count = Math.Max(1, window.LastIndex - window.FirstIndex);
-        float barWidth = Math.Max(1f, (float)(fullWidth / count));
+        float barWidth = Math.Max(1f, (float)(pixelsPerSecond * fileSeconds / waveform.Length));
         float maxBar = blockH * 0.42f;
 
         for (int i = window.FirstIndex; i <= window.LastIndex; i++)
         {
-            // Where this peak sits inside the trim window, 0..1. Out-of-range values are the
-            // peaks straddling the window's edges, which belong to audio the trim cut away.
-            double fraction = window.FractionFor(i);
-            if (double.IsNaN(fraction) || fraction < 0 || fraction > 1) continue;
+            float bx = (float)(fileOriginX + window.SecondsFor(i) * pixelsPerSecond);
 
-            float bx = (float)(rawX1 + fraction * fullWidth);
-            if (bx + barWidth < visibleX1 || bx > visibleX2) continue;
+            // Clipped to the block so the waveform never paints outside the edge that is
+            // currently cutting it — the visual definition of a trim.
+            float left = Math.Max(bx, clipLeft);
+            float right = Math.Min(bx + barWidth, clipRight);
+            if (right <= left) continue;
 
             float amplitude = Math.Clamp(waveform[i], 0f, 1f);
             float barHeight = amplitude * maxBar;
-
-            // Clip the bar to the visible block so a partially scrolled-out waveform does
-            // not paint over the neighbouring lane content.
-            float left = Math.Max(bx, visibleX1);
-            float right = Math.Min(bx + barWidth, visibleX2);
-            if (right <= left) continue;
-
             ds.FillRectangle(left, centerY - barHeight, right - left, barHeight * 2, color);
         }
     }

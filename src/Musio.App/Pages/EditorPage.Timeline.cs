@@ -1498,6 +1498,7 @@ public sealed partial class EditorPage
                 track.StartTime,
                 duration,
                 track.TrimStart,
+                track.SourceDuration,
                 track.Kind == AudioTrackKind.Music,
                 track.IsMuted,
                 cached.Peaks,

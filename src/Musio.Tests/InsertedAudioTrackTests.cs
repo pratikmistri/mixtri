@@ -619,5 +619,49 @@ public sealed class InsertedAudioTrackTests
         Assert.IsTrue(window.LastIndex >= window.FirstIndex && window.LastIndex < 100);
     }
 
+    [TestMethod]
+    public void WaveformWindow_PeakSourceTime_IsIndependentOfTheWindow()
+    {
+        // The drag-preview bug: while an edge is dragged the block's WIDTH changes but the
+        // committed trim window does not, so any width-relative positioning makes the
+        // waveform slide and squash instead of being clipped by the moving edge. Positioning
+        // by source time is width-free by construction — this pins that property.
+        var wide = Musio.Core.Audio.WaveformWindow.Resolve(1000, 100, 0, 100);
+        var narrow = Musio.Core.Audio.WaveformWindow.Resolve(1000, 100, 20, 5);
+
+        Assert.AreEqual(wide.SecondsFor(200), narrow.SecondsFor(200), 1e-9,
+            "the same peak must sit at the same source time no matter how the clip is trimmed");
+        Assert.AreEqual(20.0, narrow.SecondsFor(200), 1e-9);
+    }
+
+    [TestMethod]
+    public void TrimBounds_MatchWhatADragPreviewIsAllowedToShow()
+    {
+        // The timeline clamps a trim drag to [file origin, file end] so the previewed block
+        // stops exactly where the operation will. If these two ever disagree the block snaps
+        // on release, which reads as the edit being rejected.
+        var (model, track) = ModelWithTrack(startSec: 5, sourceDurationSec: 10);
+        track.TrimStart = TimeSpan.FromSeconds(2);
+        track.Duration = TimeSpan.FromSeconds(4);
+
+        // Preview's left bound: the output instant holding the file's second 0.
+        var fileOrigin = track.StartTime - track.TrimStart;
+        new TrimAudioTrackOperation(track.Id, fromStart: true, TimeSpan.FromSeconds(-100))
+            .Execute(model);
+        Assert.AreEqual(fileOrigin, track.StartTime,
+            "dragging the left edge past the file's start must stop at the file's start");
+
+        // Preview's right bound: file origin + the whole file.
+        var (model2, track2) = ModelWithTrack(startSec: 5, sourceDurationSec: 10);
+        track2.TrimStart = TimeSpan.FromSeconds(2);
+        track2.Duration = TimeSpan.FromSeconds(4);
+        var fileEnd = track2.StartTime - track2.TrimStart + track2.SourceDuration;
+
+        new TrimAudioTrackOperation(track2.Id, fromStart: false, TimeSpan.FromSeconds(100))
+            .Execute(model2);
+        Assert.AreEqual(fileEnd, track2.End,
+            "dragging the right edge past the end of the file must stop at the end of the file");
+    }
+
     #endregion
 }

@@ -63,15 +63,30 @@ public readonly record struct WaveformWindow(
     }
 
     /// <summary>
+    /// Where peak <paramref name="index"/> sits in the source file, in seconds.
+    /// </summary>
+    /// <remarks>
+    /// Consumers position peaks by this ABSOLUTE source time rather than as a fraction of a
+    /// clip's width. The difference is invisible at rest and decisive while trimming: with a
+    /// fraction, dragging an edge rescales the whole window into the changing width, so the
+    /// waveform appears to slide and squash instead of being clipped by the edge sweeping
+    /// over it.
+    /// </remarks>
+    public double SecondsFor(int index)
+    {
+        if (IsEmpty) return double.NaN;
+        return (double)index / PeakCount * FileSeconds;
+    }
+
+    /// <summary>
     /// Where peak <paramref name="index"/> sits inside the window, as a 0..1 fraction of the
-    /// clip's width. Values outside 0..1 fall outside the played window and must be skipped —
-    /// they exist because the index range is inclusive of the peaks straddling both edges.
+    /// clip's width. Values outside 0..1 fall outside the played window — they exist because
+    /// the index range is inclusive of the peaks straddling both edges.
     /// </summary>
     public double FractionFor(int index)
     {
         if (IsEmpty) return double.NaN;
-        double peakSeconds = (double)index / PeakCount * FileSeconds;
-        return (peakSeconds - WindowStartSeconds) / WindowDurationSeconds;
+        return (SecondsFor(index) - WindowStartSeconds) / WindowDurationSeconds;
     }
 }
 
