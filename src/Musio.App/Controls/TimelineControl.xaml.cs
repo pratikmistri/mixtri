@@ -2477,6 +2477,29 @@ public sealed partial class TimelineControl : UserControl
         return Color.FromArgb(160, 30, 30, 30);
     }
 
+    /// <summary>
+    /// Pushes the model's persisted mute state onto the two mute buttons.
+    /// </summary>
+    /// <remarks>
+    /// The glyphs were previously only ever written by the click handlers, so a project
+    /// restored with a muted track showed an UNMUTED icon: the flag round-tripped through
+    /// the package correctly, but nothing ever applied it to the UI. Call this whenever the
+    /// model is (re)attached — the buttons are the only place this state is visible.
+    /// </remarks>
+    public void SyncAudioMuteVisuals()
+    {
+        if (Model is null) return;
+
+        // E767 = Volume3 (unmuted), E74F = Mute
+        if (AudioMuteIcon is not null)
+            AudioMuteIcon.Glyph = Model.IsSystemAudioMuted ? "\uE74F" : "\uE767";
+        if (MicMuteIcon is not null)
+            MicMuteIcon.Glyph = Model.IsMicAudioMuted ? "\uE74F" : "\uE767";
+
+        AudioTrackCanvas?.Invalidate();
+        MicTrackCanvas?.Invalidate();
+    }
+
     private void AudioMuteButton_Click(object sender, RoutedEventArgs e)
     {
         if (Model is null) return;
@@ -2737,14 +2760,21 @@ public sealed partial class TimelineControl : UserControl
         for (int i = items.Count - 1; i >= 0; i--)
         {
             var item = items[i];
-            var (x1, x2, _, _) = VisibleExtent(
-                TimeToX(item.Start), TimeToX(item.Start + item.Duration), canvas.ActualWidth);
+            double rawX1 = TimeToX(item.Start);
+            double rawX2 = TimeToX(item.Start + item.Duration);
+            var (x1, x2, clippedStart, clippedEnd) = VisibleExtent(rawX1, rawX2, canvas.ActualWidth);
             if (x2 <= x1) continue;              // scrolled entirely out of view
             if (posX < x1 || posX > x2) continue;
 
+            // Only a REAL edge is a trim handle. Treating the canvas boundary of a clipped
+            // block as one made a block longer than the video look pinned to the timeline's
+            // end — and, worse, stole every body drag that started near that boundary, so
+            // the block could not be moved until it had first been shortened. An edge that
+            // is genuinely off-screen is trimmed from the context menu instead
+            // ("Trim start/end to playhead"), which needs no pixel to aim at.
             double edge = EdgeHitWidthFor(x2 - x1);
-            if (posX - x1 <= edge) return (item.Id, SegmentHitTarget.LeftEdge);
-            if (x2 - posX <= edge) return (item.Id, SegmentHitTarget.RightEdge);
+            if (!clippedStart && posX - x1 <= edge) return (item.Id, SegmentHitTarget.LeftEdge);
+            if (!clippedEnd && x2 - posX <= edge) return (item.Id, SegmentHitTarget.RightEdge);
             return (item.Id, SegmentHitTarget.Body);
         }
         return (null, SegmentHitTarget.None);
@@ -2997,9 +3027,18 @@ public sealed partial class TimelineControl : UserControl
 
             // Trim handles are drawn on EVERY block, not just the selected one: an invisible
             // grab strip is indistinguishable from "you cannot trim this", which is exactly
-            // how the first version of this lane read.
-            DrawTrimHandle(ds, x1, blockY, blockH, isSelected, clippedStart, atStart: true);
-            DrawTrimHandle(ds, x2, blockY, blockH, isSelected, clippedEnd, atStart: false);
+            // how the first version of this lane read. A CLIPPED edge draws only the
+            // "continues off-screen" ticks and no handle, because it is not grabbable —
+            // showing a handle there implied the audio ended at the timeline's edge.
+            if (!clippedStart)
+                DrawTrimHandle(ds, x1, blockY, blockH, isSelected, atStart: true);
+            else
+                DrawContinuationTicks(ds, x1, blockY, blockH, atStart: true);
+
+            if (!clippedEnd)
+                DrawTrimHandle(ds, x2, blockY, blockH, isSelected, atStart: false);
+            else
+                DrawContinuationTicks(ds, x2, blockY, blockH, atStart: false);
         }
     }
 
@@ -3067,14 +3106,10 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Draws one trim handle. <paramref name="clipped"/> marks an edge whose real position is
-    /// off-canvas (the block continues beyond the visible timeline), so the handle reads as a
-    /// boundary rather than as the true end of the audio — while staying grabbable, which is
-    /// the only way to trim a track longer than the video.
+    /// Draws one trim handle at a REAL (on-screen) block edge.
     /// </summary>
     private static void DrawTrimHandle(
-        CanvasDrawingSession ds, float x, float blockY, float blockH,
-        bool isSelected, bool clipped, bool atStart)
+        CanvasDrawingSession ds, float x, float blockY, float blockH, bool isSelected, bool atStart)
     {
         float handleW = InsertedAudioHandleWidth;
         float handleH = blockH * (isSelected ? 0.7f : 0.5f);
@@ -3086,17 +3121,25 @@ public sealed partial class TimelineControl : UserControl
             : Color.FromArgb(190, 245, 245, 255);
 
         ds.FillRoundedRectangle(handleX, handleY, handleW, handleH, 2, 2, color);
+    }
 
-        if (!clipped) return;
+    /// <summary>
+    /// Marks an edge whose real position is off-canvas: the block continues past the visible
+    /// timeline. Deliberately NOT a handle — this edge cannot be dragged (there is no pixel
+    /// for it), so drawing one would promise a gesture that does not exist.
+    /// </summary>
+    private static void DrawContinuationTicks(
+        CanvasDrawingSession ds, float x, float blockY, float blockH, bool atStart)
+    {
+        var tick = Color.FromArgb(150, 255, 255, 255);
+        float tickH = blockH * 0.5f;
+        float tickY = blockY + (blockH - tickH) / 2;
+        float dir = atStart ? 1 : -1;
 
-        // Two thin ticks past the handle: "this continues off-screen".
-        var tick = Color.FromArgb(160, 255, 255, 255);
-        float dir = atStart ? -1 : 1;
-        float baseX = atStart ? x + handleW + 3 : x - handleW - 3;
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < 3; i++)
         {
-            float tx = baseX + (dir * i * 3);
-            ds.FillRectangle(tx, handleY + handleH * 0.25f, 1.5f, handleH * 0.5f, tick);
+            float tx = x + (dir * (2 + i * 3));
+            ds.FillRectangle(tx, tickY, 1.5f, tickH, tick);
         }
     }
 
@@ -3358,12 +3401,24 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private SegmentTrackVisual? ResolveTrackVisual(VideoSegment seg, TimelineModel model)
     {
-        if (!string.IsNullOrEmpty(seg.VideoFilePath) &&
-            _trackVisualsByFile.TryGetValue(seg.VideoFilePath, out var v))
-            return v;
-
         bool isPrimary = model.PrimaryVideoFilePath is null ||
             string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrEmpty(seg.VideoFilePath) &&
+            _trackVisualsByFile.TryGetValue(seg.VideoFilePath, out var v))
+        {
+            // A registered visual normally wins outright. The exception is the primary
+            // recording with NO waveform in that registration: "which file is primary" is
+            // decided here from TimelineModel.PrimaryVideoFilePath but by the host (in
+            // LoadAppendedTrackVisualsAsync) from Project.VideoFilePath, and when those two
+            // disagree the primary gets a per-file entry registered for it with empty
+            // waveforms — which would then permanently shadow the model-level samples below
+            // and leave the audio tracks blank for the whole session.
+            bool hasWaveform = v.SystemWaveform is { Length: > 0 } || v.MicWaveform is { Length: > 0 };
+            if (hasWaveform || !isPrimary)
+                return v;
+        }
+
         if (isPrimary)
         {
             return new SegmentTrackVisual
@@ -3372,7 +3427,12 @@ public sealed partial class TimelineControl : UserControl
                 MouseToVideoOffsetSeconds = model.MouseToVideoOffsetSeconds,
                 SystemWaveform = model.SystemAudioWaveformSamples,
                 MicWaveform = model.MicAudioWaveformSamples,
-                WaveformDurationSeconds = model.Duration.TotalSeconds,
+                // Falls back to the timeline's own span: a restored project whose top-level
+                // Duration never got written would otherwise divide by zero here and draw
+                // nothing, which looks identical to "this recording has no audio".
+                WaveformDurationSeconds = model.Duration.TotalSeconds > 0
+                    ? model.Duration.TotalSeconds
+                    : model.DisplayDuration.TotalSeconds,
             };
         }
         return null;

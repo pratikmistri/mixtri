@@ -817,6 +817,41 @@ public class MusioPackageTests
         Assert.IsTrue(track.IsMuted, "mute state must survive so a disabled track stays disabled");
     }
 
+    [TestMethod]
+    public async Task SaveThenOpen_RemembersRecordedAudioMuteState()
+    {
+        // The mute flags are the only per-track state the recorded audio tracks have, and
+        // losing them means a project reopens louder than the user left it.
+        var (project, timeline) = BuildProject();
+        timeline.IsSystemAudioMuted = true;
+        timeline.IsMicAudioMuted = true;
+
+        var packagePath = Path.Combine(_root, "muted.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsTrue(opened.Timeline.IsSystemAudioMuted, "system audio mute must survive a round trip");
+        Assert.IsTrue(opened.Timeline.IsMicAudioMuted, "mic mute must survive a round trip");
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_DoesNotPersistRegenerableWaveformSamples()
+    {
+        // Waveforms are a render cache rebuilt from the WAVs on load; persisting them would
+        // add thousands of floats to every manifest. This pins that they are excluded — and
+        // therefore that the load path MUST regenerate them.
+        var (project, timeline) = BuildProject();
+        timeline.SystemAudioWaveformSamples = [0.1f, 0.9f, 0.4f];
+        timeline.MicAudioWaveformSamples = [0.2f, 0.7f];
+
+        var packagePath = Path.Combine(_root, "waveforms.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsNull(opened.Timeline.SystemAudioWaveformSamples);
+        Assert.IsNull(opened.Timeline.MicAudioWaveformSamples);
+    }
+
     /// <summary>Rewrites <c>manifest.json</c> inside a saved package.</summary>
     private static void RewriteManifest(string packagePath, Func<string, string> transform)
     {

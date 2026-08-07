@@ -1033,6 +1033,11 @@ public sealed partial class EditorPage
                 Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
 
             double videoDuration = project.Duration.TotalSeconds;
+            // A restored project whose top-level Duration was never written would make every
+            // coverage calculation below collapse to zero and silently produce no waveform,
+            // while the audio itself still played — indistinguishable from "no audio".
+            if (videoDuration <= 0)
+                videoDuration = ViewModel.Model.DisplayDuration.TotalSeconds;
 
             // Offset between audio and video start.
             // Positive: audio pre-roll (WAV starts before video frame 0).
@@ -1089,14 +1094,36 @@ public sealed partial class EditorPage
             _audioOffsetSeconds = audioOffset;
             _audioPlayer?.Dispose();
             _audioPlayer = new AudioPlaybackEngine();
+
+            // Filtered by the PERSISTED mute state, not loaded wholesale. Loading
+            // `validPaths` here ignored IsSystemAudioMuted/IsMicAudioMuted entirely, so a
+            // project saved with a track muted came back audible: the flags round-tripped
+            // correctly, but nothing applied them until the user toggled a mute button.
+            var unmuted = GetUnmutedAudioPaths(project);
+
             // No fade windows: T9 confirmed transition crossfades can't be wired here
             // without drifting once the timeline has real cuts — see
             // AudioPlaybackEngine's class remarks for the full reasoning.
-            _audioPlayer.Load(validPaths);
+            if (unmuted.Count > 0)
+                _audioPlayer.Load(unmuted);
+
+            // The mute BUTTONS are drawn from the model too, and are likewise only updated
+            // by their own click handlers — so a restored project showed unmuted icons over
+            // muted tracks until something else redrew them.
+            Timeline?.SyncAudioMuteVisuals();
+
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"recorded audio loaded: {unmuted.Count}/{validPaths.Count} track(s) unmuted " +
+                $"(systemMuted={ViewModel.Model.IsSystemAudioMuted}, micMuted={ViewModel.Model.IsMicAudioMuted}); " +
+                $"waveforms sys={(systemWaveform is { Length: > 0 } ? "yes" : "no")} " +
+                $"mic={(micWaveform is { Length: > 0 } ? "yes" : "no")}, " +
+                $"videoDuration={videoDuration:F2}s");
         }
-        catch
+        catch (Exception ex)
         {
-            // Audio waveform generation failed — editor still works without it
+            // Audio waveform generation failed — editor still works without it, but a
+            // silent bail-out here is indistinguishable from "this recording has no audio".
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"audio waveform load failed: {ex}");
         }
     }
 
