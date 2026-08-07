@@ -2453,12 +2453,6 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Audio Track ---
 
-    /// <summary>Raised when the system audio track mute state changes.</summary>
-    public event EventHandler<bool>? SystemAudioMuteChanged;
-
-    /// <summary>Raised when the mic track mute state changes.</summary>
-    public event EventHandler<bool>? MicAudioMuteChanged;
-
     private static Color MutedWaveformOverlay => GetMutedWaveformOverlayColor();
 
     private static Color GetMutedWaveformOverlayColor()
@@ -2482,13 +2476,13 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Pushes the model's persisted mute state onto the two mute buttons.
+    /// Pushes the model's persisted mute state onto the track labels.
     /// </summary>
     /// <remarks>
     /// The glyphs were previously only ever written by the click handlers, so a project
     /// restored with a muted track showed an UNMUTED icon: the flag round-tripped through
     /// the package correctly, but nothing ever applied it to the UI. Call this whenever the
-    /// model is (re)attached — the buttons are the only place this state is visible.
+    /// model is (re)attached — the labels are the only place this state is visible.
     /// </remarks>
     public void SyncAudioMuteVisuals()
     {
@@ -2496,43 +2490,128 @@ public sealed partial class TimelineControl : UserControl
 
         // E767 = Volume3 (unmuted), E74F = Mute
         if (AudioMuteIcon is not null)
-            AudioMuteIcon.Glyph = Model.IsSystemAudioMuted ? "\uE74F" : "\uE767";
+            AudioMuteIcon.Glyph = Model.IsMuted(AudioMixChannel.System) ? "\uE74F" : "\uE767";
         if (MicMuteIcon is not null)
-            MicMuteIcon.Glyph = Model.IsMicAudioMuted ? "\uE74F" : "\uE767";
+            MicMuteIcon.Glyph = Model.IsMuted(AudioMixChannel.Mic) ? "\uE74F" : "\uE767";
+
+        // The inserted lanes keep their own identifying glyph (a person for voice, a note for
+        // music) and show mute by dimming instead, so the lane stays recognisable at a glance.
+        if (VoiceOverMuteIcon is not null)
+            VoiceOverMuteIcon.Opacity = Model.IsMuted(AudioMixChannel.VoiceOver) ? 0.4 : 1.0;
+        if (MusicMuteIcon is not null)
+            MusicMuteIcon.Opacity = Model.IsMuted(AudioMixChannel.Music) ? 0.4 : 1.0;
 
         AudioTrackCanvas?.Invalidate();
         MicTrackCanvas?.Invalidate();
+        VoiceOverTrackCanvas?.Invalidate();
+        MusicTrackCanvas?.Invalidate();
     }
 
-    private void AudioMuteButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Raised when a track's volume or mute changes, with the channel that changed.
+    /// </summary>
+    public event EventHandler<AudioMixChannel>? AudioChannelMixChanged;
+
+    /// <summary>
+    /// Opens the volume/mute flyout for whichever track label was clicked.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The flyout is built in code rather than declared in XAML, deliberately. A declared
+    /// <c>Slider</c>/<c>ToggleSwitch</c> would need its value set from the model, and setting
+    /// it in XAML fires <c>ValueChanged</c>/<c>Toggled</c> during <c>InitializeComponent</c> —
+    /// before the suppress flag exists and before the named fields are assigned. That is the
+    /// documented cause of a hang after recording in this codebase, so this path never gives
+    /// it the chance: the controls are created, populated, and only then subscribed.
+    /// </para>
+    /// <para>
+    /// One handler for all four labels, keyed by the button's <c>Tag</c>, because every track
+    /// exposes exactly the same two controls — see <see cref="AudioMixChannel"/>.
+    /// </para>
+    /// </remarks>
+    private void AudioTrackLabel_Click(object sender, RoutedEventArgs e)
     {
         if (Model is null) return;
-        Model.IsSystemAudioMuted = !Model.IsSystemAudioMuted;
-        // E767 = Volume3 (unmuted), E74F = Mute
-        AudioMuteIcon.Glyph = Model.IsSystemAudioMuted ? "\uE74F" : "\uE767";
-        AudioTrackCanvas?.Invalidate();
-        SystemAudioMuteChanged?.Invoke(this, Model.IsSystemAudioMuted);
+        if (sender is not FrameworkElement source) return;
+        if (!Enum.TryParse<AudioMixChannel>(source.Tag as string, out var channel)) return;
+
+        var panel = new StackPanel { Spacing = 8, MinWidth = 190 };
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = ChannelDisplayName(channel),
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        });
+
+        var muteToggle = new CheckBox { Content = "Mute", IsChecked = Model.IsMuted(channel) };
+
+        var volumeLabel = new TextBlock
+        {
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            FontSize = 12,
+        };
+
+        var slider = new Slider
+        {
+            Minimum = 0,
+            Maximum = 100,
+            StepFrequency = 1,
+            Width = 170,
+            // Assigned BEFORE the handler is attached, so populating it cannot raise a change.
+            Value = Math.Round(Math.Clamp(Model.GetVolume(channel), 0, 1) * 100),
+            IsEnabled = !Model.IsMuted(channel),
+        };
+        volumeLabel.Text = $"Volume  {slider.Value:F0}%";
+
+        slider.ValueChanged += (_, args) =>
+        {
+            if (Model is null) return;
+            Model.SetVolume(channel, args.NewValue / 100.0);
+            volumeLabel.Text = $"Volume  {args.NewValue:F0}%";
+            AudioChannelMixChanged?.Invoke(this, channel);
+        };
+
+        muteToggle.Checked += (_, _) => ApplyMute(channel, true, slider);
+        muteToggle.Unchecked += (_, _) => ApplyMute(channel, false, slider);
+
+        panel.Children.Add(volumeLabel);
+        panel.Children.Add(slider);
+        panel.Children.Add(muteToggle);
+
+        new Flyout { Content = panel }.ShowAt(source);
     }
 
-    private void MicMuteButton_Click(object sender, RoutedEventArgs e)
+    private void ApplyMute(AudioMixChannel channel, bool muted, Slider slider)
     {
         if (Model is null) return;
-        Model.IsMicAudioMuted = !Model.IsMicAudioMuted;
-        MicMuteIcon.Glyph = Model.IsMicAudioMuted ? "\uE74F" : "\uE767";
-        MicTrackCanvas?.Invalidate();
-        MicAudioMuteChanged?.Invoke(this, Model.IsMicAudioMuted);
+
+        Model.SetMuted(channel, muted);
+        // A muted track's slider is disabled rather than zeroed, so unmuting restores the
+        // level the user had set instead of coming back silent.
+        slider.IsEnabled = !muted;
+        SyncAudioMuteVisuals();
+        AudioChannelMixChanged?.Invoke(this, channel);
     }
+
+    private static string ChannelDisplayName(AudioMixChannel channel) => channel switch
+    {
+        AudioMixChannel.System => "System audio",
+        AudioMixChannel.Mic => "Microphone",
+        AudioMixChannel.VoiceOver => "Voice over lane",
+        AudioMixChannel.Music => "Music lane",
+        _ => "Audio",
+    };
 
     private void AudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
         DrawWaveformTrack(sender, args, isMic: false, AudioWaveformColor, AudioEnvelopeColor,
-            Model?.IsSystemAudioMuted == true);
+            Model?.EffectiveVolume(AudioMixChannel.System) <= 0);
     }
 
     private void MicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
         DrawWaveformTrack(sender, args, isMic: true, MicWaveformColor, MicEnvelopeColor,
-            Model?.IsMicAudioMuted == true);
+            Model?.EffectiveVolume(AudioMixChannel.Mic) <= 0);
     }
 
     // ─────────────────────── Inserted audio lanes (voice / music) ───────────────────────

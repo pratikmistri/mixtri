@@ -1,3 +1,4 @@
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
 
@@ -234,6 +235,14 @@ public static class ExportAudioPlan
             ? BuildFromSegments(project, timeline!, videoSegments)
             : BuildLegacy(project, mapper);
 
+        // Apply the per-channel mix to everything cut from a recording. Done HERE, in the one
+        // place placements are built, rather than by the caller filtering file lists: the
+        // export view model used to drop muted files from Project.AudioFilePaths, which
+        // BuildFromSegments never reads (it uses each segment's own list), so muting a track
+        // and exporting an edited project silently kept the muted audio.
+        if (timeline is not null)
+            placements = ApplyRecordedMix(placements, timeline);
+
         // Appended LAST and independently of which branch ran above: inserted tracks are
         // anchored to the OUTPUT timeline the user positioned them on, so unlike everything
         // above they need no segment, speed or transition arithmetic at all.
@@ -241,6 +250,38 @@ public static class ExportAudioPlan
             placements.AddRange(BuildInsertedTracks(timeline));
 
         return placements;
+    }
+
+    /// <summary>
+    /// Scales each recorded placement by its channel's gain, dropping the ones that are
+    /// silent.
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="AudioSourceKind.AudioFile"/> placements are classified: those are the
+    /// recorder's own <c>system_*</c>/<c>mic_*</c> captures.
+    /// <see cref="AudioSourceKind.EmbeddedVideoTrack"/> is an imported clip's own soundtrack,
+    /// which belongs to neither channel and is left untouched.
+    /// </remarks>
+    private static List<AudioPlacement> ApplyRecordedMix(
+        List<AudioPlacement> placements, TimelineModel timeline)
+    {
+        var mixed = new List<AudioPlacement>(placements.Count);
+
+        foreach (var placement in placements)
+        {
+            if (placement.Kind != AudioSourceKind.AudioFile)
+            {
+                mixed.Add(placement);
+                continue;
+            }
+
+            double volume = timeline.EffectiveVolume(RecordedAudio.Classify(placement.SourcePath));
+            if (volume <= 0) continue;      // muted or silenced: never worth muxing
+
+            mixed.Add(volume >= 1.0 ? placement : placement with { Volume = volume });
+        }
+
+        return mixed;
     }
 
     /// <summary>
@@ -264,6 +305,13 @@ public static class ExportAudioPlan
         {
             if (track is null || !track.IsAudible) continue;
 
+            // The clip's own gain scaled by its lane's. Two independent controls: a lane
+            // fader that rides every clip on it, and each clip's own level — which is what
+            // lets one loud bed be pulled down without touching a carefully set voice-over.
+            double laneVolume = timeline.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            double volume = track.EffectiveVolume * laneVolume;
+            if (volume <= 0) continue;
+
             var trimStart = track.TrimStart < TimeSpan.Zero ? TimeSpan.Zero : track.TrimStart;
             var delay = track.StartTime < TimeSpan.Zero ? TimeSpan.Zero : track.StartTime;
 
@@ -273,7 +321,7 @@ public static class ExportAudioPlan
                 trimStart,
                 track.EffectiveDuration,
                 delay,
-                Volume: track.EffectiveVolume));
+                Volume: volume));
         }
 
         return placements;

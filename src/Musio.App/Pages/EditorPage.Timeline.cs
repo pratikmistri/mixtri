@@ -1101,11 +1101,20 @@ public sealed partial class EditorPage
             // correctly, but nothing applied them until the user toggled a mute button.
             var unmuted = GetUnmutedAudioPaths(project);
 
+            // Per-channel gain, from the same model state export reads, so preview and export
+            // agree on the mix rather than each deriving it their own way.
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in unmuted)
+            {
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(
+                    RecordedAudio.Classify(path));
+            }
+
             // No fade windows: T9 confirmed transition crossfades can't be wired here
             // without drifting once the timeline has real cuts — see
             // AudioPlaybackEngine's class remarks for the full reasoning.
             if (unmuted.Count > 0)
-                _audioPlayer.Load(unmuted);
+                _audioPlayer.Load(unmuted, volumes);
 
             // The mute BUTTONS are drawn from the model too, and are likewise only updated
             // by their own click handlers — so a restored project showed unmuted icons over
@@ -1291,12 +1300,19 @@ public sealed partial class EditorPage
         foreach (var track in tracks)
         {
             if (track is null || !track.IsAudible) continue;
+
+            // Clip gain scaled by its lane's fader — the same product export muxes, so the
+            // preview level matches the exported one.
+            double volume = track.EffectiveVolume
+                * ViewModel.Model.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            if (volume <= 0) continue;
+
             placements.Add(new AudioTimelinePlacement(
                 track.FilePath,
                 track.StartTime,
                 track.TrimStart,
                 track.EffectiveDuration,
-                (float)track.EffectiveVolume));
+                (float)volume));
         }
 
         if (placements.Count == 0) return;
@@ -1406,6 +1422,13 @@ public sealed partial class EditorPage
         if (tracks is not { Count: > 0 }) return string.Empty;
 
         var sb = new System.Text.StringBuilder();
+
+        // The lane faders scale every clip on them, so a lane change alters every placement
+        // without touching a single track — it has to be part of the signature or the rebuild
+        // is skipped and the fader appears to do nothing.
+        sb.Append(ViewModel.Model.EffectiveVolume(AudioMixChannel.VoiceOver)).Append('/')
+          .Append(ViewModel.Model.EffectiveVolume(AudioMixChannel.Music)).Append(';');
+
         foreach (var t in tracks)
         {
             sb.Append(t.Id).Append('|')
@@ -1730,13 +1753,20 @@ public sealed partial class EditorPage
 
         var paths = GetUnmutedAudioPaths(project);
         if (paths.Count > 0)
+        {
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in paths)
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+
             // No fade windows here either, for the same reason as the initial Load
             // above — see AudioPlaybackEngine's class remarks (T9).
-            _audioPlayer.Load(paths);
+            _audioPlayer.Load(paths, volumes);
+        }
     }
 
     /// <summary>
-    /// Returns audio file paths filtered by current mute state.
+    /// Returns audio file paths that are currently audible: neither muted nor turned down to
+    /// silence, classified per file by <see cref="RecordedAudio.Classify"/>.
     /// </summary>
     private List<string> GetUnmutedAudioPaths(Project project)
     {
@@ -1747,13 +1777,12 @@ public sealed partial class EditorPage
         foreach (var path in project.AudioFilePaths)
         {
             if (!File.Exists(path)) continue;
-            var fileName = Path.GetFileName(path);
-            if (model.IsSystemAudioMuted
-                && fileName.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (model.IsMicAudioMuted
-                && fileName.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
-                continue;
+
+            // One shared classifier rather than a prefix test repeated per call site — the
+            // export path used its own copy and disagreed with this one for files that kept a
+            // package index prefix.
+            if (model.EffectiveVolume(RecordedAudio.Classify(path)) <= 0) continue;
+
             paths.Add(path);
         }
         return paths;

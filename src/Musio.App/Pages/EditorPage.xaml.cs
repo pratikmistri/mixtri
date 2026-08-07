@@ -275,14 +275,17 @@ public sealed partial class EditorPage : Page
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
 
-        // Audio mute: toggle playback and sync mute state for export
-        Timeline.SystemAudioMuteChanged += (_, isMuted) =>
+        // Audio mix: a volume or mute change on any track label rebuilds whichever preview
+        // engine that channel feeds. Recorded audio and the inserted lanes are separate
+        // engines (they are seeked in different clocks), so only the affected one is rebuilt.
+        Timeline.AudioChannelMixChanged += (_, channel) =>
         {
-            ReloadAudioPlayer();
-        };
-        Timeline.MicAudioMuteChanged += (_, isMuted) =>
-        {
-            ReloadAudioPlayer();
+            if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
+                ReloadAudioPlayer();
+            else
+                RefreshInsertedAudio();
+
+            Timeline.Refresh();
         };
 
         ViewModel.ModelReloaded += (_, _) =>

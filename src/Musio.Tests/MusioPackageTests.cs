@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Projects;
@@ -820,11 +821,16 @@ public class MusioPackageTests
     [TestMethod]
     public async Task SaveThenOpen_RemembersRecordedAudioMuteState()
     {
-        // The mute flags are the only per-track state the recorded audio tracks have, and
-        // losing them means a project reopens louder than the user left it.
+        // The mute flags and per-channel gain are the project's whole audio mix; losing
+        // either reopens the project at the wrong level.
         var (project, timeline) = BuildProject();
         timeline.IsSystemAudioMuted = true;
         timeline.IsMicAudioMuted = true;
+        timeline.SystemAudioVolume = 0.35;
+        timeline.MicAudioVolume = 0.8;
+        timeline.IsMusicMuted = true;
+        timeline.MusicVolume = 0.25;
+        timeline.VoiceOverVolume = 0.6;
 
         var packagePath = Path.Combine(_root, "muted.musio");
         await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
@@ -832,6 +838,58 @@ public class MusioPackageTests
 
         Assert.IsTrue(opened.Timeline.IsSystemAudioMuted, "system audio mute must survive a round trip");
         Assert.IsTrue(opened.Timeline.IsMicAudioMuted, "mic mute must survive a round trip");
+        Assert.AreEqual(0.35, opened.Timeline.SystemAudioVolume, 0.0001);
+        Assert.AreEqual(0.8, opened.Timeline.MicAudioVolume, 0.0001);
+        Assert.IsTrue(opened.Timeline.IsMusicMuted, "a muted lane must stay muted");
+        Assert.AreEqual(0.25, opened.Timeline.MusicVolume, 0.0001);
+        Assert.AreEqual(0.6, opened.Timeline.VoiceOverVolume, 0.0001);
+    }
+
+    [TestMethod]
+    public async Task Open_LegacyProjectWithoutAMix_DefaultsEveryChannelToFullVolume()
+    {
+        // Projects saved before the mix existed carry no volume fields. They must come back
+        // at full volume, not silent — a gain that defaulted to zero would mute every old
+        // project on open.
+        //
+        // Saved with DELIBERATELY non-default levels, then stripped from the manifest: if the
+        // stripping ever stopped matching, the assertions below would see 0.35/0.2 and fail,
+        // rather than passing vacuously because the defaults happen to be 1.
+        var (project, timeline) = BuildProject();
+        timeline.SystemAudioVolume = 0.35;
+        timeline.MicAudioVolume = 0.2;
+        timeline.VoiceOverVolume = 0.4;
+        timeline.MusicVolume = 0.15;
+
+        var packagePath = Path.Combine(_root, "legacy-mix.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        int stripped = 0;
+        RewriteManifest(packagePath, json =>
+        {
+            // Edited as JSON rather than by regex: the last property in an object has no
+            // trailing comma, so a text pattern silently misses one of the four (and a
+            // pattern loose enough to catch it would leave the document malformed).
+            var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+            var timelineNode = root["Timeline"]!.AsObject();
+
+            foreach (var name in new[]
+                     { "SystemAudioVolume", "MicAudioVolume", "VoiceOverVolume", "MusicVolume" })
+            {
+                if (timelineNode.Remove(name)) stripped++;
+            }
+
+            return root.ToJsonString();
+        });
+
+        Assert.AreEqual(4, stripped, "the manifest must actually have carried all four levels");
+
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.System), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.Mic), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.VoiceOver), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.Music), 0.0001);
     }
 
     [TestMethod]

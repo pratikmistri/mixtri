@@ -151,6 +151,16 @@ public sealed class AudioPlaybackEngine : IDisposable
     public void Load(IEnumerable<string> wavFilePaths) => Load(wavFilePaths, fadeWindowsByPath: null);
 
     /// <summary>
+    /// Initializes playback from the given WAV file paths, applying a constant per-file gain
+    /// from <paramref name="volumeByPath"/> (missing entries play at full volume). Paths are
+    /// matched case-insensitively.
+    /// </summary>
+    public void Load(
+        IEnumerable<string> wavFilePaths,
+        IReadOnlyDictionary<string, float>? volumeByPath)
+        => Load(wavFilePaths, fadeWindowsByPath: null, volumeByPath);
+
+    /// <summary>
     /// Initializes playback from the given WAV file paths, applying an equal-power gain
     /// ramp (see <see cref="AudioFadeWindow"/>) to any file with an entry in
     /// <paramref name="fadeWindowsByPath"/>. All files are mixed together for simultaneous
@@ -159,6 +169,12 @@ public sealed class AudioPlaybackEngine : IDisposable
     public void Load(
         IEnumerable<string> wavFilePaths,
         IReadOnlyDictionary<string, IReadOnlyList<AudioFadeWindow>>? fadeWindowsByPath)
+        => Load(wavFilePaths, fadeWindowsByPath, volumeByPath: null);
+
+    private void Load(
+        IEnumerable<string> wavFilePaths,
+        IReadOnlyDictionary<string, IReadOnlyList<AudioFadeWindow>>? fadeWindowsByPath,
+        IReadOnlyDictionary<string, float>? volumeByPath)
     {
         Stop();
         DisposeReaders();
@@ -183,12 +199,28 @@ public sealed class AudioPlaybackEngine : IDisposable
                 fadeWindows[path] = windows;
         }
 
+        // Same re-keying rationale as the fade windows above: a casing mismatch here would
+        // silently play a track at full volume instead of the level the user set.
+        Dictionary<string, float>? volumes = null;
+        if (volumeByPath is { Count: > 0 })
+        {
+            volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (path, volume) in volumeByPath)
+                volumes[path] = volume;
+        }
+
         try
         {
             // Open all audio files
             foreach (var path in validPaths)
             {
                 var reader = new AudioFileReader(path);
+
+                // AudioFileReader applies this to the samples it returns, so it survives
+                // every Seek/ScrubTo without a separate provider in the chain.
+                if (volumes is not null && volumes.TryGetValue(path, out float volume))
+                    reader.Volume = Math.Clamp(volume, 0f, 1f);
+
                 _readers.Add(reader);
             }
 

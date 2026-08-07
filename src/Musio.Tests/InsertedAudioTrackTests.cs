@@ -1,3 +1,4 @@
+using Musio.Core.Audio;
 using Musio.Core.Export;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
@@ -836,6 +837,122 @@ public sealed class InsertedAudioTrackTests
         var rows = Musio.Core.Audio.AudioLaneLayout.PackIntoRows([], maxRows: 5);
         Assert.AreEqual(1, Musio.Core.Audio.AudioLaneLayout.RowCount(rows),
             "an empty lane still needs a band to draw in");
+    }
+
+    #endregion
+
+    #region Channel mix (volume + mute)
+
+    [TestMethod]
+    public void MutedRecordedTrack_IsDroppedFromASegmentTimelineExport()
+    {
+        // The bug this pins: mute was applied by the export view model stripping files from
+        // Project.AudioFilePaths, but BuildFromSegments reads each SEGMENT's own list — so
+        // muting a track had no effect on any edited (segment) project's export.
+        var project = NewProject(PrimaryMic);
+        var model = ModelWith(Video(0, 10));
+        model.IsMicAudioMuted = true;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+
+        Assert.IsFalse(plan.Any(p => p.SourcePath == PrimaryMic),
+            "a muted mic track must not be muxed, segment timeline or not");
+    }
+
+    [TestMethod]
+    public void RecordedTrackVolume_ScalesItsPlacements()
+    {
+        var project = NewProject(PrimaryMic);
+        var model = ModelWith(Video(0, 10));
+        model.MicAudioVolume = 0.3;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+        var mic = plan.Single(p => p.SourcePath == PrimaryMic);
+
+        Assert.AreEqual(0.3, mic.Volume, 0.0001);
+    }
+
+    [TestMethod]
+    public void RecordedTrackVolume_DoesNotLeakOntoTheOtherChannel()
+    {
+        var project = NewProject(PrimaryMic);
+        var model = ModelWith(Video(0, 10));
+        model.MicAudioVolume = 0.2;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+
+        // The embedded video track is neither system nor mic capture and must be untouched.
+        var embedded = plan.Single(p => p.Kind == AudioSourceKind.EmbeddedVideoTrack);
+        Assert.AreEqual(1.0, embedded.Volume, "an imported clip's own soundtrack is not a mix channel");
+    }
+
+    [TestMethod]
+    public void LaneVolume_MultipliesWithEachClipsOwnVolume()
+    {
+        // Two independent faders: the lane rides every clip on it, the clip keeps its own
+        // level — so pulling a lane down cannot destroy a carefully set per-clip balance.
+        var project = NewProject();
+        var model = ModelWith(Video(0, 30));
+        var music = Track(MusicPath, startSec: 0, sourceDurationSec: 10, kind: AudioTrackKind.Music);
+        music.Volume = 0.5;
+        model.AudioTracks.Add(music);
+        model.MusicVolume = 0.5;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+        var placement = plan.Single(p => p.SourcePath == MusicPath);
+
+        Assert.AreEqual(0.25, placement.Volume, 0.0001, "lane gain times clip gain");
+    }
+
+    [TestMethod]
+    public void MutedLane_SilencesEveryClipOnIt_WithoutTouchingTheOther()
+    {
+        var project = NewProject();
+        var model = ModelWith(Video(0, 30));
+        model.AudioTracks.Add(Track(VoicePath, startSec: 0, sourceDurationSec: 5));
+        model.AudioTracks.Add(Track(MusicPath, startSec: 0, sourceDurationSec: 5, kind: AudioTrackKind.Music));
+        model.IsMusicMuted = true;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+
+        Assert.IsFalse(plan.Any(p => p.SourcePath == MusicPath), "the muted lane is silent");
+        Assert.IsTrue(plan.Any(p => p.SourcePath == VoicePath), "the other lane is unaffected");
+    }
+
+    [TestMethod]
+    public void EffectiveVolume_FoldsInMuteAndClamps()
+    {
+        var model = new TimelineModel();
+
+        Assert.AreEqual(1.0, model.EffectiveVolume(AudioMixChannel.System), "unset channels play at full volume");
+
+        model.SetVolume(AudioMixChannel.System, 0.4);
+        Assert.AreEqual(0.4, model.EffectiveVolume(AudioMixChannel.System), 0.0001);
+
+        model.SetMuted(AudioMixChannel.System, true);
+        Assert.AreEqual(0.0, model.EffectiveVolume(AudioMixChannel.System), "mute wins over any level");
+
+        model.SetMuted(AudioMixChannel.System, false);
+        Assert.AreEqual(0.4, model.EffectiveVolume(AudioMixChannel.System), 0.0001,
+            "unmuting restores the level rather than coming back silent");
+
+        model.SetVolume(AudioMixChannel.Mic, 5);
+        Assert.AreEqual(1.0, model.GetVolume(AudioMixChannel.Mic), "gain above unity clamps");
+    }
+
+    [TestMethod]
+    public void RecordedAudio_ClassifiesByName_ToleratingAPackageIndexPrefix()
+    {
+        Assert.AreEqual(AudioMixChannel.Mic, RecordedAudio.Classify(@"C:\r\mic_0.wav"));
+        Assert.AreEqual(AudioMixChannel.System, RecordedAudio.Classify(@"C:\r\system_0.wav"));
+
+        // Opening a package keeps the entry index prefix when two recordings contribute a
+        // file with the same name; without stripping it, an appended recording's microphone
+        // would be classified as system audio and ignore the mic's mute and volume.
+        Assert.AreEqual(AudioMixChannel.Mic, RecordedAudio.Classify(@"C:\r\4_mic_0.wav"));
+
+        // An imported clip's extracted track is neither; it must not be treated as mic.
+        Assert.AreEqual(AudioMixChannel.System, RecordedAudio.Classify(@"C:\r\audio.wav"));
     }
 
     #endregion

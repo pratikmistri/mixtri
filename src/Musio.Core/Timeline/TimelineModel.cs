@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Musio.Core.Audio;
 using Musio.Core.Models;
 
 namespace Musio.Core.Timeline;
@@ -185,6 +186,75 @@ public class TimelineModel
     // Audio track mute state
     public bool IsSystemAudioMuted { get; set; }
     public bool IsMicAudioMuted { get; set; }
+
+    // Per-channel playback gain, 0..1. Persisted alongside the mute flags: together they are
+    // the project's whole audio mix, and losing either reopens the project at the wrong level.
+    public double SystemAudioVolume { get; set; } = 1.0;
+    public double MicAudioVolume { get; set; } = 1.0;
+
+    /// <summary>Mute state of the inserted voice-over lane (independent of each clip's own).</summary>
+    public bool IsVoiceOverMuted { get; set; }
+    public double VoiceOverVolume { get; set; } = 1.0;
+
+    /// <summary>Mute state of the inserted music lane (independent of each clip's own).</summary>
+    public bool IsMusicMuted { get; set; }
+    public double MusicVolume { get; set; } = 1.0;
+
+    /// <summary>Whether <paramref name="channel"/> is muted.</summary>
+    public bool IsMuted(AudioMixChannel channel) => channel switch
+    {
+        AudioMixChannel.System => IsSystemAudioMuted,
+        AudioMixChannel.Mic => IsMicAudioMuted,
+        AudioMixChannel.VoiceOver => IsVoiceOverMuted,
+        AudioMixChannel.Music => IsMusicMuted,
+        _ => false,
+    };
+
+    /// <summary>The stored gain for <paramref name="channel"/>, ignoring mute.</summary>
+    public double GetVolume(AudioMixChannel channel) => channel switch
+    {
+        AudioMixChannel.System => SystemAudioVolume,
+        AudioMixChannel.Mic => MicAudioVolume,
+        AudioMixChannel.VoiceOver => VoiceOverVolume,
+        AudioMixChannel.Music => MusicVolume,
+        _ => 1.0,
+    };
+
+    public void SetMuted(AudioMixChannel channel, bool muted)
+    {
+        switch (channel)
+        {
+            case AudioMixChannel.System: IsSystemAudioMuted = muted; break;
+            case AudioMixChannel.Mic: IsMicAudioMuted = muted; break;
+            case AudioMixChannel.VoiceOver: IsVoiceOverMuted = muted; break;
+            case AudioMixChannel.Music: IsMusicMuted = muted; break;
+        }
+    }
+
+    public void SetVolume(AudioMixChannel channel, double volume)
+    {
+        volume = Math.Clamp(volume, 0.0, 1.0);
+        switch (channel)
+        {
+            case AudioMixChannel.System: SystemAudioVolume = volume; break;
+            case AudioMixChannel.Mic: MicAudioVolume = volume; break;
+            case AudioMixChannel.VoiceOver: VoiceOverVolume = volume; break;
+            case AudioMixChannel.Music: MusicVolume = volume; break;
+        }
+    }
+
+    /// <summary>
+    /// The gain to actually apply for <paramref name="channel"/>: the stored volume with mute
+    /// folded in and clamped to 0..1.
+    /// </summary>
+    /// <remarks>
+    /// The single answer to "how loud is this channel", used by the preview engine, the export
+    /// plan and the label flyouts alike — so mute can never be honoured in one place and
+    /// ignored in another, which is exactly what happened while export filtered muted files by
+    /// name in the view model instead.
+    /// </remarks>
+    public double EffectiveVolume(AudioMixChannel channel)
+        => IsMuted(channel) ? 0.0 : Math.Clamp(GetVolume(channel), 0.0, 1.0);
 
     // Get the effective (trimmed) duration
     [JsonIgnore]

@@ -59,10 +59,11 @@
         <Border x:Name="AudioTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="AudioMuteButton"
-                        Click="AudioMuteButton_Click"
+                        Click="AudioTrackLabel_Click"
+                        Tag="System"
                         Padding="2" MinWidth="0" MinHeight="0"
                         Background="Transparent" BorderThickness="0"
-                        ToolTipService.ToolTip="Mute/unmute system audio">
+                        ToolTipService.ToolTip="System audio volume and mute">
                     <FontIcon x:Name="AudioMuteIcon" Glyph="&#xE767;" FontSize="12"
                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Button>
@@ -72,10 +73,11 @@
         <Border x:Name="MicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                 <Button x:Name="MicMuteButton"
-                        Click="MicMuteButton_Click"
+                        Click="AudioTrackLabel_Click"
+                        Tag="Mic"
                         Padding="2" MinWidth="0" MinHeight="0"
                         Background="Transparent" BorderThickness="0"
-                        ToolTipService.ToolTip="Mute/unmute microphone">
+                        ToolTipService.ToolTip="Microphone volume and mute">
                     <FontIcon x:Name="MicMuteIcon" Glyph="&#xE767;" FontSize="12"
                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Button>
@@ -85,15 +87,29 @@
 
         <Border x:Name="VoiceOverTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
-                <FontIcon Glyph="&#xE720;" FontSize="12"
-                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Button x:Name="VoiceOverLabelButton"
+                        Click="AudioTrackLabel_Click"
+                        Tag="VoiceOver"
+                        Padding="2" MinWidth="0" MinHeight="0"
+                        Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Voice over lane volume and mute">
+                    <FontIcon x:Name="VoiceOverMuteIcon" Glyph="&#xE720;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Button>
                 <TextBlock Text="Voice" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
         <Border x:Name="MusicTrackLabel" Grid.Row="9" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0" Visibility="Collapsed">
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
-                <FontIcon Glyph="&#xE8D6;" FontSize="12"
-                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Button x:Name="MusicLabelButton"
+                        Click="AudioTrackLabel_Click"
+                        Tag="Music"
+                        Padding="2" MinWidth="0" MinHeight="0"
+                        Background="Transparent" BorderThickness="0"
+                        ToolTipService.ToolTip="Music lane volume and mute">
+                    <FontIcon x:Name="MusicMuteIcon" Glyph="&#xE8D6;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Button>
                 <TextBlock Text="Music" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
             </StackPanel>
         </Border>
