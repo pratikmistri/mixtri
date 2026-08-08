@@ -1262,14 +1262,6 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// (Re)builds the inserted-audio engine from the project's <see cref="AudioTrack"/>s.
-    /// </summary>
-    /// <remarks>
-    /// Called on preview init and after an insert. Muted, silenced and missing-file tracks
-    /// are filtered by <see cref="AudioPlaybackEngine.LoadPlacements"/> itself, so this stays
-    /// a straight projection of the project model.
-    /// </remarks>
-    /// <summary>
     /// (Re)builds the inserted-audio engine from the model's <see cref="AudioTrack"/>s.
     /// </summary>
     /// <remarks>

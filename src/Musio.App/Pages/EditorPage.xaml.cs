@@ -349,7 +349,8 @@ public sealed partial class EditorPage : Page
         Timeline.CameraSegmentRemoveRequested += OnCameraSegmentRemoveRequested;
 
         // Text overlay track events
-        Timeline.TextOverlaySelected += OnTextOverlaySelected;        Timeline.TextOverlayCreated += OnTextOverlayCreated;
+        Timeline.TextOverlaySelected += OnTextOverlaySelected;
+        Timeline.TextOverlayCreated += OnTextOverlayCreated;
         Timeline.TextOverlayMoved += OnTextOverlayMoved;
         Timeline.TextOverlayResized += OnTextOverlayResized;
         Timeline.TextOverlayRemoveRequested += OnTextOverlayRemoveRequested;
