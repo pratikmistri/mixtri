@@ -530,8 +530,23 @@ public sealed class ZoomCameraPath
         float e = CubicBezierEasing.EaseInOutCinematic(u);
 
         float baseZoom = Lerp(from.Zoom, to.Zoom, e);
-        float centerX = Lerp(from.CenterX, to.CenterX, e);
-        float centerY = Lerp(from.CenterY, to.CenterY, e);
+
+        // Focal point across the handoff.
+        //
+        // When both endpoints resolve their centre the same way, interpolating between them is
+        // exactly right. When they DON'T — an auto shot centres on the live cursor, a manual one
+        // on its stored centre — the compositor still has to blend in the cursor afterwards, and
+        // interpolating here as well applies the move twice. With the cursor near the outgoing
+        // auto shot's centre those two blends compose to
+        //     A + (B - A) * e²
+        // so the camera zoomed on schedule but travelled late, which reads as "zoom first, then
+        // travel". Reporting the MANUAL endpoint's centre as a fixed anchor instead leaves the
+        // compositor's single cursor blend to supply the whole move, making travel linear in e
+        // and therefore synchronised with the zoom.
+        bool mixedCentreSources = from.IsManual != to.IsManual;
+        ZoomShot anchor = from.IsManual ? from : to;
+        float centerX = mixedCentreSources ? anchor.CenterX : Lerp(from.CenterX, to.CenterX, e);
+        float centerY = mixedCentreSources ? anchor.CenterY : Lerp(from.CenterY, to.CenterY, e);
 
         double travel = Math.Sqrt(
             Math.Pow(to.CenterX - from.CenterX, 2.0) +

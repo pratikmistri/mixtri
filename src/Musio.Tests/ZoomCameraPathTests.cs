@@ -231,6 +231,66 @@ public sealed class ZoomCameraPathTests
         }
     }
 
+    /// <summary>
+    /// In a MIXED handoff — one shot centring on the live cursor, the other on its own stored
+    /// centre — the focal point must travel in step with the zoom.
+    /// <para>
+    /// Regression: "the pre animation does the zoom but not the travel, so zoom starts first and
+    /// then the travel making overall animation feel odd." The path interpolated its centre AND
+    /// the compositor blended the cursor in afterwards, so the two compose to
+    /// <c>A + (B - A) * e²</c> — quadratic travel against linear zoom. At e=0.40 the camera was
+    /// only ~16% of the way across. The path now reports the manual endpoint as a fixed anchor
+    /// and lets the compositor's single blend supply the whole move, making travel linear in e.
+    /// </para>
+    /// <para>
+    /// This emulates <c>FrameCompositor.ResolveZoomState</c>'s blend, which is the only place the
+    /// two contributions meet — testing the path's centre alone cannot catch this.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void MixedHandoff_FocalPointTravelsInStepWithTheEasedMove()
+    {
+        const int w = 2304;
+        const int h = 1536;
+        var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
+        var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
+
+        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        Assert.IsTrue(path.IsLinkedAfter(0));
+
+        // The compositor parks the auto shot on the live cursor; place it where that shot looks.
+        float cursorX = auto.CenterX;
+        float cursorY = auto.CenterY;
+
+        double tStart = path.Shots[0].HoldEnd;
+        double tEnd = path.Shots[1].HoldStart;
+
+        (float X, float Y) Blend(double t)
+        {
+            var s = Sample(path, t);
+            float weight = Math.Clamp(s.CursorFollowWeight, 0f, 1f);
+            return (s.CenterX + ((cursorX - s.CenterX) * weight),
+                    s.CenterY + ((cursorY - s.CenterY) * weight));
+        }
+
+        var start = Blend(tStart);
+        var end = Blend(tEnd);
+        double total = Math.Sqrt(Math.Pow(end.X - start.X, 2) + Math.Pow(end.Y - start.Y, 2));
+        Assert.IsTrue(total > 1, "This fixture is meant to cover a genuine camera move.");
+
+        for (double u = 0.1; u <= 0.9; u += 0.1)
+        {
+            double t = tStart + ((tEnd - tStart) * u);
+            var p = Blend(t);
+            double travelled = Math.Sqrt(Math.Pow(p.X - start.X, 2) + Math.Pow(p.Y - start.Y, 2)) / total;
+            float expected = CubicBezierEasing.EaseInOutCinematic((float)u);
+
+            Assert.AreEqual(expected, travelled, 0.05,
+                $"At u={u:F2} the camera was {travelled:P0} across but the eased move was {expected:P0} " +
+                "through. Travel must follow the same parameter as the zoom, not lag it quadratically.");
+        }
+    }
+
     [TestMethod]
     public void LinkedPair_ZoomVelocity_IsContinuousAcrossHandoff()
     {

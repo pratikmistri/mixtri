@@ -353,6 +353,32 @@ public sealed partial class TimelineControl : UserControl
 
     private static Color WithAlpha(Color c, byte alpha) => Color.FromArgb(alpha, c.R, c.G, c.B);
 
+    /// <summary>
+    /// Desaturates and fades a zoom-segment colour for a segment that is NOT the selected one.
+    /// <para>
+    /// Zoom segments legitimately overlap — that is what drives a camera handoff — and when two
+    /// sit on top of each other in the same accent colour it is hard to tell which one the
+    /// resize handles belong to. Draining most of the colour and roughly half the opacity out of
+    /// the unselected ones lets the selected segment read as the foreground object without
+    /// hiding its neighbours, which still need to be visible to be aimed at.
+    /// </para>
+    /// <para>
+    /// Applied only while something is selected, so the track keeps its normal appearance at rest.
+    /// </para>
+    /// </summary>
+    private static Color MutedZoomColor(Color c)
+    {
+        const float desaturation = 0.8f;
+        const float fade = 0.45f;
+
+        // Rec. 601 luma: matches how the eye weights the channels, so the muted colour keeps
+        // the segment's apparent brightness instead of flattening light and dark ones together.
+        float luma = (0.299f * c.R) + (0.587f * c.G) + (0.114f * c.B);
+        byte Mix(byte channel) => (byte)Math.Clamp(channel + ((luma - channel) * desaturation), 0f, 255f);
+
+        return Color.FromArgb((byte)(c.A * fade), Mix(c.R), Mix(c.G), Mix(c.B));
+    }
+
     private void ResolveThemeColors()
     {
         bool isDark = ActualTheme != ElementTheme.Light;
@@ -1917,7 +1943,17 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
-        foreach (var kf in sorted)
+        // Paint the selected segment LAST so it sits on top of everything it overlaps. Zoom
+        // segments overlap by design (that is what drives a handoff), and the one being edited
+        // has to be the one you can see and grab. Hit-testing gives its edges the same priority.
+        var drawOrder = sorted.Where(k => k.Id != _selectedZoomKeyframeId).ToList();
+        var selectedKeyframe = sorted.FirstOrDefault(k => k.Id == _selectedZoomKeyframeId);
+        if (selectedKeyframe is not null)
+            drawOrder.Add(selectedKeyframe);
+
+        bool hasSelection = selectedKeyframe is not null;
+
+        foreach (var kf in drawOrder)
         {
             float x1 = (float)GetZoomSegmentStartX(kf);
             float x2 = (float)GetZoomSegmentEndX(kf);
@@ -1930,17 +1966,20 @@ public sealed partial class TimelineControl : UserControl
 
             bool isSelected = kf.Id == _selectedZoomKeyframeId;
             bool isEditable = kf.IsManual;
+            bool muted = hasSelection && !isSelected;
 
             // Fill
             var fillColor = isSelected ? ZoomSegmentSelectedFill
                 : isEditable ? ZoomSegmentFill
                 : ZoomSegmentAutoFill;
+            if (muted) fillColor = MutedZoomColor(fillColor);
 
             using var roundedRect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(roundedRect, fillColor);
 
             // Border
             var borderColor = isSelected ? ZoomSegmentSelectedBorder : ZoomSegmentBorder;
+            if (muted) borderColor = MutedZoomColor(borderColor);
             float borderWidth = isSelected ? 1.5f : 1f;
             ds.DrawGeometry(roundedRect, borderColor, borderWidth);
 
@@ -1948,7 +1987,8 @@ public sealed partial class TimelineControl : UserControl
             if (segW > 30)
             {
                 string label = $"{kf.ZoomLevel:0.#}x";
-                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, ZoomSegmentTextColor,
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7,
+                    muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                     {
                         FontSize = 11,
@@ -2180,6 +2220,27 @@ public sealed partial class TimelineControl : UserControl
             .OrderBy(k => k.Timestamp)
             .ThenBy(k => k.Start)
             .ToList();
+
+        // The selected segment's EDGES win over everything else, because it is painted on top
+        // and its resize handles are drawn there — without this, an overlapping neighbour's body
+        // claims the click first and the handles become impossible to grab, which is exactly the
+        // case overlapping zoom segments create.
+        // Deliberately edges only: letting its BODY win too would trap the selection, since a
+        // segment sitting underneath could then never be clicked to select it.
+        if (_selectedZoomKeyframeId is not null)
+        {
+            var selected = sorted.FirstOrDefault(k => k.Id == _selectedZoomKeyframeId);
+            if (selected is not null)
+            {
+                float sx1 = (float)ZoomKeyframeTimeToX(selected, selected.Start);
+                float sx2 = (float)ZoomKeyframeTimeToX(selected, selected.End);
+                if (!float.IsNaN(sx1) && Math.Abs(posX - sx1) <= ZoomSegmentEdgeHitWidth)
+                    return (selected.Id, ZoomHitTarget.LeftEdge);
+                if (!float.IsNaN(sx2) && Math.Abs(posX - sx2) <= ZoomSegmentEdgeHitWidth)
+                    return (selected.Id, ZoomHitTarget.RightEdge);
+            }
+        }
+
         for (int i = sorted.Count - 1; i >= 0; i--)
         {
             var kf = sorted[i];
