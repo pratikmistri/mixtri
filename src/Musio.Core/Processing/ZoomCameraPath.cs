@@ -114,6 +114,15 @@ public sealed class ZoomCameraPath
     private const double ArcFullRatio = 1.2;
     private const double ArcStrength = 0.6;
 
+    /// <summary>
+    /// Zoom-level difference between two linked shots at which the arc floor reaches the
+    /// lower of the two zooms, guaranteeing the handoff never undershoots its destination.
+    /// Below this the floor eases back toward 0, restoring the full arc for shots that sit
+    /// at (or near) the same zoom, where a dip is the only way to widen the frame for a
+    /// long lateral move.
+    /// </summary>
+    private const double ArcFloorFullDelta = 0.25;
+
     private static readonly ReadOnlyCollection<ZoomShot> EmptyShots = Array.AsReadOnly(Array.Empty<ZoomShot>());
 
     private readonly bool[] _linkedAfter;
@@ -513,7 +522,20 @@ public sealed class ZoomCameraPath
         // reintroducing the very kick the chained path removes.
         double s = Math.Sin(Math.PI * e);
         double bump = s * s;
-        float zoom = (float)(baseZoom / (1.0 + arcAmount * bump));
+
+        // Apply the arc to the zoom ABOVE a floor rather than to the whole zoom, so a
+        // handoff between two DIFFERENT zoom levels can never undershoot its destination.
+        // Dividing the whole interpolated zoom (the original form) sent a 2x -> 1.5x move
+        // down to ~1.39x mid-transition and then back up to 1.5x — a bounce, because the
+        // move already widens the frame and the arc widened it again on top. The floor
+        // rises to the lower endpoint as the two zooms diverge, which makes such a move
+        // monotonic, and falls to 0 when they are equal, where the arc is the only thing
+        // that can widen the frame and is still wanted at full strength.
+        // Note this is a smooth blend, never a clamp: a max() against the floor would flatten
+        // the curve at the crossing point and reintroduce a derivative corner.
+        double zoomDelta = Math.Abs(from.Zoom - to.Zoom);
+        double arcFloor = Math.Min(from.Zoom, to.Zoom) * Clamp01(zoomDelta / ArcFloorFullDelta);
+        float zoom = (float)(arcFloor + ((baseZoom - arcFloor) / (1.0 + (arcAmount * bump))));
         zoom = Math.Clamp(zoom, 1f, Math.Max(from.Zoom, to.Zoom));
 
         float progressA = Normalize(fromData.OriginalHoldEnd, from.RampStart, from.ReleaseEnd);

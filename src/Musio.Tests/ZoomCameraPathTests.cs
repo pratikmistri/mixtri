@@ -18,8 +18,9 @@ public sealed class ZoomCameraPathTests
         float zoom,
         float centerX,
         float centerY,
-        int seed = 0)
-        => new(rampStart, holdStart, holdEnd, releaseEnd, zoom, centerX, centerY, seed);
+        int seed = 0,
+        bool isManual = false)
+        => new(rampStart, holdStart, holdEnd, releaseEnd, zoom, centerX, centerY, seed, isManual);
 
     private static ZoomShot ShotFrom(ZoomKeyframe keyframe)
     {
@@ -82,6 +83,72 @@ public sealed class ZoomCameraPathTests
 
         Assert.IsTrue(minZoom > 1.5f,
             $"Linked segments should hand off without releasing toward 1x; min zoom was {minZoom:F3}.");
+    }
+
+    /// <summary>
+    /// A handoff between two DIFFERENT zoom levels must be monotonic — it must never
+    /// undershoot its destination and climb back.
+    /// <para>
+    /// Regression from Sample7.musio, reported as "segment 1 is 2x and segment 2 is 1.5x...
+    /// I expect a smooth transition from 2x to 1.5x without a dip". The arc originally divided
+    /// the whole interpolated zoom, so with these centres ~1058px apart it pulled the move down
+    /// to ~1.39x mid-transition and then back up to 1.5x. The arc now applies above a floor that
+    /// rises to the lower endpoint as the two zooms diverge, so the frame widening the move
+    /// already provides is not doubled up on.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void HandoffBetweenDifferentZoomLevels_IsMonotonic_AndNeverUndershoots()
+    {
+        // Exact values from Sample7.musio (source 2304x1536).
+        const int w = 2304;
+        const int h = 1536;
+        var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
+        var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
+
+        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        Assert.IsTrue(path.IsLinkedAfter(0), "These two segments overlap and must be linked.");
+
+        float previous = float.MaxValue;
+        float minZoom = float.MaxValue;
+        for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
+        {
+            float zoom = Sample(path, t).Zoom;
+            minZoom = Math.Min(minZoom, zoom);
+
+            // Going 2.0 -> 1.5, so the curve must never rise again.
+            Assert.IsTrue(zoom <= previous + 0.0005f,
+                $"Zoom rose from {previous:F4} to {zoom:F4} at t={t:F3}s — that is the dip-and-recover bounce.");
+            previous = zoom;
+        }
+
+        Assert.IsTrue(minZoom >= 1.5f - 0.001f,
+            $"Zoom undershot the 1.5x destination, reaching {minZoom:F4}.");
+    }
+
+    /// <summary>
+    /// The arc must still engage when two linked shots sit at the SAME zoom, because there a
+    /// dip is the only thing that can widen the frame across a long lateral move. This is the
+    /// other half of the floor blend guarded by the test above.
+    /// </summary>
+    [TestMethod]
+    public void HandoffBetweenEqualZoomLevels_StillArcsOnALongMove()
+    {
+        var path = ZoomCameraPath.Build(
+        [
+            Shot(0.00, 1.00, 2.00, 3.50, 2.5f, 200, 200, 1),
+            Shot(1.50, 2.60, 3.60, 5.10, 2.5f, 1750, 900, 2),
+        ], SourceWidth, SourceHeight);
+
+        Assert.IsTrue(path.IsLinkedAfter(0));
+
+        float minZoom = float.MaxValue;
+        for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
+            minZoom = Math.Min(minZoom, Sample(path, t).Zoom);
+
+        Assert.IsTrue(minZoom < 2.45f,
+            $"Equal-zoom shots far apart should still pull back mid-move; min zoom was {minZoom:F3}.");
+        Assert.IsTrue(minZoom >= 1.0f, "The arc must never drive the zoom below 1x.");
     }
 
     [TestMethod]
