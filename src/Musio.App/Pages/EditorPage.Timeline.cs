@@ -1396,6 +1396,76 @@ public sealed partial class EditorPage
         RefreshInsertedAudio();
     }
 
+    /// <summary>
+    /// Applies a mix change to the running preview, rebuilding an engine only when the SET of
+    /// tracks it plays actually changed.
+    /// </summary>
+    /// <remarks>
+    /// Volume is a per-reader property, so a level change needs no reload. The first version
+    /// rebuilt the whole engine from the flyout's <c>ValueChanged</c>, which reopened every
+    /// WAV and recreated the output device on every slider tick — roughly thirty times a
+    /// second while dragging, as `diag.log` showed. A rebuild is still required when a
+    /// channel is muted or unmuted, because muted tracks are not loaded at all.
+    /// </remarks>
+    /// <returns>
+    /// <c>true</c> when the change needed a rebuild, so the caller should repaint the whole
+    /// timeline; <c>false</c> when only levels moved and repainting the audio lanes suffices.
+    /// </returns>
+    private bool ApplyAudioMixChange(AudioMixChannel channel)
+    {
+        if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
+        {
+            var project = ProjectService.Instance.CurrentProject;
+            if (project is null) return false;
+
+            var audible = GetUnmutedAudioPaths(project);
+
+            // The loaded set is what mute changes; compare it before deciding.
+            bool sameSet = _audioPlayer is { IsLoaded: true } player
+                && player.LoadedPaths.Count == audible.Count
+                && player.LoadedPaths.SequenceEqual(audible, StringComparer.OrdinalIgnoreCase);
+
+            if (!sameSet)
+            {
+                ReloadAudioPlayer();
+                return true;
+            }
+
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in audible)
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+
+            _audioPlayer!.SetVolumesByPath(volumes);
+            return false;
+        }
+
+        // Inserted lanes: the placements are rebuilt from the same track list in the same
+        // order, so equal counts mean the same placements in the same slots and only the
+        // levels moved. Any change that adds or removes one (muting a lane drops all of its
+        // clips) changes the count and falls through to a full rebuild.
+        var laneVolumes = new List<float>();
+        foreach (var track in ViewModel.Model.AudioTracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+            double volume = track.EffectiveVolume
+                * ViewModel.Model.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            if (volume <= 0) continue;
+            laneVolumes.Add((float)volume);
+        }
+
+        if (_insertedAudioPlayer is { IsLoaded: true } inserted
+            && inserted.TrySetPlacementVolumes(laneVolumes))
+        {
+            // Keep the change-detection signature in step, or the next undo/redo would see a
+            // difference and rebuild anyway.
+            _insertedAudioSignature = BuildInsertedAudioSignature();
+            return false;
+        }
+
+        RefreshInsertedAudio();
+        return true;
+    }
+
     /// <summary>Rebuilds the inserted-audio preview engine and timeline lane from the model.</summary>
     private void RefreshInsertedAudio()
     {

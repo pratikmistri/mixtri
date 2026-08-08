@@ -955,5 +955,52 @@ public sealed class InsertedAudioTrackTests
         Assert.AreEqual(AudioMixChannel.System, RecordedAudio.Classify(@"C:\r\audio.wav"));
     }
 
+    [TestMethod]
+    public void RecordedChannelMix_NeverTouchesAnInsertedClip()
+    {
+        // Both kinds of placement are AudioSourceKind.AudioFile, and an inserted clip's file
+        // is typically named `audio.wav` — which the recorded classifier reads as SYSTEM
+        // capture. Only the fact that inserted tracks are built separately, after the
+        // recorded mix has been applied, stops them being scaled a second time by a channel
+        // they do not belong to. These assertions fail loudly if that separation is lost.
+        var project = NewProject(PrimaryMic);
+        var model = ModelWith(Video(0, 30));
+        var music = Track(MusicPath, startSec: 0, sourceDurationSec: 10, kind: AudioTrackKind.Music);
+        music.Volume = 0.8;
+        model.AudioTracks.Add(music);
+
+        model.SystemAudioVolume = 0.5;
+        model.MicAudioVolume = 0.5;
+
+        var placement = ExportAudioPlan.Build(project, model, null)
+            .Single(p => p.SourcePath == MusicPath);
+
+        Assert.AreEqual(0.8, placement.Volume, 0.0001,
+            "an inserted clip carries its own gain times its LANE's, never a recorded channel's");
+    }
+
+    [TestMethod]
+    public void MutingEveryRecordedChannel_LeavesInsertedClipsPlaying()
+    {
+        // The louder failure of the same defect: if an inserted clip were run through the
+        // recorded mix, muting system audio would DROP it from the export entirely.
+        var project = NewProject(PrimaryMic);
+        var model = ModelWith(Video(0, 30));
+        model.AudioTracks.Add(Track(VoicePath, startSec: 0, sourceDurationSec: 5));
+        model.AudioTracks.Add(Track(MusicPath, startSec: 0, sourceDurationSec: 5, kind: AudioTrackKind.Music));
+
+        model.IsSystemAudioMuted = true;
+        model.IsMicAudioMuted = true;
+
+        var plan = ExportAudioPlan.Build(project, model, null);
+
+        Assert.IsTrue(plan.Any(p => p.SourcePath == VoicePath),
+            "muting the recording must not silence an inserted voice-over");
+        Assert.IsTrue(plan.Any(p => p.SourcePath == MusicPath),
+            "nor an inserted music bed");
+        Assert.IsFalse(plan.Any(p => p.SourcePath == PrimaryMic),
+            "while the recorded track it WAS aimed at is still dropped");
+    }
+
     #endregion
 }

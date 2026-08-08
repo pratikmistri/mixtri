@@ -275,17 +275,18 @@ public sealed partial class EditorPage : Page
 
         ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
 
-        // Audio mix: a volume or mute change on any track label rebuilds whichever preview
-        // engine that channel feeds. Recorded audio and the inserted lanes are separate
-        // engines (they are seeked in different clocks), so only the affected one is rebuilt.
+        // Audio mix: a volume or mute change on any track label. Only a change to the SET of
+        // loaded tracks (mute/unmute) rebuilds an engine or repaints the whole timeline; a
+        // level change updates the open readers in place and repaints just the audio lanes.
+        // Dragging the slider raises this ~30 times a second, and the first version rebuilt
+        // the engine AND invalidated every canvas on each tick — enough UI-thread and decode
+        // churn to starve the preview decoder ("no decoded frame; preview is stale").
         Timeline.AudioChannelMixChanged += (_, channel) =>
         {
-            if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
-                ReloadAudioPlayer();
+            if (ApplyAudioMixChange(channel))
+                Timeline.Refresh();
             else
-                RefreshInsertedAudio();
-
-            Timeline.Refresh();
+                Timeline.SyncAudioMuteVisuals();
         };
 
         ViewModel.ModelReloaded += (_, _) =>

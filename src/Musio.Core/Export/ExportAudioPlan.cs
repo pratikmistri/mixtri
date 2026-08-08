@@ -231,7 +231,7 @@ public static class ExportAudioPlan
             .OrderBy(s => s.Start)
             .ToList();
 
-        var placements = videoSegments is { Count: > 0 }
+        var recorded = videoSegments is { Count: > 0 }
             ? BuildFromSegments(project, timeline!, videoSegments)
             : BuildLegacy(project, mapper);
 
@@ -241,15 +241,19 @@ public static class ExportAudioPlan
         // BuildFromSegments never reads (it uses each segment's own list), so muting a track
         // and exporting an edited project silently kept the muted audio.
         if (timeline is not null)
-            placements = ApplyRecordedMix(placements, timeline);
+            recorded = ApplyRecordedMix(recorded, timeline);
 
-        // Appended LAST and independently of which branch ran above: inserted tracks are
-        // anchored to the OUTPUT timeline the user positioned them on, so unlike everything
-        // above they need no segment, speed or transition arithmetic at all.
-        if (timeline is not null)
-            placements.AddRange(BuildInsertedTracks(timeline));
+        // Inserted tracks are built into a SEPARATE list and concatenated only on the way
+        // out, so they can never reach ApplyRecordedMix. That separation is load-bearing, not
+        // stylistic: an inserted clip is also an AudioSourceKind.AudioFile, so the classifier
+        // would read its file name (typically `audio.wav`) as system capture and REPLACE its
+        // carefully computed clip×lane gain with the system channel's — or drop it entirely
+        // when system audio is muted. Keeping them in one list would leave that correctness
+        // resting on nothing but the order of two statements; two guard tests pin it.
+        var inserted = timeline is not null ? BuildInsertedTracks(timeline) : [];
 
-        return placements;
+        recorded.AddRange(inserted);
+        return recorded;
     }
 
     /// <summary>

@@ -441,6 +441,69 @@ public sealed class AudioPlaybackEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Paths currently loaded, in load order. Lets a caller tell "only levels changed" from
+    /// "the set of tracks changed" and avoid a rebuild for the former.
+    /// </summary>
+    public IReadOnlyList<string> LoadedPaths
+    {
+        get
+        {
+            lock (_transportLock)
+            {
+                return _readers.Select(r => r.FileName).ToList();
+            }
+        }
+    }
+
+    /// <summary>Number of loaded placements; see <see cref="TrySetPlacementVolumes"/>.</summary>
+    public int PlacementCount
+    {
+        get { lock (_transportLock) { return _placements.Count; } }
+    }
+
+    /// <summary>
+    /// Updates the gain of already-open readers, by path, without reopening anything.
+    /// </summary>
+    /// <remarks>
+    /// Volume is a property of the reader, so changing it needs no reload at all. Rebuilding
+    /// the engine for it — as the mix flyout first did — reopened every WAV and recreated the
+    /// output device on EVERY slider tick, roughly thirty times a second while dragging.
+    /// </remarks>
+    public void SetVolumesByPath(IReadOnlyDictionary<string, float> volumeByPath)
+    {
+        ArgumentNullException.ThrowIfNull(volumeByPath);
+
+        lock (_transportLock)
+        {
+            foreach (var reader in _readers)
+            {
+                if (volumeByPath.TryGetValue(reader.FileName, out float volume))
+                    reader.Volume = Math.Clamp(volume, 0f, 1f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Updates placed tracks' gains in load order, without reopening anything. Returns false
+    /// when the counts disagree — i.e. the set of placements changed, not just their levels —
+    /// so the caller must do a full <see cref="LoadPlacements"/> instead.
+    /// </summary>
+    public bool TrySetPlacementVolumes(IReadOnlyList<float> volumes)
+    {
+        ArgumentNullException.ThrowIfNull(volumes);
+
+        lock (_transportLock)
+        {
+            if (_readers.Count == 0 || volumes.Count != _readers.Count) return false;
+
+            for (int i = 0; i < _readers.Count; i++)
+                _readers[i].Volume = Math.Clamp(volumes[i], 0f, 1f);
+
+            return true;
+        }
+    }
+
     public void Play()
     {
         lock (_transportLock)
