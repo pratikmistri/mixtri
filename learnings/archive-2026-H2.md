@@ -1616,3 +1616,57 @@ ewStart to TimeSpan.Zero before raising *Moved; Zoom's does not clamp at all (re
 - **Why manual and auto stay two separate paths**: merging them into one shot list would silently change manual-over-auto precedence. Two paths, manual evaluated first, preserves it exactly.
 - **Verified**: Musio.Core / Musio.App / Musio.Tests all build x64 with 0 errors and only pre-existing MVVMTK0045 + CS0618 warnings; suite **1037 passed, 3 skipped, 0 failed**.
 
+## Zoom handoff, round 2: the two bugs that only showed up in the actual editor
+
+Both of these shipped green (1037 tests passing) and were still visibly broken on real
+content. Worth reading before trusting a zoom change that "passes".
+
+- **Feature/area**: `ZoomCameraPath`, `AutoZoomEngine`, `FrameCompositor`.
+
+### Bug 1 — two independent paths can never hand off to each other
+- **Symptom, as reported**: "overlapping zoom segments... a flash to no zoom then zoom in again."
+- **Cause**: manual keyframes and auto (click-driven) segments were built as **two separate
+  `ZoomCameraPath`s** resolved by hard precedence — manual first, auto only as a fallback. When
+  a manual segment overlapped an auto one, the manual path became active at its own `RampStart`,
+  which by definition begins at 1×, so the camera cut from the auto zoom straight out to full
+  frame and dove back in. Measured at the join: `t=2.90 → 2.000x`, `t=3.00 → 1.000x`, `t=3.10 → 1.898x`.
+- **Why every test missed it**: all the handoff tests exercised shots *within one path*. The
+  chained-path machinery was completely correct and completely bypassed. **When a design's whole
+  purpose is continuity between A and B, a test that only ever puts A and B in the same container
+  proves nothing.**
+- **Fix**: one chained path carrying both kinds of shot, so manual↔auto is just another linked pair.
+- **Manual still wins on genuine conflict**: an auto shot whose hold **overlaps** a manual shot's
+  hold is dropped. **Overlap, not containment/midpoint** — an auto segment spans ~3.9s versus
+  whatever the user dragged out, so a containment test lets a long auto shot escape suppression by
+  a short manual shot sitting right on top of it, and the auto zoom then wins the exact instant the
+  user explicitly authored. That regression was caught by the pre-existing
+  `GetZoomState_ManualKeyframe_OverridesAuto`, which was right and should not have been "modernised".
+- **`IsManualOverride` had to become a weight.** Manual and auto shots take their focal point from
+  *different sources* — the live cursor versus the keyframe's stored centre. A bool flipping at the
+  piece boundary snaps the centre even when the zoom curve is perfect. `ZoomState.CursorFollowWeight`
+  eases 1→0 across the handoff; `FrameCompositor` lerps the cursor into the centre by it instead of
+  branching on a bool. At the extremes it is bit-identical to the old behaviour.
+  **General rule: when two states resolve a value from different sources, the transition between
+  them needs a weight, not a branch.**
+
+### Bug 2 — a threshold tuned so tight the feature never engaged
+- `LinkGapSeconds` was 0.35s. Because a shot's `RampStart`/`ReleaseEnd` are the instants the camera
+  leaves and returns to 1×, that constant is literally *how long the frame may sit fully zoomed out
+  before the next zoom begins*. Two segments dragged out near each other with the default ease
+  durations typically leave **0.4–0.7s**, which fell outside 0.35s — so they stayed unlinked, kept
+  the old pump, and the feature did nothing on exactly the "close together" case it was built for.
+  Raised to 0.75s.
+- **Lesson**: after adding a threshold, compute what value the *real authoring path* actually
+  produces (here `ZoomKeyframe.FromRange`) and check the threshold against it. The regression test
+  now builds keyframes through `FromRange` rather than hand-picked ramp times for this reason.
+
+### How both were actually found
+Not by reading code — by dumping the curve. A throwaway `[TestMethod]` that wrote
+`t, zoom, centre, manual` to a file for two scenarios (two manual segments vs. manual-over-auto)
+made both bugs obvious in seconds, and scenario A proving *correct* is what localised the fault to
+the cross-path case. **For motion bugs, print the curve before theorising.**
+
+- **Verified**: suite **1042 passed, 3 skipped, 0 failed**; Musio.App ARM64 Release rebuilt,
+  re-registered and relaunched clean.
+
+
