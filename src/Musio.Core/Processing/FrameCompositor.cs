@@ -561,6 +561,7 @@ public class FrameCompositor : IDisposable
             recentred.SegmentProgress = zoomState.SegmentProgress;
             recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
             recentred.SegmentHeadingY = zoomState.SegmentHeadingY;
+            recentred.DriftScale = zoomState.DriftScale;
             zoomState = recentred;
         }
 
@@ -593,10 +594,18 @@ public class FrameCompositor : IDisposable
             vp.ViewportWidth, vp.ViewportHeight, slackX, slackY, zoomState.SegmentHeadingX, zoomState.SegmentHeadingY);
         if (!drift.IsActive) return zoomState;
 
+        float driftScale = float.IsFinite(zoomState.DriftScale)
+            ? Math.Clamp(zoomState.DriftScale, 0f, 1f)
+            : 1f;
+        var scaledDrift = new CameraDriftResult(
+            1f + ((drift.ZoomFactor - 1f) * driftScale),
+            drift.OffsetX * driftScale,
+            drift.OffsetY * driftScale);
+
         // ApplyZoom (never a plain multiply) preserves the 1x == 1x invariant.
-        float driftedZoom = Musio.Core.Processing.CameraDrift.ApplyZoom(zoomState.ZoomLevel, drift);
-        float cx = zoomState.CenterX + drift.OffsetX;
-        float cy = zoomState.CenterY + drift.OffsetY;
+        float driftedZoom = Musio.Core.Processing.CameraDrift.ApplyZoom(zoomState.ZoomLevel, scaledDrift);
+        float cx = zoomState.CenterX + scaledDrift.OffsetX;
+        float cy = zoomState.CenterY + scaledDrift.OffsetY;
 
         var drifted = _zoomEngine.ComputeViewportForCenter(driftedZoom, cx, cy);
         drifted.IsManualOverride = zoomState.IsManualOverride;
@@ -604,6 +613,7 @@ public class FrameCompositor : IDisposable
         drifted.SegmentProgress = zoomState.SegmentProgress;
         drifted.SegmentHeadingX = zoomState.SegmentHeadingX;
         drifted.SegmentHeadingY = zoomState.SegmentHeadingY;
+        drifted.DriftScale = zoomState.DriftScale;
         return drifted;
     }
 
@@ -1482,4 +1492,3 @@ public class FrameCompositor : IDisposable
         }
     }
 }
-

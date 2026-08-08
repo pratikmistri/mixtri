@@ -1574,3 +1574,45 @@ ewStart to TimeSpan.Zero before raising *Moved; Zoom's does not clamp at all (re
 - **The duplicated doc block was worse than the "redundant" the reviewer described, and worth reading before deleting either half.** The FIRST block was also stale: it said the tracks live on the *project* (they had moved to `TimelineModel.AudioTracks` so the undo system could reach them) and credited `LoadPlacements` with filtering the method now does itself via `IsAudible`. Deleting the wrong one would have left actively misleading documentation. **When a reviewer reports a duplicate, check which copy is current rather than deleting either at random.**
 - **Swept the whole branch for both patterns rather than fixing only the two reported lines** — a statement followed by another on the same line, and `</remarks>` immediately followed by `<summary>`. One genuine instance of the first (the reported one; the other hits were aligned trailing comments) and none of the second. A reviewer finding one instance of a mechanical slip is reason to check for the rest.
 - **Verification**: `Musio.App` + `Musio.Tests` x64 Debug 0 errors / 0 new warnings; suite **1022 passed, 3 skipped, 0 failed** (unchanged — both fixes are cosmetic/doc). Replied to both threads on the PR with the reasoning.
+
+## Zoom handoff path wired into AutoZoomEngine
+
+- **Feature/area**: `AutoZoomEngine` and `FrameCompositor` zoom/drift handoff evaluation.
+- **Approaches tried**: Replaced per-frame overlap blending with cached manual and auto `ZoomCameraPath` lookups; rebuilt manual paths on keyframe changes and both paths once source dimensions arrive; audited every fresh `ZoomState` rebuild for the new `DriftScale` field.
+- **What worked**: Keeping manual and auto paths separate preserved manual-over-auto precedence while making `GetZoomState(t)` a pure lookup. Applying `DriftScale` only to drift offsets and to `1 + (factor - 1) * scale` kept `CameraDrift.ApplyZoom`'s 1× invariant intact.
+- **What didn't work**: The old max/weighted-average evaluator and its docs were actively misleading once handoff paths owned continuity; leaving any fresh `ZoomState` copy without `DriftScale` would silently kill the handoff drift fade.
+
+## Zoom-track authoring UX: snap-to-handoff and linked indicators
+
+- **Feature/area**: `src\Musio.App\Controls\TimelineControl.xaml.cs` zoom track authoring.
+- **Approaches tried**: Mirrored the primary segment track's `SnapX` shape, but kept a separate `SnapZoomX` that routes keyframe edges through `ZoomKeyframeTimeToX`/`XToKeyframeFileTime`. Drew handoff connectors from the shared `ZoomCameraPath.AreLinked` predicate instead of duplicating the gap test.
+- **What worked**: Snapping the body by its projected left edge makes the high-value “start snaps to previous end” handoff easy, while edge drags reuse the same source-file-filtered targets. Drawing connectors per independent zoom path (`IsManual` + `SourceVideoFilePath`) keeps manual/auto and cross-recording paths visually honest.
+- **What didn't work**: Reusing the plain timeline `SnapX` would have mapped appended-recording keyframes through output time/primary time and recreated the historic thin-line appended-zoom bug; the zoom track needs its own source-file-aware snapping helper.
+
+## Zoom handoff path test coverage
+
+- **Feature/area**: `src\Musio.Tests` zoom camera path and `AutoZoomEngine` regression coverage.
+- **Approaches tried**: Added dense derivative-based assertions for linked zoom handoffs, path arc/drift/determinism/degenerate-input coverage, and engine-level manual precedence/waypoint tests; replaced the old center step-size assertion with a bounded-acceleration invariant.
+- **What worked**: Testing velocity deltas rather than value continuity catches the old `max(falling,rising)` corner, and testing acceleration keeps eased center motion from being mislabeled as a snap.
+- **What didn't work**: Auto-click handoff coverage exposed that `AutoZoomEngine.MergeSegments` still collapses close raw clicks before `ZoomCameraPath` sees them, losing the first click as a waypoint; that production fix is still needed.
+
+## Zoom handoff final integration
+
+- **Feature/area**: `AutoZoomEngine` auto-click handoff integration and full ARM64 validation.
+- **Approaches tried**: Removed the remaining close-click merge before `ZoomCameraPath`, audited `ZoomState` rebuilds for `DriftScale`, rechecked UI linkage against `ZoomCameraPath.AreLinked`, then fixed the `dotnet test` PriGen path.
+- **What worked**: Feeding raw ordered auto click segments into the chained path preserves both click centers while the path owns smoothing. The auto-click regression now samples the second waypoint after the minimum cinematic handoff settles, not during the transition itself.
+- **`MergeSegments` was deleted on purpose, and it is the one behaviour change here beyond the four artifacts.** It collapsed every click within roughly one segment span (~3.9s) into a single shot that used the *last* click's centre, so the merged camera sat on a point the user had not clicked yet — and, more importantly, post-merge auto segments never overlapped, which made the whole chained-handoff path inert for auto-zoom. Removing it is what actually delivers "apply the handoff to auto too". Rapid same-spot clicks (double-clicks) degrade gracefully: two shots with identical centre and zoom produce a transition that is visually a constant hold. Nearby clicks get `arcAmount == 0` from the arc onset threshold, so there is no zoom pulsing. `AutoZoomConfig.MinTimeBetweenZooms` is now unused and retained only for config/serialization compatibility.
+- **What didn't work**: Two attempts to make the bare `dotnet test <csproj>` command work — a `global.json` SDK pin (the missing piece was the Appx/Pri *task path*, not the SDK version) and then a root `Directory.Build.props` pointing at the installed VS BuildTools Appx/Pri tasks. **The `Directory.Build.props` was reverted**: it hard-coded an absolute machine-specific Visual Studio path into the repo root and worked around the settled playbook rule rather than following it. The playbook route is the supported one — build with VS MSBuild, then run `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=x64` (with `DOTNET_ROLL_FORWARD=Major`), which needs no repo-level build files. Do not reintroduce a props file for this.
+
+## Zoom-segment handoff: the two pieces of maths that actually matter
+
+- **Feature/area**: `src\Musio.Core\Processing\ZoomCameraPath.cs` — design rationale behind the chained camera path, recorded because both results are non-obvious and easy to "simplify" back into a bug.
+- **The real defect was a derivative discontinuity, not a value discontinuity.** The old evaluator resolved concurrent zooms with `max(zoomA, zoomB)`. That is continuous in *value*, so every existing overlap test passed, but `max` of a falling and a rising ramp has a corner in its first derivative — the visible "kick". **Any test for this class of bug must assert bounded change in velocity (second differences), not bounded change in value.** A value-continuity test here is worthless: it cannot fail on the original bug.
+- **The unified `mid`/`half` hold-repair window.** To guarantee exactly one active piece, overlapping hold intervals must be separated. The naive fix — clip `A.HoldEnd` down to `B.HoldStart` — produces a **zero-length transition** whenever the holds overlap heavily, i.e. a hard snap, which is worse than the artifact being fixed. The correct form handles overlap, near-abutment and a genuine gap in one expression:
+  `mid = (A.HoldEnd + B.HoldStart) / 2;  half = max(MinTransitionSeconds / 2, |A.HoldEnd - B.HoldStart| / 2)`
+  then clamp the window to `[A.HoldStart, B.HoldEnd]`. For a heavy overlap this recovers the natural overlap region; for a tiny overlap it widens to the minimum; for a real gap `half` already exceeds the minimum so the natural gap is preserved untouched. **Do not "simplify" this back to a clip.**
+- **The arc bump must be `sin²(π·e)`, not `sin(π·e)` or `4e(1−e)`.** The arc dips the zoom during a long lateral move so the viewer stays oriented. Both obvious bumps have *non-zero* derivative at their endpoints, which would reintroduce a velocity discontinuity at the very junctions this whole change exists to smooth. `sin²` is zero **and** has zero derivative at both ends, so it composes with the eased handoff for free.
+- **Linkage is classified from the original, unclipped `RampStart`/`ReleaseEnd`, before hold repair mutates anything.** That is what lets the timeline's linked-segment indicator share one predicate (`ZoomCameraPath.AreLinked`) with the renderer and never disagree with it.
+- **Why manual and auto stay two separate paths**: merging them into one shot list would silently change manual-over-auto precedence. Two paths, manual evaluated first, preserves it exactly.
+- **Verified**: Musio.Core / Musio.App / Musio.Tests all build x64 with 0 errors and only pre-existing MVVMTK0045 + CS0618 warnings; suite **1037 passed, 3 skipped, 0 failed**.
+

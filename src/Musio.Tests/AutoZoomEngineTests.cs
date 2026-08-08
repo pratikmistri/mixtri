@@ -15,6 +15,25 @@ public sealed class AutoZoomEngineTests
         List<(double timeSeconds, int x, int y)> clicks)
         => TestMouseRecordingBuilder.WithClicks(durationSeconds, clicks, TickFrequency);
 
+    private static void AssertSmoothCenterVelocity(
+        IReadOnlyList<float> centers,
+        double sampleStepSeconds,
+        double maxVelocityDelta,
+        string axis)
+    {
+        var velocities = new List<double>();
+        for (int i = 1; i < centers.Count; i++)
+            velocities.Add((centers[i] - centers[i - 1]) / sampleStepSeconds);
+
+        double observed = 0;
+        for (int i = 1; i < velocities.Count; i++)
+            observed = Math.Max(observed, Math.Abs(velocities[i] - velocities[i - 1]));
+
+        Assert.IsTrue(observed < maxVelocityDelta,
+            $"Center {axis} velocity changed by {observed:F1}px/s between adjacent samples; " +
+            "that indicates a snap rather than a smooth eased handoff.");
+    }
+
     [TestMethod]
     public void GetZoomState_NoClicks_ReturnsNoZoom()
     {
@@ -132,6 +151,173 @@ public sealed class AutoZoomEngineTests
 
         Assert.AreEqual(3.5f, state.ZoomLevel, 0.01f,
             $"Manual keyframe zoom (3.5) should override auto (2.0), got {state.ZoomLevel}");
+        Assert.IsTrue(state.IsManualOverride, "Manual override state must be reported for compositor/export parity.");
+    }
+
+    [TestMethod]
+    public void GetZoomState_AutoZoom_DoesNotSetManualOverride()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig { DefaultZoomLevel = 2.0f });
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(5.0, [(2.0, 960, 540)]), 1920, 1080, TickFrequency);
+
+        var state = engine.GetZoomState(2.1);
+
+        Assert.IsTrue(state.HasSegment);
+        Assert.IsFalse(state.IsManualOverride, "Auto zooms must not be reported as manual overrides.");
+    }
+
+    [TestMethod]
+    public void GetZoomState_LinkedManualKeyframes_ZoomVelocityIsContinuous()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(8.0, []), 1920, 1080, TickFrequency);
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.0),
+                ZoomLevel = 2.4,
+                CenterX = 0.45,
+                CenterY = 0.50,
+                PreDuration = TimeSpan.FromMilliseconds(500),
+                HoldDuration = TimeSpan.FromMilliseconds(700),
+                PostDuration = TimeSpan.FromSeconds(1.0),
+                IsManual = true,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(3.3),
+                ZoomLevel = 1.8,
+                CenterX = 0.55,
+                CenterY = 0.50,
+                PreDuration = TimeSpan.FromSeconds(1.0),
+                HoldDuration = TimeSpan.FromMilliseconds(600),
+                PostDuration = TimeSpan.FromMilliseconds(600),
+                IsManual = true,
+            },
+        ]);
+
+        const double dt = 0.002;
+        var zooms = new List<float>();
+        for (double t = 2.60; t <= 3.40; t += dt)
+            zooms.Add(engine.GetZoomState(t).ZoomLevel);
+
+        var velocities = new List<double>();
+        for (int i = 1; i < zooms.Count; i++)
+            velocities.Add((zooms[i] - zooms[i - 1]) / dt);
+
+        double maxVelocityDelta = 0;
+        for (int i = 1; i < velocities.Count; i++)
+            maxVelocityDelta = Math.Max(maxVelocityDelta, Math.Abs(velocities[i] - velocities[i - 1]));
+
+        Assert.IsTrue(maxVelocityDelta < 0.40,
+            $"Linked manual zoom velocity changed by {maxVelocityDelta:F3} zoom/s between adjacent 2ms samples. " +
+            "This asserts derivative continuity, not just value continuity, so the old max(falling,rising) corner would fail.");
+    }
+
+    [TestMethod]
+    public void GetZoomState_ContainedManualKeyframe_IsVisitedAsWaypoint()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(10.0, []), 1920, 1080, TickFrequency);
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.0),
+                ZoomLevel = 3.0,
+                CenterX = 0.35,
+                CenterY = 0.35,
+                PreDuration = TimeSpan.FromSeconds(1.0),
+                HoldDuration = TimeSpan.FromSeconds(5.0),
+                PostDuration = TimeSpan.FromSeconds(1.0),
+                IsManual = true,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(3.0),
+                ZoomLevel = 2.0,
+                CenterX = 0.65,
+                CenterY = 0.65,
+                PreDuration = TimeSpan.FromMilliseconds(500),
+                HoldDuration = TimeSpan.FromMilliseconds(500),
+                PostDuration = TimeSpan.FromMilliseconds(500),
+                IsManual = true,
+            },
+        ]);
+
+        var waypoint = engine.GetZoomState(3.5);
+
+        Assert.AreEqual(2.0f, waypoint.ZoomLevel, 0.02f,
+            "A contained lower-zoom keyframe must become a waypoint rather than being swallowed by the higher zoom.");
+        Assert.AreEqual(0.65f * 1920, waypoint.CenterX, 2f);
+        Assert.AreEqual(0.65f * 1080, waypoint.CenterY, 2f);
+    }
+
+    [TestMethod]
+    public void GetZoomState_LinkedManualKeyframes_ZoomNeverFallsBelowOne()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(8.0, []), 1920, 1080, TickFrequency);
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.0),
+                ZoomLevel = 1.2,
+                CenterX = 0.35,
+                CenterY = 0.35,
+                PreDuration = TimeSpan.FromMilliseconds(500),
+                HoldDuration = TimeSpan.FromMilliseconds(500),
+                PostDuration = TimeSpan.FromMilliseconds(600),
+                IsManual = true,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.7),
+                ZoomLevel = 1.2,
+                CenterX = 0.80,
+                CenterY = 0.80,
+                PreDuration = TimeSpan.FromMilliseconds(500),
+                HoldDuration = TimeSpan.FromMilliseconds(500),
+                PostDuration = TimeSpan.FromMilliseconds(600),
+                IsManual = true,
+            },
+        ]);
+
+        for (double t = 0.0; t <= 4.0; t += 0.005)
+        {
+            var state = engine.GetZoomState(t);
+            Assert.IsTrue(state.ZoomLevel >= 1.0f,
+                $"Zoom fell below 1x at t={t:F3}: {state.ZoomLevel:F4}.");
+        }
+    }
+
+    [TestMethod]
+    public void GetZoomState_LinkedAutoClicks_VisitsEachClickCenter()
+    {
+        // This is the auto-click equivalent of the manual/path handoff tests: a close
+        // pair must become two ordered waypoints. If AutoZoomEngine collapses raw clicks
+        // before building ZoomCameraPath, the first click's center is lost.
+        var engine = new AutoZoomEngine(new AutoZoomConfig
+        {
+            DefaultZoomLevel = 2.0f,
+            PreClickDuration = 0.5f,
+            HoldDuration = 0.6f,
+            EaseOutDuration = 0.6f,
+        });
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(6.0, [(2.0, 700, 500), (2.6, 1200, 500)]),
+            1920,
+            1080,
+            TickFrequency);
+
+        var firstClick = engine.GetZoomState(2.0);
+        // The chained camera may spend a short minimum-duration handoff around the
+        // second click, so assert the second waypoint once that handoff has settled.
+        var secondClick = engine.GetZoomState(2.85);
+
+        Assert.AreEqual(700f, firstClick.CenterX, 2f,
+            "The auto path should visit the first click before handing off to the second.");
+        Assert.AreEqual(1200f, secondClick.CenterX, 2f,
+            "The auto path should visit the second click after the handoff.");
     }
 
     [TestMethod]
@@ -345,31 +531,25 @@ public sealed class AutoZoomEngineTests
             },
         ]);
 
-        // Step through and assert per-step center movement is bounded.
-        // With smoothed blending across a ~500ms overlap, peak rate is roughly
-        // (W * 0.4) / 0.5s ≈ 1.5 px/ms ≈ 8 px per 5ms linear, ~16 px with
-        // cubic-bezier ease. Pick 60 px as a generous-but-meaningful threshold
-        // — well below the old ~768 px hard-switch snap (B's center minus A's
-        // center across the crossover), while still catching any future
-        // regression that re-introduces a jump.
+        // Step through the linked handoff and assert the real invariant: center motion
+        // is smooth in velocity (bounded acceleration), not that each 5ms step stays
+        // under a number derived from the old weighted-blend behavior. An eased
+        // handoff legitimately has a higher peak velocity than its average; the snap
+        // bug was the velocity spike from a hard center switch.
         const double step = 0.005;
-        const float maxStepPixels = 60f;
-        float prevCx = -1, prevCy = -1;
+        var centerXs = new List<float>();
+        var centerYs = new List<float>();
         for (double t = 2.0; t <= 3.6; t += step)
         {
             var state = engine.GetZoomState(t);
-            float cx = state.CenterX;
-            float cy = state.CenterY;
-            if (prevCx >= 0)
-            {
-                Assert.IsTrue(Math.Abs(cx - prevCx) < maxStepPixels,
-                    $"Center X jumped {Math.Abs(cx - prevCx):F1}px at t={t:F3}");
-                Assert.IsTrue(Math.Abs(cy - prevCy) < maxStepPixels,
-                    $"Center Y jumped {Math.Abs(cy - prevCy):F1}px at t={t:F3}");
-            }
-            prevCx = cx;
-            prevCy = cy;
+            centerXs.Add(state.CenterX);
+            centerYs.Add(state.CenterY);
         }
+
+        // The limits are calibrated to the eased curve's acceleration, while staying
+        // far below the old hard-switch snap (~150,000 px/s velocity delta on X).
+        AssertSmoothCenterVelocity(centerXs, step, 5_000.0, "X");
+        AssertSmoothCenterVelocity(centerYs, step, 3_000.0, "Y");
 
         // Endpoint assertions: outside the overlap, each keyframe should own
         // the focal point — verifies the blend doesn't bias the result.
