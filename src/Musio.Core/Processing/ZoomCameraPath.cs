@@ -173,12 +173,10 @@ public sealed class ZoomCameraPath
     /// <summary>
     /// Builds an immutable camera path from unordered shot requests.
     /// <para>
-    /// The repair step uses one mid/half formula for heavy overlap, tiny overlap, and
-    /// close-but-separated shots. It computes the handoff window around the two hold
-    /// edges, widens it only when needed to preserve a minimum transition, and clamps
-    /// it back inside the two holds. A tempting shortcut is to clip A's hold end to
-    /// B's hold start; that produces a zero-length transition when B is already well
-    /// inside A's hold, which is the exact hard snap this path exists to remove.
+    /// The repair step runs each handoff across the INCOMING shot's own ramp — its leading
+    /// edge on the timeline, over its authored <c>PreDuration</c> — so an overlapped segment
+    /// animates in at the same place and speed it would have unoverlapped. The outgoing shot
+    /// holds until that edge. See <see cref="RepairLinkedHolds"/> for the degenerate cases.
     /// </para>
     /// </summary>
     /// <param name="shots">Shot requests in source time. Invalid or no-op shots are ignored.</param>
@@ -350,6 +348,31 @@ public sealed class ZoomCameraPath
             && float.IsFinite(shot.CenterY)
             && shot.Zoom > 1f + ZoomNoOpEpsilon;
 
+    /// <summary>
+    /// Separates the holds of consecutive shots so exactly one piece is ever active, and in
+    /// doing so decides when each handoff runs.
+    /// <para>
+    /// <b>The handoff runs across the INCOMING shot's own ramp</b> — from
+    /// <see cref="ZoomShot.RampStart"/> to <see cref="ZoomShot.HoldStart"/> of shot B — not from
+    /// wherever shot A happened to stop holding. That window is exactly the segment's leading
+    /// edge on the timeline and exactly its authored <c>PreDuration</c>, so an overlapped
+    /// segment animates in at the same place and over the same span it would have if nothing
+    /// overlapped it. The outgoing shot simply holds until that edge arrives.
+    /// </para>
+    /// <para>
+    /// Deriving the window from A's hold end instead (the original approach) put the move in the
+    /// wrong place and gave it the wrong duration: for two segments overlapping by ~0.5s it
+    /// started the animation early, when A stopped holding, and compressed it into the leftover
+    /// ~440ms instead of B's authored 1s — so it read as both mistimed and faster than a normal
+    /// zoom-in.
+    /// </para>
+    /// <para>
+    /// The clamp to <c>[a.HoldStart, a.HoldEnd]</c> covers the two degenerate directions: a B
+    /// whose ramp opens before A has even settled (start as soon as A settles) and a linked pair
+    /// with a real gap between them (start when A stops holding, so the camera never releases
+    /// toward 1× in between — the gap is absorbed into a longer move).
+    /// </para>
+    /// </summary>
     private static void RepairLinkedHolds(List<BuildShot> shots, bool[] linkedAfter)
     {
         for (int i = 0; i < linkedAfter.Length; i++)
@@ -360,15 +383,18 @@ public sealed class ZoomCameraPath
             BuildShot a = shots[i];
             BuildShot b = shots[i + 1];
 
-            double tA = a.HoldEnd;
-            double tB = b.HoldStart;
-            double mid = (tA + tB) / 2.0;
-            double half = Math.Max(MinTransitionSeconds / 2.0, Math.Abs(tA - tB) / 2.0);
-            double windowStart = mid - half;
-            double windowEnd = mid + half;
+            // Run the move across B's own ramp: its timeline leading edge, its PreDuration.
+            double windowStart = Math.Clamp(b.RampStart, a.HoldStart, a.HoldEnd);
+            double windowEnd = Math.Max(b.HoldStart, windowStart);
 
-            windowStart = Math.Max(windowStart, a.HoldStart);
-            windowEnd = Math.Min(windowEnd, b.HoldEnd);
+            // Only when that authored window is too short to read as a move do we widen it,
+            // symmetrically, bounded by how much hold either neighbour can spare.
+            if (windowEnd - windowStart < MinTransitionSeconds)
+            {
+                double mid = (windowStart + windowEnd) / 2.0;
+                windowStart = Math.Max(mid - (MinTransitionSeconds / 2.0), a.HoldStart);
+                windowEnd = Math.Min(Math.Max(mid + (MinTransitionSeconds / 2.0), windowStart), b.HoldEnd);
+            }
 
             if (windowStart > windowEnd)
             {

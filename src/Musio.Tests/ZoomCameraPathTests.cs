@@ -151,6 +151,86 @@ public sealed class ZoomCameraPathTests
         Assert.IsTrue(minZoom >= 1.0f, "The arc must never drive the zoom below 1x.");
     }
 
+    /// <summary>
+    /// The handoff must run across the INCOMING segment's own ramp — starting at its leading
+    /// edge on the timeline and lasting its authored <c>PreDuration</c> — so an overlapped
+    /// segment animates in at the same place and speed as an unoverlapped one.
+    /// <para>
+    /// Regression from Sample7.musio: "the transition to 1.5x happens when first segment is
+    /// ending, instead of where 2nd segment is starting, and the timing curve is different than
+    /// usual zoom segment's start." The window used to be derived from the outgoing shot's hold
+    /// end, which for these two segments started the move at 3.759s and squeezed it into 443ms
+    /// instead of starting at 3.202s and running the authored 1.0s.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void Handoff_RunsAcrossTheIncomingSegmentsOwnRamp()
+    {
+        const int w = 2304;
+        const int h = 1536;
+        var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
+        var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
+
+        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        Assert.IsTrue(path.IsLinkedAfter(0));
+
+        // The move starts exactly at segment 2's leading edge...
+        Assert.AreEqual(manual.RampStart, path.Shots[0].HoldEnd, 0.001,
+            "The handoff should begin where the incoming segment begins, not where the outgoing one stops holding.");
+        // ...and ends exactly where segment 2 settles, so it lasts its authored PreDuration.
+        Assert.AreEqual(manual.HoldStart, path.Shots[1].HoldStart, 0.001,
+            "The incoming segment should still settle at its own timestamp.");
+        Assert.AreEqual(
+            (manual.HoldStart - manual.RampStart),
+            path.Shots[1].HoldStart - path.Shots[0].HoldEnd,
+            0.001,
+            "The handoff should last the incoming segment's authored PreDuration.");
+
+        // The outgoing segment holds its target right up to that edge.
+        Assert.AreEqual(2.0f, Sample(path, manual.RampStart - 0.01).Zoom, 0.01f,
+            "Segment 1 should still be holding 2x immediately before segment 2's edge.");
+    }
+
+    /// <summary>
+    /// The handoff curve must match a normal zoom-in's curve. Both run
+    /// <see cref="CubicBezierEasing.EaseInOutCinematic"/> over the incoming segment's ramp, so
+    /// the normalized progress of a handoff and of an ordinary ramp-in should agree closely.
+    /// </summary>
+    [TestMethod]
+    public void Handoff_UsesTheSameTimingCurveAsAnOrdinaryRampIn()
+    {
+        const int w = 1920;
+        const int h = 1080;
+        const double rampStart = 3.0;
+        const double holdStart = 4.0;
+
+        // Overlapped: 2x hands off to 1.5x across the incoming ramp.
+        var overlapped = ZoomCameraPath.Build(
+        [
+            Shot(0.0, 1.0, 3.6, 5.0, 2.0f, 960, 540, 1),
+            Shot(rampStart, holdStart, 5.0, 6.5, 1.5f, 960, 540, 2, isManual: true),
+        ], w, h);
+
+        // Unoverlapped: the same incoming segment ramping from 1x on its own.
+        var alone = ZoomCameraPath.Build(
+        [
+            Shot(rampStart, holdStart, 5.0, 6.5, 1.5f, 960, 540, 2, isManual: true),
+        ], w, h);
+
+        // Same centre on both shots above, so the arc cannot contribute and the curves are
+        // comparable purely as timing.
+        for (double u = 0.05; u <= 0.95; u += 0.05)
+        {
+            double t = rampStart + ((holdStart - rampStart) * u);
+            float overlappedProgress = (Sample(overlapped, t).Zoom - 2.0f) / (1.5f - 2.0f);
+            float aloneProgress = (Sample(alone, t).Zoom - 1.0f) / (1.5f - 1.0f);
+
+            Assert.AreEqual(aloneProgress, overlappedProgress, 0.02f,
+                $"At u={u:F2} the handoff was {overlappedProgress:F3} through its move but an " +
+                $"ordinary ramp-in was {aloneProgress:F3} through its own — the curves must match.");
+        }
+    }
+
     [TestMethod]
     public void LinkedPair_ZoomVelocity_IsContinuousAcrossHandoff()
     {

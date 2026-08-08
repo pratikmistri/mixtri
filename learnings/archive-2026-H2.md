@@ -1698,4 +1698,37 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1044 passed, 3 skipped, 0 failed**, including a regression test built from
   Sample7's exact keyframe values; ARM64 Release rebuilt, re-registered, relaunched clean.
 
+## Zoom handoff, round 4: the handoff belongs to the INCOMING segment's ramp
+
+- **Feature/area**: `ZoomCameraPath.RepairLinkedHolds` — where a handoff runs, and for how long.
+- **Symptom, as reported**: "the transition to 1.5x happens when first segment is ending, instead of
+  where 2nd segment is starting, and the timing curve is different than usual zoom segment's start."
+- **Cause**: the handoff window was derived from the two *hold* edges — `[A.HoldEnd, B.HoldStart]`.
+  For the Sample7 pair that put the move at 3.759s (where A stopped holding) lasting 443ms, when the
+  user expected it at 3.202s (segment 2's leading edge on the timeline) lasting its authored 1.0s
+  `PreDuration`. Both complaints — wrong place *and* wrong speed — were the same bug: the window had
+  no relationship to anything the user had authored, it was just whatever time happened to be left
+  between two holds.
+- **Fix**: run the handoff across **B's own ramp**, `[B.RampStart, B.HoldStart]`, clamped into
+  `[A.HoldStart, A.HoldEnd]`. A simply holds until B's edge arrives. An overlapped segment now
+  animates in at exactly the place and speed it would have if nothing overlapped it — the only
+  difference is that it starts from A's zoom instead of from 1×, which is the entire point.
+  The clamp handles both degenerate directions: B's ramp opening before A has settled, and a linked
+  pair with a real gap (start when A stops holding, absorbing the gap into a longer move rather than
+  releasing toward 1×). `MinTransitionSeconds` widening now applies only when B's authored ramp is
+  genuinely too short to read.
+- **The design lesson, and the reason this took four rounds**: every earlier iteration of this window
+  was defined in terms of *internal* quantities (hold edges, midpoints, a `mid`/`half` formula that
+  looked elegant and satisfied every unit test). None of them corresponded to anything visible on the
+  timeline, so the motion could not help but feel arbitrary. **The timing of a transition should be
+  expressed in terms of what the user authored and can see — here the segment's leading edge and its
+  own PreDuration — not in terms of whatever slack the algorithm has left over.** When a user says a
+  transition is in the wrong place, check what the window is *derived from* before tuning constants.
+- **Curve parity is now asserted directly**: `Handoff_UsesTheSameTimingCurveAsAnOrdinaryRampIn`
+  compares normalized progress of a handoff against a plain ramp-in of the same segment, with both
+  shots on the same centre so the arc cannot contribute. That is a much stronger guarantee than
+  eyeballing that both call `EaseInOutCinematic`.
+- **Verified**: suite **1046 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
 
