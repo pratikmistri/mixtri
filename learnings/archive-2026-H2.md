@@ -1775,4 +1775,40 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   selection: a segment underneath could never be clicked to select it. Priority for the gesture
   that needs it, not for the whole control.
 
+## Zoom handoff, round 6: the arc is gone — predictability beats cleverness
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition`, `AutoZoomEngine.IsCoveredByManualHold`.
+- **Symptom, as reported** (Sample9: five overlapping auto segments, all 2×): "I see zoom in and
+  out and in across segments between 5 click events. Ideally all of these should have been one
+  smooth movement with no dips… it gets weird when I start editing the segment lengths."
+- **Cause 1 — the long-move arc.** It divided the zoom by `(1 + arc·bump)` whenever the focal point
+  had far to travel. With those centres on opposite corners it hit the `0.6` cap on *every* handoff,
+  pulling 2× down to **1.25×** mid-move — four pulses through what should have been one flat 2× move.
+- **The deeper error: the arc measured a move that was not happening.** Travel was computed between
+  the shots' **stored** centres, but an auto shot is re-centred on the **live cursor** by the
+  compositor. So the arc sized a pull-back from a trajectory that never appears on screen — which is
+  exactly why the user saw correct mouse tracking alongside misbehaving zoom. **Before deriving an
+  effect from a quantity, confirm that quantity is the one actually rendered.**
+- **Removed entirely.** A handoff is now a pure monotonic interpolation between the two segments'
+  own levels; nothing else touches the zoom. This also retired the arc-floor term from round 3,
+  which existed *only* to stop the arc undershooting its destination — complexity layered on to
+  correct a surprising feature. **Three of the six rounds of churn in this area were the arc or its
+  corrections. A feature that needs a correction term to stop being surprising is usually the thing
+  to delete.** If a wider frame is wanted mid-move, authoring a lower zoom level says so explicitly.
+- **Cause 2 — suppression was far too broad.** Editing a segment's length promotes it to manual, and
+  the engine dropped any auto shot whose hold *overlapped* a manual shot's hold. Auto segments span
+  ~3.9s while clicks land ~1.1s apart, so consecutive auto shots overlap **as a matter of course** —
+  promoting the middle segment silently deleted the zooms on both sides of it. Now a same-moment
+  test (within 50ms), so it only replaces the click the manual keyframe actually came from. The real
+  editor flow already handles this precisely via `SuppressedClickTicks`; this is only a fallback for
+  paths that bypass it (e.g. `AddManualKeyframe` straight onto the engine).
+- **Note the pattern across rounds 1–6**: every regression here came from an *extra* mechanism —
+  `max()` blending, two precedence paths, the arc, the arc floor, broad suppression, a double-applied
+  cursor blend. Each was individually defensible and each produced motion the user could not predict.
+  The version that finally satisfied "predictable and elegant" is the one with the fewest terms.
+- **Verified**: suite **1048 passed, 3 skipped, 0 failed**, including
+  `ChainOfEqualZoomSegments_HoldsThatZoomFlatThroughout` built from Sample9's exact keyframes and
+  `GetZoomState_EditingOneOverlappingAutoSegment_KeepsItsNeighbours`; ARM64 Release rebuilt,
+  re-registered, relaunched clean.
+
 
