@@ -21,6 +21,43 @@ public readonly record struct AudioFadeWindow(TimeSpan Start, TimeSpan Duration,
 }
 
 /// <summary>
+/// One inserted audio file placed at a chosen instant on the OUTPUT timeline, as
+/// <see cref="AudioPlaybackEngine.LoadPlacements"/> plays it.
+/// </summary>
+/// <remarks>
+/// This is the preview mirror of <see cref="Export.AudioPlacement"/>, and deliberately the
+/// ONE thing this engine positions by output time rather than by a source file's own clock:
+/// an inserted voice-over/music track (<see cref="Models.AudioTrack"/>) is anchored to the
+/// finished timeline, so output time IS its native clock and none of the segment-mapping
+/// problems documented on <see cref="AudioPlaybackEngine"/> apply to it.
+/// </remarks>
+/// <param name="FilePath">WAV to play.</param>
+/// <param name="OutputStart">Where the track starts on the output timeline.</param>
+/// <param name="TrimStart">How far into the file playback begins.</param>
+/// <param name="Duration">How long the track sounds for.</param>
+/// <param name="Volume">Constant gain, 0..1.</param>
+public readonly record struct AudioTimelinePlacement(
+    string FilePath,
+    TimeSpan OutputStart,
+    TimeSpan TrimStart,
+    TimeSpan Duration,
+    float Volume)
+{
+    /// <summary>Where this placement stops sounding on the output timeline.</summary>
+    public TimeSpan OutputEnd => OutputStart + Duration;
+
+    /// <summary>
+    /// The position inside the file that <paramref name="outputPosition"/> maps to, or
+    /// <c>null</c> when this track is silent there (before it starts, or after it ends).
+    /// </summary>
+    public TimeSpan? FilePositionFor(TimeSpan outputPosition)
+    {
+        if (outputPosition < OutputStart || outputPosition >= OutputEnd) return null;
+        return TrimStart + (outputPosition - OutputStart);
+    }
+}
+
+/// <summary>
 /// Plays back one or more WAV files in sync with the editor preview.
 /// Mixes multiple sources (system audio + mic) into a single output.
 /// </summary>
@@ -91,6 +128,15 @@ public sealed class AudioPlaybackEngine : IDisposable
     private MixingSampleProvider? _mixer;
     private readonly List<AudioFileReader> _readers = [];
     private readonly List<MediaFoundationResampler> _resamplers = [];
+
+    /// <summary>
+    /// Output-timeline placement of each entry in <see cref="_readers"/>, by index, or empty
+    /// when the engine was loaded with plain paths. Non-empty switches
+    /// <see cref="SeekCore"/> from "every reader to the same file position" to a per-reader
+    /// mapping — see <see cref="LoadPlacements"/>.
+    /// </summary>
+    private readonly List<AudioTimelinePlacement> _placements = [];
+
     private readonly object _transportLock = new();
     private readonly object _scrubQueueLock = new();
     private Timer? _scrubTimer;
@@ -105,6 +151,16 @@ public sealed class AudioPlaybackEngine : IDisposable
     public void Load(IEnumerable<string> wavFilePaths) => Load(wavFilePaths, fadeWindowsByPath: null);
 
     /// <summary>
+    /// Initializes playback from the given WAV file paths, applying a constant per-file gain
+    /// from <paramref name="volumeByPath"/> (missing entries play at full volume). Paths are
+    /// matched case-insensitively.
+    /// </summary>
+    public void Load(
+        IEnumerable<string> wavFilePaths,
+        IReadOnlyDictionary<string, float>? volumeByPath)
+        => Load(wavFilePaths, fadeWindowsByPath: null, volumeByPath);
+
+    /// <summary>
     /// Initializes playback from the given WAV file paths, applying an equal-power gain
     /// ramp (see <see cref="AudioFadeWindow"/>) to any file with an entry in
     /// <paramref name="fadeWindowsByPath"/>. All files are mixed together for simultaneous
@@ -113,6 +169,12 @@ public sealed class AudioPlaybackEngine : IDisposable
     public void Load(
         IEnumerable<string> wavFilePaths,
         IReadOnlyDictionary<string, IReadOnlyList<AudioFadeWindow>>? fadeWindowsByPath)
+        => Load(wavFilePaths, fadeWindowsByPath, volumeByPath: null);
+
+    private void Load(
+        IEnumerable<string> wavFilePaths,
+        IReadOnlyDictionary<string, IReadOnlyList<AudioFadeWindow>>? fadeWindowsByPath,
+        IReadOnlyDictionary<string, float>? volumeByPath)
     {
         Stop();
         DisposeReaders();
@@ -137,12 +199,28 @@ public sealed class AudioPlaybackEngine : IDisposable
                 fadeWindows[path] = windows;
         }
 
+        // Same re-keying rationale as the fade windows above: a casing mismatch here would
+        // silently play a track at full volume instead of the level the user set.
+        Dictionary<string, float>? volumes = null;
+        if (volumeByPath is { Count: > 0 })
+        {
+            volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (path, volume) in volumeByPath)
+                volumes[path] = volume;
+        }
+
         try
         {
             // Open all audio files
             foreach (var path in validPaths)
             {
                 var reader = new AudioFileReader(path);
+
+                // AudioFileReader applies this to the samples it returns, so it survives
+                // every Seek/ScrubTo without a separate provider in the chain.
+                if (volumes is not null && volumes.TryGetValue(path, out float volume))
+                    reader.Volume = Math.Clamp(volume, 0f, 1f);
+
                 _readers.Add(reader);
             }
 
@@ -204,6 +282,225 @@ public sealed class AudioPlaybackEngine : IDisposable
             _outputDevice?.Dispose();
             _outputDevice = null;
             _mixer = null;
+        }
+    }
+
+    /// <summary>
+    /// Initializes playback from inserted timeline-positioned tracks (voice-over, music),
+    /// each at its own output-timeline offset and constant gain. Drive it with
+    /// <see cref="SyncTo"/> rather than <see cref="Seek"/>, which takes an output-timeline
+    /// position here rather than a file position.
+    /// </summary>
+    /// <remarks>
+    /// Kept as a separate engine instance from the recorded-audio one on purpose: the two
+    /// are seeked in DIFFERENT clocks. Recorded tracks are positioned by the caller in the
+    /// primary recording's own file time (<c>EditorPage.AudioPositionForVideo</c>, which
+    /// maps through segments); inserted tracks are positioned in output time directly. One
+    /// engine cannot be seeked in both at once, and conflating them is exactly the drift
+    /// this type's remarks describe.
+    /// </remarks>
+    public void LoadPlacements(IEnumerable<AudioTimelinePlacement> placements)
+    {
+        ArgumentNullException.ThrowIfNull(placements);
+
+        Stop();
+        DisposeReaders();
+        _outputDevice?.Dispose();
+        _outputDevice = null;
+        _mixer = null;
+
+        var valid = placements
+            .Where(p => !string.IsNullOrWhiteSpace(p.FilePath)
+                        && p.Duration > TimeSpan.Zero
+                        && p.Volume > 0
+                        && File.Exists(p.FilePath))
+            .ToList();
+        if (valid.Count == 0) return;
+
+        try
+        {
+            foreach (var placement in valid)
+            {
+                _readers.Add(new AudioFileReader(placement.FilePath));
+                _placements.Add(placement);
+            }
+
+            var first = _readers[0];
+            _mixer = new MixingSampleProvider(
+                WaveFormat.CreateIeeeFloatWaveFormat(first.WaveFormat.SampleRate, first.WaveFormat.Channels))
+            {
+                ReadFully = true
+            };
+
+            for (int i = 0; i < _readers.Count; i++)
+            {
+                var reader = _readers[i];
+
+                // AudioFileReader has its own Volume, applied to the samples it returns —
+                // no extra provider needed, and it survives every Seek/ScrubTo.
+                reader.Volume = Math.Clamp(_placements[i].Volume, 0f, 1f);
+
+                // CRITICAL: pad to silence BEFORE anything downstream sees the reader.
+                // A placed track is parked at EOF wherever it is silent (before it starts,
+                // after it ends), so it returns 0 samples — and MixingSampleProvider
+                // permanently REMOVES any input that reads 0, while MediaFoundationResampler
+                // latches end-of-input. Either would silently drop a track that simply had
+                // not started yet, which is every track not placed at 00:00.
+                ISampleProvider sampleProvider = new SilencePaddedSampleProvider(reader);
+
+                if (reader.WaveFormat.SampleRate != _mixer.WaveFormat.SampleRate
+                    || reader.WaveFormat.Channels != _mixer.WaveFormat.Channels)
+                {
+                    var resampled = new MediaFoundationResampler(
+                        new SampleToWaveProvider(sampleProvider),
+                        WaveFormat.CreateIeeeFloatWaveFormat(
+                            _mixer.WaveFormat.SampleRate, _mixer.WaveFormat.Channels));
+                    _resamplers.Add(resampled);
+                    sampleProvider = resampled.ToSampleProvider();
+                }
+
+                _mixer.AddMixerInput(sampleProvider);
+            }
+
+            _outputDevice = new WaveOutEvent { DesiredLatency = 100 };
+            _outputDevice.Init(_mixer);
+
+            // Nothing has been positioned yet, so every reader sits at byte 0 — i.e. every
+            // track would sound from the very start of the timeline until the first sync.
+            // Park them all where the playhead actually is instead.
+            SeekCore(TimeSpan.Zero);
+        }
+        catch
+        {
+            DisposeReaders();
+            _outputDevice?.Dispose();
+            _outputDevice = null;
+            _mixer = null;
+        }
+    }
+
+    /// <summary>
+    /// Whether any loaded placement sounds at <paramref name="outputPosition"/>. Callers use
+    /// this to pause rather than run silent readers through the mixer over a stretch of
+    /// timeline no inserted track covers.
+    /// </summary>
+    public bool HasAudioAt(TimeSpan outputPosition)
+    {
+        lock (_transportLock)
+        {
+            foreach (var placement in _placements)
+            {
+                if (placement.FilePositionFor(outputPosition) is not null)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Re-aligns every placed track with an OUTPUT-timeline position, seeking only those
+    /// that have drifted past <paramref name="tolerance"/>. Returns whether anything sounds
+    /// there, so the caller can start or pause transport in one call.
+    /// </summary>
+    /// <remarks>
+    /// Per-reader rather than the single whole-engine drift check the recorded-audio path
+    /// uses (<c>EditorPage.SyncAudioToPlayhead</c>): placed tracks start at different
+    /// instants, so "the first reader is in the right place" says nothing about the rest.
+    /// A track that is silent at this position is parked at EOF rather than left where it
+    /// was, so it contributes silence through the mixer's <c>ReadFully</c> padding instead
+    /// of audibly running on past its own end.
+    /// </remarks>
+    public bool SyncTo(TimeSpan outputPosition, TimeSpan tolerance)
+    {
+        lock (_transportLock)
+        {
+            bool audible = false;
+
+            for (int i = 0; i < _readers.Count && i < _placements.Count; i++)
+            {
+                var reader = _readers[i];
+                var target = _placements[i].FilePositionFor(outputPosition);
+
+                try
+                {
+                    if (target is not { } filePosition)
+                    {
+                        if (reader.Position < reader.Length)
+                            reader.Position = reader.Length;
+                        continue;
+                    }
+
+                    audible = true;
+                    if ((reader.CurrentTime - filePosition).Duration() > tolerance)
+                        SeekReader(reader, filePosition);
+                }
+                catch { }
+            }
+
+            return audible;
+        }
+    }
+
+    /// <summary>
+    /// Paths currently loaded, in load order. Lets a caller tell "only levels changed" from
+    /// "the set of tracks changed" and avoid a rebuild for the former.
+    /// </summary>
+    public IReadOnlyList<string> LoadedPaths
+    {
+        get
+        {
+            lock (_transportLock)
+            {
+                return _readers.Select(r => r.FileName).ToList();
+            }
+        }
+    }
+
+    /// <summary>Number of loaded placements; see <see cref="TrySetPlacementVolumes"/>.</summary>
+    public int PlacementCount
+    {
+        get { lock (_transportLock) { return _placements.Count; } }
+    }
+
+    /// <summary>
+    /// Updates the gain of already-open readers, by path, without reopening anything.
+    /// </summary>
+    /// <remarks>
+    /// Volume is a property of the reader, so changing it needs no reload at all. Rebuilding
+    /// the engine for it — as the mix flyout first did — reopened every WAV and recreated the
+    /// output device on EVERY slider tick, roughly thirty times a second while dragging.
+    /// </remarks>
+    public void SetVolumesByPath(IReadOnlyDictionary<string, float> volumeByPath)
+    {
+        ArgumentNullException.ThrowIfNull(volumeByPath);
+
+        lock (_transportLock)
+        {
+            foreach (var reader in _readers)
+            {
+                if (volumeByPath.TryGetValue(reader.FileName, out float volume))
+                    reader.Volume = Math.Clamp(volume, 0f, 1f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Updates placed tracks' gains in load order, without reopening anything. Returns false
+    /// when the counts disagree — i.e. the set of placements changed, not just their levels —
+    /// so the caller must do a full <see cref="LoadPlacements"/> instead.
+    /// </summary>
+    public bool TrySetPlacementVolumes(IReadOnlyList<float> volumes)
+    {
+        ArgumentNullException.ThrowIfNull(volumes);
+
+        lock (_transportLock)
+        {
+            if (_readers.Count == 0 || volumes.Count != _readers.Count) return false;
+
+            for (int i = 0; i < _readers.Count; i++)
+                _readers[i].Volume = Math.Clamp(volumes[i], 0f, 1f);
+
+            return true;
         }
     }
 
@@ -335,17 +632,41 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         try { _outputDevice?.Stop(); } catch { }
 
-        foreach (var reader in _readers)
+        // Placement mode: `position` is an OUTPUT-timeline instant, and each reader maps it
+        // through its own offset (or parks at EOF where that track is silent). Plain mode:
+        // `position` is already a file position shared by every reader.
+        bool placed = _placements.Count > 0;
+
+        for (int i = 0; i < _readers.Count; i++)
         {
+            var reader = _readers[i];
             try
             {
-                long targetBytes = (long)(position.TotalSeconds
-                    * reader.WaveFormat.AverageBytesPerSecond);
-                targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
-                reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
+                if (!placed)
+                {
+                    SeekReader(reader, position);
+                    continue;
+                }
+
+                if (i < _placements.Count && _placements[i].FilePositionFor(position) is { } filePosition)
+                    SeekReader(reader, filePosition);
+                else
+                    reader.Position = reader.Length;
             }
             catch { }
         }
+    }
+
+    /// <summary>
+    /// Moves one reader to a position in its OWN file, snapped down to a block boundary
+    /// (a mid-sample position produces noise) and clamped to the file's length.
+    /// </summary>
+    private static void SeekReader(AudioFileReader reader, TimeSpan filePosition)
+    {
+        long targetBytes = (long)(filePosition.TotalSeconds
+            * reader.WaveFormat.AverageBytesPerSecond);
+        targetBytes -= targetBytes % reader.WaveFormat.BlockAlign;
+        reader.Position = Math.Clamp(targetBytes, 0, reader.Length);
     }
 
     private void ResetScrubStopTimer()
@@ -393,6 +714,39 @@ public sealed class AudioPlaybackEngine : IDisposable
             try { reader.Dispose(); } catch { }
         }
         _readers.Clear();
+
+        // Indexed in lockstep with _readers, so it must never outlive them: a stale entry
+        // would map the next Load's readers through the previous load's offsets.
+        _placements.Clear();
+    }
+
+    /// <summary>
+    /// Wraps a source provider so it NEVER reports end-of-stream: any shortfall in a read is
+    /// zero-filled and the full requested count is returned.
+    /// </summary>
+    /// <remarks>
+    /// Required by <see cref="LoadPlacements"/>, where a track is parked at EOF for every
+    /// instant of the timeline it does not cover. Both consumers downstream treat a
+    /// zero-sample read as permanent death — <see cref="MixingSampleProvider"/> REMOVES the
+    /// input, and <see cref="MediaFoundationResampler"/> latches end-of-input — so without
+    /// this, a track placed at anything other than 00:00 would be dropped during the very
+    /// first buffer, before the playhead ever reached it, and never play at all.
+    /// <para>
+    /// Only <see cref="LoadPlacements"/> uses it. The plain <see cref="Load"/> path plays
+    /// whole recordings from the start and deliberately keeps NAudio's default behaviour.
+    /// </para>
+    /// </remarks>
+    private sealed class SilencePaddedSampleProvider(ISampleProvider source) : ISampleProvider
+    {
+        public WaveFormat WaveFormat => source.WaveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int read = source.Read(buffer, offset, count);
+            if (read < count)
+                Array.Clear(buffer, offset + read, count - read);
+            return count;
+        }
     }
 
     /// <summary>

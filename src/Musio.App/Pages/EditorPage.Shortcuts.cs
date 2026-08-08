@@ -53,6 +53,15 @@ public sealed partial class EditorPage
     {
         if (IsFocusOnInteractiveControl()) return;
 
+        // A selected inserted audio block claims the split, so the same key cuts whichever
+        // track the user is actually working on rather than always the primary video.
+        if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
+        {
+            SplitInsertedAudioTrack(audioTrackId);
+            args.Handled = true;
+            return;
+        }
+
         ViewModel.SplitAtPlayheadCommand.Execute(null);
         args.Handled = true;
     }
@@ -60,6 +69,14 @@ public sealed partial class EditorPage
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (IsFocusOnInteractiveControl()) return;
+
+        // If an inserted voice-over/music block is selected, remove it.
+        if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
+        {
+            DeleteInsertedAudioTrack(audioTrackId);
+            args.Handled = true;
+            return;
+        }
 
         // If a camera segment is selected, remove it.
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
@@ -201,6 +218,7 @@ public sealed partial class EditorPage
         // the encoder when both pull from the same source files at once.
         Preview.Pause();
         try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
+        try { _insertedAudioPlayer?.Pause(); } catch { /* best-effort */ }
 
         // Start new export
         ExportVM.PrepareForExport();
@@ -423,6 +441,7 @@ public sealed partial class EditorPage
         // Navigate to RecordingPage in append mode
         Preview?.Pause();
         _audioPlayer?.Stop();
+        _insertedAudioPlayer?.Stop();
         Frame.Navigate(typeof(RecordingPage), "append");
     }
 
@@ -494,5 +513,159 @@ public sealed partial class EditorPage
 
         if (errorMessage is not null)
             await ShowProjectDialogAsync("Could not import video", errorMessage);
+    }
+
+    /// <summary>Inserts an external audio file as narration at the playhead.</summary>
+    private void ImportVoiceOver_Click(object sender, RoutedEventArgs e)
+        => _ = ImportAudioAsync(AudioTrackKind.VoiceOver);
+
+    /// <summary>Inserts an external audio file as a background music bed at the playhead.</summary>
+    private void ImportMusic_Click(object sender, RoutedEventArgs e)
+        => _ = ImportAudioAsync(AudioTrackKind.Music);
+
+    /// <summary>
+    /// Lets the user pick an external audio file and inserts it at the playhead as an
+    /// <see cref="AudioTrack"/>. The file is normalised by <see cref="AudioImportService"/>
+    /// into a PCM WAV, so preview (which seeks by byte offset) and export (which trims by
+    /// time) both land on the same sample.
+    /// </summary>
+    /// <remarks>
+    /// Anchored to the playhead, and to the OUTPUT timeline, deliberately: a voice-over
+    /// belongs to the moment in the finished video the user is looking at, and must stay
+    /// there when the footage beneath it is later trimmed or reordered — which is exactly
+    /// what separates an inserted track from the recording's own audio.
+    /// </remarks>
+    private async Task ImportAudioAsync(AudioTrackKind kind)
+    {
+        bool isMusic = kind == AudioTrackKind.Music;
+        string label = isMusic ? "music" : "voice over";
+
+        // An audio track has no frames, so unlike a video import it cannot start a project.
+        // Checked BEFORE the picker so the user is not made to choose a file first.
+        if (ProjectService.Instance.CurrentProject is null)
+        {
+            await ShowProjectDialogAsync(
+                $"Could not insert {label}",
+                "Open or record a project first — audio is inserted into an existing timeline.");
+            return;
+        }
+
+        Windows.Storage.StorageFile? file = null;
+        try
+        {
+            file = await PickerHelper.PickSingleFileAsync(
+                Windows.Storage.Pickers.PickerLocationId.MusicLibrary,
+                AudioImportService.SupportedExtensions,
+                Windows.Storage.Pickers.PickerViewMode.List);
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Audio import picker failed: {ex.Message}");
+        }
+        if (file is null) return;
+
+        // Captured before the transcode: the playhead can move while a multi-second import
+        // runs, and the track belongs where the user was when they asked for it.
+        var startTime = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
+        using var cts = new CancellationTokenSource();
+        var (dialog, bar) = DialogHelper.BuildProgressDialog(
+            XamlRoot, $"Importing {label}", "Converting and importing the audio…", cts);
+        var progress = new Progress<double>(p =>
+        {
+            DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
+        });
+
+        var showTask = dialog.ShowAsync();
+        string? errorMessage = null;
+        try
+        {
+            var result = await AudioImportService.ImportAsync(file.Path, null, progress, cts.Token);
+
+            // Executed through the undo manager, like every other timeline edit: an inserted
+            // track lives on TimelineModel.AudioTracks precisely so Ctrl+Z can take it back.
+            var name = Path.GetFileNameWithoutExtension(result.SourceFileName);
+
+            // Clamped to what is left of the timeline. A music bed is routinely far longer
+            // than the footage, and a block running past the end of the ruler puts its own
+            // trim handle somewhere the user cannot reach or scroll to. The rest of the file
+            // is not lost — the lane draws it dimmed behind the block, so it can be dragged
+            // back in from the right edge whenever there is room for it.
+            var timelineEnd = ViewModel.Model.DisplayDuration;
+            var start = startTime < TimeSpan.Zero ? TimeSpan.Zero : startTime;
+
+            // A playhead parked AT the end of the timeline (pressing End, or a clip that ends
+            // the project) leaves no room at all, and a block starting there maps to the
+            // canvas's right edge — so it draws as nothing, and the ruler cannot scroll past
+            // DisplayDuration to reach it. The insert would appear to do nothing at all. Back
+            // the start off just far enough for the clip to land somewhere it can be seen and
+            // grabbed; the audio is still anchored as late as it can be.
+            if (timelineEnd > TimeSpan.Zero && start >= timelineEnd)
+            {
+                var wanted = result.Duration < timelineEnd ? result.Duration : timelineEnd;
+                start = timelineEnd - wanted;
+            }
+
+            TimeSpan? duration = null;
+            if (timelineEnd > start)
+            {
+                var room = timelineEnd - start;
+                if (room < result.Duration)
+                {
+                    // Never clamp below the minimum a block can be trimmed to, or inserting
+                    // at the very end of the timeline would produce something too small to
+                    // grab and drag back out.
+                    duration = room >= AudioTrackEditing.MinDuration
+                        ? room
+                        : AudioTrackEditing.MinDuration;
+                }
+            }
+
+            var operation = new AddAudioTrackOperation(new AudioTrack
+            {
+                FilePath = result.AudioFilePath,
+                Name = string.IsNullOrWhiteSpace(name) ? (isMusic ? "Music" : "Voice over") : name,
+                Kind = kind,
+                StartTime = start,
+                TrimStart = TimeSpan.Zero,
+                SourceDuration = result.Duration,
+                Duration = duration,
+                Volume = AudioTrack.DefaultVolumeFor(kind),
+            });
+
+            ViewModel.UndoRedoManager.Execute(operation);
+
+            // The import can run for many seconds, during which the page may have been
+            // unloaded — the model edit above still stands (it is the shared timeline), but
+            // there may no longer be a control to select in or a preview to rebuild.
+            if (Timeline is not null)
+            {
+                Timeline.SelectedInsertedAudioTrackId = operation.CreatedId;
+                RefreshInsertedAudio();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancelled — nothing to report.
+        }
+        catch (AudioImportException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Audio import failed: {ex}");
+            errorMessage = ex.Message;
+        }
+        finally
+        {
+            // Only one ContentDialog may be shown at a time, so the error dialog below has
+            // to wait for this one to finish closing.
+            dialog.Hide();
+            try { await showTask; } catch { /* dialog dismissed */ }
+        }
+
+        if (errorMessage is not null)
+            await ShowProjectDialogAsync($"Could not insert {label}", errorMessage);
     }
 }

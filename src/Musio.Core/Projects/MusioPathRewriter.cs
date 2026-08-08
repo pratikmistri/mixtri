@@ -177,6 +177,12 @@ public static class MusioPathRewriter
         foreach (var overlay in timeline.TextOverlays)
             Add(overlay.SourceVideoFilePath);
 
+        // Inserted voice-over/music is irreplaceable in exactly the way a style asset is
+        // not: the normalised WAV lives in an app-owned import folder the orphan sweep can
+        // reclaim, so dropping it from a package silently would lose the only copy.
+        foreach (var track in timeline.AudioTracks)
+            Add(track.FilePath, MediaReferenceKind.Recording);
+
         return found;
     }
 
@@ -263,6 +269,10 @@ public static class MusioPathRewriter
                 SourceVideoFilePath = ApplyOptional(timeline.TextOverlays[i].SourceVideoFilePath, map),
             };
         }
+
+        // AudioTrack is a mutable class (not a record), so it updates in place.
+        foreach (var track in timeline.AudioTracks)
+            track.FilePath = Apply(track.FilePath, map);
     }
 
     private static void RewriteList(List<string> paths, Func<string, string?> map)

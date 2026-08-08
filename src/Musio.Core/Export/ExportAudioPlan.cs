@@ -1,3 +1,4 @@
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
 
@@ -77,6 +78,20 @@ public enum AudioSourceKind
 /// <see cref="TrimFromStart"/> or <see cref="Delay"/> — the fade runs entirely inside audio
 /// that was already going to be placed there.
 /// </param>
+/// <param name="Volume">
+/// <para>
+/// Constant playback gain in the 0..1 range <c>BackgroundAudioTrack.Volume</c> accepts.
+/// <c>1.0</c> (the default) is every placement cut from a recording — recorded audio is
+/// muxed at the level it was captured, and the editor's per-source control is a mute, not
+/// a fader.
+/// </para>
+/// <para>
+/// Below 1.0 only for an inserted <see cref="Musio.Core.Models.AudioTrack"/> (voice-over
+/// or music bed), whose whole point is sitting under the recording. Unlike the fade fields
+/// above this IS actually applied on export: a CONSTANT gain needs no envelope API, which
+/// is exactly the capability <c>BackgroundAudioTrack</c> lacks.
+/// </para>
+/// </param>
 public readonly record struct AudioPlacement(
     string SourcePath,
     AudioSourceKind Kind,
@@ -85,7 +100,8 @@ public readonly record struct AudioPlacement(
     TimeSpan Delay,
     bool PlaysAtNativeRateOnSpeedAdjustedSegment = false,
     TimeSpan FadeOutDuration = default,
-    TimeSpan FadeInDuration = default);
+    TimeSpan FadeInDuration = default,
+    double Volume = 1.0);
 
 /// <summary>
 /// Pure mapping from a project + timeline to the set of audio tracks the exporter must
@@ -215,9 +231,104 @@ public static class ExportAudioPlan
             .OrderBy(s => s.Start)
             .ToList();
 
-        return videoSegments is { Count: > 0 }
+        var recorded = videoSegments is { Count: > 0 }
             ? BuildFromSegments(project, timeline!, videoSegments)
             : BuildLegacy(project, mapper);
+
+        // Apply the per-channel mix to everything cut from a recording. Done HERE, in the one
+        // place placements are built, rather than by the caller filtering file lists: the
+        // export view model used to drop muted files from Project.AudioFilePaths, which
+        // BuildFromSegments never reads (it uses each segment's own list), so muting a track
+        // and exporting an edited project silently kept the muted audio.
+        if (timeline is not null)
+            recorded = ApplyRecordedMix(recorded, timeline);
+
+        // Inserted tracks are built into a SEPARATE list and concatenated only on the way
+        // out, so they can never reach ApplyRecordedMix. That separation is load-bearing, not
+        // stylistic: an inserted clip is also an AudioSourceKind.AudioFile, so the classifier
+        // would read its file name (typically `audio.wav`) as system capture and REPLACE its
+        // carefully computed clip×lane gain with the system channel's — or drop it entirely
+        // when system audio is muted. Keeping them in one list would leave that correctness
+        // resting on nothing but the order of two statements; two guard tests pin it.
+        var inserted = timeline is not null ? BuildInsertedTracks(timeline) : [];
+
+        recorded.AddRange(inserted);
+        return recorded;
+    }
+
+    /// <summary>
+    /// Scales each recorded placement by its channel's gain, dropping the ones that are
+    /// silent.
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="AudioSourceKind.AudioFile"/> placements are classified: those are the
+    /// recorder's own <c>system_*</c>/<c>mic_*</c> captures.
+    /// <see cref="AudioSourceKind.EmbeddedVideoTrack"/> is an imported clip's own soundtrack,
+    /// which belongs to neither channel and is left untouched.
+    /// </remarks>
+    private static List<AudioPlacement> ApplyRecordedMix(
+        List<AudioPlacement> placements, TimelineModel timeline)
+    {
+        var mixed = new List<AudioPlacement>(placements.Count);
+
+        foreach (var placement in placements)
+        {
+            if (placement.Kind != AudioSourceKind.AudioFile)
+            {
+                mixed.Add(placement);
+                continue;
+            }
+
+            double volume = timeline.EffectiveVolume(RecordedAudio.Classify(placement.SourcePath));
+            if (volume <= 0) continue;      // muted or silenced: never worth muxing
+
+            mixed.Add(volume >= 1.0 ? placement : placement with { Volume = volume });
+        }
+
+        return mixed;
+    }
+
+    /// <summary>
+    /// Placements for the timeline's inserted <see cref="AudioTrack"/>s (voice-over, music).
+    /// </summary>
+    /// <remarks>
+    /// These are the one kind of audio that is NOT derived from a segment: an inserted
+    /// track's <see cref="AudioTrack.StartTime"/> is already an output-timeline instant, so
+    /// it maps to <see cref="AudioPlacement.Delay"/> directly, with no trim/speed/transition
+    /// arithmetic. That is the entire point of the type — a voice-over must stay where the
+    /// user put it when the footage under it is re-cut, where recorded audio must follow its
+    /// segment. Muted, silenced and zero-length tracks are dropped here rather than muxed at
+    /// volume 0, so a disabled track costs nothing in the export.
+    /// </remarks>
+    private static List<AudioPlacement> BuildInsertedTracks(TimelineModel timeline)
+    {
+        var placements = new List<AudioPlacement>();
+        if (timeline.AudioTracks is not { Count: > 0 }) return placements;
+
+        foreach (var track in timeline.AudioTracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+
+            // The clip's own gain scaled by its lane's. Two independent controls: a lane
+            // fader that rides every clip on it, and each clip's own level — which is what
+            // lets one loud bed be pulled down without touching a carefully set voice-over.
+            double laneVolume = timeline.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            double volume = track.EffectiveVolume * laneVolume;
+            if (volume <= 0) continue;
+
+            var trimStart = track.TrimStart < TimeSpan.Zero ? TimeSpan.Zero : track.TrimStart;
+            var delay = track.StartTime < TimeSpan.Zero ? TimeSpan.Zero : track.StartTime;
+
+            placements.Add(new AudioPlacement(
+                track.FilePath,
+                AudioSourceKind.AudioFile,
+                trimStart,
+                track.EffectiveDuration,
+                delay,
+                Volume: volume));
+        }
+
+        return placements;
     }
 
     private static List<AudioPlacement> BuildFromSegments(

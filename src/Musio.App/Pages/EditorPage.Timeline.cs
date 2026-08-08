@@ -507,6 +507,14 @@ public sealed partial class EditorPage
 
             UpdateZoomPanelVisibility();
             UpdateSpeedPanelVisibility();
+
+            // Undo/redo mutates the model directly, so the inserted-audio preview engine and
+            // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
+            // rebuilt too, or Ctrl+Z after an audio edit would keep playing (and drawing) the
+            // placement that was just undone. Guarded, because this handler fires on every
+            // edit of any kind and rebuilding reopens every inserted WAV.
+            RefreshInsertedAudioIfChanged();
+
             Timeline.Refresh();
             InvalidatePreview();
         });
@@ -1025,6 +1033,11 @@ public sealed partial class EditorPage
                 Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
 
             double videoDuration = project.Duration.TotalSeconds;
+            // A restored project whose top-level Duration was never written would make every
+            // coverage calculation below collapse to zero and silently produce no waveform,
+            // while the audio itself still played — indistinguishable from "no audio".
+            if (videoDuration <= 0)
+                videoDuration = ViewModel.Model.DisplayDuration.TotalSeconds;
 
             // Offset between audio and video start.
             // Positive: audio pre-roll (WAV starts before video frame 0).
@@ -1081,14 +1094,45 @@ public sealed partial class EditorPage
             _audioOffsetSeconds = audioOffset;
             _audioPlayer?.Dispose();
             _audioPlayer = new AudioPlaybackEngine();
+
+            // Filtered by the PERSISTED mute state, not loaded wholesale. Loading
+            // `validPaths` here ignored IsSystemAudioMuted/IsMicAudioMuted entirely, so a
+            // project saved with a track muted came back audible: the flags round-tripped
+            // correctly, but nothing applied them until the user toggled a mute button.
+            var unmuted = GetUnmutedAudioPaths(project);
+
+            // Per-channel gain, from the same model state export reads, so preview and export
+            // agree on the mix rather than each deriving it their own way.
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in unmuted)
+            {
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(
+                    RecordedAudio.Classify(path));
+            }
+
             // No fade windows: T9 confirmed transition crossfades can't be wired here
             // without drifting once the timeline has real cuts — see
             // AudioPlaybackEngine's class remarks for the full reasoning.
-            _audioPlayer.Load(validPaths);
+            if (unmuted.Count > 0)
+                _audioPlayer.Load(unmuted, volumes);
+
+            // The mute BUTTONS are drawn from the model too, and are likewise only updated
+            // by their own click handlers — so a restored project showed unmuted icons over
+            // muted tracks until something else redrew them.
+            Timeline?.SyncAudioMuteVisuals();
+
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"recorded audio loaded: {unmuted.Count}/{validPaths.Count} track(s) unmuted " +
+                $"(systemMuted={ViewModel.Model.IsSystemAudioMuted}, micMuted={ViewModel.Model.IsMicAudioMuted}); " +
+                $"waveforms sys={(systemWaveform is { Length: > 0 } ? "yes" : "no")} " +
+                $"mic={(micWaveform is { Length: > 0 } ? "yes" : "no")}, " +
+                $"videoDuration={videoDuration:F2}s");
         }
-        catch
+        catch (Exception ex)
         {
-            // Audio waveform generation failed — editor still works without it
+            // Audio waveform generation failed — editor still works without it, but a
+            // silent bail-out here is indistinguishable from "this recording has no audio".
+            Musio.Core.Diagnostics.DiagLog.Write("Editor", $"audio waveform load failed: {ex}");
         }
     }
 
@@ -1158,7 +1202,23 @@ public sealed partial class EditorPage
     /// (or when the playhead has jumped to unrelated footage), starts it when the playhead
     /// enters footage that has audio, and pauses it over slides, gaps and appended clips.
     /// </summary>
+    /// <remarks>
+    /// Drives the recorded and the inserted engines independently, because they are silent
+    /// in different places: the recorded one over a text slide, the inserted one wherever no
+    /// voice-over/music track covers the playhead. Neither may gate the other, or a project
+    /// whose only audio is an inserted track would play nothing at all.
+    /// </remarks>
     private void SyncAudioToPlayhead(TimeSpan videoPosition)
+    {
+        SyncRecordedAudioToPlayhead(videoPosition);
+        SyncInsertedAudioToPlayhead(videoPosition);
+    }
+
+    /// <summary>Whether either preview engine has anything loaded to play.</summary>
+    private bool HasPreviewAudio
+        => _audioPlayer is { IsLoaded: true } || _insertedAudioPlayer is { IsLoaded: true };
+
+    private void SyncRecordedAudioToPlayhead(TimeSpan videoPosition)
     {
         if (_audioPlayer is not { IsLoaded: true } player) return;
 
@@ -1176,6 +1236,533 @@ public sealed partial class EditorPage
 
         if (drifted) player.Seek(target);
         if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// Re-aligns the inserted voice-over/music engine, which is positioned in OUTPUT time
+    /// directly — the playhead IS its clock, so there is no segment mapping to apply and no
+    /// per-file offset to add.
+    /// </summary>
+    private void SyncInsertedAudioToPlayhead(TimeSpan videoPosition)
+    {
+        if (_insertedAudioPlayer is not { IsLoaded: true } player) return;
+
+        // One call both re-seeks the drifted tracks and reports whether any of them sound
+        // here; a stretch of timeline no inserted track covers pauses rather than running
+        // silent readers through the mixer.
+        bool audible = player.SyncTo(videoPosition, AudioDriftTolerance);
+
+        if (!audible)
+        {
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// (Re)builds the inserted-audio engine from the model's <see cref="AudioTrack"/>s.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The engine is built on a background thread.</b> <c>LoadPlacements</c> opens every
+    /// inserted WAV synchronously, and this runs during preview initialisation and on every
+    /// model reload — so doing it inline stalled the UI thread exactly when the decoder,
+    /// filmstrip and preview surfaces are all coming up, which is what made loading a project
+    /// with audio feel like it was glitching.
+    /// </para>
+    /// <para>
+    /// The lane projection stays synchronous: it is cheap (no I/O), and the timeline must
+    /// show the blocks immediately rather than a frame later.
+    /// </para>
+    /// </remarks>
+    private void ReloadInsertedAudioPlayer()
+    {
+        _insertedAudioPlayer?.Dispose();
+        _insertedAudioPlayer = null;
+        _insertedAudioSignature = BuildInsertedAudioSignature();
+
+        PublishInsertedAudioLane();
+
+        var tracks = ViewModel.Model.AudioTracks;
+        if (tracks is not { Count: > 0 }) return;
+
+        var placements = new List<AudioTimelinePlacement>();
+        foreach (var track in tracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+
+            // Clip gain scaled by its lane's fader — the same product export muxes, so the
+            // preview level matches the exported one.
+            double volume = track.EffectiveVolume
+                * ViewModel.Model.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            if (volume <= 0) continue;
+
+            placements.Add(new AudioTimelinePlacement(
+                track.FilePath,
+                track.StartTime,
+                track.TrimStart,
+                track.EffectiveDuration,
+                (float)volume));
+        }
+
+        if (placements.Count == 0) return;
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor",
+            $"inserted audio: building engine for {placements.Count} placement(s)");
+
+        // Every rebuild invalidates the previous one: a reload can be triggered again while
+        // the last engine is still opening its files, and publishing a stale engine would
+        // play the pre-edit placements (and leak the one that superseded it).
+        int generation = ++_insertedAudioGeneration;
+
+        _ = Task.Run(() =>
+        {
+            AudioPlaybackEngine? player = null;
+            try
+            {
+                player = new AudioPlaybackEngine();
+                player.LoadPlacements(placements);
+            }
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                    $"inserted audio engine failed to load: {ex.Message}");
+                player?.Dispose();
+                return;
+            }
+
+            var built = player;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (generation != _insertedAudioGeneration || _pageUnloaded)
+                {
+                    built.Dispose();
+                    return;
+                }
+
+                _insertedAudioPlayer?.Dispose();
+                _insertedAudioPlayer = built;
+            });
+        });
+    }
+
+    /// <summary>Invalidates in-flight engine builds; see <see cref="ReloadInsertedAudioPlayer"/>.</summary>
+    private int _insertedAudioGeneration;
+
+    /// <summary>
+    /// <see cref="ReloadInsertedAudioPlayer"/>, guaranteed never to propagate a failure.
+    /// </summary>
+    /// <remarks>
+    /// Called from the preview-initialisation path, where an exception would abort the whole
+    /// rebuild and leave a live but blank editor with no retry — the failure mode the
+    /// crash-hardening playbook was written for. Inserted audio is strictly additive to the
+    /// editor, so it must degrade to "no inserted audio", never take the preview with it.
+    /// </remarks>
+    private void TryReloadInsertedAudioPlayer()
+    {
+        try
+        {
+            ReloadInsertedAudioPlayer();
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"inserted audio reload failed, continuing without it: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Applies an inserted-audio edit and republishes everything that depends on it.
+    /// </summary>
+    /// <remarks>
+    /// The single funnel for every audio-track mutation. The preview engine and the lane
+    /// projection are both derived state rebuilt from <c>TimelineModel.AudioTracks</c>, and
+    /// neither is refreshed by <c>UndoRedoManager</c> (which only mutates the model), so an
+    /// edit that skipped this would appear to do nothing until the editor was reopened.
+    /// </remarks>
+    private void ExecuteAudioTrackOperation(IEditOperation operation)
+    {
+        ViewModel.UndoRedoManager.Execute(operation);
+        RefreshInsertedAudio();
+    }
+
+    /// <summary>
+    /// Applies a mix change to the running preview, rebuilding an engine only when the SET of
+    /// tracks it plays actually changed.
+    /// </summary>
+    /// <remarks>
+    /// Volume is a per-reader property, so a level change needs no reload. The first version
+    /// rebuilt the whole engine from the flyout's <c>ValueChanged</c>, which reopened every
+    /// WAV and recreated the output device on every slider tick — roughly thirty times a
+    /// second while dragging, as `diag.log` showed. A rebuild is still required when a
+    /// channel is muted or unmuted, because muted tracks are not loaded at all.
+    /// </remarks>
+    /// <returns>
+    /// <c>true</c> when the change needed a rebuild, so the caller should repaint the whole
+    /// timeline; <c>false</c> when only levels moved and repainting the audio lanes suffices.
+    /// </returns>
+    private bool ApplyAudioMixChange(AudioMixChannel channel)
+    {
+        if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
+        {
+            var project = ProjectService.Instance.CurrentProject;
+            if (project is null) return false;
+
+            var audible = GetUnmutedAudioPaths(project);
+
+            // The loaded set is what mute changes; compare it before deciding.
+            bool sameSet = _audioPlayer is { IsLoaded: true } player
+                && player.LoadedPaths.Count == audible.Count
+                && player.LoadedPaths.SequenceEqual(audible, StringComparer.OrdinalIgnoreCase);
+
+            if (!sameSet)
+            {
+                ReloadAudioPlayer();
+                return true;
+            }
+
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in audible)
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+
+            _audioPlayer!.SetVolumesByPath(volumes);
+            return false;
+        }
+
+        // Inserted lanes: the placements are rebuilt from the same track list in the same
+        // order, so equal counts mean the same placements in the same slots and only the
+        // levels moved. Any change that adds or removes one (muting a lane drops all of its
+        // clips) changes the count and falls through to a full rebuild.
+        var laneVolumes = new List<float>();
+        foreach (var track in ViewModel.Model.AudioTracks)
+        {
+            if (track is null || !track.IsAudible) continue;
+            double volume = track.EffectiveVolume
+                * ViewModel.Model.EffectiveVolume(RecordedAudio.ChannelFor(track.Kind));
+            if (volume <= 0) continue;
+            laneVolumes.Add((float)volume);
+        }
+
+        if (_insertedAudioPlayer is { IsLoaded: true } inserted
+            && inserted.TrySetPlacementVolumes(laneVolumes))
+        {
+            // Keep the change-detection signature in step, or the next undo/redo would see a
+            // difference and rebuild anyway.
+            _insertedAudioSignature = BuildInsertedAudioSignature();
+            return false;
+        }
+
+        RefreshInsertedAudio();
+        return true;
+    }
+
+    /// <summary>Rebuilds the inserted-audio preview engine and timeline lane from the model.</summary>
+    private void RefreshInsertedAudio()
+    {
+        _insertedAudioSignature = BuildInsertedAudioSignature();
+        TryReloadInsertedAudioPlayer();
+        Timeline?.Refresh();
+    }
+
+    /// <summary>
+    /// State of the inserted tracks as of the last rebuild, so an undo/redo of an unrelated
+    /// edit does not needlessly reopen every inserted WAV.
+    /// </summary>
+    private string? _insertedAudioSignature;
+
+    /// <summary>
+    /// Everything the preview engine and the lane are derived from, flattened. Deliberately
+    /// includes the fields an EDIT changes (position, trim, length, level) rather than just
+    /// the track ids: a move or trim leaves the set of tracks identical while changing every
+    /// placement in it.
+    /// </summary>
+    private string BuildInsertedAudioSignature()
+    {
+        var tracks = ViewModel.Model.AudioTracks;
+        if (tracks is not { Count: > 0 }) return string.Empty;
+
+        var sb = new System.Text.StringBuilder();
+
+        // The lane faders scale every clip on them, so a lane change alters every placement
+        // without touching a single track — it has to be part of the signature or the rebuild
+        // is skipped and the fader appears to do nothing.
+        sb.Append(ViewModel.Model.EffectiveVolume(AudioMixChannel.VoiceOver)).Append('/')
+          .Append(ViewModel.Model.EffectiveVolume(AudioMixChannel.Music)).Append(';');
+
+        foreach (var t in tracks)
+        {
+            sb.Append(t.Id).Append('|')
+              .Append(t.FilePath).Append('|')
+              .Append(t.StartTime.Ticks).Append('|')
+              .Append(t.TrimStart.Ticks).Append('|')
+              .Append(t.EffectiveDuration.Ticks).Append('|')
+              .Append(t.EffectiveVolume).Append(';');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Rebuilds the inserted-audio derived state only when it actually changed.</summary>
+    private void RefreshInsertedAudioIfChanged()
+    {
+        if (BuildInsertedAudioSignature() == _insertedAudioSignature) return;
+        RefreshInsertedAudio();
+    }
+
+    private void OnInsertedAudioTrackSelected(object? sender, string? trackId)
+    {
+        // Selecting an inserted block collapses any panel bound to another selection kind,
+        // matching what the other tracks do — the control already cleared their selections.
+        if (trackId is not null)
+            HideTextSlidePanel();
+    }
+
+    private void OnInsertedAudioTrackMoved(object? sender, (string Id, TimeSpan NewStart) e)
+        => ExecuteAudioTrackOperation(new MoveAudioTrackOperation(e.Id, e.NewStart));
+
+    private void OnInsertedAudioTrackResized(
+        object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e)
+        => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(e.Id, e.IsStartEdge, e.NewEdgeTime));
+
+    /// <summary>
+    /// Shows the split/mute/remove menu for an inserted voice-over or music track.
+    /// </summary>
+    private void OnInsertedAudioTrackContextRequested(
+        object? sender, (string Id, FrameworkElement Target, Windows.Foundation.Point Position) e)
+    {
+        var trackId = e.Id;
+        var track = ViewModel.Model.AudioTracks.FirstOrDefault(t => t.Id == trackId);
+        if (track is null) return;
+
+        var menu = new MenuFlyout();
+        var playhead = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
+        // Trim to the playhead: the precise, geometry-independent alternative to dragging an
+        // edge. This is the only way to trim an edge that sits outside the visible timeline
+        // by more than a drag can reach, and the only exact one at low zoom, where a pixel is
+        // worth a substantial slice of time.
+        var trimStartItem = new MenuFlyoutItem
+        {
+            Text = "Trim start to playhead",
+            IsEnabled = playhead > track.StartTime
+                        && playhead <= track.End - AudioTrackEditing.MinDuration,
+        };
+        trimStartItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(trackId, fromStart: true, playhead));
+        menu.Items.Add(trimStartItem);
+
+        var trimEndItem = new MenuFlyoutItem
+        {
+            Text = "Trim end to playhead",
+            IsEnabled = playhead >= track.StartTime + AudioTrackEditing.MinDuration
+                        && playhead < track.End,
+        };
+        trimEndItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new TrimAudioTrackOperation(trackId, fromStart: false, playhead));
+        menu.Items.Add(trimEndItem);
+
+        var splitItem = new MenuFlyoutItem
+        {
+            Text = "Split at playhead",
+            // Disabled rather than hidden when the playhead is outside the block (or too
+            // close to an edge for both halves to survive), so the action stays discoverable
+            // and its precondition is visible.
+            IsEnabled = SplitAudioTrackOperation.CanSplit(track, playhead),
+        };
+        splitItem.Click += (_, _) => SplitInsertedAudioTrack(trackId);
+        menu.Items.Add(splitItem);
+
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        var muteItem = new MenuFlyoutItem { Text = track.IsMuted ? "Unmute" : "Mute" };
+        muteItem.Click += (_, _) => ExecuteAudioTrackOperation(
+            new UpdateAudioTrackPropertiesOperation(trackId, isMuted: !track.IsMuted));
+        menu.Items.Add(muteItem);
+
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        var removeItem = new MenuFlyoutItem { Text = "Remove" };
+        removeItem.Click += (_, _) => DeleteInsertedAudioTrack(trackId);
+        menu.Items.Add(removeItem);
+
+        // Anchored to the lane canvas at the click point. Showing it at `Timeline` opened the
+        // flyout against the control's own bounds, which put it up by the preview instead of
+        // at the block the user actually right-clicked.
+        menu.ShowAt(e.Target, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions
+        {
+            Position = e.Position,
+        });
+    }
+
+    /// <summary>Splits the given track at the playhead, selecting the right half.</summary>
+    private void SplitInsertedAudioTrack(string trackId)
+    {
+        var track = ViewModel.Model.AudioTracks.FirstOrDefault(t => t.Id == trackId);
+        if (track is null) return;
+
+        var playhead = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+        if (!SplitAudioTrackOperation.CanSplit(track, playhead)) return;
+
+        var operation = new SplitAudioTrackOperation(trackId, playhead);
+        ExecuteAudioTrackOperation(operation);
+
+        // Selecting the right half matches the primary track's split behaviour and is what
+        // makes "split, then drag the tail away" a two-step gesture rather than three.
+        if (operation.CreatedId is { } createdId && Timeline is not null)
+        {
+            Timeline.SelectedInsertedAudioTrackId = createdId;
+        }
+    }
+
+    /// <summary>Removes the given inserted track and clears the selection.</summary>
+    private void DeleteInsertedAudioTrack(string trackId)
+    {
+        ExecuteAudioTrackOperation(new RemoveAudioTrackOperation(trackId));
+        Timeline?.ClearInsertedAudioSelection();
+    }
+
+    /// <summary>
+    /// Whole-file waveform peaks per inserted track file, keyed by path, with the source-time
+    /// span each array covers.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Whole-file, not per-block.</b> The first version generated peaks starting at the
+    /// track's trim point and let the lane stretch them across the block, which made a trim
+    /// look like the entire track had been squeezed rather than cut. It was also stale by
+    /// construction: keyed by path, it was never regenerated when the trim changed. A
+    /// whole-file array is trim-independent, so the cache is correct for the life of the
+    /// file and the lane simply draws the window it needs.
+    /// </para>
+    /// <para>
+    /// Cached because generating peaks decodes the entire WAV: without it, every mute toggle,
+    /// drag or undo would re-read every inserted file from disk.
+    /// </para>
+    /// </remarks>
+    private readonly Dictionary<string, (float[] Peaks, double DurationSeconds)> _insertedAudioWaveforms =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Waveform resolution. Scaled by duration rather than fixed, because a fixed budget
+    /// spread over a multi-minute music bed leaves only a handful of peaks once it is trimmed
+    /// down to a few seconds — precisely when the user most needs to see what remains.
+    /// </summary>
+    private const double InsertedAudioPeaksPerSecond = 20;
+    private const int InsertedAudioMinPeaks = 400;
+    private const int InsertedAudioMaxPeaks = 6000;
+
+    /// <summary>
+    /// How long the waveform decode waits before starting, so it never competes with preview
+    /// and filmstrip initialisation for I/O during a project load.
+    /// </summary>
+    private static readonly TimeSpan WaveformDecodeDelay = TimeSpan.FromMilliseconds(600);
+
+    /// <summary>
+    /// Projects the timeline's inserted audio tracks onto the lanes, then fills in any
+    /// missing waveforms in the background and republishes when they arrive.
+    /// </summary>
+    private void PublishInsertedAudioLane()
+    {
+        if (Timeline is null) return;
+
+        var tracks = ViewModel.Model.AudioTracks;
+        if (tracks is not { Count: > 0 })
+        {
+            Timeline.InsertedAudioTracks = [];
+            return;
+        }
+
+        var items = new List<Controls.TimelineControl.InsertedAudioLaneItem>();
+        var missing = new List<string>();
+
+        foreach (var track in tracks)
+        {
+            if (track is null || string.IsNullOrWhiteSpace(track.FilePath)) continue;
+            var duration = track.EffectiveDuration;
+            if (duration <= TimeSpan.Zero) continue;
+
+            _insertedAudioWaveforms.TryGetValue(track.FilePath, out var cached);
+            if (cached.Peaks is null
+                && !missing.Contains(track.FilePath, StringComparer.OrdinalIgnoreCase)
+                && File.Exists(track.FilePath))
+            {
+                // One entry per FILE, not per track: after a split, both halves read the
+                // same file and must not decode it twice.
+                missing.Add(track.FilePath);
+            }
+
+            items.Add(new Controls.TimelineControl.InsertedAudioLaneItem(
+                track.Id,
+                string.IsNullOrWhiteSpace(track.Name) ? "Audio" : track.Name,
+                track.StartTime,
+                duration,
+                track.TrimStart,
+                track.SourceDuration,
+                track.Kind == AudioTrackKind.Music,
+                track.IsMuted,
+                cached.Peaks,
+                cached.DurationSeconds));
+        }
+
+        Timeline.InsertedAudioTracks = items;
+
+        if (missing.Count == 0) return;
+
+        // Decoding a WAV is far too slow for a draw pass, so the lane draws as a plain block
+        // first and gains its waveform on the republish below.
+        _ = Task.Run(async () =>
+        {
+            // Deliberately yields first. This runs during project load, where the preview
+            // decoder, the filmstrip pass and the audio engine are all starting at once;
+            // decoding several minutes of WAV in that window competes with them for I/O and
+            // CPU and shows up as the editor stuttering while it opens. The waveform is
+            // decoration — it can afford to arrive a moment later than the blocks.
+            await Task.Delay(WaveformDecodeDelay);
+
+            var built = new List<(string Path, float[] Peaks, double DurationSeconds)>();
+            foreach (var path in missing)
+            {
+                try
+                {
+                    // Measured from the file itself rather than taken from AudioTrack
+                    // .SourceDuration: the peaks are keyed by path and shared by every track
+                    // cut from it, so their span must describe the FILE, not any one track.
+                    double fileSeconds;
+                    using (var probe = new NAudio.Wave.AudioFileReader(path))
+                        fileSeconds = probe.TotalTime.TotalSeconds;
+                    if (fileSeconds <= 0) continue;
+
+                    int peakCount = (int)Math.Clamp(
+                        fileSeconds * InsertedAudioPeaksPerSecond,
+                        InsertedAudioMinPeaks,
+                        InsertedAudioMaxPeaks);
+
+                    var peaks = AudioWaveformGenerator.GenerateWaveform(path, peakCount);
+                    if (peaks is { Length: > 0 })
+                        built.Add((path, peaks, fileSeconds));
+                }
+                catch
+                {
+                    // An unreadable file still draws as a block; it just never gets a waveform.
+                }
+            }
+
+            if (built.Count == 0) return;
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_pageUnloaded || Timeline is null) return;
+
+                foreach (var (path, peaks, seconds) in built)
+                    _insertedAudioWaveforms[path] = (peaks, seconds);
+
+                // Re-projects with the waveforms now cached. Guarded because this lands
+                // after an await boundary, by which time the page may have unloaded.
+                PublishInsertedAudioLane();
+            });
+        });
     }
 
     /// <summary>
@@ -1228,13 +1815,20 @@ public sealed partial class EditorPage
 
         var paths = GetUnmutedAudioPaths(project);
         if (paths.Count > 0)
+        {
+            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in paths)
+                volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+
             // No fade windows here either, for the same reason as the initial Load
             // above — see AudioPlaybackEngine's class remarks (T9).
-            _audioPlayer.Load(paths);
+            _audioPlayer.Load(paths, volumes);
+        }
     }
 
     /// <summary>
-    /// Returns audio file paths filtered by current mute state.
+    /// Returns audio file paths that are currently audible: neither muted nor turned down to
+    /// silence, classified per file by <see cref="RecordedAudio.Classify"/>.
     /// </summary>
     private List<string> GetUnmutedAudioPaths(Project project)
     {
@@ -1245,13 +1839,12 @@ public sealed partial class EditorPage
         foreach (var path in project.AudioFilePaths)
         {
             if (!File.Exists(path)) continue;
-            var fileName = Path.GetFileName(path);
-            if (model.IsSystemAudioMuted
-                && fileName.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (model.IsMicAudioMuted
-                && fileName.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
-                continue;
+
+            // One shared classifier rather than a prefix test repeated per call site — the
+            // export path used its own copy and disagreed with this one for files that kept a
+            // package index prefix.
+            if (model.EffectiveVolume(RecordedAudio.Classify(path)) <= 0) continue;
+
             paths.Add(path);
         }
         return paths;

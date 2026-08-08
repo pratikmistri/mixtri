@@ -33,6 +33,10 @@
             <!-- System audio track -->
             <RowDefinition x:Name="MicRow" Height="40" />
             <!-- Mic audio track -->
+            <RowDefinition x:Name="VoiceOverRow" Height="0" />
+            <!-- Inserted voice-over track -->
+            <RowDefinition x:Name="MusicRow" Height="0" />
+            <!-- Inserted music track -->
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
@@ -52,31 +56,70 @@
         <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
             <TextBlock Text="Text" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border x:Name="AudioTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
-                <Button x:Name="AudioMuteButton"
-                        Click="AudioMuteButton_Click"
-                        Padding="2" MinWidth="0" MinHeight="0"
-                        Background="Transparent" BorderThickness="0"
-                        ToolTipService.ToolTip="Mute/unmute system audio">
+        <Border x:Name="AudioTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+            <Button x:Name="AudioMuteButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="System"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="System audio volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                     <FontIcon x:Name="AudioMuteIcon" Glyph="&#xE767;" FontSize="12"
                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </Button>
-                <TextBlock Text="Audio" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
-            </StackPanel>
+                    <TextBlock Text="Audio" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
         </Border>
-        <Border x:Name="MicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="2,0">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
-                <Button x:Name="MicMuteButton"
-                        Click="MicMuteButton_Click"
-                        Padding="2" MinWidth="0" MinHeight="0"
-                        Background="Transparent" BorderThickness="0"
-                        ToolTipService.ToolTip="Mute/unmute microphone">
+        <Border x:Name="MicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+            <Button x:Name="MicMuteButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="Mic"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Microphone volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                     <FontIcon x:Name="MicMuteIcon" Glyph="&#xE767;" FontSize="12"
                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </Button>
-                <TextBlock Text="Mic" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
-            </StackPanel>
+                    <TextBlock Text="Mic" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+
+        <Border x:Name="VoiceOverTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+            <Button x:Name="VoiceOverLabelButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="VoiceOver"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Voice over lane volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="VoiceOverMuteIcon" Glyph="&#xE720;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Voice" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+        <Border x:Name="MusicTrackLabel" Grid.Row="9" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+            <Button x:Name="MusicLabelButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="Music"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Music lane volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="MusicMuteIcon" Glyph="&#xE8D6;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Music" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
         </Border>
 
         <!-- Canvases -->
@@ -151,13 +194,37 @@
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed" />
 
+        <canvas:CanvasControl
+            x:Name="VoiceOverTrackCanvas"
+            Grid.Row="8"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="VoiceOverTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Voice over track" />
+
+        <canvas:CanvasControl
+            x:Name="MusicTrackCanvas"
+            Grid.Row="9"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="MusicTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Music track" />
+
         <!-- Playhead overlay line — the only visual moved on a playback tick / scrub
              (see UpdatePlayheadVisual). Purely decorative: not hit-testable, and kept out
              of the automation tree so it isn't announced while playing. -->
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="8"
+            Grid.RowSpan="10"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

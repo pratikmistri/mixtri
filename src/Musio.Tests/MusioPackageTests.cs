@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Projects;
@@ -770,6 +771,143 @@ public class MusioPackageTests
         var segment = opened.Timeline.Segments.OfType<VideoSegment>().Single();
         Assert.IsTrue(File.Exists(segment.VideoFilePath), "the segment's media should still resolve");
         Assert.AreEqual(0, opened.Timeline.TextOverlays.Count, "the retired per-segment shape carries no overlays forward");
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_PacksAndRepointsInsertedAudioTracks()
+    {
+        // An inserted voice-over lives in an app-owned import folder the orphan sweep can
+        // reclaim, so a package that dropped it would lose the only copy — and a path left
+        // pointing at that folder would break the moment it was swept.
+        var (project, timeline) = BuildProject();
+        var voicePath = WriteFile("voiceover.wav", 3072, 0x5A);
+
+        timeline.AudioTracks.Add(new AudioTrack
+        {
+            FilePath = voicePath,
+            Name = "Take 1",
+            Kind = AudioTrackKind.VoiceOver,
+            StartTime = TimeSpan.FromSeconds(2),
+            TrimStart = TimeSpan.FromSeconds(1),
+            SourceDuration = TimeSpan.FromSeconds(9),
+            Duration = TimeSpan.FromSeconds(5),
+            Volume = 0.4,
+            IsMuted = true,
+        });
+
+        var packagePath = Path.Combine(_root, "voiceover.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        var track = opened.Timeline.AudioTracks.Single();
+        Assert.IsTrue(File.Exists(track.FilePath), "the inserted audio should be packed and extracted");
+        Assert.IsFalse(
+            track.FilePath.StartsWith(_sourceFolder, StringComparison.OrdinalIgnoreCase),
+            "the restored track must not still point at the import folder");
+        CollectionAssert.AreEqual(
+            File.ReadAllBytes(voicePath), File.ReadAllBytes(track.FilePath),
+            "the audio bytes must survive the round trip");
+
+        Assert.AreEqual("Take 1", track.Name);
+        Assert.AreEqual(AudioTrackKind.VoiceOver, track.Kind);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), track.StartTime);
+        Assert.AreEqual(TimeSpan.FromSeconds(1), track.TrimStart);
+        Assert.AreEqual(TimeSpan.FromSeconds(9), track.SourceDuration);
+        Assert.AreEqual(TimeSpan.FromSeconds(5), track.Duration);
+        Assert.AreEqual(0.4, track.Volume);
+        Assert.IsTrue(track.IsMuted, "mute state must survive so a disabled track stays disabled");
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_RemembersRecordedAudioMuteState()
+    {
+        // The mute flags and per-channel gain are the project's whole audio mix; losing
+        // either reopens the project at the wrong level.
+        var (project, timeline) = BuildProject();
+        timeline.IsSystemAudioMuted = true;
+        timeline.IsMicAudioMuted = true;
+        timeline.SystemAudioVolume = 0.35;
+        timeline.MicAudioVolume = 0.8;
+        timeline.IsMusicMuted = true;
+        timeline.MusicVolume = 0.25;
+        timeline.VoiceOverVolume = 0.6;
+
+        var packagePath = Path.Combine(_root, "muted.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsTrue(opened.Timeline.IsSystemAudioMuted, "system audio mute must survive a round trip");
+        Assert.IsTrue(opened.Timeline.IsMicAudioMuted, "mic mute must survive a round trip");
+        Assert.AreEqual(0.35, opened.Timeline.SystemAudioVolume, 0.0001);
+        Assert.AreEqual(0.8, opened.Timeline.MicAudioVolume, 0.0001);
+        Assert.IsTrue(opened.Timeline.IsMusicMuted, "a muted lane must stay muted");
+        Assert.AreEqual(0.25, opened.Timeline.MusicVolume, 0.0001);
+        Assert.AreEqual(0.6, opened.Timeline.VoiceOverVolume, 0.0001);
+    }
+
+    [TestMethod]
+    public async Task Open_LegacyProjectWithoutAMix_DefaultsEveryChannelToFullVolume()
+    {
+        // Projects saved before the mix existed carry no volume fields. They must come back
+        // at full volume, not silent — a gain that defaulted to zero would mute every old
+        // project on open.
+        //
+        // Saved with DELIBERATELY non-default levels, then stripped from the manifest: if the
+        // stripping ever stopped matching, the assertions below would see 0.35/0.2 and fail,
+        // rather than passing vacuously because the defaults happen to be 1.
+        var (project, timeline) = BuildProject();
+        timeline.SystemAudioVolume = 0.35;
+        timeline.MicAudioVolume = 0.2;
+        timeline.VoiceOverVolume = 0.4;
+        timeline.MusicVolume = 0.15;
+
+        var packagePath = Path.Combine(_root, "legacy-mix.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        int stripped = 0;
+        RewriteManifest(packagePath, json =>
+        {
+            // Edited as JSON rather than by regex: the last property in an object has no
+            // trailing comma, so a text pattern silently misses one of the four (and a
+            // pattern loose enough to catch it would leave the document malformed).
+            var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+            var timelineNode = root["Timeline"]!.AsObject();
+
+            foreach (var name in new[]
+                     { "SystemAudioVolume", "MicAudioVolume", "VoiceOverVolume", "MusicVolume" })
+            {
+                if (timelineNode.Remove(name)) stripped++;
+            }
+
+            return root.ToJsonString();
+        });
+
+        Assert.AreEqual(4, stripped, "the manifest must actually have carried all four levels");
+
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.System), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.Mic), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.VoiceOver), 0.0001);
+        Assert.AreEqual(1.0, opened.Timeline.EffectiveVolume(AudioMixChannel.Music), 0.0001);
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_DoesNotPersistRegenerableWaveformSamples()
+    {
+        // Waveforms are a render cache rebuilt from the WAVs on load; persisting them would
+        // add thousands of floats to every manifest. This pins that they are excluded — and
+        // therefore that the load path MUST regenerate them.
+        var (project, timeline) = BuildProject();
+        timeline.SystemAudioWaveformSamples = [0.1f, 0.9f, 0.4f];
+        timeline.MicAudioWaveformSamples = [0.2f, 0.7f];
+
+        var packagePath = Path.Combine(_root, "waveforms.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsNull(opened.Timeline.SystemAudioWaveformSamples);
+        Assert.IsNull(opened.Timeline.MicAudioWaveformSamples);
     }
 
     /// <summary>Rewrites <c>manifest.json</c> inside a saved package.</summary>

@@ -421,7 +421,8 @@ public class VideoEncoder : IDisposable
 
     /// <summary>
     /// Applies a planned placement to a background audio track: where playback starts
-    /// inside the source, how much of it plays, and where it lands on the output.
+    /// inside the source, how much of it plays, where it lands on the output, and at what
+    /// level.
     /// </summary>
     private static void ApplyPlacement(BackgroundAudioTrack track, AudioPlacement placement)
     {
@@ -442,6 +443,12 @@ public class VideoEncoder : IDisposable
         // Place the audio at its segment's position on the output timeline so text
         // slides (and deleted ranges) become silent gaps instead of shifting audio.
         track.Delay = placement.Delay;
+
+        // A CONSTANT gain is the one level control this pipeline does have (see
+        // ExportTakeDuration's remarks for why a time-varying one does not exist), and it
+        // is what an inserted music bed needs to sit under the recording. Everything cut
+        // from a recording plans Volume = 1.0, so this is a no-op for those.
+        track.Volume = Math.Clamp(placement.Volume, 0.0, 1.0);
     }
 
     /// <summary>

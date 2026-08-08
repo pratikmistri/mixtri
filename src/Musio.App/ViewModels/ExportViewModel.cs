@@ -426,25 +426,11 @@ public partial class ExportViewModel : ObservableObject
             ProgressStatus = $"{EstimatedTimeRemaining} remaining";
         });
 
-        // Apply audio mute state: temporarily filter muted tracks
+        // Audio mute/volume is applied by ExportAudioPlan, which is the one place placements
+        // are built. This used to temporarily strip muted files from Project.AudioFilePaths
+        // instead — a filter BuildFromSegments never sees, because it reads each segment's
+        // own AudioFilePaths, so muting a track had no effect on any edited project's export.
         var timeline = ProjectService.Instance.CurrentTimeline;
-        var originalAudioPaths = CurrentProject.AudioFilePaths;
-        if (timeline is not null)
-        {
-            CurrentProject.AudioFilePaths = originalAudioPaths
-                .Where(p =>
-                {
-                    var fn = Path.GetFileName(p);
-                    if (timeline.IsSystemAudioMuted
-                        && fn.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
-                        return false;
-                    if (timeline.IsMicAudioMuted
-                        && fn.StartsWith("mic_", StringComparison.OrdinalIgnoreCase))
-                        return false;
-                    return true;
-                })
-                .ToList();
-        }
 
         try
         {
@@ -497,8 +483,6 @@ public partial class ExportViewModel : ObservableObject
         }
         finally
         {
-            // Restore original audio paths
-            CurrentProject.AudioFilePaths = originalAudioPaths;
             IsExporting = false;
             _exportCts?.Dispose();
             _exportCts = null;
