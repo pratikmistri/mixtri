@@ -1669,4 +1669,33 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1042 passed, 3 skipped, 0 failed**; Musio.App ARM64 Release rebuilt,
   re-registered and relaunched clean.
 
+## Zoom handoff, round 3: the arc must not undershoot its destination
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition` — the long-move arc.
+- **Symptom, as reported**: "segment 1 is 2x and segment 2 is 1.5x — I expect a smooth transition
+  from 2x to 1.5x without a dip."
+- **Cause**: the arc was applied as `zoom = baseZoom / (1 + arc*bump)`, i.e. it scaled the **whole**
+  interpolated zoom. Reproduced from the real `Sample7.musio` keyframes (source 2304×1536): a 2×
+  shot centred (0.669, 0.876) handing off to a 1.5× shot centred (0.931, 0.014) — centres ~1058px
+  apart, 0.72 of the viewport diagonal at 1.5×, giving `arcAmount ≈ 0.26`. Mid-transition that
+  pulled the camera to ~1.39×, **below the 1.5× destination**, then back up. A bounce.
+- **The reasoning error**: dividing the whole value is only correct when both endpoints sit at the
+  same zoom. When the move *already* zooms out, the destination itself supplies the widening, and
+  the arc widened a frame that was widening anyway.
+- **Fix**: apply the arc to the zoom **above a floor** —
+  `zoom = floor + (baseZoom - floor) / (1 + arc*bump)` — where `floor` rises to
+  `min(from, to)` as the two zoom levels diverge (`ArcFloorFullDelta = 0.25`) and falls to `0` when
+  they are equal. Different zooms ⇒ monotonic, never undershooting; equal zooms ⇒ full pull-back
+  preserved, which is the only way to widen the frame for a long lateral move there.
+- **The floor is a smooth blend, never a `max()` clamp.** Clamping the curve against the floor
+  would flatten it at the crossing point and reintroduce exactly the derivative corner this whole
+  design exists to remove. Any "just clamp it" instinct in this file is almost always wrong —
+  reach for a blend whose endpoints have zero derivative instead.
+- **General rule this is the third instance of**: a correction that is right for the symmetric case
+  is not automatically right for the asymmetric one. `max()` overlap resolution, the two-path
+  precedence split, and now the arc divisor all failed the same way — fine when the two sides
+  matched, wrong the moment they differed.
+- **Verified**: suite **1044 passed, 3 skipped, 0 failed**, including a regression test built from
+  Sample7's exact keyframe values; ARM64 Release rebuilt, re-registered, relaunched clean.
+
 
