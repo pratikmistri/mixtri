@@ -110,26 +110,12 @@ public sealed class ZoomCameraPath
     private const double ZoomNoOpEpsilon = 1e-4;
     private const double SmallDuration = 1e-9;
     private const double HeadingNormalizeEpsilon = 1e-4;
-    private const double ArcOnsetRatio = 0.35;
-    private const double ArcFullRatio = 1.2;
-    private const double ArcStrength = 0.6;
-
-    /// <summary>
-    /// Zoom-level difference between two linked shots at which the arc floor reaches the
-    /// lower of the two zooms, guaranteeing the handoff never undershoots its destination.
-    /// Below this the floor eases back toward 0, restoring the full arc for shots that sit
-    /// at (or near) the same zoom, where a dip is the only way to widen the frame for a
-    /// long lateral move.
-    /// </summary>
-    private const double ArcFloorFullDelta = 0.25;
 
     private static readonly ReadOnlyCollection<ZoomShot> EmptyShots = Array.AsReadOnly(Array.Empty<ZoomShot>());
 
     private readonly bool[] _linkedAfter;
     private readonly Piece[] _pieces;
     private readonly ShotData[] _shotData;
-    private readonly int _sourceWidth;
-    private readonly int _sourceHeight;
 
     /// <summary>
     /// An empty path that never evaluates to an active zoom. Reusing a singleton keeps
@@ -139,24 +125,18 @@ public sealed class ZoomCameraPath
         EmptyShots,
         Array.Empty<bool>(),
         Array.Empty<ShotData>(),
-        Array.Empty<Piece>(),
-        0,
-        0);
+        Array.Empty<Piece>());
 
     private ZoomCameraPath(
         ReadOnlyCollection<ZoomShot> shots,
         bool[] linkedAfter,
         ShotData[] shotData,
-        Piece[] pieces,
-        int sourceWidth,
-        int sourceHeight)
+        Piece[] pieces)
     {
         Shots = shots;
         _linkedAfter = linkedAfter;
         _shotData = shotData;
         _pieces = pieces;
-        _sourceWidth = Math.Max(0, sourceWidth);
-        _sourceHeight = Math.Max(0, sourceHeight);
         IsEmpty = pieces.Length == 0;
     }
 
@@ -180,10 +160,17 @@ public sealed class ZoomCameraPath
     /// </para>
     /// </summary>
     /// <param name="shots">Shot requests in source time. Invalid or no-op shots are ignored.</param>
-    /// <param name="sourceWidth">Source width in pixels, used only to size long-move arc easing.</param>
-    /// <param name="sourceHeight">Source height in pixels, used only to size long-move arc easing.</param>
+    /// <param name="sourceWidth">
+    /// Source width in pixels. Retained for call-site symmetry with the rest of the zoom
+    /// pipeline; the path itself no longer needs the frame size now that the long-move arc
+    /// is gone and zoom is a pure interpolation between the two shots' levels.
+    /// </param>
+    /// <param name="sourceHeight">Source height in pixels. See <paramref name="sourceWidth"/>.</param>
     public static ZoomCameraPath Build(IEnumerable<ZoomShot> shots, int sourceWidth, int sourceHeight)
     {
+        _ = sourceWidth;
+        _ = sourceHeight;
+
         if (shots is null)
             return Empty;
 
@@ -267,9 +254,7 @@ public sealed class ZoomCameraPath
             Array.AsReadOnly(normalizedShots),
             linkedAfter,
             shotData,
-            pieces,
-            sourceWidth,
-            sourceHeight);
+            pieces);
     }
 
     /// <summary>
@@ -548,36 +533,29 @@ public sealed class ZoomCameraPath
         float centerX = mixedCentreSources ? anchor.CenterX : Lerp(from.CenterX, to.CenterX, e);
         float centerY = mixedCentreSources ? anchor.CenterY : Lerp(from.CenterY, to.CenterY, e);
 
-        double travel = Math.Sqrt(
-            Math.Pow(to.CenterX - from.CenterX, 2.0) +
-            Math.Pow(to.CenterY - from.CenterY, 2.0));
-        double refZoom = Math.Min(from.Zoom, to.Zoom);
-        double viewportDiag = Math.Sqrt(
-            Math.Pow(_sourceWidth / refZoom, 2.0) +
-            Math.Pow(_sourceHeight / refZoom, 2.0));
-        double ratio = travel / Math.Max(1e-6, viewportDiag);
-        double arcAmount = ArcStrength * Clamp01((ratio - ArcOnsetRatio) / (ArcFullRatio - ArcOnsetRatio));
+        // The zoom across a handoff is a plain monotonic ease between the two segments' own
+        // levels, and nothing else touches it. Two 2x segments therefore hold exactly 2x
+        // straight through; 2x -> 1.5x falls once and never rises.
+        //
+        // There used to be a "cinematic arc" here that dipped the zoom out in proportion to how
+        // far the focal point had to travel, on the theory that a long lateral move needs a wider
+        // frame to stay readable. It was removed because it was not predictable:
+        //   * On a chain of five equal-zoom auto segments it produced four visible zoom-out /
+        //     zoom-in pulses through what should have been one continuous 2x move.
+        //   * Its travel was measured between the shots' STORED centres, but an auto shot is
+        //     re-centred on the live cursor by the compositor, so the arc was sized from a move
+        //     that was not the one on screen.
+        //   * Applied to a handoff between two different levels it undershot the destination and
+        //     climbed back, which needed a floor term to correct — complexity on top of a feature
+        //     that was already surprising.
+        // If a wider frame is wanted mid-move, authoring a lower zoom level says so explicitly
+        // and predictably. Keep this a pure interpolation.
+        float zoom = Math.Clamp(baseZoom, 1f, Math.Max(from.Zoom, to.Zoom));
 
-        // sin² is zero and has zero derivative at both ends. A plain sine or
-        // parabolic bump would lower the zoom with non-zero endpoint velocity,
-        // reintroducing the very kick the chained path removes.
+        // sin² is zero and has zero derivative at both ends, so drift fades out and back in
+        // across the move without a kick at either junction.
         double s = Math.Sin(Math.PI * e);
         double bump = s * s;
-
-        // Apply the arc to the zoom ABOVE a floor rather than to the whole zoom, so a
-        // handoff between two DIFFERENT zoom levels can never undershoot its destination.
-        // Dividing the whole interpolated zoom (the original form) sent a 2x -> 1.5x move
-        // down to ~1.39x mid-transition and then back up to 1.5x — a bounce, because the
-        // move already widens the frame and the arc widened it again on top. The floor
-        // rises to the lower endpoint as the two zooms diverge, which makes such a move
-        // monotonic, and falls to 0 when they are equal, where the arc is the only thing
-        // that can widen the frame and is still wanted at full strength.
-        // Note this is a smooth blend, never a clamp: a max() against the floor would flatten
-        // the curve at the crossing point and reintroduce a derivative corner.
-        double zoomDelta = Math.Abs(from.Zoom - to.Zoom);
-        double arcFloor = Math.Min(from.Zoom, to.Zoom) * Clamp01(zoomDelta / ArcFloorFullDelta);
-        float zoom = (float)(arcFloor + ((baseZoom - arcFloor) / (1.0 + (arcAmount * bump))));
-        zoom = Math.Clamp(zoom, 1f, Math.Max(from.Zoom, to.Zoom));
 
         float progressA = Normalize(fromData.OriginalHoldEnd, from.RampStart, from.ReleaseEnd);
         float progressB = Normalize(toData.OriginalHoldStart, to.RampStart, to.ReleaseEnd);

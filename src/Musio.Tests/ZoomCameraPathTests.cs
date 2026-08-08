@@ -125,30 +125,47 @@ public sealed class ZoomCameraPathTests
         Assert.IsTrue(minZoom >= 1.5f - 0.001f,
             $"Zoom undershot the 1.5x destination, reaching {minZoom:F4}.");
     }
-
     /// <summary>
-    /// The arc must still engage when two linked shots sit at the SAME zoom, because there a
-    /// dip is the only thing that can widen the frame across a long lateral move. This is the
-    /// other half of the floor blend guarded by the test above.
+    /// A chain of equal-zoom segments must hold that zoom dead flat the whole way through.
+    /// <para>
+    /// Regression from Sample9.musio: five overlapping auto segments, all 2×, produced four
+    /// visible zoom-out/zoom-in pulses across what should have been one continuous 2× move.
+    /// The cause was the long-move "cinematic arc", which dipped the zoom in proportion to how
+    /// far the stored centres were apart — and for auto shots those stored centres are not even
+    /// what is on screen, since the compositor re-centres them on the live cursor. The arc is
+    /// gone; a handoff is now a pure interpolation between the two segments' own levels.
+    /// </para>
     /// </summary>
     [TestMethod]
-    public void HandoffBetweenEqualZoomLevels_StillArcsOnALongMove()
+    public void ChainOfEqualZoomSegments_HoldsThatZoomFlatThroughout()
     {
+        const int w = 2304;
+        const int h = 1536;
+
+        // Sample9.musio: five auto clicks, all 2x, centres flung across opposite corners so any
+        // travel-driven zoom effect would show up loudly.
         var path = ZoomCameraPath.Build(
         [
-            Shot(0.00, 1.00, 2.00, 3.50, 2.5f, 200, 200, 1),
-            Shot(1.50, 2.60, 3.60, 5.10, 2.5f, 1750, 900, 2),
-        ], SourceWidth, SourceHeight);
+            Shot(-0.481, 0.519, 1.852, 3.408, 2.0f, (float)(0.053 * w), (float)(0.132 * h), 1),
+            Shot(0.679, 1.679, 3.012, 4.568, 2.0f, (float)(0.882 * w), (float)(0.149 * h), 2),
+            Shot(1.807, 2.807, 4.140, 5.696, 2.0f, (float)(0.034 * w), (float)(0.780 * h), 3),
+            Shot(2.991, 3.991, 5.324, 6.880, 2.0f, (float)(0.898 * w), (float)(0.768 * h), 4),
+            Shot(4.199, 5.199, 6.532, 8.088, 2.0f, (float)(0.458 * w), (float)(0.421 * h), 5),
+        ], w, h);
 
-        Assert.IsTrue(path.IsLinkedAfter(0));
+        for (int i = 0; i < 4; i++)
+            Assert.IsTrue(path.IsLinkedAfter(i), $"Shots {i} and {i + 1} overlap and must be linked.");
 
-        float minZoom = float.MaxValue;
-        for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
-            minZoom = Math.Min(minZoom, Sample(path, t).Zoom);
-
-        Assert.IsTrue(minZoom < 2.45f,
-            $"Equal-zoom shots far apart should still pull back mid-move; min zoom was {minZoom:F3}.");
-        Assert.IsTrue(minZoom >= 1.0f, "The arc must never drive the zoom below 1x.");
+        // From the first segment settling to the last one releasing, the zoom must not move.
+        double start = path.Shots[0].HoldStart;
+        double end = path.Shots[4].HoldEnd;
+        for (double t = start; t <= end; t += 0.002)
+        {
+            float zoom = Sample(path, t).Zoom;
+            Assert.AreEqual(2.0f, zoom, 0.001f,
+                $"Zoom moved to {zoom:F4} at t={t:F3}s in a chain where every segment is 2x. " +
+                "An all-2x chain must read as one continuous move with no pulses.");
+        }
     }
 
     /// <summary>
@@ -417,8 +434,14 @@ public sealed class ZoomCameraPathTests
         _ = zeroDimensions.TryEvaluate(1.25, out _);
     }
 
+    /// <summary>
+    /// A long lateral handoff must NOT invent a zoom dip. This used to assert the opposite —
+    /// that the "cinematic arc" pulled back for orientation — but that arc was removed after it
+    /// turned an all-2× chain into a series of visible pulses. Zoom is now driven only by the
+    /// two segments' own levels, which is the predictable behaviour.
+    /// </summary>
     [TestMethod]
-    public void FarHandoff_AddsArcZoomDip()
+    public void FarHandoff_DoesNotInventAZoomDip()
     {
         var path = ZoomCameraPath.Build(
         [
@@ -426,12 +449,12 @@ public sealed class ZoomCameraPathTests
             Shot(1.9, 2.5, 3.5, 4.5, 3.0f, 1800, 900, 2),
         ], SourceWidth, SourceHeight);
 
-        double mid = (path.Shots[0].HoldEnd + path.Shots[1].HoldStart) / 2.0;
-        var middle = Sample(path, mid);
-
-        Assert.IsTrue(middle.Zoom < 2.90f,
-            $"A long lateral handoff should dip below both endpoint zooms for orientation; mid zoom was {middle.Zoom:F3}.");
-        Assert.IsTrue(middle.Zoom > 1.0f);
+        for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
+        {
+            float zoom = Sample(path, t).Zoom;
+            Assert.AreEqual(3.0f, zoom, 0.001f,
+                $"Two 3x shots must stay at 3x however far apart their centres are; got {zoom:F4} at t={t:F3}.");
+        }
     }
 
     [TestMethod]

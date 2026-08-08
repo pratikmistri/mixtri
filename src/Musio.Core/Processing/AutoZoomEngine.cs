@@ -306,23 +306,30 @@ public class AutoZoomEngine
     }
 
     /// <summary>
-    /// True when <paramref name="autoShot"/>'s settled hold overlaps some manual shot's hold,
-    /// meaning the user has explicitly framed that stretch of the timeline and the
-    /// click-driven zoom competing for it should give way.
+    /// True when <paramref name="autoShot"/> is the SAME zoom moment as some manual shot —
+    /// they settle at effectively the same instant — so the user's explicit segment should
+    /// replace the click-driven one rather than both firing.
     /// <para>
-    /// Overlap — not containment — is the right test. An auto segment is typically far longer
-    /// than a manual one (~3.9s versus whatever was dragged out), so a containment or midpoint
-    /// test lets a long auto shot escape suppression by a short manual shot sitting on top of
-    /// it, and the auto zoom then wins the very instant the user explicitly authored. Holds
-    /// that merely abut do not overlap, so a neighbouring auto shot still survives and hands
-    /// off to the manual one instead of being discarded.
+    /// This is deliberately a same-moment test and not an overlap test. Auto segments span
+    /// ~3.9s while clicks are often ~1s apart, so consecutive auto shots overlap each other
+    /// heavily as a matter of course. Suppressing on overlap meant that editing one segment's
+    /// length — which promotes it to manual — silently deleted its neighbours on both sides,
+    /// which is exactly the "it gets weird when I start editing the segment lengths" report.
+    /// </para>
+    /// <para>
+    /// In the normal editor flow this is belt-and-braces anyway: promoting an auto keyframe also
+    /// adds its source click to <c>SuppressedClickTicks</c>, so the matching auto shot is never
+    /// generated in the first place. This covers the paths that bypass that, such as adding a
+    /// manual keyframe straight onto the engine.
     /// </para>
     /// </summary>
     private static bool IsCoveredByManualHold(ZoomShot autoShot, List<ZoomShot> manualShots)
     {
+        const double sameMomentSeconds = 0.05;
+
         foreach (var manual in manualShots)
         {
-            if (autoShot.HoldStart <= manual.HoldEnd && manual.HoldStart <= autoShot.HoldEnd)
+            if (Math.Abs(manual.HoldStart - autoShot.HoldStart) <= sameMomentSeconds)
                 return true;
         }
 

@@ -231,6 +231,52 @@ public sealed class AutoZoomEngineTests
             "it must ease across the handoff rather than switching, or the focal point snaps.");
     }
 
+    /// <summary>
+    /// Promoting one auto keyframe to manual (which is what editing a segment's length does)
+    /// must not delete its neighbours.
+    /// <para>
+    /// Regression from Sample9.musio: "it gets weird when I start editing the segment lengths."
+    /// Auto segments span ~3.9s while clicks are often ~1s apart, so consecutive auto shots
+    /// overlap heavily as a matter of course. The engine suppressed any auto shot whose hold
+    /// OVERLAPPED a manual shot's hold, so promoting the middle segment silently removed the
+    /// zooms on both sides of it. Suppression is now a same-moment test — it only replaces the
+    /// click the manual keyframe actually came from.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void GetZoomState_EditingOneOverlappingAutoSegment_KeepsItsNeighbours()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig { DefaultZoomLevel = 2.0f });
+        // Five clicks about 1.1s apart, as in Sample9 — every auto segment overlaps its neighbours.
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(12.0,
+            [
+                (0.5, 120, 200), (1.7, 2030, 230), (2.8, 80, 1200), (4.0, 2070, 1180), (5.2, 1050, 650),
+            ]),
+            2304, 1536, TickFrequency);
+
+        // Editing the middle segment's length promotes it to manual at the same moment.
+        engine.SetManualKeyframes([
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(2.8),
+                ZoomLevel = 2.0,
+                CenterX = 80.0 / 2304,
+                CenterY = 1200.0 / 1536,
+                IsManual = true,
+            },
+        ]);
+
+        // The neighbouring clicks must still zoom. Sample each one's settled moment.
+        foreach (double clickTime in new[] { 0.5, 1.7, 4.0, 5.2 })
+        {
+            float zoom = engine.GetZoomState(clickTime).ZoomLevel;
+            Assert.IsTrue(zoom > 1.5f,
+                $"The zoom at the click at {clickTime:F1}s collapsed to {zoom:F3}x after a " +
+                "neighbouring segment was edited — editing one segment must not delete the others.");
+        }
+    }
+
     [TestMethod]
     public void GetZoomState_AutoZoom_DoesNotSetManualOverride()
     {
