@@ -25,7 +25,8 @@ public readonly record struct ZoomShot(
     float Zoom,
     float CenterX,
     float CenterY,
-    int Seed);
+    int Seed,
+    bool IsManual = false);
 
 /// <summary>
 /// The camera state resolved from a <see cref="ZoomCameraPath"/> at one instant.
@@ -45,6 +46,18 @@ public readonly record struct ZoomShot(
 /// because a deliberate camera move already supplies motion; ordinary holds and ramps
 /// leave it at 1.
 /// </param>
+/// <param name="CursorFollowWeight">
+/// How strongly the compositor should re-centre this sample on the live cursor rather
+/// than on <see cref="CenterX"/>/<see cref="CenterY"/>: <c>1</c> for an auto (click-driven)
+/// shot, <c>0</c> for a manual one.
+/// <para>
+/// It is a weight rather than a bool precisely so a manual shot can hand off to an auto
+/// shot. Those two kinds of shot resolve their focal point from different sources — the
+/// live cursor versus the keyframe's stored centre — so flipping between them at a piece
+/// boundary would snap the camera. Across a handoff this eases between the two, which
+/// keeps the focal point continuous even though its *source* changes.
+/// </para>
+/// </param>
 public readonly record struct ZoomCameraSample(
     float Zoom,
     float CenterX,
@@ -52,7 +65,8 @@ public readonly record struct ZoomCameraSample(
     float SegmentProgress,
     float HeadingX,
     float HeadingY,
-    float DriftScale);
+    float DriftScale,
+    float CursorFollowWeight = 0f);
 
 /// <summary>
 /// A precomputed, immutable camera path for zoom shots that overlap or nearly touch.
@@ -191,6 +205,7 @@ public sealed class ZoomCameraPath
                 CenterX = shot.CenterX,
                 CenterY = shot.CenterY,
                 Seed = shot.Seed,
+                IsManual = shot.IsManual,
                 OriginalRampStart = shot.RampStart,
                 OriginalHoldStart = holdStart,
                 OriginalHoldEnd = holdEnd,
@@ -462,7 +477,8 @@ public sealed class ZoomCameraPath
             progress,
             headingX,
             headingY,
-            1f);
+            1f,
+            shot.IsManual ? 0f : 1f);
     }
 
     private ZoomCameraSample EvaluateTransition(int shotIndex, double timeSeconds)
@@ -524,7 +540,8 @@ public sealed class ZoomCameraPath
             progress,
             headingX,
             headingY,
-            driftScale);
+            driftScale,
+            Lerp(from.IsManual ? 0f : 1f, to.IsManual ? 0f : 1f, e));
     }
 
     private static float Ease(float from, float to, float t)
@@ -586,6 +603,7 @@ public sealed class ZoomCameraPath
         public float CenterX;
         public float CenterY;
         public int Seed;
+        public bool IsManual;
         public double OriginalRampStart;
         public double OriginalHoldStart;
         public double OriginalHoldEnd;
@@ -593,6 +611,7 @@ public sealed class ZoomCameraPath
         public int OriginalIndex;
 
         public readonly ZoomShot ToZoomShot()
-            => new(RampStart, HoldStart, HoldEnd, ReleaseEnd, Zoom, CenterX, CenterY, Seed);
+            => new(RampStart, HoldStart, HoldEnd, ReleaseEnd, Zoom, CenterX, CenterY, Seed, IsManual);
+
     }
 }

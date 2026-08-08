@@ -545,23 +545,33 @@ public class FrameCompositor : IDisposable
         int cursorIndex = ResolveCursorIndex(timeSeconds);
         var cursorPos = _smoothedPositions[cursorIndex];
 
-        // Get zoom state — use smoothed cursor position as center hint
-        // so the viewport always keeps the cursor in view.
+        // Get zoom state — blend the smoothed cursor position into the center so an
+        // auto segment keeps the cursor in view.
         var zoomState = _zoomEngine.GetZoomState(timeSeconds);
-        if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
+        float cursorWeight = float.IsFinite(zoomState.CursorFollowWeight)
+            ? Math.Clamp(zoomState.CursorFollowWeight, 0f, 1f)
+            : 1f;
+        if (zoomState.ZoomLevel > 1.01f && cursorWeight > 0f)
         {
-            // Override zoom center with actual cursor position for auto segments.
-            // Manual segments keep their user-defined center.
+            // Auto (click-driven) zooms center on the actual cursor; manual segments keep
+            // their user-defined center. The weight eases between the two across a handoff
+            // rather than switching abruptly — the two kinds of shot take their focal point
+            // from different sources, so a hard switch at the join would snap the camera.
             // ComputeViewportForCenter returns a fresh state, so the segment identity
             // has to be carried across by hand — losing it here would silently
             // disable camera drift for every auto zoom, which is the common case.
+            float centerX = zoomState.CenterX + ((float)cursorPos.X - zoomState.CenterX) * cursorWeight;
+            float centerY = zoomState.CenterY + ((float)cursorPos.Y - zoomState.CenterY) * cursorWeight;
+
             var recentred = _zoomEngine.ComputeViewportForCenter(
-                zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
+                zoomState.ZoomLevel, centerX, centerY);
+            recentred.IsManualOverride = zoomState.IsManualOverride;
             recentred.HasSegment = zoomState.HasSegment;
             recentred.SegmentProgress = zoomState.SegmentProgress;
             recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
             recentred.SegmentHeadingY = zoomState.SegmentHeadingY;
             recentred.DriftScale = zoomState.DriftScale;
+            recentred.CursorFollowWeight = zoomState.CursorFollowWeight;
             zoomState = recentred;
         }
 
@@ -614,6 +624,7 @@ public class FrameCompositor : IDisposable
         drifted.SegmentHeadingX = zoomState.SegmentHeadingX;
         drifted.SegmentHeadingY = zoomState.SegmentHeadingY;
         drifted.DriftScale = zoomState.DriftScale;
+        drifted.CursorFollowWeight = zoomState.CursorFollowWeight;
         return drifted;
     }
 

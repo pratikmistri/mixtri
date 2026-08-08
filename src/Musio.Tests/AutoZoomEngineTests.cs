@@ -154,6 +154,83 @@ public sealed class AutoZoomEngineTests
         Assert.IsTrue(state.IsManualOverride, "Manual override state must be reported for compositor/export parity.");
     }
 
+    /// <summary>
+    /// A manual segment overlapping an auto (click-driven) zoom must hand off to it, not cut.
+    /// <para>
+    /// Regression, reported from the editor as "a flash to no zoom then zoom in again".
+    /// Manual and auto used to be two independent camera paths resolved by hard precedence, so
+    /// when a manual segment overlapped an auto one the manual path took over at its own ramp
+    /// start — which begins at 1× — and the camera snapped from the auto zoom out to full frame
+    /// and immediately back in. Two independent paths can never hand off to each other; they
+    /// are now one chained path.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void GetZoomState_ManualOverlappingAuto_HandsOffWithoutFlashingToFullFrame()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig { DefaultZoomLevel = 2.0f });
+        // Auto click at t=2.0 produces a segment spanning roughly [1.0 .. 4.9].
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(12.0, [(2.0, 400, 300)]), 1920, 1080, TickFrequency);
+
+        // A manual segment dragged out so it overlaps that auto segment's tail.
+        var manual = ZoomKeyframe.FromRange(
+            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), 3.0, 0.8, 0.7);
+        engine.SetManualKeyframes([manual]);
+
+        // Sweep the whole overlap. Once the auto zoom has settled, the camera must never
+        // fall back toward full frame on its way into the manual segment.
+        float minZoom = float.MaxValue;
+        double minAt = 0;
+        for (double t = 2.0; t <= manual.Timestamp.TotalSeconds; t += 0.002)
+        {
+            float zoom = engine.GetZoomState(t).ZoomLevel;
+            if (zoom < minZoom)
+            {
+                minZoom = zoom;
+                minAt = t;
+            }
+        }
+
+        Assert.IsTrue(minZoom > 1.5f,
+            $"Camera dropped to {minZoom:F3}x at t={minAt:F3}s while moving from the auto zoom " +
+            "into the overlapping manual segment. Anything near 1x is the flash-to-full-frame cut.");
+    }
+
+    /// <summary>
+    /// The focal point must stay continuous across a manual/auto handoff even though the two
+    /// kinds of shot take their centre from different sources (live cursor versus the
+    /// keyframe's stored centre). <see cref="ZoomState.CursorFollowWeight"/> eases between
+    /// them; a hard switch would snap the camera at the join.
+    /// </summary>
+    [TestMethod]
+    public void GetZoomState_ManualOverlappingAuto_EasesCursorFollowWeightAcrossTheHandoff()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig { DefaultZoomLevel = 2.0f });
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(12.0, [(2.0, 400, 300)]), 1920, 1080, TickFrequency);
+        var manual = ZoomKeyframe.FromRange(
+            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), 3.0, 0.8, 0.7);
+        engine.SetManualKeyframes([manual]);
+
+        Assert.AreEqual(1f, engine.GetZoomState(2.5).CursorFollowWeight, 0.001f,
+            "A settled auto zoom should follow the cursor exactly as before.");
+        Assert.AreEqual(0f, engine.GetZoomState(manual.Timestamp.TotalSeconds + 0.2).CursorFollowWeight, 0.001f,
+            "A settled manual segment should use its own centre.");
+
+        var weights = new List<float>();
+        for (double t = 2.0; t <= manual.Timestamp.TotalSeconds + 0.2; t += 0.002)
+            weights.Add(engine.GetZoomState(t).CursorFollowWeight);
+
+        double maxStep = 0;
+        for (int i = 1; i < weights.Count; i++)
+            maxStep = Math.Max(maxStep, Math.Abs(weights[i] - weights[i - 1]));
+
+        Assert.IsTrue(maxStep < 0.05,
+            $"CursorFollowWeight jumped by {maxStep:F3} between adjacent 2ms samples; " +
+            "it must ease across the handoff rather than switching, or the focal point snaps.");
+    }
+
     [TestMethod]
     public void GetZoomState_AutoZoom_DoesNotSetManualOverride()
     {

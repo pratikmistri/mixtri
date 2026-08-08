@@ -28,6 +28,19 @@ public struct ZoomState
     /// <summary>True when the zoom center comes from a manual keyframe and should not be overridden.</summary>
     public bool IsManualOverride;
 
+    /// <summary>
+    /// How strongly the compositor should re-centre on the live cursor instead of on
+    /// <see cref="CenterX"/>/<see cref="CenterY"/>: <c>1</c> for a purely auto (click-driven)
+    /// zoom, <c>0</c> for a purely manual one, and eased in between across a handoff.
+    /// <para>
+    /// This is a weight rather than a bool because manual and auto shots resolve their focal
+    /// point from different sources — the live cursor versus the keyframe's stored centre —
+    /// so switching between them abruptly at a piece boundary would snap the camera. Defaults
+    /// to 1 so a plain <c>ZoomState</c> keeps the historical cursor-following behaviour.
+    /// </para>
+    /// </summary>
+    public float CursorFollowWeight;
+
     /// <summary>True when a zoom segment (auto or manual) is active at this instant.</summary>
     public bool HasSegment;
 
@@ -62,8 +75,7 @@ public class AutoZoomEngine
     private AutoZoomConfig _config;
     private readonly List<ZoomKeyframe> _manualKeyframes = [];
     private List<ZoomSegment> _autoSegments = [];
-    private ZoomCameraPath _manualPath = ZoomCameraPath.Empty;
-    private ZoomCameraPath _autoPath = ZoomCameraPath.Empty;
+    private ZoomCameraPath _path = ZoomCameraPath.Empty;
     private int _sourceWidth;
     private int _sourceHeight;
 
@@ -131,7 +143,7 @@ public class AutoZoomEngine
         _lastTimeOffsetSeconds = timeOffsetSeconds;
         _lastDurationSeconds = durationSeconds;
 
-        RebuildManualPath();
+        RebuildPath();
         RebuildAutoSegments();
     }
 
@@ -156,7 +168,7 @@ public class AutoZoomEngine
 
         if (!_config.Enabled || _lastMouseData is null)
         {
-            RebuildAutoPath();
+            RebuildPath();
             return;
         }
 
@@ -167,7 +179,7 @@ public class AutoZoomEngine
 
         if (clicks.Count == 0)
         {
-            RebuildAutoPath();
+            RebuildPath();
             return;
         }
 
@@ -200,20 +212,20 @@ public class AutoZoomEngine
         }
 
         _autoSegments = rawSegments;
-        RebuildAutoPath();
+        RebuildPath();
     }
 
     public void AddManualKeyframe(ZoomKeyframe keyframe)
     {
         _manualKeyframes.Add(keyframe);
         _manualKeyframes.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
-        RebuildManualPath();
+        RebuildPath();
     }
 
     public void RemoveManualKeyframe(TimeSpan timestamp)
     {
         _manualKeyframes.RemoveAll(k => k.Timestamp == timestamp);
-        RebuildManualPath();
+        RebuildPath();
     }
 
     /// <summary>
@@ -228,7 +240,7 @@ public class AutoZoomEngine
             _manualKeyframes.AddRange(keyframes);
             _manualKeyframes.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
         }
-        RebuildManualPath();
+        RebuildPath();
     }
 
     /// <summary>
@@ -239,44 +251,82 @@ public class AutoZoomEngine
         => (int)Math.Round(startSeconds * 1000.0);
 
     /// <summary>
-    /// Get the zoom state at any timestamp. Manual keyframes are evaluated as their
-    /// own precomputed camera path and override the auto-click path whenever active.
+    /// Get the zoom state at any timestamp, resolved from the single chained camera path
+    /// that carries both manual keyframes and auto (click-driven) segments. Pure function
+    /// of time: the path is prebuilt, so this only reads immutable state.
     /// </summary>
     public ZoomState GetZoomState(double timeSeconds)
     {
-        if (_manualPath.TryEvaluate(timeSeconds, out var manualSample))
-        {
-            var state = ComputeViewport(manualSample);
-            state.IsManualOverride = true;
-            return state;
-        }
-
-        if (_autoPath.TryEvaluate(timeSeconds, out var autoSample))
-            return ComputeViewport(autoSample);
+        if (_path.TryEvaluate(timeSeconds, out var sample))
+            return ComputeViewport(sample);
 
         return ComputeViewportForCenter(1.0f, _sourceWidth / 2f, _sourceHeight / 2f);
     }
 
-    private void RebuildManualPath()
+    /// <summary>
+    /// Rebuilds the single camera path from BOTH manual keyframes and auto (click-driven)
+    /// segments.
+    /// <para>
+    /// These used to be two independent paths evaluated with hard precedence — manual first,
+    /// auto only as a fallback. That produced a hard cut whenever a manual segment overlapped
+    /// an auto one: the manual path became active at its own ramp start, which begins at 1×,
+    /// so the camera flashed from the auto zoom out to full frame and immediately dove back
+    /// in. Two independent paths can never hand off to each other, which is exactly what the
+    /// chained-path model exists to do.
+    /// </para>
+    /// <para>
+    /// They are now one ordered shot list, so a manual and an auto shot hand off to each other
+    /// like any other linked pair. Manual still wins where the two genuinely conflict: an auto
+    /// shot whose hold sits inside a manual shot's hold is dropped (see
+    /// <see cref="IsCoveredByManualHold"/>), so an explicit segment is never chopped into
+    /// waypoints by the clicks underneath it.
+    /// </para>
+    /// </summary>
+    private void RebuildPath()
     {
-        if (_sourceWidth <= 0 || _sourceHeight <= 0 || _manualKeyframes.Count == 0)
+        if (_sourceWidth <= 0 || _sourceHeight <= 0)
         {
-            _manualPath = ZoomCameraPath.Empty;
+            _path = ZoomCameraPath.Empty;
             return;
         }
 
-        _manualPath = ZoomCameraPath.Build(_manualKeyframes.Select(ToZoomShot), _sourceWidth, _sourceHeight);
+        var manualShots = _manualKeyframes.Select(ToZoomShot).ToList();
+        var shots = new List<ZoomShot>(manualShots);
+
+        foreach (var segment in _autoSegments)
+        {
+            var autoShot = ToZoomShot(segment);
+            if (!IsCoveredByManualHold(autoShot, manualShots))
+                shots.Add(autoShot);
+        }
+
+        _path = shots.Count == 0
+            ? ZoomCameraPath.Empty
+            : ZoomCameraPath.Build(shots, _sourceWidth, _sourceHeight);
     }
 
-    private void RebuildAutoPath()
+    /// <summary>
+    /// True when <paramref name="autoShot"/>'s settled hold overlaps some manual shot's hold,
+    /// meaning the user has explicitly framed that stretch of the timeline and the
+    /// click-driven zoom competing for it should give way.
+    /// <para>
+    /// Overlap — not containment — is the right test. An auto segment is typically far longer
+    /// than a manual one (~3.9s versus whatever was dragged out), so a containment or midpoint
+    /// test lets a long auto shot escape suppression by a short manual shot sitting on top of
+    /// it, and the auto zoom then wins the very instant the user explicitly authored. Holds
+    /// that merely abut do not overlap, so a neighbouring auto shot still survives and hands
+    /// off to the manual one instead of being discarded.
+    /// </para>
+    /// </summary>
+    private static bool IsCoveredByManualHold(ZoomShot autoShot, List<ZoomShot> manualShots)
     {
-        if (_sourceWidth <= 0 || _sourceHeight <= 0 || _autoSegments.Count == 0)
+        foreach (var manual in manualShots)
         {
-            _autoPath = ZoomCameraPath.Empty;
-            return;
+            if (autoShot.HoldStart <= manual.HoldEnd && manual.HoldStart <= autoShot.HoldEnd)
+                return true;
         }
 
-        _autoPath = ZoomCameraPath.Build(_autoSegments.Select(ToZoomShot), _sourceWidth, _sourceHeight);
+        return false;
     }
 
     private ZoomShot ToZoomShot(ZoomKeyframe keyframe)
@@ -290,7 +340,8 @@ public class AutoZoomEngine
             (float)keyframe.ZoomLevel,
             (float)(keyframe.CenterX * _sourceWidth),
             (float)(keyframe.CenterY * _sourceHeight),
-            SegmentSeedFromStart(rampStart));
+            SegmentSeedFromStart(rampStart),
+            IsManual: true);
     }
 
     private static ZoomShot ToZoomShot(ZoomSegment segment)
@@ -302,7 +353,8 @@ public class AutoZoomEngine
             segment.TargetZoom,
             segment.CenterX,
             segment.CenterY,
-            SegmentSeedFromStart(segment.ZoomInStart));
+            SegmentSeedFromStart(segment.ZoomInStart),
+            IsManual: false);
 
     /// <summary>
     /// Step-based spring interpolation helper for real-time use.
@@ -327,6 +379,8 @@ public class AutoZoomEngine
         state.SegmentHeadingX = sample.HeadingX;
         state.SegmentHeadingY = sample.HeadingY;
         state.DriftScale = sample.DriftScale;
+        state.CursorFollowWeight = sample.CursorFollowWeight;
+        state.IsManualOverride = sample.CursorFollowWeight <= 0f;
         return state;
     }
 
@@ -360,6 +414,7 @@ public class AutoZoomEngine
             ViewportWidth = vpWidth,
             ViewportHeight = vpHeight,
             DriftScale = 1f,
+            CursorFollowWeight = 1f,
         };
     }
 }
