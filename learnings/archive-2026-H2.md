@@ -1731,4 +1731,48 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1046 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
   relaunched clean.
 
+## Zoom handoff, round 5: travel lagged zoom because the move was applied twice
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition` focal point + `FrameCompositor` cursor blend.
+- **Symptom, as reported**: "the pre animation does the zoom but not the travel, so zoom starts
+  first and then the travel making overall animation feel odd."
+- **Cause — two blends stacked without either knowing about the other.** A handoff can be *mixed*:
+  an auto shot resolves its focal point from the **live cursor**, a manual one from its **stored
+  centre**. `ZoomCameraPath` interpolated its centre A→B, and `FrameCompositor` then blended the
+  cursor in on top with `CursorFollowWeight` easing 1→0. With the cursor near the outgoing auto
+  shot's centre those compose to `A + (B − A)·e²` — **quadratic travel against linear zoom**.
+  Measured on Sample7: at `e = 0.40` the camera was only ~16% of the way across.
+- **Fix**: for a mixed handoff the path reports the **manual endpoint's centre as a fixed anchor**
+  instead of an interpolated centre, leaving the compositor's single blend to supply the whole
+  move. Travel becomes linear in `e`; the same fixture now measures 40% at `e = 0.40`. Matched
+  endpoints (both manual, or both auto) still interpolate exactly as before.
+- **The generalisable trap**: when two layers each blend toward the same destination, the result is
+  the *product* of their progressions, not either one. Check for double application whenever a
+  value is interpolated in one stage and then re-blended in another — the symptom is motion that is
+  correct at both endpoints (so every endpoint assertion passes) but lags in the middle.
+- **Test it where the layers meet.** `MixedHandoff_FocalPointTravelsInStepWithTheEasedMove`
+  emulates the compositor's blend rather than asserting on the path's centre alone, because the
+  path's centre in isolation is *not* wrong — only the composition is. An isolated unit test of
+  either layer passes happily.
+- **Verified**: suite **1047 passed, 3 skipped, 0 failed**.
+
+## Zoom track: making the selected segment findable among overlapping ones
+
+- **Feature/area**: `TimelineControl.ZoomTrackCanvas_Draw` / `HitTestZoomSegment`.
+- **Context**: zoom segments overlap *by design* now (that is what drives a handoff), which made
+  the track hard to read and the selected segment's resize handles hard to grab.
+- **Three changes, and all three were needed** — paint order alone is not enough:
+  1. Paint the selected segment **last** so it is on top of what it overlaps.
+  2. **Desaturate (Rec. 601 luma) and fade** the unselected segments while a selection exists.
+     Luma-weighted desaturation keeps each segment's apparent brightness instead of flattening
+     light and dark ones together. Only while something is selected, so the track looks normal
+     at rest.
+  3. Give the selected segment's **edges** priority in hit-testing. Without this an overlapping
+     neighbour's body claims the click first and the handles are unreachable no matter what the
+     paint order says. **Painting order and hit-test order are separate things and must be
+     changed together.**
+- **Edges only, deliberately.** Giving the selected segment's *body* priority too would trap the
+  selection: a segment underneath could never be clicked to select it. Priority for the gesture
+  that needs it, not for the whole control.
+
 
