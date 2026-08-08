@@ -41,6 +41,49 @@ public sealed class ZoomCameraPathTests
         return sample;
     }
 
+    /// <summary>
+    /// Two zoom segments dragged out near each other on the timeline must actually link.
+    /// <para>
+    /// Regression: <see cref="ZoomCameraPath.LinkGapSeconds"/> was originally 0.35s, which
+    /// was tighter than the gap two default-eased segments naturally leave, so the handoff
+    /// never engaged on the "close together" case it exists for and the feature looked like
+    /// it did nothing. These build the keyframes exactly as the editor does — via
+    /// <see cref="ZoomKeyframe.FromRange"/> — rather than with hand-picked ramp times, so the
+    /// test tracks what a user actually authors.
+    /// </para>
+    /// </summary>
+    [DataTestMethod]
+    [DataRow(0.0, 3.0, 3.4, 6.4, true, DisplayName = "0.4s apart links")]
+    [DataRow(0.0, 3.0, 3.6, 6.6, true, DisplayName = "0.6s apart links")]
+    [DataRow(0.0, 3.0, 4.4, 7.4, false, DisplayName = "1.4s apart stays independent")]
+    public void SegmentsAuthoredCloseTogether_LinkIntoAHandoff(
+        double aStart, double aEnd, double bStart, double bEnd, bool expectLinked)
+    {
+        var a = ZoomKeyframe.FromRange(
+            TimeSpan.FromSeconds(aStart), TimeSpan.FromSeconds(aEnd), 2.0, 0.3, 0.3);
+        var b = ZoomKeyframe.FromRange(
+            TimeSpan.FromSeconds(bStart), TimeSpan.FromSeconds(bEnd), 2.0, 0.7, 0.7);
+
+        Assert.AreEqual(expectLinked, ZoomCameraPath.AreLinked(a, b),
+            $"AreLinked disagreed for a gap of {(b.Start - a.End).TotalSeconds:F2}s " +
+            $"(LinkGapSeconds = {ZoomCameraPath.LinkGapSeconds:F2}).");
+
+        var path = ZoomCameraPath.Build([ShotFrom(a), ShotFrom(b)], SourceWidth, SourceHeight);
+        Assert.AreEqual(expectLinked, path.IsLinkedAfter(0),
+            "The path's own linkage must agree with the shared AreLinked predicate the timeline draws from.");
+
+        if (!expectLinked)
+            return;
+
+        // A linked pair must carry the camera across without pumping back toward 1x.
+        float minZoom = float.MaxValue;
+        for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
+            minZoom = Math.Min(minZoom, Sample(path, t).Zoom);
+
+        Assert.IsTrue(minZoom > 1.5f,
+            $"Linked segments should hand off without releasing toward 1x; min zoom was {minZoom:F3}.");
+    }
+
     [TestMethod]
     public void LinkedPair_ZoomVelocity_IsContinuousAcrossHandoff()
     {

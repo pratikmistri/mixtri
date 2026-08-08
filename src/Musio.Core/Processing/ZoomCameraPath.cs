@@ -70,8 +70,25 @@ public readonly record struct ZoomCameraSample(
 /// </summary>
 public sealed class ZoomCameraPath
 {
-    /// <summary>Maximum source-time gap that still turns two shots into one camera handoff.</summary>
-    public const double LinkGapSeconds = 0.35;
+    /// <summary>
+    /// Maximum source-time gap that still turns two shots into one camera handoff.
+    /// <para>
+    /// A shot's <c>RampStart</c>/<c>ReleaseEnd</c> are the instants the camera leaves and
+    /// returns to 1×, so this value is literally <b>how long the frame is allowed to sit
+    /// fully zoomed out before the next zoom begins</b>. Anything shorter reads as a pump —
+    /// the camera snaps out to full frame and immediately punches back in — which is the
+    /// artifact the chained path exists to remove, so those pairs are linked and hand off
+    /// directly instead.
+    /// </para>
+    /// <para>
+    /// This was originally 0.35s, which was too tight to be useful: with the default ease
+    /// durations, two segments dragged out near each other typically leave a 0.4–0.7s gap,
+    /// so they stayed unlinked and the feature never engaged on exactly the "close together"
+    /// case it was built for. 0.75s links that range while still preserving a deliberate
+    /// return to full frame whenever the user leaves a full second or more between zooms.
+    /// </para>
+    /// </summary>
+    public const double LinkGapSeconds = 0.75;
 
     /// <summary>Shortest handoff window allowed when overlapping holds would otherwise collapse to a snap.</summary>
     public const double MinTransitionSeconds = 0.25;
