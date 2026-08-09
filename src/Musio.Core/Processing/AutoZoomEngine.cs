@@ -145,7 +145,12 @@ public class AutoZoomEngine
         _lastTimeOffsetSeconds = timeOffsetSeconds;
         _lastDurationSeconds = durationSeconds;
 
-        RebuildPath();
+        // RebuildAutoSegments ends with RebuildPath on every path, and that rebuild picks up
+        // BOTH the manual keyframes and the freshly-built auto segments using the dimensions
+        // just cached above — so it also covers the case where SetManualKeyframes ran before
+        // this call, when the source size was still unknown. Rebuilding here as well would be
+        // redundant work, and would briefly publish a path built from the NEW dimensions but
+        // the STALE auto segments.
         RebuildAutoSegments();
     }
 

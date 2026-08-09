@@ -775,18 +775,8 @@ public sealed partial class EditorPage : Page
 
         var project = ProjectService.Instance.CurrentProject;
         double mouseOffset = project?.MouseToVideoOffsetSeconds ?? 0;
-        double targetTime = kf.Timestamp.TotalSeconds + mouseOffset;
-        double tickFreq = cursorData.TickFrequency;
-        if (tickFreq <= 0) return;
-
-        long startTick = cursorData.StartTimestampTicks;
-        Musio.Core.Models.MouseSample closest = cursorData.Samples[0];
-        double bestDist = double.MaxValue;
-        foreach (var s in cursorData.Samples)
-        {
-            double dist = Math.Abs(((s.TimestampTicks - startTick) / tickFreq) - targetTime);
-            if (dist < bestDist) { bestDist = dist; closest = s; }
-        }
+        if (cursorData.FindSampleNearest(kf.Timestamp.TotalSeconds + mouseOffset) is not { } closest)
+            return;
 
         // Hook coordinates are already physical pixels (PerMonitorV2) — no DPI scaling here.
         _zoomRegionCursorX = closest.X - (project?.CropOffsetX ?? 0);

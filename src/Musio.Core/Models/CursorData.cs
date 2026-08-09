@@ -61,6 +61,55 @@ public class MouseRecordingData
         : TimeSpan.Zero;
 
     /// <summary>
+    /// Returns the recorded sample nearest <paramref name="secondsFromStart"/>, or <c>null</c>
+    /// when there are no samples to choose from.
+    /// <para>
+    /// Binary search rather than a linear scan: a long recording holds tens of thousands of
+    /// samples, and the callers run on the UI thread while the user is interacting. This is safe
+    /// because <see cref="Musio.Core.Capture.MouseHookRecorder"/> keeps
+    /// <see cref="MouseSample.TimestampTicks"/> non-decreasing by construction — two threads
+    /// append samples (the hook and the shape poller), so its append path clamps any
+    /// out-of-order timestamp up to its predecessor.
+    /// </para>
+    /// </summary>
+    public MouseSample? FindSampleNearest(double secondsFromStart)
+    {
+        if (Samples.Count == 0) return null;
+        if (!double.IsFinite(secondsFromStart) || TickFrequency <= 0) return Samples[0];
+
+        double offsetTicks = secondsFromStart * TickFrequency;
+
+        // Past either end of the recording the answer is simply the nearest end sample, and
+        // short-circuiting here also keeps the conversion below away from long overflow.
+        if (offsetTicks <= 0) return Samples[0];
+        if (offsetTicks >= Samples[^1].TimestampTicks - StartTimestampTicks) return Samples[^1];
+
+        long targetTicks = StartTimestampTicks + (long)offsetTicks;
+
+        // Lower bound: the first sample at or after the target.
+        int lo = 0;
+        int hi = Samples.Count - 1;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) / 2);
+            if (Samples[mid].TimestampTicks < targetTicks)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        var atOrAfter = Samples[lo];
+        if (lo == 0) return atOrAfter;
+
+        // The sample before it can be closer; ties go to the earlier one, matching the
+        // "first closest wins" behaviour of the linear scans this replaced.
+        var before = Samples[lo - 1];
+        return Math.Abs(before.TimestampTicks - targetTicks) <= Math.Abs(atOrAfter.TimestampTicks - targetTicks)
+            ? before
+            : atOrAfter;
+    }
+
+    /// <summary>
     /// Returns a copy of <paramref name="data"/> with the stop-trigger click removed.
     /// The stop-trigger click is the last left-button-down event that occurred
     /// within 200 ms before <paramref name="stopRequestedTicks"/>. Its matching
