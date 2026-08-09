@@ -512,11 +512,12 @@ public record ZoomKeyframe
     /// chose, and so should be held, rather than a byproduct of where a click happened.
     /// <para>
     /// When this is false the compositor keeps re-centring the shot on the live cursor, which
-    /// is what makes a click-driven zoom follow what you are doing. It is set when a region is
-    /// explicitly authored — creating a segment, or editing its region — and deliberately NOT
-    /// set by merely moving or resizing one. Before it existed, <see cref="IsManual"/> served
-    /// both purposes, so dragging a segment's edge silently converted it from cursor-following
-    /// to pinned-on-the-click-point: a framing change the user never asked for.
+    /// is what makes a click-driven zoom follow what you are doing. It is set ONLY by an
+    /// explicit region edit — not by creating, moving, resizing, or restyling a segment.
+    /// Creating a segment says <i>when</i> to zoom, not <i>where</i> to look. Before this
+    /// existed, <see cref="IsManual"/> served both purposes, so dragging a segment's edge
+    /// silently converted it from cursor-following to pinned-on-the-click-point: a framing
+    /// change the user never asked for.
     /// </para>
     /// <para>
     /// Nullable for back-compat: projects saved before this existed carry no value, and
@@ -586,9 +587,13 @@ public record ZoomKeyframe
             HoldDuration = hold,
             PostDuration = post,
             IsManual = true,
-            // Creating a segment IS choosing a framing, so hold it. Only move/resize leave
-            // this alone, so lengthening a click-driven zoom keeps it following the cursor.
-            HasAuthoredCenter = true,
+            // Creating a segment says WHEN to zoom, not WHERE to look — so it keeps following
+            // the cursor. CenterX/CenterY are seeded from the cursor at the segment's midpoint
+            // and kept as a fallback (they are what a cursorless clip uses, and what gets held
+            // if the region is later authored), but they are only a snapshot. Following the
+            // live cursor is strictly better than freezing that snapshot. Only an explicit
+            // region edit pins the framing.
+            HasAuthoredCenter = false,
         };
     }
 }

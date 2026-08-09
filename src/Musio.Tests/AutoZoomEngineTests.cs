@@ -216,7 +216,13 @@ public sealed class AutoZoomEngineTests
         engine.BuildZoomTimeline(
             BuildRecordingWithClicks(12.0, [(2.0, 400, 300)]), 1920, 1080, TickFrequency);
         var manual = ZoomKeyframe.FromRange(
-            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), 3.0, 0.8, 0.7);
+            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(6), 3.0, 0.8, 0.7) with
+        {
+            // This test is about a MIXED handoff, which needs one shot that holds its own
+            // centre. Creating a segment no longer does that on its own — only editing its
+            // region does — so the fixture states that explicitly.
+            HasAuthoredCenter = true,
+        };
         engine.SetManualKeyframes([manual]);
 
         Assert.AreEqual(1f, engine.GetZoomState(2.5).CursorFollowWeight, 0.001f,
@@ -365,16 +371,29 @@ public sealed class AutoZoomEngineTests
     }
 
     /// <summary>
-    /// Creating a segment IS choosing a framing, so it holds its centre from the start.
+    /// Creating a segment says WHEN to zoom, not WHERE to look, so it must not pin the framing —
+    /// a freshly created segment keeps following the cursor until its region is edited.
     /// </summary>
     [TestMethod]
-    public void CreatingASegment_HoldsItsFraming()
+    public void CreatingASegment_DoesNotPinItsFraming()
     {
         var created = ZoomKeyframe.FromRange(
             TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4), 2.0, 0.7, 0.3);
 
-        Assert.IsTrue(created.IsManual);
-        Assert.IsTrue(created.UsesAuthoredCenter);
+        Assert.IsTrue(created.IsManual, "A created segment is user-owned and editable.");
+        Assert.IsFalse(created.UsesAuthoredCenter,
+            "Creating a segment should leave it following the cursor; only editing its region pins it.");
+
+        // The seeded centre is still carried, so it is available as the fallback for a
+        // cursorless clip and as the starting point if the region is later authored.
+        Assert.AreEqual(0.7, created.CenterX, 1e-9);
+        Assert.AreEqual(0.3, created.CenterY, 1e-9);
+
+        // ...and editing the region is what pins it.
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(12) };
+        model.ZoomKeyframes.Add(created);
+        new UpdateZoomSegmentPropertiesOperation(created.Id, centerX: 0.2, centerY: 0.9).Execute(model);
+        Assert.IsTrue(model.ZoomKeyframes[0].UsesAuthoredCenter);
     }
 
     [TestMethod]
