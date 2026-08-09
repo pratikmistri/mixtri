@@ -144,6 +144,12 @@ public sealed class AutoZoomEngineTests
             PreDuration = TimeSpan.FromMilliseconds(300),
             HoldDuration = TimeSpan.FromMilliseconds(500),
             PostDuration = TimeSpan.FromMilliseconds(500),
+            // The fixture's whole premise is that this is a manual, user-framed keyframe;
+            // it just never said so. IsManual now only governs ownership, and the framing
+            // question it also used to answer lives on HasAuthoredCenter, so a keyframe that
+            // means to hold its own centre has to declare it.
+            IsManual = true,
+            HasAuthoredCenter = true,
         });
 
         // During hold phase of the manual keyframe
@@ -275,6 +281,100 @@ public sealed class AutoZoomEngineTests
                 $"The zoom at the click at {clickTime:F1}s collapsed to {zoom:F3}x after a " +
                 "neighbouring segment was edited — editing one segment must not delete the others.");
         }
+    }
+
+    /// <summary>
+    /// Resizing or moving a click-driven zoom must not silently repoint the camera.
+    /// <para>
+    /// Regression: <c>IsManual</c> used to mean both "the user owns this" and "hold this
+    /// centre", so dragging a segment's edge promoted it and thereby switched it from
+    /// following the cursor to being pinned on the click point — a framing change nobody asked
+    /// for, and part of "it gets weird when I start editing the segment lengths".
+    /// <see cref="ZoomKeyframe.HasAuthoredCenter"/> now carries the framing question on its own.
+    /// </para>
+    /// </summary>
+    [TestMethod]
+    public void ResizingAnAutoKeyframe_KeepsItFollowingTheCursor()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(12) };
+        model.ZoomKeyframes.Add(new ZoomKeyframe
+        {
+            Id = "kf1",
+            Timestamp = TimeSpan.FromSeconds(3),
+            ZoomLevel = 2.0,
+            CenterX = 0.25,
+            CenterY = 0.75,
+            IsManual = false,
+        });
+
+        new ResizeZoomSegmentOperation("kf1", resizeStart: false, TimeSpan.FromSeconds(7))
+            .Execute(model);
+
+        var resized = model.ZoomKeyframes[0];
+        Assert.IsTrue(resized.IsManual, "Resizing should still hand ownership to the user.");
+        Assert.IsFalse(resized.UsesAuthoredCenter,
+            "Resizing must not pin the framing — the segment should still follow the cursor.");
+
+        new MoveZoomKeyframeOperation("kf1", TimeSpan.FromSeconds(5)).Execute(model);
+        Assert.IsFalse(model.ZoomKeyframes[0].UsesAuthoredCenter,
+            "Moving must not pin the framing either.");
+    }
+
+    /// <summary>
+    /// Explicitly editing a segment's region is the gesture that DOES pin its framing —
+    /// the other half of the split guarded by the test above. Changing only the zoom level
+    /// must leave the framing question alone.
+    /// </summary>
+    [TestMethod]
+    public void EditingTheRegion_PinsTheFraming_ButChangingOnlyZoomDoesNot()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(12) };
+        model.ZoomKeyframes.Add(new ZoomKeyframe
+        {
+            Id = "kf1",
+            Timestamp = TimeSpan.FromSeconds(3),
+            ZoomLevel = 2.0,
+            IsManual = false,
+        });
+
+        new UpdateZoomSegmentPropertiesOperation("kf1", zoomLevel: 3.0).Execute(model);
+        Assert.IsFalse(model.ZoomKeyframes[0].UsesAuthoredCenter,
+            "Changing the zoom level alone should not repoint the camera.");
+
+        new UpdateZoomSegmentPropertiesOperation("kf1", centerX: 0.8, centerY: 0.2).Execute(model);
+        Assert.IsTrue(model.ZoomKeyframes[0].UsesAuthoredCenter,
+            "Authoring a region is exactly the gesture that should hold that framing.");
+    }
+
+    /// <summary>
+    /// Projects saved before <see cref="ZoomKeyframe.HasAuthoredCenter"/> existed carry no
+    /// value for it, and must keep rendering exactly as they did: a manual keyframe held its
+    /// centre, an auto one followed the cursor.
+    /// </summary>
+    [TestMethod]
+    public void LegacyKeyframesWithoutTheFlag_KeepTheirOriginalFramingBehaviour()
+    {
+        var legacyManual = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1), IsManual = true };
+        var legacyAuto = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1), IsManual = false };
+
+        Assert.IsNull(legacyManual.HasAuthoredCenter);
+        Assert.IsTrue(legacyManual.UsesAuthoredCenter,
+            "A manual keyframe from an older project must keep holding its authored centre.");
+        Assert.IsFalse(legacyAuto.UsesAuthoredCenter,
+            "An auto keyframe must keep following the cursor.");
+    }
+
+    /// <summary>
+    /// Creating a segment IS choosing a framing, so it holds its centre from the start.
+    /// </summary>
+    [TestMethod]
+    public void CreatingASegment_HoldsItsFraming()
+    {
+        var created = ZoomKeyframe.FromRange(
+            TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4), 2.0, 0.7, 0.3);
+
+        Assert.IsTrue(created.IsManual);
+        Assert.IsTrue(created.UsesAuthoredCenter);
     }
 
     [TestMethod]

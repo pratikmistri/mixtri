@@ -26,7 +26,7 @@ public readonly record struct ZoomShot(
     float CenterX,
     float CenterY,
     int Seed,
-    bool IsManual = false);
+    bool HasFixedCenter = false);
 
 /// <summary>
 /// The camera state resolved from a <see cref="ZoomCameraPath"/> at one instant.
@@ -199,7 +199,7 @@ public sealed class ZoomCameraPath
                 CenterX = shot.CenterX,
                 CenterY = shot.CenterY,
                 Seed = shot.Seed,
-                IsManual = shot.IsManual,
+                HasFixedCenter = shot.HasFixedCenter,
                 OriginalRampStart = shot.RampStart,
                 OriginalHoldStart = holdStart,
                 OriginalHoldEnd = holdEnd,
@@ -498,7 +498,7 @@ public sealed class ZoomCameraPath
             headingX,
             headingY,
             1f,
-            shot.IsManual ? 0f : 1f);
+            shot.HasFixedCenter ? 0f : 1f);
     }
 
     private ZoomCameraSample EvaluateTransition(int shotIndex, double timeSeconds)
@@ -528,8 +528,8 @@ public sealed class ZoomCameraPath
         // travel". Reporting the MANUAL endpoint's centre as a fixed anchor instead leaves the
         // compositor's single cursor blend to supply the whole move, making travel linear in e
         // and therefore synchronised with the zoom.
-        bool mixedCentreSources = from.IsManual != to.IsManual;
-        ZoomShot anchor = from.IsManual ? from : to;
+        bool mixedCentreSources = from.HasFixedCenter != to.HasFixedCenter;
+        ZoomShot anchor = from.HasFixedCenter ? from : to;
         float centerX = mixedCentreSources ? anchor.CenterX : Lerp(from.CenterX, to.CenterX, e);
         float centerY = mixedCentreSources ? anchor.CenterY : Lerp(from.CenterY, to.CenterY, e);
 
@@ -582,7 +582,7 @@ public sealed class ZoomCameraPath
             headingX,
             headingY,
             driftScale,
-            Lerp(from.IsManual ? 0f : 1f, to.IsManual ? 0f : 1f, e));
+            Lerp(from.HasFixedCenter ? 0f : 1f, to.HasFixedCenter ? 0f : 1f, e));
     }
 
     private static float Ease(float from, float to, float t)
@@ -644,7 +644,7 @@ public sealed class ZoomCameraPath
         public float CenterX;
         public float CenterY;
         public int Seed;
-        public bool IsManual;
+        public bool HasFixedCenter;
         public double OriginalRampStart;
         public double OriginalHoldStart;
         public double OriginalHoldEnd;
@@ -652,7 +652,7 @@ public sealed class ZoomCameraPath
         public int OriginalIndex;
 
         public readonly ZoomShot ToZoomShot()
-            => new(RampStart, HoldStart, HoldEnd, ReleaseEnd, Zoom, CenterX, CenterY, Seed, IsManual);
+            => new(RampStart, HoldStart, HoldEnd, ReleaseEnd, Zoom, CenterX, CenterY, Seed, HasFixedCenter);
 
     }
 }

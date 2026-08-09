@@ -22,7 +22,14 @@ public class MoveZoomKeyframeOperation : IEditOperation
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
         var sourceClickTicks = model.ZoomKeyframes[index].SourceClickTicks;
-        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp, IsManual = true };
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with
+        {
+            Timestamp = _newTimestamp,
+            IsManual = true,
+            // Moving is not a framing decision. Carry the effective value across so promotion
+            // cannot flip a click-driven zoom to a pinned one via the IsManual fallback.
+            HasAuthoredCenter = model.ZoomKeyframes[index].UsesAuthoredCenter,
+        };
 
         // When converting an auto-generated keyframe to manual, suppress the
         // original auto-zoom click so it doesn't double-fire.
@@ -162,11 +169,18 @@ public class ResizeZoomSegmentOperation : IEditOperation
                     PreDuration = TimeSpan.FromMilliseconds(50),
                     HoldDuration = newHold,
                     IsManual = true,
+                    // Resizing is not a framing decision — see MoveZoomKeyframeOperation.
+                    HasAuthoredCenter = kf.UsesAuthoredCenter,
                 };
             }
             else
             {
-                model.ZoomKeyframes[index] = kf with { PreDuration = newPre, IsManual = true };
+                model.ZoomKeyframes[index] = kf with
+                {
+                    PreDuration = newPre,
+                    IsManual = true,
+                    HasAuthoredCenter = kf.UsesAuthoredCenter,
+                };
             }
         }
         else
@@ -190,7 +204,13 @@ public class ResizeZoomSegmentOperation : IEditOperation
                 newPost = totalAfterTimestamp;
             }
 
-            model.ZoomKeyframes[index] = kf with { HoldDuration = newHold, PostDuration = newPost, IsManual = true };
+            model.ZoomKeyframes[index] = kf with
+            {
+                HoldDuration = newHold,
+                PostDuration = newPost,
+                IsManual = true,
+                HasAuthoredCenter = kf.UsesAuthoredCenter,
+            };
         }
     }
 
@@ -243,6 +263,12 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
             CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
             IsManual = true,
+            // Only an explicit region edit pins the framing. Otherwise carry the keyframe's
+            // EFFECTIVE value across, not its raw one: promoting sets IsManual, and a null
+            // HasAuthoredCenter falls back to IsManual, so leaving it null here would flip a
+            // click-driven zoom to pinned as a side effect of changing its zoom level.
+            HasAuthoredCenter = (_newCenterX is not null || _newCenterY is not null)
+                || kf.UsesAuthoredCenter,
         };
     }
 

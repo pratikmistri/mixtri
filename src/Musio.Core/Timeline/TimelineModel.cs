@@ -498,8 +498,40 @@ public record ZoomKeyframe
     /// <summary>
     /// True for keyframes added by the user via the editor UI.
     /// False for keyframes auto-generated from click events (visualization only).
+    /// <para>
+    /// This governs OWNERSHIP — whether the keyframe is editable and persisted. It does NOT
+    /// govern where the focal point comes from; see <see cref="HasAuthoredCenter"/>. Keeping
+    /// the two apart is what lets you lengthen a click-driven zoom without it also stopping
+    /// following the cursor.
+    /// </para>
     /// </summary>
     public bool IsManual { get; init; }
+
+    /// <summary>
+    /// Whether <see cref="CenterX"/>/<see cref="CenterY"/> are a framing the user actually
+    /// chose, and so should be held, rather than a byproduct of where a click happened.
+    /// <para>
+    /// When this is false the compositor keeps re-centring the shot on the live cursor, which
+    /// is what makes a click-driven zoom follow what you are doing. It is set when a region is
+    /// explicitly authored — creating a segment, or editing its region — and deliberately NOT
+    /// set by merely moving or resizing one. Before it existed, <see cref="IsManual"/> served
+    /// both purposes, so dragging a segment's edge silently converted it from cursor-following
+    /// to pinned-on-the-click-point: a framing change the user never asked for.
+    /// </para>
+    /// <para>
+    /// Nullable for back-compat: projects saved before this existed carry no value, and
+    /// <see cref="UsesAuthoredCenter"/> resolves those to <see cref="IsManual"/> so they keep
+    /// rendering exactly as they did.
+    /// </para>
+    /// </summary>
+    public bool? HasAuthoredCenter { get; init; }
+
+    /// <summary>
+    /// Resolved answer to "hold this centre, or follow the cursor?", applying the legacy
+    /// fallback described on <see cref="HasAuthoredCenter"/>.
+    /// </summary>
+    [JsonIgnore]
+    public bool UsesAuthoredCenter => HasAuthoredCenter ?? IsManual;
 
     /// <summary>
     /// The raw <see cref="ClickEvent.TimestampTicks"/> of the source click that
@@ -554,6 +586,9 @@ public record ZoomKeyframe
             HoldDuration = hold,
             PostDuration = post,
             IsManual = true,
+            // Creating a segment IS choosing a framing, so hold it. Only move/resize leave
+            // this alone, so lengthening a click-driven zoom keeps it following the cursor.
+            HasAuthoredCenter = true,
         };
     }
 }

@@ -348,7 +348,10 @@ public class AutoZoomEngine
             (float)(keyframe.CenterX * _sourceWidth),
             (float)(keyframe.CenterY * _sourceHeight),
             SegmentSeedFromStart(rampStart),
-            IsManual: true);
+            // A manual keyframe only pins its framing if the user actually authored a region.
+            // One promoted just by being moved or resized keeps following the cursor, exactly
+            // as it did before the edit.
+            HasFixedCenter: keyframe.UsesAuthoredCenter);
     }
 
     private static ZoomShot ToZoomShot(ZoomSegment segment)
@@ -361,7 +364,7 @@ public class AutoZoomEngine
             segment.CenterX,
             segment.CenterY,
             SegmentSeedFromStart(segment.ZoomInStart),
-            IsManual: false);
+            HasFixedCenter: false);
 
     /// <summary>
     /// Step-based spring interpolation helper for real-time use.
