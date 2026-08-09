@@ -160,17 +160,8 @@ public sealed class ZoomCameraPath
     /// </para>
     /// </summary>
     /// <param name="shots">Shot requests in source time. Invalid or no-op shots are ignored.</param>
-    /// <param name="sourceWidth">
-    /// Source width in pixels. Retained for call-site symmetry with the rest of the zoom
-    /// pipeline; the path itself no longer needs the frame size now that the long-move arc
-    /// is gone and zoom is a pure interpolation between the two shots' levels.
-    /// </param>
-    /// <param name="sourceHeight">Source height in pixels. See <paramref name="sourceWidth"/>.</param>
-    public static ZoomCameraPath Build(IEnumerable<ZoomShot> shots, int sourceWidth, int sourceHeight)
+    public static ZoomCameraPath Build(IEnumerable<ZoomShot> shots)
     {
-        _ = sourceWidth;
-        _ = sourceHeight;
-
         if (shots is null)
             return Empty;
 

@@ -565,7 +565,6 @@ public class FrameCompositor : IDisposable
 
             var recentred = _zoomEngine.ComputeViewportForCenter(
                 zoomState.ZoomLevel, centerX, centerY);
-            recentred.IsManualOverride = zoomState.IsManualOverride;
             recentred.HasSegment = zoomState.HasSegment;
             recentred.SegmentProgress = zoomState.SegmentProgress;
             recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
@@ -618,7 +617,6 @@ public class FrameCompositor : IDisposable
         float cy = zoomState.CenterY + scaledDrift.OffsetY;
 
         var drifted = _zoomEngine.ComputeViewportForCenter(driftedZoom, cx, cy);
-        drifted.IsManualOverride = zoomState.IsManualOverride;
         drifted.HasSegment = zoomState.HasSegment;
         drifted.SegmentProgress = zoomState.SegmentProgress;
         drifted.SegmentHeadingX = zoomState.SegmentHeadingX;

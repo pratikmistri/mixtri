@@ -69,7 +69,7 @@ public sealed class ZoomCameraPathTests
             $"AreLinked disagreed for a gap of {(b.Start - a.End).TotalSeconds:F2}s " +
             $"(LinkGapSeconds = {ZoomCameraPath.LinkGapSeconds:F2}).");
 
-        var path = ZoomCameraPath.Build([ShotFrom(a), ShotFrom(b)], SourceWidth, SourceHeight);
+        var path = ZoomCameraPath.Build([ShotFrom(a), ShotFrom(b)]);
         Assert.AreEqual(expectLinked, path.IsLinkedAfter(0),
             "The path's own linkage must agree with the shared AreLinked predicate the timeline draws from.");
 
@@ -106,7 +106,7 @@ public sealed class ZoomCameraPathTests
         var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
         var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
 
-        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        var path = ZoomCameraPath.Build([auto, manual]);
         Assert.IsTrue(path.IsLinkedAfter(0), "These two segments overlap and must be linked.");
 
         float previous = float.MaxValue;
@@ -151,7 +151,7 @@ public sealed class ZoomCameraPathTests
             Shot(1.807, 2.807, 4.140, 5.696, 2.0f, (float)(0.034 * w), (float)(0.780 * h), 3),
             Shot(2.991, 3.991, 5.324, 6.880, 2.0f, (float)(0.898 * w), (float)(0.768 * h), 4),
             Shot(4.199, 5.199, 6.532, 8.088, 2.0f, (float)(0.458 * w), (float)(0.421 * h), 5),
-        ], w, h);
+        ]);
 
         for (int i = 0; i < 4; i++)
             Assert.IsTrue(path.IsLinkedAfter(i), $"Shots {i} and {i + 1} overlap and must be linked.");
@@ -188,7 +188,7 @@ public sealed class ZoomCameraPathTests
         var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
         var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
 
-        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        var path = ZoomCameraPath.Build([auto, manual]);
         Assert.IsTrue(path.IsLinkedAfter(0));
 
         // The move starts exactly at segment 2's leading edge...
@@ -226,13 +226,13 @@ public sealed class ZoomCameraPathTests
         [
             Shot(0.0, 1.0, 3.6, 5.0, 2.0f, 960, 540, 1),
             Shot(rampStart, holdStart, 5.0, 6.5, 1.5f, 960, 540, 2, isManual: true),
-        ], w, h);
+        ]);
 
         // Unoverlapped: the same incoming segment ramping from 1x on its own.
         var alone = ZoomCameraPath.Build(
         [
             Shot(rampStart, holdStart, 5.0, 6.5, 1.5f, 960, 540, 2, isManual: true),
-        ], w, h);
+        ]);
 
         // Same centre on both shots above, so the arc cannot contribute and the curves are
         // comparable purely as timing.
@@ -272,7 +272,7 @@ public sealed class ZoomCameraPathTests
         var auto = Shot(1.426384, 2.426384, 3.759384, 5.315384, 2.0f, (float)(0.669 * w), (float)(0.876 * h), 1426);
         var manual = Shot(3.2024495, 4.2024495, 5.5354495, 7.0914495, 1.5f, (float)(0.931 * w), (float)(0.014 * h), 3202, isManual: true);
 
-        var path = ZoomCameraPath.Build([auto, manual], w, h);
+        var path = ZoomCameraPath.Build([auto, manual]);
         Assert.IsTrue(path.IsLinkedAfter(0));
 
         // The compositor parks the auto shot on the live cursor; place it where that shot looks.
@@ -315,7 +315,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(1.00, 2.00, 2.25, 3.25, 2.2f, 700, 500, 1000),
             Shot(2.00, 2.45, 3.20, 4.20, 2.2f, 780, 540, 2000),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         Assert.IsTrue(path.IsLinkedAfter(0));
 
@@ -347,7 +347,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(1.00, 2.00, 2.25, 3.25, 2.2f, 700, 500, 1000),
             Shot(2.00, 2.45, 3.20, 4.20, 2.2f, 780, 540, 2000),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         float minZoom = float.MaxValue;
         for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
@@ -365,7 +365,7 @@ public sealed class ZoomCameraPathTests
             Shot(0.00, 0.50, 1.00, 2.00, 1.2f, 100, 100, 1),
             Shot(0.90, 1.50, 2.00, 3.00, 1.2f, 1850, 1000, 2),
             Shot(2.70, 3.20, 3.60, 4.20, 2.8f, 960, 540, 3),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         int activeSamples = 0;
         for (double t = -0.2; t <= 4.4; t += 0.005)
@@ -387,7 +387,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(0.0, 1.0, 6.0, 7.0, 3.0f, 200, 200, 1),
             Shot(2.0, 2.5, 3.0, 3.5, 2.0f, 1600, 800, 2),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         Assert.IsTrue(path.IsLinkedAfter(0));
 
@@ -401,7 +401,7 @@ public sealed class ZoomCameraPathTests
     [TestMethod]
     public void DegenerateInputs_DoNotThrow()
     {
-        var empty = ZoomCameraPath.Build([], SourceWidth, SourceHeight);
+        var empty = ZoomCameraPath.Build([]);
         Assert.IsTrue(empty.IsEmpty);
         Assert.IsFalse(empty.TryEvaluate(0, out _));
         Assert.IsFalse(ZoomCameraPath.Empty.TryEvaluate(double.PositiveInfinity, out _));
@@ -411,27 +411,20 @@ public sealed class ZoomCameraPathTests
             Shot(double.NaN, 0, 0, 0, 2.0f, 960, 540),
             Shot(0, double.PositiveInfinity, 0, 0, 2.0f, 960, 540),
             Shot(0, 0, 0, 0, float.NaN, 960, 540),
-        ], SourceWidth, SourceHeight);
+        ]);
         Assert.IsTrue(invalid.IsEmpty);
 
         var zeroLength = ZoomCameraPath.Build(
         [
             Shot(1, 1, 1, 1, 2.0f, 960, 540, 1),
             Shot(1, 1, 1, 1, 2.5f, 1000, 560, 2),
-        ], SourceWidth, SourceHeight);
+        ]);
         Assert.IsFalse(zeroLength.IsEmpty);
         _ = zeroLength.TryEvaluate(1, out _);
 
-        var single = ZoomCameraPath.Build([Shot(2, 2, 2, 2, 2.0f, 960, 540)], SourceWidth, SourceHeight);
+        var single = ZoomCameraPath.Build([Shot(2, 2, 2, 2, 2.0f, 960, 540)]);
         Assert.IsFalse(single.IsEmpty);
         _ = single.TryEvaluate(2, out _);
-
-        var zeroDimensions = ZoomCameraPath.Build(
-            [Shot(0, 1, 2, 3, 2.0f, 960, 540), Shot(0.9, 1.5, 2.5, 3.5, 2.0f, 1000, 600)],
-            0,
-            0);
-        Assert.IsFalse(zeroDimensions.IsEmpty);
-        _ = zeroDimensions.TryEvaluate(1.25, out _);
     }
 
     /// <summary>
@@ -447,7 +440,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(0.0, 1.0, 2.0, 3.0, 3.0f, 200, 200, 1),
             Shot(1.9, 2.5, 3.5, 4.5, 3.0f, 1800, 900, 2),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         for (double t = path.Shots[0].HoldEnd; t <= path.Shots[1].HoldStart; t += 0.002)
         {
@@ -464,7 +457,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(0.0, 1.0, 2.0, 3.0, 2.0f, 960, 540, 1),
             Shot(1.9, 2.5, 3.5, 4.5, 2.6f, 985, 550, 2),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         float previous = Sample(path, path.Shots[0].HoldEnd).Zoom;
         for (double t = path.Shots[0].HoldEnd + 0.005; t <= path.Shots[1].HoldStart + 1e-9; t += 0.005)
@@ -487,8 +480,8 @@ public sealed class ZoomCameraPathTests
             Shot(4.8, 5.3, 5.7, 6.5, 1.6f, 960, 540, 30),
         ];
 
-        var first = ZoomCameraPath.Build(shots, SourceWidth, SourceHeight);
-        var second = ZoomCameraPath.Build(shots, SourceWidth, SourceHeight);
+        var first = ZoomCameraPath.Build(shots);
+        var second = ZoomCameraPath.Build(shots);
 
         for (double t = 0; t <= 6.6; t += 0.037)
         {
@@ -533,13 +526,9 @@ public sealed class ZoomCameraPathTests
             "The raw source times are close enough to link; filtering must keep different recordings apart.");
 
         var primaryPath = ZoomCameraPath.Build(
-            SegmentFrameComposer.SelectManualZoomKeyframes(model, primary).Select(ShotFrom),
-            SourceWidth,
-            SourceHeight);
+            SegmentFrameComposer.SelectManualZoomKeyframes(model, primary).Select(ShotFrom));
         var appendedPath = ZoomCameraPath.Build(
-            SegmentFrameComposer.SelectManualZoomKeyframes(model, appended).Select(ShotFrom),
-            SourceWidth,
-            SourceHeight);
+            SegmentFrameComposer.SelectManualZoomKeyframes(model, appended).Select(ShotFrom));
 
         Assert.AreEqual(1, primaryPath.Shots.Count);
         Assert.AreEqual(1, appendedPath.Shots.Count);
@@ -554,7 +543,7 @@ public sealed class ZoomCameraPathTests
         [
             Shot(0.0, 1.0, 2.0, 3.0, 2.0f, 200, 200, 1),
             Shot(1.9, 2.5, 3.5, 4.5, 2.0f, 1800, 900, 2),
-        ], SourceWidth, SourceHeight);
+        ]);
 
         var hold = Sample(path, 1.5);
         float minHandoffDriftScale = 1f;

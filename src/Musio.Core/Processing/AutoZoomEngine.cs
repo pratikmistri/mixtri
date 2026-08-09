@@ -10,10 +10,7 @@ public record AutoZoomConfig
     public float PreClickDuration { get; init; } = 1.0f;    // graceful anticipatory zoom-in
     public float HoldDuration { get; init; } = 1.333f;      // settled dwell on the focal point
     public float EaseOutDuration { get; init; } = 1.556f;   // slow, elegant release back to full frame
-    public float SpringConstant { get; init; } = 200f;
-    public float SpringDamping { get; init; } = 20f;
     public bool ZoomOnScroll { get; init; } = false;
-    public float MinTimeBetweenZooms { get; init; } = 0.5f; // retained for config compatibility; chained paths now handle close clicks
 }
 
 public struct ZoomState
@@ -25,8 +22,13 @@ public struct ZoomState
     public float ViewportY;
     public float ViewportWidth;
     public float ViewportHeight;
-    /// <summary>True when the zoom center comes from a manual keyframe and should not be overridden.</summary>
-    public bool IsManualOverride;
+    /// <summary>
+    /// True when the focal point comes from a keyframe's authored centre and should not be
+    /// overridden by the cursor. Derived from <see cref="CursorFollowWeight"/> rather than
+    /// stored, so it cannot be forgotten at one of the sites that rebuild this struct — a
+    /// silent-failure mode this repo has hit before with exactly this kind of field.
+    /// </summary>
+    public readonly bool IsManualOverride => CursorFollowWeight <= 0f;
 
     /// <summary>
     /// How strongly the compositor should re-centre on the live cursor instead of on
@@ -302,7 +304,7 @@ public class AutoZoomEngine
 
         _path = shots.Count == 0
             ? ZoomCameraPath.Empty
-            : ZoomCameraPath.Build(shots, _sourceWidth, _sourceHeight);
+            : ZoomCameraPath.Build(shots);
     }
 
     /// <summary>
@@ -367,18 +369,6 @@ public class AutoZoomEngine
             HasFixedCenter: false);
 
     /// <summary>
-    /// Step-based spring interpolation helper for real-time use.
-    /// Exponentially decays <paramref name="current"/> toward <paramref name="target"/>.
-    /// </summary>
-    public static float SpringInterpolate(float current, float target, float springK, float damping, float dt)
-    {
-        float omega = MathF.Sqrt(springK);
-        float zeta = damping / (2f * omega);
-        float decay = MathF.Exp(-zeta * omega * dt);
-        return target + (current - target) * decay;
-    }
-
-    /// <summary>
     /// Compute the visible viewport rectangle from zoom level and center, clamped to source bounds.
     /// </summary>
     private ZoomState ComputeViewport(ZoomCameraSample sample)
@@ -390,7 +380,6 @@ public class AutoZoomEngine
         state.SegmentHeadingY = sample.HeadingY;
         state.DriftScale = sample.DriftScale;
         state.CursorFollowWeight = sample.CursorFollowWeight;
-        state.IsManualOverride = sample.CursorFollowWeight <= 0f;
         return state;
     }
 

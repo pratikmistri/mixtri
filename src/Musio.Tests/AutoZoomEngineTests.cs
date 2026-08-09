@@ -656,7 +656,6 @@ public sealed class AutoZoomEngineTests
         var config = new AutoZoomConfig
         {
             DefaultZoomLevel = 2.0f,
-            MinTimeBetweenZooms = 0.5f,
         };
         var engine = new AutoZoomEngine(config);
         // Two clicks far apart: t=1.0 and t=4.0
@@ -705,20 +704,6 @@ public sealed class AutoZoomEngineTests
         Assert.AreEqual(1, model.ZoomKeyframes.Count, "Keyframe should be restored on undo");
         Assert.IsFalse(model.SuppressedClickTicks.Contains(clickTicks),
             "Suppression should be removed on undo");
-    }
-
-    [TestMethod]
-    public void SpringInterpolate_ConvergesToTarget()
-    {
-        float current = 1.0f;
-        float target = 2.0f;
-
-        // Simulate 100 steps
-        for (int i = 0; i < 100; i++)
-            current = AutoZoomEngine.SpringInterpolate(current, target, 200f, 20f, 0.016f);
-
-        Assert.AreEqual(target, current, 0.01f,
-            $"SpringInterpolate should converge to target, got {current}");
     }
 
     [TestMethod]
