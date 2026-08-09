@@ -1811,4 +1811,54 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   `GetZoomState_EditingOneOverlappingAutoSegment_KeepsItsNeighbours`; ARM64 Release rebuilt,
   re-registered, relaunched clean.
 
+## Zoom handoff, round 7: one flag was answering three questions
+
+- **Feature/area**: `ZoomKeyframe.IsManual` / new `HasAuthoredCenter`; `ZoomOperations`;
+  `ZoomShot.HasFixedCenter`. Also `EditorPage` preview decode-miss recovery.
+- **Symptom**: resizing or moving a click-driven zoom silently repointed the camera — it stopped
+  following the mouse and pinned to the click position. Part of "it gets weird when I start editing
+  the segment lengths".
+- **Cause**: `IsManual` was answering three independent questions at once — *is this editable*,
+  *is this persisted*, and *where does the focal point come from*. Editing a segment's **length**
+  therefore also changed its **framing**. Splitting the framing question onto `HasAuthoredCenter`
+  (set by creating a segment or editing its region; NOT by move/resize/zoom-level change) fixes it.
+  `ZoomShot.IsManual` was renamed `HasFixedCenter`, since the centre source is the only thing it
+  ever actually drove.
+- **The nullable-fallback trap, which is the part worth remembering.** `HasAuthoredCenter` is
+  `bool?` so pre-existing projects (no value) resolve via `UsesAuthoredCenter => HasAuthoredCenter
+  ?? IsManual` and render unchanged. But that fallback means **every operation that promotes a
+  keyframe must write the EFFECTIVE value across explicitly**: leaving it null while setting
+  `IsManual = true` lets the fallback flip a click-driven zoom to pinned *as a side effect of the
+  promotion* — the original bug in a new costume. The new tests caught exactly that on first run.
+  **When you add a nullable field whose fallback is the very flag you are splitting away from, audit
+  every writer of that flag.**
+- **A fixture that never stated its premise**: `GetZoomState_ManualKeyframe_OverridesAuto` built a
+  "manual keyframe" without setting `IsManual`, and had passed only because the old conflation made
+  the distinction invisible. Splitting a concept surfaces every test that was relying on the
+  conflation — treat those as fixtures to correct, not assertions to weaken.
+
+## Preview: a decode miss at a stationary playhead never retried
+
+- **Feature/area**: `EditorPage.UpdatePreviewFrameAsync` / `RenderVideoFrameAsync`.
+- **Symptom**: black "corrupted" preview that would not recover, with
+  `[Editor] no decoded frame at …; preview is stale` in `diag.log`.
+- **Cause**: the miss WAS detected, and the code reset `_lastRenderedFrameIndex` so that "the next
+  tick retries even if the playhead has not moved" — but preview rendering is **entirely
+  event-driven** (playhead movement or an edit). With the playhead parked there is no next tick, so
+  nothing ever re-requested the frame.
+- **Fix**: the render path flags the miss and the drain loop schedules a bounded backing-off retry
+  (5 attempts, 80ms × attempt) for the same position, capturing and re-checking
+  `_previewInitGeneration` so a retry queued against a torn-down preview is dropped. Giving up is
+  logged rather than silent.
+- **The lesson mirrors an existing playbook rule** ("a flag that suppresses rendering for the
+  duration of an operation needs an explicit flush AFTER that operation"): **in an event-driven
+  renderer, any "we'll get it next time" recovery is a no-op whenever the event source can go
+  quiet.** Either schedule the retry yourself or prove an event must follow.
+- This is recovery, not a cure for the underlying decoder hiccup — noted so a future investigation
+  does not read the symptom's absence as the cause being fixed. An earlier round chased one source
+  of decoder starvation (audio-mix thrash) and explicitly left the corruption unexplained.
+- **Verified**: suite **1052 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
+
 
