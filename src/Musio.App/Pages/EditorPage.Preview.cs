@@ -538,7 +538,17 @@ public sealed partial class EditorPage
                 // Wall-clock time is intentionally used as the user-visible load signal:
                 // decode, composition and UI contention all reduce preview headroom.
                 long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                _decodeMissed = false;
                 await RenderFrameAtAsync(currentPos, currentForce);
+
+                // A decode miss leaves whatever was last presented on screen — often nothing,
+                // i.e. a black preview. Rendering is entirely event-driven, so with the
+                // playhead stationary NOTHING would ever ask for this frame again and the
+                // preview would stay broken until the user happened to scrub. Retry it.
+                if (_decodeMissed)
+                    ScheduleDecodeMissRetry(currentPos);
+                else
+                    _decodeMissRetries = 0;
 
                 if (Preview.IsPlaying
                     && IsVideoPosition(currentPos)
@@ -1257,6 +1267,49 @@ public sealed partial class EditorPage
         ShowTextEditOverlay();
     }
 
+    /// <summary>
+    /// Re-requests a frame that failed to decode, so a transient decoder miss cannot leave the
+    /// preview permanently blank.
+    /// <para>
+    /// Preview rendering is event-driven — it runs when the playhead moves or an edit lands. A
+    /// decode miss at a STATIONARY playhead therefore has nothing to retry it, which is how a
+    /// momentary decoder hiccup (reader being rebuilt, seek contention, UI-thread churn while
+    /// dragging segments) turned into a black preview that "won't recover" until the user
+    /// scrubbed. Retries back off and are bounded, so a position that genuinely cannot decode
+    /// costs a handful of attempts instead of spinning.
+    /// </para>
+    /// <para>
+    /// The init generation is captured and re-checked so a retry queued against a preview that
+    /// has since been torn down or rebuilt is dropped rather than fighting the newer one.
+    /// </para>
+    /// </summary>
+    private void ScheduleDecodeMissRetry(TimeSpan position)
+    {
+        const int maxDecodeMissRetries = 5;
+
+        if (_decodeMissRetries >= maxDecodeMissRetries)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"giving up re-decoding {position} after {maxDecodeMissRetries} attempts; " +
+                "preview will stay stale until the playhead moves");
+            return;
+        }
+
+        int attempt = ++_decodeMissRetries;
+        int generation = _previewInitGeneration;
+        int delayMs = 80 * attempt;
+
+        _ = Task.Delay(delayMs).ContinueWith(
+            _ => DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_pageUnloaded || _frameReader is null) return;
+                if (generation != _previewInitGeneration) return;
+
+                _ = UpdatePreviewFrameAsync(position, force: true);
+            }),
+            TaskScheduler.Default);
+    }
+
     private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
     {
         if (_frameReader is null) return;
@@ -1271,6 +1324,7 @@ public sealed partial class EditorPage
             // slide the playhead has already left — stays on screen, so make sure the
             // next tick retries even if the playhead has not moved, and leave a trace.
             _lastRenderedFrameIndex = -1;
+            _decodeMissed = true;
             Musio.Core.Diagnostics.DiagLog.Write("Editor",
                 $"no decoded frame at {sourcePosition} (index {frameIndex}); preview is stale");
             return;
@@ -1340,6 +1394,7 @@ public sealed partial class EditorPage
         if (bitmap is null)
         {
             _lastRenderedFrameIndex = -1;
+            _decodeMissed = true;
             Musio.Core.Diagnostics.DiagLog.Write("Editor",
                 $"no decoded frame for appended segment at {sourceTime} (index {frameIndex}); preview is stale");
             return;

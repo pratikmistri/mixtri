@@ -125,6 +125,19 @@ public sealed partial class EditorPage : Page
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+
+    /// <summary>
+    /// Set by the frame-render path when the decoder returns no bitmap for the requested
+    /// position, so <see cref="UpdatePreviewFrameAsync"/> can schedule a retry.
+    /// </summary>
+    private bool _decodeMissed;
+
+    /// <summary>
+    /// Consecutive decode misses at a stationary playhead. Reset by the first frame that
+    /// decodes, and bounded by <c>MaxDecodeMissRetries</c> so a genuinely undecodable
+    /// position costs a few retries rather than spinning forever.
+    /// </summary>
+    private int _decodeMissRetries;
     private bool _syncingTimelineFromPlayback;
     private readonly EditorGraphicsDeviceManager _graphicsDeviceManager;
     private bool _pageUnloaded;
