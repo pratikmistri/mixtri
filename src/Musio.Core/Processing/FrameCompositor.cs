@@ -545,22 +545,32 @@ public class FrameCompositor : IDisposable
         int cursorIndex = ResolveCursorIndex(timeSeconds);
         var cursorPos = _smoothedPositions[cursorIndex];
 
-        // Get zoom state — use smoothed cursor position as center hint
-        // so the viewport always keeps the cursor in view.
+        // Get zoom state — blend the smoothed cursor position into the center so an
+        // auto segment keeps the cursor in view.
         var zoomState = _zoomEngine.GetZoomState(timeSeconds);
-        if (zoomState.ZoomLevel > 1.01f && !zoomState.IsManualOverride)
+        float cursorWeight = float.IsFinite(zoomState.CursorFollowWeight)
+            ? Math.Clamp(zoomState.CursorFollowWeight, 0f, 1f)
+            : 1f;
+        if (zoomState.ZoomLevel > 1.01f && cursorWeight > 0f)
         {
-            // Override zoom center with actual cursor position for auto segments.
-            // Manual segments keep their user-defined center.
+            // Auto (click-driven) zooms center on the actual cursor; manual segments keep
+            // their user-defined center. The weight eases between the two across a handoff
+            // rather than switching abruptly — the two kinds of shot take their focal point
+            // from different sources, so a hard switch at the join would snap the camera.
             // ComputeViewportForCenter returns a fresh state, so the segment identity
             // has to be carried across by hand — losing it here would silently
             // disable camera drift for every auto zoom, which is the common case.
+            float centerX = zoomState.CenterX + ((float)cursorPos.X - zoomState.CenterX) * cursorWeight;
+            float centerY = zoomState.CenterY + ((float)cursorPos.Y - zoomState.CenterY) * cursorWeight;
+
             var recentred = _zoomEngine.ComputeViewportForCenter(
-                zoomState.ZoomLevel, (float)cursorPos.X, (float)cursorPos.Y);
+                zoomState.ZoomLevel, centerX, centerY);
             recentred.HasSegment = zoomState.HasSegment;
             recentred.SegmentProgress = zoomState.SegmentProgress;
             recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
             recentred.SegmentHeadingY = zoomState.SegmentHeadingY;
+            recentred.DriftScale = zoomState.DriftScale;
+            recentred.CursorFollowWeight = zoomState.CursorFollowWeight;
             zoomState = recentred;
         }
 
@@ -593,17 +603,26 @@ public class FrameCompositor : IDisposable
             vp.ViewportWidth, vp.ViewportHeight, slackX, slackY, zoomState.SegmentHeadingX, zoomState.SegmentHeadingY);
         if (!drift.IsActive) return zoomState;
 
+        float driftScale = float.IsFinite(zoomState.DriftScale)
+            ? Math.Clamp(zoomState.DriftScale, 0f, 1f)
+            : 1f;
+        var scaledDrift = new CameraDriftResult(
+            1f + ((drift.ZoomFactor - 1f) * driftScale),
+            drift.OffsetX * driftScale,
+            drift.OffsetY * driftScale);
+
         // ApplyZoom (never a plain multiply) preserves the 1x == 1x invariant.
-        float driftedZoom = Musio.Core.Processing.CameraDrift.ApplyZoom(zoomState.ZoomLevel, drift);
-        float cx = zoomState.CenterX + drift.OffsetX;
-        float cy = zoomState.CenterY + drift.OffsetY;
+        float driftedZoom = Musio.Core.Processing.CameraDrift.ApplyZoom(zoomState.ZoomLevel, scaledDrift);
+        float cx = zoomState.CenterX + scaledDrift.OffsetX;
+        float cy = zoomState.CenterY + scaledDrift.OffsetY;
 
         var drifted = _zoomEngine.ComputeViewportForCenter(driftedZoom, cx, cy);
-        drifted.IsManualOverride = zoomState.IsManualOverride;
         drifted.HasSegment = zoomState.HasSegment;
         drifted.SegmentProgress = zoomState.SegmentProgress;
         drifted.SegmentHeadingX = zoomState.SegmentHeadingX;
         drifted.SegmentHeadingY = zoomState.SegmentHeadingY;
+        drifted.DriftScale = zoomState.DriftScale;
+        drifted.CursorFollowWeight = zoomState.CursorFollowWeight;
         return drifted;
     }
 
@@ -1482,4 +1501,3 @@ public class FrameCompositor : IDisposable
         }
     }
 }
-

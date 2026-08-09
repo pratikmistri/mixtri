@@ -22,7 +22,14 @@ public class MoveZoomKeyframeOperation : IEditOperation
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
         var sourceClickTicks = model.ZoomKeyframes[index].SourceClickTicks;
-        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _newTimestamp, IsManual = true };
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with
+        {
+            Timestamp = _newTimestamp,
+            IsManual = true,
+            // Moving is not a framing decision. Carry the effective value across so promotion
+            // cannot flip a click-driven zoom to a pinned one via the IsManual fallback.
+            HasAuthoredCenter = model.ZoomKeyframes[index].UsesAuthoredCenter,
+        };
 
         // When converting an auto-generated keyframe to manual, suppress the
         // original auto-zoom click so it doesn't double-fire.
@@ -162,11 +169,18 @@ public class ResizeZoomSegmentOperation : IEditOperation
                     PreDuration = TimeSpan.FromMilliseconds(50),
                     HoldDuration = newHold,
                     IsManual = true,
+                    // Resizing is not a framing decision — see MoveZoomKeyframeOperation.
+                    HasAuthoredCenter = kf.UsesAuthoredCenter,
                 };
             }
             else
             {
-                model.ZoomKeyframes[index] = kf with { PreDuration = newPre, IsManual = true };
+                model.ZoomKeyframes[index] = kf with
+                {
+                    PreDuration = newPre,
+                    IsManual = true,
+                    HasAuthoredCenter = kf.UsesAuthoredCenter,
+                };
             }
         }
         else
@@ -190,7 +204,13 @@ public class ResizeZoomSegmentOperation : IEditOperation
                 newPost = totalAfterTimestamp;
             }
 
-            model.ZoomKeyframes[index] = kf with { HoldDuration = newHold, PostDuration = newPost, IsManual = true };
+            model.ZoomKeyframes[index] = kf with
+            {
+                HoldDuration = newHold,
+                PostDuration = newPost,
+                IsManual = true,
+                HasAuthoredCenter = kf.UsesAuthoredCenter,
+            };
         }
     }
 
@@ -213,17 +233,27 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly double? _newZoomLevel;
     private readonly double? _newCenterX;
     private readonly double? _newCenterY;
+    private readonly bool? _newHasAuthoredCenter;
     private ZoomKeyframe? _previousKeyframe;
 
-    public string Description => "Update Zoom Properties";
+    public string Description => _newHasAuthoredCenter == false
+        ? "Follow Mouse"
+        : "Update Zoom Properties";
 
+    /// <param name="hasAuthoredCenter">
+    /// Explicitly sets whether the segment holds its own centre. Pass <c>false</c> to hand the
+    /// framing back to the live cursor. Leave null to apply the normal rule, where supplying a
+    /// centre pins the framing and anything else preserves it.
+    /// </param>
     public UpdateZoomSegmentPropertiesOperation(string keyframeId,
-        double? zoomLevel = null, double? centerX = null, double? centerY = null)
+        double? zoomLevel = null, double? centerX = null, double? centerY = null,
+        bool? hasAuthoredCenter = null)
     {
         _keyframeId = keyframeId;
         _newZoomLevel = zoomLevel;
         _newCenterX = centerX;
         _newCenterY = centerY;
+        _newHasAuthoredCenter = hasAuthoredCenter;
     }
 
     public void Execute(TimelineModel model)
@@ -243,6 +273,12 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
             CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
             IsManual = true,
+            // An explicit request wins — that is how "follow mouse" hands the framing back to
+            // the cursor. Otherwise the normal rule: authoring a region pins it, and anything
+            // else carries the EFFECTIVE value across (see MoveZoomKeyframeOperation for why
+            // the effective value rather than the raw one).
+            HasAuthoredCenter = _newHasAuthoredCenter
+                ?? ((_newCenterX is not null || _newCenterY is not null) || kf.UsesAuthoredCenter),
         };
     }
 

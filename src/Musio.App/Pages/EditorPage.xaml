@@ -139,6 +139,22 @@
                     <Rectangle x:Name="HandleBR" Width="10" Height="10"
                                Fill="White" Stroke="Black" StrokeThickness="1"
                                IsHitTestVisible="False" />
+
+                    <!-- Where the mouse is at this moment. The region editor shows the RAW
+                         frame (no compositor, so no cursor overlay), and without this there is
+                         nothing on screen to aim the region at. Hidden for sources with no
+                         cursor data, e.g. imported clips. -->
+                    <Ellipse x:Name="ZoomRegionCursorMarker"
+                             Width="16" Height="16"
+                             Stroke="White" StrokeThickness="2"
+                             Fill="#80000000"
+                             Visibility="Collapsed"
+                             IsHitTestVisible="False" />
+                    <Ellipse x:Name="ZoomRegionCursorDot"
+                             Width="4" Height="4"
+                             Fill="White"
+                             Visibility="Collapsed"
+                             IsHitTestVisible="False" />
                 </Canvas>
 
                 <StackPanel
@@ -156,6 +172,12 @@
                         Foreground="{ThemeResource OverlayForegroundBrush}"
                         Text="Drag to position zoom region"
                         FontSize="12" />
+                    <Button
+                        x:Name="ZoomRegionFollowMouseButton"
+                        Content="Follow mouse"
+                        Click="ZoomRegionFollowMouse_Click"
+                        Padding="12,4"
+                        ToolTipService.ToolTip="Stop holding this region and let the zoom follow the mouse instead. Keeps the zoom level you have set here." />
                     <Button
                         Content="Apply"
                         Style="{ThemeResource AccentButtonStyle}"

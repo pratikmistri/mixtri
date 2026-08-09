@@ -901,19 +901,11 @@ public sealed partial class EditorPage
             int cropOffY = project?.CropOffsetY ?? 0;
 
             double mouseOffset = project?.MouseToVideoOffsetSeconds ?? 0;
-            double targetTime = midpoint.TotalSeconds + mouseOffset;
-            double tickFreq = cursorData.TickFrequency;
-            long startTick = cursorData.StartTimestampTicks;
-            Musio.Core.Models.MouseSample closest = cursorData.Samples[0];
-            double bestDist = double.MaxValue;
-            foreach (var s in cursorData.Samples)
+            if (cursorData.FindSampleNearest(midpoint.TotalSeconds + mouseOffset) is { } closest)
             {
-                double sTime = (s.TimestampTicks - startTick) / tickFreq;
-                double dist = Math.Abs(sTime - targetTime);
-                if (dist < bestDist) { bestDist = dist; closest = s; }
+                cx = (closest.X * dpiX - cropOffX) / sourceW;
+                cy = (closest.Y * dpiY - cropOffY) / sourceH;
             }
-            cx = (closest.X * dpiX - cropOffX) / sourceW;
-            cy = (closest.Y * dpiY - cropOffY) / sourceH;
         }
 
         // Build the keyframe tagged with the owning source file so it renders on the

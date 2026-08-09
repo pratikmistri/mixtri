@@ -1574,3 +1574,413 @@ ewStart to TimeSpan.Zero before raising *Moved; Zoom's does not clamp at all (re
 - **The duplicated doc block was worse than the "redundant" the reviewer described, and worth reading before deleting either half.** The FIRST block was also stale: it said the tracks live on the *project* (they had moved to `TimelineModel.AudioTracks` so the undo system could reach them) and credited `LoadPlacements` with filtering the method now does itself via `IsAudible`. Deleting the wrong one would have left actively misleading documentation. **When a reviewer reports a duplicate, check which copy is current rather than deleting either at random.**
 - **Swept the whole branch for both patterns rather than fixing only the two reported lines** — a statement followed by another on the same line, and `</remarks>` immediately followed by `<summary>`. One genuine instance of the first (the reported one; the other hits were aligned trailing comments) and none of the second. A reviewer finding one instance of a mechanical slip is reason to check for the rest.
 - **Verification**: `Musio.App` + `Musio.Tests` x64 Debug 0 errors / 0 new warnings; suite **1022 passed, 3 skipped, 0 failed** (unchanged — both fixes are cosmetic/doc). Replied to both threads on the PR with the reasoning.
+
+## Zoom handoff path wired into AutoZoomEngine
+
+- **Feature/area**: `AutoZoomEngine` and `FrameCompositor` zoom/drift handoff evaluation.
+- **Approaches tried**: Replaced per-frame overlap blending with cached manual and auto `ZoomCameraPath` lookups; rebuilt manual paths on keyframe changes and both paths once source dimensions arrive; audited every fresh `ZoomState` rebuild for the new `DriftScale` field.
+- **What worked**: Keeping manual and auto paths separate preserved manual-over-auto precedence while making `GetZoomState(t)` a pure lookup. Applying `DriftScale` only to drift offsets and to `1 + (factor - 1) * scale` kept `CameraDrift.ApplyZoom`'s 1× invariant intact.
+- **What didn't work**: The old max/weighted-average evaluator and its docs were actively misleading once handoff paths owned continuity; leaving any fresh `ZoomState` copy without `DriftScale` would silently kill the handoff drift fade.
+
+## Zoom-track authoring UX: snap-to-handoff and linked indicators
+
+- **Feature/area**: `src\Musio.App\Controls\TimelineControl.xaml.cs` zoom track authoring.
+- **Approaches tried**: Mirrored the primary segment track's `SnapX` shape, but kept a separate `SnapZoomX` that routes keyframe edges through `ZoomKeyframeTimeToX`/`XToKeyframeFileTime`. Drew handoff connectors from the shared `ZoomCameraPath.AreLinked` predicate instead of duplicating the gap test.
+- **What worked**: Snapping the body by its projected left edge makes the high-value “start snaps to previous end” handoff easy, while edge drags reuse the same source-file-filtered targets. Drawing connectors per independent zoom path (`IsManual` + `SourceVideoFilePath`) keeps manual/auto and cross-recording paths visually honest.
+- **What didn't work**: Reusing the plain timeline `SnapX` would have mapped appended-recording keyframes through output time/primary time and recreated the historic thin-line appended-zoom bug; the zoom track needs its own source-file-aware snapping helper.
+
+## Zoom handoff path test coverage
+
+- **Feature/area**: `src\Musio.Tests` zoom camera path and `AutoZoomEngine` regression coverage.
+- **Approaches tried**: Added dense derivative-based assertions for linked zoom handoffs, path arc/drift/determinism/degenerate-input coverage, and engine-level manual precedence/waypoint tests; replaced the old center step-size assertion with a bounded-acceleration invariant.
+- **What worked**: Testing velocity deltas rather than value continuity catches the old `max(falling,rising)` corner, and testing acceleration keeps eased center motion from being mislabeled as a snap.
+- **What didn't work**: Auto-click handoff coverage exposed that `AutoZoomEngine.MergeSegments` still collapses close raw clicks before `ZoomCameraPath` sees them, losing the first click as a waypoint; that production fix is still needed.
+
+## Zoom handoff final integration
+
+- **Feature/area**: `AutoZoomEngine` auto-click handoff integration and full ARM64 validation.
+- **Approaches tried**: Removed the remaining close-click merge before `ZoomCameraPath`, audited `ZoomState` rebuilds for `DriftScale`, rechecked UI linkage against `ZoomCameraPath.AreLinked`, then fixed the `dotnet test` PriGen path.
+- **What worked**: Feeding raw ordered auto click segments into the chained path preserves both click centers while the path owns smoothing. The auto-click regression now samples the second waypoint after the minimum cinematic handoff settles, not during the transition itself.
+- **`MergeSegments` was deleted on purpose, and it is the one behaviour change here beyond the four artifacts.** It collapsed every click within roughly one segment span (~3.9s) into a single shot that used the *last* click's centre, so the merged camera sat on a point the user had not clicked yet — and, more importantly, post-merge auto segments never overlapped, which made the whole chained-handoff path inert for auto-zoom. Removing it is what actually delivers "apply the handoff to auto too". Rapid same-spot clicks (double-clicks) degrade gracefully: two shots with identical centre and zoom produce a transition that is visually a constant hold. Nearby clicks get `arcAmount == 0` from the arc onset threshold, so there is no zoom pulsing. `AutoZoomConfig.MinTimeBetweenZooms` is now unused and retained only for config/serialization compatibility.
+- **What didn't work**: Two attempts to make the bare `dotnet test <csproj>` command work — a `global.json` SDK pin (the missing piece was the Appx/Pri *task path*, not the SDK version) and then a root `Directory.Build.props` pointing at the installed VS BuildTools Appx/Pri tasks. **The `Directory.Build.props` was reverted**: it hard-coded an absolute machine-specific Visual Studio path into the repo root and worked around the settled playbook rule rather than following it. The playbook route is the supported one — build with VS MSBuild, then run `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=x64` (with `DOTNET_ROLL_FORWARD=Major`), which needs no repo-level build files. Do not reintroduce a props file for this.
+
+## Zoom-segment handoff: the two pieces of maths that actually matter
+
+- **Feature/area**: `src\Musio.Core\Processing\ZoomCameraPath.cs` — design rationale behind the chained camera path, recorded because both results are non-obvious and easy to "simplify" back into a bug.
+- **The real defect was a derivative discontinuity, not a value discontinuity.** The old evaluator resolved concurrent zooms with `max(zoomA, zoomB)`. That is continuous in *value*, so every existing overlap test passed, but `max` of a falling and a rising ramp has a corner in its first derivative — the visible "kick". **Any test for this class of bug must assert bounded change in velocity (second differences), not bounded change in value.** A value-continuity test here is worthless: it cannot fail on the original bug.
+- **The unified `mid`/`half` hold-repair window.** To guarantee exactly one active piece, overlapping hold intervals must be separated. The naive fix — clip `A.HoldEnd` down to `B.HoldStart` — produces a **zero-length transition** whenever the holds overlap heavily, i.e. a hard snap, which is worse than the artifact being fixed. The correct form handles overlap, near-abutment and a genuine gap in one expression:
+  `mid = (A.HoldEnd + B.HoldStart) / 2;  half = max(MinTransitionSeconds / 2, |A.HoldEnd - B.HoldStart| / 2)`
+  then clamp the window to `[A.HoldStart, B.HoldEnd]`. For a heavy overlap this recovers the natural overlap region; for a tiny overlap it widens to the minimum; for a real gap `half` already exceeds the minimum so the natural gap is preserved untouched. **Do not "simplify" this back to a clip.**
+- **The arc bump must be `sin²(π·e)`, not `sin(π·e)` or `4e(1−e)`.** The arc dips the zoom during a long lateral move so the viewer stays oriented. Both obvious bumps have *non-zero* derivative at their endpoints, which would reintroduce a velocity discontinuity at the very junctions this whole change exists to smooth. `sin²` is zero **and** has zero derivative at both ends, so it composes with the eased handoff for free.
+- **Linkage is classified from the original, unclipped `RampStart`/`ReleaseEnd`, before hold repair mutates anything.** That is what lets the timeline's linked-segment indicator share one predicate (`ZoomCameraPath.AreLinked`) with the renderer and never disagree with it.
+- **Why manual and auto stay two separate paths**: merging them into one shot list would silently change manual-over-auto precedence. Two paths, manual evaluated first, preserves it exactly.
+- **Verified**: Musio.Core / Musio.App / Musio.Tests all build x64 with 0 errors and only pre-existing MVVMTK0045 + CS0618 warnings; suite **1037 passed, 3 skipped, 0 failed**.
+
+## Zoom handoff, round 2: the two bugs that only showed up in the actual editor
+
+Both of these shipped green (1037 tests passing) and were still visibly broken on real
+content. Worth reading before trusting a zoom change that "passes".
+
+- **Feature/area**: `ZoomCameraPath`, `AutoZoomEngine`, `FrameCompositor`.
+
+### Bug 1 — two independent paths can never hand off to each other
+- **Symptom, as reported**: "overlapping zoom segments... a flash to no zoom then zoom in again."
+- **Cause**: manual keyframes and auto (click-driven) segments were built as **two separate
+  `ZoomCameraPath`s** resolved by hard precedence — manual first, auto only as a fallback. When
+  a manual segment overlapped an auto one, the manual path became active at its own `RampStart`,
+  which by definition begins at 1×, so the camera cut from the auto zoom straight out to full
+  frame and dove back in. Measured at the join: `t=2.90 → 2.000x`, `t=3.00 → 1.000x`, `t=3.10 → 1.898x`.
+- **Why every test missed it**: all the handoff tests exercised shots *within one path*. The
+  chained-path machinery was completely correct and completely bypassed. **When a design's whole
+  purpose is continuity between A and B, a test that only ever puts A and B in the same container
+  proves nothing.**
+- **Fix**: one chained path carrying both kinds of shot, so manual↔auto is just another linked pair.
+- **Manual still wins on genuine conflict**: an auto shot whose hold **overlaps** a manual shot's
+  hold is dropped. **Overlap, not containment/midpoint** — an auto segment spans ~3.9s versus
+  whatever the user dragged out, so a containment test lets a long auto shot escape suppression by
+  a short manual shot sitting right on top of it, and the auto zoom then wins the exact instant the
+  user explicitly authored. That regression was caught by the pre-existing
+  `GetZoomState_ManualKeyframe_OverridesAuto`, which was right and should not have been "modernised".
+- **`IsManualOverride` had to become a weight.** Manual and auto shots take their focal point from
+  *different sources* — the live cursor versus the keyframe's stored centre. A bool flipping at the
+  piece boundary snaps the centre even when the zoom curve is perfect. `ZoomState.CursorFollowWeight`
+  eases 1→0 across the handoff; `FrameCompositor` lerps the cursor into the centre by it instead of
+  branching on a bool. At the extremes it is bit-identical to the old behaviour.
+  **General rule: when two states resolve a value from different sources, the transition between
+  them needs a weight, not a branch.**
+
+### Bug 2 — a threshold tuned so tight the feature never engaged
+- `LinkGapSeconds` was 0.35s. Because a shot's `RampStart`/`ReleaseEnd` are the instants the camera
+  leaves and returns to 1×, that constant is literally *how long the frame may sit fully zoomed out
+  before the next zoom begins*. Two segments dragged out near each other with the default ease
+  durations typically leave **0.4–0.7s**, which fell outside 0.35s — so they stayed unlinked, kept
+  the old pump, and the feature did nothing on exactly the "close together" case it was built for.
+  Raised to 0.75s.
+- **Lesson**: after adding a threshold, compute what value the *real authoring path* actually
+  produces (here `ZoomKeyframe.FromRange`) and check the threshold against it. The regression test
+  now builds keyframes through `FromRange` rather than hand-picked ramp times for this reason.
+
+### How both were actually found
+Not by reading code — by dumping the curve. A throwaway `[TestMethod]` that wrote
+`t, zoom, centre, manual` to a file for two scenarios (two manual segments vs. manual-over-auto)
+made both bugs obvious in seconds, and scenario A proving *correct* is what localised the fault to
+the cross-path case. **For motion bugs, print the curve before theorising.**
+
+- **Verified**: suite **1042 passed, 3 skipped, 0 failed**; Musio.App ARM64 Release rebuilt,
+  re-registered and relaunched clean.
+
+## Zoom handoff, round 3: the arc must not undershoot its destination
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition` — the long-move arc.
+- **Symptom, as reported**: "segment 1 is 2x and segment 2 is 1.5x — I expect a smooth transition
+  from 2x to 1.5x without a dip."
+- **Cause**: the arc was applied as `zoom = baseZoom / (1 + arc*bump)`, i.e. it scaled the **whole**
+  interpolated zoom. Reproduced from the real `Sample7.musio` keyframes (source 2304×1536): a 2×
+  shot centred (0.669, 0.876) handing off to a 1.5× shot centred (0.931, 0.014) — centres ~1058px
+  apart, 0.72 of the viewport diagonal at 1.5×, giving `arcAmount ≈ 0.26`. Mid-transition that
+  pulled the camera to ~1.39×, **below the 1.5× destination**, then back up. A bounce.
+- **The reasoning error**: dividing the whole value is only correct when both endpoints sit at the
+  same zoom. When the move *already* zooms out, the destination itself supplies the widening, and
+  the arc widened a frame that was widening anyway.
+- **Fix**: apply the arc to the zoom **above a floor** —
+  `zoom = floor + (baseZoom - floor) / (1 + arc*bump)` — where `floor` rises to
+  `min(from, to)` as the two zoom levels diverge (`ArcFloorFullDelta = 0.25`) and falls to `0` when
+  they are equal. Different zooms ⇒ monotonic, never undershooting; equal zooms ⇒ full pull-back
+  preserved, which is the only way to widen the frame for a long lateral move there.
+- **The floor is a smooth blend, never a `max()` clamp.** Clamping the curve against the floor
+  would flatten it at the crossing point and reintroduce exactly the derivative corner this whole
+  design exists to remove. Any "just clamp it" instinct in this file is almost always wrong —
+  reach for a blend whose endpoints have zero derivative instead.
+- **General rule this is the third instance of**: a correction that is right for the symmetric case
+  is not automatically right for the asymmetric one. `max()` overlap resolution, the two-path
+  precedence split, and now the arc divisor all failed the same way — fine when the two sides
+  matched, wrong the moment they differed.
+- **Verified**: suite **1044 passed, 3 skipped, 0 failed**, including a regression test built from
+  Sample7's exact keyframe values; ARM64 Release rebuilt, re-registered, relaunched clean.
+
+## Zoom handoff, round 4: the handoff belongs to the INCOMING segment's ramp
+
+- **Feature/area**: `ZoomCameraPath.RepairLinkedHolds` — where a handoff runs, and for how long.
+- **Symptom, as reported**: "the transition to 1.5x happens when first segment is ending, instead of
+  where 2nd segment is starting, and the timing curve is different than usual zoom segment's start."
+- **Cause**: the handoff window was derived from the two *hold* edges — `[A.HoldEnd, B.HoldStart]`.
+  For the Sample7 pair that put the move at 3.759s (where A stopped holding) lasting 443ms, when the
+  user expected it at 3.202s (segment 2's leading edge on the timeline) lasting its authored 1.0s
+  `PreDuration`. Both complaints — wrong place *and* wrong speed — were the same bug: the window had
+  no relationship to anything the user had authored, it was just whatever time happened to be left
+  between two holds.
+- **Fix**: run the handoff across **B's own ramp**, `[B.RampStart, B.HoldStart]`, clamped into
+  `[A.HoldStart, A.HoldEnd]`. A simply holds until B's edge arrives. An overlapped segment now
+  animates in at exactly the place and speed it would have if nothing overlapped it — the only
+  difference is that it starts from A's zoom instead of from 1×, which is the entire point.
+  The clamp handles both degenerate directions: B's ramp opening before A has settled, and a linked
+  pair with a real gap (start when A stops holding, absorbing the gap into a longer move rather than
+  releasing toward 1×). `MinTransitionSeconds` widening now applies only when B's authored ramp is
+  genuinely too short to read.
+- **The design lesson, and the reason this took four rounds**: every earlier iteration of this window
+  was defined in terms of *internal* quantities (hold edges, midpoints, a `mid`/`half` formula that
+  looked elegant and satisfied every unit test). None of them corresponded to anything visible on the
+  timeline, so the motion could not help but feel arbitrary. **The timing of a transition should be
+  expressed in terms of what the user authored and can see — here the segment's leading edge and its
+  own PreDuration — not in terms of whatever slack the algorithm has left over.** When a user says a
+  transition is in the wrong place, check what the window is *derived from* before tuning constants.
+- **Curve parity is now asserted directly**: `Handoff_UsesTheSameTimingCurveAsAnOrdinaryRampIn`
+  compares normalized progress of a handoff against a plain ramp-in of the same segment, with both
+  shots on the same centre so the arc cannot contribute. That is a much stronger guarantee than
+  eyeballing that both call `EaseInOutCinematic`.
+- **Verified**: suite **1046 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
+## Zoom handoff, round 5: travel lagged zoom because the move was applied twice
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition` focal point + `FrameCompositor` cursor blend.
+- **Symptom, as reported**: "the pre animation does the zoom but not the travel, so zoom starts
+  first and then the travel making overall animation feel odd."
+- **Cause — two blends stacked without either knowing about the other.** A handoff can be *mixed*:
+  an auto shot resolves its focal point from the **live cursor**, a manual one from its **stored
+  centre**. `ZoomCameraPath` interpolated its centre A→B, and `FrameCompositor` then blended the
+  cursor in on top with `CursorFollowWeight` easing 1→0. With the cursor near the outgoing auto
+  shot's centre those compose to `A + (B − A)·e²` — **quadratic travel against linear zoom**.
+  Measured on Sample7: at `e = 0.40` the camera was only ~16% of the way across.
+- **Fix**: for a mixed handoff the path reports the **manual endpoint's centre as a fixed anchor**
+  instead of an interpolated centre, leaving the compositor's single blend to supply the whole
+  move. Travel becomes linear in `e`; the same fixture now measures 40% at `e = 0.40`. Matched
+  endpoints (both manual, or both auto) still interpolate exactly as before.
+- **The generalisable trap**: when two layers each blend toward the same destination, the result is
+  the *product* of their progressions, not either one. Check for double application whenever a
+  value is interpolated in one stage and then re-blended in another — the symptom is motion that is
+  correct at both endpoints (so every endpoint assertion passes) but lags in the middle.
+- **Test it where the layers meet.** `MixedHandoff_FocalPointTravelsInStepWithTheEasedMove`
+  emulates the compositor's blend rather than asserting on the path's centre alone, because the
+  path's centre in isolation is *not* wrong — only the composition is. An isolated unit test of
+  either layer passes happily.
+- **Verified**: suite **1047 passed, 3 skipped, 0 failed**.
+
+## Zoom track: making the selected segment findable among overlapping ones
+
+- **Feature/area**: `TimelineControl.ZoomTrackCanvas_Draw` / `HitTestZoomSegment`.
+- **Context**: zoom segments overlap *by design* now (that is what drives a handoff), which made
+  the track hard to read and the selected segment's resize handles hard to grab.
+- **Three changes, and all three were needed** — paint order alone is not enough:
+  1. Paint the selected segment **last** so it is on top of what it overlaps.
+  2. **Desaturate (Rec. 601 luma) and fade** the unselected segments while a selection exists.
+     Luma-weighted desaturation keeps each segment's apparent brightness instead of flattening
+     light and dark ones together. Only while something is selected, so the track looks normal
+     at rest.
+  3. Give the selected segment's **edges** priority in hit-testing. Without this an overlapping
+     neighbour's body claims the click first and the handles are unreachable no matter what the
+     paint order says. **Painting order and hit-test order are separate things and must be
+     changed together.**
+- **Edges only, deliberately.** Giving the selected segment's *body* priority too would trap the
+  selection: a segment underneath could never be clicked to select it. Priority for the gesture
+  that needs it, not for the whole control.
+
+## Zoom handoff, round 6: the arc is gone — predictability beats cleverness
+
+- **Feature/area**: `ZoomCameraPath.EvaluateTransition`, `AutoZoomEngine.IsCoveredByManualHold`.
+- **Symptom, as reported** (Sample9: five overlapping auto segments, all 2×): "I see zoom in and
+  out and in across segments between 5 click events. Ideally all of these should have been one
+  smooth movement with no dips… it gets weird when I start editing the segment lengths."
+- **Cause 1 — the long-move arc.** It divided the zoom by `(1 + arc·bump)` whenever the focal point
+  had far to travel. With those centres on opposite corners it hit the `0.6` cap on *every* handoff,
+  pulling 2× down to **1.25×** mid-move — four pulses through what should have been one flat 2× move.
+- **The deeper error: the arc measured a move that was not happening.** Travel was computed between
+  the shots' **stored** centres, but an auto shot is re-centred on the **live cursor** by the
+  compositor. So the arc sized a pull-back from a trajectory that never appears on screen — which is
+  exactly why the user saw correct mouse tracking alongside misbehaving zoom. **Before deriving an
+  effect from a quantity, confirm that quantity is the one actually rendered.**
+- **Removed entirely.** A handoff is now a pure monotonic interpolation between the two segments'
+  own levels; nothing else touches the zoom. This also retired the arc-floor term from round 3,
+  which existed *only* to stop the arc undershooting its destination — complexity layered on to
+  correct a surprising feature. **Three of the six rounds of churn in this area were the arc or its
+  corrections. A feature that needs a correction term to stop being surprising is usually the thing
+  to delete.** If a wider frame is wanted mid-move, authoring a lower zoom level says so explicitly.
+- **Cause 2 — suppression was far too broad.** Editing a segment's length promotes it to manual, and
+  the engine dropped any auto shot whose hold *overlapped* a manual shot's hold. Auto segments span
+  ~3.9s while clicks land ~1.1s apart, so consecutive auto shots overlap **as a matter of course** —
+  promoting the middle segment silently deleted the zooms on both sides of it. Now a same-moment
+  test (within 50ms), so it only replaces the click the manual keyframe actually came from. The real
+  editor flow already handles this precisely via `SuppressedClickTicks`; this is only a fallback for
+  paths that bypass it (e.g. `AddManualKeyframe` straight onto the engine).
+- **Note the pattern across rounds 1–6**: every regression here came from an *extra* mechanism —
+  `max()` blending, two precedence paths, the arc, the arc floor, broad suppression, a double-applied
+  cursor blend. Each was individually defensible and each produced motion the user could not predict.
+  The version that finally satisfied "predictable and elegant" is the one with the fewest terms.
+- **Verified**: suite **1048 passed, 3 skipped, 0 failed**, including
+  `ChainOfEqualZoomSegments_HoldsThatZoomFlatThroughout` built from Sample9's exact keyframes and
+  `GetZoomState_EditingOneOverlappingAutoSegment_KeepsItsNeighbours`; ARM64 Release rebuilt,
+  re-registered, relaunched clean.
+
+## Zoom handoff, round 7: one flag was answering three questions
+
+- **Feature/area**: `ZoomKeyframe.IsManual` / new `HasAuthoredCenter`; `ZoomOperations`;
+  `ZoomShot.HasFixedCenter`. Also `EditorPage` preview decode-miss recovery.
+- **Symptom**: resizing or moving a click-driven zoom silently repointed the camera — it stopped
+  following the mouse and pinned to the click position. Part of "it gets weird when I start editing
+  the segment lengths".
+- **Cause**: `IsManual` was answering three independent questions at once — *is this editable*,
+  *is this persisted*, and *where does the focal point come from*. Editing a segment's **length**
+  therefore also changed its **framing**. Splitting the framing question onto `HasAuthoredCenter`
+  (set by creating a segment or editing its region; NOT by move/resize/zoom-level change) fixes it.
+  `ZoomShot.IsManual` was renamed `HasFixedCenter`, since the centre source is the only thing it
+  ever actually drove.
+- **The nullable-fallback trap, which is the part worth remembering.** `HasAuthoredCenter` is
+  `bool?` so pre-existing projects (no value) resolve via `UsesAuthoredCenter => HasAuthoredCenter
+  ?? IsManual` and render unchanged. But that fallback means **every operation that promotes a
+  keyframe must write the EFFECTIVE value across explicitly**: leaving it null while setting
+  `IsManual = true` lets the fallback flip a click-driven zoom to pinned *as a side effect of the
+  promotion* — the original bug in a new costume. The new tests caught exactly that on first run.
+  **When you add a nullable field whose fallback is the very flag you are splitting away from, audit
+  every writer of that flag.**
+- **A fixture that never stated its premise**: `GetZoomState_ManualKeyframe_OverridesAuto` built a
+  "manual keyframe" without setting `IsManual`, and had passed only because the old conflation made
+  the distinction invisible. Splitting a concept surfaces every test that was relying on the
+  conflation — treat those as fixtures to correct, not assertions to weaken.
+
+## Preview: a decode miss at a stationary playhead never retried
+
+- **Feature/area**: `EditorPage.UpdatePreviewFrameAsync` / `RenderVideoFrameAsync`.
+- **Symptom**: black "corrupted" preview that would not recover, with
+  `[Editor] no decoded frame at …; preview is stale` in `diag.log`.
+- **Cause**: the miss WAS detected, and the code reset `_lastRenderedFrameIndex` so that "the next
+  tick retries even if the playhead has not moved" — but preview rendering is **entirely
+  event-driven** (playhead movement or an edit). With the playhead parked there is no next tick, so
+  nothing ever re-requested the frame.
+- **Fix**: the render path flags the miss and the drain loop schedules a bounded backing-off retry
+  (5 attempts, 80ms × attempt) for the same position, capturing and re-checking
+  `_previewInitGeneration` so a retry queued against a torn-down preview is dropped. Giving up is
+  logged rather than silent.
+- **The lesson mirrors an existing playbook rule** ("a flag that suppresses rendering for the
+  duration of an operation needs an explicit flush AFTER that operation"): **in an event-driven
+  renderer, any "we'll get it next time" recovery is a no-op whenever the event source can go
+  quiet.** Either schedule the retry yourself or prove an event must follow.
+- This is recovery, not a cure for the underlying decoder hiccup — noted so a future investigation
+  does not read the symptom's absence as the cause being fixed. An earlier round chased one source
+  of decoder starvation (audio-mix thrash) and explicitly left the corruption unexplained.
+- **Verified**: suite **1052 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
+## Zoom framing, round 8: creation should not pin, and a way back to the cursor
+
+- **Feature/area**: `ZoomKeyframe.FromRange`, `UpdateZoomSegmentPropertiesOperation`,
+  `EditorPage` zoom region picker.
+- **Creating a segment no longer pins its framing.** User's call, and the right one: creating says
+  *when* to zoom, not *where* to look. `FromRange` still seeds `CenterX`/`CenterY` from the cursor
+  at the segment's midpoint and keeps them — they remain the fallback a cursorless (imported) clip
+  uses and the starting point if the region is later authored — but a snapshot of one instant is
+  strictly worse than following the live cursor. **Only an explicit region edit pins.**
+- **New "Follow mouse" button in the region picker**, since once a region was authored there was no
+  way back short of deleting and recreating the segment. It goes through the existing
+  `UpdateZoomSegmentPropertiesOperation` (new optional `hasAuthoredCenter`), so it is undoable, and
+  the operation's `Description` becomes "Follow Mouse" so the undo tooltip says what happened.
+- **It deliberately passes NO centre.** Supplying one would be read as authoring a region and would
+  instantly re-pin what was just released. It does keep the zoom LEVEL the region rectangle
+  expresses, since that is a separate decision the user may have just made in the same picker.
+  Disabled when the segment already follows the cursor, so it only looks actionable when it can do
+  something.
+- **Splitting a concept keeps surfacing fixtures that leaned on the conflation.** Two more tests had
+  to state a premise they had been getting for free (`GetZoomState_ManualKeyframe_OverridesAuto`,
+  `..._EasesCursorFollowWeightAcrossTheHandoff`). Each time, the fix was to make the fixture say what
+  it means — not to weaken the assertion.
+- **Verified**: suite **1053 passed, 3 skipped, 0 failed**.
+
+## Zoom region picker: source time is not playhead time (again)
+
+- **Feature/area**: `EditorPage.EnterZoomRegionEditMode`.
+- **Symptom**: "Edit Region" put the playhead somewhere that was not the zoom segment, and with a
+  text slide ahead of the video it landed *inside the slide* — so the region editor framed the
+  slide, not the frame being framed.
+- **Cause**: `var pos = kf.Timestamp` — a zoom keyframe's `Timestamp` is a **source** time in its
+  owning clip's clock, and the playhead runs in **output** time. They coincide only when nothing
+  shifts the video, so any slide, trim, reorder or speed change breaks it. **This is the single
+  most repeated bug class in this area** (see the archive entries on appended-zoom mapping and the
+  thin-line regression) — treat every `kf.Timestamp` that reaches UI or playhead code as suspect.
+- **Fix**: primary keyframes go through `TimelineModel.SourceToOutputTime`, which already walks
+  timeline order and is covered by `TimelineSyncMappingTests` (including
+  `InsertedTextSlide_ShiftsLaterSourceContent`, i.e. the exact reported case). **Reuse that mapping
+  rather than writing a second one** — the first draft of this fix duplicated the walk and was
+  replaced, because a parallel implementation is how these two time spaces drift apart again.
+  Appended/imported clips keep a dedicated path since the primary-only mapping does not cover their
+  own source clock.
+- **The region editor renders the RAW frame on purpose** (no compositor, so the zoom being edited
+  does not fight the picker) — which also means **no cursor overlay**, leaving nothing to aim at.
+  It now draws a cursor marker from the recorded path, using the *same* source→display transform as
+  the region rectangle so the two cannot disagree. Hidden for sources with no cursor data.
+- **Verified**: suite **1053 passed, 3 skipped, 0 failed**; ARM64 Release clean-rebuilt (XAML
+  changed), re-registered, relaunched clean.
+
+## Branch cleanup + code review: what a "clean" review missed, and why
+
+- **Feature/area**: dead-code removal across the zoom branch, plus a review pass over the whole
+  `master...HEAD` diff (~2800 lines).
+- **Dead code removed**, all of it debris from consumers deleted earlier in the branch:
+  `AutoZoomConfig.SpringConstant`/`SpringDamping` (only `SpringEase` read them),
+  `MinTimeBetweenZooms` (only `MergeSegments` read it), `AutoZoomEngine.SpringInterpolate` (called
+  by nothing but its own test), and `ZoomCameraPath.Build`'s `sourceWidth`/`sourceHeight` (unused
+  once the arc went, and being swallowed by `_ = sourceWidth;` discards — a smell, not a
+  justification).
+- **Removing persisted config properties is safe here**: `MusioPackage.JsonOptions` does not set
+  `UnmappedMemberHandling.Disallow`, so existing manifests carrying the old keys just ignore them.
+  **Check that before deleting any serialized property** — with `Disallow` it would break loading
+  every existing project.
+- **`ZoomState.IsManualOverride` became a computed property** over `CursorFollowWeight`. Nothing
+  read it for behaviour any more (both remaining writes were copies at struct-rebuild sites), and
+  deriving it removes one more field that every rebuild site had to remember to carry — the
+  documented silent-failure mode in this repo. **Prefer deriving over storing for any field whose
+  only correctness requirement is "copy me everywhere".**
+- **`ZoomOnScroll` was deliberately KEPT** despite being unreferenced: it predates this branch and
+  represents unimplemented product intent, not debris from this work. Clean up your own debris;
+  do not silently delete someone's roadmap.
+- **The code review returned no findings** — which, over 2800 lines, is worth distrusting on
+  principle. Verified independently by writing two seeded fuzz tests, and that was the right call:
+  the exercise turned up the genuinely interesting result below.
+- **The fuzz test's first two failures were both the TEST being wrong, not the code** — and
+  diagnosing them was still worth it:
+  1. A zero-length ramp makes a shot pop from 1x to its target in one instant. That is a
+     discontinuity by construction, and the app cannot author one (`FromRange` yields ≥40ms,
+     resize clamps to 50ms, auto uses a fixed 1s).
+  2. **`MinTransitionSeconds` cannot always be honoured**, and that is correct behaviour. Two
+     shots settling 3ms apart get a 3ms move, because the widening is bounded by
+     `[a.HoldStart, b.HoldEnd]` and earlier pairs in a chain can consume those holds entirely.
+     The speed is authored; forcing 250ms would make the camera lag the timeline.
+- **The lesson that generalises**: a fixed-grid continuity assertion conflates CONTINUITY with
+  SPEED. Only continuity is invariant — speed is authored. The final test samples a hair either
+  side of every piece boundary (`epsilon = 1e-6`) instead, which measures the property that is
+  actually guaranteed: **pieces hand off at equal values**. That catches tiling gaps, piece
+  overlaps and off-by-ones, and is immune to how fast the user asked the camera to move.
+- **Verified**: suite **1054 passed, 3 skipped, 0 failed**, including 400 randomized realistic
+  arrangements and 300 degenerate ones.
+
+## PR #88 review: both findings valid, and one of them had a second call site
+
+- **Feature/area**: `AutoZoomEngine.BuildZoomTimeline`, new `MouseRecordingData.FindSampleNearest`,
+  its two callers in `EditorPage`.
+- **Finding 1 — redundant rebuild.** `BuildZoomTimeline` called `RebuildPath()` and then
+  `RebuildAutoSegments()`, which itself calls `RebuildPath()` on **every one of its three exits**.
+  The first call was wasted work and briefly published a path built from the NEW source dimensions
+  but the STALE auto segments. Removed. The rebuild inside `RebuildAutoSegments` still covers the
+  ordering case the early call was added for (`SetManualKeyframes` arriving before the source size
+  is known), because it rebuilds from both lists.
+- **Finding 2 — O(n) cursor lookup on the UI thread.** Finding the sample nearest a moment was a
+  linear scan over a list that holds tens of thousands of entries on a long recording.
+- **Verify the precondition before trusting a suggested binary search.** The reviewer asserted the
+  samples are ordered; that is true, but for a non-obvious reason worth knowing:
+  `MouseHookRecorder.AddSampleLocked` **clamps** any out-of-order timestamp up to its predecessor,
+  precisely because two threads append (the hook and the shape poller). So the list is
+  non-decreasing *by construction*, not by luck — and it contains **runs of identical timestamps**,
+  which the search and its tests must handle.
+- **The review flagged one call site; there were two.** The same scan existed in the zoom-segment
+  creation path. **When a review points at a pattern, grep for the pattern rather than fixing the
+  line.** Both now share one helper instead of two copies of a subtle search.
+- **The test that actually justifies the swap is the equivalence test**: the binary search is
+  checked against the linear scan it replaced across 200 seeded recordings with duplicates and
+  irregular gaps. Unit tests for exact hits and midpoints prove it is plausible; agreeing with the
+  implementation it replaces on realistic data proves it is a safe substitution.
+- **Verified**: suite **1061 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
+
+
+
+
+

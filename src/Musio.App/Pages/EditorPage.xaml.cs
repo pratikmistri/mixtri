@@ -125,6 +125,19 @@ public sealed partial class EditorPage : Page
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+
+    /// <summary>
+    /// Set by the frame-render path when the decoder returns no bitmap for the requested
+    /// position, so <see cref="UpdatePreviewFrameAsync"/> can schedule a retry.
+    /// </summary>
+    private bool _decodeMissed;
+
+    /// <summary>
+    /// Consecutive decode misses at a stationary playhead. Reset by the first frame that
+    /// decodes, and bounded by <c>MaxDecodeMissRetries</c> so a genuinely undecodable
+    /// position costs a few retries rather than spinning forever.
+    /// </summary>
+    private int _decodeMissRetries;
     private bool _syncingTimelineFromPlayback;
     private readonly EditorGraphicsDeviceManager _graphicsDeviceManager;
     private bool _pageUnloaded;
@@ -579,6 +592,13 @@ public sealed partial class EditorPage : Page
 
     private bool _zoomRegionEditMode;
     private string? _zoomRegionKeyframeId;
+
+    /// <summary>
+    /// Mouse position at the edited keyframe's moment, in SOURCE pixels, or NaN when the
+    /// source has no cursor data. Drawn as a marker so the region can be aimed at it.
+    /// </summary>
+    private double _zoomRegionCursorX = double.NaN;
+    private double _zoomRegionCursorY = double.NaN;
     private double _zoomRegionCenterX, _zoomRegionCenterY;
     private double _zoomRegionZoomLevel;
     private int _zoomRegionSourceW, _zoomRegionSourceH;
@@ -632,17 +652,32 @@ public sealed partial class EditorPage : Page
             ? owning.SourceHeight
             : (project.Height > 0 ? project.Height : 1080);
 
-        // Pause playback and move to segment timestamp for context
+        // Pause playback and move to the segment for context.
+        //
+        // kf.Timestamp is a SOURCE time in the owning clip's own time space; the playhead runs
+        // in OUTPUT time. Assigning one to the other lands the playhead wherever the arithmetic
+        // happens to point — with a text slide ahead of the video it lands inside the SLIDE, so
+        // the region editor showed the slide instead of the frame being framed.
         Preview.Pause();
-        var pos = kf.Timestamp;
+        var pos = ResolveKeyframeOutputTime(kf);
         Timeline.PlayheadPosition = pos;
         Preview.PlayheadPosition = pos;
         ViewModel.Model.PlayheadPosition = pos;
+
+        // Where the mouse actually is at this moment, so the region can be aimed at it.
+        ResolveZoomRegionCursorPoint(kf);
 
         // Re-render without compositor (raw frame for positioning)
         _ = UpdatePreviewFrameAsync(pos, force: true);
 
         ZoomRegionOverlay.Visibility = Visibility.Visible;
+
+        // Only offer "follow mouse" when there is something to undo — a segment that already
+        // follows the cursor has nothing to hand back. Null-guarded because handlers and setup
+        // here can run before x:Name fields are assigned.
+        if (ZoomRegionFollowMouseButton is not null)
+            ZoomRegionFollowMouseButton.IsEnabled = kf.UsesAuthoredCenter;
+
         UpdateZoomRegionRect();
     }
 
@@ -652,12 +687,129 @@ public sealed partial class EditorPage : Page
         _isDraggingZoomRegion = false;
         _zoomDragMode = ZoomDragMode.None;
         _zoomRegionKeyframeId = null;
+        _zoomRegionCursorX = double.NaN;
+        _zoomRegionCursorY = double.NaN;
+        if (ZoomRegionCursorMarker is not null) ZoomRegionCursorMarker.Visibility = Visibility.Collapsed;
+        if (ZoomRegionCursorDot is not null) ZoomRegionCursorDot.Visibility = Visibility.Collapsed;
         ZoomRegionOverlay.Visibility = Visibility.Collapsed;
         UpdateSnapGuides(false, false);
 
         // Re-render with compositor
         _lastRenderedFrameIndex = -1;
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+    }
+
+    /// <summary>
+    /// Maps a zoom keyframe's SOURCE time to its position on the OUTPUT timeline, routing
+    /// through the video segment that owns it.
+    /// <para>
+    /// Zoom keyframes are stored in the source-time space of the clip they were authored
+    /// against, which is not the timeline's time space as soon as anything shifts it — a text
+    /// slide ahead of the video, a trim, a speed change, or an appended recording with its own
+    /// source clock. This mirrors what the timeline control does for drawing zoom segments
+    /// (<c>OwningSegmentForKeyframe</c>), so the playhead lands on the same frame the segment
+    /// is drawn over.
+    /// </para>
+    /// </summary>
+    private TimeSpan ResolveKeyframeOutputTime(ZoomKeyframe kf)
+    {
+        var model = ViewModel.Model;
+
+        // The primary recording already has a tested mapping that walks timeline order and
+        // handles slides, trims, reorders and speed changes — use it rather than a second
+        // implementation that could drift from it.
+        if (kf.SourceVideoFilePath is null)
+            return model.SourceToOutputTime(kf.Timestamp);
+
+        // An appended/imported clip has its own source clock, which the primary-only mapping
+        // above does not cover, so resolve through the segment that owns this keyframe —
+        // the same rule the timeline uses to draw it (OwningSegmentForKeyframe).
+        VideoSegment? firstMatch = null;
+        foreach (var seg in model.Segments.OfType<VideoSegment>())
+        {
+            if (!string.Equals(seg.VideoFilePath, kf.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            firstMatch ??= seg;
+
+            var local = kf.Timestamp - seg.SourceStart;
+            if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
+                return OutputTimeWithin(seg, local);
+        }
+
+        // Outside every kept range of its source (trimmed out): clamp into the first segment
+        // cut from that file rather than leaving the playhead adrift.
+        if (firstMatch is not null)
+        {
+            var local = kf.Timestamp - firstMatch.SourceStart;
+            if (local < TimeSpan.Zero) local = TimeSpan.Zero;
+            if (local > firstMatch.SourceDuration) local = firstMatch.SourceDuration;
+            return OutputTimeWithin(firstMatch, local);
+        }
+
+        return kf.Timestamp;
+
+        static TimeSpan OutputTimeWithin(VideoSegment seg, TimeSpan localSourceOffset)
+        {
+            double speed = seg.SpeedFactor > 0 ? seg.SpeedFactor : 1.0;
+            return seg.Start + TimeSpan.FromTicks((long)(localSourceOffset.Ticks / speed));
+        }
+    }
+
+    /// <summary>
+    /// Resolves where the mouse is at a keyframe's moment, in source pixels, so the region
+    /// editor can show it. The region editor renders the RAW frame (no compositor, hence no
+    /// cursor overlay), which left nothing on screen to aim the region at.
+    /// Sets <see cref="_zoomRegionCursorX"/>/<see cref="_zoomRegionCursorY"/> to NaN when the
+    /// source carries no cursor data — an imported clip, typically — and the marker stays hidden.
+    /// </summary>
+    private void ResolveZoomRegionCursorPoint(ZoomKeyframe kf)
+    {
+        _zoomRegionCursorX = double.NaN;
+        _zoomRegionCursorY = double.NaN;
+
+        // Only the primary recording's cursor path is available on the model; a keyframe on an
+        // appended/imported clip has none to show.
+        if (kf.SourceVideoFilePath is not null) return;
+        if (ViewModel.Model.CursorData is not { } cursorData || cursorData.Samples.Count == 0) return;
+
+        var project = ProjectService.Instance.CurrentProject;
+        double mouseOffset = project?.MouseToVideoOffsetSeconds ?? 0;
+        if (cursorData.FindSampleNearest(kf.Timestamp.TotalSeconds + mouseOffset) is not { } closest)
+            return;
+
+        // Hook coordinates are already physical pixels (PerMonitorV2) — no DPI scaling here.
+        _zoomRegionCursorX = closest.X - (project?.CropOffsetX ?? 0);
+        _zoomRegionCursorY = closest.Y - (project?.CropOffsetY ?? 0);
+    }
+
+    /// <summary>
+    /// Places the cursor marker over the raw frame, using the same source→display transform
+    /// the region rectangle uses so the two agree exactly.
+    /// </summary>
+    private void UpdateZoomRegionCursorMarker()
+    {
+        if (ZoomRegionCursorMarker is null || ZoomRegionCursorDot is null) return;
+
+        bool known = !double.IsNaN(_zoomRegionCursorX) && !double.IsNaN(_zoomRegionCursorY)
+            && _zoomRegionSourceW > 0 && _zoomRegionSourceH > 0;
+        if (!known)
+        {
+            ZoomRegionCursorMarker.Visibility = Visibility.Collapsed;
+            ZoomRegionCursorDot.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        double x = _frameDisplayX + (_zoomRegionCursorX / _zoomRegionSourceW) * _frameDisplayW;
+        double y = _frameDisplayY + (_zoomRegionCursorY / _zoomRegionSourceH) * _frameDisplayH;
+
+        Canvas.SetLeft(ZoomRegionCursorMarker, x - (ZoomRegionCursorMarker.Width / 2));
+        Canvas.SetTop(ZoomRegionCursorMarker, y - (ZoomRegionCursorMarker.Height / 2));
+        Canvas.SetLeft(ZoomRegionCursorDot, x - (ZoomRegionCursorDot.Width / 2));
+        Canvas.SetTop(ZoomRegionCursorDot, y - (ZoomRegionCursorDot.Height / 2));
+
+        ZoomRegionCursorMarker.Visibility = Visibility.Visible;
+        ZoomRegionCursorDot.Visibility = Visibility.Visible;
     }
 
     private void UpdateZoomRegionRect()
@@ -717,6 +869,8 @@ public sealed partial class EditorPage : Page
         PositionHandle(HandleTR, rectX + rectW, rectY);
         PositionHandle(HandleBL, rectX, rectY + rectH);
         PositionHandle(HandleBR, rectX + rectW, rectY + rectH);
+
+        UpdateZoomRegionCursorMarker();
 
         // Dim overlays constrained to frame display area
         double fX = _frameDisplayX, fY = _frameDisplayY;
@@ -989,6 +1143,28 @@ public sealed partial class EditorPage : Page
 
     private void ZoomRegionCancel_Click(object sender, RoutedEventArgs e)
     {
+        ExitZoomRegionEditMode();
+    }
+
+    /// <summary>
+    /// Hands the framing back to the cursor: the segment stops holding the region shown here
+    /// and follows the mouse again, which is what a click-driven zoom does by default.
+    /// <para>
+    /// The zoom LEVEL the region rectangle currently expresses is kept, since that is a
+    /// separate decision the user may well have just made here. No centre is passed —
+    /// supplying one would be read as authoring a region and would immediately re-pin it.
+    /// </para>
+    /// </summary>
+    private void ZoomRegionFollowMouse_Click(object sender, RoutedEventArgs e)
+    {
+        if (_zoomRegionKeyframeId is null) return;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(
+            _zoomRegionKeyframeId,
+            zoomLevel: _zoomRegionZoomLevel,
+            hasAuthoredCenter: false);
+        ViewModel.UndoRedoManager.Execute(operation);
+
         ExitZoomRegionEditMode();
     }
 

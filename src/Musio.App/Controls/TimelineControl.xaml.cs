@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Musio.Core.Audio;
 using Musio.Core.Models;
+using Musio.Core.Processing;
 using Musio.Core.Timeline;
 using Windows.Foundation;
 using Windows.UI;
@@ -127,6 +128,7 @@ public sealed partial class TimelineControl : UserControl
     private Color ZoomSegmentSelectedBorder;
     private Color ZoomSegmentHandleColor;
     private Color ZoomSegmentCreatePreview;
+    private Color ZoomSegmentLinkedConnector;
     private Color ZoomSegmentTextColor;
     private Color AudioTrackBackground;
     private Color AudioPlaceholderColor;
@@ -351,6 +353,32 @@ public sealed partial class TimelineControl : UserControl
 
     private static Color WithAlpha(Color c, byte alpha) => Color.FromArgb(alpha, c.R, c.G, c.B);
 
+    /// <summary>
+    /// Desaturates and fades a zoom-segment colour for a segment that is NOT the selected one.
+    /// <para>
+    /// Zoom segments legitimately overlap — that is what drives a camera handoff — and when two
+    /// sit on top of each other in the same accent colour it is hard to tell which one the
+    /// resize handles belong to. Draining most of the colour and roughly half the opacity out of
+    /// the unselected ones lets the selected segment read as the foreground object without
+    /// hiding its neighbours, which still need to be visible to be aimed at.
+    /// </para>
+    /// <para>
+    /// Applied only while something is selected, so the track keeps its normal appearance at rest.
+    /// </para>
+    /// </summary>
+    private static Color MutedZoomColor(Color c)
+    {
+        const float desaturation = 0.8f;
+        const float fade = 0.45f;
+
+        // Rec. 601 luma: matches how the eye weights the channels, so the muted colour keeps
+        // the segment's apparent brightness instead of flattening light and dark ones together.
+        float luma = (0.299f * c.R) + (0.587f * c.G) + (0.114f * c.B);
+        byte Mix(byte channel) => (byte)Math.Clamp(channel + ((luma - channel) * desaturation), 0f, 255f);
+
+        return Color.FromArgb((byte)(c.A * fade), Mix(c.R), Mix(c.G), Mix(c.B));
+    }
+
     private void ResolveThemeColors()
     {
         bool isDark = ActualTheme != ElementTheme.Light;
@@ -391,6 +419,7 @@ public sealed partial class TimelineControl : UserControl
         ZoomSegmentSelectedBorder = isDark ? Color.FromArgb(255, 240, 255, 100) : Color.FromArgb(255, 160, 190, 0);
         ZoomSegmentHandleColor = isDark ? Color.FromArgb(255, 245, 255, 150) : Color.FromArgb(255, 140, 170, 0);
         ZoomSegmentCreatePreview = WithAlpha(zoomBase, 120);
+        ZoomSegmentLinkedConnector = WithAlpha(zoomLight, 190);
         // Dark text on bright neon yellow for readability
         ZoomSegmentTextColor  = isDark ? Color.FromArgb(255, 30, 40, 0) : Color.FromArgb(255, 40, 50, 0);
 
@@ -1891,7 +1920,10 @@ public sealed partial class TimelineControl : UserControl
             return;
 
         // Draw zoom segments as rounded rectangles
-        var sorted = model.ZoomKeyframes.OrderBy(k => k.Timestamp).ToList();
+        var sorted = model.ZoomKeyframes
+            .OrderBy(k => k.Timestamp)
+            .ThenBy(k => k.Start)
+            .ToList();
 
         // Empty state: the hint belongs on the track it describes, where the user is
         // looking, rather than in the toolbar.
@@ -1911,7 +1943,17 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
-        foreach (var kf in sorted)
+        // Paint the selected segment LAST so it sits on top of everything it overlaps. Zoom
+        // segments overlap by design (that is what drives a handoff), and the one being edited
+        // has to be the one you can see and grab. Hit-testing gives its edges the same priority.
+        var drawOrder = sorted.Where(k => k.Id != _selectedZoomKeyframeId).ToList();
+        var selectedKeyframe = sorted.FirstOrDefault(k => k.Id == _selectedZoomKeyframeId);
+        if (selectedKeyframe is not null)
+            drawOrder.Add(selectedKeyframe);
+
+        bool hasSelection = selectedKeyframe is not null;
+
+        foreach (var kf in drawOrder)
         {
             float x1 = (float)GetZoomSegmentStartX(kf);
             float x2 = (float)GetZoomSegmentEndX(kf);
@@ -1924,17 +1966,20 @@ public sealed partial class TimelineControl : UserControl
 
             bool isSelected = kf.Id == _selectedZoomKeyframeId;
             bool isEditable = kf.IsManual;
+            bool muted = hasSelection && !isSelected;
 
             // Fill
             var fillColor = isSelected ? ZoomSegmentSelectedFill
                 : isEditable ? ZoomSegmentFill
                 : ZoomSegmentAutoFill;
+            if (muted) fillColor = MutedZoomColor(fillColor);
 
             using var roundedRect = CanvasGeometry.CreateRoundedRectangle(ds, x1, segY, segW, segH, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
             ds.FillGeometry(roundedRect, fillColor);
 
             // Border
             var borderColor = isSelected ? ZoomSegmentSelectedBorder : ZoomSegmentBorder;
+            if (muted) borderColor = MutedZoomColor(borderColor);
             float borderWidth = isSelected ? 1.5f : 1f;
             ds.DrawGeometry(roundedRect, borderColor, borderWidth);
 
@@ -1942,7 +1987,8 @@ public sealed partial class TimelineControl : UserControl
             if (segW > 30)
             {
                 string label = $"{kf.ZoomLevel:0.#}x";
-                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, ZoomSegmentTextColor,
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7,
+                    muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                     {
                         FontSize = 11,
@@ -1965,6 +2011,8 @@ public sealed partial class TimelineControl : UserControl
             }
         }
 
+        DrawZoomLinkedSegmentIndicators(ds, sorted, w, h);
+
         // Draw create-preview if dragging to create
         if (_zoomCreateActive && _dragMode == DragMode.ZoomSegmentCreate)
         {
@@ -1979,7 +2027,77 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
                 new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
         }
+
+        if (!double.IsNaN(_segmentSnapGuideX))
+        {
+            var snapGuideColor = Color.FromArgb(255, 255, 214, 10);
+            ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
+        }
     }
+
+    private void DrawZoomLinkedSegmentIndicators(
+        CanvasDrawingSession ds,
+        IReadOnlyList<ZoomKeyframe> sorted,
+        float w,
+        float h)
+    {
+        if (sorted.Count < 2)
+            return;
+
+        var previousByPath = new List<ZoomKeyframe>();
+        float segY = ZoomSegmentVerticalPadding;
+        float segH = h - ZoomSegmentVerticalPadding * 2;
+        float bridgeY = segY + Math.Max(2f, segH - 5f);
+
+        foreach (var current in sorted)
+        {
+            int pathIndex = previousByPath.FindIndex(previous => SameZoomPath(previous, current));
+            if (pathIndex < 0)
+            {
+                previousByPath.Add(current);
+                continue;
+            }
+
+            var earlier = previousByPath[pathIndex];
+            previousByPath[pathIndex] = current;
+
+            if (!ZoomCameraPath.AreLinked(earlier, current))
+                continue;
+
+            float fromX = (float)GetZoomSegmentEndX(earlier);
+            float toX = (float)GetZoomSegmentStartX(current);
+            if (float.IsNaN(fromX) || float.IsNaN(toX))
+                continue;
+
+            float left = Math.Min(fromX, toX);
+            float right = Math.Max(fromX, toX);
+            if (right < 0 || left > w)
+                continue;
+
+            float mid = (fromX + toX) / 2f;
+            if (right - left < 6f)
+            {
+                left = mid - 3f;
+                right = mid + 3f;
+            }
+
+            left = Math.Clamp(left, 0, w);
+            right = Math.Clamp(right, 0, w);
+            if (right <= left)
+                continue;
+
+            using var stroke = new CanvasStrokeStyle
+            {
+                StartCap = CanvasCapStyle.Round,
+                EndCap = CanvasCapStyle.Round,
+            };
+            ds.DrawLine(left, bridgeY, right, bridgeY, ZoomSegmentLinkedConnector, 3f, stroke);
+        }
+    }
+
+    private static bool SameZoomPath(ZoomKeyframe a, ZoomKeyframe b)
+        => a.IsManual == b.IsManual &&
+           string.Equals(a.SourceVideoFilePath, b.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Finds the video segment that owns a zoom keyframe: the segment matching the
@@ -2087,7 +2205,7 @@ public sealed partial class TimelineControl : UserControl
     private (string? Id, ZoomHitTarget Target) HitTestZoomSegment(double posX, double posY)
     {
         var model = Model;
-        if (model is null) return (null, ZoomHitTarget.None);
+        if (model is null || ZoomTrackCanvas is null) return (null, ZoomHitTarget.None);
 
         float h = (float)ZoomTrackCanvas.ActualHeight;
         float segY = ZoomSegmentVerticalPadding;
@@ -2098,7 +2216,31 @@ public sealed partial class TimelineControl : UserControl
             return (null, ZoomHitTarget.None);
 
         // Check segments in reverse order (last drawn = on top)
-        var sorted = model.ZoomKeyframes.OrderBy(k => k.Timestamp).ToList();
+        var sorted = model.ZoomKeyframes
+            .OrderBy(k => k.Timestamp)
+            .ThenBy(k => k.Start)
+            .ToList();
+
+        // The selected segment's EDGES win over everything else, because it is painted on top
+        // and its resize handles are drawn there — without this, an overlapping neighbour's body
+        // claims the click first and the handles become impossible to grab, which is exactly the
+        // case overlapping zoom segments create.
+        // Deliberately edges only: letting its BODY win too would trap the selection, since a
+        // segment sitting underneath could then never be clicked to select it.
+        if (_selectedZoomKeyframeId is not null)
+        {
+            var selected = sorted.FirstOrDefault(k => k.Id == _selectedZoomKeyframeId);
+            if (selected is not null)
+            {
+                float sx1 = (float)ZoomKeyframeTimeToX(selected, selected.Start);
+                float sx2 = (float)ZoomKeyframeTimeToX(selected, selected.End);
+                if (!float.IsNaN(sx1) && Math.Abs(posX - sx1) <= ZoomSegmentEdgeHitWidth)
+                    return (selected.Id, ZoomHitTarget.LeftEdge);
+                if (!float.IsNaN(sx2) && Math.Abs(posX - sx2) <= ZoomSegmentEdgeHitWidth)
+                    return (selected.Id, ZoomHitTarget.RightEdge);
+            }
+        }
+
         for (int i = sorted.Count - 1; i >= 0; i--)
         {
             var kf = sorted[i];
@@ -2213,8 +2355,9 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not CanvasControl canvas) return;
+        if (sender is not CanvasControl canvas || TimeRulerCanvas is null) return;
         var pos = e.GetCurrentPoint(canvas).Position;
+        _segmentSnapGuideX = double.NaN;
 
         var (hitId, hitTarget) = HitTestZoomSegment(pos.X, pos.Y);
 
@@ -2283,25 +2426,45 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not CanvasControl canvas) return;
+        var model = Model;
+        if (sender is not CanvasControl canvas || TimeRulerCanvas is null || model is null) return;
         var pos = e.GetCurrentPoint(canvas).Position;
+        double clampedX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+        bool snap = !IsAltDown();
 
         switch (_dragMode)
         {
             case DragMode.ZoomSegmentBody:
-                _zoomDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+            {
+                var kf = model.ZoomKeyframes.FirstOrDefault(k => k.Id == _selectedZoomKeyframeId);
+                double originalStartX = kf is not null
+                    ? ZoomKeyframeTimeToX(kf, _zoomDragOriginalStart)
+                    : double.NaN;
+                if (kf is not null && !double.IsNaN(originalStartX))
+                {
+                    double leftX = originalStartX + (clampedX - _zoomDragStartX);
+                    double snappedLeftX = SnapZoomX(model, leftX, kf.Id, kf.SourceVideoFilePath, snap);
+                    _zoomDragCurrentX = _zoomDragStartX + (snappedLeftX - originalStartX);
+                }
+                else
+                {
+                    _segmentSnapGuideX = double.NaN;
+                    _zoomDragCurrentX = clampedX;
+                }
                 SetCursor(InputSystemCursorShape.SizeAll);
                 InvalidateAll();
                 break;
+            }
 
             case DragMode.ZoomSegmentLeftEdge:
             case DragMode.ZoomSegmentRightEdge:
-                _zoomDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                _zoomDragCurrentX = SnapZoomX(model, clampedX, _selectedZoomKeyframeId, SelectedZoomKeyframeFile, snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
                 InvalidateAll();
                 break;
 
             case DragMode.ZoomSegmentCreate:
+                _segmentSnapGuideX = double.NaN;
                 double dragDistance = Math.Abs(pos.X - _zoomDragStartX);
                 if (dragDistance >= ZoomCreateDragThreshold)
                 {
@@ -2329,6 +2492,7 @@ public sealed partial class TimelineControl : UserControl
                 break;
 
             case DragMode.None:
+                _segmentSnapGuideX = double.NaN;
                 // Hover cursor feedback
                 var (hitId, hitTarget) = HitTestZoomSegment(pos.X, pos.Y);
                 SetCursor(hitTarget switch
@@ -2340,6 +2504,7 @@ public sealed partial class TimelineControl : UserControl
                 break;
 
             default:
+                _segmentSnapGuideX = double.NaN;
                 if (_dragMode == DragMode.Playhead)
                     PlayheadPosition = XToTime(pos.X);
                 break;
@@ -2348,7 +2513,12 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not CanvasControl canvas) return;
+        if (sender is not CanvasControl canvas || TimeRulerCanvas is null)
+        {
+            _segmentSnapGuideX = double.NaN;
+            _dragMode = DragMode.None;
+            return;
+        }
 
         switch (_dragMode)
         {
@@ -2407,6 +2577,7 @@ public sealed partial class TimelineControl : UserControl
 
         _zoomDragStartX = double.NaN;
         _zoomDragCurrentX = double.NaN;
+        _segmentSnapGuideX = double.NaN;
         _dragMode = DragMode.None;
         SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
@@ -4186,6 +4357,58 @@ public sealed partial class TimelineControl : UserControl
             _segmentSnapGuideX = best;
             return best;
         }
+        return x;
+    }
+
+    /// <summary>
+    /// Snaps a zoom-track X coordinate to nearby snap targets in the dragged
+    /// keyframe's own source-file domain.
+    /// </summary>
+    private double SnapZoomX(
+        TimelineModel model,
+        double x,
+        string? excludeKeyframeId,
+        string? sourceVideoFilePath,
+        bool enabled)
+    {
+        _segmentSnapGuideX = double.NaN;
+        if (!enabled) return x;
+
+        double best = x;
+        double bestDist = SegmentSnapThreshold;
+
+        void Consider(double candidate)
+        {
+            if (double.IsNaN(candidate))
+                return;
+
+            double dist = Math.Abs(candidate - x);
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+
+        Consider(TimeToX(PlayheadPosition));
+        foreach (var kf in model.ZoomKeyframes)
+        {
+            if (kf.Id == excludeKeyframeId)
+                continue;
+
+            if (!string.Equals(kf.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            Consider(ZoomKeyframeTimeToX(kf, kf.Start));
+            Consider(ZoomKeyframeTimeToX(kf, kf.End));
+        }
+
+        if (bestDist < SegmentSnapThreshold && Math.Abs(best - x) > 0.001)
+        {
+            _segmentSnapGuideX = best;
+            return best;
+        }
+
         return x;
     }
 
