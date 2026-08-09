@@ -157,6 +157,12 @@
                         Text="Drag to position zoom region"
                         FontSize="12" />
                     <Button
+                        x:Name="ZoomRegionFollowMouseButton"
+                        Content="Follow mouse"
+                        Click="ZoomRegionFollowMouse_Click"
+                        Padding="12,4"
+                        ToolTipService.ToolTip="Stop holding this region and let the zoom follow the mouse instead. Keeps the zoom level you have set here." />
+                    <Button
                         Content="Apply"
                         Style="{ThemeResource AccentButtonStyle}"
                         Click="ZoomRegionApply_Click"

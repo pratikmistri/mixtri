@@ -396,6 +396,43 @@ public sealed class AutoZoomEngineTests
         Assert.IsTrue(model.ZoomKeyframes[0].UsesAuthoredCenter);
     }
 
+    /// <summary>
+    /// The region picker's "Follow mouse" button hands the framing back to the cursor, keeps
+    /// the zoom level, and is undoable.
+    /// </summary>
+    [TestMethod]
+    public void FollowMouse_UnpinsTheFraming_KeepsZoom_AndUndoesCleanly()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(12) };
+        model.ZoomKeyframes.Add(new ZoomKeyframe
+        {
+            Id = "kf1",
+            Timestamp = TimeSpan.FromSeconds(3),
+            ZoomLevel = 2.0,
+            CenterX = 0.8,
+            CenterY = 0.2,
+            IsManual = true,
+            HasAuthoredCenter = true,
+        });
+
+        var op = new UpdateZoomSegmentPropertiesOperation(
+            "kf1", zoomLevel: 2.5, hasAuthoredCenter: false);
+        Assert.AreEqual("Follow Mouse", op.Description,
+            "The undo entry should say what the user actually did.");
+
+        op.Execute(model);
+
+        var updated = model.ZoomKeyframes[0];
+        Assert.IsFalse(updated.UsesAuthoredCenter, "The segment should be following the cursor again.");
+        Assert.AreEqual(2.5, updated.ZoomLevel, 1e-9, "The zoom level set in the picker should be kept.");
+        Assert.AreEqual(0.8, updated.CenterX, 1e-9,
+            "The stored centre is kept as the fallback and as a starting point if re-pinned.");
+
+        op.Undo(model);
+        Assert.IsTrue(model.ZoomKeyframes[0].UsesAuthoredCenter, "Undo must restore the pinned framing.");
+        Assert.AreEqual(2.0, model.ZoomKeyframes[0].ZoomLevel, 1e-9);
+    }
+
     [TestMethod]
     public void GetZoomState_AutoZoom_DoesNotSetManualOverride()
     {

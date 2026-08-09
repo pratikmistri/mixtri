@@ -656,6 +656,13 @@ public sealed partial class EditorPage : Page
         _ = UpdatePreviewFrameAsync(pos, force: true);
 
         ZoomRegionOverlay.Visibility = Visibility.Visible;
+
+        // Only offer "follow mouse" when there is something to undo — a segment that already
+        // follows the cursor has nothing to hand back. Null-guarded because handlers and setup
+        // here can run before x:Name fields are assigned.
+        if (ZoomRegionFollowMouseButton is not null)
+            ZoomRegionFollowMouseButton.IsEnabled = kf.UsesAuthoredCenter;
+
         UpdateZoomRegionRect();
     }
 
@@ -1002,6 +1009,28 @@ public sealed partial class EditorPage : Page
 
     private void ZoomRegionCancel_Click(object sender, RoutedEventArgs e)
     {
+        ExitZoomRegionEditMode();
+    }
+
+    /// <summary>
+    /// Hands the framing back to the cursor: the segment stops holding the region shown here
+    /// and follows the mouse again, which is what a click-driven zoom does by default.
+    /// <para>
+    /// The zoom LEVEL the region rectangle currently expresses is kept, since that is a
+    /// separate decision the user may well have just made here. No centre is passed —
+    /// supplying one would be read as authoring a region and would immediately re-pin it.
+    /// </para>
+    /// </summary>
+    private void ZoomRegionFollowMouse_Click(object sender, RoutedEventArgs e)
+    {
+        if (_zoomRegionKeyframeId is null) return;
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(
+            _zoomRegionKeyframeId,
+            zoomLevel: _zoomRegionZoomLevel,
+            hasAuthoredCenter: false);
+        ViewModel.UndoRedoManager.Execute(operation);
+
         ExitZoomRegionEditMode();
     }
 

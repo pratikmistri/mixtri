@@ -233,17 +233,27 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly double? _newZoomLevel;
     private readonly double? _newCenterX;
     private readonly double? _newCenterY;
+    private readonly bool? _newHasAuthoredCenter;
     private ZoomKeyframe? _previousKeyframe;
 
-    public string Description => "Update Zoom Properties";
+    public string Description => _newHasAuthoredCenter == false
+        ? "Follow Mouse"
+        : "Update Zoom Properties";
 
+    /// <param name="hasAuthoredCenter">
+    /// Explicitly sets whether the segment holds its own centre. Pass <c>false</c> to hand the
+    /// framing back to the live cursor. Leave null to apply the normal rule, where supplying a
+    /// centre pins the framing and anything else preserves it.
+    /// </param>
     public UpdateZoomSegmentPropertiesOperation(string keyframeId,
-        double? zoomLevel = null, double? centerX = null, double? centerY = null)
+        double? zoomLevel = null, double? centerX = null, double? centerY = null,
+        bool? hasAuthoredCenter = null)
     {
         _keyframeId = keyframeId;
         _newZoomLevel = zoomLevel;
         _newCenterX = centerX;
         _newCenterY = centerY;
+        _newHasAuthoredCenter = hasAuthoredCenter;
     }
 
     public void Execute(TimelineModel model)
@@ -263,12 +273,12 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             CenterX = Math.Clamp(_newCenterX ?? kf.CenterX, 0, 1),
             CenterY = Math.Clamp(_newCenterY ?? kf.CenterY, 0, 1),
             IsManual = true,
-            // Only an explicit region edit pins the framing. Otherwise carry the keyframe's
-            // EFFECTIVE value across, not its raw one: promoting sets IsManual, and a null
-            // HasAuthoredCenter falls back to IsManual, so leaving it null here would flip a
-            // click-driven zoom to pinned as a side effect of changing its zoom level.
-            HasAuthoredCenter = (_newCenterX is not null || _newCenterY is not null)
-                || kf.UsesAuthoredCenter,
+            // An explicit request wins — that is how "follow mouse" hands the framing back to
+            // the cursor. Otherwise the normal rule: authoring a region pins it, and anything
+            // else carries the EFFECTIVE value across (see MoveZoomKeyframeOperation for why
+            // the effective value rather than the raw one).
+            HasAuthoredCenter = _newHasAuthoredCenter
+                ?? ((_newCenterX is not null || _newCenterY is not null) || kf.UsesAuthoredCenter),
         };
     }
 
