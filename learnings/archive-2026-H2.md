@@ -1860,5 +1860,55 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1052 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
   relaunched clean.
 
+## Zoom framing, round 8: creation should not pin, and a way back to the cursor
+
+- **Feature/area**: `ZoomKeyframe.FromRange`, `UpdateZoomSegmentPropertiesOperation`,
+  `EditorPage` zoom region picker.
+- **Creating a segment no longer pins its framing.** User's call, and the right one: creating says
+  *when* to zoom, not *where* to look. `FromRange` still seeds `CenterX`/`CenterY` from the cursor
+  at the segment's midpoint and keeps them — they remain the fallback a cursorless (imported) clip
+  uses and the starting point if the region is later authored — but a snapshot of one instant is
+  strictly worse than following the live cursor. **Only an explicit region edit pins.**
+- **New "Follow mouse" button in the region picker**, since once a region was authored there was no
+  way back short of deleting and recreating the segment. It goes through the existing
+  `UpdateZoomSegmentPropertiesOperation` (new optional `hasAuthoredCenter`), so it is undoable, and
+  the operation's `Description` becomes "Follow Mouse" so the undo tooltip says what happened.
+- **It deliberately passes NO centre.** Supplying one would be read as authoring a region and would
+  instantly re-pin what was just released. It does keep the zoom LEVEL the region rectangle
+  expresses, since that is a separate decision the user may have just made in the same picker.
+  Disabled when the segment already follows the cursor, so it only looks actionable when it can do
+  something.
+- **Splitting a concept keeps surfacing fixtures that leaned on the conflation.** Two more tests had
+  to state a premise they had been getting for free (`GetZoomState_ManualKeyframe_OverridesAuto`,
+  `..._EasesCursorFollowWeightAcrossTheHandoff`). Each time, the fix was to make the fixture say what
+  it means — not to weaken the assertion.
+- **Verified**: suite **1053 passed, 3 skipped, 0 failed**.
+
+## Zoom region picker: source time is not playhead time (again)
+
+- **Feature/area**: `EditorPage.EnterZoomRegionEditMode`.
+- **Symptom**: "Edit Region" put the playhead somewhere that was not the zoom segment, and with a
+  text slide ahead of the video it landed *inside the slide* — so the region editor framed the
+  slide, not the frame being framed.
+- **Cause**: `var pos = kf.Timestamp` — a zoom keyframe's `Timestamp` is a **source** time in its
+  owning clip's clock, and the playhead runs in **output** time. They coincide only when nothing
+  shifts the video, so any slide, trim, reorder or speed change breaks it. **This is the single
+  most repeated bug class in this area** (see the archive entries on appended-zoom mapping and the
+  thin-line regression) — treat every `kf.Timestamp` that reaches UI or playhead code as suspect.
+- **Fix**: primary keyframes go through `TimelineModel.SourceToOutputTime`, which already walks
+  timeline order and is covered by `TimelineSyncMappingTests` (including
+  `InsertedTextSlide_ShiftsLaterSourceContent`, i.e. the exact reported case). **Reuse that mapping
+  rather than writing a second one** — the first draft of this fix duplicated the walk and was
+  replaced, because a parallel implementation is how these two time spaces drift apart again.
+  Appended/imported clips keep a dedicated path since the primary-only mapping does not cover their
+  own source clock.
+- **The region editor renders the RAW frame on purpose** (no compositor, so the zoom being edited
+  does not fight the picker) — which also means **no cursor overlay**, leaving nothing to aim at.
+  It now draws a cursor marker from the recorded path, using the *same* source→display transform as
+  the region rectangle so the two cannot disagree. Hidden for sources with no cursor data.
+- **Verified**: suite **1053 passed, 3 skipped, 0 failed**; ARM64 Release clean-rebuilt (XAML
+  changed), re-registered, relaunched clean.
+
+
 
 
