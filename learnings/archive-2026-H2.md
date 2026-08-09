@@ -1909,6 +1909,49 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1053 passed, 3 skipped, 0 failed**; ARM64 Release clean-rebuilt (XAML
   changed), re-registered, relaunched clean.
 
+## Branch cleanup + code review: what a "clean" review missed, and why
+
+- **Feature/area**: dead-code removal across the zoom branch, plus a review pass over the whole
+  `master...HEAD` diff (~2800 lines).
+- **Dead code removed**, all of it debris from consumers deleted earlier in the branch:
+  `AutoZoomConfig.SpringConstant`/`SpringDamping` (only `SpringEase` read them),
+  `MinTimeBetweenZooms` (only `MergeSegments` read it), `AutoZoomEngine.SpringInterpolate` (called
+  by nothing but its own test), and `ZoomCameraPath.Build`'s `sourceWidth`/`sourceHeight` (unused
+  once the arc went, and being swallowed by `_ = sourceWidth;` discards — a smell, not a
+  justification).
+- **Removing persisted config properties is safe here**: `MusioPackage.JsonOptions` does not set
+  `UnmappedMemberHandling.Disallow`, so existing manifests carrying the old keys just ignore them.
+  **Check that before deleting any serialized property** — with `Disallow` it would break loading
+  every existing project.
+- **`ZoomState.IsManualOverride` became a computed property** over `CursorFollowWeight`. Nothing
+  read it for behaviour any more (both remaining writes were copies at struct-rebuild sites), and
+  deriving it removes one more field that every rebuild site had to remember to carry — the
+  documented silent-failure mode in this repo. **Prefer deriving over storing for any field whose
+  only correctness requirement is "copy me everywhere".**
+- **`ZoomOnScroll` was deliberately KEPT** despite being unreferenced: it predates this branch and
+  represents unimplemented product intent, not debris from this work. Clean up your own debris;
+  do not silently delete someone's roadmap.
+- **The code review returned no findings** — which, over 2800 lines, is worth distrusting on
+  principle. Verified independently by writing two seeded fuzz tests, and that was the right call:
+  the exercise turned up the genuinely interesting result below.
+- **The fuzz test's first two failures were both the TEST being wrong, not the code** — and
+  diagnosing them was still worth it:
+  1. A zero-length ramp makes a shot pop from 1x to its target in one instant. That is a
+     discontinuity by construction, and the app cannot author one (`FromRange` yields ≥40ms,
+     resize clamps to 50ms, auto uses a fixed 1s).
+  2. **`MinTransitionSeconds` cannot always be honoured**, and that is correct behaviour. Two
+     shots settling 3ms apart get a 3ms move, because the widening is bounded by
+     `[a.HoldStart, b.HoldEnd]` and earlier pairs in a chain can consume those holds entirely.
+     The speed is authored; forcing 250ms would make the camera lag the timeline.
+- **The lesson that generalises**: a fixed-grid continuity assertion conflates CONTINUITY with
+  SPEED. Only continuity is invariant — speed is authored. The final test samples a hair either
+  side of every piece boundary (`epsilon = 1e-6`) instead, which measures the property that is
+  actually guaranteed: **pieces hand off at equal values**. That catches tiling gaps, piece
+  overlaps and off-by-ones, and is immune to how fast the user asked the camera to move.
+- **Verified**: suite **1054 passed, 3 skipped, 0 failed**, including 400 randomized realistic
+  arrangements and 300 degenerate ones.
+
+
 
 
 

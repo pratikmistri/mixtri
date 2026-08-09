@@ -308,6 +308,164 @@ public sealed class ZoomCameraPathTests
         }
     }
 
+    /// <summary>
+    /// Fuzzes the path over many randomly generated shot arrangements and asserts the structural
+    /// invariant that must hold for every input: the piecewise camera function is CONTINUOUS —
+    /// every piece hands off to its neighbour at the same value.
+    /// <para>
+    /// This is the assertion that catches a whole class of bug at once: a gap in the tiling
+    /// (which makes <c>TryEvaluate</c> return false and renders 1x, i.e. a visible flash), two
+    /// pieces overlapping so the binary search can return either, or an off-by-one at a piece
+    /// edge. Treating "no active piece" as 1x is exactly what the renderer does, so this probes
+    /// the tiling as the compositor actually experiences it.
+    /// </para>
+    /// <para>
+    /// It samples a hair either side of every piece boundary rather than on a fixed grid,
+    /// deliberately. A coarse grid conflates continuity with SPEED, and speed is authored: two
+    /// segments can legitimately settle a few milliseconds apart, and the camera then has to
+    /// cover the whole zoom change in those few milliseconds. That is fast, but it is not a
+    /// discontinuity, and <see cref="ZoomCameraPath.MinTransitionSeconds"/> cannot widen it when
+    /// neighbouring holds have already been consumed. Asserting at the boundaries measures the
+    /// property that is actually invariant.
+    /// </para>
+    /// <para>
+    /// Ramps and releases are given a realistic floor, because a zero-length ramp makes a shot
+    /// pop from 1x to its target in one instant — a discontinuity by construction rather than a
+    /// tiling defect — and the app cannot author one: <see cref="ZoomKeyframe.FromRange"/>
+    /// derives a pre-duration of at least ~40ms, resizing clamps it to 50ms, and auto segments
+    /// use a fixed 1s. Zero-length holds ARE generated, since heavy overlap collapses them.
+    /// </para>
+    /// <para>The generator is seeded, so any failure reproduces exactly.</para>
+    /// </summary>
+    [TestMethod]
+    public void Fuzz_PieceBoundariesAreContinuous()
+    {
+        // Far smaller than the shortest piece the generator can produce, so the sampled pair
+        // straddles the boundary and nothing else.
+        const double epsilon = 1e-6;
+        const float tolerance = 0.01f;
+
+        for (int trial = 0; trial < 400; trial++)
+        {
+            var rng = new Random(trial);
+            var shots = new List<ZoomShot>();
+
+            for (int i = 0, n = 1 + rng.Next(5); i < n; i++)
+            {
+                double rampStart = Math.Round(rng.NextDouble() * 8.0, 3);
+                double ramp = 0.05 + (rng.NextDouble() * 1.0);
+                double hold = rng.Next(4) == 0 ? 0 : rng.NextDouble() * 1.5;
+                double release = 0.05 + (rng.NextDouble() * 1.5);
+
+                shots.Add(Shot(
+                    rampStart,
+                    rampStart + ramp,
+                    rampStart + ramp + hold,
+                    rampStart + ramp + hold + release,
+                    1.05f + ((float)rng.NextDouble() * 3f),
+                    (float)rng.NextDouble() * SourceWidth,
+                    (float)rng.NextDouble() * SourceHeight,
+                    seed: i,
+                    isManual: rng.Next(2) == 0));
+            }
+
+            var path = ZoomCameraPath.Build(shots);
+            if (path.IsEmpty) continue;
+
+            // "No active piece" is 1x, which is what the renderer shows there.
+            float ZoomAt(double t) => path.TryEvaluate(t, out var s) ? s.Zoom : 1f;
+
+            foreach (var shot in path.Shots)
+            {
+                foreach (double boundary in new[] { shot.RampStart, shot.HoldStart, shot.HoldEnd, shot.ReleaseEnd })
+                {
+                    float before = ZoomAt(boundary - epsilon);
+                    float after = ZoomAt(boundary + epsilon);
+
+                    Assert.IsTrue(float.IsFinite(before) && float.IsFinite(after),
+                        $"trial {trial}: non-finite zoom around boundary {boundary:F6}.");
+                    Assert.IsTrue(before >= 1f && after >= 1f,
+                        $"trial {trial}: zoom below 1x around boundary {boundary:F6} " +
+                        $"({before:F4} -> {after:F4}).");
+                    Assert.IsTrue(Math.Abs(after - before) <= tolerance,
+                        $"trial {trial}: the camera jumped {Math.Abs(after - before):F4} across the " +
+                        $"piece boundary at {boundary:F6}s ({before:F4} -> {after:F4}). Pieces must " +
+                        "hand off at equal values — this is a gap or an overlap in the tiling.");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fuzzes deliberately degenerate input — zero-length ramps, holds and releases, shots out of
+    /// order, heavy overlap, full containment, shots sharing a moment — and asserts what still
+    /// has to hold there: the path never throws, never produces a non-finite or sub-1x value, and
+    /// always comes back with ordered, non-overlapping holds, which is the premise the binary
+    /// search in <c>TryEvaluate</c> relies on.
+    /// </summary>
+    [TestMethod]
+    public void Fuzz_DegenerateShots_StayWellFormed()
+    {
+        for (int trial = 0; trial < 300; trial++)
+        {
+            var rng = new Random(10_000 + trial);
+            var shots = new List<ZoomShot>();
+
+            for (int i = 0, n = 1 + rng.Next(5); i < n; i++)
+            {
+                // Cluster the starts so containment and shared moments actually occur.
+                double rampStart = Math.Round(rng.NextDouble() * 2.0, 3);
+                double ramp = rng.Next(3) == 0 ? 0 : rng.NextDouble();
+                double hold = rng.Next(3) == 0 ? 0 : rng.NextDouble() * 1.5;
+                double release = rng.Next(3) == 0 ? 0 : rng.NextDouble() * 1.5;
+
+                shots.Add(Shot(
+                    rampStart,
+                    rampStart + ramp,
+                    rampStart + ramp + hold,
+                    rampStart + ramp + hold + release,
+                    1.05f + ((float)rng.NextDouble() * 3f),
+                    (float)rng.NextDouble() * SourceWidth,
+                    (float)rng.NextDouble() * SourceHeight,
+                    seed: i,
+                    isManual: rng.Next(2) == 0));
+            }
+
+            var path = ZoomCameraPath.Build(shots);
+            if (path.IsEmpty) continue;
+
+            for (int i = 0; i < path.Shots.Count; i++)
+            {
+                var s = path.Shots[i];
+                Assert.IsTrue(s.RampStart <= s.HoldStart && s.HoldStart <= s.HoldEnd && s.HoldEnd <= s.ReleaseEnd,
+                    $"trial {trial}: shot {i} has out-of-order edges: " +
+                    $"{s.RampStart}/{s.HoldStart}/{s.HoldEnd}/{s.ReleaseEnd}.");
+                if (i > 0)
+                {
+                    Assert.IsTrue(path.Shots[i - 1].HoldEnd <= s.HoldStart + 1e-9,
+                        $"trial {trial}: shot {i - 1}'s hold overlaps shot {i}'s — the binary " +
+                        "search premise of one active piece would break.");
+                }
+            }
+
+            double start = path.Shots.Min(s => s.RampStart) - 0.2;
+            double end = path.Shots.Max(s => s.ReleaseEnd) + 0.2;
+            for (double t = start; t <= end; t += 0.001)
+            {
+                if (!path.TryEvaluate(t, out var sample)) continue;
+
+                Assert.IsTrue(float.IsFinite(sample.Zoom) && sample.Zoom >= 1f,
+                    $"trial {trial}: zoom {sample.Zoom} at t={t:F3} is not a sane zoom level.");
+                Assert.IsTrue(float.IsFinite(sample.CenterX) && float.IsFinite(sample.CenterY),
+                    $"trial {trial}: focal point was not finite at t={t:F3}.");
+                Assert.IsTrue(float.IsFinite(sample.DriftScale)
+                    && float.IsFinite(sample.CursorFollowWeight)
+                    && float.IsFinite(sample.SegmentProgress),
+                    $"trial {trial}: a drift/blend value was not finite at t={t:F3}.");
+            }
+        }
+    }
+
     [TestMethod]
     public void LinkedPair_ZoomVelocity_IsContinuousAcrossHandoff()
     {
