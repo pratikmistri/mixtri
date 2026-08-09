@@ -1951,6 +1951,35 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Verified**: suite **1054 passed, 3 skipped, 0 failed**, including 400 randomized realistic
   arrangements and 300 degenerate ones.
 
+## PR #88 review: both findings valid, and one of them had a second call site
+
+- **Feature/area**: `AutoZoomEngine.BuildZoomTimeline`, new `MouseRecordingData.FindSampleNearest`,
+  its two callers in `EditorPage`.
+- **Finding 1 — redundant rebuild.** `BuildZoomTimeline` called `RebuildPath()` and then
+  `RebuildAutoSegments()`, which itself calls `RebuildPath()` on **every one of its three exits**.
+  The first call was wasted work and briefly published a path built from the NEW source dimensions
+  but the STALE auto segments. Removed. The rebuild inside `RebuildAutoSegments` still covers the
+  ordering case the early call was added for (`SetManualKeyframes` arriving before the source size
+  is known), because it rebuilds from both lists.
+- **Finding 2 — O(n) cursor lookup on the UI thread.** Finding the sample nearest a moment was a
+  linear scan over a list that holds tens of thousands of entries on a long recording.
+- **Verify the precondition before trusting a suggested binary search.** The reviewer asserted the
+  samples are ordered; that is true, but for a non-obvious reason worth knowing:
+  `MouseHookRecorder.AddSampleLocked` **clamps** any out-of-order timestamp up to its predecessor,
+  precisely because two threads append (the hook and the shape poller). So the list is
+  non-decreasing *by construction*, not by luck — and it contains **runs of identical timestamps**,
+  which the search and its tests must handle.
+- **The review flagged one call site; there were two.** The same scan existed in the zoom-segment
+  creation path. **When a review points at a pattern, grep for the pattern rather than fixing the
+  line.** Both now share one helper instead of two copies of a subtle search.
+- **The test that actually justifies the swap is the equivalence test**: the binary search is
+  checked against the linear scan it replaced across 200 seeded recordings with duplicates and
+  irregular gaps. Unit tests for exact hits and midpoints prove it is plausible; agreeing with the
+  implementation it replaces on realistic data proves it is a safe substitution.
+- **Verified**: suite **1061 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered,
+  relaunched clean.
+
+
 
 
 
