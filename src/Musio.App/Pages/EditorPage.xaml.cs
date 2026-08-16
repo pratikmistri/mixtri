@@ -627,6 +627,7 @@ public sealed partial class EditorPage : Page
     private const double MaxZoomLevel = 4.0;
     private const double CenterSnapThreshold = 0.02; // normalized (~2% of frame)
     private double _dragAnchorDispX, _dragAnchorDispY;
+    private double _dragStartCenterDispX, _dragStartCenterDispY;
     private double _dragStartRectW, _dragStartRectH;
     private double _dragStartZoomLevel;
 
@@ -1093,6 +1094,26 @@ public sealed partial class EditorPage : Page
             => System.Math.Abs(pt.X - cx) <= HandleHitRadius && System.Math.Abs(pt.Y - cy) <= HandleHitRadius;
     }
 
+    /// <summary>
+    /// Alt state for a pointer gesture: hold it while dragging a corner to resize the region
+    /// around its own centre instead of the opposite corner.
+    /// <para>
+    /// <see cref="PointerRoutedEventArgs.KeyModifiers"/> is the primary source, with a
+    /// keyboard-state fallback (the pattern <c>RegionSelectorOverlay.IsShiftHeld</c> uses)
+    /// because Alt is routed to menu handling and does not always survive into the pointer
+    /// message's modifiers.
+    /// </para>
+    /// </summary>
+    private static bool IsAltHeld(PointerRoutedEventArgs e)
+    {
+        if ((e.KeyModifiers & VirtualKeyModifiers.Menu) == VirtualKeyModifiers.Menu)
+            return true;
+
+        return Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(VirtualKey.Menu)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+    }
+
     private void ZoomRegionCanvas_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (!_zoomRegionEditMode) return;
@@ -1117,6 +1138,9 @@ public sealed partial class EditorPage : Page
             // Anchor is the opposite corner in display coords
             _dragAnchorDispX = corner is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeBL ? rectR : rectX;
             _dragAnchorDispY = corner is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeTR ? rectB : rectY;
+            // The rect's own centre, which an Alt-drag resizes around instead.
+            _dragStartCenterDispX = rectX + ZoomRegionRect.Width / 2.0;
+            _dragStartCenterDispY = rectY + ZoomRegionRect.Height / 2.0;
             ZoomRegionCanvas.CapturePointer(e.Pointer);
             e.Handled = true;
             return;
@@ -1170,17 +1194,26 @@ public sealed partial class EditorPage : Page
         }
         else if (_zoomDragMode is ZoomDragMode.ResizeTL or ZoomDragMode.ResizeTR or ZoomDragMode.ResizeBL or ZoomDragMode.ResizeBR)
         {
-            double dispDx = point.Position.X - _dragAnchorDispX;
-            double dispDy = point.Position.Y - _dragAnchorDispY;
-
             int signX = _zoomDragMode is ZoomDragMode.ResizeTR or ZoomDragMode.ResizeBR ? 1 : -1;
             int signY = _zoomDragMode is ZoomDragMode.ResizeBL or ZoomDragMode.ResizeBR ? 1 : -1;
 
-            // Project pointer-from-anchor onto the rect's diagonal direction
+            // Alt resizes around the rect's centre instead of pinning the opposite corner, so
+            // the framing stays put and only the zoom level changes. Measuring from the centre
+            // over HALF the diagonal is what makes the pointer track the dragged corner in both
+            // modes: at 1:1 the corner is half a diagonal from the centre, a full one from the
+            // opposite corner.
+            bool symmetric = IsAltHeld(e);
+            double originX = symmetric ? _dragStartCenterDispX : _dragAnchorDispX;
+            double originY = symmetric ? _dragStartCenterDispY : _dragAnchorDispY;
+            double diagX = signX * _dragStartRectW / (symmetric ? 2.0 : 1.0);
+            double diagY = signY * _dragStartRectH / (symmetric ? 2.0 : 1.0);
+
+            double dispDx = point.Position.X - originX;
+            double dispDy = point.Position.Y - originY;
+
+            // Project pointer-from-origin onto the rect's diagonal direction
             // (signX*W0, signY*H0). This makes resize feel natural in both
             // outward and inward directions while preserving aspect.
-            double diagX = signX * _dragStartRectW;
-            double diagY = signY * _dragStartRectH;
             double diagLenSq = diagX * diagX + diagY * diagY;
             if (diagLenSq <= 0) { e.Handled = true; return; }
             double projLen = (dispDx * diagX + dispDy * diagY) / System.Math.Sqrt(diagLenSq);
@@ -1194,22 +1227,36 @@ public sealed partial class EditorPage : Page
             double newRectW = _dragStartRectW * effectiveScale;
             double newRectH = _dragStartRectH * effectiveScale;
 
-            double centerDispX = _dragAnchorDispX + signX * newRectW / 2.0;
-            double centerDispY = _dragAnchorDispY + signY * newRectH / 2.0;
+            bool snappedX = false, snappedY = false;
+            double newCx, newCy;
 
-            double newCx = (centerDispX - _frameDisplayX) / _frameDisplayW;
-            double newCy = (centerDispY - _frameDisplayY) / _frameDisplayH;
+            if (symmetric)
+            {
+                // Keep the centre exactly as it was — deriving it back from display
+                // coordinates would let rounding (and any edge clamping already folded into
+                // the drawn rect) nudge the framing the user is holding still. No centre
+                // snapping either: nothing is moving to snap.
+                newCx = _dragStartCenterX;
+                newCy = _dragStartCenterY;
+            }
+            else
+            {
+                double centerDispX = _dragAnchorDispX + signX * newRectW / 2.0;
+                double centerDispY = _dragAnchorDispY + signY * newRectH / 2.0;
+
+                newCx = (centerDispX - _frameDisplayX) / _frameDisplayW;
+                newCy = (centerDispY - _frameDisplayY) / _frameDisplayH;
+
+                if (!shift)
+                {
+                    if (System.Math.Abs(newCx - 0.5) < CenterSnapThreshold) { newCx = 0.5; snappedX = true; }
+                    if (System.Math.Abs(newCy - 0.5) < CenterSnapThreshold) { newCy = 0.5; snappedY = true; }
+                }
+            }
 
             (double rMinX, double rMaxX, double rMinY, double rMaxY) = GetCenterBounds(newZoom);
             newCx = System.Math.Clamp(newCx, rMinX, rMaxX);
             newCy = System.Math.Clamp(newCy, rMinY, rMaxY);
-
-            bool snappedX = false, snappedY = false;
-            if (!shift)
-            {
-                if (System.Math.Abs(newCx - 0.5) < CenterSnapThreshold) { newCx = 0.5; snappedX = true; }
-                if (System.Math.Abs(newCy - 0.5) < CenterSnapThreshold) { newCy = 0.5; snappedY = true; }
-            }
 
             _zoomRegionZoomLevel = newZoom;
             _zoomRegionCenterX = newCx;

@@ -170,7 +170,8 @@
                     <TextBlock
                         VerticalAlignment="Center"
                         Foreground="{ThemeResource OverlayForegroundBrush}"
-                        Text="Drag to position zoom region"
+                        Text="Drag to position zoom region · Alt-drag a corner to resize from the centre"
+                        ToolTipService.ToolTip="Drag inside the region to move it, or a corner to resize. Hold Alt while resizing to keep the centre fixed; hold Shift while moving to bypass centre snapping."
                         FontSize="12" />
                     <Button
                         x:Name="ZoomRegionFollowMouseButton"

@@ -2025,3 +2025,24 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   and a pixel-equality check that a suppressed zoom composes byte-identically to an unzoomed clip.
   Suite **1073 passed, 3 skipped, 0 failed**; x64 Debug app + tests build clean with VS MSBuild.
   Not exercised at runtime — reaching the editor still needs a live recording.
+
+## Zoom-region picker: Alt-drag resizes from the centre
+
+- **Feature/area**: `EditorPage` zoom-region corner resize.
+- **Request**: resizing always pinned the opposite corner, which moves the framing while you are
+  only trying to change the zoom level. Alt now resizes around the rect's own centre.
+- **What worked**: one origin/diagonal switch in the existing projection maths —
+  origin = rect centre and diagonal = HALF the start rect (vs. opposite corner and the FULL
+  diagonal). Halving matters: the dragged corner is half a diagonal from the centre but a whole
+  one from the opposite corner, so without it the pointer would run at double speed.
+- **The centre is carried over verbatim** (`_dragStartCenterX/Y`) rather than re-derived from the
+  new rect's display centre. The display round-trip folds in rounding and any edge clamping already
+  baked into the drawn rect, which would drift the framing the user is deliberately holding still.
+  Centre snapping is skipped in this mode for the same reason.
+- **Alt needs a fallback**: `PointerRoutedEventArgs.KeyModifiers` does not reliably carry
+  `VirtualKeyModifiers.Menu` (Alt is routed to menu handling), so `IsAltHeld` also checks
+  `InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu)` — the same pattern
+  `RegionSelectorOverlay.IsShiftHeld` already uses. Read per move tick, so the mode can be toggled
+  mid-drag.
+- **Verified**: suite **1073 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered and
+  relaunched; user confirmed the composed-preview picker behaviour from issue #87 works on device.
