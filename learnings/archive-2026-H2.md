@@ -1984,3 +1984,113 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 
 
 
+
+## Zoom-region picker: frame the render, not the capture (issue #87)
+
+- **Feature/area**: `EditorPage` zoom-region edit overlay + `FrameCompositor`/`PreviewRenderer`
+  geometry.
+- **Symptom**: "Edit Region" showed the RAW capture while the committed preview showed the composed
+  frame, and the composed cursor was missing while scrubbing — so the picker and the render
+  disagreed about padding, aspect-ratio fit, and where the mouse was.
+- **Root cause was a deliberate old decision** (`!_zoomRegionEditMode` bypassed the compositor in
+  all four preview render paths, so the zoom being edited could not fight the rectangle). The fix
+  keeps that intent but moves it down a layer: `FrameCompositor.SuppressZoom` holds the camera at
+  rest inside `ResolveZoomState`, so the picker gets the fully composed frame minus the zoom.
+  Suppression is applied in `ResolveZoomState`, NOT at the `ComposeFrame` call site — the
+  motion-blur and camera-velocity samplers resolve their own states and would otherwise reintroduce
+  the zoom.
+- **What worked**: making the compositor the single source of the picker's geometry —
+  `SourceAreaRect`, `RestSourceViewport`, `ComputeRegionOutputRect`, `ComputeRegionCenterBounds`.
+  The overlay maps through `Preview.FrameLayoutRect` (same rect the text-edit overlay uses) and
+  redraws from `FrameLayoutChanged`, so it tracks the composed frame instead of re-deriving it.
+- **The trap that nearly shipped**: the first pass drew the region as the *source* viewport
+  (`srcW / zoom`). That is only right for `ZoomScope.Source`. The default `ZoomScope.Frame`
+  magnifies the whole CANVAS, so its visible region is `OutputWidth / zoom` — with the default 48px
+  padding it covers noticeably more source than `srcW / zoom`, and the drawn rect under-reported it.
+  `ComputeRegionOutputRect` is therefore scope-aware and returns OUTPUT pixels.
+- **Same trap for the centre clamp**: under `ZoomScope.Frame` the camera clamps in output space, so
+  the background around the source area is slack the centre can spend — a centred 2x region reaches
+  ~0.179 rather than the 0.25 that half-a-viewport-in arithmetic gives. `ComputeRegionCenterBounds`
+  returns an asymmetric-capable min/max range; `GetNormalizedHalfExtents` survives only as the
+  no-compositor fallback.
+- **Cursor marker is now fallback-only.** It was added earlier because the raw frame had no cursor;
+  a composed frame draws the real one, and leaving the ring on top recreated the "picker shows one
+  thing, preview another" complaint in miniature.
+- **What didn't work / rejected**: keeping the raw-frame picker and only re-deriving aspect-ratio
+  math beside the compositor (that duplication is exactly what drifted); and setting `SuppressZoom`
+  once on enter/exit — a preview rebuild mid-edit drops it, so each render path sets it from
+  `_zoomRegionEditMode` instead.
+- **Verified**: `ZoomRegionPickerGeometryTests` (12 new tests, Win2D-device-gated with
+  `Assert.Inconclusive`) covering padding/source-area, Cover crop, both zoom scopes, centre bounds,
+  and a pixel-equality check that a suppressed zoom composes byte-identically to an unzoomed clip.
+  Suite **1073 passed, 3 skipped, 0 failed**; x64 Debug app + tests build clean with VS MSBuild.
+  Not exercised at runtime — reaching the editor still needs a live recording.
+
+## Zoom-region picker: Alt-drag resizes from the centre
+
+- **Feature/area**: `EditorPage` zoom-region corner resize.
+- **Request**: resizing always pinned the opposite corner, which moves the framing while you are
+  only trying to change the zoom level. Alt now resizes around the rect's own centre.
+- **What worked**: one origin/diagonal switch in the existing projection maths —
+  origin = rect centre and diagonal = HALF the start rect (vs. opposite corner and the FULL
+  diagonal). Halving matters: the dragged corner is half a diagonal from the centre but a whole
+  one from the opposite corner, so without it the pointer would run at double speed.
+- **The centre is carried over verbatim** (`_dragStartCenterX/Y`) rather than re-derived from the
+  new rect's display centre. The display round-trip folds in rounding and any edge clamping already
+  baked into the drawn rect, which would drift the framing the user is deliberately holding still.
+  Centre snapping is skipped in this mode for the same reason.
+- **Alt needs a fallback**: `PointerRoutedEventArgs.KeyModifiers` does not reliably carry
+  `VirtualKeyModifiers.Menu` (Alt is routed to menu handling), so `IsAltHeld` also checks
+  `InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu)` — the same pattern
+  `RegionSelectorOverlay.IsShiftHeld` already uses. Read per move tick, so the mode can be toggled
+  mid-drag.
+- **Verified**: suite **1073 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered and
+  relaunched; user confirmed the composed-preview picker behaviour from issue #87 works on device.
+
+## Zoom-region picker: review round — two clamps, not one
+
+- **Feature/area**: `FrameCompositor.ComputeRegionCenterBounds` / `ComputeRegionOutputRect`, plus the
+  editor callers.
+- **The bug the review caught**: `ComputeRegionCenterBounds` derived the Frame-scope range purely
+  from the OUTPUT-space clamp in `ComputeCompositeCropRect`, and claimed padding was slack the
+  centre could spend. It is not: every centre passes through
+  `AutoZoomEngine.ComputeViewportForCenter` FIRST, which clamps the un-narrowed viewport into the
+  source frame — so `1/(2·zoom)` is an outer bound no scope escapes. The loose bound gave the picker
+  a dead zone (rect frozen while the pointer kept travelling ~7% of the frame) and, under
+  `FitMode.Contain` with a mismatched target AR, bounds outside 0..1 entirely.
+- **The rule to keep**: the reachable centre range is the INTERSECTION of the camera engine's
+  source-space clamp and the scope's own clamp — output-space for `ZoomScope.Frame` (which bites
+  first under a Cover crop, e.g. 0.359 vs 0.25 on a 1:1 crop of 16:9), rest-viewport containment for
+  `ZoomScope.Source`. Neither alone is right.
+- **Two smaller ones from the same review**: `ComputeRegionOutputRect` extrapolated the Source-scope
+  rect through the at-rest transform, so a region outside a Cover crop mapped to a negative X and
+  parked the handles off screen (now clipped to `SourceAreaRect`); and Frame scope at `zoom <= 1.01`
+  fell into the source-area branch, drawing the padding as if it would be cropped when 1x renders
+  the whole canvas (now returns the full canvas).
+- **A second clamp model had survived in the UI**: `ZoomLevelCombo_TextSubmitted` still used
+  `GetNormalizedHalfExtents`, so typing a zoom level re-clamped the centre by different rules than
+  the drag paths and jumped the framing. It now goes through `GetCenterBounds`;
+  `GetNormalizedHalfExtents` is documented as the no-compositor fallback only (its renderer branch
+  was both dead on that path and the wrong model — a source viewport, while the drawn rect is
+  scope-aware).
+- **Test lesson**: the original bounds test asserted `MinX < 0.25`, i.e. it enshrined the bug. The
+  assertion that actually holds is a ROUND TRIP — a centre at the bound must move the rendered crop,
+  a centre past it must not. That form catches both a too-loose and a too-tight bound, and it is what
+  the replacement tests assert.
+- **Verified**: suite **1078 passed, 3 skipped, 0 failed** (5 new geometry tests; the round-trip test
+  fails against the pre-fix bounds).
+
+## Zoom-region picker: the dim mask is scope-dependent too (PR #89 review)
+
+- **Feature/area**: zoom-region picker dim overlay.
+- **Finding (valid)**: the composed-mode dim covered the whole `Preview.FrameLayoutRect`. Under
+  `ZoomScope.Source` the background and padding are NOT cropped — they stay at a fixed size — so
+  dimming them told the user they would be lost.
+- **Fix**: `FrameCompositor.RegionCanvasRect` — the whole canvas for `ZoomScope.Frame`, the source
+  area for `ZoomScope.Source`. The editor maps it through the preview layout instead of branching on
+  scope itself, which keeps every scope-dependent rule in the compositor beside the ones the
+  earlier rounds moved there (`ComputeRegionOutputRect`, `ComputeRegionCenterBounds`).
+- **Pattern worth noting**: this is the third scope-dependent rule in the picker (visible region,
+  centre bounds, dim mask). If a fourth appears, they belong behind one scope-aware type rather than
+  three parallel members.
+- **Verified**: suite **1080 passed, 3 skipped, 0 failed**.

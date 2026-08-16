@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.Models;
 using Musio.Core.Timeline;
+using Windows.Foundation;
 
 namespace Musio.Core.Processing;
 
@@ -13,6 +14,61 @@ public class PreviewRenderer : IDisposable
     private FrameCompositor? _compositor;
     private int _outputFps;
     private bool _disposed;
+    private bool _suppressZoom;
+
+    /// <summary>
+    /// Composes at rest (1x) without disturbing the rest of the composition — see
+    /// <see cref="FrameCompositor.SuppressZoom"/>. Survives a re-initialization, so the
+    /// zoom-region picker keeps its rest frame across a compositor rebuild.
+    /// </summary>
+    public bool SuppressZoom
+    {
+        get => _suppressZoom;
+        set
+        {
+            _suppressZoom = value;
+            if (_compositor is not null) _compositor.SuppressZoom = value;
+        }
+    }
+
+    /// <summary>
+    /// The rect the source frame occupies inside the composed output, in output pixels.
+    /// See <see cref="FrameCompositor.SourceAreaRect"/>.
+    /// </summary>
+    public Rect SourceAreaRect => _compositor?.SourceAreaRect ?? default;
+
+    /// <summary>
+    /// The source pixels visible in a frame composed at rest.
+    /// See <see cref="FrameCompositor.RestSourceViewport"/>.
+    /// </summary>
+    public Rect RestSourceViewport => _compositor?.RestSourceViewport ?? default;
+
+    /// <summary>
+    /// The source pixels a zoom of the given level and normalised centre would show.
+    /// See <see cref="FrameCompositor.ComputeRegionViewport"/>.
+    /// </summary>
+    public Rect ComputeRegionViewport(float zoomLevel, float centerXNormalized, float centerYNormalized)
+        => _compositor?.ComputeRegionViewport(zoomLevel, centerXNormalized, centerYNormalized) ?? default;
+
+    /// <summary>
+    /// The area of the composed output a zoom region is chosen within.
+    /// See <see cref="FrameCompositor.RegionCanvasRect"/>.
+    /// </summary>
+    public Rect RegionCanvasRect => _compositor?.RegionCanvasRect ?? default;
+
+    /// <summary>
+    /// The region of the composed output a zoom would show, in output pixels.
+    /// See <see cref="FrameCompositor.ComputeRegionOutputRect"/>.
+    /// </summary>
+    public Rect ComputeRegionOutputRect(float zoomLevel, float centerXNormalized, float centerYNormalized)
+        => _compositor?.ComputeRegionOutputRect(zoomLevel, centerXNormalized, centerYNormalized) ?? default;
+
+    /// <summary>
+    /// The range a zoom's normalised centre can occupy before the camera clamps.
+    /// See <see cref="FrameCompositor.ComputeRegionCenterBounds"/>.
+    /// </summary>
+    public (double MinX, double MaxX, double MinY, double MaxY)? ComputeRegionCenterBounds(float zoomLevel)
+        => _compositor?.ComputeRegionCenterBounds(zoomLevel);
 
     /// <summary>Preview output width (half of full export resolution).</summary>
     public int PreviewWidth { get; private set; }
@@ -51,7 +107,7 @@ public class PreviewRenderer : IDisposable
         _outputFps = config.OutputFps;
 
         _compositor?.Dispose();
-        _compositor = new FrameCompositor(config);
+        _compositor = new FrameCompositor(config) { SuppressZoom = _suppressZoom };
         await _compositor.InitializeAsync(mouseData, sourceWidth, sourceHeight, duration,
             mouseToVideoOffsetSeconds, cropOffsetX, cropOffsetY, dpiScale);
     }

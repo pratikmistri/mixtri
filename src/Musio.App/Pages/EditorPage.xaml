@@ -140,10 +140,10 @@
                                Fill="White" Stroke="Black" StrokeThickness="1"
                                IsHitTestVisible="False" />
 
-                    <!-- Where the mouse is at this moment. The region editor shows the RAW
-                         frame (no compositor, so no cursor overlay), and without this there is
-                         nothing on screen to aim the region at. Hidden for sources with no
-                         cursor data, e.g. imported clips. -->
+                    <!-- Where the mouse is at this moment. Shown only when the picker falls
+                         back to the RAW frame (compositor not ready): a composed frame draws
+                         the real cursor itself. Hidden for sources with no cursor data,
+                         e.g. imported clips. -->
                     <Ellipse x:Name="ZoomRegionCursorMarker"
                              Width="16" Height="16"
                              Stroke="White" StrokeThickness="2"
@@ -170,7 +170,8 @@
                     <TextBlock
                         VerticalAlignment="Center"
                         Foreground="{ThemeResource OverlayForegroundBrush}"
-                        Text="Drag to position zoom region"
+                        Text="Drag to position zoom region · Alt-drag a corner to resize from the centre"
+                        ToolTipService.ToolTip="Drag inside the region to move it, or a corner to resize. Hold Alt while resizing to keep the centre fixed; hold Shift while moving to bypass centre snapping."
                         FontSize="12" />
                     <Button
                         x:Name="ZoomRegionFollowMouseButton"

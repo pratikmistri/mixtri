@@ -982,10 +982,11 @@ public sealed partial class EditorPage
         if (_zoomRegionEditMode)
         {
             _zoomRegionZoomLevel = zoom;
-            // Re-clamp center for new zoom
-            (double halfW, double halfH) = GetNormalizedHalfExtents(zoom);
-            _zoomRegionCenterX = Math.Clamp(_zoomRegionCenterX, halfW, 1.0 - halfW);
-            _zoomRegionCenterY = Math.Clamp(_zoomRegionCenterY, halfH, 1.0 - halfH);
+            // Re-clamp center for new zoom, through the same bounds the drag paths use —
+            // a second clamp model here would jump the framing on a typed zoom level.
+            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(zoom);
+            _zoomRegionCenterX = Math.Clamp(_zoomRegionCenterX, minX, maxX);
+            _zoomRegionCenterY = Math.Clamp(_zoomRegionCenterY, minY, maxY);
             UpdateZoomRegionRect();
         }
         else
