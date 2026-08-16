@@ -62,7 +62,8 @@ public class TextSlideRenderer : IDisposable
         var rect = ComputeTextRect(slide, width, height);
 
         _textEngine.DrawAnimatedText(ds, slide.Text, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
-            slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds);
+            slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
+            TextAnimationWindow.FromSlide(slide));
 
         return target;
     }

@@ -33,6 +33,16 @@ public abstract record TimelineSegment
 {
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
 
+    /// <summary>
+    /// Video-track lane for full-frame segments: 0 is the contiguous base track; higher
+    /// tracks are absolute-time overlays so inserts can cover instead of ripple-editing.
+    /// </summary>
+    public int TrackIndex { get; set; }
+
+    /// <summary>True when this segment lives on an absolute overlay track rather than the reflowed base track.</summary>
+    [JsonIgnore]
+    public bool IsOverlayTrack => TrackIndex > 0;
+
     /// <summary>Position on the output timeline where this segment starts.</summary>
     public TimeSpan Start { get; set; }
 
@@ -118,6 +128,9 @@ public record VideoSegment : TimelineSegment
 /// </summary>
 public record TextSlideSegment : TimelineSegment
 {
+    private const double AutomaticTextRampSeconds = 0.6;
+    private const double AutomaticTextRampDurationFraction = 0.45;
+
     public string Text { get; set; } = "Title";
     public string FontFamily { get; set; } = "Segoe UI";
     public double FontSize { get; set; } = 72;
@@ -151,6 +164,99 @@ public record TextSlideSegment : TimelineSegment
     public string? BackgroundImagePath { get; set; }
 
     public TextSlideAnimation Animation { get; set; } = TextSlideAnimation.ZoomBlurIn;
+
+    /// <summary>
+    /// Offset from the segment start at which text begins animating in; callers may set
+    /// a rough drag result and let the resolve accessors clamp it defensively.
+    /// </summary>
+    public TimeSpan TextInStart { get; set; }
+
+    /// <summary>
+    /// Length of the text entrance ramp. Null preserves the legacy automatic 0.6s ramp,
+    /// clamped to 45% of the segment duration.
+    /// </summary>
+    public TimeSpan? TextInDuration { get; set; }
+
+    /// <summary>
+    /// Offset from the segment start at which text has finished animating out. Null means
+    /// the segment end, matching every saved project that predates editable windows.
+    /// </summary>
+    public TimeSpan? TextOutEnd { get; set; }
+
+    /// <summary>
+    /// Length of the text exit ramp. Null preserves the legacy automatic 0.6s ramp,
+    /// clamped to 45% of the segment duration.
+    /// </summary>
+    public TimeSpan? TextOutDuration { get; set; }
+
+    /// <summary>
+    /// Resolves the clamped text-window start. Clamping is total and ordered: duration is
+    /// first made non-negative, <see cref="TextInStart"/> is clamped into that span, then
+    /// <see cref="TextOutEnd"/> is clamped no earlier than the resolved start.
+    /// </summary>
+    public TimeSpan ResolveTextInStart() => ResolveTextWindow().InStart;
+
+    /// <summary>
+    /// Resolves the entrance ramp after the window is clamped. Negative ramp requests become
+    /// zero; if both ramps cannot fit, they are scaled down together so neither overlaps.
+    /// </summary>
+    public TimeSpan ResolveTextInDuration() => ResolveTextWindow().InDuration;
+
+    /// <summary>
+    /// Resolves the clamped text-window end. Null keeps the legacy whole-slide window, while
+    /// inverted user input is clamped to the resolved start rather than throwing mid-render.
+    /// </summary>
+    public TimeSpan ResolveTextOutEnd() => ResolveTextWindow().OutEnd;
+
+    /// <summary>
+    /// Resolves the exit ramp after the window is clamped, using the same proportional
+    /// shrink as the entrance ramp so short or inverted windows remain renderable.
+    /// </summary>
+    public TimeSpan ResolveTextOutDuration() => ResolveTextWindow().OutDuration;
+
+    private (TimeSpan InStart, TimeSpan InDuration, TimeSpan OutEnd, TimeSpan OutDuration) ResolveTextWindow()
+    {
+        var duration = Duration < TimeSpan.Zero ? TimeSpan.Zero : Duration;
+        var inStart = Clamp(TextInStart, TimeSpan.Zero, duration);
+        var outEnd = Clamp(TextOutEnd ?? duration, inStart, duration);
+        var window = outEnd - inStart;
+
+        var inDuration = ClampNonNegative(TextInDuration ?? AutomaticTextRamp(duration));
+        var outDuration = ClampNonNegative(TextOutDuration ?? AutomaticTextRamp(duration));
+
+        if (window <= TimeSpan.Zero)
+            return (inStart, TimeSpan.Zero, outEnd, TimeSpan.Zero);
+
+        if (inDuration > window) inDuration = window;
+        if (outDuration > window) outDuration = window;
+
+        double totalTicks = inDuration.Ticks + (double)outDuration.Ticks;
+        if (totalTicks > window.Ticks)
+        {
+            double scale = window.Ticks / totalTicks;
+            long inTicks = (long)(inDuration.Ticks * scale);
+            inDuration = TimeSpan.FromTicks(inTicks);
+            outDuration = TimeSpan.FromTicks(window.Ticks - inTicks);
+        }
+
+        return (inStart, inDuration, outEnd, outDuration);
+    }
+
+    private static TimeSpan AutomaticTextRamp(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero) return TimeSpan.Zero;
+        return TimeSpan.FromSeconds(Math.Min(AutomaticTextRampSeconds, duration.TotalSeconds * AutomaticTextRampDurationFraction));
+    }
+
+    private static TimeSpan ClampNonNegative(TimeSpan value) =>
+        value < TimeSpan.Zero ? TimeSpan.Zero : value;
+
+    private static TimeSpan Clamp(TimeSpan value, TimeSpan min, TimeSpan max)
+    {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
 }
 
 /// <summary>

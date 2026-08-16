@@ -19,8 +19,8 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="30" />
             <!-- Time ruler -->
-            <RowDefinition Height="80" />
-            <!-- Video track -->
+            <RowDefinition Height="Auto" />
+            <!-- Video track: the canvas owns its dynamic height so overlay rows grow instead of clipping. -->
             <RowDefinition x:Name="CursorRow" Height="40" />
             <!-- Cursor path track -->
             <RowDefinition Height="50" />
@@ -134,11 +134,14 @@
             x:Name="VideoTrackCanvas"
             Grid.Row="1"
             Grid.Column="1"
+            Height="80"
             Draw="VideoTrackCanvas_Draw"
             PointerMoved="VideoTrack_PointerMoved"
             PointerExited="VideoTrack_PointerExited"
             PointerPressed="VideoTrack_PointerPressed"
             PointerReleased="VideoTrack_PointerReleased"
+            PointerCaptureLost="VideoTrack_PointerCaptureLost"
+            PointerCanceled="VideoTrack_PointerCaptureLost"
             RightTapped="VideoTrack_RightTapped" />
 
         <canvas:CanvasControl

@@ -38,7 +38,7 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, TextSlideWindowInEdge, TextSlideWindowOutEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge }
     private DragMode _dragMode = DragMode.None;
 
     // ── Primary-track (video / text slide) segment drag state ──
@@ -48,20 +48,44 @@ public sealed partial class TimelineControl : UserControl
 
     private string? _draggedSegmentId;
     private double _segmentDragStartX = double.NaN;
+    /// <summary>
+    /// Pointer Y where the segment drag began. The target lane is derived from movement
+    /// relative to this rather than from the pointer's absolute Y, because revealing the
+    /// drop-hint lane changes the canvas height and therefore shifts every row underneath
+    /// the (stationary) cursor mid-gesture.
+    /// </summary>
+    private double _segmentDragStartY = double.NaN;
     private double _segmentDragCurrentX = double.NaN;
     private bool _segmentDragMoved;
     private TimeSpan _segmentDragOriginalStart;
     private TimeSpan _segmentDragOriginalDuration;
+    private int _segmentDragOriginalTrackIndex;
+    private int _segmentDragCurrentTrackIndex;
     private double _segmentSnapGuideX = double.NaN;     // NaN = no snap guide drawn
     private double _segmentDropIndicatorX = double.NaN; // NaN = no drop indicator drawn
+    private double _textSlideWindowDragCurrentX = double.NaN;
+    private TimeSpan _textSlideWindowOriginalInStart;
+    private TimeSpan _textSlideWindowOriginalOutEnd;
 
     /// <summary>Raised when a primary-track segment should be moved to a new index (commit).</summary>
     public event EventHandler<(string Id, int TargetIndex)>? SegmentMoveRequested;
 
+    /// <summary>
+    /// Raised when a full-frame segment is dropped on a different video lane or an overlay
+    /// lane is moved in absolute time; the host owns the undoable model operation.
+    /// </summary>
+    public event EventHandler<SegmentTrackMoveEventArgs>? SegmentTrackMoveRequested;
+
     /// <summary>Raised when a primary-track segment edge should be ripple-trimmed (commit).</summary>
     public event EventHandler<(string Id, bool FromStart, TimeSpan NewDuration)>? SegmentTrimRequested;
 
-    private enum SegmentHitTarget { None, Body, LeftEdge, RightEdge }
+    /// <summary>
+    /// Raised when a text slide's inner animation window is edited from the timeline so the
+    /// page can keep preview, properties and undo in one authoritative transaction.
+    /// </summary>
+    public event EventHandler<TextSlideWindowEventArgs>? TextSlideWindowChanged;
+
+    private enum SegmentHitTarget { None, Body, LeftEdge, RightEdge, TextWindowInEdge, TextWindowOutEdge }
 
     // Video clip selection
     private int? _selectedClipIndex;
@@ -268,6 +292,15 @@ public sealed partial class TimelineControl : UserControl
             _transitionChipHoverTimer = null;
             _transitionChipGlyphFormat?.Dispose();
             _transitionChipGlyphFormat = null;
+
+            // The drop-hint reveal timer is the same class of leak: it ticks a layout pass and
+            // a canvas invalidation, so it must not outlive the control that owns them.
+            _hintLaneRevealTimer?.Stop();
+            _hintLaneRevealTimer = null;
+            _hintLaneReveal = 0;
+            _hintLaneRevealTarget = 0;
+            _hintLaneArmed = false;
+            _hintLaneLatched = false;
         };
     }
 
@@ -515,6 +548,9 @@ public sealed partial class TimelineControl : UserControl
     // The inserted-audio lanes size themselves from their stacked sub-row count instead of a
     // fixed height — see LayoutInsertedAudioRows and InsertedAudioSubRowHeight.
 
+    private const double BaseVideoTrackHeight = 80;
+    private const double OverlayVideoTrackHeight = 44;
+
     /// <summary>
     /// Collapses the tracks that visualise recorded media the current project does not
     /// have — cursor, camera, system audio and microphone — so the timeline only spends
@@ -526,6 +562,8 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private void UpdateTrackVisibility()
     {
+        UpdateVideoTrackHeight();
+
         // The XAML may not be realised yet when the model is assigned during construction.
         if (CursorRow is null || AudioRow is null) return;
 
@@ -569,6 +607,229 @@ public sealed partial class TimelineControl : UserControl
             MusicRow, MusicTrackLabel, MusicTrackCanvas,
             _insertedAudioTracks.Any(t => t.IsMusic),
             _musicSubRowCount * InsertedAudioSubRowHeight);
+    }
+
+    /// <summary>
+    /// Sizes the video canvas to every full-frame lane instead of relying on a fixed grid
+    /// height, so overlay tracks grow the control rather than being silently clipped.
+    /// </summary>
+    private void UpdateVideoTrackHeight()
+    {
+        if (VideoTrackCanvas is null) return;
+        double height = VideoTrackHeight(Model);
+        if (Math.Abs(VideoTrackCanvas.Height - height) > 0.1)
+            VideoTrackCanvas.Height = height;
+    }
+
+    private double VideoTrackHeight(TimelineModel? model)
+    {
+        int used = Math.Max(1, model?.VideoTrackCount ?? 1);
+        return BaseVideoTrackHeight + (used - 1) * OverlayVideoTrackHeight + HintLaneBandHeight;
+    }
+
+    // ── Transient overlay drop-hint lane ──
+    //
+    // The lane used to be snapped in and out as a whole extra 44px row, which made it flash
+    // and the timeline stutter for three compounding reasons:
+    //   1. the destination lane was rounded to the nearest row of drag travel, so the switch
+    //      point sat on a knife edge and the sub-pixel jitter of a hand holding the mouse
+    //      flipped the lane on and off many times a second;
+    //   2. every flip instantly re-laid-out the whole timeline grid, teleporting the dragged
+    //      block (and every track below it) by a full lane height;
+    //   3. even with (1) and (2) fixed, the lane's presence still tracked the pointer's
+    //      CURRENT lane, so the ordinary vertical drift of a hand positioning a clip
+    //      horizontally kept opening and folding it away in the middle of one gesture.
+    // ResolveDragTrackIndex's hysteresis fixes (1), the eased reveal fraction fixes (2), and
+    // the latch below fixes (3): a gesture may grow the timeline ONCE, on the way in, and
+    // shrink it ONCE, on release — never repeatedly while the user is still holding the clip.
+    private const double HintLaneRevealDurationMs = 140;
+
+    private double _hintLaneReveal;         // 0 = folded away, 1 = fully open
+    private double _hintLaneRevealFrom;
+    private double _hintLaneRevealTarget;
+    private long _hintLaneRevealStartTicks;
+    private DispatcherTimer? _hintLaneRevealTimer;
+
+    /// <summary>
+    /// Whether the drag is currently aiming AT the hint lane, latched separately from the drag
+    /// state so the lane keeps its highlighted look for the whole fold-away. Reading the live
+    /// drag index instead made the outline drop back to its idle grey on the release frame,
+    /// one last colour pop at the end of the very gesture this animation is smoothing.
+    /// </summary>
+    private bool _hintLaneArmed;
+
+    /// <summary>
+    /// Set once the in-flight drag has reached the hint lane, and not cleared until the gesture
+    /// ends. See <see cref="HintLaneRequested"/> for why the lane is held open rather than
+    /// tracking the pointer.
+    /// </summary>
+    private bool _hintLaneLatched;
+
+    /// <summary>
+    /// True while the drag is currently aiming at the hint lane — i.e. releasing now would
+    /// create the new overlay track. Drives only the lane's ARMED highlight; it must not drive
+    /// the lane's existence (see <see cref="HintLaneRequested"/>).
+    /// </summary>
+    private bool ShowOverlayDropHint =>
+        _dragMode == DragMode.SegmentBody
+        && _segmentDragMoved
+        && _segmentDragCurrentTrackIndex >= Math.Max(1, Model?.VideoTrackCount ?? 1);
+
+    /// <summary>
+    /// Whether the hint lane should be open. Deliberately LATCHED for the rest of the gesture
+    /// once the drag has reached the lane, rather than following the pointer's current lane.
+    /// </summary>
+    /// <remarks>
+    /// Hysteresis alone was not enough. Its dead band is necessarily about a third of a lane
+    /// (~14px) — enough to absorb the jitter of a hand holding still, but nothing like the
+    /// vertical drift of a hand sweeping a clip sideways across the timeline to position it.
+    /// So the lane kept opening and folding mid-gesture: correct by the letter of "show the
+    /// lane the pointer is in", useless as an affordance, and the source of the remaining
+    /// churn even once each transition was individually smooth.
+    /// <para>
+    /// Latching makes the timeline's geometry CONSTANT for the whole drag, which is what the
+    /// user is really asking for when they say the lane must stop coming and going. It costs
+    /// nothing: the lane is empty, and whether the drop actually lands there is still decided
+    /// entirely by <see cref="_segmentDragCurrentTrackIndex"/> and shown by the armed
+    /// highlight. Crucially it also preserves the property the previous round added — a plain
+    /// horizontal reorder still never reveals the lane at all, because the latch is only ever
+    /// set by reaching for it.
+    /// </para>
+    /// </remarks>
+    private bool HintLaneRequested =>
+        _dragMode == DragMode.SegmentBody && _segmentDragMoved && _hintLaneLatched;
+
+    /// <summary>
+    /// Whether the hint lane currently occupies layout space — true while it is opening, open,
+    /// or still folding away.
+    /// </summary>
+    private bool HintLaneVisible => _hintLaneReveal > 0.0005 || _hintLaneRevealTarget > 0;
+
+    /// <summary>Height the hint lane occupies right now (0 = folded, 44 = fully open).</summary>
+    private float HintLaneBandHeight =>
+        HintLaneVisible
+            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * OverlayVideoTrackHeight)
+            : 0f;
+
+    /// <summary>
+    /// Destination lane for the in-flight segment drag, derived from vertical travel since
+    /// the grab so it is immune to the canvas resizing underneath the cursor. Allows reaching
+    /// exactly one lane above the highest one currently in use — that is the lane the drop
+    /// hint offers to create.
+    /// </summary>
+    /// <remarks>
+    /// The travel is banded with HYSTERESIS rather than rounded to the nearest row: a
+    /// neighbouring lane is only entered after <see cref="HintLaneEnterFraction"/> of a row of
+    /// travel towards it, measured from the lane currently held. Plain rounding put the switch
+    /// point exactly half a row out, so a hand holding still across that boundary flipped the
+    /// destination lane — and with it the dragged block's row — continuously.
+    /// </remarks>
+    private int ResolveDragTrackIndex(TimelineModel model, double y)
+    {
+        if (double.IsNaN(_segmentDragStartY)) return _segmentDragOriginalTrackIndex;
+
+        int used = Math.Max(1, model.VideoTrackCount);
+
+        // Clamped so a fling far outside the track band can't spin the stepping loops below.
+        double rows = Math.Clamp(
+            (_segmentDragStartY - y) / OverlayVideoTrackHeight,
+            -(used + 2),
+            used + 2);
+
+        int offset = _segmentDragCurrentTrackIndex - _segmentDragOriginalTrackIndex;
+        while (rows >= offset + HintLaneEnterFraction) offset++;
+        while (rows <= offset - HintLaneEnterFraction) offset--;
+
+        return Math.Clamp(_segmentDragOriginalTrackIndex + offset, TimelineModel.BaseTrackIndex, used);
+    }
+
+    /// <summary>
+    /// Fraction of a lane height the pointer must travel towards a neighbouring lane before it
+    /// is adopted. Being &gt; 0.5 is what creates the dead band: leaving a lane needs the same
+    /// travel back, so the switch points sit 0.5 of a lane (~22px) apart instead of coinciding.
+    /// </summary>
+    /// <remarks>
+    /// Sized for a hand sweeping a clip sideways, not for a hand holding still. The first pass
+    /// used 0.65 (a ~14px band), which stopped the jitter of a stationary pointer but not the
+    /// vertical drift of an actual positioning gesture, so the drop target still flip-flopped
+    /// while the user was moving the clip along the timeline.
+    /// </remarks>
+    private const double HintLaneEnterFraction = 0.75;
+
+    /// <summary>
+    /// Points the hint lane's reveal animation at the state <see cref="HintLaneRequested"/>
+    /// now implies. Cheap to call on every pointer move: it returns immediately unless the
+    /// target actually changed.
+    /// </summary>
+    /// <param name="animate">
+    /// False snaps straight to the target. Used when a drop has just turned the hint lane into
+    /// a real one — the real lane is exactly the same height, so animating the hint away would
+    /// double the lane's height for a frame and then shrink it back.
+    /// </param>
+    private void SyncHintLaneReveal(bool animate = true)
+    {
+        double target = HintLaneRequested ? 1 : 0;
+        if (Math.Abs(target - _hintLaneRevealTarget) < 0.0001) return;
+
+        _hintLaneRevealTarget = target;
+
+        if (!animate)
+        {
+            _hintLaneRevealTimer?.Stop();
+            _hintLaneReveal = target;
+            UpdateVideoTrackHeight();
+            VideoTrackCanvas?.Invalidate();
+            return;
+        }
+
+        // Re-target from wherever the previous animation got to, so a reversal mid-slide
+        // continues from the current height rather than restarting from 0 or 1.
+        _hintLaneRevealFrom = _hintLaneReveal;
+        _hintLaneRevealStartTicks = Environment.TickCount64;
+
+        if (_hintLaneRevealTimer is null)
+        {
+            _hintLaneRevealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+            _hintLaneRevealTimer.Tick += HintLaneReveal_Tick;
+        }
+        _hintLaneRevealTimer.Start();
+    }
+
+    private void HintLaneReveal_Tick(object? sender, object e)
+    {
+        double elapsed = Environment.TickCount64 - _hintLaneRevealStartTicks;
+        double t = Math.Clamp(elapsed / HintLaneRevealDurationMs, 0, 1);
+        double eased = t * t * (3 - 2 * t);   // smoothstep — no overshoot, soft at both ends
+        _hintLaneReveal = _hintLaneRevealFrom + (_hintLaneRevealTarget - _hintLaneRevealFrom) * eased;
+
+        if (t >= 1)
+        {
+            _hintLaneReveal = _hintLaneRevealTarget;
+            _hintLaneRevealTimer?.Stop();
+        }
+
+        UpdateVideoTrackHeight();
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>
+    /// Number of video lanes to lay out: the tracks the model actually uses, plus one
+    /// transient empty lane while a segment is being dragged towards a new one (and for as
+    /// long as that lane is still animating open or folding away).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TimelineModel.VideoTrackCount"/> counts only tracks that currently hold a
+    /// segment, so a project with nothing on an overlay track reports 1 and the base lane is
+    /// the only row on screen. A segment could then never be dragged UP to a parallel track,
+    /// because there is no row above it to aim at. Rather than permanently parking an empty
+    /// lane on every timeline, the destination is revealed only once the drag actually
+    /// reaches for it, and folds away again on release. It is a layout concept only and is
+    /// never persisted; a lane the user drops nothing into simply stops being drawn.
+    /// </remarks>
+    private int VideoDisplayTrackCount(TimelineModel? model)
+    {
+        int used = Math.Max(1, model?.VideoTrackCount ?? 1);
+        return HintLaneVisible ? used + 1 : used;
     }
 
     /// <summary>
@@ -982,6 +1243,8 @@ public sealed partial class TimelineControl : UserControl
     // --- Video Track ---
 
     private const float VideoClipCornerRadius = 6;
+    private const float BaseVideoTrackVerticalPadding = 14f;
+    private const float OverlayVideoTrackVerticalPadding = 6f;
 
     private void VideoTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
@@ -1003,7 +1266,7 @@ public sealed partial class TimelineControl : UserControl
         // filmstrip. This keeps text slides occupying real timeline space.
         if (model.Segments.Count > 0)
         {
-            DrawVideoTrackFromSegments(ds, model, w, h, pad, hasThumbnails);
+            DrawVideoTrackFromSegments(ds, model, w, h, hasThumbnails);
 
             // Trim handles + speed overlays don't apply to the segment view
             return;
@@ -1128,28 +1391,67 @@ public sealed partial class TimelineControl : UserControl
     /// <see cref="TextSlideSegment"/> as a colored block with its text.
     /// </summary>
     private void DrawVideoTrackFromSegments(
-        CanvasDrawingSession ds, TimelineModel model, float w, float h, float pad, bool hasThumbnails)
+        CanvasDrawingSession ds, TimelineModel model, float w, float h, bool hasThumbnails)
     {
         var textLabelColor = Color.FromArgb(255, 255, 255, 255);
         var snapGuideColor = Color.FromArgb(255, 255, 214, 10);  // Amber snap line
-        float clipH = h - pad * 2;
+        int trackCount = VideoDisplayTrackCount(model);
+
+        // The topmost lane is the transient drop hint whenever it sits above every track the
+        // model actually uses. Drawn as a dashed outline rather than a solid row so it reads
+        // as "release here to create V<n>" instead of an empty track that already exists.
+        int hintTrack = HintLaneVisible && trackCount > Math.Max(1, model.VideoTrackCount)
+            ? trackCount - 1
+            : -1;
+
+        for (int track = trackCount - 1; track >= 0; track--)
+        {
+            var (rowY, rowH, rowPad) = VideoTrackRowBounds(track, trackCount);
+
+            if (track == hintTrack)
+            {
+                DrawOverlayDropHintLane(ds, track, rowY, rowH, rowPad, w);
+                continue;
+            }
+
+            ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
+
+            if (track > 0)
+            {
+                ds.DrawText(
+                    $"V{track}",
+                    6, rowY + 3,
+                    TrackHintTextColor,
+                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                    {
+                        FontSize = 10,
+                        FontFamily = "Segoe UI",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    });
+            }
+        }
 
         // Collected alongside the main draw loop (post drag-preview x1/x2) so the
         // boundary-chip pass below shares the exact on-screen geometry the segments
-        // were just painted at, rather than recomputing it a second time.
-        var segRects = new List<(TimelineSegment Segment, float X1, float X2)>(model.Segments.Count);
+        // were just painted at. Transitions belong to the contiguous base chain only.
+        var baseRects = new List<(TimelineSegment Segment, float X1, float X2)>(model.Segments.Count);
 
         foreach (var segment in model.Segments)
         {
             var (x1, x2) = GetSegmentDisplayX(segment);
+            int displayTrack = GetSegmentDisplayTrackIndex(segment, trackCount);
+            var (rowY, rowH, rowPad) = VideoTrackRowBounds(displayTrack, trackCount);
+            float clipY = rowY + rowPad;
+            float clipH = rowH - rowPad * 2;
             bool isDragged = segment.Id == _draggedSegmentId;
-            segRects.Add((segment, x1, x2));
+            if (segment.TrackIndex == TimelineModel.BaseTrackIndex)
+                baseRects.Add((segment, x1, x2));
 
-            if (x2 < 0 || x1 > w) continue;
+            if (x2 < 0 || x1 > w || clipH <= 0) continue;
             float segW = Math.Max(2, x2 - x1);
 
             using var segGeom = CanvasGeometry.CreateRoundedRectangle(
-                ds, x1, pad, segW, clipH, VideoClipCornerRadius, VideoClipCornerRadius);
+                ds, x1, clipY, segW, clipH, VideoClipCornerRadius, VideoClipCornerRadius);
 
             if (segment is VideoSegment video)
             {
@@ -1162,7 +1464,7 @@ public sealed partial class TimelineControl : UserControl
                     using (ds.CreateLayer(1f, segGeom))
                     {
                         ds.FillGeometry(segGeom, FilmstripBackplateColor);
-                        DrawFilmstripForSegment(ds, x1, x2, pad, clipH, video, thumbSet);
+                        DrawFilmstripForSegment(ds, x1, x2, clipY, clipH, video, thumbSet);
                     }
                     var strokeColor = isSelected ? VideoClipSelectedBorder : FilmstripStrokeColor;
                     ds.DrawGeometry(segGeom, strokeColor, isSelected ? 2f : 1f);
@@ -1193,8 +1495,10 @@ public sealed partial class TimelineControl : UserControl
                         WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
                         TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
                     };
-                    ds.DrawText(labelText, new Rect(x1 + 4, pad, segW - 8, clipH), textLabelColor, fmt);
+                    ds.DrawText(labelText, new Rect(x1 + 4, clipY, segW - 8, clipH), textLabelColor, fmt);
                 }
+
+                DrawTextSlideWindow(ds, slide, x1, x2, clipY, clipH, w);
             }
 
             // Trim-edge handles on the selected segment (grab affordance).
@@ -1202,7 +1506,7 @@ public sealed partial class TimelineControl : UserControl
             {
                 float handleW = 3f;
                 float handleH = clipH * 0.5f;
-                float handleY = pad + (clipH - handleH) / 2;
+                float handleY = clipY + (clipH - handleH) / 2;
                 ds.FillRoundedRectangle(x1 + 1.5f, handleY, handleW, handleH, 1.5f, 1.5f, VideoClipSelectedBorder);
                 ds.FillRoundedRectangle(x2 - handleW - 1.5f, handleY, handleW, handleH, 1.5f, 1.5f, VideoClipSelectedBorder);
             }
@@ -1214,24 +1518,128 @@ public sealed partial class TimelineControl : UserControl
 
             // Boundary line between segments
             if (segment.Start > TimeSpan.Zero && !isDragged)
-                ds.DrawLine(x1, pad, x1, h - pad, CutLineColor, 1.5f);
+                ds.DrawLine(x1, clipY, x1, clipY + clipH, CutLineColor, 1.5f);
         }
 
         // Transition boundary chips — drawn after every segment rect is known so each
         // chip can be centred on the boundary and density-guarded against both
-        // neighbours, not just the incoming segment.
-        for (int i = 1; i < segRects.Count; i++)
+        // neighbours, not just the incoming segment. Only adjacent base-track
+        // segments have transitions; overlays cover rather than crossfade.
+        var (baseRowY, baseRowH, basePad) = VideoTrackRowBounds(TimelineModel.BaseTrackIndex, trackCount);
+        float baseClipH = baseRowH - basePad * 2;
+        for (int i = 1; i < baseRects.Count; i++)
         {
-            DrawTransitionChipForBoundary(ds, segRects[i - 1], segRects[i], pad, clipH, w);
+            DrawTransitionChipForBoundary(ds, baseRects[i - 1], baseRects[i], baseRowY + basePad, baseClipH, w);
         }
 
         // Drop indicator (where a moved segment will land).
         if (!double.IsNaN(_segmentDropIndicatorX))
-            ds.DrawLine((float)_segmentDropIndicatorX, 0, (float)_segmentDropIndicatorX, h, VideoClipSelectedBorder, 2.5f);
+        {
+            var (rowY, rowH, _) = VideoTrackRowBounds(_segmentDragCurrentTrackIndex, trackCount);
+            ds.DrawLine((float)_segmentDropIndicatorX, rowY, (float)_segmentDropIndicatorX, rowY + rowH, VideoClipSelectedBorder, 2.5f);
+        }
 
         // Snap guide line.
         if (!double.IsNaN(_segmentSnapGuideX))
             ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
+    }
+
+    /// <summary>
+    /// Paints the transient "drop here to create V&lt;n&gt;" lane.
+    /// </summary>
+    /// <remarks>
+    /// Everything is drawn inside a layer that is both clipped to the lane's current band and
+    /// scaled to its opacity, because mid-reveal the row is only a few pixels tall: an
+    /// unclipped dashed outline and label would spill over the lane below, and a full-strength
+    /// outline in a 4px slot is exactly the "pops in and out" artefact the animation exists to
+    /// remove. The affordance therefore fades in as the lane slides open.
+    /// </remarks>
+    private void DrawOverlayDropHintLane(
+        CanvasDrawingSession ds, int track, float rowY, float rowH, float rowPad, float w)
+    {
+        float reveal = (float)Math.Clamp(_hintLaneReveal, 0, 1);
+        if (reveal <= 0.01f || rowH <= 0.5f) return;
+
+        bool armed = _hintLaneArmed;
+        var hintColor = armed ? VideoClipSelectedBorder : Color.FromArgb(120, 255, 255, 255);
+
+        float hintY = rowY + rowPad;
+        float hintH = Math.Max(1f, rowH - rowPad * 2);
+        float hintW = Math.Max(2f, w - 2);
+
+        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+        using var label = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 10,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+
+        using (ds.CreateLayer(reveal, new Rect(0, rowY, w, rowH)))
+        {
+            ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
+            if (armed)
+                ds.FillRoundedRectangle(1, hintY, hintW, hintH, 4, 4, Color.FromArgb(28, 255, 255, 255));
+            ds.DrawRoundedRectangle(1, hintY, hintW, hintH, 4, 4, hintColor, 1.2f, dashed);
+            ds.DrawText($"V{track}  ·  drop to create", 6, rowY + 3, TrackHintTextColor, label);
+        }
+    }
+
+    /// <summary>
+    /// Maps a logical full-frame video track to its on-canvas row. Track 0 remains the
+    /// historical 80px base lane at the bottom; higher overlay tracks stack upward.
+    /// </summary>
+    /// <remarks>
+    /// The transient drop-hint lane (always the topmost index when present) is only as tall as
+    /// <see cref="HintLaneBandHeight"/>, which eases between 0 and a full lane while it opens
+    /// and folds. Every real lane is therefore offset by that partial band rather than by a
+    /// whole row, so the tracks slide down smoothly instead of teleporting. The hint lane's
+    /// padding is scaled by the same fraction, which keeps the clip height it yields positive
+    /// throughout — an unscaled 6px pad would exceed a 4px-tall band and make the segment
+    /// being dragged into the lane vanish for the first frames of the reveal.
+    /// </remarks>
+    private (float Y, float Height, float Pad) VideoTrackRowBounds(int trackIndex, int trackCount)
+    {
+        trackCount = Math.Max(1, trackCount);
+        trackIndex = Math.Clamp(trackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
+
+        bool hasHintLane = HintLaneVisible;
+        float hintBand = HintLaneBandHeight;
+        int realCount = Math.Max(1, hasHintLane ? trackCount - 1 : trackCount);
+
+        if (hasHintLane && trackIndex == trackCount - 1)
+        {
+            float reveal = (float)Math.Clamp(_hintLaneReveal, 0, 1);
+            return (0f, hintBand, OverlayVideoTrackVerticalPadding * reveal);
+        }
+
+        if (trackIndex == TimelineModel.BaseTrackIndex)
+        {
+            float y = hintBand + (float)((realCount - 1) * OverlayVideoTrackHeight);
+            return (y, (float)BaseVideoTrackHeight, BaseVideoTrackVerticalPadding);
+        }
+
+        float rowY = hintBand + (float)((realCount - 1 - trackIndex) * OverlayVideoTrackHeight);
+        return (rowY, (float)OverlayVideoTrackHeight, OverlayVideoTrackVerticalPadding);
+    }
+
+    /// <summary>
+    /// Resolves the video lane under the pointer before segment hit-testing so overlapping
+    /// full-frame blocks on different tracks are independently selectable.
+    /// </summary>
+    private int VideoTrackIndexFromY(TimelineModel model, double y)
+    {
+        int trackCount = VideoDisplayTrackCount(model);
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
+
+        // Measured from below the (possibly partly open) hint band, so hit-testing agrees with
+        // the row geometry mid-animation instead of being a lane out.
+        double localY = y - HintLaneBandHeight;
+        double overlayBandHeight = (realCount - 1) * OverlayVideoTrackHeight;
+        if (localY >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
+
+        int visualRow = Math.Clamp((int)(Math.Max(0, localY) / OverlayVideoTrackHeight), 0, Math.Max(0, realCount - 2));
+        return realCount - 1 - visualRow;
     }
 
     /// <summary>
@@ -1268,6 +1676,235 @@ public sealed partial class TimelineControl : UserControl
         }
 
         return (x1, x2);
+    }
+
+    private int GetSegmentDisplayTrackIndex(TimelineSegment segment, int trackCount)
+    {
+        if (segment.Id == _draggedSegmentId &&
+            _dragMode == DragMode.SegmentBody &&
+            _segmentDragMoved)
+        {
+            return Math.Clamp(_segmentDragCurrentTrackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
+        }
+
+        return Math.Clamp(segment.TrackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
+    }
+
+    private void DrawTextSlideWindow(
+        CanvasDrawingSession ds,
+        TextSlideSegment slide,
+        float segX1,
+        float segX2,
+        float segY,
+        float segH,
+        float canvasWidth)
+    {
+        if (segX2 <= segX1 || segH <= 0) return;
+
+        var (inStart, outEnd) = GetTextSlideWindowForDisplay(slide);
+        if (outEnd <= inStart) return;
+
+        double rawInX = TimeToX(slide.Start + inStart);
+        double rawOutX = TimeToX(slide.Start + outEnd);
+        double visibleLeft = Math.Max(Math.Max(segX1, 0), rawInX);
+        double visibleRight = Math.Min(Math.Min(segX2, canvasWidth), rawOutX);
+        if (visibleRight <= visibleLeft) return;
+
+        var (barY, barH) = TextSlideWindowBarBounds(segY, segH);
+        var barFill = Color.FromArgb(130, 255, 255, 255);
+        var rampColor = Color.FromArgb(115, 255, 214, 10);
+        var borderColor = Color.FromArgb(180, 255, 255, 255);
+
+        ds.FillRoundedRectangle((float)visibleLeft, barY, (float)(visibleRight - visibleLeft), barH, barH / 2, barH / 2, barFill);
+        ds.DrawRoundedRectangle((float)visibleLeft, barY, (float)(visibleRight - visibleLeft), barH, barH / 2, barH / 2, borderColor, 1f);
+
+        DrawTextSlideRampHatch(ds, rawInX, rawInX + TimeToXDuration(slide.ResolveTextInDuration()), rawInX, rawOutX, barY, barH, canvasWidth, rampColor);
+        DrawTextSlideRampHatch(ds, rawOutX - TimeToXDuration(slide.ResolveTextOutDuration()), rawOutX, rawInX, rawOutX, barY, barH, canvasWidth, rampColor);
+
+        if (slide.Id != _selectedSegmentId) return;
+
+        double handleInX = TextSlideWindowHandleX(rawInX, segX1, segX2, isInHandle: true);
+        double handleOutX = TextSlideWindowHandleX(rawOutX, segX1, segX2, isInHandle: false);
+
+        bool inVisible = !double.IsNaN(handleInX)
+            && handleInX >= Math.Max(segX1, 0) && handleInX <= Math.Min(segX2, canvasWidth);
+        bool outVisible = !double.IsNaN(handleOutX)
+            && handleOutX >= Math.Max(segX1, 0) && handleOutX <= Math.Min(segX2, canvasWidth);
+        if (inVisible)
+            DrawTextSlideWindowHandle(ds, (float)handleInX, barY, barH);
+        if (outVisible)
+            DrawTextSlideWindowHandle(ds, (float)handleOutX, barY, barH);
+    }
+
+    /// <summary>
+    /// Screen X at which a text-slide window handle is drawn and grabbed, or
+    /// <see cref="double.NaN"/> when the slide is too narrow to carry one.
+    /// </summary>
+    /// <remarks>
+    /// A never-edited window spans the whole slide, so its handles would sit exactly on the
+    /// segment's own trim edges — and since the window is hit-tested before the segment
+    /// loop, they would swallow every trim drag on a selected slide (the recorded "a
+    /// grabbable edge stole the drag that began near it" failure). Nudging a coincident
+    /// handle inboard keeps both gestures reachable: the trim edge keeps the outer band and
+    /// the window handle sits just inside it. Draw and hit-test share this so the pixel the
+    /// user aims at is the pixel that responds.
+    /// </remarks>
+    private static double TextSlideWindowHandleX(double rawX, float segX1, float segX2, bool isInHandle)
+    {
+        double inset = SegmentEdgeHitWidth + 3.0;
+
+        // Too narrow to separate the two affordances — trimming is the more destructive and
+        // more expected gesture, so it keeps the whole block and the window handle is dropped.
+        if (segX2 - segX1 < inset * 3) return double.NaN;
+
+        return isInHandle
+            ? Math.Max(rawX, segX1 + inset)
+            : Math.Min(rawX, segX2 - inset);
+    }
+
+    private (TimeSpan InStart, TimeSpan OutEnd) GetTextSlideWindowForDisplay(TextSlideSegment slide)
+    {
+        if (slide.Id == _draggedSegmentId &&
+            _dragMode is DragMode.TextSlideWindowInEdge or DragMode.TextSlideWindowOutEdge &&
+            !double.IsNaN(_textSlideWindowDragCurrentX))
+        {
+            var draggedOffset = XToTime(_textSlideWindowDragCurrentX) - slide.Start;
+            if (_dragMode == DragMode.TextSlideWindowInEdge)
+                return ClampTextSlideWindow(draggedOffset, _textSlideWindowOriginalOutEnd, slide.Duration);
+            return ClampTextSlideWindow(_textSlideWindowOriginalInStart, draggedOffset, slide.Duration);
+        }
+
+        return (slide.ResolveTextInStart(), slide.ResolveTextOutEnd());
+    }
+
+    private double TimeToXDuration(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero) return 0;
+        return TimeToX(duration) - TimeToX(TimeSpan.Zero);
+    }
+
+    private static (float Y, float Height) TextSlideWindowBarBounds(float segY, float segH)
+    {
+        float barH = Math.Clamp(segH * 0.16f, 4f, 8f);
+        float y = segY + segH - barH - Math.Clamp(segH * 0.12f, 3f, 6f);
+        return (y, barH);
+    }
+
+    private void DrawTextSlideRampHatch(
+        CanvasDrawingSession ds,
+        double rawRampX1,
+        double rawRampX2,
+        double rawWindowX1,
+        double rawWindowX2,
+        float barY,
+        float barH,
+        float canvasWidth,
+        Color color)
+    {
+        double x1 = Math.Max(Math.Max(rawRampX1, rawWindowX1), 0);
+        double x2 = Math.Min(Math.Min(rawRampX2, rawWindowX2), canvasWidth);
+        if (x2 - x1 < 2) return;
+
+        for (float x = (float)x1 - barH; x < x2; x += 5f)
+        {
+            float sx = Math.Max((float)x1, x);
+            float ex = Math.Min((float)x2, x + barH);
+            if (ex <= sx) continue;
+            float sy = barY + barH - (sx - x);
+            float ey = barY + barH - (ex - x);
+            ds.DrawLine(sx, sy, ex, ey, color, 1f);
+        }
+    }
+
+    private void DrawTextSlideWindowHandle(CanvasDrawingSession ds, float x, float barY, float barH)
+    {
+        float handleW = 4f;
+        float handleH = barH + 8f;
+        float handleY = barY - 4f;
+        ds.FillRoundedRectangle(x - handleW / 2, handleY, handleW, handleH, 1.5f, 1.5f, VideoClipSelectedBorder);
+    }
+
+    private static (TimeSpan InStart, TimeSpan OutEnd) ClampTextSlideWindow(
+        TimeSpan inStart,
+        TimeSpan outEnd,
+        TimeSpan duration)
+    {
+        duration = duration < TimeSpan.Zero ? TimeSpan.Zero : duration;
+        if (duration <= TimeSpan.Zero) return (TimeSpan.Zero, TimeSpan.Zero);
+        if (duration <= SetTextSlideTextWindowOperation.MinTextWindow)
+            return (TimeSpan.Zero, duration);
+
+        var start = Clamp(inStart, TimeSpan.Zero, duration);
+        var end = Clamp(outEnd, TimeSpan.Zero, duration);
+        if (end < start) end = start;
+        if (end - start < SetTextSlideTextWindowOperation.MinTextWindow)
+        {
+            end = start + SetTextSlideTextWindowOperation.MinTextWindow;
+            if (end > duration)
+            {
+                end = duration;
+                start = end - SetTextSlideTextWindowOperation.MinTextWindow;
+            }
+        }
+
+        return (start, end);
+    }
+
+    private static TimeSpan Clamp(TimeSpan value, TimeSpan min, TimeSpan max)
+    {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
+
+    private (string? Id, SegmentHitTarget Target) HitTestTextSlideWindowHandle(
+        TimelineModel model,
+        double posX,
+        double posY,
+        int trackIndex)
+    {
+        if (_selectedSegmentId is null) return (null, SegmentHitTarget.None);
+
+        var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s =>
+            s.Id == _selectedSegmentId && s.TrackIndex == trackIndex);
+        if (slide is null) return (null, SegmentHitTarget.None);
+
+        int trackCount = VideoDisplayTrackCount(model);
+        var (segX1, segX2) = GetSegmentDisplayX(slide);
+        var (rowY, rowH, rowPad) = VideoTrackRowBounds(trackIndex, trackCount);
+        float segY = rowY + rowPad;
+        float segH = rowH - rowPad * 2;
+        var (barY, barH) = TextSlideWindowBarBounds(segY, segH);
+        if (posY < barY - 5 || posY > barY + barH + 5) return (null, SegmentHitTarget.None);
+
+        var (inStart, outEnd) = GetTextSlideWindowForDisplay(slide);
+        double rawInX = TimeToX(slide.Start + inStart);
+        double rawOutX = TimeToX(slide.Start + outEnd);
+        double visibleSegLeft = Math.Max(segX1, 0);
+        double visibleSegRight = Math.Min(segX2, VideoTrackCanvas?.ActualWidth ?? 0);
+
+        double edge = Math.Clamp(Math.Abs(rawOutX - rawInX) / 3.0, 3.0, SegmentEdgeHitWidth);
+
+        // Same nudged positions the handles are DRAWN at, so the pixel the user aims at is
+        // the pixel that responds and the segment's own trim edges stay grabbable.
+        double handleInX = TextSlideWindowHandleX(rawInX, segX1, segX2, isInHandle: true);
+        double handleOutX = TextSlideWindowHandleX(rawOutX, segX1, segX2, isInHandle: false);
+
+        if (!double.IsNaN(handleInX)
+            && handleInX >= visibleSegLeft && handleInX <= visibleSegRight
+            && Math.Abs(posX - handleInX) <= edge)
+        {
+            return (slide.Id, SegmentHitTarget.LeftEdge);
+        }
+
+        if (!double.IsNaN(handleOutX)
+            && handleOutX >= visibleSegLeft && handleOutX <= visibleSegRight
+            && Math.Abs(posX - handleOutX) <= edge)
+        {
+            return (slide.Id, SegmentHitTarget.RightEdge);
+        }
+
+        return (null, SegmentHitTarget.None);
     }
 
     // ── Transition boundary chip — the selectable affordance sitting on the cut line
@@ -1488,15 +2125,19 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || model.Segments.Count < 2 || VideoTrackCanvas is null)
             return (null, false);
 
-        const float pad = 14f; // matches VideoTrackCanvas_Draw's pad for the segment track
-        float h = (float)VideoTrackCanvas.ActualHeight;
+        if (VideoTrackIndexFromY(model, posY) != TimelineModel.BaseTrackIndex)
+            return (null, false);
+
         float w = (float)VideoTrackCanvas.ActualWidth;
-        float clipH = h - pad * 2;
+        int trackCount = VideoDisplayTrackCount(model);
+        var (rowY, rowH, pad) = VideoTrackRowBounds(TimelineModel.BaseTrackIndex, trackCount);
+        float clipY = rowY + pad;
+        float clipH = rowH - pad * 2;
 
         TimelineSegment? prevSegment = null;
         float prevX1 = 0, prevX2 = 0;
 
-        foreach (var segment in model.Segments)
+        foreach (var segment in model.BaseSegments)
         {
             var (x1, x2) = GetSegmentDisplayX(segment);
 
@@ -1507,7 +2148,7 @@ public sealed partial class TimelineControl : UserControl
                 float boundaryX = x1;
                 if (boundaryX >= -TransitionChipWidth && boundaryX <= w + TransitionChipWidth)
                 {
-                    var rect = GetTransitionChipRect(boundaryX, pad, clipH);
+                    var rect = GetTransitionChipRect(boundaryX, clipY, clipH);
                     if (rect.Contains(new Point(posX, posY)))
                     {
                         chipRect = rect;
@@ -4028,7 +4669,7 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
-        var target = HitTestSegment(model, x, out var segId);
+        var target = HitTestSegment(model, x, y, out var segId);
 
         if (segId is null)
         {
@@ -4056,24 +4697,40 @@ public sealed partial class TimelineControl : UserControl
 
         _draggedSegmentId = segId;
         _segmentDragStartX = x;
+        _segmentDragStartY = y;
         _segmentDragCurrentX = x;
         _segmentDragMoved = false;
         _segmentDragOriginalStart = segment.Start;
         _segmentDragOriginalDuration = segment.Duration;
+        _segmentDragOriginalTrackIndex = segment.TrackIndex;
+        _segmentDragCurrentTrackIndex = segment.TrackIndex;
+        _hintLaneArmed = false;
+        _hintLaneLatched = false;
         _segmentSnapGuideX = double.NaN;
         _segmentDropIndicatorX = double.NaN;
+        _textSlideWindowDragCurrentX = double.NaN;
+        if (segment is TextSlideSegment slide)
+        {
+            _textSlideWindowOriginalInStart = slide.ResolveTextInStart();
+            _textSlideWindowOriginalOutEnd = slide.ResolveTextOutEnd();
+        }
 
         _dragMode = target switch
         {
             SegmentHitTarget.LeftEdge => DragMode.SegmentLeftEdge,
             SegmentHitTarget.RightEdge => DragMode.SegmentRightEdge,
+            SegmentHitTarget.TextWindowInEdge => DragMode.TextSlideWindowInEdge,
+            SegmentHitTarget.TextWindowOutEdge => DragMode.TextSlideWindowOutEdge,
             _ => DragMode.SegmentBody,
         };
 
         if (_dragMode == DragMode.SegmentBody)
             PlayheadPosition = XToTime(x);
+        else if (_dragMode is DragMode.TextSlideWindowInEdge or DragMode.TextSlideWindowOutEdge)
+            _textSlideWindowDragCurrentX = x;
 
         SetCursor(target is SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge
+            or SegmentHitTarget.TextWindowInEdge or SegmentHitTarget.TextWindowOutEdge
             ? InputSystemCursorShape.SizeWestEast
             : InputSystemCursorShape.SizeAll);
 
@@ -4149,6 +4806,13 @@ public sealed partial class TimelineControl : UserControl
                 InvalidateAll();
                 break;
 
+            case DragMode.TextSlideWindowInEdge:
+            case DragMode.TextSlideWindowOutEdge:
+                _textSlideWindowDragCurrentX = Math.Clamp(x, 0, canvas.ActualWidth);
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                InvalidateAll();
+                break;
+
             case DragMode.SegmentBody:
                 if (!_segmentDragMoved && Math.Abs(x - _segmentDragStartX) < SegmentMoveThreshold)
                 {
@@ -4157,6 +4821,18 @@ public sealed partial class TimelineControl : UserControl
                     break;
                 }
                 _segmentDragMoved = true;
+
+                // Resolve the destination lane from how far the pointer has TRAVELLED, not
+                // from where it now sits. Revealing the hint lane grows the canvas, which
+                // pushes every existing row down by one lane height while the cursor stays
+                // put — reading absolute Y would then report a lane the user never aimed at,
+                // silently promoting a plain horizontal reorder into an overlay move.
+                _segmentDragCurrentTrackIndex = ResolveDragTrackIndex(model, y);
+                _hintLaneArmed = ShowOverlayDropHint;
+                // Latch on the way in only, and never let go until the gesture ends — see
+                // HintLaneRequested for why the lane must not follow the pointer back out.
+                _hintLaneLatched |= _hintLaneArmed;
+                SyncHintLaneReveal();
                 SetCursor(InputSystemCursorShape.SizeAll);
 
                 // Snap the dragged segment's projected left edge to nearby boundaries.
@@ -4165,8 +4841,15 @@ public sealed partial class TimelineControl : UserControl
                 double snappedLeftX = SnapX(model, leftX, _draggedSegmentId, snap);
                 _segmentDragCurrentX = _segmentDragStartX + (snappedLeftX - TimeToX(_segmentDragOriginalStart));
 
-                _segmentDropIndicatorX = ComputeDropIndicatorX(model, snappedLeftX);
-                InvalidateAll();
+                _segmentDropIndicatorX = _segmentDragCurrentTrackIndex == TimelineModel.BaseTrackIndex
+                    ? ComputeDropIndicatorX(model, snappedLeftX)
+                    : double.NaN;
+
+                // Only the video canvas shows the drag preview (block position, drop
+                // indicator, snap guide, hint lane); repainting all ten track canvases —
+                // filmstrips and waveforms included — on every pointer sample is what made
+                // the gesture feel like it was stuttering.
+                VideoTrackCanvas?.Invalidate();
                 break;
 
             case DragMode.None:
@@ -4180,10 +4863,11 @@ public sealed partial class TimelineControl : UserControl
                     SetCursor(InputSystemCursorShape.Hand);
                     break;
                 }
-                var target = HitTestSegment(model, x, out _);
+                var target = HitTestSegment(model, x, y, out _);
                 SetCursor(target switch
                 {
-                    SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge => InputSystemCursorShape.SizeWestEast,
+                    SegmentHitTarget.LeftEdge or SegmentHitTarget.RightEdge
+                        or SegmentHitTarget.TextWindowInEdge or SegmentHitTarget.TextWindowOutEdge => InputSystemCursorShape.SizeWestEast,
                     SegmentHitTarget.Body => InputSystemCursorShape.Hand,
                     _ => InputSystemCursorShape.Arrow,
                 });
@@ -4195,6 +4879,38 @@ public sealed partial class TimelineControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Abandons an in-flight drag when the pointer is taken away without a release (window
+    /// deactivation, a touch cancel, a system gesture). Without this the drag state — and so
+    /// the drop-hint lane and the canvas height it forces — would stay latched with no
+    /// gesture left to clear it.
+    /// </summary>
+    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragMode == DragMode.None) return;
+
+        _draggedSegmentId = null;
+        _segmentDragStartX = double.NaN;
+        _segmentDragStartY = double.NaN;
+        _segmentDragCurrentX = double.NaN;
+        _segmentDragMoved = false;
+        _segmentDragOriginalTrackIndex = TimelineModel.BaseTrackIndex;
+        _segmentDragCurrentTrackIndex = TimelineModel.BaseTrackIndex;
+        _segmentSnapGuideX = double.NaN;
+        _segmentDropIndicatorX = double.NaN;
+        _textSlideWindowDragCurrentX = double.NaN;
+        _dragMode = DragMode.None;
+
+        // _hintLaneArmed is deliberately NOT cleared: it keeps the outline's highlight for the
+        // fold-away animation that SyncHintLaneReveal is about to start.
+        _hintLaneLatched = false;
+
+        SetCursor(InputSystemCursorShape.Arrow);
+        SyncHintLaneReveal();
+        UpdateVideoTrackHeight();
+        InvalidateAll();
+    }
+
     private void VideoTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
         var model = Model;
@@ -4203,6 +4919,9 @@ public sealed partial class TimelineControl : UserControl
             _dragMode = DragMode.None;
             return;
         }
+
+        // Captured before the commit, which may itself add the lane the hint was offering.
+        int usedTracksBeforeDrop = Math.Max(1, model?.VideoTrackCount ?? 1);
 
         if (model is not null && model.Segments.Count > 0 && _draggedSegmentId is { } draggedId)
         {
@@ -4213,11 +4932,22 @@ public sealed partial class TimelineControl : UserControl
         _segmentDragStartX = double.NaN;
         _segmentDragCurrentX = double.NaN;
         _segmentDragMoved = false;
+        _segmentDragOriginalTrackIndex = TimelineModel.BaseTrackIndex;
+        _segmentDragCurrentTrackIndex = TimelineModel.BaseTrackIndex;
         _segmentSnapGuideX = double.NaN;
         _segmentDropIndicatorX = double.NaN;
+        _textSlideWindowDragCurrentX = double.NaN;
         _dragMode = DragMode.None;
+        _hintLaneLatched = false;
         SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
+        // _dragMode is cleared above, so the hint lane is gone. Fold it away with the same
+        // eased animation it opened with — UNLESS the drop just turned it into a real lane,
+        // in which case the real row takes over the identical height and the hint must be
+        // dropped in the same frame or the track band would visibly bulge and settle.
+        bool laneBecameReal = Math.Max(1, model?.VideoTrackCount ?? 1) > usedTracksBeforeDrop;
+        SyncHintLaneReveal(animate: !laneBecameReal);
+        UpdateVideoTrackHeight();
         InvalidateAll();
     }
 
@@ -4226,6 +4956,30 @@ public sealed partial class TimelineControl : UserControl
     {
         switch (_dragMode)
         {
+            case DragMode.TextSlideWindowInEdge:
+            case DragMode.TextSlideWindowOutEdge:
+            {
+                var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == draggedId);
+                if (slide is null) break;
+
+                var draggedOffset = XToTime(_textSlideWindowDragCurrentX) - slide.Start;
+                var window = _dragMode == DragMode.TextSlideWindowInEdge
+                    ? ClampTextSlideWindow(draggedOffset, _textSlideWindowOriginalOutEnd, slide.Duration)
+                    : ClampTextSlideWindow(_textSlideWindowOriginalInStart, draggedOffset, slide.Duration);
+
+                if (Math.Abs((window.InStart - _textSlideWindowOriginalInStart).TotalMilliseconds) > 1 ||
+                    Math.Abs((window.OutEnd - _textSlideWindowOriginalOutEnd).TotalMilliseconds) > 1)
+                {
+                    TextSlideWindowChanged?.Invoke(this, new TextSlideWindowEventArgs
+                    {
+                        SegmentId = draggedId,
+                        InStart = window.InStart,
+                        OutEnd = window.OutEnd,
+                    });
+                }
+                break;
+            }
+
             case DragMode.SegmentRightEdge:
             {
                 var newRight = XToTime(_segmentDragCurrentX);
@@ -4252,8 +5006,28 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.SegmentBody when _segmentDragMoved:
             {
                 double deltaX = _segmentDragCurrentX - _segmentDragStartX;
-                var dropCenter = _segmentDragOriginalStart + _segmentDragOriginalDuration / 2
-                    + (XToTime(_segmentDragStartX + deltaX) - XToTime(_segmentDragStartX));
+                var grabbed = XToTime(_segmentDragStartX);
+                var dropped = XToTime(_segmentDragStartX + deltaX);
+                var newStart = _segmentDragOriginalStart + (dropped - grabbed);
+                if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+
+                if (_segmentDragOriginalTrackIndex != TimelineModel.BaseTrackIndex ||
+                    _segmentDragCurrentTrackIndex != TimelineModel.BaseTrackIndex)
+                {
+                    if (_segmentDragOriginalTrackIndex != _segmentDragCurrentTrackIndex ||
+                        Math.Abs((newStart - _segmentDragOriginalStart).TotalMilliseconds) > 1)
+                    {
+                        SegmentTrackMoveRequested?.Invoke(this, new SegmentTrackMoveEventArgs
+                        {
+                            SegmentId = draggedId,
+                            NewStart = newStart,
+                            NewTrackIndex = _segmentDragCurrentTrackIndex,
+                        });
+                    }
+                    break;
+                }
+
+                var dropCenter = _segmentDragOriginalStart + _segmentDragOriginalDuration / 2 + (dropped - grabbed);
 
                 int targetIndex = ComputeMoveTargetIndex(model, draggedId, dropCenter);
                 int fromIndex = model.Segments.FindIndex(s => s.Id == draggedId);
@@ -4303,11 +5077,29 @@ public sealed partial class TimelineControl : UserControl
     /// Determines which segment (and which part of it — body or trim edge) is under
     /// the given X coordinate on the primary track.
     /// </summary>
-    private SegmentHitTarget HitTestSegment(TimelineModel model, double x, out string? segmentId)
+    private SegmentHitTarget HitTestSegment(TimelineModel model, double x, double y, out string? segmentId)
     {
         segmentId = null;
-        foreach (var seg in model.Segments)
+        int trackIndex = VideoTrackIndexFromY(model, y);
+        int trackCount = VideoDisplayTrackCount(model);
+        var (rowY, rowH, rowPad) = VideoTrackRowBounds(trackIndex, trackCount);
+        float clipY = rowY + rowPad;
+        float clipH = rowH - rowPad * 2;
+        if (y < clipY || y > clipY + clipH) return SegmentHitTarget.None;
+
+        var (windowHitId, windowTarget) = HitTestTextSlideWindowHandle(model, x, y, trackIndex);
+        if (windowHitId is not null)
         {
+            segmentId = windowHitId;
+            return windowTarget == SegmentHitTarget.LeftEdge
+                ? SegmentHitTarget.TextWindowInEdge
+                : SegmentHitTarget.TextWindowOutEdge;
+        }
+
+        for (int i = model.Segments.Count - 1; i >= 0; i--)
+        {
+            var seg = model.Segments[i];
+            if (seg.TrackIndex != trackIndex) continue;
             double x1 = TimeToX(seg.Start);
             double x2 = TimeToX(seg.End);
             if (x < x1 || x > x2) continue;
@@ -4424,8 +5216,12 @@ public sealed partial class TimelineControl : UserControl
 
         // The indicator sits at the start of the segment now occupying targetIndex,
         // or at the end of the timeline when appending.
-        if (targetIndex >= model.Segments.Count)
-            return TimeToX(model.TotalSegmentsDuration);
+        if (targetIndex >= model.Segments.Count ||
+            model.Segments[targetIndex].TrackIndex != TimelineModel.BaseTrackIndex)
+        {
+            var lastBase = model.BaseSegments.LastOrDefault();
+            return TimeToX(lastBase?.End ?? model.TotalSegmentsDuration);
+        }
         return TimeToX(model.Segments[targetIndex].Start);
     }
 
@@ -4435,14 +5231,17 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private static int ComputeMoveTargetIndex(TimelineModel model, string? draggedId, TimeSpan dropCenter)
     {
+        int afterLastBase = model.Segments.Count;
         for (int i = 0; i < model.Segments.Count; i++)
         {
             var seg = model.Segments[i];
             if (seg.Id == draggedId) continue;
+            if (seg.TrackIndex != TimelineModel.BaseTrackIndex) continue;
+            afterLastBase = i + 1;
             var mid = seg.Start + seg.Duration / 2;
             if (mid > dropCenter) return i;
         }
-        return model.Segments.Count;
+        return afterLastBase;
     }
 
     private static bool IsAltDown()
@@ -5338,4 +6137,36 @@ public sealed partial class TimelineControl : UserControl
             return;
         ProtectedCursor = InputSystemCursor.Create(shape);
     }
+}
+
+/// <summary>
+/// Describes a requested full-frame video segment lane move; the control reports intent
+/// only so the editor page can apply the shared undoable timeline operation.
+/// </summary>
+public sealed class SegmentTrackMoveEventArgs : EventArgs
+{
+    /// <summary>Segment to move; ids survive reflow whereas list indexes do not.</summary>
+    public string SegmentId { get; init; } = "";
+
+    /// <summary>Absolute output start requested for overlay lanes, or the base insertion hint.</summary>
+    public TimeSpan NewStart { get; init; }
+
+    /// <summary>Destination full-frame video track: 0 is the contiguous base chain.</summary>
+    public int NewTrackIndex { get; init; }
+}
+
+/// <summary>
+/// Describes a requested edit to a text slide's inner animation window, separate from
+/// segment trim so preview/export keep using the shared Core timing rules.
+/// </summary>
+public sealed class TextSlideWindowEventArgs : EventArgs
+{
+    /// <summary>Text slide whose animation window changed.</summary>
+    public string SegmentId { get; init; } = "";
+
+    /// <summary>Offset from the segment start where the text begins animating in.</summary>
+    public TimeSpan InStart { get; init; }
+
+    /// <summary>Offset from the segment start where the text has finished animating out.</summary>
+    public TimeSpan OutEnd { get; init; }
 }

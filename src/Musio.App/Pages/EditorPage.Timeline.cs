@@ -593,6 +593,44 @@ public sealed partial class EditorPage
     private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
         EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
 
+    /// <summary>
+    /// Moves a segment to a new track and/or a new absolute start, in response to the
+    /// timeline's vertical/horizontal segment drag. The control raises the intent; the
+    /// page owns the undo stack, so the operation is executed here.
+    /// </summary>
+    private void OnSegmentTrackMoveRequested(object? sender, SegmentTrackMoveEventArgs e)
+    {
+        if (e is null || string.IsNullOrWhiteSpace(e.SegmentId)) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new MoveSegmentOnTrackOperation(e.SegmentId, e.NewStart, e.NewTrackIndex));
+        Timeline.SelectSegment(e.SegmentId);
+
+        if (ViewModel.Model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == e.SegmentId) is { } slide)
+            ShowTextSlidePanel(slide);
+
+        InvalidatePreview();
+    }
+
+    /// <summary>
+    /// Applies a text slide's animation window after the user drags the in/out handles
+    /// drawn inside its timeline block, keeping the properties pane in step so the two
+    /// editing surfaces never disagree.
+    /// </summary>
+    private void OnTextSlideWindowChanged(object? sender, TextSlideWindowEventArgs e)
+    {
+        if (e is null || string.IsNullOrWhiteSpace(e.SegmentId)) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new SetTextSlideTextWindowOperation(e.SegmentId, e.InStart, e.OutEnd));
+
+        var slide = ViewModel.Model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == e.SegmentId);
+        if (slide is not null && string.Equals(_selectedTextSlideId, e.SegmentId, StringComparison.Ordinal))
+            SyncTextSlideWindowControls(slide);
+
+        RefreshSlidePreview();
+    }
+
     // ── Camera track handlers ──
 
     private string? _selectedCameraSegmentId;
@@ -1398,6 +1436,11 @@ public sealed partial class EditorPage
     /// </returns>
     private bool ApplyAudioMixChange(AudioMixChannel channel)
     {
+        // Mute flags and per-channel volumes are persisted in the package but are written
+        // straight onto TimelineModel by the mixer flyout, bypassing UndoRedoManager — so
+        // without this an audio mix change would never mark the project dirty.
+        ProjectService.Instance.MarkDirty();
+
         if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
         {
             var project = ProjectService.Instance.CurrentProject;

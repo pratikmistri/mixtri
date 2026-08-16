@@ -334,17 +334,14 @@ public static class ExportAudioPlan
     private static List<AudioPlacement> BuildFromSegments(
         Project project, TimelineModel timeline, List<VideoSegment> segments)
     {
-        // Resolve every boundary on the COMPLETE ordered timeline (timeline.Segments, not
-        // just the video-only `segments` list), so a transition whose INCOMING or OUTGOING
-        // side is a TextSlideSegment is captured too — e.g. a video segment dissolving into
-        // a following text slide must still get its own audio extended/faded, exactly like
-        // a video-to-video boundary, even though the slide itself contributes no audio
-        // placement of its own. Resolving at each full-timeline segment's own Start (for
-        // every index but the first, which can never be a transition's incoming side) and
-        // reading back TransitionResolver's own resolved Outgoing/IncomingSegment references
-        // — rather than manually indexing "segments[i-1]" ourselves — means this is correct
-        // regardless of how TransitionResolver internally locates adjacency.
-        var fullSegments = timeline.Segments;
+        // Resolve every boundary on the COMPLETE BASE timeline (not just the video-only
+        // `segments` list), so a transition whose INCOMING or OUTGOING side is a
+        // TextSlideSegment is captured too — e.g. a video segment dissolving into a
+        // following text slide must still get its own audio extended/faded, exactly like a
+        // video-to-video boundary, even though the slide itself contributes no audio
+        // placement of its own. Overlay tracks are absolute covers, not adjacent edits, so
+        // they intentionally do not participate in this boundary pass.
+        var baseSegments = timeline.BaseSegments.ToList();
         var videoIndexByRef = new Dictionary<VideoSegment, int>(ReferenceEqualityComparer.Instance);
         for (int i = 0; i < segments.Count; i++)
             videoIndexByRef[segments[i]] = i;
@@ -355,9 +352,9 @@ public static class ExportAudioPlan
         // and how long this video's own incoming fade-in should ramp for, respectively.
         var trailingExtension = new TimeSpan[segments.Count];
         var fadeInDuration = new TimeSpan[segments.Count];
-        for (int j = 1; j < fullSegments.Count; j++)
+        for (int j = 1; j < baseSegments.Count; j++)
         {
-            var resolution = TransitionResolver.Resolve(timeline, fullSegments[j].Start);
+            var resolution = TransitionResolver.Resolve(timeline, baseSegments[j].Start);
             if (!resolution.Active || resolution.Duration <= TimeSpan.Zero)
                 continue;
 
@@ -389,23 +386,42 @@ public static class ExportAudioPlan
             }
         }
 
-        var placements = new List<AudioPlacement>();
-        // Contiguous [Start, Start+Count) range of `placements` contributed by each
-        // segment, so the fade pass below can revisit them without re-deriving paths.
-        var ranges = new (int Start, int Count)[segments.Count];
-
+        var audibleRanges = new List<(VideoSegment Segment, TimeSpan FadeOut, TimeSpan FadeIn)>();
         for (int i = 0; i < segments.Count; i++)
         {
             var segment = segments[i];
+            foreach (var visible in timeline.VisibleRanges(segment))
+            {
+                var visibleSegment = ProjectVisibleRange(segment, visible.Start, visible.End);
+                if (visibleSegment is null)
+                    continue;
+
+                // Transition metadata belongs only to the visible range that touches the
+                // base-chain boundary. A middle slice revealed between two overlays is just
+                // ordinary segment audio and must not borrow fade data from another edge.
+                var fadeOut = visible.End == segment.End ? trailingExtension[i] : TimeSpan.Zero;
+                var fadeIn = visible.Start == segment.Start ? fadeInDuration[i] : TimeSpan.Zero;
+                audibleRanges.Add((visibleSegment, fadeOut, fadeIn));
+            }
+        }
+
+        var placements = new List<AudioPlacement>();
+        // Contiguous [Start, Start+Count) range of `placements` contributed by each
+        // visible segment range, so the fade pass below can revisit them without
+        // re-deriving paths.
+        var ranges = new (int Start, int Count)[audibleRanges.Count];
+
+        for (int i = 0; i < audibleRanges.Count; i++)
+        {
+            var (segment, fadeOut, _) = audibleRanges[i];
             int rangeStart = placements.Count;
             bool isPrimary = IsPrimarySource(segment.VideoFilePath, project, timeline);
-            var extension = trailingExtension[i];
 
             // Audio embedded in the recording is inherently aligned with its own video
             // frames, so it needs no extra offset.
             var embedded = BuildPlacement(
                 segment.VideoFilePath, AudioSourceKind.EmbeddedVideoTrack, segment,
-                offsetSeconds: 0, extension);
+                offsetSeconds: 0, fadeOut);
             if (embedded is { } embeddedPlacement)
                 placements.Add(embeddedPlacement);
 
@@ -422,7 +438,7 @@ public static class ExportAudioPlan
                 foreach (var path in audioPaths)
                 {
                     var placement = BuildPlacement(
-                        path, AudioSourceKind.AudioFile, segment, offsetSeconds, extension);
+                        path, AudioSourceKind.AudioFile, segment, offsetSeconds, fadeOut);
                     if (placement is { } audioPlacement)
                         placements.Add(audioPlacement);
                 }
@@ -431,7 +447,7 @@ public static class ExportAudioPlan
             ranges[i] = (rangeStart, placements.Count - rangeStart);
         }
 
-        ApplyTransitionFadeMetadata(segments, placements, ranges, trailingExtension, fadeInDuration);
+        ApplyTransitionFadeMetadata(audibleRanges, placements, ranges);
 
         return placements;
     }
@@ -441,10 +457,9 @@ public static class ExportAudioPlan
     /// <see cref="Musio.Core.Audio.EqualPowerCrossfade"/>) should run, on both sides of
     /// every active transition boundary: <see cref="AudioPlacement.FadeInDuration"/> on the
     /// incoming video's own placements, and <see cref="AudioPlacement.FadeOutDuration"/> on
-    /// the outgoing video's — both sides looked up via <paramref name="fadeInDuration"/>/
-    /// <paramref name="trailingExtension"/>, which <see cref="BuildFromSegments"/> already
-    /// populated by resolving every boundary on the COMPLETE timeline (so a boundary whose
-    /// other side is a <see cref="TextSlideSegment"/>, not just another
+    /// the outgoing video's — both sides are already attached to the visible range that
+    /// touches that base-chain boundary by <see cref="BuildFromSegments"/> (so a boundary
+    /// whose other side is a <see cref="TextSlideSegment"/>, not just another
     /// <see cref="VideoSegment"/>, is still captured for whichever side IS a video).
     /// <see cref="AudioPlacement.TakeDuration"/> for the outgoing side was already extended
     /// (or deliberately left alone for a speed-adjusted segment) while placements were
@@ -452,15 +467,13 @@ public static class ExportAudioPlan
     /// fade-curve metadata to match.
     /// </summary>
     private static void ApplyTransitionFadeMetadata(
-        List<VideoSegment> segments,
+        List<(VideoSegment Segment, TimeSpan FadeOut, TimeSpan FadeIn)> segmentRanges,
         List<AudioPlacement> placements,
-        (int Start, int Count)[] ranges,
-        TimeSpan[] trailingExtension,
-        TimeSpan[] fadeInDuration)
+        (int Start, int Count)[] ranges)
     {
-        for (int i = 0; i < segments.Count; i++)
+        for (int i = 0; i < segmentRanges.Count; i++)
         {
-            var fadeIn = fadeInDuration[i];
+            var fadeIn = segmentRanges[i].FadeIn;
             if (fadeIn > TimeSpan.Zero)
             {
                 var (start, count) = ranges[i];
@@ -474,7 +487,7 @@ public static class ExportAudioPlan
                 }
             }
 
-            var fadeOut = trailingExtension[i];
+            var fadeOut = segmentRanges[i].FadeOut;
             if (fadeOut > TimeSpan.Zero)
             {
                 var (start, count) = ranges[i];
@@ -489,6 +502,44 @@ public static class ExportAudioPlan
             }
         }
     }
+
+    /// <summary>
+    /// Re-expresses one visible output-time slice of a segment as a segment-shaped value so
+    /// the existing trim/offset/speed audio arithmetic can be reused unchanged.
+    /// </summary>
+    private static VideoSegment? ProjectVisibleRange(VideoSegment segment, TimeSpan visibleStart, TimeSpan visibleEnd)
+    {
+        if (visibleEnd <= visibleStart)
+            return null;
+
+        var localStart = visibleStart - segment.Start;
+        var localEnd = visibleEnd - segment.Start;
+        if (localEnd <= TimeSpan.Zero || localStart >= segment.Duration)
+            return null;
+
+        if (localStart < TimeSpan.Zero) localStart = TimeSpan.Zero;
+        if (localEnd > segment.Duration) localEnd = segment.Duration;
+        if (localEnd <= localStart)
+            return null;
+
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        var visibleDuration = localEnd - localStart;
+        var sourceStart = segment.SourceStart + ScaleDuration(localStart, speed);
+        var sourceDuration = ScaleDuration(visibleDuration, speed);
+        if (sourceDuration <= TimeSpan.Zero)
+            return null;
+
+        return segment with
+        {
+            Start = segment.Start + localStart,
+            Duration = visibleDuration,
+            SourceStart = sourceStart,
+            SourceDuration = sourceDuration,
+        };
+    }
+
+    private static TimeSpan ScaleDuration(TimeSpan value, double scale)
+        => TimeSpan.FromTicks((long)(value.Ticks * scale));
 
     /// <summary>
     /// Places one source's audio for a single video segment.

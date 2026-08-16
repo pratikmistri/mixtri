@@ -1119,8 +1119,79 @@ public sealed partial class EditorPage
 
         slide.Duration = TimeSpan.FromSeconds(args.NewValue);
         ViewModel.Model.RecalculateSegmentPositions();
+        SyncTextSlideWindowControls(slide);
         Timeline.InvalidateAllCanvases();
         InvalidatePreview();
+    }
+
+    /// <summary>
+    /// Debounces the animation-window sliders. They emit a tick per <c>StepFrequency</c> step,
+    /// so committing on every tick would push dozens of operations onto the undo stack for a
+    /// single thumb drag (making one drag take dozens of Ctrl+Z to reverse, and clearing the
+    /// redo stack each time) and fire an un-debounced forced recompose on the UI thread.
+    /// Matches how every other continuous control here behaves (<c>_cursorDebouncer</c>,
+    /// <c>_motionDebouncer</c>, <c>_styleDebouncer</c>).
+    /// </summary>
+    private void ScheduleSlideTextWindowCommit()
+    {
+        _slideTextWindowDebouncer ??= new Debouncer(CommitSlideTextWindowFromControls);
+        _slideTextWindowDebouncer.Schedule();
+    }
+
+    private void SlideTextWindowSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        ScheduleSlideTextWindowCommit();
+    }
+
+    private void SlideTextRampSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        ScheduleSlideTextWindowCommit();
+    }
+
+    /// <summary>
+    /// Reads all four animation-window sliders and commits them as ONE undoable edit. Values
+    /// are re-read here rather than captured at schedule time so a burst of ticks that
+    /// coalesced into a single commit always reflects the newest thumb positions.
+    /// </summary>
+    private void CommitSlideTextWindowFromControls()
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var pane = PropertiesPanel.TextSlide;
+        if (pane.SlideTextInAtSlider is null || pane.SlideTextOutBySlider is null ||
+            pane.SlideTextInRampSlider is null || pane.SlideTextOutRampSlider is null)
+        {
+            return;
+        }
+
+        var inStart = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInAtSlider.Value));
+        var outEnd = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutBySlider.Value));
+        var inDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInRampSlider.Value));
+        var outDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutRampSlider.Value));
+
+        // One operation carries both the window and the ramps, so a drag that touched either
+        // is a single undo step.
+        ViewModel.UndoRedoManager.Execute(new UpdateTextSlideOperation(
+            slide.Id,
+            slide.Text, slide.FontFamily, slide.FontSize,
+            slide.IsBold, slide.IsItalic,
+            slide.TextColor, slide.BackgroundColor,
+            slide.Duration, slide.Animation,
+            inStart, inDuration,
+            outEnd, outDuration));
+
+        SyncTextSlideWindowControls(slide);
+        RefreshSlidePreview();
     }
 
     private void SlideFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -1148,6 +1219,7 @@ public sealed partial class EditorPage
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
         SlideFontSizeBox.Value = slide.FontSize;
+        SyncTextSlideWindowControls(slide);
 
         // Formatting toggles
         SlideBoldToggle.IsChecked = slide.IsBold;
@@ -1200,6 +1272,42 @@ public sealed partial class EditorPage
 
         // Reveal the text slide panel so properties are immediately editable on selection.
         PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
+    }
+
+    private void SyncTextSlideWindowControls(TextSlideSegment slide)
+    {
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        var pane = PropertiesPanel.TextSlide;
+        if (pane.SlideTextInAtSlider is null ||
+            pane.SlideTextOutBySlider is null ||
+            pane.SlideTextInRampSlider is null ||
+            pane.SlideTextOutRampSlider is null)
+        {
+            return;
+        }
+
+        var wasSuppressed = _suppressSlideEvents;
+        _suppressSlideEvents = true;
+        try
+        {
+            // A Slider with Maximum == Minimum is degenerate (the thumb cannot move and the
+            // control reports 0), so a zero-length slide still gets a usable range. Maximum
+            // is assigned before Value because the Slider clamps Value into the range.
+            var max = Math.Max(0.1, slide.Duration.TotalSeconds);
+            pane.SlideTextInAtSlider.Maximum = max;
+            pane.SlideTextOutBySlider.Maximum = max;
+            pane.SlideTextInRampSlider.Maximum = max;
+            pane.SlideTextOutRampSlider.Maximum = max;
+            pane.SlideTextInAtSlider.Value = slide.ResolveTextInStart().TotalSeconds;
+            pane.SlideTextOutBySlider.Value = slide.ResolveTextOutEnd().TotalSeconds;
+            pane.SlideTextInRampSlider.Value = slide.ResolveTextInDuration().TotalSeconds;
+            pane.SlideTextOutRampSlider.Value = slide.ResolveTextOutDuration().TotalSeconds;
+        }
+        finally
+        {
+            _suppressSlideEvents = wasSuppressed;
+        }
     }
 
     private void HideTextSlidePanel()
@@ -1325,6 +1433,11 @@ public sealed partial class EditorPage
         // almost every tick, so a single cached frame no longer helps — see the remarks on
         // ComposePreviewFrameAtOffsetAsync). There is nothing left to invalidate here; the next
         // dissolve tick simply recomposes from the now-current slide state.
+        // Several slide property handlers mutate the segment directly instead of going
+        // through UndoRedoManager, so the edit signal that normally rides on it never fires
+        // for them. This is the one call they all share.
+        ProjectService.Instance.MarkDirty();
+
         Timeline.InvalidateAllCanvases();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }

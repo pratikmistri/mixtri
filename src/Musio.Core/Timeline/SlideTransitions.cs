@@ -2,10 +2,10 @@ namespace Musio.Core.Timeline;
 
 /// <summary>
 /// Computes automatic crossfade transitions around <see cref="TextSlideSegment"/>
-/// boundaries so a text slide dissolves into (and out of) its neighbouring
-/// segment instead of hard-cutting. The transition occupies the leading edge of
-/// the <em>incoming</em> segment; the outgoing segment is held at its final
-/// instant and cross-dissolved underneath.
+/// boundaries on the contiguous base track so a text slide dissolves into (and
+/// out of) its neighbouring segment instead of hard-cutting. The transition
+/// occupies the leading edge of the <em>incoming</em> segment; the outgoing
+/// segment is held at its final instant and cross-dissolved underneath.
 ///
 /// This is a pure function of the timeline so it can be shared, identically,
 /// between the live preview and the exporter (the two rendering paths that

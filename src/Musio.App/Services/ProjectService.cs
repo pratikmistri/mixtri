@@ -34,8 +34,80 @@ public class ProjectService
     /// project bound to the old project's file.
     /// </summary>
     public bool IsSaveInFlight { get; private set; }
-    public CompositionConfig CurrentComposition { get; set; } = new();
+
+    private CompositionConfig _currentComposition = new();
+
+    /// <summary>
+    /// The project-wide composition (background, cursor, motion, aspect ratio…).
+    /// </summary>
+    /// <remarks>
+    /// Assigning a DIFFERENT config counts as an unsaved edit — this property is the single
+    /// place every style control writes through, so tracking it here catches all of them
+    /// without each handler having to remember. The equality check matters: the preview
+    /// rebuild path re-assigns the same config on load, and a plain "any assignment is an
+    /// edit" rule would mark a freshly opened project dirty before the user touched it.
+    /// <see cref="CompositionConfig"/> is a record, so this is a value comparison.
+    /// </remarks>
+    public CompositionConfig CurrentComposition
+    {
+        get => _currentComposition;
+        set
+        {
+            if (Equals(_currentComposition, value)) return;
+            _currentComposition = value;
+            MarkDirty();
+        }
+    }
+
+    /// <summary>
+    /// Publishes a composition that was DERIVED at load time — first-open defaults, fields
+    /// mirrored from the project, a webcam style implied by the recording — without flagging
+    /// unsaved changes.
+    /// </summary>
+    /// <remarks>
+    /// The ordinary <see cref="CurrentComposition"/> setter treats a value-different config as
+    /// a user edit, which is what makes style controls mark the project dirty for free. The
+    /// preview rebuild runs after navigation and legitimately produces a config that differs
+    /// from the one <see cref="SetProject"/> left behind, so routing it through the ordinary
+    /// setter made every freshly captured recording look modified before the user touched it —
+    /// defeating the <see cref="MarkSaved"/> call at the end of <see cref="SetProject"/>.
+    /// </remarks>
+    public void ApplyLoadTimeComposition(CompositionConfig config)
+    {
+        _currentComposition = config;
+    }
+
     public TimelineModel? CurrentTimeline { get; set; }
+
+    /// <summary>
+    /// True when the project has edits that have not been written to its <c>.musio</c> file.
+    /// Drives the save prompt shown when the window is dismissed.
+    /// </summary>
+    public bool HasUnsavedChanges { get; private set; }
+
+    /// <summary>Raised whenever <see cref="HasUnsavedChanges"/> flips.</summary>
+    public event EventHandler? UnsavedChangesChanged;
+
+    /// <summary>
+    /// Records that the project differs from its saved file. Safe to call repeatedly; only a
+    /// transition raises <see cref="UnsavedChangesChanged"/>.
+    /// </summary>
+    public void MarkDirty()
+    {
+        // Nothing to lose until there is a project, so a dirty flag before one exists would
+        // only produce a save prompt with nothing behind it.
+        if (CurrentProject is null || HasUnsavedChanges) return;
+        HasUnsavedChanges = true;
+        UnsavedChangesChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Records that the project now matches its saved file (saved, opened, or replaced).</summary>
+    public void MarkSaved()
+    {
+        if (!HasUnsavedChanges) return;
+        HasUnsavedChanges = false;
+        UnsavedChangesChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     /// <summary>
     /// Path of the <c>.musio</c> file this project was opened from or last saved to,
@@ -121,7 +193,13 @@ public class ProjectService
             // that file with the wrong project's content. The package itself was
             // written correctly either way, so the recents entry is still accurate.
             if (ReferenceEquals(CurrentProject, project))
+            {
                 CurrentPackagePath = packagePath;
+                // Guarded by the same check as the rebind above: if an open completed while
+                // this save was running, the project on screen is NOT the one just written
+                // and its own edits are still unsaved.
+                MarkSaved();
+            }
 
             RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
         }
@@ -167,6 +245,10 @@ public class ProjectService
             }
 
             RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
+
+            // Assigning CurrentComposition above may have flagged a change; a project that
+            // was just loaded from disk is by definition in sync with it.
+            MarkSaved();
 
             ProjectChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -215,57 +297,54 @@ public class ProjectService
             };
         }
 
+        // A brand-new recording has no EDITS yet, only content, so it does not start dirty —
+        // the save prompt is for work the user did, not for the act of recording. The capture
+        // defaults applied just above are ours, not theirs, and would otherwise make every
+        // monitor recording look modified the moment it opened.
+        MarkSaved();
+
         ProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
     /// Appends a new recording (captured as a separate Project) to the current
-    /// project's timeline as an additional <see cref="VideoSegment"/>.
+    /// project's timeline as an additional <see cref="VideoSegment"/>, or inserts it as an
+    /// overlay when the playhead is parked mid-edit so existing segments do not ripple.
     /// </summary>
-    public void AppendRecording(Project newRecording)
+    public VideoSegment? AppendRecording(Project newRecording)
     {
         if (CurrentProject is null || CurrentTimeline is null)
         {
             // No existing project — just set this as the primary
             SetProject(newRecording);
-            return;
+            return CurrentTimeline?.Segments
+                .OfType<VideoSegment>()
+                .FirstOrDefault(s => string.Equals(
+                    s.VideoFilePath, newRecording.VideoFilePath, StringComparison.OrdinalIgnoreCase));
         }
 
-        // Add to sources list
-        var source = new RecordingSource
+        var segment = AddProjectSourceAndCreateSegment(newRecording);
+        if (ShouldAppendRecordingToBaseTrack(CurrentTimeline))
         {
-            Id = newRecording.Id,
-            VideoFilePath = newRecording.VideoFilePath,
-            CursorDataFilePath = newRecording.CursorDataFilePath,
-            WebcamFilePath = newRecording.WebcamFilePath,
-            KeyboardDataFilePath = newRecording.KeyboardDataFilePath,
-            AudioFilePaths = newRecording.AudioFilePaths,
-            Duration = newRecording.Duration,
-            Width = newRecording.Width,
-            Height = newRecording.Height,
-            Fps = newRecording.Fps,
-            MouseToVideoOffsetSeconds = newRecording.MouseToVideoOffsetSeconds,
-            AudioToVideoOffsetSeconds = newRecording.AudioToVideoOffsetSeconds,
-            CropOffsetX = newRecording.CropOffsetX,
-            CropOffsetY = newRecording.CropOffsetY,
-            DpiScale = newRecording.DpiScale,
-            CaptureType = newRecording.CaptureType,
-        };
-        CurrentProject.Sources.Add(source);
+            new AppendVideoSegmentOperation(segment).Execute(CurrentTimeline);
+        }
+        else
+        {
+            new InsertSegmentOnOverlayTrackOperation(segment, CurrentTimeline.PlayheadPosition)
+                .Execute(CurrentTimeline);
+        }
 
-        // Create and append a VideoSegment
-        var segment = CreateVideoSegmentFromProject(newRecording);
-        CurrentTimeline.Segments.Add(segment);
-        CurrentTimeline.RecalculateSegmentPositions();
-
+        // Executed directly rather than through UndoRedoManager, so the edit signal that
+        // normally rides on it does not fire here.
+        MarkDirty();
         ProjectChanged?.Invoke(this, EventArgs.Empty);
+        return segment;
     }
 
     /// <summary>
     /// Turns an external video file (already normalised by <see cref="VideoImportService"/>
     /// into a constant-frame-rate H.264 clip plus extracted audio) into a project source and
-    /// appends it to the timeline, exactly as <see cref="AppendRecording"/> does for a captured
-    /// recording.
+    /// inserts it on an overlay track at the requested output time.
     /// </summary>
     /// <remarks>
     /// An imported clip has none of the metadata a live capture produces: there is no cursor,
@@ -276,7 +355,7 @@ public class ProjectService
     /// than fabricate it. <see cref="Project.DpiScale"/> is 1 because the pixels are already the
     /// real frame pixels — there is no logical→physical mapping to undo.
     /// </remarks>
-    public void ImportVideo(VideoImportResult result)
+    public VideoSegment? ImportVideo(VideoImportResult result, TimeSpan? insertAt = null)
     {
         var project = new Project
         {
@@ -297,9 +376,67 @@ public class ProjectService
             CaptureType = CaptureTargetType.Monitor,
         };
 
-        // AppendRecording already mirrors "no current project → make this the primary" via
-        // SetProject, so importing is also a valid way to START a project.
-        AppendRecording(project);
+        // Importing is also a valid way to START a project; in that case the imported clip is
+        // the primary base-track segment because there is no existing edit to cover.
+        if (CurrentProject is null || CurrentTimeline is null)
+        {
+            SetProject(project);
+            return CurrentTimeline?.Segments
+                .OfType<VideoSegment>()
+                .FirstOrDefault(s => string.Equals(
+                    s.VideoFilePath, project.VideoFilePath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var segment = AddProjectSourceAndCreateSegment(project);
+        new InsertSegmentOnOverlayTrackOperation(segment, insertAt ?? CurrentTimeline.PlayheadPosition)
+            .Execute(CurrentTimeline);
+
+        MarkDirty();
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
+        return segment;
+    }
+
+    /// <summary>
+    /// Registers a new recording/import as a project source and returns the segment that will
+    /// be placed on either the base track or an overlay lane by the caller.
+    /// </summary>
+    private VideoSegment AddProjectSourceAndCreateSegment(Project newRecording)
+    {
+        CurrentProject!.Sources.Add(new RecordingSource
+        {
+            Id = newRecording.Id,
+            VideoFilePath = newRecording.VideoFilePath,
+            CursorDataFilePath = newRecording.CursorDataFilePath,
+            WebcamFilePath = newRecording.WebcamFilePath,
+            KeyboardDataFilePath = newRecording.KeyboardDataFilePath,
+            AudioFilePaths = newRecording.AudioFilePaths,
+            Duration = newRecording.Duration,
+            Width = newRecording.Width,
+            Height = newRecording.Height,
+            Fps = newRecording.Fps,
+            MouseToVideoOffsetSeconds = newRecording.MouseToVideoOffsetSeconds,
+            AudioToVideoOffsetSeconds = newRecording.AudioToVideoOffsetSeconds,
+            CropOffsetX = newRecording.CropOffsetX,
+            CropOffsetY = newRecording.CropOffsetY,
+            DpiScale = newRecording.DpiScale,
+            CaptureType = newRecording.CaptureType,
+        });
+
+        return CreateVideoSegmentFromProject(newRecording);
+    }
+
+    /// <summary>
+    /// Treats a recording append as "continue recording" only when the playhead is already at
+    /// the tail; mid-timeline appends are overlay inserts so existing edits do not ripple.
+    /// </summary>
+    private static bool ShouldAppendRecordingToBaseTrack(TimelineModel timeline)
+    {
+        var end = timeline.DisplayDuration;
+        if (end <= TimeSpan.Zero) return true;
+
+        var fps = timeline.Fps > 0 ? timeline.Fps : 30;
+        var oneFrame = TimeSpan.FromSeconds(1.0 / fps);
+        return timeline.PlayheadPosition >= end - oneFrame;
     }
 
     /// <summary>

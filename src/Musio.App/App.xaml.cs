@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Musio_App.Pages;
 using Musio_App.Services;
 using Musio.Core.Diagnostics;
@@ -27,6 +28,8 @@ public partial class App : Application
     private GlobalHotkeyService? _hotkeyService;
     private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
+    private bool _promptingUnsavedChanges;
+    private bool _dismissalConfirmed;
     private System.Threading.Timer? _quiesceTimer;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
@@ -573,6 +576,13 @@ public partial class App : Application
             InitializeTray();
         }
 
+        // Subscribed unconditionally, and deliberately NOT inside InitializeTray: a document
+        // instance has no tray, so if this rode along with it, opening a .musio from Explorer,
+        // editing it and clicking X would discard every change with no prompt — the single
+        // most common edit flow. The handler already copes with there being no tray (it lets
+        // the close proceed rather than stranding an unreachable process).
+        mainWindow.AppWindow.Closing += OnWindowClosing;
+
         // A redirect that landed while the window was still being built. Queued rather
         // than called directly so it runs after OnLaunched has finished wiring up.
         if (focusOwed)
@@ -605,7 +615,6 @@ public partial class App : Application
             _trayService.ShowWindowRequested += OnShowWindowRequested;
             _trayService.StartRecordingRequested += OnStartRecordingRequested;
             _trayService.ExitRequested += OnExitRequested;
-            _window.AppWindow.Closing += OnWindowClosing;
 
             // Tell the shell a tray affordance exists, so hide-to-tray is safe.
             if (_shell is not null) _shell.IsTrayAvailable = true;
@@ -793,6 +802,11 @@ public partial class App : Application
 
     private void OnExitRequested(object? sender, EventArgs e)
     {
+        // Exiting from the tray skips the window entirely, so it is the one shutdown route
+        // that can discard edits without the user ever seeing the window again.
+        if (TryPromptUnsavedChanges(afterSaveDecision: () => BeginQuiesce(timeoutMs: 2000)))
+            return;
+
         // User-initiated exit shares the same shutdown routine as OS
         // quiesce so the two paths can't drift; a slightly longer
         // timeout gives the dispatcher more room to drain cleanly when
@@ -805,12 +819,131 @@ public partial class App : Application
         // Never block an OS- or user-initiated exit.
         if (_isExiting || _window is null) return;
 
+        // Dismissing the window with unsaved edits asks first. The close has to be cancelled
+        // outright because AppWindowClosingEventArgs is evaluated synchronously — there is no
+        // deferral, so the dialog cannot be awaited "inside" the close. The prompt therefore
+        // re-drives whichever dismissal the user originally asked for once they answer.
+        if (TryPromptUnsavedChanges(afterSaveDecision: DismissMainWindow))
+        {
+            args.Cancel = true;
+            return;
+        }
+
         // If the tray isn't available we have no way to bring the app
         // back, so let the close proceed instead of stranding the process.
         if (_trayService is null) return;
 
         // User clicked the window's X — minimize to tray.
         args.Cancel = true;
+        HideMainWindowToTray();
+    }
+
+    /// <summary>
+    /// Shows the "save your changes?" prompt when the project is dirty, and returns true when
+    /// it took ownership of the dismissal — in which case the caller must abort its own
+    /// shutdown and let <paramref name="afterSaveDecision"/> resume it.
+    /// </summary>
+    /// <remarks>
+    /// Returns false (and does nothing) when there is nothing to lose, so the ordinary
+    /// close/exit paths stay exactly as they were. <c>_promptingUnsavedChanges</c> guards
+    /// against a second prompt while one is already on screen: the X remains clickable behind
+    /// a <see cref="ContentDialog"/>, and the tray's Exit item certainly is.
+    /// </remarks>
+    private bool TryPromptUnsavedChanges(Action afterSaveDecision)
+    {
+        if (_isExiting || _dismissalConfirmed) return false;
+        if (_promptingUnsavedChanges) return true;
+        if (!ProjectService.Instance.HasUnsavedChanges) return false;
+        if (_window?.Content?.XamlRoot is null) return false;
+
+        _promptingUnsavedChanges = true;
+        _ = RunUnsavedChangesPromptAsync(afterSaveDecision);
+        return true;
+    }
+
+    private async Task RunUnsavedChangesPromptAsync(Action afterSaveDecision)
+    {
+        try
+        {
+            var root = _window?.Content?.XamlRoot;
+            if (root is null) return;
+
+            var dialog = new ContentDialog
+            {
+                Title = "You have unsaved changes",
+                Content = "Do you want to save this project before closing?",
+                PrimaryButtonText = "Save",
+                SecondaryButtonText = "Don't save",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = root,
+            };
+
+            var choice = await dialog.ShowAsync();
+
+            // Cancel (and Esc, which reports the same) means "keep working" — the window
+            // stays exactly as it was.
+            if (choice == ContentDialogResult.None) return;
+
+            if (choice == ContentDialogResult.Primary
+                && !await ProjectSaveCoordinator.SaveAsync(root, _window))
+            {
+                // The save failed, or the user backed out of the file picker. Treat that as
+                // Cancel rather than closing anyway: the edits are still unsaved and this is
+                // the last moment they can be rescued.
+                return;
+            }
+
+            // Cleared BEFORE the dismissal runs, and replaced by a one-shot "already asked"
+            // flag: closing the window re-raises Closing synchronously, and a still-set
+            // prompting flag would cancel that close outright — leaving a window that can
+            // never be shut.
+            _promptingUnsavedChanges = false;
+            _dismissalConfirmed = true;
+            try
+            {
+                afterSaveDecision();
+            }
+            finally
+            {
+                // Only meaningful for the hide-to-tray route, where the window outlives the
+                // dismissal and must ask again the next time it is closed.
+                _dismissalConfirmed = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Most likely another ContentDialog is already open (export/import progress),
+            // which WinUI rejects outright. Abandon the dismissal rather than proceeding:
+            // continuing here would discard the edit session precisely because the prompt
+            // that exists to protect it failed. The window stays open and the user can try
+            // again once the other dialog is gone.
+            DiagLog.Write("Shell", $"Unsaved-changes prompt failed; dismissal abandoned: {ex}");
+        }
+        finally
+        {
+            _promptingUnsavedChanges = false;
+        }
+    }
+
+    /// <summary>
+    /// Performs the dismissal the user originally asked for, now that the save question has
+    /// been answered: hide to tray when there is a tray to come back from, otherwise close.
+    /// </summary>
+    private void DismissMainWindow()
+    {
+        if (_trayService is not null)
+        {
+            HideMainWindowToTray();
+            return;
+        }
+
+        try { _window?.Close(); } catch { BeginQuiesce(); }
+    }
+
+    private void HideMainWindowToTray()
+    {
+        if (_window is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         NativeMethods.ShowWindow(hwnd, SW_HIDE);
     }

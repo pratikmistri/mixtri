@@ -32,6 +32,22 @@
             GotFocus="PlaybackChrome_GotFocus"
             LostFocus="PlaybackChrome_LostFocus">
             <Button
+                x:Name="GoToStartButton"
+                Click="GoToStart_Click"
+                Width="40"
+                Height="40"
+                Background="Transparent"
+                BorderBrush="Transparent"
+                CornerRadius="20"
+                Padding="0"
+                AutomationProperties.Name="Go to start (Home)"
+                ToolTipService.ToolTip="Go to start (Home)">
+                <FontIcon
+                    Glyph="&#xE892;"
+                    Foreground="{ThemeResource OverlayForegroundBrush}"
+                    FontSize="18" />
+            </Button>
+            <Button
                 x:Name="PlayPauseButton"
                 Click="PlayPause_Click"
                 Width="40"
@@ -43,6 +59,22 @@
                 <FontIcon
                     x:Name="PlayPauseIcon"
                     Glyph="&#xE768;"
+                    Foreground="{ThemeResource OverlayForegroundBrush}"
+                    FontSize="18" />
+            </Button>
+            <Button
+                x:Name="GoToEndButton"
+                Click="GoToEnd_Click"
+                Width="40"
+                Height="40"
+                Background="Transparent"
+                BorderBrush="Transparent"
+                CornerRadius="20"
+                Padding="0"
+                AutomationProperties.Name="Go to end (End)"
+                ToolTipService.ToolTip="Go to end (End)">
+                <FontIcon
+                    Glyph="&#xE893;"
                     Foreground="{ThemeResource OverlayForegroundBrush}"
                     FontSize="18" />
             </Button>

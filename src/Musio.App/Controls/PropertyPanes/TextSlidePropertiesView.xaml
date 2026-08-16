@@ -254,6 +254,36 @@
                        TextTrimming="CharacterEllipsis" />
         </StackPanel>
 
+        <!-- Animation window: last, because it tunes the text animation chosen at the top
+             against the finished slide, and its ranges depend on the slide duration. -->
+        <StackPanel Spacing="10">
+            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInAtSlider"
+                x:FieldModifier="public"
+                Header="Text in at (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutBySlider"
+                x:FieldModifier="public"
+                Header="Text out by (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInRampSlider"
+                x:FieldModifier="public"
+                Header="In ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutRampSlider"
+                x:FieldModifier="public"
+                Header="Out ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+        </StackPanel>
+
         <Button
             x:Name="RemoveSlideButton"
             x:FieldModifier="public"

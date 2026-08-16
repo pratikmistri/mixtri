@@ -74,13 +74,31 @@ internal sealed class TimelineSnapshot
 /// <see cref="TimelineModel.RecalculateSegmentPositions"/>, matching what every call site did
 /// before this type existed.
 /// </summary>
+/// <remarks>
+/// The snapshot is shallow — it holds the same segment instances the model does — so the list
+/// order alone is not enough to restore state. <see cref="TimelineModel.RecalculateSegmentPositions"/>
+/// re-derives <see cref="TimelineSegment.Start"/> for the base track only; an overlay segment's
+/// <see cref="TimelineSegment.Start"/> and its <see cref="TimelineSegment.TrackIndex"/> are
+/// authored values that nothing would put back, so an operation that moved a clip between tracks
+/// or along an overlay track would survive its own undo. Both are therefore captured per segment
+/// and reapplied before the re-flow.
+/// </remarks>
 internal sealed class SegmentListSnapshot
 {
     private readonly List<TimelineSegment> _segments;
+    private readonly TimeSpan[] _starts;
+    private readonly int[] _trackIndices;
 
     private SegmentListSnapshot(List<TimelineSegment> segments)
     {
         _segments = segments;
+        _starts = new TimeSpan[segments.Count];
+        _trackIndices = new int[segments.Count];
+        for (int i = 0; i < segments.Count; i++)
+        {
+            _starts[i] = segments[i].Start;
+            _trackIndices[i] = segments[i].TrackIndex;
+        }
     }
 
     /// <summary>Captures a shallow copy (same element references) of <paramref name="model"/>'s segments.</summary>
@@ -89,6 +107,12 @@ internal sealed class SegmentListSnapshot
     /// <summary>Replaces <paramref name="model"/>'s segments with the captured list and recalculates positions.</summary>
     public void Restore(TimelineModel model)
     {
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            _segments[i].Start = _starts[i];
+            _segments[i].TrackIndex = _trackIndices[i];
+        }
+
         model.Segments.Clear();
         model.Segments.AddRange(_segments);
         model.RecalculateSegmentPositions();

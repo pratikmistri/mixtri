@@ -110,7 +110,32 @@ The single most-churned area. The process is **PerMonitorV2**, which is the key 
   `XAML_E_LAYOUT_CYCLE` (HRESULT 0x802B000A) when the page is navigated to. Look brushes up at
   runtime from `Application.Current.Resources` (keyed by `ConverterParameter`) instead.
 
-## Playbook: Frame-style / compositor coordinate model (settled after 10 rounds)
+## Playbook: Transient UI revealed by a drag gesture (timeline drop-hint lane)
+
+Three rounds of rework, all on the same lane. The rules generalise to any affordance a drag
+reveals:
+
+- **Latch it for the duration of the gesture.** Reveal it when the drag first reaches for it,
+  then hold it until the pointer is released — never re-evaluate its existence per pointer
+  sample. Anything that changes layout under a live pointer gets ONE chance to grow and one to
+  shrink (`TimelineControl._hintLaneLatched` / `HintLaneRequested`). Keep the "would the drop
+  land here right now" state separate, driving only the highlight (`ShowOverlayDropHint`).
+- **Hysteresis is for noise, not for intent.** A dead band can absorb the jitter of a hand
+  holding still (~0.75 of a lane); it can never be widened enough to absorb the drift of a hand
+  sweeping sideways to position something without also making the target unreachable on purpose.
+  If you find yourself widening a dead band to fix churn, latch instead.
+- **A gesture that changes the layout must not measure itself against that layout.** Resolve the
+  target from how far the pointer has TRAVELLED (`_segmentDragStartY - y`), never from where it
+  now sits — revealing the lane shifts every row under a stationary cursor.
+- **Animate the SIZE, don't toggle existence**, and scale the row's padding by the same reveal
+  fraction — an unscaled pad exceeds a part-open band, yields a negative clip height, and makes
+  the dragged block vanish for the first frames. Draw the lane's contents in a layer clipped to
+  the band and scaled to its opacity. Skip the fold-away when the drop actually created the
+  lane: `UndoRedoManager.Execute` is synchronous, so the real row already occupies that height.
+- **During a segment drag invalidate ONLY `VideoTrackCanvas`**, not `InvalidateAll()` — ten
+  canvases with filmstrips and waveforms repainted per pointer sample is a visible stutter.
+
+
 
 - **`BackgroundCompositor.CalculateOutputSize` is identity `(w, h)`** — padding insets WITHIN the
   canvas and never grows it. The output canvas AR is driven only by the target aspect ratio.

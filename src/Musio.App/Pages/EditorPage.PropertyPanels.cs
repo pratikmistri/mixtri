@@ -60,6 +60,10 @@ public sealed partial class EditorPage
 
     private TextBox SlideTextBox => PropertiesPanel.TextSlide.SlideTextBox;
     private ComboBox SlideAnimationCombo => PropertiesPanel.TextSlide.SlideAnimationCombo;
+    private Slider SlideTextInAtSlider => PropertiesPanel.TextSlide.SlideTextInAtSlider;
+    private Slider SlideTextOutBySlider => PropertiesPanel.TextSlide.SlideTextOutBySlider;
+    private Slider SlideTextInRampSlider => PropertiesPanel.TextSlide.SlideTextInRampSlider;
+    private Slider SlideTextOutRampSlider => PropertiesPanel.TextSlide.SlideTextOutRampSlider;
     private ComboBox SlideFontCombo => PropertiesPanel.TextSlide.SlideFontCombo;
     private NumberBox SlideDurationBox => PropertiesPanel.TextSlide.SlideDurationBox;
     private NumberBox SlideFontSizeBox => PropertiesPanel.TextSlide.SlideFontSizeBox;
@@ -208,6 +212,10 @@ public sealed partial class EditorPage
         // Text slide
         SlideTextBox.TextChanged += SlideTextBox_TextChanged;
         SlideAnimationCombo.SelectionChanged += SlideAnimationCombo_SelectionChanged;
+        SlideTextInAtSlider.ValueChanged += SlideTextWindowSlider_ValueChanged;
+        SlideTextOutBySlider.ValueChanged += SlideTextWindowSlider_ValueChanged;
+        SlideTextInRampSlider.ValueChanged += SlideTextRampSlider_ValueChanged;
+        SlideTextOutRampSlider.ValueChanged += SlideTextRampSlider_ValueChanged;
         SlideFontCombo.SelectionChanged += SlideFontCombo_SelectionChanged;
         SlideDurationBox.ValueChanged += SlideDurationBox_ValueChanged;
         SlideFontSizeBox.ValueChanged += SlideFontSizeBox_ValueChanged;
