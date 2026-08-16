@@ -1415,6 +1415,11 @@ public sealed partial class EditorPage
         // almost every tick, so a single cached frame no longer helps — see the remarks on
         // ComposePreviewFrameAtOffsetAsync). There is nothing left to invalidate here; the next
         // dissolve tick simply recomposes from the now-current slide state.
+        // Several slide property handlers mutate the segment directly instead of going
+        // through UndoRedoManager, so the edit signal that normally rides on it never fires
+        // for them. This is the one call they all share.
+        ProjectService.Instance.MarkDirty();
+
         Timeline.InvalidateAllCanvases();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }

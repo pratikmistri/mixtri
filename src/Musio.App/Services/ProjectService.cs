@@ -34,8 +34,62 @@ public class ProjectService
     /// project bound to the old project's file.
     /// </summary>
     public bool IsSaveInFlight { get; private set; }
-    public CompositionConfig CurrentComposition { get; set; } = new();
+
+    private CompositionConfig _currentComposition = new();
+
+    /// <summary>
+    /// The project-wide composition (background, cursor, motion, aspect ratio…).
+    /// </summary>
+    /// <remarks>
+    /// Assigning a DIFFERENT config counts as an unsaved edit — this property is the single
+    /// place every style control writes through, so tracking it here catches all of them
+    /// without each handler having to remember. The equality check matters: the preview
+    /// rebuild path re-assigns the same config on load, and a plain "any assignment is an
+    /// edit" rule would mark a freshly opened project dirty before the user touched it.
+    /// <see cref="CompositionConfig"/> is a record, so this is a value comparison.
+    /// </remarks>
+    public CompositionConfig CurrentComposition
+    {
+        get => _currentComposition;
+        set
+        {
+            if (Equals(_currentComposition, value)) return;
+            _currentComposition = value;
+            MarkDirty();
+        }
+    }
+
     public TimelineModel? CurrentTimeline { get; set; }
+
+    /// <summary>
+    /// True when the project has edits that have not been written to its <c>.musio</c> file.
+    /// Drives the save prompt shown when the window is dismissed.
+    /// </summary>
+    public bool HasUnsavedChanges { get; private set; }
+
+    /// <summary>Raised whenever <see cref="HasUnsavedChanges"/> flips.</summary>
+    public event EventHandler? UnsavedChangesChanged;
+
+    /// <summary>
+    /// Records that the project differs from its saved file. Safe to call repeatedly; only a
+    /// transition raises <see cref="UnsavedChangesChanged"/>.
+    /// </summary>
+    public void MarkDirty()
+    {
+        // Nothing to lose until there is a project, so a dirty flag before one exists would
+        // only produce a save prompt with nothing behind it.
+        if (CurrentProject is null || HasUnsavedChanges) return;
+        HasUnsavedChanges = true;
+        UnsavedChangesChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Records that the project now matches its saved file (saved, opened, or replaced).</summary>
+    public void MarkSaved()
+    {
+        if (!HasUnsavedChanges) return;
+        HasUnsavedChanges = false;
+        UnsavedChangesChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     /// <summary>
     /// Path of the <c>.musio</c> file this project was opened from or last saved to,
@@ -121,7 +175,13 @@ public class ProjectService
             // that file with the wrong project's content. The package itself was
             // written correctly either way, so the recents entry is still accurate.
             if (ReferenceEquals(CurrentProject, project))
+            {
                 CurrentPackagePath = packagePath;
+                // Guarded by the same check as the rebind above: if an open completed while
+                // this save was running, the project on screen is NOT the one just written
+                // and its own edits are still unsaved.
+                MarkSaved();
+            }
 
             RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
         }
@@ -167,6 +227,10 @@ public class ProjectService
             }
 
             RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
+
+            // Assigning CurrentComposition above may have flagged a change; a project that
+            // was just loaded from disk is by definition in sync with it.
+            MarkSaved();
 
             ProjectChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -215,6 +279,12 @@ public class ProjectService
             };
         }
 
+        // A brand-new recording has no EDITS yet, only content, so it does not start dirty —
+        // the save prompt is for work the user did, not for the act of recording. The capture
+        // defaults applied just above are ours, not theirs, and would otherwise make every
+        // monitor recording look modified the moment it opened.
+        MarkSaved();
+
         ProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -246,6 +316,9 @@ public class ProjectService
                 .Execute(CurrentTimeline);
         }
 
+        // Executed directly rather than through UndoRedoManager, so the edit signal that
+        // normally rides on it does not fire here.
+        MarkDirty();
         ProjectChanged?.Invoke(this, EventArgs.Empty);
         return segment;
     }
@@ -300,6 +373,7 @@ public class ProjectService
         new InsertSegmentOnOverlayTrackOperation(segment, insertAt ?? CurrentTimeline.PlayheadPosition)
             .Execute(CurrentTimeline);
 
+        MarkDirty();
         ProjectChanged?.Invoke(this, EventArgs.Empty);
         return segment;
     }

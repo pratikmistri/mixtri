@@ -1458,24 +1458,11 @@ public sealed partial class EditorPage : Page
 
     private async Task<string?> PickSavePathAsync(string projectName)
     {
-        var picker = new Windows.Storage.Pickers.FileSavePicker
-        {
-            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-            SuggestedFileName = SanitizeFileName(projectName),
-        };
-        picker.FileTypeChoices.Add("Musio project", [MusioPackage.FileExtension]);
-
-        var window = App.Current.MainAppWindow;
-        if (window is not null)
-        {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-        }
-
         try
         {
-            var file = await picker.PickSaveFileAsync();
-            return file?.Path;
+            // Shared with the save-before-close prompt so the two cannot drift on file type,
+            // default location or name sanitisation.
+            return await ProjectSaveCoordinator.PickSavePathAsync(projectName, App.Current.MainAppWindow);
         }
         catch (Exception ex)
         {
@@ -1505,16 +1492,5 @@ public sealed partial class EditorPage : Page
         {
             System.Diagnostics.Debug.WriteLine($"[EditorPage] Dialog failed: {ex.Message}");
         }
-    }
-
-    private static string SanitizeFileName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return "Musio project";
-
-        foreach (var invalid in System.IO.Path.GetInvalidFileNameChars())
-            name = name.Replace(invalid, '-');
-
-        return name;
     }
 }

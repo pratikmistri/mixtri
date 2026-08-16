@@ -20,6 +20,7 @@ public partial class EditorViewModel : ObservableObject
         };
         _undoRedoManager = new UndoRedoManager(_model);
         _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
+        _undoRedoManager.EditPerformed += OnEditPerformed;
 
         ProjectService.Instance.ProjectChanged += OnProjectChanged;
     }
@@ -144,16 +145,26 @@ public partial class EditorViewModel : ObservableObject
         if (timeline is null) return;
 
         _undoRedoManager.StateChanged -= OnUndoRedoStateChanged;
+        _undoRedoManager.EditPerformed -= OnEditPerformed;
 
         _model = timeline;
         _undoRedoManager = new UndoRedoManager(_model);
         _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
+        _undoRedoManager.EditPerformed += OnEditPerformed;
 
         OnPropertyChanged(nameof(Model));
         OnPropertyChanged(nameof(UndoRedoManager));
         OnUndoRedoStateChanged(this, EventArgs.Empty);
         ModelReloaded?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// Every undoable timeline edit funnels through here, which is what makes the
+    /// unsaved-changes prompt on window close reliable without each of the ~50 call sites
+    /// having to remember to flag it.
+    /// </summary>
+    private void OnEditPerformed(object? sender, EventArgs e) =>
+        ProjectService.Instance.MarkDirty();
 
     /// <summary>
     /// Unsubscribes from singleton and long-lived event sources to prevent
@@ -163,6 +174,7 @@ public partial class EditorViewModel : ObservableObject
     {
         ProjectService.Instance.ProjectChanged -= OnProjectChanged;
         _undoRedoManager.StateChanged -= OnUndoRedoStateChanged;
+        _undoRedoManager.EditPerformed -= OnEditPerformed;
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)

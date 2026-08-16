@@ -22,6 +22,7 @@ public class UndoRedoManager
         _undoStack.Push(operation);
         _redoStack.Clear();
         StateChanged?.Invoke(this, EventArgs.Empty);
+        EditPerformed?.Invoke(this, EventArgs.Empty);
     }
 
     public void Undo()
@@ -31,6 +32,7 @@ public class UndoRedoManager
         operation.Undo(_model);
         _redoStack.Push(operation);
         StateChanged?.Invoke(this, EventArgs.Empty);
+        EditPerformed?.Invoke(this, EventArgs.Empty);
     }
 
     public void Redo()
@@ -40,6 +42,7 @@ public class UndoRedoManager
         operation.Execute(_model);
         _undoStack.Push(operation);
         StateChanged?.Invoke(this, EventArgs.Empty);
+        EditPerformed?.Invoke(this, EventArgs.Empty);
     }
 
     public void Clear()
@@ -50,4 +53,16 @@ public class UndoRedoManager
     }
 
     public event EventHandler? StateChanged;
+
+    /// <summary>
+    /// Raised when the user actually changed the timeline — an execute, an undo or a redo.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately narrower than <see cref="StateChanged"/>, which also fires from
+    /// <see cref="Clear"/> so the undo/redo buttons refresh when a project is loaded.
+    /// Unsaved-changes tracking must not treat that as an edit, or every freshly opened
+    /// project would immediately look dirty. Note an undo back to the original state still
+    /// counts as an edit here: this is a "something happened" signal, not a content hash.
+    /// </remarks>
+    public event EventHandler? EditPerformed;
 }
