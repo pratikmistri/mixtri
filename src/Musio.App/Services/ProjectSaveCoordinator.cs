@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Musio.Core.Diagnostics;
 using Musio.Core.Projects;
+using Musio_App.Helpers;
 
 namespace Musio_App.Services;
 
@@ -45,7 +46,7 @@ public static class ProjectSaveCoordinator
             DiagLog.Write("Shell", $"Save before close failed: {ex}");
             try
             {
-                await Helpers.DialogHelper.ShowErrorAsync(root, "Could not save project", ex.Message);
+                await DialogHelper.ShowErrorAsync(root, "Could not save project", ex.Message);
             }
             catch
             {
