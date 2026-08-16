@@ -47,62 +47,6 @@
             </ComboBox>
         </StackPanel>
 
-        <StackPanel Spacing="8">
-            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
-            <Grid ColumnSpacing="10">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Spacing="6">
-                    <TextBlock Text="Text in at" Style="{StaticResource PropertyHintStyle}" />
-                    <NumberBox
-                        x:Name="SlideTextInAtBox"
-                        x:FieldModifier="public"
-                        Minimum="0"
-                        Maximum="30"
-                        SpinButtonPlacementMode="Inline"
-                        SmallChange="0.1" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Spacing="6">
-                    <TextBlock Text="Text out by" Style="{StaticResource PropertyHintStyle}" />
-                    <NumberBox
-                        x:Name="SlideTextOutByBox"
-                        x:FieldModifier="public"
-                        Minimum="0"
-                        Maximum="30"
-                        SpinButtonPlacementMode="Inline"
-                        SmallChange="0.1" />
-                </StackPanel>
-            </Grid>
-            <Grid ColumnSpacing="10">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Spacing="6">
-                    <TextBlock Text="In ramp" Style="{StaticResource PropertyHintStyle}" />
-                    <NumberBox
-                        x:Name="SlideTextInRampBox"
-                        x:FieldModifier="public"
-                        Minimum="0"
-                        Maximum="30"
-                        SpinButtonPlacementMode="Inline"
-                        SmallChange="0.1" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Spacing="6">
-                    <TextBlock Text="Out ramp" Style="{StaticResource PropertyHintStyle}" />
-                    <NumberBox
-                        x:Name="SlideTextOutRampBox"
-                        x:FieldModifier="public"
-                        Minimum="0"
-                        Maximum="30"
-                        SpinButtonPlacementMode="Inline"
-                        SmallChange="0.1" />
-                </StackPanel>
-            </Grid>
-        </StackPanel>
-
         <StackPanel Spacing="6">
             <TextBlock Text="Font" Style="{StaticResource PropertyLabelStyle}" />
             <ComboBox
@@ -308,6 +252,36 @@
             <TextBlock x:Name="SlideImagePathText" x:FieldModifier="public"
                        Style="{StaticResource PropertyHintStyle}"
                        TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <!-- Animation window: last, because it tunes the text animation chosen at the top
+             against the finished slide, and its ranges depend on the slide duration. -->
+        <StackPanel Spacing="10">
+            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInAtSlider"
+                x:FieldModifier="public"
+                Header="Text in at (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutBySlider"
+                x:FieldModifier="public"
+                Header="Text out by (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInRampSlider"
+                x:FieldModifier="public"
+                Header="In ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutRampSlider"
+                x:FieldModifier="public"
+                Header="Out ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
         </StackPanel>
 
         <Button

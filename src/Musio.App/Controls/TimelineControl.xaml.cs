@@ -605,10 +605,37 @@ public sealed partial class TimelineControl : UserControl
             VideoTrackCanvas.Height = height;
     }
 
-    private static double VideoTrackHeight(TimelineModel? model)
+    private double VideoTrackHeight(TimelineModel? model)
     {
-        int trackCount = Math.Max(1, model?.VideoTrackCount ?? 1);
+        int trackCount = VideoDisplayTrackCount(model);
         return BaseVideoTrackHeight + (trackCount - 1) * OverlayVideoTrackHeight;
+    }
+
+    /// <summary>
+    /// True while a segment is actively being dragged, which is when an extra empty overlay
+    /// lane is revealed as a drop target.
+    /// </summary>
+    private bool ShowOverlayDropHint => _dragMode == DragMode.SegmentBody && _segmentDragMoved;
+
+    /// <summary>
+    /// Number of video lanes to lay out: the tracks the model actually uses, plus one
+    /// transient empty lane while a segment is being dragged.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TimelineModel.VideoTrackCount"/> counts only tracks that currently hold a
+    /// segment, so a project with nothing on an overlay track reports 1 and the base lane is
+    /// the only row on screen. A segment could then never be dragged UP to a parallel track:
+    /// there is no row above it to aim at, and <see cref="VideoTrackIndexFromY"/> has no y
+    /// range that resolves to anything but the base track. Rather than permanently parking an
+    /// empty lane on every timeline, the destination is revealed only once a drag is under
+    /// way — the moment it becomes actionable — and folds away again on release. It is a
+    /// layout concept only and is never persisted; a lane the user drops nothing into simply
+    /// stops being drawn.
+    /// </remarks>
+    private int VideoDisplayTrackCount(TimelineModel? model)
+    {
+        int used = Math.Max(1, model?.VideoTrackCount ?? 1);
+        return ShowOverlayDropHint ? used + 1 : used;
     }
 
     /// <summary>
@@ -1174,16 +1201,41 @@ public sealed partial class TimelineControl : UserControl
     {
         var textLabelColor = Color.FromArgb(255, 255, 255, 255);
         var snapGuideColor = Color.FromArgb(255, 255, 214, 10);  // Amber snap line
-        int trackCount = Math.Max(1, model.VideoTrackCount);
+        int trackCount = VideoDisplayTrackCount(model);
+
+        // The topmost lane is the transient drop hint whenever it sits above every track the
+        // model actually uses. Drawn as a dashed outline rather than a solid row so it reads
+        // as "release here to create V<n>" instead of an empty track that already exists.
+        int hintTrack = ShowOverlayDropHint && trackCount > Math.Max(1, model.VideoTrackCount)
+            ? trackCount - 1
+            : -1;
 
         for (int track = trackCount - 1; track >= 0; track--)
         {
-            var (rowY, _, _) = VideoTrackRowBounds(track, trackCount);
+            var (rowY, rowH, rowPad) = VideoTrackRowBounds(track, trackCount);
             ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
+
+            if (track == hintTrack)
+            {
+                bool armed = _segmentDragCurrentTrackIndex == track;
+                var hintColor = armed
+                    ? VideoClipSelectedBorder
+                    : Color.FromArgb(120, 255, 255, 255);
+                float hintY = rowY + rowPad;
+                float hintH = Math.Max(2, rowH - rowPad * 2);
+                using var dashed = new Microsoft.Graphics.Canvas.Geometry.CanvasStrokeStyle
+                {
+                    DashStyle = Microsoft.Graphics.Canvas.Geometry.CanvasDashStyle.Dash,
+                };
+                if (armed)
+                    ds.FillRoundedRectangle(1, hintY, Math.Max(2, w - 2), hintH, 4, 4, Color.FromArgb(28, 255, 255, 255));
+                ds.DrawRoundedRectangle(1, hintY, Math.Max(2, w - 2), hintH, 4, 4, hintColor, 1.2f, dashed);
+            }
+
             if (track > 0)
             {
                 ds.DrawText(
-                    $"V{track}",
+                    track == hintTrack ? $"V{track}  ·  drop to create" : $"V{track}",
                     6, rowY + 3,
                     TrackHintTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
@@ -1330,9 +1382,9 @@ public sealed partial class TimelineControl : UserControl
     /// Resolves the video lane under the pointer before segment hit-testing so overlapping
     /// full-frame blocks on different tracks are independently selectable.
     /// </summary>
-    private static int VideoTrackIndexFromY(TimelineModel model, double y)
+    private int VideoTrackIndexFromY(TimelineModel model, double y)
     {
-        int trackCount = Math.Max(1, model.VideoTrackCount);
+        int trackCount = VideoDisplayTrackCount(model);
         double overlayBandHeight = (trackCount - 1) * OverlayVideoTrackHeight;
         if (y >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
 
@@ -1567,7 +1619,7 @@ public sealed partial class TimelineControl : UserControl
             s.Id == _selectedSegmentId && s.TrackIndex == trackIndex);
         if (slide is null) return (null, SegmentHitTarget.None);
 
-        int trackCount = Math.Max(1, model.VideoTrackCount);
+        int trackCount = VideoDisplayTrackCount(model);
         var (segX1, segX2) = GetSegmentDisplayX(slide);
         var (rowY, rowH, rowPad) = VideoTrackRowBounds(trackIndex, trackCount);
         float segY = rowY + rowPad;
@@ -1827,7 +1879,7 @@ public sealed partial class TimelineControl : UserControl
             return (null, false);
 
         float w = (float)VideoTrackCanvas.ActualWidth;
-        int trackCount = Math.Max(1, model.VideoTrackCount);
+        int trackCount = VideoDisplayTrackCount(model);
         var (rowY, rowH, pad) = VideoTrackRowBounds(TimelineModel.BaseTrackIndex, trackCount);
         float clipY = rowY + pad;
         float clipH = rowH - pad * 2;
@@ -4516,6 +4568,9 @@ public sealed partial class TimelineControl : UserControl
                     break;
                 }
                 _segmentDragMoved = true;
+                // The hint lane only exists while dragging, so the canvas has to grow before
+                // the pointer can resolve into it.
+                UpdateVideoTrackHeight();
                 _segmentDragCurrentTrackIndex = VideoTrackIndexFromY(model, y);
                 SetCursor(InputSystemCursorShape.SizeAll);
 
@@ -4584,6 +4639,9 @@ public sealed partial class TimelineControl : UserControl
         _dragMode = DragMode.None;
         SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
+        // _dragMode is cleared above, so the hint lane is gone: fold the canvas back down —
+        // or keep the extra row, if the drop actually populated a new track.
+        UpdateVideoTrackHeight();
         InvalidateAll();
     }
 
@@ -4717,7 +4775,7 @@ public sealed partial class TimelineControl : UserControl
     {
         segmentId = null;
         int trackIndex = VideoTrackIndexFromY(model, y);
-        int trackCount = Math.Max(1, model.VideoTrackCount);
+        int trackCount = VideoDisplayTrackCount(model);
         var (rowY, rowH, rowPad) = VideoTrackRowBounds(trackIndex, trackCount);
         float clipY = rowY + rowPad;
         float clipH = rowH - rowPad * 2;

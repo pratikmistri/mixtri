@@ -1124,7 +1124,7 @@ public sealed partial class EditorPage
         InvalidatePreview();
     }
 
-    private void SlideTextWindowBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    private void SlideTextWindowSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
     {
         if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
@@ -1134,10 +1134,10 @@ public sealed partial class EditorPage
 
         var pane = PropertiesPanel.TextSlide;
         var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
-        var inStart = ReferenceEquals(sender, pane.SlideTextInAtBox)
+        var inStart = ReferenceEquals(sender, pane.SlideTextInAtSlider)
             ? newValue
             : slide.ResolveTextInStart();
-        var outEnd = ReferenceEquals(sender, pane.SlideTextOutByBox)
+        var outEnd = ReferenceEquals(sender, pane.SlideTextOutBySlider)
             ? newValue
             : slide.ResolveTextOutEnd();
 
@@ -1147,7 +1147,7 @@ public sealed partial class EditorPage
         RefreshSlidePreview();
     }
 
-    private void SlideTextRampBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    private void SlideTextRampSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
     {
         if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
@@ -1157,10 +1157,10 @@ public sealed partial class EditorPage
 
         var pane = PropertiesPanel.TextSlide;
         var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
-        var inDuration = ReferenceEquals(sender, pane.SlideTextInRampBox)
+        var inDuration = ReferenceEquals(sender, pane.SlideTextInRampSlider)
             ? newValue
             : slide.TextInDuration;
-        var outDuration = ReferenceEquals(sender, pane.SlideTextOutRampBox)
+        var outDuration = ReferenceEquals(sender, pane.SlideTextOutRampSlider)
             ? newValue
             : slide.TextOutDuration;
 
@@ -1261,10 +1261,10 @@ public sealed partial class EditorPage
         if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
 
         var pane = PropertiesPanel.TextSlide;
-        if (pane.SlideTextInAtBox is null ||
-            pane.SlideTextOutByBox is null ||
-            pane.SlideTextInRampBox is null ||
-            pane.SlideTextOutRampBox is null)
+        if (pane.SlideTextInAtSlider is null ||
+            pane.SlideTextOutBySlider is null ||
+            pane.SlideTextInRampSlider is null ||
+            pane.SlideTextOutRampSlider is null)
         {
             return;
         }
@@ -1273,15 +1273,18 @@ public sealed partial class EditorPage
         _suppressSlideEvents = true;
         try
         {
-            var max = Math.Max(0, slide.Duration.TotalSeconds);
-            pane.SlideTextInAtBox.Maximum = max;
-            pane.SlideTextOutByBox.Maximum = max;
-            pane.SlideTextInRampBox.Maximum = max;
-            pane.SlideTextOutRampBox.Maximum = max;
-            pane.SlideTextInAtBox.Value = slide.ResolveTextInStart().TotalSeconds;
-            pane.SlideTextOutByBox.Value = slide.ResolveTextOutEnd().TotalSeconds;
-            pane.SlideTextInRampBox.Value = slide.ResolveTextInDuration().TotalSeconds;
-            pane.SlideTextOutRampBox.Value = slide.ResolveTextOutDuration().TotalSeconds;
+            // A Slider with Maximum == Minimum is degenerate (the thumb cannot move and the
+            // control reports 0), so a zero-length slide still gets a usable range. Maximum
+            // is assigned before Value because the Slider clamps Value into the range.
+            var max = Math.Max(0.1, slide.Duration.TotalSeconds);
+            pane.SlideTextInAtSlider.Maximum = max;
+            pane.SlideTextOutBySlider.Maximum = max;
+            pane.SlideTextInRampSlider.Maximum = max;
+            pane.SlideTextOutRampSlider.Maximum = max;
+            pane.SlideTextInAtSlider.Value = slide.ResolveTextInStart().TotalSeconds;
+            pane.SlideTextOutBySlider.Value = slide.ResolveTextOutEnd().TotalSeconds;
+            pane.SlideTextInRampSlider.Value = slide.ResolveTextInDuration().TotalSeconds;
+            pane.SlideTextOutRampSlider.Value = slide.ResolveTextOutDuration().TotalSeconds;
         }
         finally
         {
