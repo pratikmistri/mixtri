@@ -830,7 +830,34 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
                 break;
         }
 
+        AnchorOverlayOutPoint(model.Segments[_index], _previous);
         return true;
+    }
+
+    /// <summary>
+    /// Keeps a head-trimmed OVERLAY segment's out-point where it was, by moving its
+    /// <see cref="TimelineSegment.Start"/> forward to absorb the duration change.
+    /// </summary>
+    /// <remarks>
+    /// Trimming only ever rewrites <see cref="TimelineSegment.Duration"/> (plus the source
+    /// range). On the base chain that is enough, because
+    /// <see cref="TimelineModel.RecalculateSegmentPositions"/> re-derives every base
+    /// <see cref="TimelineSegment.Start"/> afterwards and the timeline ripples. An overlay
+    /// segment's start is authored, so the re-flow deliberately leaves it alone — which meant
+    /// a left-edge trim held the start still and pulled the RIGHT edge in instead. When that
+    /// overlay was the last-ending segment it also shortened
+    /// <see cref="TimelineModel.TotalSegmentsDuration"/>, so the whole scene got shorter
+    /// while the user was dragging the other end of the clip.
+    /// Start is clamped at zero; a head pulled out past the timeline origin can only extend
+    /// the out-point, since there is nowhere further left to go.
+    /// </remarks>
+    private void AnchorOverlayOutPoint(TimelineSegment trimmed, TimelineSegment previous)
+    {
+        if (!_fromStart || previous.TrackIndex == TimelineModel.BaseTrackIndex) return;
+
+        var outPoint = previous.Start + previous.Duration;
+        var newStart = outPoint - trimmed.Duration;
+        trimmed.Start = newStart < TimeSpan.Zero ? TimeSpan.Zero : newStart;
     }
 
     private VideoSegment TrimVideo(VideoSegment video)

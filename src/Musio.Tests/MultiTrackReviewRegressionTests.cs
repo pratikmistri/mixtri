@@ -173,4 +173,114 @@ public sealed class MultiTrackReviewRegressionTests
             Assert.IsFalse(model.IsCoveredByHigherTrack(b, t));
         }
     }
+
+    // ── Head-trimming an overlay clip must move its head, not its tail ──
+
+    /// <summary>
+    /// Trimming rewrites Duration and lets <c>RecalculateSegmentPositions</c> re-derive the
+    /// base chain's starts. An overlay start is authored and deliberately not re-flowed, so a
+    /// left-edge trim used to hold the start still and pull the RIGHT edge in — dragging one
+    /// end of the clip moved the other. When the overlay was the last-ending segment it also
+    /// shortened the whole scene, because TotalSegmentsDuration is max-End.
+    /// </summary>
+    [TestMethod]
+    public void TrimOverlaySegmentFromStart_MovesTheHeadAndKeepsTheOutPoint()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 6));
+        var overlay = Video(6, 2, track: 1);
+        model.Segments.Add(overlay);
+
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.TotalSegmentsDuration);
+
+        new TrimSegmentEdgeOperation(overlay.Id, fromStart: true, TimeSpan.FromSeconds(1.5)).Execute(model);
+
+        var trimmed = model.Segments.First(s => s.Id == overlay.Id);
+        Assert.AreEqual(TimeSpan.FromSeconds(1.5), trimmed.Duration);
+        Assert.AreEqual(TimeSpan.FromSeconds(6.5), trimmed.Start, "The head should move right, not the tail left.");
+        Assert.AreEqual(TimeSpan.FromSeconds(8), trimmed.End, "The out-point must not move.");
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.TotalSegmentsDuration, "The scene must not get shorter.");
+    }
+
+    /// <summary>Growing an overlay's head backwards also holds the out-point.</summary>
+    [TestMethod]
+    public void TrimOverlaySegmentFromStart_Growing_AlsoKeepsTheOutPoint()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 6));
+        var overlay = new VideoSegment
+        {
+            VideoFilePath = "video.mp4",
+            Start = TimeSpan.FromSeconds(6),
+            Duration = TimeSpan.FromSeconds(2),
+            SourceStart = TimeSpan.FromSeconds(3),
+            SourceDuration = TimeSpan.FromSeconds(2),
+            TrackIndex = 1,
+        };
+        model.Segments.Add(overlay);
+
+        new TrimSegmentEdgeOperation(overlay.Id, fromStart: true, TimeSpan.FromSeconds(3)).Execute(model);
+
+        var trimmed = model.Segments.First(s => s.Id == overlay.Id);
+        Assert.AreEqual(TimeSpan.FromSeconds(3), trimmed.Duration);
+        Assert.AreEqual(TimeSpan.FromSeconds(5), trimmed.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(8), trimmed.End);
+    }
+
+    /// <summary>Trimming the out-edge of an overlay leaves the head alone, as before.</summary>
+    [TestMethod]
+    public void TrimOverlaySegmentFromEnd_LeavesTheStartAlone()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 6));
+        var overlay = Video(6, 2, track: 1);
+        model.Segments.Add(overlay);
+
+        new TrimSegmentEdgeOperation(overlay.Id, fromStart: false, TimeSpan.FromSeconds(1.5)).Execute(model);
+
+        var trimmed = model.Segments.First(s => s.Id == overlay.Id);
+        Assert.AreEqual(TimeSpan.FromSeconds(6), trimmed.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(1.5), trimmed.Duration);
+    }
+
+    /// <summary>
+    /// The base chain keeps its ripple behaviour: a head trim there shortens the timeline,
+    /// because the re-flow closes the gap. Only overlay tracks anchor the out-point.
+    /// </summary>
+    [TestMethod]
+    public void TrimBaseSegmentFromStart_StillRipples()
+    {
+        var model = new TimelineModel();
+        var a = Video(0, 4);
+        var b = Video(4, 6);
+        model.Segments.Add(a);
+        model.Segments.Add(b);
+
+        new TrimSegmentEdgeOperation(b.Id, fromStart: true, TimeSpan.FromSeconds(4)).Execute(model);
+        model.RecalculateSegmentPositions();
+
+        var trimmed = model.Segments.First(s => s.Id == b.Id);
+        Assert.AreEqual(TimeSpan.FromSeconds(4), trimmed.Start, "The base chain stays contiguous.");
+        Assert.AreEqual(TimeSpan.FromSeconds(4), trimmed.Duration);
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.TotalSegmentsDuration);
+    }
+
+    /// <summary>Undo restores the overlay's original head position, not just its duration.</summary>
+    [TestMethod]
+    public void TrimOverlaySegmentFromStart_Undo_RestoresStartAndDuration()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 6));
+        var overlay = Video(6, 2, track: 1);
+        model.Segments.Add(overlay);
+
+        var op = new TrimSegmentEdgeOperation(overlay.Id, fromStart: true, TimeSpan.FromSeconds(1.5));
+        op.Execute(model);
+        op.Undo(model);
+
+        var restored = model.Segments.First(s => s.Id == overlay.Id);
+        Assert.AreEqual(TimeSpan.FromSeconds(6), restored.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), restored.Duration);
+        Assert.AreEqual(1, restored.TrackIndex);
+    }
 }
