@@ -981,15 +981,24 @@ public sealed partial class EditorPage : Page
 
         UpdateZoomRegionCursorMarker(composed);
 
-        // Dim everything outside the region. On a composed frame that is the whole rendered
-        // image including its background — dimming only the source area would leave the
-        // padding bright and imply it survives the zoom. On the raw fallback it is the frame
-        // rect, as before.
+        // Dim everything the zoom will crop away. That area is scope-dependent: a frame zoom
+        // magnifies the whole canvas, so its background and padding go too, while a source
+        // zoom leaves them at a fixed size — dimming them there would claim they get cropped
+        // when they survive untouched. The compositor owns that distinction (RegionCanvasRect).
+        // On the raw fallback it stays the frame rect, as before.
         double fX, fY, fW, fH;
-        if (composed)
+        var regionCanvas = composed ? renderer?.RegionCanvasRect : null;
+        if (composed && regionCanvas is { Width: > 0, Height: > 0 } canvasRect
+            && renderer is { OutputWidth: > 0, OutputHeight: > 0 })
         {
             var layout = Preview.FrameLayoutRect;
-            fX = layout.X; fY = layout.Y; fW = layout.Width; fH = layout.Height;
+            double outToCanvasX = layout.Width / renderer.OutputWidth;
+            double outToCanvasY = layout.Height / renderer.OutputHeight;
+
+            fX = layout.X + canvasRect.X * outToCanvasX;
+            fY = layout.Y + canvasRect.Y * outToCanvasY;
+            fW = canvasRect.Width * outToCanvasX;
+            fH = canvasRect.Height * outToCanvasY;
         }
         else
         {

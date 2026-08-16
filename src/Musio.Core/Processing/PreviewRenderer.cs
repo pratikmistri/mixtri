@@ -51,6 +51,12 @@ public class PreviewRenderer : IDisposable
         => _compositor?.ComputeRegionViewport(zoomLevel, centerXNormalized, centerYNormalized) ?? default;
 
     /// <summary>
+    /// The area of the composed output a zoom region is chosen within.
+    /// See <see cref="FrameCompositor.RegionCanvasRect"/>.
+    /// </summary>
+    public Rect RegionCanvasRect => _compositor?.RegionCanvasRect ?? default;
+
+    /// <summary>
     /// The region of the composed output a zoom would show, in output pixels.
     /// See <see cref="FrameCompositor.ComputeRegionOutputRect"/>.
     /// </summary>

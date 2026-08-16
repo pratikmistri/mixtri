@@ -2079,3 +2079,18 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   the replacement tests assert.
 - **Verified**: suite **1078 passed, 3 skipped, 0 failed** (5 new geometry tests; the round-trip test
   fails against the pre-fix bounds).
+
+## Zoom-region picker: the dim mask is scope-dependent too (PR #89 review)
+
+- **Feature/area**: zoom-region picker dim overlay.
+- **Finding (valid)**: the composed-mode dim covered the whole `Preview.FrameLayoutRect`. Under
+  `ZoomScope.Source` the background and padding are NOT cropped — they stay at a fixed size — so
+  dimming them told the user they would be lost.
+- **Fix**: `FrameCompositor.RegionCanvasRect` — the whole canvas for `ZoomScope.Frame`, the source
+  area for `ZoomScope.Source`. The editor maps it through the preview layout instead of branching on
+  scope itself, which keeps every scope-dependent rule in the compositor beside the ones the
+  earlier rounds moved there (`ComputeRegionOutputRect`, `ComputeRegionCenterBounds`).
+- **Pattern worth noting**: this is the third scope-dependent rule in the picker (visible region,
+  centre bounds, dim mask). If a fourth appears, they belong behind one scope-aware type rather than
+  three parallel members.
+- **Verified**: suite **1080 passed, 3 skipped, 0 failed**.

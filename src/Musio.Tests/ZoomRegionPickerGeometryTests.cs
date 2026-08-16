@@ -327,6 +327,35 @@ public class ZoomRegionPickerGeometryTests
     }
 
     [TestMethod]
+    public async Task RegionCanvasRect_FrameScope_IsTheWholeCanvas()
+    {
+        using var compositor = await BuildAsync(Config(padding: 40));
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var canvas = compositor.RegionCanvasRect;
+
+        // A frame zoom magnifies the background and padding along with the source, so the
+        // picker dims all of it outside the region.
+        Assert.AreEqual(0.0, canvas.X);
+        Assert.AreEqual(0.0, canvas.Y);
+        Assert.AreEqual(640.0, canvas.Width);
+        Assert.AreEqual(360.0, canvas.Height);
+    }
+
+    [TestMethod]
+    public async Task RegionCanvasRect_SourceScope_IsJustTheSourceArea()
+    {
+        var config = Config(padding: 40) with { ZoomScope = ZoomScope.Source };
+        using var compositor = await BuildAsync(config);
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        // A source zoom leaves the background and padding at a fixed size, so dimming them
+        // would claim they get cropped when they survive untouched.
+        Assert.AreEqual(compositor.SourceAreaRect, compositor.RegionCanvasRect);
+        Assert.IsTrue(compositor.RegionCanvasRect.Width < 640, "padding must be excluded");
+    }
+
+    [TestMethod]
     public async Task SuppressZoom_ComposesTheSameFrameAsAnUnzoomedClip()
     {
         if (!HasDevice()) { Assert.Inconclusive("No Win2D device."); return; }

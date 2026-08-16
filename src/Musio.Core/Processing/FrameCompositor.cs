@@ -165,6 +165,27 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// The area of the composed output a zoom region is chosen WITHIN, in output pixels:
+    /// the whole canvas under <see cref="ZoomScope.Frame"/> (which magnifies background and
+    /// padding along with the source), and just the source area under
+    /// <see cref="ZoomScope.Source"/> (which leaves that chrome at a fixed size).
+    /// <para>
+    /// The picker dims everything in here that falls outside the region, so getting the scope
+    /// wrong would tell the user their background is about to be cropped when it is not.
+    /// </para>
+    /// </summary>
+    public Rect RegionCanvasRect
+    {
+        get
+        {
+            if (!_initialized) return default;
+            return _config.ZoomScope == ZoomScope.Frame
+                ? new Rect(0, 0, OutputWidth, OutputHeight)
+                : SourceAreaRect;
+        }
+    }
+
+    /// <summary>
     /// The region of the composed OUTPUT frame that a zoom of <paramref name="zoomLevel"/>
     /// centred on (<paramref name="centerXNormalized"/>, <paramref name="centerYNormalized"/>)
     /// will end up showing, in output pixels.
