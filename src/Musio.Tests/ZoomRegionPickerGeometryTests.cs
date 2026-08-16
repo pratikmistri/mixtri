@@ -202,25 +202,6 @@ public class ZoomRegionPickerGeometryTests
     }
 
     [TestMethod]
-    public async Task ComputeRegionCenterBounds_FrameScope_SpendsPaddingAsSlack()
-    {
-        using var compositor = await BuildAsync(Config(padding: 40));
-        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
-
-        var bounds = compositor.ComputeRegionCenterBounds(2f);
-
-        // Half a viewport in from each edge would be 0.25; the background around the source
-        // area lets the camera go further before it clamps, and the picker has to allow the
-        // same range or its rectangle stops short of what renders.
-        Assert.IsTrue(bounds.MinX > 0 && bounds.MinX < 0.25,
-            $"expected the centre to reach past 0.25, got {bounds.MinX}");
-        Assert.IsTrue(bounds.MinY > 0 && bounds.MinY < 0.25,
-            $"expected the centre to reach past 0.25, got {bounds.MinY}");
-        Assert.AreEqual(1.0 - bounds.MinX, bounds.MaxX, 1e-6, "bounds are symmetric for a centred crop anchor");
-        Assert.AreEqual(1.0 - bounds.MinY, bounds.MaxY, 1e-6, "bounds are symmetric for a centred crop anchor");
-    }
-
-    [TestMethod]
     public async Task ComputeRegionCenterBounds_SourceScope_IsHalfAViewportFromEachEdge()
     {
         var config = Config() with { ZoomScope = ZoomScope.Source };
@@ -233,6 +214,116 @@ public class ZoomRegionPickerGeometryTests
         Assert.AreEqual(0.75, bounds.MaxX, 1e-6);
         Assert.AreEqual(0.25, bounds.MinY, 1e-6);
         Assert.AreEqual(0.75, bounds.MaxY, 1e-6);
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionOutputRect_FrameScope_AtRest_IsTheWholeCanvas()
+    {
+        using var compositor = await BuildAsync(Config(padding: 40));
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var outRect = compositor.ComputeRegionOutputRect(1f, 0.5f, 0.5f);
+
+        // 1x renders the canvas untouched, background included; framing only the source area
+        // would claim the padding gets cropped.
+        Assert.AreEqual(0.0, outRect.X);
+        Assert.AreEqual(0.0, outRect.Y);
+        Assert.AreEqual(640.0, outRect.Width);
+        Assert.AreEqual(360.0, outRect.Height);
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionCenterBounds_FrameScope_MinCentre_RendersAtTheClampedEdge()
+    {
+        using var compositor = await BuildAsync(Config(padding: 40));
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var bounds = compositor.ComputeRegionCenterBounds(2f);
+
+        // The invariant that matters: a centre AT the bound must still move the rendered crop.
+        // Push past it by a hair and the crop must not have moved — that is the clamp.
+        var atMin = compositor.ComputeRegionOutputRect(2f, (float)bounds.MinX, 0.5f);
+        var pastMin = compositor.ComputeRegionOutputRect(2f, (float)(bounds.MinX - 0.05), 0.5f);
+        var insideMin = compositor.ComputeRegionOutputRect(2f, (float)(bounds.MinX + 0.05), 0.5f);
+
+        Assert.AreEqual(atMin.X, pastMin.X, 0.5,
+            "a centre below the bound must render identically to the bound, or the bound is too loose");
+        Assert.IsTrue(insideMin.X > atMin.X + 0.5,
+            "a centre above the bound must actually move the crop, or the bound is too tight");
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionCenterBounds_FrameScope_HonoursTheCameraEngineClamp()
+    {
+        using var compositor = await BuildAsync(Config(padding: 40));
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var bounds = compositor.ComputeRegionCenterBounds(2f);
+
+        // AutoZoomEngine clamps the un-narrowed viewport into the source frame before output
+        // space is ever considered, so padding is NOT slack the centre can spend.
+        Assert.AreEqual(0.25, bounds.MinX, 1e-6);
+        Assert.AreEqual(0.75, bounds.MaxX, 1e-6);
+        Assert.AreEqual(0.25, bounds.MinY, 1e-6);
+        Assert.AreEqual(0.75, bounds.MaxY, 1e-6);
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionCenterBounds_CoverCrop_IsTighterThanTheSourceClamp()
+    {
+        using var compositor = await BuildAsync(
+            Config(aspectRatio: AspectRatio.Square1x1, fitMode: FitMode.Cover));
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var bounds = compositor.ComputeRegionCenterBounds(2f);
+
+        // Only the middle 360px of the 640px source survives the 1:1 cover crop, so the
+        // camera saturates well before the source-space 0.25.
+        Assert.IsTrue(bounds.MinX > 0.25, $"expected a tighter bound than 0.25, got {bounds.MinX}");
+        var atMin = compositor.ComputeRegionOutputRect(2f, (float)bounds.MinX, 0.5f);
+        var pastMin = compositor.ComputeRegionOutputRect(2f, (float)(bounds.MinX - 0.05), 0.5f);
+        Assert.AreEqual(atMin.X, pastMin.X, 0.5, "past the bound the rendered crop must not move");
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionOutputRect_SourceScopeWithCoverCrop_StaysOnScreen()
+    {
+        var config = Config(aspectRatio: AspectRatio.Square1x1, fitMode: FitMode.Cover)
+            with { ZoomScope = ZoomScope.Source };
+        using var compositor = await BuildAsync(config);
+        if (compositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        var area = compositor.SourceAreaRect;
+
+        // A centre far outside the cover crop used to extrapolate to a negative X, parking the
+        // rectangle and its handles off the preview.
+        var outRect = compositor.ComputeRegionOutputRect(2f, 0.1f, 0.5f);
+
+        Assert.IsTrue(outRect.X >= area.X - 0.5, $"region {outRect} started left of the source area {area}");
+        Assert.IsTrue(outRect.X + outRect.Width <= area.X + area.Width + 0.5,
+            $"region {outRect} spilled past the source area {area}");
+        Assert.IsTrue(outRect.Width > 0 && outRect.Height > 0, "the region must stay grabbable");
+    }
+
+    [TestMethod]
+    public async Task ComputeRegionOutputRect_CoverCrop_TracksTheCropAnchor()
+    {
+        var centred = Config(aspectRatio: AspectRatio.Square1x1, fitMode: FitMode.Cover);
+        var leftAnchored = centred with { CropAnchorX = 0.0 };
+
+        using var centredCompositor = await BuildAsync(centred);
+        using var anchoredCompositor = await BuildAsync(leftAnchored);
+        if (centredCompositor is null || anchoredCompositor is null) { Assert.Inconclusive("No Win2D device."); return; }
+
+        // The anchor moves which source pixels the canvas shows, so the same normalised centre
+        // must land the rendered crop somewhere else.
+        var centredRect = centredCompositor.ComputeRegionOutputRect(2f, 0.5f, 0.5f);
+        var anchoredRect = anchoredCompositor.ComputeRegionOutputRect(2f, 0.5f, 0.5f);
+
+        Assert.AreEqual(140.0, centredCompositor.RestSourceViewport.X, 0.5);
+        Assert.AreEqual(0.0, anchoredCompositor.RestSourceViewport.X, 0.5);
+        Assert.AreNotEqual(centredRect.X, anchoredRect.X,
+            "a left-anchored cover crop must not frame the same region as a centred one");
     }
 
     [TestMethod]

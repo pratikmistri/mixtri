@@ -1042,18 +1042,14 @@ public sealed partial class EditorPage : Page
         return (halfW, 1.0 - halfW, halfH, 1.0 - halfH);
     }
 
+    /// <summary>
+    /// No-compositor fallback for <see cref="GetCenterBounds"/>: half a viewport in from each
+    /// source edge, aspect-ratio fit included. Deliberately does NOT consult a renderer — the
+    /// only caller reaches here precisely because there is no live compositor to ask, and a
+    /// source-space extent is not the same box as the drawn (scope-aware) rectangle.
+    /// </summary>
     private (double halfW, double halfH) GetNormalizedHalfExtents(double zoom)
     {
-        // Same source as the drawn rectangle (see UpdateZoomRegionRect), so the centre can
-        // never be clamped to a box of a different size than the one on screen.
-        var rendererViewport = RendererForSource(_zoomRegionSourceFile)?.ComputeRegionViewport(
-            (float)zoom, (float)_zoomRegionCenterX, (float)_zoomRegionCenterY);
-        if (rendererViewport is { Width: > 0, Height: > 0 } vp
-            && _zoomRegionSourceW > 0 && _zoomRegionSourceH > 0)
-        {
-            return (vp.Width / _zoomRegionSourceW / 2.0, vp.Height / _zoomRegionSourceH / 2.0);
-        }
-
         double vpW = _zoomRegionSourceW / zoom;
         double vpH = _zoomRegionSourceH / zoom;
 

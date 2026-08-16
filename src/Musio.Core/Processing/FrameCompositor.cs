@@ -186,16 +186,35 @@ public class FrameCompositor : IDisposable
             centerYNormalized * _sourceHeight);
         var viewport1x = ComputeEffectiveViewport(RestZoomState());
 
-        if (_config.ZoomScope == ZoomScope.Frame && state.ZoomLevel > 1.01f)
-            return ComputeCompositeCropRect(state, viewport1x);
+        if (_config.ZoomScope == ZoomScope.Frame)
+        {
+            // At rest the entire canvas renders, background included — reporting only the
+            // source area here would tell the picker the padding gets cropped when it does not.
+            return state.ZoomLevel > 1.01f
+                ? ComputeCompositeCropRect(state, viewport1x)
+                : new Rect(0, 0, OutputWidth, OutputHeight);
+        }
 
         // Source scope: the cropped source is redrawn into the (fixed) source area, so the
         // visible region is that crop mapped through the at-rest source→output transform.
+        // Clipped to the source area because a Cover crop can put the requested region
+        // outside the pixels the at-rest frame shows, and extrapolating past the frame would
+        // park the rectangle (and its handles) off screen.
         var vp = ComputeEffectiveViewport(state);
         var topLeft = MapSourcePointToOutput(new Vector2((float)vp.X, (float)vp.Y), viewport1x);
         double scaleX = _sourceAreaWidth / viewport1x.Width;
         double scaleY = _sourceAreaHeight / viewport1x.Height;
-        return new Rect(topLeft.X, topLeft.Y, vp.Width * scaleX, vp.Height * scaleY);
+        return ClipToSourceArea(
+            new Rect(topLeft.X, topLeft.Y, vp.Width * scaleX, vp.Height * scaleY));
+    }
+
+    private Rect ClipToSourceArea(Rect rect)
+    {
+        double left = Math.Max(rect.X, _sourceAreaOffsetX);
+        double top = Math.Max(rect.Y, _sourceAreaOffsetY);
+        double right = Math.Min(rect.X + rect.Width, _sourceAreaOffsetX + (double)_sourceAreaWidth);
+        double bottom = Math.Min(rect.Y + rect.Height, _sourceAreaOffsetY + (double)_sourceAreaHeight);
+        return new Rect(left, top, Math.Max(0, right - left), Math.Max(0, bottom - top));
     }
 
     /// <summary>
@@ -203,11 +222,17 @@ public class FrameCompositor : IDisposable
     /// the compositor clamps the camera, in the same 0..1 source space as
     /// <see cref="Timeline.ZoomKeyframe.CenterX"/>/<c>CenterY</c>.
     /// <para>
-    /// Not simply "half a viewport in from each edge": under <see cref="ZoomScope.Frame"/> the
-    /// clamp happens in output space, where the background around the source area is slack the
-    /// centre can spend, so the centre legitimately reaches closer to the source edges than the
-    /// source-space arithmetic alone would allow. The picker clamps with this so its rectangle
-    /// stops exactly where the rendered camera does.
+    /// The intersection of TWO clamps, which is the whole subtlety here. Every centre first
+    /// passes through <see cref="AutoZoomEngine.ComputeViewportForCenter"/>, which clamps the
+    /// un-narrowed viewport into the source frame — so half a viewport in from each source edge
+    /// is an outer bound no scope escapes. On top of that, <see cref="ZoomScope.Frame"/> crops
+    /// in OUTPUT space, which under a Cover crop bites first, and <see cref="ZoomScope.Source"/>
+    /// can only usefully frame pixels the at-rest composition actually shows.
+    /// </para>
+    /// <para>
+    /// Taking either clamp alone leaves the picker with a dead zone: the rectangle stops while
+    /// the pointer keeps travelling, because the value it is storing no longer changes what
+    /// renders.
     /// </para>
     /// </summary>
     public (double MinX, double MaxX, double MinY, double MaxY) ComputeRegionCenterBounds(float zoomLevel)
@@ -217,23 +242,40 @@ public class FrameCompositor : IDisposable
         zoomLevel = Math.Max(1f, zoomLevel);
         var viewport1x = ComputeEffectiveViewport(RestZoomState());
 
+        // The camera engine's own clamp: the un-narrowed viewport is srcW/zoom wide, so its
+        // centre lives half of that in from each edge, whatever the scope or fit mode.
+        double minX = 1.0 / (2 * zoomLevel), maxX = 1.0 - minX;
+        double minY = minX, maxY = maxX;
+
         if (_config.ZoomScope == ZoomScope.Frame && zoomLevel > 1.01f)
         {
             double cropW = OutputWidth / (double)zoomLevel;
             double cropH = OutputHeight / (double)zoomLevel;
 
-            return (
-                OutputToNormalizedSourceX(cropW / 2),
-                OutputToNormalizedSourceX(OutputWidth - cropW / 2),
-                OutputToNormalizedSourceY(cropH / 2),
-                OutputToNormalizedSourceY(OutputHeight - cropH / 2));
+            minX = Math.Max(minX, OutputToNormalizedSourceX(cropW / 2));
+            maxX = Math.Min(maxX, OutputToNormalizedSourceX(OutputWidth - cropW / 2));
+            minY = Math.Max(minY, OutputToNormalizedSourceY(cropH / 2));
+            maxY = Math.Min(maxY, OutputToNormalizedSourceY(OutputHeight - cropH / 2));
+        }
+        else
+        {
+            // Source scope keeps the region inside the pixels the at-rest frame shows, which
+            // under a Cover crop is narrower than the source frame.
+            var vp = ComputeEffectiveViewport(
+                _zoomEngine.ComputeViewportForCenter(zoomLevel, _sourceWidth / 2f, _sourceHeight / 2f));
+
+            minX = Math.Max(minX, (viewport1x.X + vp.Width / 2) / _sourceWidth);
+            maxX = Math.Min(maxX, (viewport1x.X + viewport1x.Width - vp.Width / 2) / _sourceWidth);
+            minY = Math.Max(minY, (viewport1x.Y + vp.Height / 2) / _sourceHeight);
+            maxY = Math.Min(maxY, (viewport1x.Y + viewport1x.Height - vp.Height / 2) / _sourceHeight);
         }
 
-        var vp = ComputeEffectiveViewport(
-            _zoomEngine.ComputeViewportForCenter(zoomLevel, _sourceWidth / 2f, _sourceHeight / 2f));
-        double halfX = vp.Width / 2 / _sourceWidth;
-        double halfY = vp.Height / 2 / _sourceHeight;
-        return (halfX, 1.0 - halfX, halfY, 1.0 - halfY);
+        // An extreme ratio can leave no room at all; collapse to the one reachable point
+        // rather than handing back an inverted range that Math.Clamp would throw on.
+        if (maxX < minX) minX = maxX = (minX + maxX) / 2;
+        if (maxY < minY) minY = maxY = (minY + maxY) / 2;
+
+        return (minX, maxX, minY, maxY);
 
         double OutputToNormalizedSourceX(double outputX) =>
             ((outputX - _sourceAreaOffsetX) * viewport1x.Width / _sourceAreaWidth + viewport1x.X) / _sourceWidth;

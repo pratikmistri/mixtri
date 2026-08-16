@@ -2046,3 +2046,36 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   mid-drag.
 - **Verified**: suite **1073 passed, 3 skipped, 0 failed**; ARM64 Release rebuilt, re-registered and
   relaunched; user confirmed the composed-preview picker behaviour from issue #87 works on device.
+
+## Zoom-region picker: review round — two clamps, not one
+
+- **Feature/area**: `FrameCompositor.ComputeRegionCenterBounds` / `ComputeRegionOutputRect`, plus the
+  editor callers.
+- **The bug the review caught**: `ComputeRegionCenterBounds` derived the Frame-scope range purely
+  from the OUTPUT-space clamp in `ComputeCompositeCropRect`, and claimed padding was slack the
+  centre could spend. It is not: every centre passes through
+  `AutoZoomEngine.ComputeViewportForCenter` FIRST, which clamps the un-narrowed viewport into the
+  source frame — so `1/(2·zoom)` is an outer bound no scope escapes. The loose bound gave the picker
+  a dead zone (rect frozen while the pointer kept travelling ~7% of the frame) and, under
+  `FitMode.Contain` with a mismatched target AR, bounds outside 0..1 entirely.
+- **The rule to keep**: the reachable centre range is the INTERSECTION of the camera engine's
+  source-space clamp and the scope's own clamp — output-space for `ZoomScope.Frame` (which bites
+  first under a Cover crop, e.g. 0.359 vs 0.25 on a 1:1 crop of 16:9), rest-viewport containment for
+  `ZoomScope.Source`. Neither alone is right.
+- **Two smaller ones from the same review**: `ComputeRegionOutputRect` extrapolated the Source-scope
+  rect through the at-rest transform, so a region outside a Cover crop mapped to a negative X and
+  parked the handles off screen (now clipped to `SourceAreaRect`); and Frame scope at `zoom <= 1.01`
+  fell into the source-area branch, drawing the padding as if it would be cropped when 1x renders
+  the whole canvas (now returns the full canvas).
+- **A second clamp model had survived in the UI**: `ZoomLevelCombo_TextSubmitted` still used
+  `GetNormalizedHalfExtents`, so typing a zoom level re-clamped the centre by different rules than
+  the drag paths and jumped the framing. It now goes through `GetCenterBounds`;
+  `GetNormalizedHalfExtents` is documented as the no-compositor fallback only (its renderer branch
+  was both dead on that path and the wrong model — a source viewport, while the drawn rect is
+  scope-aware).
+- **Test lesson**: the original bounds test asserted `MinX < 0.25`, i.e. it enshrined the bug. The
+  assertion that actually holds is a ROUND TRIP — a centre at the bound must move the rendered crop,
+  a centre past it must not. That form catches both a too-loose and a too-tight bound, and it is what
+  the replacement tests assert.
+- **Verified**: suite **1078 passed, 3 skipped, 0 failed** (5 new geometry tests; the round-trip test
+  fails against the pre-fix bounds).
