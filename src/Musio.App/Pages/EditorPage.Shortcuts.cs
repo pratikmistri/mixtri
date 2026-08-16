@@ -164,6 +164,49 @@ public sealed partial class EditorPage
         args.Handled = true;
     }
 
+    private void GoToStartAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        GoToStart();
+        args.Handled = true;
+    }
+
+    private void GoToEndAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (IsFocusOnInteractiveControl()) return;
+
+        GoToEnd();
+        args.Handled = true;
+    }
+
+    private void GoToStart() => SeekPreviewAndTimeline(TimeSpan.Zero);
+
+    private void GoToEnd()
+    {
+        var model = ViewModel.Model;
+        var duration = model.DisplayDuration;
+        if (duration <= TimeSpan.Zero)
+        {
+            SeekPreviewAndTimeline(TimeSpan.Zero);
+            return;
+        }
+
+        var fps = model.Fps > 0 ? model.Fps : 30;
+        var target = duration - TimeSpan.FromSeconds(1.0 / fps);
+        if (target < TimeSpan.Zero) target = TimeSpan.Zero;
+        SeekPreviewAndTimeline(target);
+    }
+
+    private void SeekPreviewAndTimeline(TimeSpan target)
+    {
+        Preview.Pause();
+        Timeline.PlayheadPosition = target;
+        Preview.PlayheadPosition = target;
+        ViewModel.Model.PlayheadPosition = target;
+        _ = UpdatePreviewFrameAsync(target, force: true);
+    }
+
     private bool IsFocusOnInteractiveControl()
     {
         DependencyObject? node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
@@ -313,9 +356,7 @@ public sealed partial class EditorPage
 
         var playhead = ViewModel.Model.PlayheadPosition;
 
-        // Use the split-and-insert operation which splits the video segment
-        // at the playhead, keeping audio in sync
-        var operation = new SplitAndInsertTextSlideOperation(playhead, slide);
+        var operation = new InsertSegmentOnOverlayTrackOperation(slide, playhead);
         ViewModel.UndoRedoManager.Execute(operation);
 
         // Select the new slide and show properties
@@ -323,7 +364,7 @@ public sealed partial class EditorPage
         Timeline.SelectSegment(slide.Id);
         ShowTextSlidePanel(slide);
 
-        Timeline.InvalidateAllCanvases();
+        InvalidatePreview();
     }
 
     /// <summary>
@@ -468,6 +509,10 @@ public sealed partial class EditorPage
         }
         if (file is null) return;
 
+        // Captured before the transcode: the playhead can move while a multi-second import
+        // runs, and the imported clip belongs where the user was when they asked for it.
+        var insertAt = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();
@@ -485,10 +530,18 @@ public sealed partial class EditorPage
         {
             var result = await VideoImportService.ImportAsync(file.Path, null, progress, cts.Token);
 
-            // The import staying on this page means the editor must be told to reload; appending
-            // fires ProjectService.ProjectChanged, which the EditorViewModel turns into a
+            // The import staying on this page means the editor must be told to reload; the
+            // service fires ProjectChanged, which the EditorViewModel turns into a
             // ModelReloaded the page already handles (timeline swap + preview re-init).
-            ProjectService.Instance.ImportVideo(result);
+            var inserted = ProjectService.Instance.ImportVideo(result, insertAt);
+            if (inserted is not null)
+            {
+                _selectedPrimarySegmentId = inserted.Id;
+                _selectedTextSlideId = null;
+                Timeline?.SelectSegment(inserted.Id);
+                HideTextSlidePanel();
+                InvalidatePreview();
+            }
         }
         catch (OperationCanceledException)
         {

@@ -12,6 +12,12 @@ namespace Musio.Core.Timeline;
 [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
 public class TimelineModel
 {
+    /// <summary>
+    /// The base track is the only track that keeps the historical contiguous reflow behaviour;
+    /// higher tracks are absolute-time overlays that cover, rather than shift, the base edit.
+    /// </summary>
+    public const int BaseTrackIndex = 0;
+
     public TimeSpan Duration { get; set; }
     public int Fps { get; set; } = 30;
     public TimeSpan PlayheadPosition { get; set; }
@@ -24,10 +30,39 @@ public class TimelineModel
 
     /// <summary>
     /// Ordered list of segments on the output timeline.
-    /// Each segment is either a <see cref="VideoSegment"/> or a <see cref="TextSlideSegment"/>.
-    /// When empty, the legacy <see cref="Clips"/> / trim-based pipeline is used.
+    /// Base-track segments are reflowed contiguously in list order; overlay-track segments keep
+    /// absolute starts and render above lower tracks. When empty, the legacy
+    /// <see cref="Clips"/> / trim-based pipeline is used.
     /// </summary>
     public List<TimelineSegment> Segments { get; } = [];
+
+    /// <summary>
+    /// Full-frame segments on the contiguous base track, in list order. This is the timeline
+    /// chain used for transitions and source↔output mapping so overlay inserts never destabilize
+    /// cursor, click, or zoom visualizations tied to the original recording.
+    /// </summary>
+    [JsonIgnore]
+    public IEnumerable<TimelineSegment> BaseSegments => Segments.Where(s => s.TrackIndex == BaseTrackIndex);
+
+    /// <summary>
+    /// Full-frame overlay segments ordered by visual lane and absolute start; overlays are
+    /// independent of the base-track reflow and may intentionally overlap.
+    /// </summary>
+    [JsonIgnore]
+    public IEnumerable<TimelineSegment> OverlaySegments =>
+        Segments.Where(s => s.TrackIndex > BaseTrackIndex)
+            .OrderBy(s => s.TrackIndex)
+            .ThenBy(s => s.Start);
+
+    /// <summary>
+    /// Number of full-frame video lanes that need to be displayed. It is always at least one
+    /// so an empty or legacy project still has a base lane.
+    /// </summary>
+    [JsonIgnore]
+    public int VideoTrackCount =>
+        Segments.Count == 0
+            ? 1
+            : Math.Max(1, Segments.Max(s => s.TrackIndex) + 1);
 
     /// <summary>
     /// Camera (webcam) overlay segments on the independent camera track. Each
@@ -144,13 +179,13 @@ public class TimelineModel
     public string? PrimaryVideoFilePath { get; set; }
 
     /// <summary>
-    /// Total output duration computed from segments.
+    /// Total output duration computed from the furthest segment end across all tracks.
     /// Falls back to <see cref="EffectiveDuration"/> when no segments exist.
     /// </summary>
     [JsonIgnore]
     public TimeSpan TotalSegmentsDuration =>
         Segments.Count > 0
-            ? Segments.Aggregate(TimeSpan.Zero, (acc, s) => acc + s.Duration)
+            ? Segments.Aggregate(TimeSpan.Zero, (acc, s) => s.End > acc ? s.End : acc)
             : EffectiveDuration;
 
     // Trim handles
@@ -269,50 +304,219 @@ public class TimelineModel
         Segments.Count > 0 ? TotalSegmentsDuration : Duration;
 
     /// <summary>
-    /// Recalculates <see cref="TimelineSegment.Start"/> for every segment so they
-    /// are contiguous (no gaps, no overlaps). Call after insert, delete, or reorder.
+    /// Recalculates <see cref="TimelineSegment.Start"/> only for base-track segments so they
+    /// remain contiguous, while overlay tracks keep their authored absolute starts. Call after
+    /// segment edits so the legacy base chain stays magnetic without turning overlays into
+    /// accidental ripple edits.
     /// </summary>
     public void RecalculateSegmentPositions()
     {
         var position = TimeSpan.Zero;
         foreach (var segment in Segments)
         {
-            segment.Start = position;
-            position += segment.Duration;
+            if (segment.TrackIndex == BaseTrackIndex)
+            {
+                segment.Start = position;
+                position += segment.Duration;
+            }
+            else if (segment.Start < TimeSpan.Zero)
+            {
+                segment.Start = TimeSpan.Zero;
+            }
         }
     }
 
     /// <summary>
-    /// Finds the segment and local offset for a given output time position.
+    /// Finds the topmost full-frame segment for a given output time position. Higher tracks win,
+    /// and segments on the same track use later list position as the tie-break so z-order is
+    /// deterministic without a second stacking property.
     /// </summary>
     public (TimelineSegment? Segment, TimeSpan LocalOffset) GetSegmentAtTime(TimeSpan outputTime)
     {
+        TimelineSegment? best = null;
+        int bestTrack = int.MinValue;
+
         foreach (var segment in Segments)
         {
             if (outputTime >= segment.Start && outputTime < segment.End)
-                return (segment, outputTime - segment.Start);
+            {
+                if (best is null || segment.TrackIndex >= bestTrack)
+                {
+                    best = segment;
+                    bestTrack = segment.TrackIndex;
+                }
+            }
         }
-        // If at the exact end, return the last segment
-        if (Segments.Count > 0 && outputTime >= Segments[^1].End)
-            return (Segments[^1], Segments[^1].Duration);
+
+        if (best is not null)
+            return (best, outputTime - best.Start);
+
+        // Past the end of every segment: fall back to whichever segment ends LAST, so a
+        // playhead parked at the timeline end resolves to the clip that actually finishes
+        // there. List position is not a proxy for that any more — overlay inserts append to
+        // the list, so `Segments[^1]` is routinely a short clip sitting in the middle.
+        TimelineSegment? latest = null;
+        foreach (var segment in Segments)
+        {
+            if (latest is null
+                || segment.End > latest.End
+                || (segment.End == latest.End && segment.TrackIndex >= latest.TrackIndex))
+            {
+                latest = segment;
+            }
+        }
+
+        if (latest is not null && outputTime >= latest.End)
+            return (latest, latest.Duration);
+
         return (null, TimeSpan.Zero);
     }
 
     /// <summary>
+    /// Finds the base-track segment and local offset for an output time. Transitions and
+    /// source↔output mapping use this contiguous chain so overlay-only edits cannot perturb
+    /// source-time visualizations.
+    /// </summary>
+    public (TimelineSegment? Segment, TimeSpan LocalOffset) GetBaseSegmentAtTime(TimeSpan outputTime)
+    {
+        TimelineSegment? lastBase = null;
+        foreach (var segment in Segments)
+        {
+            if (segment.TrackIndex != BaseTrackIndex) continue;
+            lastBase = segment;
+            if (outputTime >= segment.Start && outputTime < segment.End)
+                return (segment, outputTime - segment.Start);
+        }
+
+        if (lastBase is not null && outputTime >= lastBase.End)
+            return (lastBase, lastBase.Duration);
+        return (null, TimeSpan.Zero);
+    }
+
+    /// <summary>
+    /// Returns true when a strictly higher full-frame track hides <paramref name="segment"/> at
+    /// <paramref name="outputTime"/>. This shared visibility rule is consumed by preview/export
+    /// callers so they agree on which layer is actually visible.
+    /// </summary>
+    public bool IsCoveredByHigherTrack(TimelineSegment segment, TimeSpan outputTime)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+
+        foreach (var candidate in Segments)
+        {
+            if (candidate.TrackIndex <= segment.TrackIndex) continue;
+            if (outputTime >= candidate.Start && outputTime < candidate.End)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that are not
+    /// covered by any higher full-frame track. Covers are coalesced before subtraction so
+    /// overlapping overlays do not create duplicate or inverted visible spans.
+    /// </summary>
+    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> VisibleRanges(TimelineSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+
+        var segmentStart = segment.Start;
+        var segmentEnd = segment.End;
+        if (segmentEnd <= segmentStart)
+            return [];
+
+        var covers = new List<(TimeSpan Start, TimeSpan End)>();
+        foreach (var candidate in Segments)
+        {
+            if (candidate.TrackIndex <= segment.TrackIndex) continue;
+            var coverStart = Max(segmentStart, candidate.Start);
+            var coverEnd = Min(segmentEnd, candidate.End);
+            if (coverStart < coverEnd)
+                covers.Add((coverStart, coverEnd));
+        }
+
+        if (covers.Count == 0)
+            return [(segmentStart, segmentEnd)];
+
+        covers.Sort(static (a, b) =>
+        {
+            int start = a.Start.CompareTo(b.Start);
+            return start != 0 ? start : a.End.CompareTo(b.End);
+        });
+
+        var merged = new List<(TimeSpan Start, TimeSpan End)>();
+        foreach (var cover in covers)
+        {
+            if (merged.Count == 0 || cover.Start > merged[^1].End)
+            {
+                merged.Add(cover);
+                continue;
+            }
+
+            if (cover.End > merged[^1].End)
+                merged[^1] = (merged[^1].Start, cover.End);
+        }
+
+        var visible = new List<(TimeSpan Start, TimeSpan End)>();
+        var cursor = segmentStart;
+        foreach (var cover in merged)
+        {
+            if (cover.Start > cursor)
+                visible.Add((cursor, cover.Start));
+            if (cover.End > cursor)
+                cursor = cover.End;
+        }
+
+        if (cursor < segmentEnd)
+            visible.Add((cursor, segmentEnd));
+        return visible;
+    }
+
+    /// <summary>
+    /// Finds the first overlay track whose half-open range does not intersect an existing
+    /// segment on that track. Touching endpoints are allowed so adjacent overlays do not burn
+    /// extra lanes.
+    /// </summary>
+    public int FindFreeOverlayTrack(TimeSpan start, TimeSpan duration)
+    {
+        var rangeStart = start < TimeSpan.Zero ? TimeSpan.Zero : start;
+        var rangeEnd = rangeStart + (duration < TimeSpan.Zero ? TimeSpan.Zero : duration);
+
+        for (int track = 1; ; track++)
+        {
+            bool collides = false;
+            foreach (var segment in Segments)
+            {
+                if (segment.TrackIndex != track) continue;
+                if (RangesIntersect(rangeStart, rangeEnd, segment.Start, segment.End))
+                {
+                    collides = true;
+                    break;
+                }
+            }
+
+            if (!collides)
+                return track;
+        }
+    }
+
+    /// <summary>
     /// Primary recording's video segments (those carrying cursor/zoom data),
-    /// in their actual order on the output timeline. The timeline order — not the
-    /// recorded source order — is authoritative, so that reordering/moving video
-    /// segments keeps the linked zoom, click, and cursor visualizations in sync.
+    /// in their base-track order on the output timeline. Overlay video segments are excluded
+    /// because they cover the edit visually but do not participate in source↔output mapping for
+    /// cursor, click, or zoom visualization stability.
     /// </summary>
     private IEnumerable<VideoSegment> PrimaryVideoSegments =>
-        Segments.OfType<VideoSegment>()
+        BaseSegments.OfType<VideoSegment>()
             .Where(v => PrimaryVideoFilePath is null ||
                         string.Equals(v.VideoFilePath, PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Maps a source-video time (e.g. a zoom keyframe or cursor timestamp) to its
     /// position on the output timeline, accounting for inserted text slides and
-    /// reordered/trimmed video segments. Identity when no segments exist.
+    /// reordered/trimmed base-track video segments. Overlay segments intentionally do not
+    /// participate. Identity when no segments exist.
     /// Unlike <see cref="TrySourceToOutputTime"/>, this always returns a value,
     /// falling back to the nearest kept segment boundary when the source time has
     /// been trimmed out of the timeline.
@@ -350,7 +554,7 @@ public class TimelineModel
 
     /// <summary>
     /// Attempts to map a source-video time to its position on the output timeline,
-    /// walking segments in their actual timeline order. Returns <c>false</c> when
+    /// walking base-track segments in their actual timeline order. Returns <c>false</c> when
     /// the source time falls outside every kept primary video segment (i.e. it was
     /// trimmed out and has no corresponding output position). Callers that draw
     /// source-time visualizations (zoom/click/cursor) should skip rendering when
@@ -386,14 +590,15 @@ public class TimelineModel
 
     /// <summary>
     /// Inverse of <see cref="SourceToOutputTime"/>: maps an output-timeline time
-    /// to the corresponding source-video time. Returns null when the output time
-    /// falls on a text slide (no underlying source frame).
+    /// to the corresponding base-track source-video time. Returns null when the output time
+    /// falls on a text slide (no underlying source frame); overlay segments are deliberately
+    /// ignored so visualizations remain pinned to the base recording chain.
     /// </summary>
     public TimeSpan? OutputToSourceTime(TimeSpan outputTime)
     {
         if (Segments.Count == 0) return outputTime;
 
-        foreach (var segment in Segments)
+        foreach (var segment in BaseSegments)
         {
             if (outputTime >= segment.Start && outputTime < segment.End)
             {
@@ -409,6 +614,13 @@ public class TimelineModel
         }
         return null;
     }
+
+    private static bool RangesIntersect(TimeSpan aStart, TimeSpan aEnd, TimeSpan bStart, TimeSpan bEnd) =>
+        aStart < bEnd && bStart < aEnd;
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
+
+    private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 
     /// <summary>
     /// Finds the video segment among <paramref name="candidates"/> whose start or end

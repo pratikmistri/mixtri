@@ -47,6 +47,11 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
     private readonly string _newBackgroundColor;
     private readonly TimeSpan _newDuration;
     private readonly TextSlideAnimation _newAnimation;
+    private readonly bool _updatesTextWindow;
+    private readonly TimeSpan _newTextInStart;
+    private readonly TimeSpan? _newTextInDuration;
+    private readonly TimeSpan? _newTextOutEnd;
+    private readonly TimeSpan? _newTextOutDuration;
 
     private string _oldText = "";
     private string _oldFontFamily = "";
@@ -57,6 +62,10 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
     private string _oldBackgroundColor = "";
     private TimeSpan _oldDuration;
     private TextSlideAnimation _oldAnimation;
+    private TimeSpan _oldTextInStart;
+    private TimeSpan? _oldTextInDuration;
+    private TimeSpan? _oldTextOutEnd;
+    private TimeSpan? _oldTextOutDuration;
 
     public override string Description => "Update Text Slide";
 
@@ -66,6 +75,33 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
         bool isBold, bool isItalic,
         string textColor, string backgroundColor,
         TimeSpan duration, TextSlideAnimation animation)
+        : this(segmentId, text, fontFamily, fontSize, isBold, isItalic, textColor, backgroundColor,
+            duration, animation, default, null, null, null, false)
+    {
+    }
+
+    public UpdateTextSlideOperation(
+        string segmentId,
+        string text, string fontFamily, double fontSize,
+        bool isBold, bool isItalic,
+        string textColor, string backgroundColor,
+        TimeSpan duration, TextSlideAnimation animation,
+        TimeSpan textInStart, TimeSpan? textInDuration,
+        TimeSpan? textOutEnd, TimeSpan? textOutDuration)
+        : this(segmentId, text, fontFamily, fontSize, isBold, isItalic, textColor, backgroundColor,
+            duration, animation, textInStart, textInDuration, textOutEnd, textOutDuration, true)
+    {
+    }
+
+    private UpdateTextSlideOperation(
+        string segmentId,
+        string text, string fontFamily, double fontSize,
+        bool isBold, bool isItalic,
+        string textColor, string backgroundColor,
+        TimeSpan duration, TextSlideAnimation animation,
+        TimeSpan textInStart, TimeSpan? textInDuration,
+        TimeSpan? textOutEnd, TimeSpan? textOutDuration,
+        bool updatesTextWindow)
     {
         _segmentId = segmentId;
         _newText = text;
@@ -77,6 +113,11 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
         _newBackgroundColor = backgroundColor;
         _newDuration = duration;
         _newAnimation = animation;
+        _newTextInStart = textInStart;
+        _newTextInDuration = textInDuration;
+        _newTextOutEnd = textOutEnd;
+        _newTextOutDuration = textOutDuration;
+        _updatesTextWindow = updatesTextWindow;
     }
 
     protected override bool ExecuteCore(TimelineModel model)
@@ -93,6 +134,10 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
         _oldBackgroundColor = slide.BackgroundColor;
         _oldDuration = slide.Duration;
         _oldAnimation = slide.Animation;
+        _oldTextInStart = slide.TextInStart;
+        _oldTextInDuration = slide.TextInDuration;
+        _oldTextOutEnd = slide.TextOutEnd;
+        _oldTextOutDuration = slide.TextOutDuration;
 
         slide.Text = _newText;
         slide.FontFamily = _newFontFamily;
@@ -103,6 +148,13 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
         slide.BackgroundColor = _newBackgroundColor;
         slide.Duration = _newDuration;
         slide.Animation = _newAnimation;
+        if (_updatesTextWindow)
+        {
+            slide.TextInStart = _newTextInStart;
+            slide.TextInDuration = _newTextInDuration;
+            slide.TextOutEnd = _newTextOutEnd;
+            slide.TextOutDuration = _newTextOutDuration;
+        }
 
         return true;
     }
@@ -121,6 +173,13 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
         slide.BackgroundColor = _oldBackgroundColor;
         slide.Duration = _oldDuration;
         slide.Animation = _oldAnimation;
+        if (_updatesTextWindow)
+        {
+            slide.TextInStart = _oldTextInStart;
+            slide.TextInDuration = _oldTextInDuration;
+            slide.TextOutEnd = _oldTextOutEnd;
+            slide.TextOutDuration = _oldTextOutDuration;
+        }
 
         return true;
     }
@@ -213,6 +272,249 @@ public class AppendVideoSegmentOperation : SegmentEditOperationBase
     {
         model.Segments.Remove(_segment);
         return true;
+    }
+}
+
+/// <summary>
+/// Inserts a full-frame segment on an absolute overlay track so adding a title card, imported
+/// video, or appended recording covers the base edit instead of splitting and shifting it.
+/// </summary>
+public class InsertSegmentOnOverlayTrackOperation : SegmentEditOperationBase
+{
+    private readonly TimelineSegment _segment;
+    private readonly TimeSpan _start;
+    private readonly int _trackIndex;
+
+    public override string Description => "Insert Segment on Overlay Track";
+
+    /// <summary>
+    /// Creates an overlay insert. A <paramref name="trackIndex"/> of -1 asks the model for the
+    /// first non-colliding overlay lane; any other value is clamped to the overlay range.
+    /// </summary>
+    public InsertSegmentOnOverlayTrackOperation(TimelineSegment segment, TimeSpan start, int trackIndex = -1)
+    {
+        _segment = segment ?? throw new ArgumentNullException(nameof(segment));
+        _start = start;
+        _trackIndex = trackIndex;
+    }
+
+    /// <summary>
+    /// Track used by the last successful execute, so UI code can select the lane that auto
+    /// placement resolved without re-running collision logic.
+    /// </summary>
+    public int ResolvedTrackIndex { get; private set; }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        var start = ClampNonNegative(_start);
+        int track = _trackIndex < 1
+            ? model.FindFreeOverlayTrack(start, _segment.Duration)
+            : Math.Max(1, _trackIndex);
+
+        _segment.TrackIndex = track;
+        _segment.Start = start;
+        ResolvedTrackIndex = track;
+        model.Segments.Add(_segment);
+        return true;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        model.Segments.Remove(_segment);
+        return true;
+    }
+
+    private static TimeSpan ClampNonNegative(TimeSpan value) =>
+        value < TimeSpan.Zero ? TimeSpan.Zero : value;
+}
+
+/// <summary>
+/// Moves a full-frame segment between absolute overlay lanes and the contiguous base chain.
+/// Undo restores a full segment-list snapshot because base reflow and overlay z-order make a
+/// hand-written inverse easy to get subtly wrong.
+/// </summary>
+public class MoveSegmentOnTrackOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly TimeSpan _newStart;
+    private readonly int _newTrackIndex;
+    private SegmentListSnapshot? _snapshot;
+    private bool _didMove;
+
+    public override string Description => "Move Segment on Track";
+
+    /// <summary>
+    /// Creates a track move. Moving to track 0 inserts into the base chain at the position
+    /// implied by <paramref name="newStart"/>; moving off track 0 pins the current absolute
+    /// start so the segment leaves the base chain without jumping.
+    /// </summary>
+    public MoveSegmentOnTrackOperation(string segmentId, TimeSpan newStart, int newTrackIndex)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _newStart = newStart;
+        _newTrackIndex = newTrackIndex;
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _didMove = false;
+
+        int index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (index < 0) return false;
+
+        _snapshot = SegmentListSnapshot.Capture(model);
+        var segment = model.Segments[index];
+        int targetTrack = Math.Max(TimelineModel.BaseTrackIndex, _newTrackIndex);
+
+        if (targetTrack == TimelineModel.BaseTrackIndex)
+        {
+            model.Segments.RemoveAt(index);
+            segment.TrackIndex = TimelineModel.BaseTrackIndex;
+            model.RecalculateSegmentPositions();
+            int insertAt = FindBaseInsertionIndex(model, ClampNonNegative(_newStart));
+            model.Segments.Insert(insertAt, segment);
+        }
+        else
+        {
+            var start = segment.TrackIndex == TimelineModel.BaseTrackIndex
+                ? segment.Start
+                : ClampNonNegative(_newStart);
+            segment.TrackIndex = targetTrack;
+            segment.Start = ClampToNoGap(model, segment, start);
+        }
+
+        _didMove = true;
+        return true;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (!_didMove) return false;
+        _snapshot?.Restore(model);
+        return false;
+    }
+
+    /// <summary>
+    /// Clamps an overlay segment's start so it can never begin after everything else has
+    /// finished. A gap would extend <see cref="TimelineModel.TotalSegmentsDuration"/> (now
+    /// max-End) past the last covered instant, and the export composer resolves every frame
+    /// in that range through <see cref="TimelineModel.GetSegmentAtTime"/> — an uncovered
+    /// frame has no segment to render. Pinning the start to the end of the rest of the
+    /// timeline keeps "the timeline is fully covered from 0 to its duration" an invariant
+    /// rather than something each consumer has to defend against.
+    /// </summary>
+    private static TimeSpan ClampToNoGap(TimelineModel model, TimelineSegment moving, TimeSpan start)
+    {
+        var latestEnd = TimeSpan.Zero;
+        foreach (var other in model.Segments)
+        {
+            if (ReferenceEquals(other, moving)) continue;
+            if (other.End > latestEnd) latestEnd = other.End;
+        }
+
+        return start > latestEnd ? latestEnd : ClampNonNegative(start);
+    }
+
+    private static int FindBaseInsertionIndex(TimelineModel model, TimeSpan newStart)
+    {
+        for (int i = 0; i < model.Segments.Count; i++)
+        {
+            var segment = model.Segments[i];
+            if (segment.TrackIndex == TimelineModel.BaseTrackIndex && newStart <= segment.Start)
+                return i;
+        }
+
+        return model.Segments.Count;
+    }
+
+    private static TimeSpan ClampNonNegative(TimeSpan value) =>
+        value < TimeSpan.Zero ? TimeSpan.Zero : value;
+}
+
+/// <summary>
+/// Changes a text slide's editable animation window without touching the slide duration, so
+/// timeline drag handles get undo/redo while the base track does not reflow unnecessarily.
+/// </summary>
+public class SetTextSlideTextWindowOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly TimeSpan _inStart;
+    private readonly TimeSpan _outEnd;
+    private TimeSpan _oldInStart;
+    private TimeSpan? _oldOutEnd;
+
+    /// <summary>Smallest authored text window allowed by drag handles when the slide is long enough.</summary>
+    public static readonly TimeSpan MinTextWindow = TimeSpan.FromMilliseconds(200);
+
+    public override string Description => "Set Text Slide Text Window";
+
+    /// <summary>
+    /// Creates a text-window edit. Inputs are clamped during execute because drag gestures may
+    /// temporarily cross over or leave the segment bounds.
+    /// </summary>
+    public SetTextSlideTextWindowOperation(string segmentId, TimeSpan inStart, TimeSpan outEnd)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _inStart = inStart;
+        _outEnd = outEnd;
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
+        if (slide is null) return false;
+
+        _oldInStart = slide.TextInStart;
+        _oldOutEnd = slide.TextOutEnd;
+
+        var window = ClampWindow(_inStart, _outEnd, slide.Duration);
+        slide.TextInStart = window.Start;
+        slide.TextOutEnd = window.End;
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
+        if (slide is null) return false;
+
+        slide.TextInStart = _oldInStart;
+        slide.TextOutEnd = _oldOutEnd;
+        return false;
+    }
+
+    private static (TimeSpan Start, TimeSpan End) ClampWindow(TimeSpan inStart, TimeSpan outEnd, TimeSpan duration)
+    {
+        duration = duration < TimeSpan.Zero ? TimeSpan.Zero : duration;
+        if (duration <= TimeSpan.Zero)
+            return (TimeSpan.Zero, TimeSpan.Zero);
+
+        if (duration <= MinTextWindow)
+            return (TimeSpan.Zero, duration);
+
+        var start = Clamp(inStart, TimeSpan.Zero, duration);
+        var end = Clamp(outEnd, TimeSpan.Zero, duration);
+        if (end < start)
+            end = start;
+
+        if (end - start < MinTextWindow)
+        {
+            end = start + MinTextWindow;
+            if (end > duration)
+            {
+                end = duration;
+                start = end - MinTextWindow;
+            }
+        }
+
+        return (start, end);
+    }
+
+    private static TimeSpan Clamp(TimeSpan value, TimeSpan min, TimeSpan max)
+    {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
     }
 }
 

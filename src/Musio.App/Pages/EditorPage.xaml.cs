@@ -218,6 +218,9 @@ public sealed partial class EditorPage : Page
             if (playing) HideTextEditOverlay();
         };
 
+        Preview.GoToStartRequested += (_, _) => GoToStart();
+        Preview.GoToEndRequested += (_, _) => GoToEnd();
+
         // Sync playhead: when timeline scrubs, update preview + audio
         Timeline.RegisterPropertyChangedCallback(
             Controls.TimelineControl.PlayheadPositionProperty,
@@ -358,6 +361,8 @@ public sealed partial class EditorPage : Page
         // Primary-track segment move / ripple-trim events
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+        Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;
+        Timeline.TextSlideWindowChanged += OnTextSlideWindowChanged;
 
         // Camera track events
         Timeline.CameraSegmentSelected += OnCameraSegmentSelected;

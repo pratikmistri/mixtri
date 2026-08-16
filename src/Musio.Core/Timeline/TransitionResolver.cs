@@ -77,6 +77,8 @@ public readonly record struct TransitionResolution(
 /// preview and the exporter — two entirely separate rendering code paths in this repo that have
 /// historically diverged (see <see cref="SlideTransitions"/>'s remarks) — dissolve at identical
 /// instants using identical parameters.
+/// Transitions are resolved only across the contiguous base track; overlay tracks are absolute
+/// full-frame covers, not neighbouring edits that can own a boundary.
 /// </summary>
 /// <remarks>
 /// This class is deliberately pure: no I/O, no Win2D, no UI types. It only reads
@@ -132,7 +134,7 @@ public static class TransitionResolver
         bool ignoreExplicitConfig,
         TimeSpan? legacyDuration)
     {
-        var segments = timeline.Segments;
+        var segments = timeline.BaseSegments.ToList();
 
         int index = -1;
         for (int i = 0; i < segments.Count; i++)

@@ -692,8 +692,13 @@ public sealed partial class EditorPage
             // calls the exact same function, so both pipelines dissolve at identical
             // instants with identical effect/duration/easing. Fully guarded — any failure
             // falls back to the normal render.
+            // The overlay-visibility gate mirrors SegmentFrameComposer exactly: when a
+            // higher track covers this instant the boundary underneath it is not on screen,
+            // so dissolving into it would blend a layer the viewer cannot see.
             var resolution = TransitionResolver.Resolve(model, position);
-            if (resolution.Active)
+            if (resolution.Active
+                && resolution.IncomingSegment is { } incomingSeg
+                && !model.IsCoveredByHigherTrack(incomingSeg, position))
             {
                 CanvasRenderTarget? incoming = null;
                 CanvasRenderTarget? outgoing = null;

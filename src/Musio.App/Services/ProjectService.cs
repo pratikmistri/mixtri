@@ -220,52 +220,40 @@ public class ProjectService
 
     /// <summary>
     /// Appends a new recording (captured as a separate Project) to the current
-    /// project's timeline as an additional <see cref="VideoSegment"/>.
+    /// project's timeline as an additional <see cref="VideoSegment"/>, or inserts it as an
+    /// overlay when the playhead is parked mid-edit so existing segments do not ripple.
     /// </summary>
-    public void AppendRecording(Project newRecording)
+    public VideoSegment? AppendRecording(Project newRecording)
     {
         if (CurrentProject is null || CurrentTimeline is null)
         {
             // No existing project — just set this as the primary
             SetProject(newRecording);
-            return;
+            return CurrentTimeline?.Segments
+                .OfType<VideoSegment>()
+                .FirstOrDefault(s => string.Equals(
+                    s.VideoFilePath, newRecording.VideoFilePath, StringComparison.OrdinalIgnoreCase));
         }
 
-        // Add to sources list
-        var source = new RecordingSource
+        var segment = AddProjectSourceAndCreateSegment(newRecording);
+        if (ShouldAppendRecordingToBaseTrack(CurrentTimeline))
         {
-            Id = newRecording.Id,
-            VideoFilePath = newRecording.VideoFilePath,
-            CursorDataFilePath = newRecording.CursorDataFilePath,
-            WebcamFilePath = newRecording.WebcamFilePath,
-            KeyboardDataFilePath = newRecording.KeyboardDataFilePath,
-            AudioFilePaths = newRecording.AudioFilePaths,
-            Duration = newRecording.Duration,
-            Width = newRecording.Width,
-            Height = newRecording.Height,
-            Fps = newRecording.Fps,
-            MouseToVideoOffsetSeconds = newRecording.MouseToVideoOffsetSeconds,
-            AudioToVideoOffsetSeconds = newRecording.AudioToVideoOffsetSeconds,
-            CropOffsetX = newRecording.CropOffsetX,
-            CropOffsetY = newRecording.CropOffsetY,
-            DpiScale = newRecording.DpiScale,
-            CaptureType = newRecording.CaptureType,
-        };
-        CurrentProject.Sources.Add(source);
-
-        // Create and append a VideoSegment
-        var segment = CreateVideoSegmentFromProject(newRecording);
-        CurrentTimeline.Segments.Add(segment);
-        CurrentTimeline.RecalculateSegmentPositions();
+            new AppendVideoSegmentOperation(segment).Execute(CurrentTimeline);
+        }
+        else
+        {
+            new InsertSegmentOnOverlayTrackOperation(segment, CurrentTimeline.PlayheadPosition)
+                .Execute(CurrentTimeline);
+        }
 
         ProjectChanged?.Invoke(this, EventArgs.Empty);
+        return segment;
     }
 
     /// <summary>
     /// Turns an external video file (already normalised by <see cref="VideoImportService"/>
     /// into a constant-frame-rate H.264 clip plus extracted audio) into a project source and
-    /// appends it to the timeline, exactly as <see cref="AppendRecording"/> does for a captured
-    /// recording.
+    /// inserts it on an overlay track at the requested output time.
     /// </summary>
     /// <remarks>
     /// An imported clip has none of the metadata a live capture produces: there is no cursor,
@@ -276,7 +264,7 @@ public class ProjectService
     /// than fabricate it. <see cref="Project.DpiScale"/> is 1 because the pixels are already the
     /// real frame pixels — there is no logical→physical mapping to undo.
     /// </remarks>
-    public void ImportVideo(VideoImportResult result)
+    public VideoSegment? ImportVideo(VideoImportResult result, TimeSpan? insertAt = null)
     {
         var project = new Project
         {
@@ -297,9 +285,66 @@ public class ProjectService
             CaptureType = CaptureTargetType.Monitor,
         };
 
-        // AppendRecording already mirrors "no current project → make this the primary" via
-        // SetProject, so importing is also a valid way to START a project.
-        AppendRecording(project);
+        // Importing is also a valid way to START a project; in that case the imported clip is
+        // the primary base-track segment because there is no existing edit to cover.
+        if (CurrentProject is null || CurrentTimeline is null)
+        {
+            SetProject(project);
+            return CurrentTimeline?.Segments
+                .OfType<VideoSegment>()
+                .FirstOrDefault(s => string.Equals(
+                    s.VideoFilePath, project.VideoFilePath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var segment = AddProjectSourceAndCreateSegment(project);
+        new InsertSegmentOnOverlayTrackOperation(segment, insertAt ?? CurrentTimeline.PlayheadPosition)
+            .Execute(CurrentTimeline);
+
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
+        return segment;
+    }
+
+    /// <summary>
+    /// Registers a new recording/import as a project source and returns the segment that will
+    /// be placed on either the base track or an overlay lane by the caller.
+    /// </summary>
+    private VideoSegment AddProjectSourceAndCreateSegment(Project newRecording)
+    {
+        CurrentProject!.Sources.Add(new RecordingSource
+        {
+            Id = newRecording.Id,
+            VideoFilePath = newRecording.VideoFilePath,
+            CursorDataFilePath = newRecording.CursorDataFilePath,
+            WebcamFilePath = newRecording.WebcamFilePath,
+            KeyboardDataFilePath = newRecording.KeyboardDataFilePath,
+            AudioFilePaths = newRecording.AudioFilePaths,
+            Duration = newRecording.Duration,
+            Width = newRecording.Width,
+            Height = newRecording.Height,
+            Fps = newRecording.Fps,
+            MouseToVideoOffsetSeconds = newRecording.MouseToVideoOffsetSeconds,
+            AudioToVideoOffsetSeconds = newRecording.AudioToVideoOffsetSeconds,
+            CropOffsetX = newRecording.CropOffsetX,
+            CropOffsetY = newRecording.CropOffsetY,
+            DpiScale = newRecording.DpiScale,
+            CaptureType = newRecording.CaptureType,
+        });
+
+        return CreateVideoSegmentFromProject(newRecording);
+    }
+
+    /// <summary>
+    /// Treats a recording append as "continue recording" only when the playhead is already at
+    /// the tail; mid-timeline appends are overlay inserts so existing edits do not ripple.
+    /// </summary>
+    private static bool ShouldAppendRecordingToBaseTrack(TimelineModel timeline)
+    {
+        var end = timeline.DisplayDuration;
+        if (end <= TimeSpan.Zero) return true;
+
+        var fps = timeline.Fps > 0 ? timeline.Fps : 30;
+        var oneFrame = TimeSpan.FromSeconds(1.0 / fps);
+        return timeline.PlayheadPosition >= end - oneFrame;
     }
 
     /// <summary>

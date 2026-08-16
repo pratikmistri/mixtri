@@ -226,6 +226,7 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
         // free-form so it could have touched it — restoring it keeps "undo puts back exactly
         // what Execute found" true with no exceptions to reason about.
         overlay.InTransition = _previous.InTransition;
+        overlay.TrackIndex = _previous.TrackIndex;
         overlay.Animation = _previous.Animation;
         overlay.Anchor = _previous.Anchor;
         overlay.X = _previous.X;

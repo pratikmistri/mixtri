@@ -59,6 +59,12 @@
             Key="Space"
             Invoked="PlayPauseAccelerator_Invoked" />
         <KeyboardAccelerator
+            Key="Home"
+            Invoked="GoToStartAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="End"
+            Invoked="GoToEndAccelerator_Invoked" />
+        <KeyboardAccelerator
             Key="S"
             Invoked="SaveAccelerator_Invoked"
             Modifiers="Control" />

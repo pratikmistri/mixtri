@@ -10,6 +10,43 @@ using Windows.UI.Text;
 namespace Musio.Core.Processing;
 
 /// <summary>
+/// Text-slide-local window that controls when the text itself appears and disappears, while
+/// leaving slide background motion tied to the full segment duration.
+/// </summary>
+public readonly record struct TextAnimationWindow(
+    double InStartSeconds,
+    double InDurationSeconds,
+    double OutEndSeconds,
+    double OutDurationSeconds)
+{
+    /// <summary>
+    /// Legacy whole-slide timing: the text starts at segment time zero, ends at the segment
+    /// end, and uses the historical constant 0.6s ramps clamped to 45% of the duration.
+    /// </summary>
+    public static TextAnimationWindow Auto(double durationSeconds)
+    {
+        double dur = Math.Max(0.001, durationSeconds);
+        double ramp = Math.Min(0.6, dur * 0.45);
+        return new TextAnimationWindow(0, ramp, dur, ramp);
+    }
+
+    /// <summary>
+    /// Converts a slide's defensively-clamped persisted window into renderer seconds so all
+    /// preview/export callers share the model's on-disk compatibility rules.
+    /// </summary>
+    public static TextAnimationWindow FromSlide(TextSlideSegment slide)
+    {
+        ArgumentNullException.ThrowIfNull(slide);
+
+        return new TextAnimationWindow(
+            slide.ResolveTextInStart().TotalSeconds,
+            slide.ResolveTextInDuration().TotalSeconds,
+            slide.ResolveTextOutEnd().TotalSeconds,
+            slide.ResolveTextOutDuration().TotalSeconds);
+    }
+}
+
+/// <summary>
 /// The shared cinematic / After-Effects-style text animation engine used by every
 /// renderer that draws animated <see cref="TextSlideAnimation"/> text: full-screen
 /// text slides via <see cref="TextSlideRenderer"/>, and text drawn on top of the
@@ -61,16 +98,39 @@ public class AnimatedTextEngine : IDisposable
     /// duration while the entrance and exit motion stay at a fixed, consistent speed.
     /// </summary>
     public static (double InP, double OutP) ComputeInOutProgress(double progress, double durationSeconds)
+        => ComputeInOutProgress(progress, durationSeconds, TextAnimationWindow.Auto(durationSeconds));
+
+    /// <summary>
+    /// Maps normalized <paramref name="progress"/> (0..1 over the whole slide) into
+    /// entrance/exit progresses inside an explicit text-animation window.
+    /// </summary>
+    public static (double InP, double OutP) ComputeInOutProgress(
+        double progress, double durationSeconds, TextAnimationWindow window)
     {
         double dur = Math.Max(0.001, durationSeconds);
         double elapsed = Math.Clamp(progress, 0, 1) * dur;
 
-        // Never let entrance + exit exceed the slide; keep a hold when there's room.
-        double inSec = Math.Min(EntranceSeconds, dur * 0.45);
-        double outSec = Math.Min(ExitSeconds, dur * 0.45);
+        double inStart = Math.Clamp(window.InStartSeconds, 0, dur);
+        double outEnd = Math.Clamp(window.OutEndSeconds, inStart, dur);
+        double windowLength = outEnd - inStart;
+        double inSec = Math.Clamp(window.InDurationSeconds, 0, windowLength);
+        double outSec = Math.Clamp(window.OutDurationSeconds, 0, windowLength);
+        double total = inSec + outSec;
+        if (total > windowLength && total > 1e-6)
+        {
+            double scale = windowLength / total;
+            inSec *= scale;
+            outSec = windowLength - inSec;
+        }
 
-        double inP = inSec > 1e-6 ? Math.Clamp(elapsed / inSec, 0, 1) : 1;
-        double outP = outSec > 1e-6 ? Math.Clamp((elapsed - (dur - outSec)) / outSec, 0, 1) : 0;
+        double inP = inSec > 1e-6
+            ? Math.Clamp((elapsed - inStart) / inSec, 0, 1)
+            : elapsed >= inStart ? 1 : 0;
+
+        double outStart = outEnd - outSec;
+        double outP = outSec > 1e-6
+            ? Math.Clamp((elapsed - outStart) / outSec, 0, 1)
+            : elapsed >= outEnd ? 1 : 0;
         return (inP, outP);
     }
 
@@ -83,9 +143,11 @@ public class AnimatedTextEngine : IDisposable
     /// keeps a background box steady while its characters animate individually.
     /// </summary>
     public static (float Scale, float Tx, float Ty, double Opacity) ComputeEnvelope(
-        TextSlideAnimation anim, double progress, double durationSeconds, int width, int height)
+        TextSlideAnimation anim, double progress, double durationSeconds, int width, int height,
+        TextAnimationWindow? window = null)
     {
-        var (inP, outP) = ComputeInOutProgress(progress, durationSeconds);
+        var effectiveWindow = window ?? TextAnimationWindow.Auto(durationSeconds);
+        var (inP, outP) = ComputeInOutProgress(progress, durationSeconds, effectiveWindow);
 
         // Typewriter (with or without caret) draws the text fully opaque for its whole
         // duration (see DrawAnimatedText) — the background must not fade with it.
@@ -100,7 +162,7 @@ public class AnimatedTextEngine : IDisposable
                 // Wave is continuous (no discrete entrance) — mirror the fade envelope
                 // ComputeCharParams uses: a quick fade-in over WaveFadeSeconds, then
                 // tracking the exit progress out.
-                double elapsedSeconds = Math.Clamp(progress, 0, 1) * Math.Max(0.001, durationSeconds);
+                double elapsedSeconds = WindowElapsedSeconds(progress, durationSeconds, effectiveWindow);
                 double fadeIn = Math.Clamp(elapsedSeconds / WaveFadeSeconds, 0, 1);
                 fade = Math.Min(fadeIn, Math.Clamp(1 - outP, 0, 1));
             }
@@ -121,13 +183,16 @@ public class AnimatedTextEngine : IDisposable
     public void DrawAnimatedText(
         CanvasDrawingSession ds, string text, CanvasTextFormat format, Rect rect,
         Color baseColor, TextSlideAnimation anim, double progress,
-        int canvasWidth, int canvasHeight, float fontSize, double durationSeconds)
+        int canvasWidth, int canvasHeight, float fontSize, double durationSeconds,
+        TextAnimationWindow? window = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (string.IsNullOrEmpty(text)) return;
 
-        double elapsedSeconds = Math.Clamp(progress, 0, 1) * Math.Max(0.001, durationSeconds);
-        var (inP, outP) = ComputeInOutProgress(progress, durationSeconds);
+        var effectiveWindow = window ?? TextAnimationWindow.Auto(durationSeconds);
+        double elapsedSeconds = WindowElapsedSeconds(progress, durationSeconds, effectiveWindow);
+        double windowDurationSeconds = WindowDurationSeconds(durationSeconds, effectiveWindow);
+        var (inP, outP) = ComputeInOutProgress(progress, durationSeconds, effectiveWindow);
 
         if (IsPerCharacter(anim))
         {
@@ -141,7 +206,10 @@ public class AnimatedTextEngine : IDisposable
         // Typewriter (with optional caret): type in, then erase out — at a constant rate.
         if (anim is TextSlideAnimation.TypeWriter or TextSlideAnimation.TypewriterCaret)
         {
-            var (typed, showCaret) = TypewriterText(text, elapsedSeconds, durationSeconds);
+            if (elapsedSeconds < 0 || elapsedSeconds >= windowDurationSeconds)
+                return;
+
+            var (typed, showCaret) = TypewriterText(text, elapsedSeconds, windowDurationSeconds);
             var col0 = WithAlpha(baseColor, 1.0);
             ds.DrawText(typed, rect, col0, format);
             if (anim == TextSlideAnimation.TypewriterCaret && showCaret)
@@ -150,6 +218,8 @@ public class AnimatedTextEngine : IDisposable
         }
 
         var (scale, tx, ty, blur, opacity) = ComputeWholeState(anim, inP, outP, canvasWidth, canvasHeight);
+        if (WindowTrimsText(durationSeconds, effectiveWindow))
+            opacity *= WindowGate(progress, durationSeconds, effectiveWindow);
         var col = WithAlpha(baseColor, opacity);
 
         // Reveal: wipe in from the left, then wipe out to the left.
@@ -158,6 +228,8 @@ public class AnimatedTextEngine : IDisposable
             double inFrac = EaseInOutCubic(inP);
             double outFrac = EaseInOutCubic(outP);
             double visible = Math.Clamp(Math.Min(inFrac, 1 - outFrac), 0, 1);
+            if (WindowTrimsText(durationSeconds, effectiveWindow))
+                visible *= WindowGate(progress, durationSeconds, effectiveWindow);
             if (visible <= 0.001) return;
             var clip = new Rect(rect.X, rect.Y, rect.Width * visible, rect.Height);
             using (ds.CreateLayer(1f, clip))
@@ -381,6 +453,39 @@ public class AnimatedTextEngine : IDisposable
 
         bool caret = ((int)(elapsedSeconds / 0.5)) % 2 == 0;
         return (text[..shown], caret);
+    }
+
+    private static double WindowElapsedSeconds(
+        double progress, double durationSeconds, TextAnimationWindow window)
+    {
+        double dur = Math.Max(0.001, durationSeconds);
+        double elapsed = Math.Clamp(progress, 0, 1) * dur;
+        double inStart = Math.Clamp(window.InStartSeconds, 0, dur);
+        return elapsed - inStart;
+    }
+
+    private static double WindowDurationSeconds(double durationSeconds, TextAnimationWindow window)
+    {
+        double dur = Math.Max(0.001, durationSeconds);
+        double inStart = Math.Clamp(window.InStartSeconds, 0, dur);
+        double outEnd = Math.Clamp(window.OutEndSeconds, inStart, dur);
+        return Math.Max(0.001, outEnd - inStart);
+    }
+
+    private static bool WindowTrimsText(double durationSeconds, TextAnimationWindow window)
+    {
+        double dur = Math.Max(0.001, durationSeconds);
+        double inStart = Math.Clamp(window.InStartSeconds, 0, dur);
+        double outEnd = Math.Clamp(window.OutEndSeconds, inStart, dur);
+        return inStart > 1e-6 || outEnd < dur - 1e-6;
+    }
+
+    private static double WindowGate(double progress, double durationSeconds, TextAnimationWindow window)
+    {
+        double elapsed = Math.Clamp(progress, 0, 1) * Math.Max(0.001, durationSeconds);
+        double inStart = Math.Clamp(window.InStartSeconds, 0, Math.Max(0.001, durationSeconds));
+        double outEnd = Math.Clamp(window.OutEndSeconds, inStart, Math.Max(0.001, durationSeconds));
+        return elapsed >= inStart && elapsed < outEnd ? 1 : 0;
     }
 
     private void DrawBlurredText(

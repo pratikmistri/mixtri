@@ -893,6 +893,93 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task SaveThenOpen_PreservesVideoTrackIndexAndTextSlideWindow()
+    {
+        var (project, timeline) = BuildProject();
+        var slide = timeline.Segments.OfType<TextSlideSegment>().Single();
+        slide.TrackIndex = 1;
+        slide.Start = TimeSpan.FromSeconds(2);
+        slide.TextInStart = TimeSpan.FromSeconds(0.5);
+        slide.TextInDuration = TimeSpan.FromMilliseconds(250);
+        slide.TextOutEnd = TimeSpan.FromSeconds(2.5);
+        slide.TextOutDuration = TimeSpan.FromMilliseconds(300);
+
+        var packagePath = Path.Combine(_root, "tracks-and-text-window.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        var restored = opened.Timeline.Segments.OfType<TextSlideSegment>().Single();
+        Assert.AreEqual(1, restored.TrackIndex);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), restored.Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(0.5), restored.TextInStart);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(250), restored.TextInDuration);
+        Assert.AreEqual(TimeSpan.FromSeconds(2.5), restored.TextOutEnd);
+        Assert.AreEqual(TimeSpan.FromMilliseconds(300), restored.TextOutDuration);
+    }
+
+    /// <summary>
+    /// Legacy manifests are edited as JSON, not text: nullable window properties can be the
+    /// last member in a segment object, where regex comma stripping silently misses them.
+    /// </summary>
+    [TestMethod]
+    public async Task Open_LegacyProjectWithoutTrackAndTextWindowFields_UsesDefaults()
+    {
+        var (project, timeline) = BuildProject();
+        var slide = timeline.Segments.OfType<TextSlideSegment>().Single();
+        slide.TrackIndex = 2;
+        slide.Start = TimeSpan.FromSeconds(2);
+        slide.TextInStart = TimeSpan.FromSeconds(0.4);
+        slide.TextInDuration = TimeSpan.FromMilliseconds(250);
+        slide.TextOutEnd = TimeSpan.FromSeconds(2.4);
+        slide.TextOutDuration = TimeSpan.FromMilliseconds(350);
+
+        var packagePath = Path.Combine(_root, "legacy-tracks-and-text-window.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+
+        int strippedTrackIndices = 0;
+        int strippedWindowFields = 0;
+        RewriteManifest(packagePath, json =>
+        {
+            var root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+            var segments = root["Timeline"]!["Segments"]!.AsArray();
+
+            foreach (var node in segments)
+            {
+                var segment = node!.AsObject();
+                if (segment.Remove("TrackIndex"))
+                    strippedTrackIndices++;
+
+                if ((string?)segment["$kind"] == "textSlide")
+                {
+                    foreach (var name in new[] { "TextInStart", "TextInDuration", "TextOutEnd", "TextOutDuration" })
+                    {
+                        if (segment.Remove(name))
+                            strippedWindowFields++;
+                    }
+                }
+            }
+
+            return root.ToJsonString();
+        });
+
+        Assert.IsTrue(strippedTrackIndices > 0, "the manifest must actually have carried track indices");
+        Assert.AreEqual(4, strippedWindowFields, "the manifest must actually have carried all text-window fields");
+
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsTrue(opened.Timeline.Segments.All(s => s.TrackIndex == 0));
+        var restored = opened.Timeline.Segments.OfType<TextSlideSegment>().Single();
+        Assert.AreEqual(TimeSpan.Zero, restored.TextInStart);
+        Assert.IsNull(restored.TextInDuration);
+        Assert.IsNull(restored.TextOutEnd);
+        Assert.IsNull(restored.TextOutDuration);
+        Assert.AreEqual(TimeSpan.Zero, restored.ResolveTextInStart());
+        Assert.AreEqual(TimeSpan.FromMilliseconds(600), restored.ResolveTextInDuration());
+        Assert.AreEqual(restored.Duration, restored.ResolveTextOutEnd());
+        Assert.AreEqual(TimeSpan.FromMilliseconds(600), restored.ResolveTextOutDuration());
+    }
+
+    [TestMethod]
     public async Task SaveThenOpen_DoesNotPersistRegenerableWaveformSamples()
     {
         // Waveforms are a render cache rebuilt from the WAVs on load; persisting them would

@@ -47,6 +47,62 @@
             </ComboBox>
         </StackPanel>
 
+        <StackPanel Spacing="8">
+            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Spacing="6">
+                    <TextBlock Text="Text in at" Style="{StaticResource PropertyHintStyle}" />
+                    <NumberBox
+                        x:Name="SlideTextInAtBox"
+                        x:FieldModifier="public"
+                        Minimum="0"
+                        Maximum="30"
+                        SpinButtonPlacementMode="Inline"
+                        SmallChange="0.1" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="6">
+                    <TextBlock Text="Text out by" Style="{StaticResource PropertyHintStyle}" />
+                    <NumberBox
+                        x:Name="SlideTextOutByBox"
+                        x:FieldModifier="public"
+                        Minimum="0"
+                        Maximum="30"
+                        SpinButtonPlacementMode="Inline"
+                        SmallChange="0.1" />
+                </StackPanel>
+            </Grid>
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Spacing="6">
+                    <TextBlock Text="In ramp" Style="{StaticResource PropertyHintStyle}" />
+                    <NumberBox
+                        x:Name="SlideTextInRampBox"
+                        x:FieldModifier="public"
+                        Minimum="0"
+                        Maximum="30"
+                        SpinButtonPlacementMode="Inline"
+                        SmallChange="0.1" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="6">
+                    <TextBlock Text="Out ramp" Style="{StaticResource PropertyHintStyle}" />
+                    <NumberBox
+                        x:Name="SlideTextOutRampBox"
+                        x:FieldModifier="public"
+                        Minimum="0"
+                        Maximum="30"
+                        SpinButtonPlacementMode="Inline"
+                        SmallChange="0.1" />
+                </StackPanel>
+            </Grid>
+        </StackPanel>
+
         <StackPanel Spacing="6">
             <TextBlock Text="Font" Style="{StaticResource PropertyLabelStyle}" />
             <ComboBox

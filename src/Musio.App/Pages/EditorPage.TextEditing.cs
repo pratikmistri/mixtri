@@ -1119,8 +1119,61 @@ public sealed partial class EditorPage
 
         slide.Duration = TimeSpan.FromSeconds(args.NewValue);
         ViewModel.Model.RecalculateSegmentPositions();
+        SyncTextSlideWindowControls(slide);
         Timeline.InvalidateAllCanvases();
         InvalidatePreview();
+    }
+
+    private void SlideTextWindowBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var pane = PropertiesPanel.TextSlide;
+        var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
+        var inStart = ReferenceEquals(sender, pane.SlideTextInAtBox)
+            ? newValue
+            : slide.ResolveTextInStart();
+        var outEnd = ReferenceEquals(sender, pane.SlideTextOutByBox)
+            ? newValue
+            : slide.ResolveTextOutEnd();
+
+        ViewModel.UndoRedoManager.Execute(
+            new SetTextSlideTextWindowOperation(slide.Id, inStart, outEnd));
+        SyncTextSlideWindowControls(slide);
+        RefreshSlidePreview();
+    }
+
+    private void SlideTextRampBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        var slide = SelectedSlide();
+        if (slide is null) return;
+
+        var pane = PropertiesPanel.TextSlide;
+        var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
+        var inDuration = ReferenceEquals(sender, pane.SlideTextInRampBox)
+            ? newValue
+            : slide.TextInDuration;
+        var outDuration = ReferenceEquals(sender, pane.SlideTextOutRampBox)
+            ? newValue
+            : slide.TextOutDuration;
+
+        ViewModel.UndoRedoManager.Execute(new UpdateTextSlideOperation(
+            slide.Id,
+            slide.Text, slide.FontFamily, slide.FontSize,
+            slide.IsBold, slide.IsItalic,
+            slide.TextColor, slide.BackgroundColor,
+            slide.Duration, slide.Animation,
+            slide.TextInStart, inDuration,
+            slide.TextOutEnd, outDuration));
+        SyncTextSlideWindowControls(slide);
+        RefreshSlidePreview();
     }
 
     private void SlideFontSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -1148,6 +1201,7 @@ public sealed partial class EditorPage
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
         SlideFontSizeBox.Value = slide.FontSize;
+        SyncTextSlideWindowControls(slide);
 
         // Formatting toggles
         SlideBoldToggle.IsChecked = slide.IsBold;
@@ -1200,6 +1254,39 @@ public sealed partial class EditorPage
 
         // Reveal the text slide panel so properties are immediately editable on selection.
         PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
+    }
+
+    private void SyncTextSlideWindowControls(TextSlideSegment slide)
+    {
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
+        var pane = PropertiesPanel.TextSlide;
+        if (pane.SlideTextInAtBox is null ||
+            pane.SlideTextOutByBox is null ||
+            pane.SlideTextInRampBox is null ||
+            pane.SlideTextOutRampBox is null)
+        {
+            return;
+        }
+
+        var wasSuppressed = _suppressSlideEvents;
+        _suppressSlideEvents = true;
+        try
+        {
+            var max = Math.Max(0, slide.Duration.TotalSeconds);
+            pane.SlideTextInAtBox.Maximum = max;
+            pane.SlideTextOutByBox.Maximum = max;
+            pane.SlideTextInRampBox.Maximum = max;
+            pane.SlideTextOutRampBox.Maximum = max;
+            pane.SlideTextInAtBox.Value = slide.ResolveTextInStart().TotalSeconds;
+            pane.SlideTextOutByBox.Value = slide.ResolveTextOutEnd().TotalSeconds;
+            pane.SlideTextInRampBox.Value = slide.ResolveTextInDuration().TotalSeconds;
+            pane.SlideTextOutRampBox.Value = slide.ResolveTextOutDuration().TotalSeconds;
+        }
+        finally
+        {
+            _suppressSlideEvents = wasSuppressed;
+        }
     }
 
     private void HideTextSlidePanel()

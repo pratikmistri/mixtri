@@ -49,6 +49,18 @@ public sealed partial class PreviewCanvas : UserControl
     /// </summary>
     public event EventHandler<bool>? IsPlayingChanged;
 
+    /// <summary>
+    /// Raised when the user asks the host to seek to the first frame; the host owns
+    /// canonical timeline/model synchronization.
+    /// </summary>
+    public event EventHandler? GoToStartRequested;
+
+    /// <summary>
+    /// Raised when the user asks the host to seek to the last visible frame; the host owns
+    /// the project-duration and frame-rate rules.
+    /// </summary>
+    public event EventHandler? GoToEndRequested;
+
     public static readonly DependencyProperty PlayheadPositionProperty =
         DependencyProperty.Register(nameof(PlayheadPosition), typeof(TimeSpan), typeof(PreviewCanvas),
             new PropertyMetadata(TimeSpan.Zero, OnPlayheadPositionChanged));
@@ -273,6 +285,16 @@ public sealed partial class PreviewCanvas : UserControl
             Pause();
         else
             Play();
+    }
+
+    private void GoToStart_Click(object sender, RoutedEventArgs e)
+    {
+        GoToStartRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void GoToEnd_Click(object sender, RoutedEventArgs e)
+    {
+        GoToEndRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void EnsureTimer()

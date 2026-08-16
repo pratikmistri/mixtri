@@ -170,6 +170,14 @@ public sealed class SegmentFrameComposer : IDisposable
         if (!resolution.Active)
             return frame;
 
+        var (topmostSegment, _) = _timeline.GetSegmentAtTime(outputTime);
+        if (!ReferenceEquals(topmostSegment, resolution.IncomingSegment))
+            return frame;
+
+        // Equivalent to the IsCoveredByHigherTrack gate the preview applies at the same
+        // instant; kept as an identity check here because this path already needs the
+        // resolved topmost segment.
+
         try
         {
             // The outgoing side is composed straight from OutgoingLocalOffset, a TimeSpan
@@ -304,10 +312,18 @@ public sealed class SegmentFrameComposer : IDisposable
         // Only this (timeline-resolved) path can ever hand back a null segment -- the
         // rolling transition path below always resolves a real OutgoingSegment/
         // IncomingSegment pair, so ComposeSegmentAtOffsetAsync does not need to handle it.
+        //
+        // Multi-track timelines made an uncovered frame reachable in principle: the total
+        // frame count comes from TotalSegmentsDuration (max-End across all tracks), so a
+        // hole anywhere before the last-ending clip would ask for a frame nothing covers.
+        // MoveSegmentOnTrackOperation clamps overlay starts to keep the timeline fully
+        // covered, but a half-second of black beats aborting a long export outright, so
+        // this renders the empty frame and records why instead of throwing.
         if (segment is null)
         {
-            throw new InvalidOperationException(
-                $"No timeline segment covers output frame {frameIndex} ({outputTime}).");
+            Musio.Core.Diagnostics.DiagLog.Write("Export",
+                $"no timeline segment covers output frame {frameIndex} ({outputTime}); emitting an empty frame");
+            return Win2DUtils.CreateRenderTarget(_device, OutputWidth, OutputHeight, 96, "uncovered timeline frame");
         }
 
         return await ComposeSegmentAtOffsetAsync(segment, localOffset, ct);
