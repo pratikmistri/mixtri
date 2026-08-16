@@ -292,6 +292,15 @@ public sealed partial class TimelineControl : UserControl
             _transitionChipHoverTimer = null;
             _transitionChipGlyphFormat?.Dispose();
             _transitionChipGlyphFormat = null;
+
+            // The drop-hint reveal timer is the same class of leak: it ticks a layout pass and
+            // a canvas invalidation, so it must not outlive the control that owns them.
+            _hintLaneRevealTimer?.Stop();
+            _hintLaneRevealTimer = null;
+            _hintLaneReveal = 0;
+            _hintLaneRevealTarget = 0;
+            _hintLaneArmed = false;
+            _hintLaneLatched = false;
         };
     }
 
@@ -614,13 +623,52 @@ public sealed partial class TimelineControl : UserControl
 
     private double VideoTrackHeight(TimelineModel? model)
     {
-        int trackCount = VideoDisplayTrackCount(model);
-        return BaseVideoTrackHeight + (trackCount - 1) * OverlayVideoTrackHeight;
+        int used = Math.Max(1, model?.VideoTrackCount ?? 1);
+        return BaseVideoTrackHeight + (used - 1) * OverlayVideoTrackHeight + HintLaneBandHeight;
     }
 
+    // ── Transient overlay drop-hint lane ──
+    //
+    // The lane used to be snapped in and out as a whole extra 44px row, which made it flash
+    // and the timeline stutter for three compounding reasons:
+    //   1. the destination lane was rounded to the nearest row of drag travel, so the switch
+    //      point sat on a knife edge and the sub-pixel jitter of a hand holding the mouse
+    //      flipped the lane on and off many times a second;
+    //   2. every flip instantly re-laid-out the whole timeline grid, teleporting the dragged
+    //      block (and every track below it) by a full lane height;
+    //   3. even with (1) and (2) fixed, the lane's presence still tracked the pointer's
+    //      CURRENT lane, so the ordinary vertical drift of a hand positioning a clip
+    //      horizontally kept opening and folding it away in the middle of one gesture.
+    // ResolveDragTrackIndex's hysteresis fixes (1), the eased reveal fraction fixes (2), and
+    // the latch below fixes (3): a gesture may grow the timeline ONCE, on the way in, and
+    // shrink it ONCE, on release — never repeatedly while the user is still holding the clip.
+    private const double HintLaneRevealDurationMs = 140;
+
+    private double _hintLaneReveal;         // 0 = folded away, 1 = fully open
+    private double _hintLaneRevealFrom;
+    private double _hintLaneRevealTarget;
+    private long _hintLaneRevealStartTicks;
+    private DispatcherTimer? _hintLaneRevealTimer;
+
     /// <summary>
-    /// True while a segment is actively being dragged, which is when an extra empty overlay
-    /// lane is revealed as a drop target.
+    /// Whether the drag is currently aiming AT the hint lane, latched separately from the drag
+    /// state so the lane keeps its highlighted look for the whole fold-away. Reading the live
+    /// drag index instead made the outline drop back to its idle grey on the release frame,
+    /// one last colour pop at the end of the very gesture this animation is smoothing.
+    /// </summary>
+    private bool _hintLaneArmed;
+
+    /// <summary>
+    /// Set once the in-flight drag has reached the hint lane, and not cleared until the gesture
+    /// ends. See <see cref="HintLaneRequested"/> for why the lane is held open rather than
+    /// tracking the pointer.
+    /// </summary>
+    private bool _hintLaneLatched;
+
+    /// <summary>
+    /// True while the drag is currently aiming at the hint lane — i.e. releasing now would
+    /// create the new overlay track. Drives only the lane's ARMED highlight; it must not drive
+    /// the lane's existence (see <see cref="HintLaneRequested"/>).
     /// </summary>
     private bool ShowOverlayDropHint =>
         _dragMode == DragMode.SegmentBody
@@ -628,23 +676,146 @@ public sealed partial class TimelineControl : UserControl
         && _segmentDragCurrentTrackIndex >= Math.Max(1, Model?.VideoTrackCount ?? 1);
 
     /// <summary>
+    /// Whether the hint lane should be open. Deliberately LATCHED for the rest of the gesture
+    /// once the drag has reached the lane, rather than following the pointer's current lane.
+    /// </summary>
+    /// <remarks>
+    /// Hysteresis alone was not enough. Its dead band is necessarily about a third of a lane
+    /// (~14px) — enough to absorb the jitter of a hand holding still, but nothing like the
+    /// vertical drift of a hand sweeping a clip sideways across the timeline to position it.
+    /// So the lane kept opening and folding mid-gesture: correct by the letter of "show the
+    /// lane the pointer is in", useless as an affordance, and the source of the remaining
+    /// churn even once each transition was individually smooth.
+    /// <para>
+    /// Latching makes the timeline's geometry CONSTANT for the whole drag, which is what the
+    /// user is really asking for when they say the lane must stop coming and going. It costs
+    /// nothing: the lane is empty, and whether the drop actually lands there is still decided
+    /// entirely by <see cref="_segmentDragCurrentTrackIndex"/> and shown by the armed
+    /// highlight. Crucially it also preserves the property the previous round added — a plain
+    /// horizontal reorder still never reveals the lane at all, because the latch is only ever
+    /// set by reaching for it.
+    /// </para>
+    /// </remarks>
+    private bool HintLaneRequested =>
+        _dragMode == DragMode.SegmentBody && _segmentDragMoved && _hintLaneLatched;
+
+    /// <summary>
+    /// Whether the hint lane currently occupies layout space — true while it is opening, open,
+    /// or still folding away.
+    /// </summary>
+    private bool HintLaneVisible => _hintLaneReveal > 0.0005 || _hintLaneRevealTarget > 0;
+
+    /// <summary>Height the hint lane occupies right now (0 = folded, 44 = fully open).</summary>
+    private float HintLaneBandHeight =>
+        HintLaneVisible
+            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * OverlayVideoTrackHeight)
+            : 0f;
+
+    /// <summary>
     /// Destination lane for the in-flight segment drag, derived from vertical travel since
     /// the grab so it is immune to the canvas resizing underneath the cursor. Allows reaching
     /// exactly one lane above the highest one currently in use — that is the lane the drop
     /// hint offers to create.
     /// </summary>
+    /// <remarks>
+    /// The travel is banded with HYSTERESIS rather than rounded to the nearest row: a
+    /// neighbouring lane is only entered after <see cref="HintLaneEnterFraction"/> of a row of
+    /// travel towards it, measured from the lane currently held. Plain rounding put the switch
+    /// point exactly half a row out, so a hand holding still across that boundary flipped the
+    /// destination lane — and with it the dragged block's row — continuously.
+    /// </remarks>
     private int ResolveDragTrackIndex(TimelineModel model, double y)
     {
         if (double.IsNaN(_segmentDragStartY)) return _segmentDragOriginalTrackIndex;
 
         int used = Math.Max(1, model.VideoTrackCount);
-        int rowsUp = (int)Math.Round((_segmentDragStartY - y) / OverlayVideoTrackHeight);
-        return Math.Clamp(_segmentDragOriginalTrackIndex + rowsUp, TimelineModel.BaseTrackIndex, used);
+
+        // Clamped so a fling far outside the track band can't spin the stepping loops below.
+        double rows = Math.Clamp(
+            (_segmentDragStartY - y) / OverlayVideoTrackHeight,
+            -(used + 2),
+            used + 2);
+
+        int offset = _segmentDragCurrentTrackIndex - _segmentDragOriginalTrackIndex;
+        while (rows >= offset + HintLaneEnterFraction) offset++;
+        while (rows <= offset - HintLaneEnterFraction) offset--;
+
+        return Math.Clamp(_segmentDragOriginalTrackIndex + offset, TimelineModel.BaseTrackIndex, used);
+    }
+
+    /// <summary>
+    /// Fraction of a lane height the pointer must travel towards a neighbouring lane before it
+    /// is adopted. Being &gt; 0.5 is what creates the dead band: leaving a lane needs the same
+    /// travel back, so the switch points sit 0.5 of a lane (~22px) apart instead of coinciding.
+    /// </summary>
+    /// <remarks>
+    /// Sized for a hand sweeping a clip sideways, not for a hand holding still. The first pass
+    /// used 0.65 (a ~14px band), which stopped the jitter of a stationary pointer but not the
+    /// vertical drift of an actual positioning gesture, so the drop target still flip-flopped
+    /// while the user was moving the clip along the timeline.
+    /// </remarks>
+    private const double HintLaneEnterFraction = 0.75;
+
+    /// <summary>
+    /// Points the hint lane's reveal animation at the state <see cref="HintLaneRequested"/>
+    /// now implies. Cheap to call on every pointer move: it returns immediately unless the
+    /// target actually changed.
+    /// </summary>
+    /// <param name="animate">
+    /// False snaps straight to the target. Used when a drop has just turned the hint lane into
+    /// a real one — the real lane is exactly the same height, so animating the hint away would
+    /// double the lane's height for a frame and then shrink it back.
+    /// </param>
+    private void SyncHintLaneReveal(bool animate = true)
+    {
+        double target = HintLaneRequested ? 1 : 0;
+        if (Math.Abs(target - _hintLaneRevealTarget) < 0.0001) return;
+
+        _hintLaneRevealTarget = target;
+
+        if (!animate)
+        {
+            _hintLaneRevealTimer?.Stop();
+            _hintLaneReveal = target;
+            UpdateVideoTrackHeight();
+            VideoTrackCanvas?.Invalidate();
+            return;
+        }
+
+        // Re-target from wherever the previous animation got to, so a reversal mid-slide
+        // continues from the current height rather than restarting from 0 or 1.
+        _hintLaneRevealFrom = _hintLaneReveal;
+        _hintLaneRevealStartTicks = Environment.TickCount64;
+
+        if (_hintLaneRevealTimer is null)
+        {
+            _hintLaneRevealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+            _hintLaneRevealTimer.Tick += HintLaneReveal_Tick;
+        }
+        _hintLaneRevealTimer.Start();
+    }
+
+    private void HintLaneReveal_Tick(object? sender, object e)
+    {
+        double elapsed = Environment.TickCount64 - _hintLaneRevealStartTicks;
+        double t = Math.Clamp(elapsed / HintLaneRevealDurationMs, 0, 1);
+        double eased = t * t * (3 - 2 * t);   // smoothstep — no overshoot, soft at both ends
+        _hintLaneReveal = _hintLaneRevealFrom + (_hintLaneRevealTarget - _hintLaneRevealFrom) * eased;
+
+        if (t >= 1)
+        {
+            _hintLaneReveal = _hintLaneRevealTarget;
+            _hintLaneRevealTimer?.Stop();
+        }
+
+        UpdateVideoTrackHeight();
+        VideoTrackCanvas?.Invalidate();
     }
 
     /// <summary>
     /// Number of video lanes to lay out: the tracks the model actually uses, plus one
-    /// transient empty lane while a segment is being dragged towards a new one.
+    /// transient empty lane while a segment is being dragged towards a new one (and for as
+    /// long as that lane is still animating open or folding away).
     /// </summary>
     /// <remarks>
     /// <see cref="TimelineModel.VideoTrackCount"/> counts only tracks that currently hold a
@@ -658,7 +829,7 @@ public sealed partial class TimelineControl : UserControl
     private int VideoDisplayTrackCount(TimelineModel? model)
     {
         int used = Math.Max(1, model?.VideoTrackCount ?? 1);
-        return ShowOverlayDropHint ? used + 1 : used;
+        return HintLaneVisible ? used + 1 : used;
     }
 
     /// <summary>
@@ -1229,36 +1400,26 @@ public sealed partial class TimelineControl : UserControl
         // The topmost lane is the transient drop hint whenever it sits above every track the
         // model actually uses. Drawn as a dashed outline rather than a solid row so it reads
         // as "release here to create V<n>" instead of an empty track that already exists.
-        int hintTrack = ShowOverlayDropHint && trackCount > Math.Max(1, model.VideoTrackCount)
+        int hintTrack = HintLaneVisible && trackCount > Math.Max(1, model.VideoTrackCount)
             ? trackCount - 1
             : -1;
 
         for (int track = trackCount - 1; track >= 0; track--)
         {
             var (rowY, rowH, rowPad) = VideoTrackRowBounds(track, trackCount);
-            ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
 
             if (track == hintTrack)
             {
-                bool armed = _segmentDragCurrentTrackIndex == track;
-                var hintColor = armed
-                    ? VideoClipSelectedBorder
-                    : Color.FromArgb(120, 255, 255, 255);
-                float hintY = rowY + rowPad;
-                float hintH = Math.Max(2, rowH - rowPad * 2);
-                using var dashed = new Microsoft.Graphics.Canvas.Geometry.CanvasStrokeStyle
-                {
-                    DashStyle = Microsoft.Graphics.Canvas.Geometry.CanvasDashStyle.Dash,
-                };
-                if (armed)
-                    ds.FillRoundedRectangle(1, hintY, Math.Max(2, w - 2), hintH, 4, 4, Color.FromArgb(28, 255, 255, 255));
-                ds.DrawRoundedRectangle(1, hintY, Math.Max(2, w - 2), hintH, 4, 4, hintColor, 1.2f, dashed);
+                DrawOverlayDropHintLane(ds, track, rowY, rowH, rowPad, w);
+                continue;
             }
+
+            ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
 
             if (track > 0)
             {
                 ds.DrawText(
-                    track == hintTrack ? $"V{track}  ·  drop to create" : $"V{track}",
+                    $"V{track}",
                     6, rowY + 3,
                     TrackHintTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
@@ -1384,20 +1545,81 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
+    /// Paints the transient "drop here to create V&lt;n&gt;" lane.
+    /// </summary>
+    /// <remarks>
+    /// Everything is drawn inside a layer that is both clipped to the lane's current band and
+    /// scaled to its opacity, because mid-reveal the row is only a few pixels tall: an
+    /// unclipped dashed outline and label would spill over the lane below, and a full-strength
+    /// outline in a 4px slot is exactly the "pops in and out" artefact the animation exists to
+    /// remove. The affordance therefore fades in as the lane slides open.
+    /// </remarks>
+    private void DrawOverlayDropHintLane(
+        CanvasDrawingSession ds, int track, float rowY, float rowH, float rowPad, float w)
+    {
+        float reveal = (float)Math.Clamp(_hintLaneReveal, 0, 1);
+        if (reveal <= 0.01f || rowH <= 0.5f) return;
+
+        bool armed = _hintLaneArmed;
+        var hintColor = armed ? VideoClipSelectedBorder : Color.FromArgb(120, 255, 255, 255);
+
+        float hintY = rowY + rowPad;
+        float hintH = Math.Max(1f, rowH - rowPad * 2);
+        float hintW = Math.Max(2f, w - 2);
+
+        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+        using var label = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 10,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+
+        using (ds.CreateLayer(reveal, new Rect(0, rowY, w, rowH)))
+        {
+            ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
+            if (armed)
+                ds.FillRoundedRectangle(1, hintY, hintW, hintH, 4, 4, Color.FromArgb(28, 255, 255, 255));
+            ds.DrawRoundedRectangle(1, hintY, hintW, hintH, 4, 4, hintColor, 1.2f, dashed);
+            ds.DrawText($"V{track}  ·  drop to create", 6, rowY + 3, TrackHintTextColor, label);
+        }
+    }
+
+    /// <summary>
     /// Maps a logical full-frame video track to its on-canvas row. Track 0 remains the
     /// historical 80px base lane at the bottom; higher overlay tracks stack upward.
     /// </summary>
-    private static (float Y, float Height, float Pad) VideoTrackRowBounds(int trackIndex, int trackCount)
+    /// <remarks>
+    /// The transient drop-hint lane (always the topmost index when present) is only as tall as
+    /// <see cref="HintLaneBandHeight"/>, which eases between 0 and a full lane while it opens
+    /// and folds. Every real lane is therefore offset by that partial band rather than by a
+    /// whole row, so the tracks slide down smoothly instead of teleporting. The hint lane's
+    /// padding is scaled by the same fraction, which keeps the clip height it yields positive
+    /// throughout — an unscaled 6px pad would exceed a 4px-tall band and make the segment
+    /// being dragged into the lane vanish for the first frames of the reveal.
+    /// </remarks>
+    private (float Y, float Height, float Pad) VideoTrackRowBounds(int trackIndex, int trackCount)
     {
         trackCount = Math.Max(1, trackCount);
         trackIndex = Math.Clamp(trackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
+
+        bool hasHintLane = HintLaneVisible;
+        float hintBand = HintLaneBandHeight;
+        int realCount = Math.Max(1, hasHintLane ? trackCount - 1 : trackCount);
+
+        if (hasHintLane && trackIndex == trackCount - 1)
+        {
+            float reveal = (float)Math.Clamp(_hintLaneReveal, 0, 1);
+            return (0f, hintBand, OverlayVideoTrackVerticalPadding * reveal);
+        }
+
         if (trackIndex == TimelineModel.BaseTrackIndex)
         {
-            float y = (float)((trackCount - 1) * OverlayVideoTrackHeight);
+            float y = hintBand + (float)((realCount - 1) * OverlayVideoTrackHeight);
             return (y, (float)BaseVideoTrackHeight, BaseVideoTrackVerticalPadding);
         }
 
-        float rowY = (float)((trackCount - 1 - trackIndex) * OverlayVideoTrackHeight);
+        float rowY = hintBand + (float)((realCount - 1 - trackIndex) * OverlayVideoTrackHeight);
         return (rowY, (float)OverlayVideoTrackHeight, OverlayVideoTrackVerticalPadding);
     }
 
@@ -1408,11 +1630,16 @@ public sealed partial class TimelineControl : UserControl
     private int VideoTrackIndexFromY(TimelineModel model, double y)
     {
         int trackCount = VideoDisplayTrackCount(model);
-        double overlayBandHeight = (trackCount - 1) * OverlayVideoTrackHeight;
-        if (y >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
 
-        int visualRow = Math.Clamp((int)(Math.Max(0, y) / OverlayVideoTrackHeight), 0, Math.Max(0, trackCount - 2));
-        return trackCount - 1 - visualRow;
+        // Measured from below the (possibly partly open) hint band, so hit-testing agrees with
+        // the row geometry mid-animation instead of being a lane out.
+        double localY = y - HintLaneBandHeight;
+        double overlayBandHeight = (realCount - 1) * OverlayVideoTrackHeight;
+        if (localY >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
+
+        int visualRow = Math.Clamp((int)(Math.Max(0, localY) / OverlayVideoTrackHeight), 0, Math.Max(0, realCount - 2));
+        return realCount - 1 - visualRow;
     }
 
     /// <summary>
@@ -4477,6 +4704,8 @@ public sealed partial class TimelineControl : UserControl
         _segmentDragOriginalDuration = segment.Duration;
         _segmentDragOriginalTrackIndex = segment.TrackIndex;
         _segmentDragCurrentTrackIndex = segment.TrackIndex;
+        _hintLaneArmed = false;
+        _hintLaneLatched = false;
         _segmentSnapGuideX = double.NaN;
         _segmentDropIndicatorX = double.NaN;
         _textSlideWindowDragCurrentX = double.NaN;
@@ -4599,7 +4828,11 @@ public sealed partial class TimelineControl : UserControl
                 // put — reading absolute Y would then report a lane the user never aimed at,
                 // silently promoting a plain horizontal reorder into an overlay move.
                 _segmentDragCurrentTrackIndex = ResolveDragTrackIndex(model, y);
-                UpdateVideoTrackHeight();
+                _hintLaneArmed = ShowOverlayDropHint;
+                // Latch on the way in only, and never let go until the gesture ends — see
+                // HintLaneRequested for why the lane must not follow the pointer back out.
+                _hintLaneLatched |= _hintLaneArmed;
+                SyncHintLaneReveal();
                 SetCursor(InputSystemCursorShape.SizeAll);
 
                 // Snap the dragged segment's projected left edge to nearby boundaries.
@@ -4611,7 +4844,12 @@ public sealed partial class TimelineControl : UserControl
                 _segmentDropIndicatorX = _segmentDragCurrentTrackIndex == TimelineModel.BaseTrackIndex
                     ? ComputeDropIndicatorX(model, snappedLeftX)
                     : double.NaN;
-                InvalidateAll();
+
+                // Only the video canvas shows the drag preview (block position, drop
+                // indicator, snap guide, hint lane); repainting all ten track canvases —
+                // filmstrips and waveforms included — on every pointer sample is what made
+                // the gesture feel like it was stuttering.
+                VideoTrackCanvas?.Invalidate();
                 break;
 
             case DragMode.None:
@@ -4663,7 +4901,12 @@ public sealed partial class TimelineControl : UserControl
         _textSlideWindowDragCurrentX = double.NaN;
         _dragMode = DragMode.None;
 
+        // _hintLaneArmed is deliberately NOT cleared: it keeps the outline's highlight for the
+        // fold-away animation that SyncHintLaneReveal is about to start.
+        _hintLaneLatched = false;
+
         SetCursor(InputSystemCursorShape.Arrow);
+        SyncHintLaneReveal();
         UpdateVideoTrackHeight();
         InvalidateAll();
     }
@@ -4676,6 +4919,9 @@ public sealed partial class TimelineControl : UserControl
             _dragMode = DragMode.None;
             return;
         }
+
+        // Captured before the commit, which may itself add the lane the hint was offering.
+        int usedTracksBeforeDrop = Math.Max(1, model?.VideoTrackCount ?? 1);
 
         if (model is not null && model.Segments.Count > 0 && _draggedSegmentId is { } draggedId)
         {
@@ -4692,10 +4938,15 @@ public sealed partial class TimelineControl : UserControl
         _segmentDropIndicatorX = double.NaN;
         _textSlideWindowDragCurrentX = double.NaN;
         _dragMode = DragMode.None;
+        _hintLaneLatched = false;
         SetCursor(InputSystemCursorShape.Arrow);
         canvas.ReleasePointerCapture(e.Pointer);
-        // _dragMode is cleared above, so the hint lane is gone: fold the canvas back down —
-        // or keep the extra row, if the drop actually populated a new track.
+        // _dragMode is cleared above, so the hint lane is gone. Fold it away with the same
+        // eased animation it opened with — UNLESS the drop just turned it into a real lane,
+        // in which case the real row takes over the identical height and the hint must be
+        // dropped in the same frame or the track band would visibly bulge and settle.
+        bool laneBecameReal = Math.Max(1, model?.VideoTrackCount ?? 1) > usedTracksBeforeDrop;
+        SyncHintLaneReveal(animate: !laneBecameReal);
         UpdateVideoTrackHeight();
         InvalidateAll();
     }
