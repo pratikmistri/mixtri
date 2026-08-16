@@ -29,10 +29,23 @@ namespace Musio.Core.Timeline;
 /// </summary>
 public abstract class SegmentEditOperationBase : IEditOperation
 {
+    private bool _changedModel = true;
+
     public abstract string Description { get; }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Reported by <see cref="NothingToDo"/>, NOT by <see cref="ExecuteCore"/>'s return value —
+    /// those answer different questions, and conflating them would classify
+    /// <see cref="SetTextSlideTextWindowOperation"/> (a real edit that needs no re-flow) as a
+    /// no-op. Re-evaluated on every <see cref="Execute"/> so a redo whose target has since
+    /// disappeared is judged on its own run rather than on the original one.
+    /// </remarks>
+    public bool ChangedModel => _changedModel;
 
     public void Execute(TimelineModel model)
     {
+        _changedModel = true;
         if (ExecuteCore(model))
             model.RecalculateSegmentPositions();
     }
@@ -41,6 +54,18 @@ public abstract class SegmentEditOperationBase : IEditOperation
     {
         if (UndoCore(model))
             model.RecalculateSegmentPositions();
+    }
+
+    /// <summary>
+    /// Records that this run resolved nothing and changed no state, and returns the
+    /// <c>false</c> such a guard clause already wanted to return — so a guard becomes
+    /// <c>return NothingToDo();</c> rather than growing a second statement that is easy to
+    /// forget. See <see cref="IEditOperation.ChangedModel"/> for why it matters.
+    /// </summary>
+    protected bool NothingToDo()
+    {
+        _changedModel = false;
+        return false;
     }
 
     /// <returns>

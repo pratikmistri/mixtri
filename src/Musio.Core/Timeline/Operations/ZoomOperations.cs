@@ -9,6 +9,10 @@ public class MoveZoomKeyframeOperation : IEditOperation
 
     public string Description => "Move Zoom Point";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public MoveZoomKeyframeOperation(string keyframeId, TimeSpan newTimestamp)
     {
         _keyframeId = keyframeId;
@@ -17,8 +21,9 @@ public class MoveZoomKeyframeOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
-        if (index < 0) return;
+        if (index < 0) { _changed = false; return; }
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
         var sourceClickTicks = model.ZoomKeyframes[index].SourceClickTicks;
@@ -56,6 +61,10 @@ public class RemoveZoomKeyframeOperation : IEditOperation
 
     public string Description => "Remove Zoom Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public RemoveZoomKeyframeOperation(string keyframeId)
     {
         _keyframeId = keyframeId;
@@ -63,8 +72,9 @@ public class RemoveZoomKeyframeOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         _removedIndex = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
-        if (_removedIndex < 0) return;
+        if (_removedIndex < 0) { _changed = false; return; }
         _removedKeyframe = model.ZoomKeyframes[_removedIndex];
         model.ZoomKeyframes.RemoveAt(_removedIndex);
 
@@ -127,6 +137,10 @@ public class ResizeZoomSegmentOperation : IEditOperation
 
     public string Description => "Resize Zoom Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public ResizeZoomSegmentOperation(string keyframeId, bool resizeStart, TimeSpan newEdgeTime)
     {
         _keyframeId = keyframeId;
@@ -136,8 +150,9 @@ public class ResizeZoomSegmentOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
-        if (index < 0) return;
+        if (index < 0) { _changed = false; return; }
 
         _previousKeyframe = model.ZoomKeyframes[index];
         var kf = _previousKeyframe;
@@ -236,6 +251,10 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly bool? _newHasAuthoredCenter;
     private ZoomKeyframe? _previousKeyframe;
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public string Description => _newHasAuthoredCenter == false
         ? "Follow Mouse"
         : "Update Zoom Properties";
@@ -258,8 +277,9 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         int index = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
-        if (index < 0) return;
+        if (index < 0) { _changed = false; return; }
 
         _previousKeyframe = model.ZoomKeyframes[index];
         var kf = _previousKeyframe;

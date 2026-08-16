@@ -62,6 +62,10 @@ public class MoveAudioTrackOperation : IEditOperation
 
     public string Description => "Move Audio Track";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public MoveAudioTrackOperation(string trackId, TimeSpan newStart)
     {
         _trackId = trackId ?? throw new ArgumentNullException(nameof(trackId));
@@ -70,8 +74,9 @@ public class MoveAudioTrackOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var track = model.AudioTracks.FirstOrDefault(t => t.Id == _trackId);
-        if (track is null) return;
+        if (track is null) { _changed = false; return; }
 
         _previousStart = track.StartTime;
         track.StartTime = _newStart < TimeSpan.Zero ? TimeSpan.Zero : _newStart;
@@ -116,6 +121,10 @@ public class TrimAudioTrackOperation : IEditOperation
 
     public string Description => "Trim Audio Track";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     /// <param name="trackId">Track to trim.</param>
     /// <param name="fromStart">True for the left edge, false for the right edge.</param>
     /// <param name="newEdgeOutputTime">New OUTPUT-timeline position of the dragged edge.</param>
@@ -128,8 +137,9 @@ public class TrimAudioTrackOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var track = model.AudioTracks.FirstOrDefault(t => t.Id == _trackId);
-        if (track is null) return;
+        if (track is null) { _changed = false; return; }
 
         _previousStart = track.StartTime;
         _previousTrimStart = track.TrimStart;
@@ -219,6 +229,10 @@ public class SplitAudioTrackOperation : IEditOperation
 
     public string Description => "Split Audio Track";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public SplitAudioTrackOperation(string trackId, TimeSpan splitAtOutputTime)
     {
         _trackId = trackId ?? throw new ArgumentNullException(nameof(trackId));
@@ -239,8 +253,9 @@ public class SplitAudioTrackOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var track = model.AudioTracks.FirstOrDefault(t => t.Id == _trackId);
-        if (track is null || !CanSplit(track, _splitAt)) return;
+        if (track is null || !CanSplit(track, _splitAt)) { _changed = false; return; }
 
         _originalState = track.Clone();
 
@@ -291,6 +306,10 @@ public class RemoveAudioTrackOperation : IEditOperation
 
     public string Description => "Remove Audio Track";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public RemoveAudioTrackOperation(string trackId)
     {
         _trackId = trackId ?? throw new ArgumentNullException(nameof(trackId));
@@ -299,6 +318,7 @@ public class RemoveAudioTrackOperation : IEditOperation
     public void Execute(TimelineModel model)
     {
         _removed = model.AudioTracks.FirstOrDefault(t => t.Id == _trackId);
+        _changed = _removed is not null;
         if (_removed is not null)
             model.AudioTracks.RemoveAll(t => t.Id == _trackId);
     }
@@ -322,6 +342,10 @@ public class UpdateAudioTrackPropertiesOperation : IEditOperation
 
     public string Description => "Update Audio Track";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public UpdateAudioTrackPropertiesOperation(string trackId, bool? isMuted = null, double? volume = null)
     {
         _trackId = trackId ?? throw new ArgumentNullException(nameof(trackId));
@@ -331,8 +355,9 @@ public class UpdateAudioTrackPropertiesOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var track = model.AudioTracks.FirstOrDefault(t => t.Id == _trackId);
-        if (track is null) return;
+        if (track is null) { _changed = false; return; }
 
         _previousIsMuted = track.IsMuted;
         _previousVolume = track.Volume;

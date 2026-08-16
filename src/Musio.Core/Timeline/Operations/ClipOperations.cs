@@ -339,6 +339,10 @@ public class ApplyClipSpeedOperation : IEditOperation
 
     public string Description => "Change Speed";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public ApplyClipSpeedOperation(int clipIndex, double newSpeed)
     {
         _clipIndex = clipIndex;
@@ -347,11 +351,13 @@ public class ApplyClipSpeedOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
+
         // Unlike CutOperation, this operation can move the playhead (see below), so it also
         // snapshots/restores it.
         _snapshot = TimelineSnapshot.Capture(model, includePlayhead: true);
 
-        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
+        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) { _changed = false; return; }
 
         var clip = model.Clips[_clipIndex];
         var oldEnd = clip.End;
@@ -443,6 +449,10 @@ public class RippleDeleteOperation : IEditOperation
 
     public string Description => "Cut";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public RippleDeleteOperation(int clipIndex)
     {
         _clipIndex = clipIndex;
@@ -450,11 +460,13 @@ public class RippleDeleteOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
+
         // Unlike CutOperation, this operation can move the playhead (see below), so it also
         // snapshots/restores it.
         _snapshot = TimelineSnapshot.Capture(model, includePlayhead: true);
 
-        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) return;
+        if (_clipIndex < 0 || _clipIndex >= model.Clips.Count) { _changed = false; return; }
 
         var clip = model.Clips[_clipIndex];
         var clipDuration = clip.End - clip.Start;

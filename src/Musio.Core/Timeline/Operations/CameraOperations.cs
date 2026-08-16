@@ -53,6 +53,10 @@ public class MoveCameraSegmentOperation : IEditOperation
 
     public string Description => "Move Camera Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public MoveCameraSegmentOperation(string segmentId, TimeSpan newStart)
     {
         _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
@@ -61,8 +65,9 @@ public class MoveCameraSegmentOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
-        if (seg is null) return;
+        if (seg is null) { _changed = false; return; }
         _previousStart = seg.Start;
         seg.Start = _newStart < TimeSpan.Zero ? TimeSpan.Zero : _newStart;
         model.CameraSegments.Sort((a, b) => a.Start.CompareTo(b.Start));
@@ -91,6 +96,10 @@ public class TrimCameraSegmentOperation : IEditOperation
 
     public string Description => "Trim Camera Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     /// <param name="segmentId">Segment to trim.</param>
     /// <param name="fromStart">True for the left edge, false for the right edge.</param>
     /// <param name="newEdgeSourceTime">New source-time position of the dragged edge.</param>
@@ -103,8 +112,9 @@ public class TrimCameraSegmentOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
-        if (seg is null) return;
+        if (seg is null) { _changed = false; return; }
 
         _previousStart = seg.Start;
         _previousDuration = seg.Duration;
@@ -145,6 +155,10 @@ public class RemoveCameraSegmentOperation : IEditOperation
 
     public string Description => "Remove Camera Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public RemoveCameraSegmentOperation(string segmentId)
     {
         _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
@@ -153,6 +167,7 @@ public class RemoveCameraSegmentOperation : IEditOperation
     public void Execute(TimelineModel model)
     {
         _removed = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
+        _changed = _removed is not null;
         if (_removed is not null)
             model.CameraSegments.RemoveAll(s => s.Id == _segmentId);
     }
@@ -182,6 +197,10 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
 
     public string Description => "Update Camera Segment";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public UpdateCameraSegmentPropertiesOperation(string segmentId, bool? enabled = null,
         WebcamOverlayStyle? styleOverride = null, bool setStyle = false,
         bool? fullscreenEnabled = null, CameraFullscreenMode? fullscreenMode = null)
@@ -196,8 +215,9 @@ public class UpdateCameraSegmentPropertiesOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var seg = model.CameraSegments.FirstOrDefault(s => s.Id == _segmentId);
-        if (seg is null) return;
+        if (seg is null) { _changed = false; return; }
 
         _previousEnabled = seg.Enabled;
         _previousFullscreenEnabled = seg.FullscreenEnabled;

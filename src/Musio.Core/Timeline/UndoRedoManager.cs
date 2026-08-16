@@ -16,9 +16,16 @@ public class UndoRedoManager
     public string? UndoDescription => _undoStack.Count > 0 ? _undoStack.Peek().Description : null;
     public string? RedoDescription => _redoStack.Count > 0 ? _redoStack.Peek().Description : null;
 
+    /// <summary>
+    /// Applies an operation and records it for undo — unless it turned out to be a no-op, in
+    /// which case nothing is pushed, the redo stack is left intact (a pending redo is still
+    /// valid, since the model did not move) and no edit is reported.
+    /// </summary>
     public void Execute(IEditOperation operation)
     {
         operation.Execute(_model);
+        if (!operation.ChangedModel) return;
+
         _undoStack.Push(operation);
         _redoStack.Clear();
         StateChanged?.Invoke(this, EventArgs.Empty);

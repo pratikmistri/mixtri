@@ -123,7 +123,7 @@ public class UpdateTextSlideOperation : SegmentEditOperationBase
     protected override bool ExecuteCore(TimelineModel model)
     {
         var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
-        if (slide is null) return false;
+        if (slide is null) return NothingToDo();
 
         _oldText = slide.Text;
         _oldFontFamily = slide.FontFamily;
@@ -201,7 +201,7 @@ public class RemoveSegmentOperation : SegmentEditOperationBase
     protected override bool ExecuteCore(TimelineModel model)
     {
         _removedIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (_removedIndex < 0) return false;
+        if (_removedIndex < 0) return NothingToDo();
         _removedSegment = model.Segments[_removedIndex];
         model.Segments.RemoveAt(_removedIndex);
         return true;
@@ -231,7 +231,7 @@ public class ReorderSegmentOperation : SegmentEditOperationBase
 
     protected override bool ExecuteCore(TimelineModel model)
     {
-        if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return false;
+        if (_fromIndex < 0 || _fromIndex >= model.Segments.Count) return NothingToDo();
         _snapshot = SegmentListSnapshot.Capture(model);
         var segment = model.Segments[_fromIndex];
         model.Segments.RemoveAt(_fromIndex);
@@ -360,7 +360,7 @@ public class MoveSegmentOnTrackOperation : SegmentEditOperationBase
         _didMove = false;
 
         int index = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (index < 0) return false;
+        if (index < 0) return NothingToDo();
 
         _snapshot = SegmentListSnapshot.Capture(model);
         var segment = model.Segments[index];
@@ -396,13 +396,21 @@ public class MoveSegmentOnTrackOperation : SegmentEditOperationBase
 
     /// <summary>
     /// Clamps an overlay segment's start so it can never begin after everything else has
-    /// finished. A gap would extend <see cref="TimelineModel.TotalSegmentsDuration"/> (now
-    /// max-End) past the last covered instant, and the export composer resolves every frame
-    /// in that range through <see cref="TimelineModel.GetSegmentAtTime"/> — an uncovered
-    /// frame has no segment to render. Pinning the start to the end of the rest of the
-    /// timeline keeps "the timeline is fully covered from 0 to its duration" an invariant
-    /// rather than something each consumer has to defend against.
+    /// finished. Only the TAIL is defended: a start past the last covered instant would extend
+    /// <see cref="TimelineModel.TotalSegmentsDuration"/> (max-End) into a range that nothing
+    /// renders, so the project would gain duration made entirely of nothing.
     /// </summary>
+    /// <remarks>
+    /// This does NOT establish "the timeline is fully covered from 0 to its duration". Interior
+    /// gaps are legitimate and reachable by other means — head-trimming an overlay vacates a
+    /// range that <see cref="TimelineModel.GetSegmentAtTime"/> then resolves to null — and both
+    /// consumers deliberately handle that: the export composer and the preview each render an
+    /// empty frame for an uncovered instant rather than treating it as a bug. Clamping the head
+    /// as well would move the out-point, which is the scene-shortening regression
+    /// <c>AnchorOverlayOutPoint</c> exists to prevent. So the invariant is the narrower "no
+    /// segment starts after the end of everything else", and uncovered interior time is a state
+    /// consumers must support, not one this helper rules out.
+    /// </remarks>
     private static TimeSpan ClampToNoGap(TimelineModel model, TimelineSegment moving, TimeSpan start)
     {
         var latestEnd = TimeSpan.Zero;
@@ -462,7 +470,7 @@ public class SetTextSlideTextWindowOperation : SegmentEditOperationBase
     protected override bool ExecuteCore(TimelineModel model)
     {
         var slide = model.Segments.OfType<TextSlideSegment>().FirstOrDefault(s => s.Id == _segmentId);
-        if (slide is null) return false;
+        if (slide is null) return NothingToDo();
 
         _oldInStart = slide.TextInStart;
         _oldOutEnd = slide.TextOutEnd;
@@ -652,14 +660,14 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
         if (splitIndex >= 0 && !(_splitTime > target!.Start && _splitTime < target.End))
             splitIndex = -1;
 
-        if (splitIndex < 0) return false;
+        if (splitIndex < 0) return NothingToDo();
 
         var segment = model.Segments[splitIndex];
         var localOffset = _splitTime - segment.Start;
 
         // Reject splits that would create a degenerate half.
         if (localOffset < MinHalf || segment.Duration - localOffset < MinHalf)
-            return false;
+            return NothingToDo();
 
         _snapshot = SegmentListSnapshot.Capture(model);
 
@@ -765,7 +773,7 @@ public class MoveSegmentOperation : SegmentEditOperationBase
         _snapshot = SegmentListSnapshot.Capture(model);
 
         int fromIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (fromIndex < 0) return false;
+        if (fromIndex < 0) return NothingToDo();
 
         var segment = model.Segments[fromIndex];
         model.Segments.RemoveAt(fromIndex);
@@ -824,7 +832,7 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
     protected override bool ExecuteCore(TimelineModel model)
     {
         _index = model.Segments.FindIndex(s => s.Id == _segmentId);
-        if (_index < 0) return false;
+        if (_index < 0) return NothingToDo();
 
         _previous = model.Segments[_index];
 

@@ -25,6 +25,13 @@ public class UpdateTransitionOperation : IEditOperation
 
     public string Description => _description ?? "Update Transition";
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// <see cref="_found"/> already answers exactly this question — the boundary either
+    /// resolved and was written, or nothing happened at all.
+    /// </remarks>
+    public bool ChangedModel => _found;
+
     /// <param name="incomingSegmentId">
     /// Id of the incoming segment that owns the boundary (<see cref="TimelineSegment.InTransition"/>).
     /// </param>

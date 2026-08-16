@@ -51,6 +51,10 @@ public class MoveTextOverlayOperation : IEditOperation
 
     public string Description => "Move Text Overlay";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public MoveTextOverlayOperation(string overlayId, TimeSpan newStart)
     {
         _overlayId = overlayId ?? throw new ArgumentNullException(nameof(overlayId));
@@ -59,8 +63,9 @@ public class MoveTextOverlayOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var overlay = model.TextOverlays.FirstOrDefault(o => o.Id == _overlayId);
-        if (overlay is null) return;
+        if (overlay is null) { _changed = false; return; }
         _previousStart = overlay.Start;
         overlay.Start = _newStart < TimeSpan.Zero ? TimeSpan.Zero : _newStart;
         model.TextOverlays.Sort((a, b) => a.Start.CompareTo(b.Start));
@@ -89,6 +94,10 @@ public class TrimTextOverlayOperation : IEditOperation
 
     public string Description => "Trim Text Overlay";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     /// <param name="overlayId">Overlay to trim.</param>
     /// <param name="fromStart">True for the left edge, false for the right edge.</param>
     /// <param name="newEdgeSourceTime">New source-time position of the dragged edge.</param>
@@ -101,8 +110,9 @@ public class TrimTextOverlayOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var overlay = model.TextOverlays.FirstOrDefault(o => o.Id == _overlayId);
-        if (overlay is null) return;
+        if (overlay is null) { _changed = false; return; }
 
         _previousStart = overlay.Start;
         _previousDuration = overlay.Duration;
@@ -143,6 +153,10 @@ public class RemoveTextOverlayOperation : IEditOperation
 
     public string Description => "Remove Text Overlay";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     public RemoveTextOverlayOperation(string overlayId)
     {
         _overlayId = overlayId ?? throw new ArgumentNullException(nameof(overlayId));
@@ -151,6 +165,7 @@ public class RemoveTextOverlayOperation : IEditOperation
     public void Execute(TimelineModel model)
     {
         _removed = model.TextOverlays.FirstOrDefault(o => o.Id == _overlayId);
+        _changed = _removed is not null;
         if (_removed is not null)
             model.TextOverlays.RemoveAll(o => o.Id == _overlayId);
     }
@@ -181,6 +196,10 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
 
     public string Description => _description ?? "Update Text Overlay";
 
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
     /// <param name="overlayId">Overlay to update.</param>
     /// <param name="apply">Callback that mutates the live segment's properties.</param>
     /// <param name="description">Optional undo-stack label; defaults to "Update Text Overlay".</param>
@@ -198,8 +217,9 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        _changed = true;
         var overlay = model.TextOverlays.FirstOrDefault(o => o.Id == _overlayId);
-        if (overlay is null) return;
+        if (overlay is null) { _changed = false; return; }
 
         // Shallow record copy: captures every property's current value as the undo snapshot
         // before apply() mutates the live segment in place.
