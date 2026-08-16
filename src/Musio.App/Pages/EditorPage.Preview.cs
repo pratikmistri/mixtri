@@ -988,8 +988,10 @@ public sealed partial class EditorPage
                 if (stateGen != _primaryPreviewStateGeneration || !ReferenceEquals(reader, _frameReader))
                     return null;
 
-                if (compositor is not null && !_zoomRegionEditMode)
+                if (compositor is not null)
                 {
+                    compositor.SuppressZoom = _zoomRegionEditMode;
+
                     // The webcam overlay only follows the singleton today
                     // (SetWebcamFrameForPreviewAsync always targets _previewRenderer): an
                     // alt-style compositor built for a differently-styled transition side
@@ -1045,8 +1047,10 @@ public sealed partial class EditorPage
         {
             if (ctxGeneration != _segmentPreviewGeneration) return null;
 
-            if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+            if (ctx.Ready && ctx.Renderer is not null)
             {
+                ctx.Renderer.SuppressZoom = _zoomRegionEditMode;
+
                 if (ctx.Webcam is not null)
                 {
                     try
@@ -1077,6 +1081,25 @@ public sealed partial class EditorPage
         {
             segBitmap.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The live compositor whose geometry a zoom on <paramref name="sourceVideoFilePath"/>
+    /// (null = the primary recording) is composed through, or null while that compositor is
+    /// still building. Lets the zoom-region picker map its overlay onto the composed frame
+    /// rather than the raw capture.
+    /// </summary>
+    private PreviewRenderer? RendererForSource(string? sourceVideoFilePath)
+    {
+        if (sourceVideoFilePath is null
+            || string.Equals(sourceVideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return _compositorReady ? _previewRenderer : null;
+        }
+
+        if (SegmentForSource(sourceVideoFilePath) is not { } seg) return null;
+        if (!_segmentPreviews.TryGetValue(seg.Id, out var ctx) || !ctx.Ready) return null;
+        return ctx.Renderer;
     }
 
     /// <summary>
@@ -1332,8 +1355,12 @@ public sealed partial class EditorPage
 
         try
         {
-            if (_compositorReady && _previewRenderer is not null && !_zoomRegionEditMode)
+            if (_compositorReady && _previewRenderer is not null)
             {
+                // Region-edit mode composes at rest so the picker frames the SAME image the
+                // export produces (background, padding, cursor) minus the zoom being edited.
+                _previewRenderer.SuppressZoom = _zoomRegionEditMode;
+
                 // Extract webcam frame for overlay
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
 
@@ -1402,8 +1429,10 @@ public sealed partial class EditorPage
 
         try
         {
-            if (ctx.Ready && ctx.Renderer is not null && !_zoomRegionEditMode)
+            if (ctx.Ready && ctx.Renderer is not null)
             {
+                ctx.Renderer.SuppressZoom = _zoomRegionEditMode;
+
                 if (ctx.Webcam is not null)
                 {
                     try

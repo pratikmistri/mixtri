@@ -201,6 +201,11 @@ public sealed partial class EditorPage : Page
             if (_hasWebcamOverlay)
                 UpdateWebcamOverlayPosition();
 
+            // The zoom-region picker maps through the composed frame's layout, so it has to
+            // follow every redraw that can move or resize it.
+            if (_zoomRegionEditMode)
+                UpdateZoomRegionRect();
+
             // Keep the shared text-edit overlay (slide or text overlay) aligned with the
             // preview frame.
             if (TextEditCanvas.Visibility == Visibility.Visible && GetActiveEditTarget() is { } activeTarget)
@@ -594,8 +599,15 @@ public sealed partial class EditorPage : Page
     private string? _zoomRegionKeyframeId;
 
     /// <summary>
+    /// Source recording the edited keyframe belongs to (null = the primary recording).
+    /// Resolves which compositor's geometry the overlay maps through.
+    /// </summary>
+    private string? _zoomRegionSourceFile;
+
+    /// <summary>
     /// Mouse position at the edited keyframe's moment, in SOURCE pixels, or NaN when the
-    /// source has no cursor data. Drawn as a marker so the region can be aimed at it.
+    /// source has no cursor data. Drawn as a marker so the region can be aimed at it, but
+    /// only on the raw-frame fallback — a composed frame draws the real cursor itself.
     /// </summary>
     private double _zoomRegionCursorX = double.NaN;
     private double _zoomRegionCursorY = double.NaN;
@@ -633,6 +645,7 @@ public sealed partial class EditorPage : Page
 
         _zoomRegionEditMode = true;
         _zoomRegionKeyframeId = keyframeId;
+        _zoomRegionSourceFile = kf.SourceVideoFilePath;
         _zoomRegionCenterX = kf.CenterX;
         _zoomRegionCenterY = kf.CenterY;
         _zoomRegionZoomLevel = kf.ZoomLevel;
@@ -664,10 +677,15 @@ public sealed partial class EditorPage : Page
         Preview.PlayheadPosition = pos;
         ViewModel.Model.PlayheadPosition = pos;
 
-        // Where the mouse actually is at this moment, so the region can be aimed at it.
+        // Where the mouse actually is at this moment, so the region can be aimed at it on
+        // the raw-frame fallback (a composed frame draws the cursor itself).
         ResolveZoomRegionCursorPoint(kf);
 
-        // Re-render without compositor (raw frame for positioning)
+        // Re-render composed but held at rest: the picker has to frame the SAME image the
+        // export produces — background, padding, aspect-ratio fit, cursor — while the zoom
+        // being edited stays out of the way (PreviewRenderer.SuppressZoom, applied by the
+        // render path now that _zoomRegionEditMode is set).
+        _lastRenderedFrameIndex = -1;
         _ = UpdatePreviewFrameAsync(pos, force: true);
 
         ZoomRegionOverlay.Visibility = Visibility.Visible;
@@ -687,6 +705,7 @@ public sealed partial class EditorPage : Page
         _isDraggingZoomRegion = false;
         _zoomDragMode = ZoomDragMode.None;
         _zoomRegionKeyframeId = null;
+        _zoomRegionSourceFile = null;
         _zoomRegionCursorX = double.NaN;
         _zoomRegionCursorY = double.NaN;
         if (ZoomRegionCursorMarker is not null) ZoomRegionCursorMarker.Visibility = Visibility.Collapsed;
@@ -758,8 +777,8 @@ public sealed partial class EditorPage : Page
 
     /// <summary>
     /// Resolves where the mouse is at a keyframe's moment, in source pixels, so the region
-    /// editor can show it. The region editor renders the RAW frame (no compositor, hence no
-    /// cursor overlay), which left nothing on screen to aim the region at.
+    /// editor can show it on the RAW-frame fallback (used only while the compositor is not
+    /// ready — a composed frame draws the real cursor itself).
     /// Sets <see cref="_zoomRegionCursorX"/>/<see cref="_zoomRegionCursorY"/> to NaN when the
     /// source carries no cursor data — an imported clip, typically — and the marker stays hidden.
     /// </summary>
@@ -784,14 +803,18 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
-    /// Places the cursor marker over the raw frame, using the same source→display transform
-    /// the region rectangle uses so the two agree exactly.
+    /// Places the cursor marker over the frame, using the same source→display transform the
+    /// region rectangle uses so the two agree exactly. Only shown on the raw-frame fallback:
+    /// a composed frame already draws the real cursor, and a second ring on top of it is
+    /// exactly the kind of "picker shows one thing, preview another" mismatch this overlay
+    /// exists to avoid.
     /// </summary>
-    private void UpdateZoomRegionCursorMarker()
+    private void UpdateZoomRegionCursorMarker(bool composed)
     {
         if (ZoomRegionCursorMarker is null || ZoomRegionCursorDot is null) return;
 
-        bool known = !double.IsNaN(_zoomRegionCursorX) && !double.IsNaN(_zoomRegionCursorY)
+        bool known = !composed
+            && !double.IsNaN(_zoomRegionCursorX) && !double.IsNaN(_zoomRegionCursorY)
             && _zoomRegionSourceW > 0 && _zoomRegionSourceH > 0;
         if (!known)
         {
@@ -812,6 +835,57 @@ public sealed partial class EditorPage : Page
         ZoomRegionCursorDot.Visibility = Visibility.Visible;
     }
 
+    /// <summary>
+    /// Projects the SOURCE frame into canvas coordinates through the transform the
+    /// compositor applies to it, so the region rectangle sits over the same pixels the
+    /// composed preview (and the export) shows.
+    /// <para>
+    /// The result is where the WHOLE source frame maps, even the parts a
+    /// <see cref="FitMode.Cover"/> crop leaves off screen — every downstream calculation
+    /// here works in source-normalised coordinates, and a rect that means "the full source
+    /// frame" keeps all of it valid.
+    /// </para>
+    /// Returns false while the composed geometry is unavailable (compositor still building,
+    /// or the preview has not drawn a frame yet); the caller then fits the raw source frame
+    /// to the canvas as before.
+    /// </summary>
+    private bool TryComputeComposedSourceLayout(out double x, out double y, out double w, out double h)
+    {
+        x = y = w = h = 0;
+
+        if (RendererForSource(_zoomRegionSourceFile) is not { } renderer) return false;
+        if (_zoomRegionSourceW <= 0 || _zoomRegionSourceH <= 0) return false;
+
+        // Where the composed frame is drawn inside the preview control. ZoomRegionCanvas
+        // fills the same grid cell as the preview, so this needs no further translation
+        // (the text-edit overlay maps through the same rect).
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || layout.Height <= 0) return false;
+
+        int outW = renderer.OutputWidth, outH = renderer.OutputHeight;
+        var area = renderer.SourceAreaRect;        // source frame within the composed output
+        var visible = renderer.RestSourceViewport; // source pixels that composed frame shows
+        if (outW <= 0 || outH <= 0
+            || area.Width <= 0 || area.Height <= 0
+            || visible.Width <= 0 || visible.Height <= 0)
+        {
+            return false;
+        }
+
+        // output px → canvas px, then source px → canvas px (the visible source viewport is
+        // drawn into the source-area rect).
+        double outToCanvasX = layout.Width / outW;
+        double outToCanvasY = layout.Height / outH;
+        double scaleX = area.Width * outToCanvasX / visible.Width;
+        double scaleY = area.Height * outToCanvasY / visible.Height;
+
+        w = _zoomRegionSourceW * scaleX;
+        h = _zoomRegionSourceH * scaleY;
+        x = layout.X + (area.X * outToCanvasX) - (visible.X * scaleX);
+        y = layout.Y + (area.Y * outToCanvasY) - (visible.Y * scaleY);
+        return true;
+    }
+
     private void UpdateZoomRegionRect()
     {
         if (!_zoomRegionEditMode) return;
@@ -819,45 +893,79 @@ public sealed partial class EditorPage : Page
         double canvasW = ZoomRegionCanvas.ActualWidth;
         double canvasH = ZoomRegionCanvas.ActualHeight;
         if (canvasW <= 0 || canvasH <= 0) return;
+        if (_zoomRegionSourceW <= 0 || _zoomRegionSourceH <= 0) return;
 
-        // Compute raw frame display rect (aspect-fit centered)
-        double scale = Math.Min(canvasW / _zoomRegionSourceW, canvasH / _zoomRegionSourceH);
-        _frameDisplayW = _zoomRegionSourceW * scale;
-        _frameDisplayH = _zoomRegionSourceH * scale;
-        _frameDisplayX = (canvasW - _frameDisplayW) / 2;
-        _frameDisplayY = (canvasH - _frameDisplayH) / 2;
-
-        // Compute zoom viewport in source pixels
-        double vpW = _zoomRegionSourceW / _zoomRegionZoomLevel;
-        double vpH = _zoomRegionSourceH / _zoomRegionZoomLevel;
-
-        // Adjust for output aspect ratio if set
-        var config = ProjectService.Instance.CurrentComposition;
-        if (config is not null && config.AspectRatio != AspectRatio.Auto)
+        // Preferred: map through the compositor, so the picker and the render agree. The
+        // fallback fits the raw source frame to the canvas, which is what the picker did
+        // before the preview composed in edit mode.
+        bool composed = TryComputeComposedSourceLayout(
+            out _frameDisplayX, out _frameDisplayY, out _frameDisplayW, out _frameDisplayH);
+        if (!composed)
         {
-            double contentRatio = GetAspectRatioValue(config.AspectRatio);
-            if (contentRatio > 0)
-            {
-                double vpRatio = vpW / vpH;
-                if (vpRatio > contentRatio)
-                    vpW = vpH * contentRatio;
-                else
-                    vpH = vpW / contentRatio;
-            }
+            double scale = Math.Min(canvasW / _zoomRegionSourceW, canvasH / _zoomRegionSourceH);
+            _frameDisplayW = _zoomRegionSourceW * scale;
+            _frameDisplayH = _zoomRegionSourceH * scale;
+            _frameDisplayX = (canvasW - _frameDisplayW) / 2;
+            _frameDisplayY = (canvasH - _frameDisplayH) / 2;
         }
 
-        double vpX = _zoomRegionCenterX * _zoomRegionSourceW - vpW / 2;
-        double vpY = _zoomRegionCenterY * _zoomRegionSourceH - vpH / 2;
+        // The region this zoom will actually show, in canvas coordinates. Asking the
+        // compositor for it keeps the zoom scope, aspect-ratio-fit crop, crop anchor and
+        // bounds clamping identical to what gets rendered instead of re-deriving them beside
+        // it, which is how the rectangle and the rendered frame drifted apart.
+        double rectX, rectY, rectW, rectH;
+        var renderer = RendererForSource(_zoomRegionSourceFile);
+        var outputRect = composed
+            ? renderer?.ComputeRegionOutputRect(
+                (float)_zoomRegionZoomLevel, (float)_zoomRegionCenterX, (float)_zoomRegionCenterY)
+            : null;
 
-        // Clamp viewport to source bounds
-        vpX = Math.Clamp(vpX, 0, Math.Max(0, _zoomRegionSourceW - vpW));
-        vpY = Math.Clamp(vpY, 0, Math.Max(0, _zoomRegionSourceH - vpH));
+        if (outputRect is { Width: > 0, Height: > 0 } outRect && renderer is { OutputWidth: > 0, OutputHeight: > 0 })
+        {
+            var layout = Preview.FrameLayoutRect;
+            double outToCanvasX = layout.Width / renderer.OutputWidth;
+            double outToCanvasY = layout.Height / renderer.OutputHeight;
 
-        // Map to display coordinates
-        double rectX = _frameDisplayX + (vpX / _zoomRegionSourceW) * _frameDisplayW;
-        double rectY = _frameDisplayY + (vpY / _zoomRegionSourceH) * _frameDisplayH;
-        double rectW = (vpW / _zoomRegionSourceW) * _frameDisplayW;
-        double rectH = (vpH / _zoomRegionSourceH) * _frameDisplayH;
+            rectX = layout.X + outRect.X * outToCanvasX;
+            rectY = layout.Y + outRect.Y * outToCanvasY;
+            rectW = outRect.Width * outToCanvasX;
+            rectH = outRect.Height * outToCanvasY;
+        }
+        else
+        {
+            // Raw-frame fallback: derive the source viewport here, as the picker did before
+            // the preview composed in edit mode.
+            double vpW = _zoomRegionSourceW / _zoomRegionZoomLevel;
+            double vpH = _zoomRegionSourceH / _zoomRegionZoomLevel;
+
+            // Adjust for output aspect ratio if set
+            var config = ProjectService.Instance.CurrentComposition;
+            if (config is not null && config.AspectRatio != AspectRatio.Auto)
+            {
+                double contentRatio = GetAspectRatioValue(config.AspectRatio);
+                if (contentRatio > 0)
+                {
+                    double vpRatio = vpW / vpH;
+                    if (vpRatio > contentRatio)
+                        vpW = vpH * contentRatio;
+                    else
+                        vpH = vpW / contentRatio;
+                }
+            }
+
+            double vpX = _zoomRegionCenterX * _zoomRegionSourceW - vpW / 2;
+            double vpY = _zoomRegionCenterY * _zoomRegionSourceH - vpH / 2;
+
+            // Clamp viewport to source bounds
+            vpX = Math.Clamp(vpX, 0, Math.Max(0, _zoomRegionSourceW - vpW));
+            vpY = Math.Clamp(vpY, 0, Math.Max(0, _zoomRegionSourceH - vpH));
+
+            // Map to display coordinates
+            rectX = _frameDisplayX + (vpX / _zoomRegionSourceW) * _frameDisplayW;
+            rectY = _frameDisplayY + (vpY / _zoomRegionSourceH) * _frameDisplayH;
+            rectW = (vpW / _zoomRegionSourceW) * _frameDisplayW;
+            rectH = (vpH / _zoomRegionSourceH) * _frameDisplayH;
+        }
 
         Canvas.SetLeft(ZoomRegionRect, rectX);
         Canvas.SetTop(ZoomRegionRect, rectY);
@@ -870,11 +978,23 @@ public sealed partial class EditorPage : Page
         PositionHandle(HandleBL, rectX, rectY + rectH);
         PositionHandle(HandleBR, rectX + rectW, rectY + rectH);
 
-        UpdateZoomRegionCursorMarker();
+        UpdateZoomRegionCursorMarker(composed);
 
-        // Dim overlays constrained to frame display area
-        double fX = _frameDisplayX, fY = _frameDisplayY;
-        double fW = _frameDisplayW, fH = _frameDisplayH;
+        // Dim everything outside the region. On a composed frame that is the whole rendered
+        // image including its background — dimming only the source area would leave the
+        // padding bright and imply it survives the zoom. On the raw fallback it is the frame
+        // rect, as before.
+        double fX, fY, fW, fH;
+        if (composed)
+        {
+            var layout = Preview.FrameLayoutRect;
+            fX = layout.X; fY = layout.Y; fW = layout.Width; fH = layout.Height;
+        }
+        else
+        {
+            fX = _frameDisplayX; fY = _frameDisplayY;
+            fW = _frameDisplayW; fH = _frameDisplayH;
+        }
 
         Canvas.SetLeft(DimTop, fX);
         Canvas.SetTop(DimTop, fY);
@@ -903,8 +1023,36 @@ public sealed partial class EditorPage : Page
         return (w == 0 || h == 0) ? -1.0 : (double)w / h;
     }
 
+    /// <summary>
+    /// The range the region's normalised centre may occupy at a given zoom. Comes from the
+    /// compositor, which clamps in output space under the default frame zoom scope — the
+    /// background around the source area is slack the centre can spend, so half-a-viewport-in
+    /// from each edge (the fallback below) is stricter than what actually renders.
+    /// </summary>
+    private (double MinX, double MaxX, double MinY, double MaxY) GetCenterBounds(double zoom)
+    {
+        if (RendererForSource(_zoomRegionSourceFile)?.ComputeRegionCenterBounds((float)zoom)
+            is { } bounds && bounds.MaxX >= bounds.MinX && bounds.MaxY >= bounds.MinY)
+        {
+            return bounds;
+        }
+
+        (double halfW, double halfH) = GetNormalizedHalfExtents(zoom);
+        return (halfW, 1.0 - halfW, halfH, 1.0 - halfH);
+    }
+
     private (double halfW, double halfH) GetNormalizedHalfExtents(double zoom)
     {
+        // Same source as the drawn rectangle (see UpdateZoomRegionRect), so the centre can
+        // never be clamped to a box of a different size than the one on screen.
+        var rendererViewport = RendererForSource(_zoomRegionSourceFile)?.ComputeRegionViewport(
+            (float)zoom, (float)_zoomRegionCenterX, (float)_zoomRegionCenterY);
+        if (rendererViewport is { Width: > 0, Height: > 0 } vp
+            && _zoomRegionSourceW > 0 && _zoomRegionSourceH > 0)
+        {
+            return (vp.Width / _zoomRegionSourceW / 2.0, vp.Height / _zoomRegionSourceH / 2.0);
+        }
+
         double vpW = _zoomRegionSourceW / zoom;
         double vpH = _zoomRegionSourceH / zoom;
 
@@ -1003,10 +1151,10 @@ public sealed partial class EditorPage : Page
             double deltaNormX = deltaX / _frameDisplayW;
             double deltaNormY = deltaY / _frameDisplayH;
 
-            (double halfW, double halfH) = GetNormalizedHalfExtents(_zoomRegionZoomLevel);
+            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(_zoomRegionZoomLevel);
 
-            double newCx = System.Math.Clamp(_dragStartCenterX + deltaNormX, halfW, 1.0 - halfW);
-            double newCy = System.Math.Clamp(_dragStartCenterY + deltaNormY, halfH, 1.0 - halfH);
+            double newCx = System.Math.Clamp(_dragStartCenterX + deltaNormX, minX, maxX);
+            double newCy = System.Math.Clamp(_dragStartCenterY + deltaNormY, minY, maxY);
 
             bool snappedX = false, snappedY = false;
             if (!shift)
@@ -1052,9 +1200,9 @@ public sealed partial class EditorPage : Page
             double newCx = (centerDispX - _frameDisplayX) / _frameDisplayW;
             double newCy = (centerDispY - _frameDisplayY) / _frameDisplayH;
 
-            (double rHalfW, double rHalfH) = GetNormalizedHalfExtents(newZoom);
-            newCx = System.Math.Clamp(newCx, rHalfW, 1.0 - rHalfW);
-            newCy = System.Math.Clamp(newCy, rHalfH, 1.0 - rHalfH);
+            (double rMinX, double rMaxX, double rMinY, double rMaxY) = GetCenterBounds(newZoom);
+            newCx = System.Math.Clamp(newCx, rMinX, rMaxX);
+            newCy = System.Math.Clamp(newCy, rMinY, rMaxY);
 
             bool snappedX = false, snappedY = false;
             if (!shift)

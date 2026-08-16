@@ -1984,3 +1984,44 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 
 
 
+
+## Zoom-region picker: frame the render, not the capture (issue #87)
+
+- **Feature/area**: `EditorPage` zoom-region edit overlay + `FrameCompositor`/`PreviewRenderer`
+  geometry.
+- **Symptom**: "Edit Region" showed the RAW capture while the committed preview showed the composed
+  frame, and the composed cursor was missing while scrubbing — so the picker and the render
+  disagreed about padding, aspect-ratio fit, and where the mouse was.
+- **Root cause was a deliberate old decision** (`!_zoomRegionEditMode` bypassed the compositor in
+  all four preview render paths, so the zoom being edited could not fight the rectangle). The fix
+  keeps that intent but moves it down a layer: `FrameCompositor.SuppressZoom` holds the camera at
+  rest inside `ResolveZoomState`, so the picker gets the fully composed frame minus the zoom.
+  Suppression is applied in `ResolveZoomState`, NOT at the `ComposeFrame` call site — the
+  motion-blur and camera-velocity samplers resolve their own states and would otherwise reintroduce
+  the zoom.
+- **What worked**: making the compositor the single source of the picker's geometry —
+  `SourceAreaRect`, `RestSourceViewport`, `ComputeRegionOutputRect`, `ComputeRegionCenterBounds`.
+  The overlay maps through `Preview.FrameLayoutRect` (same rect the text-edit overlay uses) and
+  redraws from `FrameLayoutChanged`, so it tracks the composed frame instead of re-deriving it.
+- **The trap that nearly shipped**: the first pass drew the region as the *source* viewport
+  (`srcW / zoom`). That is only right for `ZoomScope.Source`. The default `ZoomScope.Frame`
+  magnifies the whole CANVAS, so its visible region is `OutputWidth / zoom` — with the default 48px
+  padding it covers noticeably more source than `srcW / zoom`, and the drawn rect under-reported it.
+  `ComputeRegionOutputRect` is therefore scope-aware and returns OUTPUT pixels.
+- **Same trap for the centre clamp**: under `ZoomScope.Frame` the camera clamps in output space, so
+  the background around the source area is slack the centre can spend — a centred 2x region reaches
+  ~0.179 rather than the 0.25 that half-a-viewport-in arithmetic gives. `ComputeRegionCenterBounds`
+  returns an asymmetric-capable min/max range; `GetNormalizedHalfExtents` survives only as the
+  no-compositor fallback.
+- **Cursor marker is now fallback-only.** It was added earlier because the raw frame had no cursor;
+  a composed frame draws the real one, and leaving the ring on top recreated the "picker shows one
+  thing, preview another" complaint in miniature.
+- **What didn't work / rejected**: keeping the raw-frame picker and only re-deriving aspect-ratio
+  math beside the compositor (that duplication is exactly what drifted); and setting `SuppressZoom`
+  once on enter/exit — a preview rebuild mid-edit drops it, so each render path sets it from
+  `_zoomRegionEditMode` instead.
+- **Verified**: `ZoomRegionPickerGeometryTests` (12 new tests, Win2D-device-gated with
+  `Assert.Inconclusive`) covering padding/source-area, Cover crop, both zoom scopes, centre bounds,
+  and a pixel-equality check that a suppressed zoom composes byte-identically to an unzoomed clip.
+  Suite **1073 passed, 3 skipped, 0 failed**; x64 Debug app + tests build clean with VS MSBuild.
+  Not exercised at runtime — reaching the editor still needs a live recording.

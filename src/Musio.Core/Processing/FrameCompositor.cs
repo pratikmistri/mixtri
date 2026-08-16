@@ -112,6 +112,140 @@ public class FrameCompositor : IDisposable
     public int OutputWidth { get; private set; }
     public int OutputHeight { get; private set; }
 
+    /// <summary>
+    /// Composes every frame at rest (1x, no camera drift) while leaving the rest of the
+    /// composition — background, padding, aspect-ratio fit, cursor, overlays — exactly as
+    /// it would be rendered.
+    /// <para>
+    /// The zoom-region picker needs both halves of that: the frame has to look like the
+    /// finished render (framing a region against raw capture pixels is what made the picker
+    /// and the preview disagree), but the zoom being edited must not fight the rectangle
+    /// being dragged. Applied inside <see cref="ResolveZoomState"/>, so every consumer of
+    /// the zoom state — crop, post-composite path, motion blur, camera velocity — sees the
+    /// same rest state for a given instant.
+    /// </para>
+    /// </summary>
+    public bool SuppressZoom { get; set; }
+
+    /// <summary>
+    /// The rect the source frame occupies inside the composed output, in OUTPUT pixels.
+    /// Everything outside it is background (user padding plus any aspect-ratio-fit gap) —
+    /// there is no separate letterbox container. See <see cref="ComputeContentDimensions"/>.
+    /// </summary>
+    public Rect SourceAreaRect => _initialized
+        ? new Rect(_sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight)
+        : default;
+
+    /// <summary>
+    /// The region of the SOURCE frame that is visible in a frame composed at rest, in source
+    /// pixels. Equals the whole source frame except in <see cref="FitMode.Cover"/>, where the
+    /// viewport is cropped to the target aspect ratio around the configured anchor.
+    /// </summary>
+    public Rect RestSourceViewport => _initialized ? ComputeEffectiveViewport(RestZoomState()) : default;
+
+    /// <summary>
+    /// The region of the SOURCE frame a zoom of <paramref name="zoomLevel"/> centred on
+    /// (<paramref name="centerXNormalized"/>, <paramref name="centerYNormalized"/>) would
+    /// show, in source pixels — clamping and aspect-ratio-fit crop included.
+    /// <para>
+    /// Exists so the zoom-region picker can draw the rectangle the compositor will actually
+    /// render rather than re-deriving that geometry beside it, which is how the two drifted
+    /// apart before.
+    /// </para>
+    /// </summary>
+    public Rect ComputeRegionViewport(float zoomLevel, float centerXNormalized, float centerYNormalized)
+    {
+        if (!_initialized) return default;
+
+        var state = _zoomEngine.ComputeViewportForCenter(
+            zoomLevel,
+            centerXNormalized * _sourceWidth,
+            centerYNormalized * _sourceHeight);
+        return ComputeEffectiveViewport(state);
+    }
+
+    /// <summary>
+    /// The region of the composed OUTPUT frame that a zoom of <paramref name="zoomLevel"/>
+    /// centred on (<paramref name="centerXNormalized"/>, <paramref name="centerYNormalized"/>)
+    /// will end up showing, in output pixels.
+    /// <para>
+    /// Scope-aware, because the two scopes crop different things:
+    /// <see cref="ZoomScope.Frame"/> (the default) magnifies the whole canvas, so its visible
+    /// region includes the background/padding around the source area, while
+    /// <see cref="ZoomScope.Source"/> keeps that chrome fixed and crops only the source.
+    /// The zoom-region picker draws this rect, so what it frames is what gets rendered.
+    /// </para>
+    /// </summary>
+    public Rect ComputeRegionOutputRect(float zoomLevel, float centerXNormalized, float centerYNormalized)
+    {
+        if (!_initialized) return default;
+
+        var state = _zoomEngine.ComputeViewportForCenter(
+            Math.Max(1f, zoomLevel),
+            centerXNormalized * _sourceWidth,
+            centerYNormalized * _sourceHeight);
+        var viewport1x = ComputeEffectiveViewport(RestZoomState());
+
+        if (_config.ZoomScope == ZoomScope.Frame && state.ZoomLevel > 1.01f)
+            return ComputeCompositeCropRect(state, viewport1x);
+
+        // Source scope: the cropped source is redrawn into the (fixed) source area, so the
+        // visible region is that crop mapped through the at-rest source→output transform.
+        var vp = ComputeEffectiveViewport(state);
+        var topLeft = MapSourcePointToOutput(new Vector2((float)vp.X, (float)vp.Y), viewport1x);
+        double scaleX = _sourceAreaWidth / viewport1x.Width;
+        double scaleY = _sourceAreaHeight / viewport1x.Height;
+        return new Rect(topLeft.X, topLeft.Y, vp.Width * scaleX, vp.Height * scaleY);
+    }
+
+    /// <summary>
+    /// The range a zoom's normalised centre can occupy at <paramref name="zoomLevel"/> before
+    /// the compositor clamps the camera, in the same 0..1 source space as
+    /// <see cref="Timeline.ZoomKeyframe.CenterX"/>/<c>CenterY</c>.
+    /// <para>
+    /// Not simply "half a viewport in from each edge": under <see cref="ZoomScope.Frame"/> the
+    /// clamp happens in output space, where the background around the source area is slack the
+    /// centre can spend, so the centre legitimately reaches closer to the source edges than the
+    /// source-space arithmetic alone would allow. The picker clamps with this so its rectangle
+    /// stops exactly where the rendered camera does.
+    /// </para>
+    /// </summary>
+    public (double MinX, double MaxX, double MinY, double MaxY) ComputeRegionCenterBounds(float zoomLevel)
+    {
+        if (!_initialized) return (0.0, 1.0, 0.0, 1.0);
+
+        zoomLevel = Math.Max(1f, zoomLevel);
+        var viewport1x = ComputeEffectiveViewport(RestZoomState());
+
+        if (_config.ZoomScope == ZoomScope.Frame && zoomLevel > 1.01f)
+        {
+            double cropW = OutputWidth / (double)zoomLevel;
+            double cropH = OutputHeight / (double)zoomLevel;
+
+            return (
+                OutputToNormalizedSourceX(cropW / 2),
+                OutputToNormalizedSourceX(OutputWidth - cropW / 2),
+                OutputToNormalizedSourceY(cropH / 2),
+                OutputToNormalizedSourceY(OutputHeight - cropH / 2));
+        }
+
+        var vp = ComputeEffectiveViewport(
+            _zoomEngine.ComputeViewportForCenter(zoomLevel, _sourceWidth / 2f, _sourceHeight / 2f));
+        double halfX = vp.Width / 2 / _sourceWidth;
+        double halfY = vp.Height / 2 / _sourceHeight;
+        return (halfX, 1.0 - halfX, halfY, 1.0 - halfY);
+
+        double OutputToNormalizedSourceX(double outputX) =>
+            ((outputX - _sourceAreaOffsetX) * viewport1x.Width / _sourceAreaWidth + viewport1x.X) / _sourceWidth;
+
+        double OutputToNormalizedSourceY(double outputY) =>
+            ((outputY - _sourceAreaOffsetY) * viewport1x.Height / _sourceAreaHeight + viewport1x.Y) / _sourceHeight;
+    }
+
+    /// <summary>The un-zoomed (1x, whole-frame) camera state.</summary>
+    private ZoomState RestZoomState() =>
+        _zoomEngine.ComputeViewportForCenter(1f, _sourceWidth / 2f, _sourceHeight / 2f);
+
     public FrameCompositor(CompositionConfig config)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -541,6 +675,11 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private ZoomState ResolveZoomState(double timeSeconds)
     {
+        // Zoom held at rest for the region picker — see SuppressZoom. Returning here rather
+        // than at the ComposeFrame call site keeps the motion-blur and camera-velocity
+        // samplers, which resolve their own states, from reintroducing the zoom.
+        if (SuppressZoom) return RestZoomState();
+
         // Same cursor-index formula as ComposeFrame.
         int cursorIndex = ResolveCursorIndex(timeSeconds);
         var cursorPos = _smoothedPositions[cursorIndex];
