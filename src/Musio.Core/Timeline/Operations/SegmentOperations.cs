@@ -639,16 +639,19 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
     {
         _didSplit = false;
 
-        int splitIndex = -1;
-        for (int i = 0; i < model.Segments.Count; i++)
-        {
-            var seg = model.Segments[i];
-            if (_splitTime > seg.Start && _splitTime < seg.End)
-            {
-                splitIndex = i;
-                break;
-            }
-        }
+        // Split whatever is VISIBLE at the playhead — the topmost covering segment — rather
+        // than the first one in list order. With overlay tracks those differ, and splitting
+        // the hidden base clip under an overlay is an edit the user cannot see happening.
+        var target = model.GetSegmentAtTime(_splitTime).Segment;
+        int splitIndex = target is null
+            ? -1
+            : model.Segments.FindIndex(s => ReferenceEquals(s, target));
+
+        // GetSegmentAtTime resolves the very end of the timeline to the last-ending segment,
+        // which is not a split: require the time to fall strictly inside the segment.
+        if (splitIndex >= 0 && !(_splitTime > target!.Start && _splitTime < target.End))
+            splitIndex = -1;
+
         if (splitIndex < 0) return false;
 
         var segment = model.Segments[splitIndex];
@@ -712,6 +715,16 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
         model.Segments.RemoveAt(splitIndex);
         model.Segments.Insert(splitIndex, firstHalf);
         model.Segments.Insert(splitIndex + 1, secondHalf);
+
+        // RecalculateSegmentPositions re-derives starts for the base chain only, so an
+        // overlay's second half would otherwise inherit the original's start and sit exactly
+        // on top of the first half.
+        if (segment.TrackIndex != TimelineModel.BaseTrackIndex)
+        {
+            firstHalf.Start = segment.Start;
+            secondHalf.Start = segment.Start + localOffset;
+        }
+
         _didSplit = true;
         return true;
     }

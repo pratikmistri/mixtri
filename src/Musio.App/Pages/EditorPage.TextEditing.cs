@@ -1124,27 +1124,26 @@ public sealed partial class EditorPage
         InvalidatePreview();
     }
 
+    /// <summary>
+    /// Debounces the animation-window sliders. They emit a tick per <c>StepFrequency</c> step,
+    /// so committing on every tick would push dozens of operations onto the undo stack for a
+    /// single thumb drag (making one drag take dozens of Ctrl+Z to reverse, and clearing the
+    /// redo stack each time) and fire an un-debounced forced recompose on the UI thread.
+    /// Matches how every other continuous control here behaves (<c>_cursorDebouncer</c>,
+    /// <c>_motionDebouncer</c>, <c>_styleDebouncer</c>).
+    /// </summary>
+    private void ScheduleSlideTextWindowCommit()
+    {
+        _slideTextWindowDebouncer ??= new Debouncer(CommitSlideTextWindowFromControls);
+        _slideTextWindowDebouncer.Schedule();
+    }
+
     private void SlideTextWindowSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
     {
         if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
 
-        var slide = SelectedSlide();
-        if (slide is null) return;
-
-        var pane = PropertiesPanel.TextSlide;
-        var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
-        var inStart = ReferenceEquals(sender, pane.SlideTextInAtSlider)
-            ? newValue
-            : slide.ResolveTextInStart();
-        var outEnd = ReferenceEquals(sender, pane.SlideTextOutBySlider)
-            ? newValue
-            : slide.ResolveTextOutEnd();
-
-        ViewModel.UndoRedoManager.Execute(
-            new SetTextSlideTextWindowOperation(slide.Id, inStart, outEnd));
-        SyncTextSlideWindowControls(slide);
-        RefreshSlidePreview();
+        ScheduleSlideTextWindowCommit();
     }
 
     private void SlideTextRampSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
@@ -1152,26 +1151,45 @@ public sealed partial class EditorPage
         if (_suppressSlideEvents || _selectedTextSlideId is null || double.IsNaN(args.NewValue)) return;
         if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
 
+        ScheduleSlideTextWindowCommit();
+    }
+
+    /// <summary>
+    /// Reads all four animation-window sliders and commits them as ONE undoable edit. Values
+    /// are re-read here rather than captured at schedule time so a burst of ticks that
+    /// coalesced into a single commit always reflects the newest thumb positions.
+    /// </summary>
+    private void CommitSlideTextWindowFromControls()
+    {
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
+        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+
         var slide = SelectedSlide();
         if (slide is null) return;
 
         var pane = PropertiesPanel.TextSlide;
-        var newValue = TimeSpan.FromSeconds(Math.Max(0, args.NewValue));
-        var inDuration = ReferenceEquals(sender, pane.SlideTextInRampSlider)
-            ? newValue
-            : slide.TextInDuration;
-        var outDuration = ReferenceEquals(sender, pane.SlideTextOutRampSlider)
-            ? newValue
-            : slide.TextOutDuration;
+        if (pane.SlideTextInAtSlider is null || pane.SlideTextOutBySlider is null ||
+            pane.SlideTextInRampSlider is null || pane.SlideTextOutRampSlider is null)
+        {
+            return;
+        }
 
+        var inStart = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInAtSlider.Value));
+        var outEnd = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutBySlider.Value));
+        var inDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInRampSlider.Value));
+        var outDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutRampSlider.Value));
+
+        // One operation carries both the window and the ramps, so a drag that touched either
+        // is a single undo step.
         ViewModel.UndoRedoManager.Execute(new UpdateTextSlideOperation(
             slide.Id,
             slide.Text, slide.FontFamily, slide.FontSize,
             slide.IsBold, slide.IsItalic,
             slide.TextColor, slide.BackgroundColor,
             slide.Duration, slide.Animation,
-            slide.TextInStart, inDuration,
-            slide.TextOutEnd, outDuration));
+            inStart, inDuration,
+            outEnd, outDuration));
+
         SyncTextSlideWindowControls(slide);
         RefreshSlidePreview();
     }

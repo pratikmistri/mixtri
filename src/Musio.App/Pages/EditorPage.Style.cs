@@ -895,6 +895,12 @@ public sealed partial class EditorPage
     /// </summary>
     private async Task RebuildForSegmentStyleChangeAsync(VideoSegment seg)
     {
+        // A per-segment override is written straight onto the segment — it goes through
+        // neither UndoRedoManager nor CurrentComposition, so this is the only place the
+        // unsaved-changes flag can learn about it. The override is persisted in the package,
+        // so missing it would lose a real edit on close.
+        ProjectService.Instance.MarkDirty();
+
         var primary = PrimaryVideoPath;
         bool isPrimary = primary is null ||
             string.Equals(seg.VideoFilePath, primary, StringComparison.OrdinalIgnoreCase);

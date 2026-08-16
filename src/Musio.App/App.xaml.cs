@@ -29,6 +29,7 @@ public partial class App : Application
     private ExtendedExecutionSession? _extendedSession;
     private bool _isExiting;
     private bool _promptingUnsavedChanges;
+    private bool _dismissalConfirmed;
     private System.Threading.Timer? _quiesceTimer;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
@@ -575,6 +576,13 @@ public partial class App : Application
             InitializeTray();
         }
 
+        // Subscribed unconditionally, and deliberately NOT inside InitializeTray: a document
+        // instance has no tray, so if this rode along with it, opening a .musio from Explorer,
+        // editing it and clicking X would discard every change with no prompt — the single
+        // most common edit flow. The handler already copes with there being no tray (it lets
+        // the close proceed rather than stranding an unreachable process).
+        mainWindow.AppWindow.Closing += OnWindowClosing;
+
         // A redirect that landed while the window was still being built. Queued rather
         // than called directly so it runs after OnLaunched has finished wiring up.
         if (focusOwed)
@@ -607,7 +615,6 @@ public partial class App : Application
             _trayService.ShowWindowRequested += OnShowWindowRequested;
             _trayService.StartRecordingRequested += OnStartRecordingRequested;
             _trayService.ExitRequested += OnExitRequested;
-            _window.AppWindow.Closing += OnWindowClosing;
 
             // Tell the shell a tray affordance exists, so hide-to-tray is safe.
             if (_shell is not null) _shell.IsTrayAvailable = true;
@@ -844,7 +851,8 @@ public partial class App : Application
     /// </remarks>
     private bool TryPromptUnsavedChanges(Action afterSaveDecision)
     {
-        if (_isExiting || _promptingUnsavedChanges) return _promptingUnsavedChanges;
+        if (_isExiting || _dismissalConfirmed) return false;
+        if (_promptingUnsavedChanges) return true;
         if (!ProjectService.Instance.HasUnsavedChanges) return false;
         if (_window?.Content?.XamlRoot is null) return false;
 
@@ -886,13 +894,31 @@ public partial class App : Application
                 return;
             }
 
-            afterSaveDecision();
+            // Cleared BEFORE the dismissal runs, and replaced by a one-shot "already asked"
+            // flag: closing the window re-raises Closing synchronously, and a still-set
+            // prompting flag would cancel that close outright — leaving a window that can
+            // never be shut.
+            _promptingUnsavedChanges = false;
+            _dismissalConfirmed = true;
+            try
+            {
+                afterSaveDecision();
+            }
+            finally
+            {
+                // Only meaningful for the hide-to-tray route, where the window outlives the
+                // dismissal and must ask again the next time it is closed.
+                _dismissalConfirmed = false;
+            }
         }
         catch (Exception ex)
         {
-            DiagLog.Write("Shell", $"Unsaved-changes prompt failed: {ex}");
-            // Never strand the user in a window they cannot close because the prompt broke.
-            afterSaveDecision();
+            // Most likely another ContentDialog is already open (export/import progress),
+            // which WinUI rejects outright. Abandon the dismissal rather than proceeding:
+            // continuing here would discard the edit session precisely because the prompt
+            // that exists to protect it failed. The window stays open and the user can try
+            // again once the other dialog is gone.
+            DiagLog.Write("Shell", $"Unsaved-changes prompt failed; dismissal abandoned: {ex}");
         }
         finally
         {

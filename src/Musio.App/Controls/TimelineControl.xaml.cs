@@ -48,6 +48,13 @@ public sealed partial class TimelineControl : UserControl
 
     private string? _draggedSegmentId;
     private double _segmentDragStartX = double.NaN;
+    /// <summary>
+    /// Pointer Y where the segment drag began. The target lane is derived from movement
+    /// relative to this rather than from the pointer's absolute Y, because revealing the
+    /// drop-hint lane changes the canvas height and therefore shifts every row underneath
+    /// the (stationary) cursor mid-gesture.
+    /// </summary>
+    private double _segmentDragStartY = double.NaN;
     private double _segmentDragCurrentX = double.NaN;
     private bool _segmentDragMoved;
     private TimeSpan _segmentDragOriginalStart;
@@ -615,22 +622,38 @@ public sealed partial class TimelineControl : UserControl
     /// True while a segment is actively being dragged, which is when an extra empty overlay
     /// lane is revealed as a drop target.
     /// </summary>
-    private bool ShowOverlayDropHint => _dragMode == DragMode.SegmentBody && _segmentDragMoved;
+    private bool ShowOverlayDropHint =>
+        _dragMode == DragMode.SegmentBody
+        && _segmentDragMoved
+        && _segmentDragCurrentTrackIndex >= Math.Max(1, Model?.VideoTrackCount ?? 1);
+
+    /// <summary>
+    /// Destination lane for the in-flight segment drag, derived from vertical travel since
+    /// the grab so it is immune to the canvas resizing underneath the cursor. Allows reaching
+    /// exactly one lane above the highest one currently in use — that is the lane the drop
+    /// hint offers to create.
+    /// </summary>
+    private int ResolveDragTrackIndex(TimelineModel model, double y)
+    {
+        if (double.IsNaN(_segmentDragStartY)) return _segmentDragOriginalTrackIndex;
+
+        int used = Math.Max(1, model.VideoTrackCount);
+        int rowsUp = (int)Math.Round((_segmentDragStartY - y) / OverlayVideoTrackHeight);
+        return Math.Clamp(_segmentDragOriginalTrackIndex + rowsUp, TimelineModel.BaseTrackIndex, used);
+    }
 
     /// <summary>
     /// Number of video lanes to lay out: the tracks the model actually uses, plus one
-    /// transient empty lane while a segment is being dragged.
+    /// transient empty lane while a segment is being dragged towards a new one.
     /// </summary>
     /// <remarks>
     /// <see cref="TimelineModel.VideoTrackCount"/> counts only tracks that currently hold a
     /// segment, so a project with nothing on an overlay track reports 1 and the base lane is
-    /// the only row on screen. A segment could then never be dragged UP to a parallel track:
-    /// there is no row above it to aim at, and <see cref="VideoTrackIndexFromY"/> has no y
-    /// range that resolves to anything but the base track. Rather than permanently parking an
-    /// empty lane on every timeline, the destination is revealed only once a drag is under
-    /// way — the moment it becomes actionable — and folds away again on release. It is a
-    /// layout concept only and is never persisted; a lane the user drops nothing into simply
-    /// stops being drawn.
+    /// the only row on screen. A segment could then never be dragged UP to a parallel track,
+    /// because there is no row above it to aim at. Rather than permanently parking an empty
+    /// lane on every timeline, the destination is revealed only once the drag actually
+    /// reaches for it, and folds away again on release. It is a layout concept only and is
+    /// never persisted; a lane the user drops nothing into simply stops being drawn.
     /// </remarks>
     private int VideoDisplayTrackCount(TimelineModel? model)
     {
@@ -4447,6 +4470,7 @@ public sealed partial class TimelineControl : UserControl
 
         _draggedSegmentId = segId;
         _segmentDragStartX = x;
+        _segmentDragStartY = y;
         _segmentDragCurrentX = x;
         _segmentDragMoved = false;
         _segmentDragOriginalStart = segment.Start;
@@ -4568,10 +4592,14 @@ public sealed partial class TimelineControl : UserControl
                     break;
                 }
                 _segmentDragMoved = true;
-                // The hint lane only exists while dragging, so the canvas has to grow before
-                // the pointer can resolve into it.
+
+                // Resolve the destination lane from how far the pointer has TRAVELLED, not
+                // from where it now sits. Revealing the hint lane grows the canvas, which
+                // pushes every existing row down by one lane height while the cursor stays
+                // put — reading absolute Y would then report a lane the user never aimed at,
+                // silently promoting a plain horizontal reorder into an overlay move.
+                _segmentDragCurrentTrackIndex = ResolveDragTrackIndex(model, y);
                 UpdateVideoTrackHeight();
-                _segmentDragCurrentTrackIndex = VideoTrackIndexFromY(model, y);
                 SetCursor(InputSystemCursorShape.SizeAll);
 
                 // Snap the dragged segment's projected left edge to nearby boundaries.
@@ -4611,6 +4639,33 @@ public sealed partial class TimelineControl : UserControl
                 PlayheadPosition = XToTime(x);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Abandons an in-flight drag when the pointer is taken away without a release (window
+    /// deactivation, a touch cancel, a system gesture). Without this the drag state — and so
+    /// the drop-hint lane and the canvas height it forces — would stay latched with no
+    /// gesture left to clear it.
+    /// </summary>
+    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragMode == DragMode.None) return;
+
+        _draggedSegmentId = null;
+        _segmentDragStartX = double.NaN;
+        _segmentDragStartY = double.NaN;
+        _segmentDragCurrentX = double.NaN;
+        _segmentDragMoved = false;
+        _segmentDragOriginalTrackIndex = TimelineModel.BaseTrackIndex;
+        _segmentDragCurrentTrackIndex = TimelineModel.BaseTrackIndex;
+        _segmentSnapGuideX = double.NaN;
+        _segmentDropIndicatorX = double.NaN;
+        _textSlideWindowDragCurrentX = double.NaN;
+        _dragMode = DragMode.None;
+
+        SetCursor(InputSystemCursorShape.Arrow);
+        UpdateVideoTrackHeight();
+        InvalidateAll();
     }
 
     private void VideoTrack_PointerReleased(object sender, PointerRoutedEventArgs e)

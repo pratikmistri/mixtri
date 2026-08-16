@@ -59,6 +59,24 @@ public class ProjectService
         }
     }
 
+    /// <summary>
+    /// Publishes a composition that was DERIVED at load time — first-open defaults, fields
+    /// mirrored from the project, a webcam style implied by the recording — without flagging
+    /// unsaved changes.
+    /// </summary>
+    /// <remarks>
+    /// The ordinary <see cref="CurrentComposition"/> setter treats a value-different config as
+    /// a user edit, which is what makes style controls mark the project dirty for free. The
+    /// preview rebuild runs after navigation and legitimately produces a config that differs
+    /// from the one <see cref="SetProject"/> left behind, so routing it through the ordinary
+    /// setter made every freshly captured recording look modified before the user touched it —
+    /// defeating the <see cref="MarkSaved"/> call at the end of <see cref="SetProject"/>.
+    /// </remarks>
+    public void ApplyLoadTimeComposition(CompositionConfig config)
+    {
+        _currentComposition = config;
+    }
+
     public TimelineModel? CurrentTimeline { get; set; }
 
     /// <summary>

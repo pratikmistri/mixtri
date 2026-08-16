@@ -157,6 +157,11 @@ public sealed partial class EditorPage : Page
     // still committed (through UndoRedoManager, for undo) on every keystroke; only the
     // (expensive) preview re-render is debounced.
     private Debouncer? _overlayPreviewDebouncer;
+
+    // Text-slide animation-window sliders — its own timer so a window drag is never coalesced
+    // with a style/motion/cursor edit. Unlike the overlay debounce above, this one defers the
+    // MODEL commit too, so a whole thumb drag lands as a single undo step.
+    private Debouncer? _slideTextWindowDebouncer;
     private bool _hasWebcamOverlay;
 
     public EditorPage()

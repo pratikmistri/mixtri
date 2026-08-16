@@ -1436,6 +1436,11 @@ public sealed partial class EditorPage
     /// </returns>
     private bool ApplyAudioMixChange(AudioMixChannel channel)
     {
+        // Mute flags and per-channel volumes are persisted in the package but are written
+        // straight onto TimelineModel by the mixer flyout, bypassing UndoRedoManager — so
+        // without this an audio mix change would never mark the project dirty.
+        ProjectService.Instance.MarkDirty();
+
         if (channel is AudioMixChannel.System or AudioMixChannel.Mic)
         {
             var project = ProjectService.Instance.CurrentProject;

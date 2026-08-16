@@ -437,8 +437,10 @@ public sealed partial class EditorPage
             config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
         }
 
-        // Persist so the export pipeline uses the same config
-        ProjectService.Instance.CurrentComposition = config;
+        // Persist so the export pipeline uses the same config. Applied through the load-time
+        // path: everything above is derived from the project or from first-open defaults, not
+        // from anything the user did, so it must not mark the project as having unsaved edits.
+        ProjectService.Instance.ApplyLoadTimeComposition(config);
 
         try
         {
@@ -814,6 +816,16 @@ public sealed partial class EditorPage
             }
 
             var (segment, localOffset) = model.GetSegmentAtTime(position);
+
+            // Nothing covers this instant — a gap opened by head-trimming or moving an
+            // overlay clip. The exporter emits an empty frame here (SegmentFrameComposer),
+            // so the preview must clear too; leaving the previous frame on screen would make
+            // the two pipelines disagree about exactly these frames.
+            if (segment is null && model.Segments.Count > 0)
+            {
+                RenderEmptyPreviewFrame();
+                return;
+            }
 
             if (segment is TextSlideSegment slide)
             {
@@ -1293,6 +1305,38 @@ public sealed partial class EditorPage
         }
 
         ShowTextEditOverlay();
+    }
+
+    /// <summary>
+    /// Clears the preview to empty for an output instant no segment covers. Gaps are a legal
+    /// timeline state (head-trimming or moving an overlay clip can open one), and the export
+    /// composer renders them as an empty frame — so the preview shows the same thing rather
+    /// than leaving the last decoded frame up.
+    /// </summary>
+    private void RenderEmptyPreviewFrame()
+    {
+        var (width, height) = GetPreviewCanvasSize();
+        if (width <= 0 || height <= 0) return;
+
+        _previewSlideId = null;
+        _previewOverlayId = null;
+        _previewFrameW = width;
+        _previewFrameH = height;
+
+        try
+        {
+            var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
+            var frame = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, width, height, 96);
+            _lastRenderedFrameIndex = -1; // force redraw next time
+            Preview.SetFrame(frame);
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Preview",
+                $"empty-gap frame render failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        HideTextEditOverlay();
     }
 
     /// <summary>

@@ -140,6 +140,8 @@
             PointerExited="VideoTrack_PointerExited"
             PointerPressed="VideoTrack_PointerPressed"
             PointerReleased="VideoTrack_PointerReleased"
+            PointerCaptureLost="VideoTrack_PointerCaptureLost"
+            PointerCanceled="VideoTrack_PointerCaptureLost"
             RightTapped="VideoTrack_RightTapped" />
 
         <canvas:CanvasControl

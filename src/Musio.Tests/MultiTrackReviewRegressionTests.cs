@@ -283,4 +283,91 @@ public sealed class MultiTrackReviewRegressionTests
         Assert.AreEqual(TimeSpan.FromSeconds(2), restored.Duration);
         Assert.AreEqual(1, restored.TrackIndex);
     }
+
+    /// <summary>
+    /// Head-trimming an overlay deliberately leaves the frames it vacated uncovered — that is
+    /// an ordinary NLE gap, and holding the out-point is exactly what the user asked for. What
+    /// must NOT happen is the scene getting shorter. Both pipelines render an uncovered instant
+    /// as an empty frame (SegmentFrameComposer emits one; the preview clears), so this pins
+    /// the gap as intentional and bounded rather than as an accident.
+    /// </summary>
+    [TestMethod]
+    public void TrimOverlaySegmentFromStart_LeavesAnIntentionalGap_ButKeepsTheSceneLength()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 6));
+        var overlay = Video(6, 2, track: 1);
+        model.Segments.Add(overlay);
+
+        new TrimSegmentEdgeOperation(overlay.Id, fromStart: true, TimeSpan.FromSeconds(1.5)).Execute(model);
+
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.TotalSegmentsDuration);
+        Assert.IsNull(model.GetSegmentAtTime(TimeSpan.FromSeconds(6.2)).Segment,
+            "The vacated range is a gap, which both pipelines render as an empty frame.");
+        Assert.IsNotNull(model.GetSegmentAtTime(TimeSpan.FromSeconds(5.9)).Segment);
+        Assert.IsNotNull(model.GetSegmentAtTime(TimeSpan.FromSeconds(6.6)).Segment);
+    }
+
+    // ── Splitting must follow what is visible, and must position overlay halves ──
+
+    /// <summary>
+    /// The split used to take the first list-order segment covering the time. With overlay
+    /// tracks that is not the visible one, so splitting at a playhead parked under an overlay
+    /// silently divided the hidden base clip instead.
+    /// </summary>
+    [TestMethod]
+    public void SplitAtTime_SplitsTheVisibleSegment_NotTheHiddenBaseClip()
+    {
+        var model = new TimelineModel();
+        var baseClip = Video(0, 10);
+        var overlay = Video(2, 6, track: 1);
+        model.Segments.Add(baseClip);
+        model.Segments.Add(overlay);
+
+        new SplitSegmentAtTimeOperation(TimeSpan.FromSeconds(5)).Execute(model);
+
+        Assert.AreEqual(1, model.Segments.Count(s => s.TrackIndex == 0),
+            "The hidden base clip must be left alone.");
+        Assert.AreEqual(2, model.Segments.Count(s => s.TrackIndex == 1),
+            "The visible overlay is the one that splits.");
+    }
+
+    /// <summary>
+    /// Overlay starts are authored, so RecalculateSegmentPositions does not re-derive them —
+    /// the second half has to be positioned explicitly or both halves stack at the same start.
+    /// </summary>
+    [TestMethod]
+    public void SplitAtTime_OverlayHalvesAreLaidOutEndToEnd()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 10));
+        var overlay = Video(2, 6, track: 1);
+        model.Segments.Add(overlay);
+
+        new SplitSegmentAtTimeOperation(TimeSpan.FromSeconds(5)).Execute(model);
+
+        var halves = model.Segments.Where(s => s.TrackIndex == 1).OrderBy(s => s.Start).ToList();
+        Assert.AreEqual(2, halves.Count);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), halves[0].Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(5), halves[0].End, "The first half ends at the split.");
+        Assert.AreEqual(TimeSpan.FromSeconds(5), halves[1].Start, "The second half starts at the split.");
+        Assert.AreEqual(TimeSpan.FromSeconds(8), halves[1].End, "The overlay's overall span is unchanged.");
+    }
+
+    /// <summary>Splitting a plain base-track timeline is unchanged.</summary>
+    [TestMethod]
+    public void SplitAtTime_BaseTrackOnly_StillSplitsContiguously()
+    {
+        var model = new TimelineModel();
+        model.Segments.Add(Video(0, 10));
+
+        new SplitSegmentAtTimeOperation(TimeSpan.FromSeconds(4)).Execute(model);
+        model.RecalculateSegmentPositions();
+
+        Assert.AreEqual(2, model.Segments.Count);
+        Assert.AreEqual(TimeSpan.Zero, model.Segments[0].Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(4), model.Segments[0].Duration);
+        Assert.AreEqual(TimeSpan.FromSeconds(4), model.Segments[1].Start);
+        Assert.AreEqual(TimeSpan.FromSeconds(10), model.TotalSegmentsDuration);
+    }
 }
