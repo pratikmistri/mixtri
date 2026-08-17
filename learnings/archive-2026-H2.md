@@ -2482,3 +2482,11 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: pause/resume preserves earlier events, filters paused events, and rehydrates physically held modifiers before collection resumes. Timeline edges now map piecewise across contiguous 1x/1.5x slices without jumping across slides, source gaps, tracks, or duplicated source occurrences.
 - **What didn't work**: resetting modifiers to false on resume misclassified keys when a modifier remained held. Direct `dotnet test` hit the Windows App SDK PriGen path; VS ARM64 MSBuild followed by `dotnet vstest` was required.
 - **Verified**: full suite **1238 passed, 0 failed, 3 skipped** (1241 total); `Musio.App` ARM64 Debug build completed with 0 errors.
+
+## PR #95 review fixes
+
+- **Feature/area**: automatic typing slice identity and typing-zoom documentation.
+- **Approaches tried**: validated both inline review comments against the operation's undo/redo contract and current pointer-fallback implementation.
+- **What worked**: generated slice IDs are now allocated once and reused on redo, so later operations and selection state keep resolving the same segments. The planner summary now documents the recent-click/nearest-pointer fallback for controls without native caret metadata.
+- **What didn't work**: allocating IDs inside each `ExecuteCore` run made redo identity unstable; the original XML summary described the pre-fallback behavior.
+- **Verified**: focused tests **12 passed**; full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` ARM64 Debug build completed with 0 errors.

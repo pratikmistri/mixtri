@@ -6,8 +6,8 @@ namespace Musio.Core.Processing;
 
 /// <summary>
 /// Builds fixed-centre zoom shots around the recorded insertion-caret path for each typing
-/// burst. Native controls expose both their caret and client bounds; custom-rendered controls
-/// that expose neither are deliberately skipped rather than guessing from the mouse.
+/// burst. Native controls use their caret and client bounds; when those are unavailable and
+/// mouse data is provided, custom-rendered controls use a broad recent-click or pointer fallback.
 /// </summary>
 public static class TypingZoomPlanner
 {

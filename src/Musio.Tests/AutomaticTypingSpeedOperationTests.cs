@@ -118,4 +118,24 @@ public sealed class AutomaticTypingSpeedOperationTests
         Assert.AreSame(video, model.Segments[0]);
         Assert.AreEqual(TimeSpan.FromSeconds(10), model.TotalSegmentsDuration);
     }
+
+    [TestMethod]
+    public void Redo_ReusesGeneratedPieceIds()
+    {
+        var video = TestTimelineBuilder.Video("primary.mp4", 0, 10);
+        var model = TestTimelineBuilder.ModelWithPrimaryPath("primary.mp4", video);
+        var manager = new UndoRedoManager(model);
+        var operation = new AutomaticTypingSpeedOperation(
+            video.Id,
+            [new TypingActivityRange(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5))]);
+
+        manager.Execute(operation);
+        var firstIds = model.Segments.Select(segment => segment.Id).ToArray();
+
+        manager.Undo();
+        manager.Redo();
+        var redoneIds = model.Segments.Select(segment => segment.Id).ToArray();
+
+        CollectionAssert.AreEqual(firstIds, redoneIds);
+    }
 }

@@ -14,6 +14,7 @@ public sealed class AutomaticTypingSpeedOperation : SegmentEditOperationBase
     private readonly string _segmentId;
     private readonly IReadOnlyList<TypingActivityRange> _ranges;
     private readonly bool _muteAcceleratedAudio;
+    private readonly List<string> _generatedPieceIds = [];
     private SegmentListSnapshot? _snapshot;
 
     public override string Description => "Accelerate Typing";
@@ -48,6 +49,7 @@ public sealed class AutomaticTypingSpeedOperation : SegmentEditOperationBase
         TimeSpan sourceCursor = video.SourceStart;
         TimeSpan outputCursor = video.Start;
         bool isFirst = true;
+        int generatedIdIndex = 0;
 
         foreach (var range in ranges)
         {
@@ -73,9 +75,21 @@ public sealed class AutomaticTypingSpeedOperation : SegmentEditOperationBase
 
             double speed = accelerated ? TypingSpeed : originalSpeed;
             var outputDuration = TimeSpan.FromTicks((long)(sourceDuration.Ticks / speed));
+            string pieceId;
+            if (isFirst)
+            {
+                pieceId = video.Id;
+            }
+            else
+            {
+                if (generatedIdIndex == _generatedPieceIds.Count)
+                    _generatedPieceIds.Add(Guid.NewGuid().ToString("N"));
+                pieceId = _generatedPieceIds[generatedIdIndex++];
+            }
+
             var piece = video with
             {
-                Id = isFirst ? video.Id : Guid.NewGuid().ToString("N"),
+                Id = pieceId,
                 Start = outputCursor,
                 SourceStart = sourceStart,
                 SourceDuration = sourceDuration,
