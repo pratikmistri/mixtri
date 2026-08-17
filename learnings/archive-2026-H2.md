@@ -2298,3 +2298,10 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: The timeline's Win2D surface only ever loads `"Segoe UI"`, so icon-font glyphs are not available there — draw marks from primitives (`DrawCircle`/`FillRectangle`/`DrawLine`). A stopwatch also reads correctly for BOTH slowed and sped-up segments, whereas a fast-forward chevron contradicts a `0.5x` label. When the badge no longer fits, the whole badge is dropped rather than just the glyph: a bare multiplier is the exact ambiguity with the zoom track's `2x` labels that the glyph exists to remove.
 - **What didn't work**: n/a — single-pass change.
 - **Verified**: `Musio.App` ARM64 Debug -> 0 errors; app registered from the build output and launched.
+
+## Segment speed badge — neutral fill
+
+- **Feature/area**: `TimelineControl` speed badge colours, `Themes/AppColors.xaml`.
+- **What worked**: New `TimelineSpeedBadgeBrush` (`#E02E2E2E` in both Default and Light, `SystemColorWindowColor` in HighContrast) paired with the existing `OverlayForegroundBrush`, replacing the sped-up/slowed status colours on the badge. Rationale: those status colours were designed to tint a WHOLE clip block, where saturation reads as state; as a small pill sitting on the video block the orange read as a separate marker (the user mistook it for a zoom badge). The multiplier text already carries the direction, so one neutral chip serves both faster and slower.
+- **Light theme note**: the badge brush stays DARK in the Light dictionary on purpose — it sits on the filmstrip (arbitrary video imagery), not on the page background, so it follows the over-media scrim + white foreground convention rather than the theme surface.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors (no XAML compiler errors from the new theme entries); app relaunched.

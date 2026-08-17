@@ -142,6 +142,8 @@ public sealed partial class TimelineControl : UserControl
     private Color FilmstripStrokeColor;
     private Color SpeedUpOverlayColor;
     private Color SlowDownOverlayColor;
+    private Color SpeedBadgeFillColor;
+    private Color SpeedBadgeForegroundColor;
     private Color TrimHandleColor;
     private Color TrimHandleBorderColor;
     private Color ZoomTrackBackground;
@@ -437,6 +439,12 @@ public sealed partial class TimelineControl : UserControl
         // ── Speed overlays — semantic status colors ──
         SpeedUpOverlayColor   = GetBrushColor("TimelineSpeedUpOverlayBrush", Color.FromArgb(200, 230, 160, 50));
         SlowDownOverlayColor  = GetBrushColor("TimelineSlowDownOverlayBrush", Color.FromArgb(200, 60, 130, 230));
+
+        // ── Speed badge — deliberately NEUTRAL, not the status colors above. The badge
+        //    sits on the video block itself, where a saturated fill reads as a status
+        //    highlight (and the orange one was mistaken for a zoom marker). ──
+        SpeedBadgeFillColor       = GetBrushColor("TimelineSpeedBadgeBrush", Color.FromArgb(224, 46, 46, 46));
+        SpeedBadgeForegroundColor = GetBrushColor("OverlayForegroundBrush", Color.FromArgb(255, 255, 255, 255));
 
         // ── Trim handles — system text/stroke ──
         TrimHandleColor       = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
@@ -1555,6 +1563,13 @@ public sealed partial class TimelineControl : UserControl
     /// The stopwatch mark is not decoration: the zoom track labels its segments with a bare
     /// "2x" too, so a speed badge showing only a multiplier reads as a zoom level on a quick
     /// scan. The glyph (plus the badge fill) is what separates the two.
+    /// <para>
+    /// The fill is a NEUTRAL scrim rather than the sped-up/slowed status colours used by the
+    /// legacy clip view: those tint a whole block, where saturation reads as state, but a
+    /// small saturated pill sitting on the video block reads as a marker of its own (the
+    /// original orange was taken for a zoom badge). The multiplier itself already says which
+    /// direction the speed went.
+    /// </para>
     /// </remarks>
     private void DrawSegmentSpeedBadge(
         CanvasDrawingSession ds, VideoSegment video, float x1, float clipY, float segW, float clipH)
@@ -1572,15 +1587,14 @@ public sealed partial class TimelineControl : UserControl
 
         float badgeX = x1 + 4;
         float badgeY = clipY + 3;
-        var badgeColor = video.SpeedFactor > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
-        ds.FillRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 3f, 3f, badgeColor);
+        ds.FillRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 3f, 3f, SpeedBadgeFillColor);
 
-        DrawSpeedGlyph(ds, badgeX + 4f, badgeY + (badgeH - iconSize) / 2f, iconSize, SpeedLabelTextColor);
+        DrawSpeedGlyph(ds, badgeX + 4f, badgeY + (badgeH - iconSize) / 2f, iconSize, SpeedBadgeForegroundColor);
 
         ds.DrawText(
             label,
             new Rect(badgeX + 6f + iconSize, badgeY, textW, badgeH),
-            SpeedLabelTextColor,
+            SpeedBadgeForegroundColor,
             new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
             {
                 FontSize = 10,
