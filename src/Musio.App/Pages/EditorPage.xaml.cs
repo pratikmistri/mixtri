@@ -335,7 +335,6 @@ public sealed partial class EditorPage : Page
                     Timeline.ClearZoomSelection();
                     Timeline.ClearClipSelection();
                     Timeline.ClearTransitionSelection();
-                    UpdateSpeedPanelVisibility();
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
                     ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -366,6 +365,7 @@ public sealed partial class EditorPage : Page
         // Primary-track segment move / ripple-trim events
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+        Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
         Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;
         Timeline.TextSlideWindowChanged += OnTextSlideWindowChanged;
 
@@ -563,8 +563,6 @@ public sealed partial class EditorPage : Page
 
     private string? PrimaryVideoPath => ProjectService.Instance.CurrentProject?.VideoFilePath;
 
-    private bool _suppressSpeedApply;
-
     /// <summary>Id of the currently selected primary-track segment (video or text slide).</summary>
     private string? _selectedPrimarySegmentId;
 
@@ -576,75 +574,6 @@ public sealed partial class EditorPage : Page
 
     /// <summary>Incoming segment Id of the currently-selected boundary chip, or null.</summary>
     private string? _selectedTransitionId;
-
-    private void UpdateSpeedPanelVisibility()
-    {
-        if (SegmentSpeedPanel is null || SpeedComboBox is null) return;
-
-        // The segment-based timeline is the live editor; Clips only exist for legacy
-        // clip-based projects, so both selections have to be able to drive the panel.
-        var segment = SelectedVideoSegment;
-        var clip = SelectedLegacyClip();
-
-        bool hasSelection = segment is not null || clip is not null;
-        SegmentSpeedPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
-        if (!hasSelection) return;
-
-        SyncSpeedComboBox(segment?.SpeedFactor ?? clip!.SpeedFactor);
-    }
-
-    /// <summary>The selected legacy (clip-based) timeline clip, if any.</summary>
-    private TimelineClip? SelectedLegacyClip() =>
-        ViewModel.SelectedClipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count
-            ? ViewModel.Model.Clips[idx]
-            : null;
-
-    /// <summary>
-    /// Points the combo at <paramref name="speed"/> without re-applying it. A speed that
-    /// isn't one of the presets (e.g. from an older project) clears the selection rather
-    /// than silently snapping the segment to the nearest preset.
-    /// </summary>
-    private void SyncSpeedComboBox(double speed)
-    {
-        _suppressSpeedApply = true;
-        int match = -1;
-        for (int i = 0; i < SpeedComboBox.Items.Count; i++)
-        {
-            if (SpeedComboBox.Items[i] is ComboBoxItem item &&
-                double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
-                Math.Abs(s - speed) < 0.01)
-            {
-                match = i;
-                break;
-            }
-        }
-        SpeedComboBox.SelectedIndex = match;
-        _suppressSpeedApply = false;
-    }
-
-    private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_suppressSpeedApply) return;
-        if (SpeedComboBox.SelectedItem is not ComboBoxItem item ||
-            !double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double speed))
-        {
-            return;
-        }
-
-        ViewModel.SelectedSpeed = speed;
-
-        if (SelectedVideoSegment is { } segment)
-        {
-            ViewModel.UndoRedoManager.Execute(new ChangeSegmentSpeedOperation(segment.Id, speed));
-            Timeline.SelectSegment(segment.Id);
-            return;
-        }
-
-        if (ViewModel.SelectedClipIndex is not null)
-        {
-            ViewModel.ApplySpeedCommand.Execute(null);
-        }
-    }
 
     // --- Zoom Segment Handlers ---
 

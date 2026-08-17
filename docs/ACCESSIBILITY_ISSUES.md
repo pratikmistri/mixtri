@@ -284,7 +284,7 @@ The `EditorInfoBar` shows dynamic status messages but does not use `AutomationPr
 | **File** | `src/Musio.App/Pages/EditorPage.xaml` (L118–323) |
 | **WCAG** | 4.1.2 Name/Role/Value |
 
-Toolbar buttons, `SpeedComboBox`, `ZoomLevelCombo`, `ExportButton`, and flyout action buttons lack `AutomationProperties.AutomationId` for UI automation and testing.
+Toolbar buttons, `ZoomLevelCombo`, `ExportButton`, and flyout action buttons lack `AutomationProperties.AutomationId` for UI automation and testing.
 
 ### 3.2 Missing AutomationProperties.AutomationId — recording page
 

@@ -34,9 +34,6 @@ public partial class EditorViewModel : ObservableObject
     public event EventHandler? ModelReloaded;
 
     [ObservableProperty]
-    private double _selectedSpeed = 1.0;
-
-    [ObservableProperty]
     private int? _selectedClipIndex;
 
     [ObservableProperty]
@@ -67,16 +64,6 @@ public partial class EditorViewModel : ObservableObject
     private void Redo()
     {
         _undoRedoManager.Redo();
-    }
-
-    [RelayCommand]
-    private void ApplySpeed()
-    {
-        if (SelectedClipIndex is not { } clipIndex) return;
-        if (clipIndex < 0 || clipIndex >= _model.Clips.Count) return;
-
-        var operation = new ApplyClipSpeedOperation(clipIndex, SelectedSpeed);
-        _undoRedoManager.Execute(operation);
     }
 
     [RelayCommand]

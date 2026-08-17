@@ -80,6 +80,15 @@ public sealed partial class TimelineControl : UserControl
     public event EventHandler<(string Id, bool FromStart, TimeSpan NewDuration)>? SegmentTrimRequested;
 
     /// <summary>
+    /// Raised when a playback speed is chosen from a video segment's right-click menu.
+    /// Speed lives behind that menu rather than on a selection-triggered toolbar control
+    /// because audio is NOT re-timed with the video (see
+    /// <c>AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment</c>) — it is a power-user
+    /// edit that should be found deliberately, not offered to everyone who clicks a clip.
+    /// </summary>
+    public event EventHandler<(string Id, double Speed)>? SegmentSpeedChangeRequested;
+
+    /// <summary>
     /// Raised when a text slide's inner animation window is edited from the timeline so the
     /// page can keep preview, properties and undo in one authoritative transaction.
     /// </summary>
@@ -5125,6 +5134,7 @@ public sealed partial class TimelineControl : UserControl
     /// <see cref="ZoomTrack_RightTapped"/> / <see cref="CameraTrack_RightTapped"/>).
     /// Right-clicking an already-Automatic chip is a no-op: there is nothing to remove, and
     /// this control must not create model state from a pointer event either.
+    /// Anywhere else on a video segment, the segment context menu opens instead.
     /// </summary>
     private void VideoTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
@@ -5132,26 +5142,84 @@ public sealed partial class TimelineControl : UserControl
         var pos = e.GetPosition(canvas);
 
         var (hitId, chipHit) = HitTestTransitionChip(pos.X, pos.Y);
-        if (!chipHit || hitId is null) return;
-
-        var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
-        // Any non-null config is removable. An explicit Type=None is a real user choice that
-        // suppresses the slide-adjacent legacy crossfade, so it must be resettable back to
-        // Automatic through the same gesture — treating it as "nothing to remove" left the
-        // user with no way to undo that choice from the timeline.
-        if (incoming?.InTransition is null) return;
-
-        // Right-clicking a chip to remove its transition also SELECTS that boundary
-        // (matching the existing zoom/camera right-tap pattern below), so — like any
-        // other selection — it deliberately takes over from whatever else was selected
-        // (e.g. a text overlay) rather than leaving both looking selected.
-        ClearOtherSelections(SelectionKind.Transition);
-        if (_selectedTransitionId != hitId)
+        if (chipHit && hitId is not null)
         {
-            _selectedTransitionId = hitId;
-            TransitionSelected?.Invoke(this, hitId);
+            var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
+            // Any non-null config is removable. An explicit Type=None is a real user choice that
+            // suppresses the slide-adjacent legacy crossfade, so it must be resettable back to
+            // Automatic through the same gesture — treating it as "nothing to remove" left the
+            // user with no way to undo that choice from the timeline.
+            if (incoming?.InTransition is null) return;
+
+            // Right-clicking a chip to remove its transition also SELECTS that boundary
+            // (matching the existing zoom/camera right-tap pattern below), so — like any
+            // other selection — it deliberately takes over from whatever else was selected
+            // (e.g. a text overlay) rather than leaving both looking selected.
+            ClearOtherSelections(SelectionKind.Transition);
+            if (_selectedTransitionId != hitId)
+            {
+                _selectedTransitionId = hitId;
+                TransitionSelected?.Invoke(this, hitId);
+            }
+            TransitionRemoveRequested?.Invoke(this, hitId);
+            return;
         }
-        TransitionRemoveRequested?.Invoke(this, hitId);
+
+        var model = Model;
+        if (model is null || model.Segments.Count == 0) return;
+
+        HitTestSegment(model, pos.X, pos.Y, out var segmentId);
+        if (segmentId is null) return;
+        if (model.Segments.OfType<VideoSegment>().FirstOrDefault(v => v.Id == segmentId) is not { } video) return;
+
+        // Select the right-clicked segment first, so the menu visibly acts on the block the
+        // user aimed at and the properties pane follows — same contract as the left-click
+        // and the zoom/camera right-tap paths.
+        ClearOtherSelections(SelectionKind.Segment);
+        if (_selectedSegmentId != segmentId)
+        {
+            _selectedSegmentId = segmentId;
+            SegmentSelected?.Invoke(this, segmentId);
+        }
+        VideoTrackCanvas?.Invalidate();
+
+        ShowVideoSegmentContextMenu(canvas, pos, video);
+    }
+
+    /// <summary>Playback speeds offered by the video segment context menu.</summary>
+    private static readonly double[] SpeedPresets = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+
+    /// <summary>
+    /// Builds the video segment's right-click menu: a Speed submenu with the current
+    /// factor checked. The edit itself is the host's (the control raises
+    /// <see cref="SegmentSpeedChangeRequested"/> rather than touching the model), matching
+    /// how <see cref="ZoomTrack_RightTapped"/> requests a zoom removal.
+    /// </summary>
+    private void ShowVideoSegmentContextMenu(CanvasControl canvas, Point pos, VideoSegment video)
+    {
+        double current = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+
+        var speedMenu = new MenuFlyoutSubItem
+        {
+            Text = "Speed",
+            Icon = new FontIcon { Glyph = "\uE916" },
+        };
+
+        foreach (double preset in SpeedPresets)
+        {
+            double speed = preset;
+            var item = new ToggleMenuFlyoutItem
+            {
+                Text = Math.Abs(speed - 1.0) < 0.001 ? "Normal (1x)" : $"{speed:0.##}x",
+                IsChecked = Math.Abs(current - speed) < 0.01,
+            };
+            item.Click += (_, _) => SegmentSpeedChangeRequested?.Invoke(this, (video.Id, speed));
+            speedMenu.Items.Add(item);
+        }
+
+        var menu = new MenuFlyout();
+        menu.Items.Add(speedMenu);
+        menu.ShowAt(canvas, pos);
     }
 
     /// <summary>

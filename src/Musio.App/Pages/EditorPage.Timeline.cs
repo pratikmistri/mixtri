@@ -506,7 +506,6 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
-            UpdateSpeedPanelVisibility();
 
             // Undo/redo mutates the model directly, so the inserted-audio preview engine and
             // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
@@ -530,10 +529,6 @@ public sealed partial class EditorPage
             _selectedTextSlideId = null;
             HideTextSlidePanel();
         }
-
-        // Shows/hides the panel and syncs the combo to whichever selection is live
-        // (legacy clip or primary-track segment).
-        UpdateSpeedPanelVisibility();
     }
 
     private void OnSegmentSelected(object? sender, string? segmentId)
@@ -563,10 +558,6 @@ public sealed partial class EditorPage
                 SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
             }
         }
-
-        // Speed is a per-video-segment property, so the toolbar control follows the
-        // primary-track selection (hidden for text slides and for no selection).
-        UpdateSpeedPanelVisibility();
     }
 
     private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e) =>
@@ -574,6 +565,9 @@ public sealed partial class EditorPage
 
     private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
         EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
+
+    private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
+        EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
 
     /// <summary>
     /// Moves a segment to a new track and/or a new absolute start, in response to the

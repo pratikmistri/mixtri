@@ -424,33 +424,6 @@
                 Spacing="8"
                 VerticalAlignment="Center">
 
-                <!-- Selected-segment speed controls -->
-                <!-- No SelectedIndex here on purpose: a XAML default fires SelectionChanged
-                     during InitializeComponent, before the suppress flag and x:Name fields
-                     exist. SyncSpeedComboBox sets the selection instead. -->
-                <StackPanel
-                    x:Name="SegmentSpeedPanel"
-                    Orientation="Horizontal"
-                    Spacing="8"
-                    VerticalAlignment="Center"
-                    Visibility="Collapsed">
-                    <TextBlock VerticalAlignment="Center" Text="Speed:" FontWeight="SemiBold" />
-                    <ComboBox
-                        x:Name="SpeedComboBox"
-                        Width="90"
-                        Height="40"
-                        SelectionChanged="SpeedComboBox_SelectionChanged"
-                        AutomationProperties.Name="Playback speed for the selected segment"
-                        ToolTipService.ToolTip="Playback speed for the selected segment">
-                        <ComboBoxItem Content="0.25x" Tag="0.25" />
-                        <ComboBoxItem Content="0.5x" Tag="0.5" />
-                        <ComboBoxItem Content="1x" Tag="1" />
-                        <ComboBoxItem Content="1.5x" Tag="1.5" />
-                        <ComboBoxItem Content="2x" Tag="2" />
-                        <ComboBoxItem Content="4x" Tag="4" />
-                    </ComboBox>
-                </StackPanel>
-
                 <!-- Zoom segment controls -->
                 <StackPanel
                     x:Name="ZoomSegmentPanel"
