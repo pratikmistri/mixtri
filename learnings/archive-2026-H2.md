@@ -2261,3 +2261,17 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Expected, non-blocking**: `Path to mspdbcmf.exe could not be found. A symbols package will not be
   generated.` Symbol upload is optional for submission.
 - **`*.msix` is already in `.gitignore`**, so staging the collected `artifacts/` folder is safe.
+
+## Store listing copy + SPEC.md implemented/missing audit
+
+- **Feature/area**: `docs/SPEC.md` (status annotation), Microsoft Store listing copy. No code changes.
+- **Approaches tried**: Writing marketing copy straight from `README.md`/`SPEC.md`; then verifying every claim against the code with targeted greps before annotating.
+- **What worked**:
+  - **`docs/SPEC.md` is ASPIRATIONAL, not a description of the app.** It is the original build plan; several F-sections were never implemented. Never quote it as fact — verify against `src/` first. Implemented items are now marked with `~~strikethrough~~`, partials with a leading warning sign and a note.
+  - **A feature can be fully built in `Musio.Core` with tests and still be unreachable.** `Musio.Core/AI/*` (SpeechToText/SubtitleGenerator/SubtitleBurner) is complete and unit-tested, but nothing in `Musio.App` references it — there is no UI entry point. Grep BOTH projects before calling a feature shipped; `Musio.Tests` coverage proves nothing about reachability.
+  - **`VideoFormat.WebM` exists in the enum but silently falls back to an MP4 container** (`ExportEngine.cs` ~line 88). Do not advertise WebM. H.265/HEVC is also specced but absent — MP4/H.264 and GIF are the only real export formats.
+  - Confirmed-missing vs spec: cursor loop, typing-triggered zoom, device-frame chrome, speed ramping (flat `SpeedFactor` only), audio noise reduction, volume leveling, auto-save, update checker, snap-to-window, crosshair guide. `GlobalHotkeyService` registers only `ShowMini`, so the specced recording/screenshot hotkeys do not exist.
+  - **SQLite in the Tech Stack section was never used** — settings/presets/region memory are `Windows.Storage.ApplicationData`, projects are `.musio` packages.
+- **What didn't work**:
+  - A broad grep alternating feature keywords with `Normalize` matched hundreds of `normalized`-coordinate lines across the compositor and drowned the real signal. Anchor negative-existence greps on distinctive identifiers only.
+  - Marketing copy written before verification claimed on-device subtitles and WebM export; both had to be pulled. Verify, then write.
