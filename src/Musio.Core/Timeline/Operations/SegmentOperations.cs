@@ -1048,3 +1048,54 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
         return true;
     }
 }
+
+/// <summary>
+/// Chooses what a segment's recorded audio does while the segment plays at a speed other
+/// than 1.0: time-stretch it to fit, play it at its native rate, or drop it.
+/// </summary>
+/// <remarks>
+/// Deliberately independent of <see cref="ChangeSegmentSpeedOperation"/> — the mode is a
+/// preference that survives further speed changes (including a trip back through 1.0 and
+/// out again), so re-timing a segment must not silently reset a user who has already said
+/// "mute this one". <c>ExecuteCore</c>/<c>UndoCore</c> return <c>false</c> because nothing
+/// moves: this edit changes no segment's position or duration.
+/// </remarks>
+public class ChangeSegmentAudioModeOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly SegmentAudioMode _mode;
+
+    private int _index = -1;
+    private SegmentAudioMode _previousMode;
+
+    public override string Description => "Change Segment Audio";
+
+    /// <param name="segmentId">Id of the video segment to change.</param>
+    /// <param name="mode">What its audio should do while the segment is speed-adjusted.</param>
+    public ChangeSegmentAudioModeOperation(string segmentId, SegmentAudioMode mode)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _mode = mode;
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+        if (video.AudioMode == _mode) return NothingToDo();
+
+        _previousMode = video.AudioMode;
+        video.AudioMode = _mode;
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (_index < 0 || _index >= model.Segments.Count) return false;
+        if (model.Segments[_index] is not VideoSegment video) return false;
+
+        video.AudioMode = _previousMode;
+        return false;
+    }
+}

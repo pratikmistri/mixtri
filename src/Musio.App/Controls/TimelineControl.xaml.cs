@@ -82,11 +82,29 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Raised when a playback speed is chosen from a video segment's right-click menu.
     /// Speed lives behind that menu rather than on a selection-triggered toolbar control
-    /// because audio is NOT re-timed with the video (see
-    /// <c>AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment</c>) — it is a power-user
-    /// edit that should be found deliberately, not offered to everyone who clicks a clip.
+    /// because it re-times the footage under everything else the user has placed — it is a
+    /// power-user edit that should be found deliberately, not offered to everyone who
+    /// clicks a clip.
     /// </summary>
     public event EventHandler<(string Id, double Speed)>? SegmentSpeedChangeRequested;
+
+    /// <summary>
+    /// Raised when an audio handling mode is chosen from a speed-adjusted video segment's
+    /// right-click menu (see <see cref="SegmentAudioMode"/>).
+    /// </summary>
+    public event EventHandler<(string Id, SegmentAudioMode Mode)>? SegmentAudioModeChangeRequested;
+
+    /// <summary>
+    /// Raised when "Detach audio" is chosen for a video segment: its recorded captures should
+    /// become free-standing, movable timeline blocks and the segment itself should go silent.
+    /// </summary>
+    public event EventHandler<string>? SegmentAudioDetachRequested;
+
+    /// <summary>
+    /// Raised when "Re-attach audio" is chosen: the blocks detached from that segment should
+    /// be removed and the segment should play its own audio again.
+    /// </summary>
+    public event EventHandler<string>? SegmentAudioReattachRequested;
 
     /// <summary>Raised when "Split at Playhead" is chosen from a segment's right-click menu.</summary>
     public event EventHandler? SegmentSplitRequested;
@@ -2491,6 +2509,10 @@ public sealed partial class TimelineControl : UserControl
         ClearOtherSelections(segmentId is null ? SelectionKind.None : SelectionKind.Segment);
         _selectedSegmentId = segmentId;
         VideoTrackCanvas?.Invalidate();
+
+        // The recorded-audio lanes outline the selected segment's block too, so they have to
+        // repaint with the video track or the highlight is left on the previous block.
+        InvalidateAudioLanes();
     }
 
     /// <summary>Raised when a text slide segment is clicked on the timeline.</summary>
@@ -3556,6 +3578,67 @@ public sealed partial class TimelineControl : UserControl
             Model?.EffectiveVolume(AudioMixChannel.Mic) <= 0);
     }
 
+    /// <summary>
+    /// Right-clicking a recorded-audio block acts on the segment that owns it.
+    /// </summary>
+    /// <remarks>
+    /// Recorded audio cannot be moved or trimmed independently of its segment — it IS the
+    /// segment's audio — so this menu offers the edits that are actually per-segment: what
+    /// the audio does while the segment is speed-adjusted. The block is also selected first,
+    /// exactly like right-clicking the segment itself, so the properties pane follows the
+    /// thing the menu is about.
+    /// </remarks>
+    private void RecordedAudioTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        var model = Model;
+        if (model is null) return;
+
+        var pos = e.GetPosition(canvas);
+        var time = XToTime(pos.X);
+
+        // Resolve the segment whose block is actually drawn under the cursor. The draw loop
+        // paints every VideoSegment in list order, and overlay inserts are appended, so an
+        // overlay's block lands on top — excluding overlay segments here would act on the
+        // base segment hidden underneath the one the user aimed at. Highest TrackIndex wins,
+        // matching TimelineModel.GetSegmentAtTime.
+        VideoSegment? segment = null;
+        foreach (var candidate in model.Segments.OfType<VideoSegment>())
+        {
+            if (time < candidate.Start || time >= candidate.End) continue;
+            if (segment is null || candidate.TrackIndex >= segment.TrackIndex)
+                segment = candidate;
+        }
+
+        if (segment is null) return;
+
+        ClearOtherSelections(SelectionKind.Segment);
+        if (_selectedSegmentId != segment.Id)
+        {
+            _selectedSegmentId = segment.Id;
+            SegmentSelected?.Invoke(this, segment.Id);
+        }
+        InvalidateAudioLanes();
+        VideoTrackCanvas?.Invalidate();
+
+        var menu = new MenuFlyout();
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        AppendSegmentAudioSection(menu, segment, speed, includeLeadingSeparator: false);
+
+        menu.ShowAt(canvas, pos);
+
+        // Must not bubble: the lane sits inside the timeline's own right-tap handling.
+        e.Handled = true;
+    }
+
+    /// <summary>Repaints both recorded-audio lanes (per-segment blocks live on them).</summary>
+    private void InvalidateAudioLanes()
+    {
+        AudioTrackCanvas?.Invalidate();
+        MicTrackCanvas?.Invalidate();
+    }
+
     // ─────────────────────── Inserted audio lanes (voice / music) ───────────────────────
     // Two lanes, one per AudioTrackKind, so a voice-over and a music bed that overlap in
     // time are still independently grabbable. Unlike every other track here, these are
@@ -4308,9 +4391,18 @@ public sealed partial class TimelineControl : UserControl
 
         float centerY = h / 2f;
 
-        // Segment-based timeline: draw each video segment's OWN audio waveform within
-        // its output range so appended recordings show their audio and it moves with
-        // the segment.
+        // Segment-based timeline: draw each video segment's own audio as its OWN block,
+        // deliberately shaped like the inserted voice-over/music clips.
+        //
+        // Recorded audio really is per-segment — it is cut, reordered, sped up and (now)
+        // muted with the segment that owns it — but drawing it as one continuous ribbon of
+        // peaks made it read as a single uninterrupted track, so a per-segment state like
+        // "this one is muted" had nowhere to appear. Blocks give every segment's audio an
+        // outline to carry its own state and its own right-click target.
+        //
+        // They are NOT draggable like the inserted lanes: this audio is bound to its
+        // segment's position by definition, so a grab handle would promise an edit that
+        // cannot exist. Moving the segment moves its audio.
         if (model.Segments.Count > 0)
         {
             if (isMuted)
@@ -4323,10 +4415,13 @@ public sealed partial class TimelineControl : UserControl
             {
                 var visual = ResolveTrackVisual(seg, model);
                 var wf = isMic ? visual?.MicWaveform : visual?.SystemWaveform;
-                if (wf is { Length: > 0 } && visual!.WaveformDurationSeconds > 0)
-                    DrawSegmentWaveform(ds, seg, wf, visual.WaveformDurationSeconds,
-                        waveformColor, envelopeColor, w, h, centerY);
+                bool hasWaveform = wf is { Length: > 0 } && visual!.WaveformDurationSeconds > 0;
+
+                DrawRecordedAudioBlock(
+                    ds, seg, hasWaveform ? wf : null, visual?.WaveformDurationSeconds ?? 0,
+                    waveformColor, envelopeColor, w, h);
             }
+
             ds.DrawLine(0, centerY, w, centerY, TrackCenterLineColor, 0.5f);
             return;
         }
@@ -4391,6 +4486,109 @@ public sealed partial class TimelineControl : UserControl
     /// file-aligned waveform at the segment's source time, so it stays aligned after
     /// the segment is moved, trimmed, or split.
     /// </summary>
+    /// <summary>
+    /// Draws one video segment's recorded audio as a discrete block on a recorded-audio lane,
+    /// with its waveform inside and its per-segment audio state on the face of it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The chrome (rounded rect, fill, border, inset label) deliberately matches
+    /// <see cref="DrawInsertedAudioLane"/>'s clips, because the two now mean the same thing to
+    /// the user: a piece of audio you can point at and act on. The COLOURS stay the lane's own
+    /// (green for system, orange for mic) so a recorded block is never mistaken for an
+    /// inserted one — only the latter can be dragged, trimmed and re-levelled.
+    /// </para>
+    /// <para>
+    /// Muting is the one per-segment audio state that has to be legible here, because it is
+    /// otherwise invisible: silencing a segment changed nothing on the timeline at all. An
+    /// audible block needs no label — its audio matches the picture by definition, which is
+    /// what a block sitting under its segment already looks like.
+    /// </para>
+    /// </remarks>
+    private void DrawRecordedAudioBlock(
+        CanvasDrawingSession ds, VideoSegment seg, float[]? wf, double waveformDurationSeconds,
+        Color waveformColor, Color envelopeColor, float w, float h)
+    {
+        double rawX1 = TimeToX(seg.Start);
+        double rawX2 = TimeToX(seg.End);
+        var (x1d, x2d, _, _) = VisibleExtent(rawX1, rawX2, w);
+        if (x2d <= x1d) return;
+
+        float x1 = (float)x1d;
+        float blockW = Math.Max(2f, (float)(x2d - x1d));
+        float blockY = RecordedAudioBlockPadding;
+        float blockH = Math.Max(4f, h - (RecordedAudioBlockPadding * 2));
+        float centerY = blockY + (blockH / 2f);
+
+        bool muted = seg.AudioMode == SegmentAudioMode.Muted;
+        bool isSelected = seg.Id == _selectedSegmentId;
+
+        // Tinted from the lane's own waveform colour, so system and mic blocks stay as
+        // distinguishable as their peaks always were.
+        var fill = muted
+            ? Color.FromArgb(70, 130, 130, 140)
+            : Color.FromArgb((byte)(isSelected ? 78 : 52), waveformColor.R, waveformColor.G, waveformColor.B);
+        var border = muted
+            ? Color.FromArgb(120, 190, 190, 200)
+            : Color.FromArgb((byte)(isSelected ? 255 : 170), waveformColor.R, waveformColor.G, waveformColor.B);
+
+        using (var rect = CanvasGeometry.CreateRoundedRectangle(ds, x1, blockY, blockW, blockH, 4, 4))
+        {
+            ds.FillGeometry(rect, fill);
+            ds.DrawGeometry(rect, border, isSelected ? 1.5f : 1f);
+        }
+
+        if (!muted && wf is { Length: > 0 } && waveformDurationSeconds > 0)
+        {
+            // Clipped to the block so a segment's peaks can never spill over its neighbour's
+            // outline — the whole point of drawing outlines.
+            using (ds.CreateLayer(1f, new Rect(x1, blockY, blockW, blockH)))
+            {
+                DrawSegmentWaveform(
+                    ds, seg, wf, waveformDurationSeconds, waveformColor, envelopeColor,
+                    w, blockH, centerY);
+            }
+        }
+
+        if (muted && blockW > 46)
+        {
+            using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            {
+                FontSize = 10,
+                FontFamily = "Segoe UI",
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+                TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+                TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
+            };
+
+            ds.DrawText(
+                "muted",
+                new Rect(x1 + 6, blockY, Math.Max(1, blockW - 12), blockH),
+                Color.FromArgb(230, 235, 235, 240),
+                fmt);
+        }
+    }
+
+    /// <summary>Vertical inset of a recorded-audio block within its lane.</summary>
+    private const float RecordedAudioBlockPadding = 3f;
+
+    /// <summary>Speed factors within this distance of 1.0 are treated as unmodified.</summary>
+    private const double SegmentSpeedEpsilon = 0.001;
+
+    /// <summary>
+    /// Draws one segment's audio waveform across its output range by sampling the
+    /// file-aligned waveform at the segment's source time, so it stays aligned after
+    /// the segment is moved, trimmed, or split.
+    /// </summary>
+    /// <remarks>
+    /// Audible recorded audio is always re-timed with the picture, so source time maps to
+    /// output time through the segment's own speed and the peaks fill the block exactly.
+    /// Audio that should NOT follow the picture is not drawn here at all — it has been
+    /// detached into its own block on the inserted lane (see
+    /// <c>DetachSegmentAudioOperation</c>), which owns its own drawing.
+    /// </remarks>
     private void DrawSegmentWaveform(CanvasDrawingSession ds, VideoSegment seg,
         float[] wf, double waveformDurationSeconds, Color waveformColor, Color envelopeColor,
         float w, float h, float centerY)
@@ -4402,22 +4600,32 @@ public sealed partial class TimelineControl : UserControl
         float segW = Math.Max(1f, segX2 - segX1);
         double srcStart = seg.SourceStart.TotalSeconds;
         double srcDur = seg.SourceDuration.TotalSeconds;
-        if (srcDur <= 0) return;
+        double outDur = seg.Duration.TotalSeconds;
+        if (srcDur <= 0 || outDur <= 0) return;
+
+        double speed = seg.SpeedFactor > 0 ? seg.SpeedFactor : 1.0;
 
         // Resolve the waveform index range covering this segment's source span.
         int len = wf.Length;
         int firstIdx = Math.Clamp((int)(srcStart / waveformDurationSeconds * len), 0, len - 1);
         int lastIdx = Math.Clamp((int)((srcStart + srcDur) / waveformDurationSeconds * len), firstIdx, len - 1);
-        int sampleCount = Math.Max(1, lastIdx - firstIdx);
-        float barWidth = Math.Max(1f, segW / sampleCount);
+
+        double pixelsPerOutputSecond = segW / outDur;
+        double secondsPerSample = waveformDurationSeconds / len;
+
+        // Derived from the timeline scale rather than from the sample count, so a bar is
+        // always exactly as wide as the time it represents.
+        float barWidth = Math.Max(1f, (float)(secondsPerSample / speed * pixelsPerOutputSecond));
         float maxBar = h * 0.45f;
 
         for (int i = firstIdx; i <= lastIdx; i++)
         {
             double srcSec = (double)i / len * waveformDurationSeconds;
-            double x = SegmentVideoTimeToX(seg, srcSec);
-            if (double.IsNaN(x)) continue;
-            float bx = (float)x;
+            double outLocal = (srcSec - srcStart) / speed;
+            if (outLocal < 0) continue;
+            if (outLocal >= outDur) break;
+
+            float bx = (float)TimeToX(seg.Start + TimeSpan.FromSeconds(outLocal));
             if (bx > w || bx + barWidth < 0) continue;
 
             float amplitude = Math.Clamp(wf[i], 0f, 1f);
@@ -5188,6 +5396,7 @@ public sealed partial class TimelineControl : UserControl
             SegmentSelected?.Invoke(this, segmentId);
         }
         VideoTrackCanvas?.Invalidate();
+        InvalidateAudioLanes();
 
         ShowVideoSegmentContextMenu(canvas, pos, video);
     }
@@ -5237,6 +5446,8 @@ public sealed partial class TimelineControl : UserControl
             menu.Items.Add(item);
         }
 
+        AppendSegmentAudioSection(menu, video, current);
+
         menu.Items.Add(new MenuFlyoutSeparator());
 
         var splitItem = new MenuFlyoutItem
@@ -5260,6 +5471,76 @@ public sealed partial class TimelineControl : UserControl
         menu.Items.Add(deleteItem);
 
         menu.ShowAt(canvas, pos);
+    }
+
+    /// <summary>
+    /// Appends the "Audio" section: whether this segment's recorded audio plays, and the
+    /// escape hatch for wanting it somewhere else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One toggle, at every speed. Audible audio is always re-timed to match the picture
+    /// (pitch preserved), so there is nothing else to choose: a user who wants the audio at
+    /// its original rate detaches it, which hands them the whole recording as a movable block
+    /// instead of silently truncating it at the segment boundary — strictly more useful than
+    /// the "keep original speed" mode this replaced.
+    /// </para>
+    /// <para>
+    /// Same one-gutter rule as the speed presets: plain <see cref="MenuFlyoutItem"/>s with a
+    /// glyph in the icon slot, never a <c>RadioMenuFlyoutItem</c>, which would reserve a
+    /// second column.
+    /// </para>
+    /// </remarks>
+    private void AppendSegmentAudioSection(
+        MenuFlyout menu, VideoSegment video, double currentSpeed, bool includeLeadingSeparator = true)
+    {
+        if (includeLeadingSeparator)
+            menu.Items.Add(new MenuFlyoutSeparator());
+
+        menu.Items.Add(new MenuFlyoutItem
+        {
+            Text = "Audio",
+            Icon = new FontIcon { Glyph = "\uE767" },
+            IsEnabled = false,
+        });
+
+        bool muted = video.AudioMode == SegmentAudioMode.Muted;
+        bool detached = Model is { } model && ReattachSegmentAudioOperation.HasDetachedAudio(model, video.Id);
+
+        if (detached)
+        {
+            // Its recording is already on the timeline as its own blocks. A plain unmute here
+            // would play the same capture twice, so the only coherent way back is to take the
+            // blocks away again.
+            var reattach = new MenuFlyoutItem
+            {
+                Text = "Re-attach audio (removes detached blocks)",
+                Icon = new FontIcon { Glyph = "\uE72C" },
+            };
+            reattach.Click += (_, _) => SegmentAudioReattachRequested?.Invoke(this, video.Id);
+            menu.Items.Add(reattach);
+            return;
+        }
+
+        var toggle = new MenuFlyoutItem
+        {
+            Text = muted ? "Unmute this segment" : "Mute this segment",
+            Icon = new FontIcon { Glyph = muted ? "\uE767" : "\uE74F" },
+        };
+        toggle.Click += (_, _) => SegmentAudioModeChangeRequested?.Invoke(
+            this, (video.Id, muted ? SegmentAudioMode.TimeStretch : SegmentAudioMode.Muted));
+        menu.Items.Add(toggle);
+
+        var detach = new MenuFlyoutItem
+        {
+            Text = "Detach audio (move / trim freely)",
+            Icon = new FontIcon { Glyph = "\uE8C8" },
+            // Already silent: detaching would lift audio the segment is not playing, and
+            // then silence a segment that is already silenced. Unmute (or undo) first.
+            IsEnabled = !muted,
+        };
+        detach.Click += (_, _) => SegmentAudioDetachRequested?.Invoke(this, video.Id);
+        menu.Items.Add(detach);
     }
 
     /// <summary>

@@ -188,14 +188,16 @@
             Grid.Row="6"
             Grid.Column="1"
             Draw="AudioTrackCanvas_Draw"
-            PointerPressed="Track_PointerPressed" />
+            PointerPressed="Track_PointerPressed"
+            RightTapped="RecordedAudioTrack_RightTapped" />
 
         <canvas:CanvasControl
             x:Name="MicTrackCanvas"
             Grid.Row="7"
             Grid.Column="1"
             Draw="MicTrackCanvas_Draw"
-            PointerPressed="Track_PointerPressed" />
+            PointerPressed="Track_PointerPressed"
+            RightTapped="RecordedAudioTrack_RightTapped" />
 
         <canvas:CanvasControl
             x:Name="VoiceOverTrackCanvas"

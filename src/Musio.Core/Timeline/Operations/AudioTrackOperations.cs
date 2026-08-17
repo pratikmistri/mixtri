@@ -24,6 +24,255 @@ public static class AudioTrackEditing
         => tracks.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 }
 
+/// <summary>
+/// One recorded capture to lift off a segment, as
+/// <see cref="DetachSegmentAudioOperation"/> needs it described.
+/// </summary>
+/// <param name="FilePath">The recorded WAV (a <c>system_*</c>/<c>mic_*</c> capture).</param>
+/// <param name="Name">Label for the resulting block.</param>
+/// <param name="OffsetSeconds">
+/// That recording's audio-to-video offset — the project's for the primary recording, the
+/// segment's own for an appended one. Exactly what <c>ExportAudioPlan</c> aligns with.
+/// </param>
+/// <param name="SourceDuration">
+/// Real length of the file, so the resulting block knows where trimming must stop.
+/// <see cref="TimeSpan.Zero"/> means "not measured" and leaves the clamp to the decoder.
+/// </param>
+public readonly record struct DetachedAudioSource(
+    string FilePath,
+    string Name,
+    double OffsetSeconds,
+    TimeSpan SourceDuration);
+
+/// <summary>
+/// Lifts a segment's recorded audio off the footage: each capture becomes a free-standing
+/// timeline block the user can move and trim, and the segment itself goes silent so the
+/// audio is never heard twice.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why the result is an ordinary <see cref="AudioTrack"/>.</b> That type already means
+/// exactly this — audio anchored to a point on the finished timeline rather than to the
+/// footage under it — and it already has the move/trim operations, the drag gestures, the
+/// preview engine and the export path. Detaching therefore reuses all of it instead of
+/// growing a second, parallel notion of a movable audio block.
+/// </para>
+/// <para>
+/// <b>The block gets the segment's WHOLE aligned source range, not the part that was
+/// audible.</b> A 2x segment only plays half its audio while bound (the rest is cut at the
+/// boundary); the entire point of detaching is to reposition what the cut threw away, so the
+/// block starts at the segment's own start and runs for as long as the source really does.
+/// It may therefore extend past the segment — which is legal for an inserted track, and is
+/// the L-cut this makes possible.
+/// </para>
+/// <para>
+/// <b>Silencing the segment reuses <see cref="SegmentAudioMode.Muted"/>.</b> Preview and
+/// export already honour it per segment, so no second suppression rule (and no way for the
+/// two pipelines to disagree about one) has to exist.
+/// </para>
+/// </remarks>
+public class DetachSegmentAudioOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly IReadOnlyList<DetachedAudioSource> _sources;
+
+    /// <summary>
+    /// The blocks this created, built once and re-added verbatim on redo.
+    /// </summary>
+    /// <remarks>
+    /// Ids must survive an undo/redo round trip: anything else holding one (the timeline's
+    /// selection, a later move or trim operation sitting above this on the redo stack) would
+    /// be pointing at a block that no longer exists after a redo. Reusing the instances is
+    /// how <see cref="AddAudioTrackOperation"/> already achieves it, and why
+    /// <see cref="SplitAudioTrackOperation"/> pins its half's id up front.
+    /// </remarks>
+    private readonly List<AudioTrack> _created = [];
+
+    private int _index = -1;
+    private SegmentAudioMode _previousMode;
+
+    public override string Description => "Detach Segment Audio";
+
+    public DetachSegmentAudioOperation(string segmentId, IReadOnlyList<DetachedAudioSource> sources)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _sources = sources ?? throw new ArgumentNullException(nameof(sources));
+    }
+
+    /// <summary>Ids of the blocks this created, so the caller can select one.</summary>
+    public IReadOnlyList<string> CreatedTrackIds => [.. _created.Select(t => t.Id)];
+
+    /// <summary>
+    /// Where a segment's recorded audio sits, in the coordinates an
+    /// <see cref="AudioTrack"/> uses: an output-timeline start, an offset into the source
+    /// file, and how much of that file the segment covers.
+    /// </summary>
+    /// <remarks>
+    /// The alignment mirrors <c>ExportAudioPlan.BuildPlacement</c> exactly — the file
+    /// position for source-video time <c>T</c> is <c>T + offset</c>, clipped to the file's own
+    /// domain, with the clipped head converted back into an output delay through the
+    /// segment's speed. What it deliberately does NOT copy is that method's take cap: this
+    /// keeps everything the segment covers, because the user is detaching it precisely to
+    /// place the part the cap would have discarded.
+    /// </remarks>
+    public static (TimeSpan Start, TimeSpan TrimStart, TimeSpan Duration)? ResolveWindow(
+        VideoSegment segment, double offsetSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+        if (segment.SourceDuration <= TimeSpan.Zero || segment.Duration <= TimeSpan.Zero) return null;
+
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        var offset = TimeSpan.FromSeconds(offsetSeconds);
+
+        var audioStart = segment.SourceStart + offset;
+        var audioEnd = segment.SourceStart + segment.SourceDuration + offset;
+        if (audioStart < TimeSpan.Zero) audioStart = TimeSpan.Zero;
+        if (audioEnd <= audioStart) return null;
+
+        var sourceLead = (audioStart - offset) - segment.SourceStart;
+        var outputLead = sourceLead > TimeSpan.Zero
+            ? TimeSpan.FromTicks((long)(sourceLead.Ticks / speed))
+            : TimeSpan.Zero;
+
+        return (segment.Start + outputLead, audioStart, audioEnd - audioStart);
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+        if (_sources.Count == 0) return NothingToDo();
+
+        // A redo re-adds the very blocks the undo removed, ids and all.
+        if (_created.Count == 0)
+        {
+            foreach (var source in _sources)
+            {
+                if (string.IsNullOrWhiteSpace(source.FilePath)) continue;
+                if (ResolveWindow(video, source.OffsetSeconds) is not { } window) continue;
+
+                _created.Add(new AudioTrack
+                {
+                    FilePath = source.FilePath,
+                    Name = string.IsNullOrWhiteSpace(source.Name) ? "Recorded audio" : source.Name,
+
+                    // Voice-over rather than music: this is the recording's own speech/system
+                    // audio, so it must sit at full level, not ducked under itself.
+                    Kind = AudioTrackKind.VoiceOver,
+                    StartTime = window.Start,
+                    TrimStart = window.TrimStart,
+                    Duration = window.Duration,
+                    SourceDuration = source.SourceDuration,
+                    Volume = 1.0,
+                    DetachedFromSegmentId = _segmentId,
+                });
+            }
+        }
+
+        if (_created.Count == 0) return NothingToDo();
+
+        foreach (var track in _created)
+        {
+            if (!model.AudioTracks.Any(t => t.Id == track.Id))
+                model.AudioTracks.Add(track);
+        }
+
+        AudioTrackEditing.Sort(model.AudioTracks);
+
+        _previousMode = video.AudioMode;
+        video.AudioMode = SegmentAudioMode.Muted;
+
+        // Audio-only: no segment moved, so no re-flow is owed.
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        foreach (var track in _created)
+            model.AudioTracks.RemoveAll(t => t.Id == track.Id);
+
+        if (_index >= 0 && _index < model.Segments.Count
+            && model.Segments[_index] is VideoSegment video)
+        {
+            video.AudioMode = _previousMode;
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// The reverse of <see cref="DetachSegmentAudioOperation"/>: removes the blocks that were
+/// lifted off a segment and lets the segment play its own audio again.
+/// </summary>
+/// <remarks>
+/// This exists so "unmute" cannot resurrect audio that is already on the timeline. A detached
+/// segment is muted precisely because its recording is playing from its own blocks; unmuting
+/// it while they remain would sum the same capture twice, in preview and in the export. So
+/// the menu offers this instead of a plain unmute whenever detached blocks are present, and
+/// the two edits stay a matched pair.
+/// </remarks>
+public class ReattachSegmentAudioOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly List<AudioTrack> _removed = [];
+
+    private int _index = -1;
+    private SegmentAudioMode _previousMode;
+
+    public override string Description => "Re-attach Segment Audio";
+
+    public ReattachSegmentAudioOperation(string segmentId)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+    }
+
+    /// <summary>Whether any block on <paramref name="model"/> was detached from this segment.</summary>
+    public static bool HasDetachedAudio(TimelineModel model, string segmentId)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return model.AudioTracks.Any(t => t.DetachedFromSegmentId == segmentId);
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+
+        _removed.Clear();
+        _removed.AddRange(model.AudioTracks.Where(t => t.DetachedFromSegmentId == _segmentId));
+        if (_removed.Count == 0) return NothingToDo();
+
+        model.AudioTracks.RemoveAll(t => t.DetachedFromSegmentId == _segmentId);
+
+        _previousMode = video.AudioMode;
+
+        // Back to audible: detaching is the only thing that muted it, so undoing that has to
+        // restore sound, not leave a silent segment with nothing playing over it.
+        video.AudioMode = SegmentAudioMode.TimeStretch;
+
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (_removed.Count == 0) return false;
+
+        model.AudioTracks.AddRange(_removed);
+        AudioTrackEditing.Sort(model.AudioTracks);
+
+        if (_index >= 0 && _index < model.Segments.Count
+            && model.Segments[_index] is VideoSegment video)
+        {
+            video.AudioMode = _previousMode;
+        }
+
+        return false;
+    }
+}
+
 /// <summary>Inserts an audio track (a completed voice-over/music import) onto the timeline.</summary>
 public class AddAudioTrackOperation : IEditOperation
 {
