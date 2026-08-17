@@ -22,6 +22,7 @@
             <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
             <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
             <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />
+            <SolidColorBrush x:Key="TimelineSpeedBadgeBrush"              Color="#E02E2E2E" />
             <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="#DCFFA064" />
             <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="#FFFF5050" />
 
@@ -62,6 +63,10 @@
             <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="#C8FFFF64" />
             <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="#C8E6A032" />
             <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="#C83C82E6" />
+            <!-- Stays dark in Light theme on purpose: the badge sits on the video
+                 filmstrip, not on the page background, so it is paired with
+                 OverlayForegroundBrush exactly like every other over-media label. -->
+            <SolidColorBrush x:Key="TimelineSpeedBadgeBrush"              Color="#E02E2E2E" />
             <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="#DCFFA064" />
             <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="#FFFF5050" />
 
@@ -102,6 +107,7 @@
             <SolidColorBrush x:Key="TimelineCutLineBrush"                 Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="TimelineSpeedUpOverlayBrush"          Color="{StaticResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TimelineSlowDownOverlayBrush"         Color="{StaticResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TimelineSpeedBadgeBrush"              Color="{StaticResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="TimelineCursorPathYBrush"             Color="{StaticResource SystemColorHotlightColor}" />
             <SolidColorBrush x:Key="TimelineCursorClickBrush"             Color="{StaticResource SystemColorHotlightColor}" />
 

@@ -2275,3 +2275,70 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What didn't work**:
   - A broad grep alternating feature keywords with `Normalize` matched hundreds of `normalized`-coordinate lines across the compositor and drowned the real signal. Anchor negative-existence greps on distinctive identifiers only.
   - Marketing copy written before verification claimed on-device subtitles and WebM export; both had to be pulled. Verify, then write.
+
+## Segment speed control (fix/segment-speed-control)
+
+- **Feature/area**: Per-segment playback speed — `ChangeSegmentSpeedOperation` (`Musio.Core/Timeline/Operations/SegmentOperations.cs`), speed toolbar control in `EditorPage.xaml`/`.xaml.cs`/`.Timeline.cs`, speed badge in `TimelineControl.DrawVideoTrackFromSegments`.
+- **Approaches tried**: First looked for a missing/broken handler on the existing `SpeedComboBox`; then traced why it never appears on screen.
+- **What worked**:
+  - **The speed UI existed but was wired to the DEAD legacy clip path.** `SpeedComboBox.Visibility` keyed off `ViewModel.SelectedClipIndex`, which is only ever set by `TimelineControl.VideoClipSelected` — and that event is unreachable once `model.Segments.Count > 0` (both `DrawVideoTrack` and `VideoTrack_Pressed` return early into the segment path). Recording always produces segments, so the control was permanently collapsed and `ApplyClipSpeedOperation` (which mutates `TimelineModel.Clips`) could never run. The fix is a segment-side operation plus binding the panel to `SelectedVideoSegment`; the legacy clip path is kept working alongside it.
+  - **The speed invariant is `SourceDuration = Duration x SpeedFactor`** (already assumed by `TrimSegmentEdgeOperation.TrimVideo`, `SplitSegmentAtTimeOperation`, and `TestTimelineBuilder.Video`). A speed change therefore holds `SourceStart`/`SourceDuration` fixed — the same footage plays — and re-derives `Duration = SourceDuration / speed`; recomputing from the CURRENT duration instead compounds on repeated changes (2x then 4x would give 1.25s instead of 2.5s). Base-track segments then re-flow via `RecalculateSegmentPositions`; overlay starts stay authored.
+  - No linked-data rewriting is needed: audio/clicks/cursor/zoom all resolve through the owning segment's `SpeedFactor` at render/export time (`SegmentFrameComposer`, `EditorPage.Preview`, `TimelineModel.TrySourceToOutputTime`), and `InvalidatePreview` (called from `OnUndoRedoStateChanged`) already refreshes `Preview.Duration` from `TimelineMapper.EffectiveDuration`.
+  - Followed the WinUI playbook: the moved combo has **no `SelectedIndex` in XAML** — the old one did, and wiring it to a real edit would have made that init-time `SelectionChanged` an actual model mutation. Selection is set only in `SyncSpeedComboBox` under `_suppressSpeedApply`.
+  - The segment view returns before the clip view's whole-block speed tint, so feedback is a small corner pill (`DrawSegmentSpeedBadge`) instead — a full-block tint would hide the filmstrip.
+- **What didn't work**:
+  - Leaving `OnVideoClipSelected`'s `else` branch (`SpeedComboBox.SelectedIndex = 2`) in place: `OnUndoRedoStateChanged` calls `Timeline.ClearClipSelection()` on EVERY edit, so that branch would have reset the combo to 1x after each speed change. Both selection paths now funnel through one `UpdateSpeedPanelVisibility`/`SyncSpeedComboBox` pair.
+  - `dotnet test` still fails at the build step with the known PriGen `MSB4062`; `vswhere -find 'MSBuild\**\Bin\MSBuild.exe'` also returned nothing on this host. Verified route: `& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe' src\Musio.Tests\Musio.Tests.csproj /restore /t:Build /p:Configuration=Debug /p:Platform=x64` then `dotnet test ... --no-build -c Debug -p:Platform=x64` with `DOTNET_ROLL_FORWARD=Major`.
+- **Verified**: `Musio.App` x64 Debug -> 0 errors. Full suite **1149 passed, 0 failed, 3 skipped (1152)**, including 12 new `SegmentSpeedOperationTests`.
+
+## Segment speed badge — stopwatch glyph
+
+- **Feature/area**: `TimelineControl.DrawSegmentSpeedBadge` / `DrawSpeedGlyph`.
+- **Approaches tried**: Considered a Segoe Fluent Icons glyph and a fast-forward double-chevron before settling on a primitive-drawn stopwatch.
+- **What worked**: The timeline's Win2D surface only ever loads `"Segoe UI"`, so icon-font glyphs are not available there — draw marks from primitives (`DrawCircle`/`FillRectangle`/`DrawLine`). A stopwatch also reads correctly for BOTH slowed and sped-up segments, whereas a fast-forward chevron contradicts a `0.5x` label. When the badge no longer fits, the whole badge is dropped rather than just the glyph: a bare multiplier is the exact ambiguity with the zoom track's `2x` labels that the glyph exists to remove.
+- **What didn't work**: n/a — single-pass change.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors; app registered from the build output and launched.
+
+## Segment speed badge — neutral fill
+
+- **Feature/area**: `TimelineControl` speed badge colours, `Themes/AppColors.xaml`.
+- **What worked**: New `TimelineSpeedBadgeBrush` (`#E02E2E2E` in both Default and Light, `SystemColorWindowColor` in HighContrast) paired with the existing `OverlayForegroundBrush`, replacing the sped-up/slowed status colours on the badge. Rationale: those status colours were designed to tint a WHOLE clip block, where saturation reads as state; as a small pill sitting on the video block the orange read as a separate marker (the user mistook it for a zoom badge). The multiplier text already carries the direction, so one neutral chip serves both faster and slower.
+- **Light theme note**: the badge brush stays DARK in the Light dictionary on purpose — it sits on the filmstrip (arbitrary video imagery), not on the page background, so it follows the over-media scrim + white foreground convention rather than the theme surface.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors (no XAML compiler errors from the new theme entries); app relaunched.
+
+## Segment speed moved behind the segment right-click menu
+
+- **Feature/area**: `TimelineControl.VideoTrack_RightTapped` / `ShowVideoSegmentContextMenu`, `EditorTimelineMediator.HandleSegmentSpeedChangeRequested`, removal of the toolbar speed panel.
+- **Approaches tried**: Keeping the toolbar combo and merely hiding it; then moving the whole control into the segment context menu.
+- **What worked**:
+  - **Discoverability is the throttle for a feature with a known gap.** Speed does not re-time audio (`AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment`), so surfacing it on every segment selection promises more than the pipeline delivers. Behind a right-click submenu it stays available to power users without being offered by default. Record the reason next to the event, or a future round will "fix" the missing toolbar control.
+  - `VideoTrack_RightTapped` previously bailed out unless a transition chip was hit; the segment menu goes in the fall-through branch, after re-using `HitTestSegment` and the same select-then-act contract the left-click and zoom/camera right-tap paths use.
+  - Menu built in the control (mirroring `ZoomTrack_RightTapped`) but the edit raised as `SegmentSpeedChangeRequested` and executed by the page/mediator, so the undo stack stays page-owned. `ToggleMenuFlyoutItem` shows the current factor; re-picking it is harmless because `ChangeSegmentSpeedOperation` reports `ChangedModel == false` and pushes no undo entry.
+  - Removing the panel orphaned `EditorViewModel.SelectedSpeed`/`ApplySpeedCommand` (their only caller) — deleted, since `ApplyClipSpeedOperation` targets the dead `Clips` list and was already unreachable. `docs/ACCESSIBILITY_ISSUES.md` referenced `SpeedComboBox` by name and was updated with it.
+  - **Deleting named XAML elements needs `obj/` (and the platform `bin/`) cleared** before rebuilding, per the playbook — stale `.g.cs` otherwise keeps the removed `x:Name` fields.
+- **Verified**: clean ARM64 `Musio.App` rebuild -> 0 errors; package re-registered (`Remove-AppxPackage` first, since the clean build deleted the files the old registration pointed at) and launched; suite still **1149 passed, 0 failed, 3 skipped**.
+
+## Segment context menu — flat layout + split/delete
+
+- **Feature/area**: `TimelineControl.ShowVideoSegmentContextMenu`, `EditorPage.DeletePrimarySegment`.
+- **What worked**:
+  - **`MenuFlyout` has no header item**, so a section label has to be a `MenuFlyoutItem` with `IsEnabled = false` (the conventional stand-in). It also keeps the section icon off the options themselves.
+  - Flat `RadioMenuFlyoutItem`s sharing a `GroupName` replaced the `MenuFlyoutSubItem` + `ToggleMenuFlyoutItem` cascade: picking a speed is the whole point of the menu, so a fly-out level to reach it is one hover-and-aim too many, and radio items express "exactly one of these" better than checkmarks. **(The radio-item half of this was SUPERSEDED the same day — see "Segment context menu — one gutter, not two" below. Radio items reserve their own check column on top of the icon column, so the shipped code uses plain `MenuFlyoutItem`s with a check glyph. Dropping the cascade stands.)**
+  - **"Split at Playhead" is disabled unless the playhead is strictly inside the right-clicked segment.** `SplitAtPlayheadCommand` cuts whatever the playhead is over, so an always-enabled item would silently edit a different block than the menu was opened on.
+  - Delete had to reuse the accelerator's existing path (`RemoveSegmentOperation` + clear `_selectedPrimarySegmentId` + `Timeline.SelectSegment(null)` + `HideTextSlidePanel`), so it was extracted to `DeletePrimarySegment` and called from both. Note `EditorViewModel.DeleteSelectedCommand` is NOT that path — it early-returns on `Clips.Count == 0` and so does nothing on a segment timeline.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors, app relaunched.
+
+## Segment context menu — one gutter, not two
+
+- **Feature/area**: `TimelineControl.ShowVideoSegmentContextMenu`.
+- **Symptom**: the menu had a wide, ragged left margin — a radio bullet in one column, item icons in a second, and text pushed past both.
+- **What worked**: **Do not mix `RadioMenuFlyoutItem`/`ToggleMenuFlyoutItem` with icon-bearing `MenuFlyoutItem`s in one WinUI `MenuFlyout`.** The checkable types reserve a check column IN ADDITION to the icon column the other entries need, so the presenter lays out two empty gutters. Using plain `MenuFlyoutItem`s throughout and marking the active option with a check GLYPH (`\uE73E`) in its Icon slot collapses it to a single column with uniform text alignment.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors, app relaunched.
+
+## PR #93 review — speed clamp broke the source/duration invariant
+
+- **Feature/area**: `ChangeSegmentSpeedOperation` (`CapSpeedToMinDuration`).
+- **What was wrong**: the degenerate-segment guard clamped `Duration` up to `MinDuration` while leaving `SpeedFactor` and `SourceDuration` untouched, so the segment claimed more footage than it had. `SplitSegmentAtTimeOperation` derives the split offset as `Duration x SpeedFactor` and subtracts it from `SourceDuration` — on a clamped segment that yields a NEGATIVE second half (0.2s of footage at 10x, split at 50ms: 200ms - 500ms = -300ms).
+- **What worked**: **move the guard to the SPEED, not the duration.** `CapSpeedToMinDuration` lowers the requested speed to `sourceDuration / MinDuration`, so the segment lands exactly on the floor with `SourceDuration = Duration x SpeedFactor` still true and all footage kept. The equality/no-op check has to run on the CAPPED speed, or a segment already at its floor pushes an undo entry that changes nothing.
+- **Generalisation**: any guard that rewrites one term of an invariant has to rewrite the term the invariant is derived FROM, not the derived one. Clamping the output of a formula leaves the inputs lying about it.
+- **Verified**: suite **1151 passed, 0 failed, 3 skipped** (1149 baseline + 3 new tests - 1 replaced), including a split-after-cap regression test; `Musio.App` ARM64 -> 0 errors.

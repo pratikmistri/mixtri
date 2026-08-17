@@ -335,7 +335,6 @@ public sealed partial class EditorPage : Page
                     Timeline.ClearZoomSelection();
                     Timeline.ClearClipSelection();
                     Timeline.ClearTransitionSelection();
-                    UpdateSpeedPanelVisibility();
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
                     ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
@@ -366,6 +365,9 @@ public sealed partial class EditorPage : Page
         // Primary-track segment move / ripple-trim events
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+        Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
+        Timeline.SegmentSplitRequested += OnSegmentSplitRequested;
+        Timeline.SegmentDeleteRequested += OnSegmentDeleteRequested;
         Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;
         Timeline.TextSlideWindowChanged += OnTextSlideWindowChanged;
 
@@ -563,8 +565,6 @@ public sealed partial class EditorPage : Page
 
     private string? PrimaryVideoPath => ProjectService.Instance.CurrentProject?.VideoFilePath;
 
-    private bool _suppressSpeedApply;
-
     /// <summary>Id of the currently selected primary-track segment (video or text slide).</summary>
     private string? _selectedPrimarySegmentId;
 
@@ -576,28 +576,6 @@ public sealed partial class EditorPage : Page
 
     /// <summary>Incoming segment Id of the currently-selected boundary chip, or null.</summary>
     private string? _selectedTransitionId;
-
-    private void UpdateSpeedPanelVisibility()
-    {
-        if (SpeedComboBox is null) return;
-        bool hasClipSelection = ViewModel.SelectedClipIndex is not null;
-        SpeedComboBox.Visibility = hasClipSelection ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void SpeedComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_suppressSpeedApply) return;
-        if (SpeedComboBox.SelectedItem is ComboBoxItem item &&
-            double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double speed))
-        {
-            ViewModel.SelectedSpeed = speed;
-
-            if (ViewModel.SelectedClipIndex is not null)
-            {
-                ViewModel.ApplySpeedCommand.Execute(null);
-            }
-        }
-    }
 
     // --- Zoom Segment Handlers ---
 

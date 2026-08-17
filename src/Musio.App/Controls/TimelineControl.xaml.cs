@@ -80,6 +80,21 @@ public sealed partial class TimelineControl : UserControl
     public event EventHandler<(string Id, bool FromStart, TimeSpan NewDuration)>? SegmentTrimRequested;
 
     /// <summary>
+    /// Raised when a playback speed is chosen from a video segment's right-click menu.
+    /// Speed lives behind that menu rather than on a selection-triggered toolbar control
+    /// because audio is NOT re-timed with the video (see
+    /// <c>AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment</c>) — it is a power-user
+    /// edit that should be found deliberately, not offered to everyone who clicks a clip.
+    /// </summary>
+    public event EventHandler<(string Id, double Speed)>? SegmentSpeedChangeRequested;
+
+    /// <summary>Raised when "Split at Playhead" is chosen from a segment's right-click menu.</summary>
+    public event EventHandler? SegmentSplitRequested;
+
+    /// <summary>Raised when "Delete Segment" is chosen from a segment's right-click menu.</summary>
+    public event EventHandler<string>? SegmentDeleteRequested;
+
+    /// <summary>
     /// Raised when a text slide's inner animation window is edited from the timeline so the
     /// page can keep preview, properties and undo in one authoritative transaction.
     /// </summary>
@@ -142,6 +157,8 @@ public sealed partial class TimelineControl : UserControl
     private Color FilmstripStrokeColor;
     private Color SpeedUpOverlayColor;
     private Color SlowDownOverlayColor;
+    private Color SpeedBadgeFillColor;
+    private Color SpeedBadgeForegroundColor;
     private Color TrimHandleColor;
     private Color TrimHandleBorderColor;
     private Color ZoomTrackBackground;
@@ -437,6 +454,12 @@ public sealed partial class TimelineControl : UserControl
         // ── Speed overlays — semantic status colors ──
         SpeedUpOverlayColor   = GetBrushColor("TimelineSpeedUpOverlayBrush", Color.FromArgb(200, 230, 160, 50));
         SlowDownOverlayColor  = GetBrushColor("TimelineSlowDownOverlayBrush", Color.FromArgb(200, 60, 130, 230));
+
+        // ── Speed badge — deliberately NEUTRAL, not the status colors above. The badge
+        //    sits on the video block itself, where a saturated fill reads as a status
+        //    highlight (and the orange one was mistaken for a zoom marker). ──
+        SpeedBadgeFillColor       = GetBrushColor("TimelineSpeedBadgeBrush", Color.FromArgb(224, 46, 46, 46));
+        SpeedBadgeForegroundColor = GetBrushColor("OverlayForegroundBrush", Color.FromArgb(255, 255, 255, 255));
 
         // ── Trim handles — system text/stroke ──
         TrimHandleColor       = GetSystemBrushColor("TextFillColorPrimaryBrush", Color.FromArgb(255, 255, 255, 255));
@@ -1474,6 +1497,8 @@ public sealed partial class TimelineControl : UserControl
                     ds.FillGeometry(segGeom, isSelected ? VideoClipSelectedColor : VideoClipColor);
                     if (isSelected) ds.DrawGeometry(segGeom, VideoClipSelectedBorder, 2f);
                 }
+
+                DrawSegmentSpeedBadge(ds, video, x1, clipY, segW, clipH);
             }
             else if (segment is TextSlideSegment slide)
             {
@@ -1542,6 +1567,77 @@ public sealed partial class TimelineControl : UserControl
         // Snap guide line.
         if (!double.IsNaN(_segmentSnapGuideX))
             ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
+    }
+
+    /// <summary>
+    /// Draws the "⏱ 1.5x" pill on a segment whose playback speed is not 1×. The legacy
+    /// clip view tints the whole block instead; on the segment view that would hide the
+    /// filmstrip, so a corner badge carries the same information.
+    /// </summary>
+    /// <remarks>
+    /// The stopwatch mark is not decoration: the zoom track labels its segments with a bare
+    /// "2x" too, so a speed badge showing only a multiplier reads as a zoom level on a quick
+    /// scan. The glyph (plus the badge fill) is what separates the two.
+    /// <para>
+    /// The fill is a NEUTRAL scrim rather than the sped-up/slowed status colours used by the
+    /// legacy clip view: those tint a whole block, where saturation reads as state, but a
+    /// small saturated pill sitting on the video block reads as a marker of its own (the
+    /// original orange was taken for a zoom badge). The multiplier itself already says which
+    /// direction the speed went.
+    /// </para>
+    /// </remarks>
+    private void DrawSegmentSpeedBadge(
+        CanvasDrawingSession ds, VideoSegment video, float x1, float clipY, float segW, float clipH)
+    {
+        if (Math.Abs(video.SpeedFactor - 1.0) <= 0.001) return;
+
+        string label = $"{video.SpeedFactor:0.##}x";
+        float badgeH = Math.Min(15f, clipH - 4);
+        float iconSize = Math.Min(9f, badgeH - 4f);
+        float textW = label.Length * 6.5f;
+        float badgeW = 11f + iconSize + textW;
+        // Drop the whole badge rather than the glyph when space is tight — a bare
+        // multiplier is exactly the ambiguity the glyph exists to remove.
+        if (badgeH < 9f || iconSize < 6f || segW < badgeW + 8f) return;
+
+        float badgeX = x1 + 4;
+        float badgeY = clipY + 3;
+        ds.FillRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 3f, 3f, SpeedBadgeFillColor);
+
+        DrawSpeedGlyph(ds, badgeX + 4f, badgeY + (badgeH - iconSize) / 2f, iconSize, SpeedBadgeForegroundColor);
+
+        ds.DrawText(
+            label,
+            new Rect(badgeX + 6f + iconSize, badgeY, textW, badgeH),
+            SpeedBadgeForegroundColor,
+            new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            {
+                FontSize = 10,
+                FontFamily = "Segoe UI",
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+            });
+    }
+
+    /// <summary>
+    /// Draws a stopwatch mark (dial, crown, two hands) inside the
+    /// <paramref name="size"/>-square box at <paramref name="x"/>,<paramref name="y"/>.
+    /// Drawn from primitives rather than an icon-font glyph because the timeline's Win2D
+    /// surface only ever loads "Segoe UI", and it reads the same for a slowed segment as
+    /// for a sped-up one — unlike a fast-forward chevron.
+    /// </summary>
+    private static void DrawSpeedGlyph(CanvasDrawingSession ds, float x, float y, float size, Color color)
+    {
+        float r = size / 2f - 0.75f;
+        float cx = x + size / 2f;
+        float cy = y + size / 2f + 0.5f;
+
+        ds.DrawCircle(cx, cy, r, color, 1.2f);
+        ds.FillRectangle(cx - 1f, y - 0.5f, 2f, 1.75f, color);
+        ds.DrawLine(cx, cy, cx, cy - r * 0.62f, color, 1.1f);
+        ds.DrawLine(cx, cy, cx + r * 0.58f, cy, color, 1.1f);
     }
 
     /// <summary>
@@ -5044,6 +5140,7 @@ public sealed partial class TimelineControl : UserControl
     /// <see cref="ZoomTrack_RightTapped"/> / <see cref="CameraTrack_RightTapped"/>).
     /// Right-clicking an already-Automatic chip is a no-op: there is nothing to remove, and
     /// this control must not create model state from a pointer event either.
+    /// Anywhere else on a video segment, the segment context menu opens instead.
     /// </summary>
     private void VideoTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
@@ -5051,26 +5148,118 @@ public sealed partial class TimelineControl : UserControl
         var pos = e.GetPosition(canvas);
 
         var (hitId, chipHit) = HitTestTransitionChip(pos.X, pos.Y);
-        if (!chipHit || hitId is null) return;
-
-        var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
-        // Any non-null config is removable. An explicit Type=None is a real user choice that
-        // suppresses the slide-adjacent legacy crossfade, so it must be resettable back to
-        // Automatic through the same gesture — treating it as "nothing to remove" left the
-        // user with no way to undo that choice from the timeline.
-        if (incoming?.InTransition is null) return;
-
-        // Right-clicking a chip to remove its transition also SELECTS that boundary
-        // (matching the existing zoom/camera right-tap pattern below), so — like any
-        // other selection — it deliberately takes over from whatever else was selected
-        // (e.g. a text overlay) rather than leaving both looking selected.
-        ClearOtherSelections(SelectionKind.Transition);
-        if (_selectedTransitionId != hitId)
+        if (chipHit && hitId is not null)
         {
-            _selectedTransitionId = hitId;
-            TransitionSelected?.Invoke(this, hitId);
+            var incoming = Model?.Segments.FirstOrDefault(s => s.Id == hitId);
+            // Any non-null config is removable. An explicit Type=None is a real user choice that
+            // suppresses the slide-adjacent legacy crossfade, so it must be resettable back to
+            // Automatic through the same gesture — treating it as "nothing to remove" left the
+            // user with no way to undo that choice from the timeline.
+            if (incoming?.InTransition is null) return;
+
+            // Right-clicking a chip to remove its transition also SELECTS that boundary
+            // (matching the existing zoom/camera right-tap pattern below), so — like any
+            // other selection — it deliberately takes over from whatever else was selected
+            // (e.g. a text overlay) rather than leaving both looking selected.
+            ClearOtherSelections(SelectionKind.Transition);
+            if (_selectedTransitionId != hitId)
+            {
+                _selectedTransitionId = hitId;
+                TransitionSelected?.Invoke(this, hitId);
+            }
+            TransitionRemoveRequested?.Invoke(this, hitId);
+            return;
         }
-        TransitionRemoveRequested?.Invoke(this, hitId);
+
+        var model = Model;
+        if (model is null || model.Segments.Count == 0) return;
+
+        HitTestSegment(model, pos.X, pos.Y, out var segmentId);
+        if (segmentId is null) return;
+        if (model.Segments.OfType<VideoSegment>().FirstOrDefault(v => v.Id == segmentId) is not { } video) return;
+
+        // Select the right-clicked segment first, so the menu visibly acts on the block the
+        // user aimed at and the properties pane follows — same contract as the left-click
+        // and the zoom/camera right-tap paths.
+        ClearOtherSelections(SelectionKind.Segment);
+        if (_selectedSegmentId != segmentId)
+        {
+            _selectedSegmentId = segmentId;
+            SegmentSelected?.Invoke(this, segmentId);
+        }
+        VideoTrackCanvas?.Invalidate();
+
+        ShowVideoSegmentContextMenu(canvas, pos, video);
+    }
+
+    /// <summary>Playback speeds offered by the video segment context menu.</summary>
+    private static readonly double[] SpeedPresets = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+
+    /// <summary>
+    /// Builds the video segment's right-click menu: a "Speed" label with the presets listed
+    /// flat beneath it, then the segment actions. Deliberately NOT a cascading submenu —
+    /// picking a speed is the point of the menu, and a fly-out level to reach it is one
+    /// hover-and-aim more than the edit is worth. The edits themselves are the host's (the
+    /// control raises events rather than touching the model), matching how
+    /// <see cref="ZoomTrack_RightTapped"/> requests a zoom removal.
+    /// </summary>
+    /// <remarks>
+    /// Every entry is a plain <see cref="MenuFlyoutItem"/>, and the active speed is marked
+    /// with a check GLYPH in the icon slot rather than by a <c>RadioMenuFlyoutItem</c> /
+    /// <c>ToggleMenuFlyoutItem</c>. Those reserve their own check column IN ADDITION to the
+    /// icon column that the other entries need, so the menu ends up with two empty gutters
+    /// and text pushed twice as far right. One column, one indent.
+    /// </remarks>
+    private void ShowVideoSegmentContextMenu(CanvasControl canvas, Point pos, VideoSegment video)
+    {
+        var menu = new MenuFlyout();
+
+        // MenuFlyout has no header item, so the label is a disabled entry — the
+        // conventional stand-in.
+        menu.Items.Add(new MenuFlyoutItem
+        {
+            Text = "Speed",
+            Icon = new FontIcon { Glyph = "\uE916" },
+            IsEnabled = false,
+        });
+
+        double current = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        foreach (double preset in SpeedPresets)
+        {
+            double speed = preset;
+            var item = new MenuFlyoutItem
+            {
+                Text = Math.Abs(speed - 1.0) < 0.001 ? "Normal (1x)" : $"{speed:0.##}x",
+            };
+            if (Math.Abs(current - speed) < 0.01)
+                item.Icon = new FontIcon { Glyph = "\uE73E" };
+            item.Click += (_, _) => SegmentSpeedChangeRequested?.Invoke(this, (video.Id, speed));
+            menu.Items.Add(item);
+        }
+
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        var splitItem = new MenuFlyoutItem
+        {
+            Text = "Split at Playhead",
+            Icon = new FontIcon { Glyph = "\uE8C6" },
+            // Splitting always cuts whatever the playhead is over, so offering it while the
+            // playhead sits outside the right-clicked block would silently edit a DIFFERENT
+            // segment than the one whose menu is open.
+            IsEnabled = PlayheadPosition > video.Start && PlayheadPosition < video.End,
+        };
+        splitItem.Click += (_, _) => SegmentSplitRequested?.Invoke(this, EventArgs.Empty);
+        menu.Items.Add(splitItem);
+
+        var deleteItem = new MenuFlyoutItem
+        {
+            Text = "Delete Segment",
+            Icon = new FontIcon { Glyph = "\uE74D" },
+        };
+        deleteItem.Click += (_, _) => SegmentDeleteRequested?.Invoke(this, video.Id);
+        menu.Items.Add(deleteItem);
+
+        menu.ShowAt(canvas, pos);
     }
 
     /// <summary>

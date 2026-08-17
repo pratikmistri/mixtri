@@ -506,7 +506,6 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
-            UpdateSpeedPanelVisibility();
 
             // Undo/redo mutates the model directly, so the inserted-audio preview engine and
             // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
@@ -523,38 +522,12 @@ public sealed partial class EditorPage
     private void OnVideoClipSelected(object? sender, int? clipIndex)
     {
         ViewModel.SelectedClipIndex = clipIndex;
-        UpdateSpeedPanelVisibility();
 
         // Hide text slide panel when a video clip is selected
         if (clipIndex is not null)
         {
             _selectedTextSlideId = null;
             HideTextSlidePanel();
-        }
-
-        // Sync combo to match selected clip's current speed
-        if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
-        {
-            var clip = ViewModel.Model.Clips[idx];
-            _suppressSpeedApply = true;
-            for (int i = 0; i < SpeedComboBox.Items.Count; i++)
-            {
-                if (SpeedComboBox.Items[i] is ComboBoxItem item &&
-                    double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
-                    Math.Abs(s - clip.SpeedFactor) < 0.01)
-                {
-                    SpeedComboBox.SelectedIndex = i;
-                    break;
-                }
-            }
-            _suppressSpeedApply = false;
-        }
-        else
-        {
-            // Reset to 1x when deselected
-            _suppressSpeedApply = true;
-            SpeedComboBox.SelectedIndex = 2;
-            _suppressSpeedApply = false;
         }
     }
 
@@ -592,6 +565,31 @@ public sealed partial class EditorPage
 
     private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
         EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
+
+    private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
+        EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
+
+    private void OnSegmentSplitRequested(object? sender, EventArgs e) =>
+        ViewModel.SplitAtPlayheadCommand.Execute(null);
+
+    private void OnSegmentDeleteRequested(object? sender, string segmentId)
+    {
+        if (!ViewModel.Model.Segments.Any(s => s.Id == segmentId)) return;
+        DeletePrimarySegment(segmentId);
+    }
+
+    /// <summary>
+    /// Ripple-deletes a primary-track segment and drops every bit of page state that
+    /// referenced it. Shared by the Delete accelerator and the segment context menu so the
+    /// two gestures cannot drift into leaving different leftovers behind.
+    /// </summary>
+    private void DeletePrimarySegment(string segmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new RemoveSegmentOperation(segmentId));
+        _selectedPrimarySegmentId = null;
+        Timeline.SelectSegment(null);
+        HideTextSlidePanel();
+    }
 
     /// <summary>
     /// Moves a segment to a new track and/or a new absolute start, in response to the

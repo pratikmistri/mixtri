@@ -109,11 +109,7 @@ public sealed partial class EditorPage
         if (_selectedPrimarySegmentId is { } segId &&
             ViewModel.Model.Segments.Any(s => s.Id == segId))
         {
-            var operation = new RemoveSegmentOperation(segId);
-            ViewModel.UndoRedoManager.Execute(operation);
-            _selectedPrimarySegmentId = null;
-            Timeline.SelectSegment(null);
-            HideTextSlidePanel();
+            DeletePrimarySegment(segId);
             args.Handled = true;
             return;
         }

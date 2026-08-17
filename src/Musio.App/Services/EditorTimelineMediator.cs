@@ -51,6 +51,12 @@ internal static class EditorTimelineMediator
         timeline.SelectSegment(id);
     }
 
+    public static void HandleSegmentSpeedChangeRequested(EditorViewModel viewModel, TimelineControl timeline, string id, double speed)
+    {
+        viewModel.UndoRedoManager.Execute(new ChangeSegmentSpeedOperation(id, speed));
+        timeline.SelectSegment(id);
+    }
+
     public static void HandleCameraSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newStart) =>
         viewModel.UndoRedoManager.Execute(new MoveCameraSegmentOperation(id, newStart));
 

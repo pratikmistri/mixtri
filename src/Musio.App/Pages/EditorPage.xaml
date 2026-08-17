@@ -415,21 +415,6 @@
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
-
-                <ComboBox
-                    x:Name="SpeedComboBox"
-                    Width="100"
-                    SelectedIndex="2"
-                    SelectionChanged="SpeedComboBox_SelectionChanged"
-                    ToolTipService.ToolTip="Playback speed"
-                    Visibility="Collapsed">
-                    <ComboBoxItem Content="0.25x" Tag="0.25" />
-                    <ComboBoxItem Content="0.5x" Tag="0.5" />
-                    <ComboBoxItem Content="1x" Tag="1" />
-                    <ComboBoxItem Content="1.5x" Tag="1.5" />
-                    <ComboBoxItem Content="2x" Tag="2" />
-                    <ComboBoxItem Content="4x" Tag="4" />
-                </ComboBox>
             </StackPanel>
 
             <!-- Speed controls -->
