@@ -514,6 +514,11 @@ public sealed partial class EditorPage
             // edit of any kind and rebuilding reopens every inserted WAV.
             RefreshInsertedAudioIfChanged();
 
+            // Same for the time-stretched segment audio, which is derived from the segments'
+            // speed/trim/audio-mode: an undone speed change must stop playing the stretch it
+            // asked for. Guarded by its own signature, since re-rendering is expensive.
+            RefreshStretchedAudioIfChanged();
+
             Timeline.Refresh();
             InvalidatePreview();
         });
@@ -568,6 +573,84 @@ public sealed partial class EditorPage
 
     private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
         EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
+
+    private void OnSegmentAudioModeChangeRequested(object? sender, (string Id, SegmentAudioMode Mode) e)
+    {
+        EditorTimelineMediator.HandleSegmentAudioModeChangeRequested(ViewModel, Timeline, e.Id, e.Mode);
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", $"segment {e.Id} audio mode -> {e.Mode}");
+
+        // The mode decides which file (if any) preview plays over this segment, so the
+        // stretched-audio engine has to be rebuilt before the next tick asks it.
+        RefreshStretchedAudioIfChanged();
+        Timeline.Refresh();
+    }
+
+    /// <summary>
+    /// Lifts a segment's recorded captures onto the inserted-audio lane as free-standing
+    /// blocks, and silences the segment so nothing is heard twice.
+    /// </summary>
+    /// <remarks>
+    /// The page resolves WHICH files and WHICH offset (the primary recording's tracks live on
+    /// the project, an appended recording carries its own — the same split
+    /// <c>ExportAudioPlan.BuildFromSegments</c> makes) and probes their real lengths, because
+    /// the operation is pure and must not touch the disk. Everything after that is the
+    /// existing inserted-audio machinery: the blocks move, trim, re-level and export exactly
+    /// like a voice-over, which is the whole reason detaching produces one.
+    /// </remarks>
+    private void OnSegmentAudioDetachRequested(object? sender, string segmentId)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return;
+
+        if (ViewModel.Model.Segments.FirstOrDefault(s => s.Id == segmentId) is not VideoSegment video)
+            return;
+
+        bool isPrimary = string.Equals(
+            video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase);
+
+        var paths = isPrimary ? project.AudioFilePaths : video.AudioFilePaths;
+        double offsetSeconds = isPrimary
+            ? project.AudioToVideoOffsetSeconds
+            : video.AudioToVideoOffsetSeconds;
+
+        var sources = new List<DetachedAudioSource>();
+        foreach (var path in paths ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path)) continue;
+
+            sources.Add(new DetachedAudioSource(
+                path,
+                RecordedAudio.IsMic(path) ? "Microphone" : "System audio",
+                offsetSeconds,
+                AudioFileDuration.TryGet(path) ?? TimeSpan.Zero));
+        }
+
+        if (sources.Count == 0)
+        {
+            EditorInfoBar.Message = "This segment has no recorded audio to detach.";
+            EditorInfoBar.Severity = InfoBarSeverity.Informational;
+            EditorInfoBar.IsOpen = true;
+            return;
+        }
+
+        var operation = new DetachSegmentAudioOperation(segmentId, sources);
+        ViewModel.UndoRedoManager.Execute(operation);
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor",
+            $"detached {operation.CreatedTrackIds.Count} audio block(s) from segment {segmentId}");
+
+        // The segment is now muted and the blocks are inserted tracks, so BOTH engines are
+        // stale: the stretched one must drop this segment, the inserted one must pick the
+        // new blocks up.
+        RefreshStretchedAudioIfChanged();
+        RefreshInsertedAudio();
+
+        if (operation.CreatedTrackIds.Count > 0)
+            Timeline.SelectedInsertedAudioTrackId = operation.CreatedTrackIds[0];
+
+        Timeline.Refresh();
+    }
 
     private void OnSegmentSplitRequested(object? sender, EventArgs e) =>
         ViewModel.SplitAtPlayheadCommand.Execute(null);
@@ -1188,6 +1271,16 @@ public sealed partial class EditorPage
     /// preview engine), or a position that lands before the audio recording started. Callers
     /// treat <c>null</c> as "silence" and pause.
     /// </para>
+    /// <para>
+    /// <b>Speed-adjusted segments never map through this engine.</b> It plays its files as one
+    /// continuous 1x pass and can only be seeked, so deriving the target through
+    /// <see cref="VideoSegment.SpeedFactor"/> made the target move faster (or slower) than the
+    /// engine itself did — every tick drifted past <see cref="AudioDriftTolerance"/> and
+    /// re-seeked, which is heard as stutter rather than as fast audio. Such a segment's audio
+    /// is re-timed offline and played by the placement-based engine instead (see
+    /// <c>ReloadStretchedAudioPlayer</c>), exactly as export muxes it. A muted segment is
+    /// silent here at any speed.
+    /// </para>
     /// </remarks>
     private TimeSpan? AudioPositionForVideo(TimeSpan videoPosition)
     {
@@ -1210,11 +1303,22 @@ public sealed partial class EditorPage
         if (!string.Equals(video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
             return null;
 
+        if (video.AudioMode == SegmentAudioMode.Muted) return null;
+
         double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
-        var sourceTime = video.SourceStart + TimeSpan.FromTicks((long)(localOffset.Ticks * speed));
+        if (Math.Abs(speed - 1.0) > SegmentSpeedEpsilon) return null;
+
+        var sourceTime = video.SourceStart + localOffset;
         var position = sourceTime + TimeSpan.FromSeconds(_audioOffsetSeconds);
         return position >= TimeSpan.Zero ? position : null;
     }
+
+    /// <summary>Speed factors within this distance of 1.0 are treated as unmodified.</summary>
+    /// <remarks>
+    /// The same epsilon <c>ExportAudioPlan</c> and <c>WsolaTimeStretcher</c> use, so preview
+    /// and export can never disagree about whether a segment counts as speed-adjusted.
+    /// </remarks>
+    private const double SegmentSpeedEpsilon = 0.001;
 
     /// <summary>
     /// How far the audio may drift from its mapped position before it is re-seeked during
@@ -1241,11 +1345,14 @@ public sealed partial class EditorPage
     {
         SyncRecordedAudioToPlayhead(videoPosition);
         SyncInsertedAudioToPlayhead(videoPosition);
+        SyncStretchedAudioToPlayhead(videoPosition);
     }
 
-    /// <summary>Whether either preview engine has anything loaded to play.</summary>
+    /// <summary>Whether any preview engine has anything loaded to play.</summary>
     private bool HasPreviewAudio
-        => _audioPlayer is { IsLoaded: true } || _insertedAudioPlayer is { IsLoaded: true };
+        => _audioPlayer is { IsLoaded: true }
+        || _insertedAudioPlayer is { IsLoaded: true }
+        || _stretchedAudioPlayer is { IsLoaded: true };
 
     private void SyncRecordedAudioToPlayhead(TimeSpan videoPosition)
     {
@@ -1379,6 +1486,210 @@ public sealed partial class EditorPage
 
     /// <summary>Invalidates in-flight engine builds; see <see cref="ReloadInsertedAudioPlayer"/>.</summary>
     private int _insertedAudioGeneration;
+
+    /// <summary>
+    /// Re-aligns the stretched-segment engine. Like the inserted engine it is positioned in
+    /// OUTPUT time — a rendered segment file starts exactly where its segment starts and
+    /// lasts exactly as long — so the playhead is its clock directly.
+    /// </summary>
+    private void SyncStretchedAudioToPlayhead(TimeSpan videoPosition)
+    {
+        if (_stretchedAudioPlayer is not { IsLoaded: true } player) return;
+
+        // The engine's placements are a snapshot taken when it was built; the segment's state
+        // is the live truth. Gating here (as well as rebuilding on change) means a rebuild
+        // that has not run yet — or one that raced an in-flight render — can never leave the
+        // user hearing re-timed audio over a segment they just muted or detached.
+        if (!HasStretchedAudioAt(videoPosition))
+        {
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        bool audible = player.SyncTo(videoPosition, AudioDriftTolerance);
+
+        if (!audible)
+        {
+            if (player.IsPlaying) player.Pause();
+            return;
+        }
+
+        if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// Whether the segment under <paramref name="videoPosition"/> is one whose audio is
+    /// re-timed: speed-adjusted, and not muted.
+    /// </summary>
+    private bool HasStretchedAudioAt(TimeSpan videoPosition)
+    {
+        var (segment, _) = ViewModel.Model.GetSegmentAtTime(videoPosition);
+        if (segment is not VideoSegment video) return false;
+        if (video.AudioMode == SegmentAudioMode.Muted) return false;
+
+        double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        return Math.Abs(speed - 1.0) > SegmentSpeedEpsilon;
+    }
+
+    /// <summary>
+    /// (Re)builds the engine that plays time-stretched audio for speed-adjusted segments
+    /// set to <see cref="SegmentAudioMode.TimeStretch"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The placements come from <see cref="ExportAudioPlan.Build"/> itself</b>, not from a
+    /// parallel preview-only mapping, and the audio files come from the same
+    /// <see cref="SegmentAudioRenderer"/> cache the exporter renders into. Preview therefore
+    /// plays literally the file export muxes, at the position export delays it to — the two
+    /// cannot drift apart, which is the failure mode every other preview/export audio
+    /// divergence in this file was caused by.
+    /// </para>
+    /// <para>
+    /// Rendering is a background pass (a minutes-long segment takes seconds), and until it
+    /// finishes those segments are simply silent: <see cref="AudioPositionForVideo"/> already
+    /// refuses to map them, so nothing else plays over them meanwhile. Silence is honest;
+    /// seek-thrashing the raw file is not.
+    /// </para>
+    /// </remarks>
+    private void ReloadStretchedAudioPlayer()
+    {
+        _stretchedAudioPlayer?.Dispose();
+        _stretchedAudioPlayer = null;
+
+        int generation = ++_stretchedAudioGeneration;
+        _stretchedAudioSignature = BuildStretchedAudioSignature();
+
+        var project = ProjectService.Instance.CurrentProject;
+        var model = ViewModel.Model;
+        if (project is null || model.Segments.Count == 0) return;
+
+        var requests = ExportAudioPlan.Build(project, model, null)
+            .Where(p => p.Stretch is not null)
+            .ToList();
+        if (requests.Count == 0) return;
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor",
+            $"stretched audio: rendering {requests.Count} placement(s)");
+
+        _ = Task.Run(async () =>
+        {
+            var renderer = new SegmentAudioRenderer();
+            var placements = new List<AudioTimelinePlacement>();
+
+            foreach (var request in requests)
+            {
+                if (generation != _stretchedAudioGeneration) return;
+
+                var stretch = request.Stretch!.Value;
+                string? rendered = await renderer.RenderAsync(
+                    request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
+                    stretch.Speed, stretch.OutputDuration);
+
+                // A source that cannot be stretched stays silent in preview rather than
+                // reverting to a drifting native-rate pass: export falls back to native for
+                // it, and a preview that thrashed the playhead would be the worse of the two
+                // disagreements.
+                if (rendered is null) continue;
+
+                placements.Add(new AudioTimelinePlacement(
+                    rendered, request.Delay, TimeSpan.Zero, stretch.OutputDuration,
+                    (float)Math.Clamp(request.Volume, 0.0, 1.0)));
+            }
+
+            if (placements.Count == 0) return;
+
+            AudioPlaybackEngine? player = null;
+            try
+            {
+                player = new AudioPlaybackEngine();
+                player.LoadPlacements(placements);
+            }
+            catch (Exception ex)
+            {
+                Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                    $"stretched audio engine failed to load: {ex.Message}");
+                player?.Dispose();
+                return;
+            }
+
+            var built = player;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (generation != _stretchedAudioGeneration || _pageUnloaded)
+                {
+                    built.Dispose();
+                    return;
+                }
+
+                _stretchedAudioPlayer?.Dispose();
+                _stretchedAudioPlayer = built;
+            });
+        });
+    }
+
+    /// <summary>Invalidates in-flight builds; see <see cref="ReloadStretchedAudioPlayer"/>.</summary>
+    private int _stretchedAudioGeneration;
+
+    /// <summary>
+    /// State of the stretched-segment placements as of the last rebuild, so an unrelated edit
+    /// (or an undo of one) does not re-render every speed-adjusted segment.
+    /// </summary>
+    private string? _stretchedAudioSignature;
+
+    /// <summary>
+    /// Everything the stretched placements are derived from: which segments are stretched,
+    /// where they sit, what source range they cut and how fast they run — plus the recorded
+    /// channel faders, which scale every placement without touching a segment.
+    /// </summary>
+    private string BuildStretchedAudioSignature()
+    {
+        var model = ViewModel.Model;
+        var sb = new System.Text.StringBuilder();
+
+        sb.Append(model.EffectiveVolume(AudioMixChannel.System)).Append('/')
+          .Append(model.EffectiveVolume(AudioMixChannel.Mic)).Append(';');
+
+        foreach (var segment in model.Segments.OfType<VideoSegment>())
+        {
+            double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+            if (Math.Abs(speed - 1.0) <= SegmentSpeedEpsilon) continue;
+            if (segment.AudioMode != SegmentAudioMode.TimeStretch) continue;
+
+            sb.Append(segment.Id).Append('|')
+              .Append(segment.Start.Ticks).Append('|')
+              .Append(segment.Duration.Ticks).Append('|')
+              .Append(segment.SourceStart.Ticks).Append('|')
+              .Append(segment.SourceDuration.Ticks).Append('|')
+              .Append(speed).Append(';');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Re-renders the stretched-segment engine only when its inputs actually changed.</summary>
+    private void RefreshStretchedAudioIfChanged()
+    {
+        if (BuildStretchedAudioSignature() == _stretchedAudioSignature) return;
+        TryReloadStretchedAudioPlayer();
+    }
+
+    /// <summary>
+    /// <see cref="ReloadStretchedAudioPlayer"/>, guaranteed never to propagate a failure —
+    /// stretched audio is strictly additive to the editor and must never take the preview
+    /// rebuild down with it (see <see cref="TryReloadInsertedAudioPlayer"/>).
+    /// </summary>
+    private void TryReloadStretchedAudioPlayer()
+    {
+        try
+        {
+            ReloadStretchedAudioPlayer();
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write("Editor",
+                $"stretched audio reload failed: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// <see cref="ReloadInsertedAudioPlayer"/>, guaranteed never to propagate a failure.

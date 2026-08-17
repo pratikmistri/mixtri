@@ -44,6 +44,20 @@ public sealed partial class EditorPage : Page
     /// position, so it cannot serve both.
     /// </remarks>
     private AudioPlaybackEngine? _insertedAudioPlayer;
+
+    /// <summary>
+    /// Third engine, for the time-stretched audio of speed-adjusted segments set to
+    /// <see cref="SegmentAudioMode.TimeStretch"/>.
+    /// </summary>
+    /// <remarks>
+    /// Shares the inserted engine's OUTPUT-time clock (each rendered file starts where its
+    /// segment starts and lasts exactly as long), but not its contents: these placements come
+    /// from the segments, are re-rendered whenever a segment's speed, trim or audio mode
+    /// changes, and must not be disposed or reloaded when an inserted voice-over is edited.
+    /// <see cref="_audioPlayer"/> cannot serve them at all — it plays whole recordings on the
+    /// primary recording's own clock, and these are per-segment files.
+    /// </remarks>
+    private AudioPlaybackEngine? _stretchedAudioPlayer;
     private bool _compositorReady;
 
     // Text slide rendering for segment-based preview
@@ -250,6 +264,17 @@ public sealed partial class EditorPage : Page
                     {
                         inserted.ScrubTo(Timeline.PlayheadPosition);
                     }
+
+                    // Stretched segment audio is likewise placed in OUTPUT time, and is
+                    // gated on live segment state for the same reason
+                    // SyncStretchedAudioToPlayhead is: a scrub must not preview a re-time
+                    // the segment no longer asks for.
+                    if (_stretchedAudioPlayer is { IsLoaded: true } stretched
+                        && HasStretchedAudioAt(Timeline.PlayheadPosition)
+                        && stretched.HasAudioAt(Timeline.PlayheadPosition))
+                    {
+                        stretched.ScrubTo(Timeline.PlayheadPosition);
+                    }
                 }
             });
 
@@ -289,6 +314,7 @@ public sealed partial class EditorPage : Page
             {
                 _audioPlayer?.Pause();
                 _insertedAudioPlayer?.Pause();
+                _stretchedAudioPlayer?.Pause();
             }
         };
 
@@ -366,6 +392,8 @@ public sealed partial class EditorPage : Page
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
         Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
+        Timeline.SegmentAudioModeChangeRequested += OnSegmentAudioModeChangeRequested;
+        Timeline.SegmentAudioDetachRequested += OnSegmentAudioDetachRequested;
         Timeline.SegmentSplitRequested += OnSegmentSplitRequested;
         Timeline.SegmentDeleteRequested += OnSegmentDeleteRequested;
         Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;
@@ -436,6 +464,8 @@ public sealed partial class EditorPage : Page
             _audioPlayer = null;
             _insertedAudioPlayer?.Dispose();
             _insertedAudioPlayer = null;
+            _stretchedAudioPlayer?.Dispose();
+            _stretchedAudioPlayer = null;
             _webcamComposition?.Clips.Clear();
             _webcamComposition = null;
             _lastWebcamFrame?.Dispose();

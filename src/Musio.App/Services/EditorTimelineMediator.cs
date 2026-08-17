@@ -57,6 +57,13 @@ internal static class EditorTimelineMediator
         timeline.SelectSegment(id);
     }
 
+    public static void HandleSegmentAudioModeChangeRequested(
+        EditorViewModel viewModel, TimelineControl timeline, string id, SegmentAudioMode mode)
+    {
+        viewModel.UndoRedoManager.Execute(new ChangeSegmentAudioModeOperation(id, mode));
+        timeline.SelectSegment(id);
+    }
+
     public static void HandleCameraSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newStart) =>
         viewModel.UndoRedoManager.Execute(new MoveCameraSegmentOperation(id, newStart));
 

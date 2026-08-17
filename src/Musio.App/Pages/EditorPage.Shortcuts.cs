@@ -258,6 +258,7 @@ public sealed partial class EditorPage
         Preview.Pause();
         try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
         try { _insertedAudioPlayer?.Pause(); } catch { /* best-effort */ }
+        try { _stretchedAudioPlayer?.Pause(); } catch { /* best-effort */ }
 
         // Start new export
         ExportVM.PrepareForExport();
@@ -479,6 +480,7 @@ public sealed partial class EditorPage
         Preview?.Pause();
         _audioPlayer?.Stop();
         _insertedAudioPlayer?.Stop();
+        _stretchedAudioPlayer?.Stop();
         Frame.Navigate(typeof(RecordingPage), "append");
     }
 

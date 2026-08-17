@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
+using Musio.Core.Audio;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
@@ -126,6 +127,13 @@ public class VideoEncoder : IDisposable
         // a silent recording never pays for the mux pass.
         var audioPlacements = await ResolveAvailableAudioAsync(
             ExportAudioPlan.Build(project, timeline, timelineMapper));
+
+        // Re-time whatever asked to be time-stretched, BEFORE anything reads a duration off
+        // a placement: from here on a stretched placement is an ordinary WAV placement, and
+        // nothing downstream needs to know it was ever speed-adjusted.
+        audioPlacements = await ApplySegmentAudioStretchAsync(
+            audioPlacements, totalFrames, progress, stopwatch, ct);
+
         bool hasAudio = audioPlacements.Count > 0;
         WarnAboutSpeedAdjustedAudio(audioPlacements);
         WarnAboutTransitionFadeAudio(audioPlacements);
@@ -629,14 +637,132 @@ public class VideoEncoder : IDisposable
     }
 
     /// <summary>
+    /// Renders every placement that carries a <see cref="SegmentAudioStretch"/> request and
+    /// substitutes the re-timed file for the original, so the mux pass downstream sees an
+    /// ordinary WAV placement that already lasts exactly as long as its segment.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is where the one thing <see cref="ExportAudioPlan"/> cannot do — touch the disk —
+    /// happens, and it is deliberately a pre-pass owned by the caller rather than a change of
+    /// that class's I/O-free contract (see its class remarks).
+    /// </para>
+    /// <para>
+    /// <b>Fail soft.</b> A request that cannot be rendered (unreadable source, exotic format,
+    /// no decoder) is simply dropped, leaving the placement exactly as planned — i.e. the
+    /// native-rate audio a speed-adjusted segment got before time-stretching existed, still
+    /// flagged with <see cref="AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment"/> so
+    /// <see cref="WarnAboutSpeedAdjustedAudio"/> reports it. Losing the stretch must never
+    /// lose the export.
+    /// </para>
+    /// <para>
+    /// Identical requests are rendered once: the system and mic tracks of one segment are
+    /// different sources, but re-exporting the same project (or previewing it first) hits
+    /// <see cref="SegmentAudioRenderer"/>'s on-disk cache instead of stretching again.
+    /// </para>
+    /// </remarks>
+    private static async Task<List<AudioPlacement>> ApplySegmentAudioStretchAsync(
+        List<AudioPlacement> placements,
+        int totalFrames,
+        IProgress<ExportProgress>? progress,
+        Stopwatch stopwatch,
+        CancellationToken ct)
+    {
+        int pending = placements.Count(p => p.Stretch is not null);
+        if (pending == 0) return placements;
+
+        var renderer = new SegmentAudioRenderer();
+        var renderedByRequest = new Dictionary<(string Source, SegmentAudioStretch Stretch), string?>();
+        var result = new List<AudioPlacement>(placements.Count);
+        int done = 0;
+
+        foreach (var placement in placements)
+        {
+            if (placement.Stretch is not { } stretch)
+            {
+                result.Add(placement);
+                continue;
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            var key = (placement.SourcePath, stretch);
+            if (!renderedByRequest.TryGetValue(key, out string? renderedPath))
+            {
+                renderedPath = await renderer.RenderAsync(
+                    placement.SourcePath, stretch.SourceStart, stretch.SourceDuration,
+                    stretch.Speed, stretch.OutputDuration, ct);
+                renderedByRequest[key] = renderedPath;
+            }
+
+            result.Add(SubstituteStretchedSource(placement, renderedPath, stretch));
+
+            done++;
+            // Stretching a long segment is not instant, and it happens before the first
+            // frame is composited — without this the UI would sit at a dead 0%. Scaled into
+            // a small leading band of the bar (PercentComplete is 0..100 everywhere else, and
+            // the frame loop below owns the rest of it), with a remaining estimate measured
+            // from this pass's own rate rather than a placeholder.
+            var perPlacement = stopwatch.Elapsed / done;
+            progress?.Report(new ExportProgress(
+                0, totalFrames, done / (double)pending * StretchProgressShare,
+                stopwatch.Elapsed, perPlacement * (pending - done)));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Share of the export progress bar the time-stretch pre-pass may advance through, in
+    /// <see cref="ExportProgress.PercentComplete"/>'s own 0..100 units. Deliberately small:
+    /// the pass is usually seconds against an encode of minutes, and the frame loop reports
+    /// true percentages straight after, so a larger band would visibly jump backwards.
+    /// </summary>
+    private const double StretchProgressShare = 2.0;
+
+    /// <summary>
+    /// Repoints a placement at its rendered, already-re-timed file — or drops the stretch
+    /// request when <paramref name="renderedPath"/> is <c>null</c>, leaving the native-rate
+    /// placement the planner built as the fallback.
+    /// </summary>
+    /// <remarks>
+    /// The rendered file contains exactly the segment's audio and nothing else, so the trim
+    /// resets to zero and the take becomes the stretch's own output duration. Fade metadata
+    /// is carried through untouched: <see cref="ExportAudioPlan"/> never records a transition
+    /// overlap for a speed-adjusted segment, so there is none to preserve or invalidate here.
+    /// </remarks>
+    internal static AudioPlacement SubstituteStretchedSource(
+        AudioPlacement placement, string? renderedPath, SegmentAudioStretch stretch)
+    {
+        if (string.IsNullOrEmpty(renderedPath))
+            return placement with { Stretch = null };
+
+        return placement with
+        {
+            SourcePath = renderedPath,
+            Kind = AudioSourceKind.AudioFile,
+            TrimFromStart = TimeSpan.Zero,
+            TakeDuration = stretch.OutputDuration,
+            PlaysAtNativeRateOnSpeedAdjustedSegment = false,
+            Stretch = null,
+        };
+    }
+
+    /// <summary>
     /// Reports the one A/V-sync limitation this pipeline cannot fix: the Windows media
     /// editing APIs used for muxing (<see cref="MediaComposition"/> /
     /// <see cref="BackgroundAudioTrack"/>) expose no playback-rate or time-scale property,
     /// so audio under a speed-adjusted segment plays at its native rate — in sync at the
     /// segment start, drifting as it plays, and cut at the segment boundary so it cannot
-    /// overlap the next segment. Logged rather than swallowed so the behaviour is never
-    /// mistaken for full synchronization.
+    /// overlap the next segment.
     /// </summary>
+    /// <remarks>
+    /// Runs AFTER <see cref="ApplySegmentAudioStretchAsync"/>, so it counts only the
+    /// placements that really are muxed at their native rate: the segments the user set to
+    /// <see cref="SegmentAudioMode.Native"/>, plus any whose time-stretch render failed and
+    /// fell back to it. Logged rather than swallowed so the behaviour is never mistaken for
+    /// full synchronization.
+    /// </remarks>
     private static void WarnAboutSpeedAdjustedAudio(IReadOnlyList<AudioPlacement> placements)
     {
         int affected = placements.Count(p => p.PlaysAtNativeRateOnSpeedAdjustedSegment);

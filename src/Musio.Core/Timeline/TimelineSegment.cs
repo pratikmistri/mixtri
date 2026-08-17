@@ -121,6 +121,57 @@ public record VideoSegment : TimelineSegment
     /// style is used. Cursor style is a per-segment property.
     /// </summary>
     public CursorStyle? CursorStyleOverride { get; set; }
+
+    /// <summary>
+    /// What this segment's recorded audio should do. <see cref="Muted"/> applies at any
+    /// speed; the other two only differ once <see cref="SpeedFactor"/> is not 1.0.
+    /// </summary>
+    public SegmentAudioMode AudioMode { get; set; } = SegmentAudioMode.TimeStretch;
+}
+
+/// <summary>
+/// What a <see cref="VideoSegment"/>'s recorded audio does.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The only real choice is whether the segment's audio plays at all. When it does, it is
+/// re-timed to match the picture (pitch preserved — see <c>WsolaTimeStretcher</c>), so it
+/// stays in sync however the segment is sped up or slowed down. A user who wants the audio at
+/// its original rate detaches it instead (<c>DetachSegmentAudioOperation</c>), which turns it
+/// into a free-standing block they can move and trim — a strictly better answer than a mode
+/// that silently truncated the audio at the segment boundary.
+/// </para>
+/// <para>
+/// <b><see cref="TimeStretch"/> is the zero value</b> so projects saved before this property
+/// existed open with picture and sound together.
+/// </para>
+/// <para>
+/// These values are serialized <b>by name</b> (<c>MusioPackage.JsonOptions</c> registers a
+/// <c>JsonStringEnumConverter</c>), so no member may be removed or renamed — a saved project
+/// referencing it would fail to open. That is why <see cref="Native"/> is still here.
+/// </para>
+/// </remarks>
+public enum SegmentAudioMode
+{
+    /// <summary>
+    /// Re-time the audio to the segment's output duration with a WSOLA time-stretch
+    /// (see <c>Musio.Core.Audio.WsolaTimeStretcher</c>), preserving pitch. The default, and
+    /// what every audible segment does.
+    /// </summary>
+    TimeStretch = 0,
+
+    /// <summary>
+    /// <b>Legacy — behaves exactly like <see cref="TimeStretch"/> and is no longer offered.</b>
+    /// Meant "play the audio at its native rate, cut at the segment boundary". It was removed
+    /// as a user-facing choice once audio could be detached: detaching gives the same
+    /// original-rate audio AND lets it be positioned, instead of silently discarding whatever
+    /// did not fit inside the segment. Retained only because the on-disk format persists this
+    /// enum by name.
+    /// </summary>
+    Native = 1,
+
+    /// <summary>Drop this segment's recorded audio entirely — the segment plays silent.</summary>
+    Muted = 2,
 }
 
 /// <summary>

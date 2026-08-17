@@ -24,6 +24,167 @@ public static class AudioTrackEditing
         => tracks.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 }
 
+/// <summary>
+/// One recorded capture to lift off a segment, as
+/// <see cref="DetachSegmentAudioOperation"/> needs it described.
+/// </summary>
+/// <param name="FilePath">The recorded WAV (a <c>system_*</c>/<c>mic_*</c> capture).</param>
+/// <param name="Name">Label for the resulting block.</param>
+/// <param name="OffsetSeconds">
+/// That recording's audio-to-video offset — the project's for the primary recording, the
+/// segment's own for an appended one. Exactly what <c>ExportAudioPlan</c> aligns with.
+/// </param>
+/// <param name="SourceDuration">
+/// Real length of the file, so the resulting block knows where trimming must stop.
+/// <see cref="TimeSpan.Zero"/> means "not measured" and leaves the clamp to the decoder.
+/// </param>
+public readonly record struct DetachedAudioSource(
+    string FilePath,
+    string Name,
+    double OffsetSeconds,
+    TimeSpan SourceDuration);
+
+/// <summary>
+/// Lifts a segment's recorded audio off the footage: each capture becomes a free-standing
+/// timeline block the user can move and trim, and the segment itself goes silent so the
+/// audio is never heard twice.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Why the result is an ordinary <see cref="AudioTrack"/>.</b> That type already means
+/// exactly this — audio anchored to a point on the finished timeline rather than to the
+/// footage under it — and it already has the move/trim operations, the drag gestures, the
+/// preview engine and the export path. Detaching therefore reuses all of it instead of
+/// growing a second, parallel notion of a movable audio block.
+/// </para>
+/// <para>
+/// <b>The block gets the segment's WHOLE aligned source range, not the part that was
+/// audible.</b> A 2x segment only plays half its audio while bound (the rest is cut at the
+/// boundary); the entire point of detaching is to reposition what the cut threw away, so the
+/// block starts at the segment's own start and runs for as long as the source really does.
+/// It may therefore extend past the segment — which is legal for an inserted track, and is
+/// the L-cut this makes possible.
+/// </para>
+/// <para>
+/// <b>Silencing the segment reuses <see cref="SegmentAudioMode.Muted"/>.</b> Preview and
+/// export already honour it per segment, so no second suppression rule (and no way for the
+/// two pipelines to disagree about one) has to exist.
+/// </para>
+/// </remarks>
+public class DetachSegmentAudioOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly IReadOnlyList<DetachedAudioSource> _sources;
+    private readonly List<string> _addedTrackIds = [];
+
+    private int _index = -1;
+    private SegmentAudioMode _previousMode;
+
+    public override string Description => "Detach Segment Audio";
+
+    public DetachSegmentAudioOperation(string segmentId, IReadOnlyList<DetachedAudioSource> sources)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _sources = sources ?? throw new ArgumentNullException(nameof(sources));
+    }
+
+    /// <summary>Ids of the blocks this created, so the caller can select one.</summary>
+    public IReadOnlyList<string> CreatedTrackIds => _addedTrackIds;
+
+    /// <summary>
+    /// Where a segment's recorded audio sits, in the coordinates an
+    /// <see cref="AudioTrack"/> uses: an output-timeline start, an offset into the source
+    /// file, and how much of that file the segment covers.
+    /// </summary>
+    /// <remarks>
+    /// The alignment mirrors <c>ExportAudioPlan.BuildPlacement</c> exactly — the file
+    /// position for source-video time <c>T</c> is <c>T + offset</c>, clipped to the file's own
+    /// domain, with the clipped head converted back into an output delay through the
+    /// segment's speed. What it deliberately does NOT copy is that method's take cap: this
+    /// keeps everything the segment covers, because the user is detaching it precisely to
+    /// place the part the cap would have discarded.
+    /// </remarks>
+    public static (TimeSpan Start, TimeSpan TrimStart, TimeSpan Duration)? ResolveWindow(
+        VideoSegment segment, double offsetSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+        if (segment.SourceDuration <= TimeSpan.Zero || segment.Duration <= TimeSpan.Zero) return null;
+
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        var offset = TimeSpan.FromSeconds(offsetSeconds);
+
+        var audioStart = segment.SourceStart + offset;
+        var audioEnd = segment.SourceStart + segment.SourceDuration + offset;
+        if (audioStart < TimeSpan.Zero) audioStart = TimeSpan.Zero;
+        if (audioEnd <= audioStart) return null;
+
+        var sourceLead = (audioStart - offset) - segment.SourceStart;
+        var outputLead = sourceLead > TimeSpan.Zero
+            ? TimeSpan.FromTicks((long)(sourceLead.Ticks / speed))
+            : TimeSpan.Zero;
+
+        return (segment.Start + outputLead, audioStart, audioEnd - audioStart);
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+        if (_sources.Count == 0) return NothingToDo();
+
+        _addedTrackIds.Clear();
+
+        foreach (var source in _sources)
+        {
+            if (string.IsNullOrWhiteSpace(source.FilePath)) continue;
+            if (ResolveWindow(video, source.OffsetSeconds) is not { } window) continue;
+
+            var track = new AudioTrack
+            {
+                FilePath = source.FilePath,
+                Name = string.IsNullOrWhiteSpace(source.Name) ? "Recorded audio" : source.Name,
+
+                // Voice-over rather than music: this is the recording's own speech/system
+                // audio, so it must sit at full level, not ducked under itself.
+                Kind = AudioTrackKind.VoiceOver,
+                StartTime = window.Start,
+                TrimStart = window.TrimStart,
+                Duration = window.Duration,
+                SourceDuration = source.SourceDuration,
+                Volume = 1.0,
+            };
+
+            model.AudioTracks.Add(track);
+            _addedTrackIds.Add(track.Id);
+        }
+
+        if (_addedTrackIds.Count == 0) return NothingToDo();
+
+        AudioTrackEditing.Sort(model.AudioTracks);
+
+        _previousMode = video.AudioMode;
+        video.AudioMode = SegmentAudioMode.Muted;
+
+        // Audio-only: no segment moved, so no re-flow is owed.
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        foreach (string id in _addedTrackIds)
+            model.AudioTracks.RemoveAll(t => t.Id == id);
+
+        if (_index >= 0 && _index < model.Segments.Count
+            && model.Segments[_index] is VideoSegment video)
+        {
+            video.AudioMode = _previousMode;
+        }
+
+        return false;
+    }
+}
+
 /// <summary>Inserts an audio track (a completed voice-over/music import) onto the timeline.</summary>
 public class AddAudioTrackOperation : IEditOperation
 {

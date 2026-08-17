@@ -214,6 +214,8 @@ public sealed partial class EditorPage
         _frameReader = null;
         _previewRenderer = null;
         _audioPlayer = null;
+        _stretchedAudioPlayer?.Dispose();
+        _stretchedAudioPlayer = null;
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
@@ -228,6 +230,11 @@ public sealed partial class EditorPage
         // the preview pipeline itself, and an exception here would leave a live but blank
         // editor with nothing scheduled to retry it.
         TryReloadInsertedAudioPlayer();
+
+        // Same reasoning for time-stretched segment audio: it is derived from the segments,
+        // not from the recording's own files, and rendering it is a background pass that must
+        // never block or abort the preview rebuild.
+        TryReloadStretchedAudioPlayer();
 
         // This method re-runs on every ModelReloaded — which fires on project change AND
         // on every editor page reconstruction. Two overlapping runs used to cancel each

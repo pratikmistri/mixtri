@@ -33,6 +33,37 @@ public enum AudioSourceKind
 }
 
 /// <summary>
+/// The time-stretch a placement's segment still needs before it can be muxed: read
+/// <see cref="SourceDuration"/> of source starting at <see cref="SourceStart"/>, re-time it
+/// by <see cref="Speed"/>, and the result lasts exactly <see cref="OutputDuration"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Present only on placements belonging to a speed-adjusted segment whose
+/// <see cref="VideoSegment.AudioMode"/> is <see cref="SegmentAudioMode.TimeStretch"/>.
+/// <see cref="ExportAudioPlan"/> is deliberately I/O-free, so it can describe the stretch
+/// but not perform it: the placement it emits is the ORIGINAL native-rate one, and this
+/// record rides alongside as a request. <c>VideoEncoder</c> renders it (via
+/// <c>SegmentAudioRenderer</c>) and substitutes the rendered file before muxing.
+/// </para>
+/// <para>
+/// That "native placement plus a request" shape is what makes the feature fail soft: if the
+/// render fails for any reason, the caller simply drops the request and muxes the placement
+/// it was already holding — which is exactly the behaviour speed-adjusted audio had before
+/// time-stretching existed.
+/// </para>
+/// </remarks>
+/// <param name="Speed">The segment's speed factor; &gt;1 shortens the audio, &lt;1 lengthens it.</param>
+/// <param name="SourceStart">Where to start reading inside the source file.</param>
+/// <param name="SourceDuration">How much source audio to consume.</param>
+/// <param name="OutputDuration">How long the stretched result must be (never overruns the segment).</param>
+public readonly record struct SegmentAudioStretch(
+    double Speed,
+    TimeSpan SourceStart,
+    TimeSpan SourceDuration,
+    TimeSpan OutputDuration);
+
+/// <summary>
 /// One audio source positioned on the exported timeline.
 /// </summary>
 /// <param name="SourcePath">Video file (embedded track) or audio file to read from.</param>
@@ -92,6 +123,13 @@ public enum AudioSourceKind
 /// is exactly the capability <c>BackgroundAudioTrack</c> lacks.
 /// </para>
 /// </param>
+/// <param name="Stretch">
+/// Non-null when this placement's segment is speed-adjusted and set to
+/// <see cref="SegmentAudioMode.TimeStretch"/>: the caller must render the described
+/// time-stretch and substitute it before muxing (see <see cref="SegmentAudioStretch"/>).
+/// The placement's own fields still describe the untouched native-rate audio, so dropping
+/// the request degrades cleanly to <see cref="SegmentAudioMode.Native"/>.
+/// </param>
 public readonly record struct AudioPlacement(
     string SourcePath,
     AudioSourceKind Kind,
@@ -101,7 +139,8 @@ public readonly record struct AudioPlacement(
     bool PlaysAtNativeRateOnSpeedAdjustedSegment = false,
     TimeSpan FadeOutDuration = default,
     TimeSpan FadeInDuration = default,
-    double Volume = 1.0);
+    double Volume = 1.0,
+    SegmentAudioStretch? Stretch = null);
 
 /// <summary>
 /// Pure mapping from a project + timeline to the set of audio tracks the exporter must
@@ -114,16 +153,19 @@ public readonly record struct AudioPlacement(
 /// audio — muxing the untouched source file would replay deleted or reordered content.
 /// Projects with no segments keep the legacy trim-based placement.</para>
 ///
-/// <para><b>Known limitation — speed-adjusted segments.</b> The mux pass is built on
+/// <para><b>Speed-adjusted segments.</b> The mux pass is built on
 /// <c>MediaComposition</c>/<c>BackgroundAudioTrack</c>, which expose trimming, delay,
-/// volume and effects but <b>no playback-rate/time-scale API</b>; audio can therefore not
-/// be re-timed to match a segment's <see cref="VideoSegment.SpeedFactor"/> (doing so would
-/// require decoding, time-stretching and re-encoding every affected track offline). Such a
-/// segment's audio is muxed at its native rate: it starts in sync with the segment, drifts
-/// as the segment plays, and is cut at the segment boundary so it can never overlap the
-/// next segment. Placements affected by this are flagged with
+/// volume and effects but <b>no playback-rate/time-scale API</b>, so nothing here can
+/// re-time audio to match a segment's <see cref="VideoSegment.SpeedFactor"/> by itself.
+/// An audible speed-adjusted segment therefore emits its placement with a
+/// <see cref="AudioPlacement.Stretch"/> request describing the offline WSOLA re-time the
+/// caller must render and substitute (see <see cref="SegmentAudioStretch"/>). The
+/// placement's own fields still describe the untouched native-rate audio, so a failed
+/// render degrades to muxing it at its native rate — flagged with
 /// <see cref="AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment"/> so the exporter can
-/// report the limitation rather than imply full A/V sync.</para>
+/// report the limitation rather than imply full A/V sync — instead of losing the export.
+/// A segment set to <see cref="SegmentAudioMode.Muted"/> emits no placement at all, at any
+/// speed.</para>
 ///
 /// <para><b>Transition crossfades (T7) and why export still hard-cuts.</b> Every boundary
 /// <see cref="TransitionResolver"/> reports as active gets an outgoing placement
@@ -581,6 +623,12 @@ public static class ExportAudioPlan
         double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
         bool speedAdjusted = IsSpeedAdjusted(segment);
 
+        // Mute is NOT a speed concept: a segment the user silenced stays silent whatever
+        // rate it plays at, so this is checked before anything speed-related. (The other two
+        // modes genuinely are — at 1.0 "re-time the audio" and "play it at its native rate"
+        // describe the same audio, so neither is consulted there.)
+        if (segment.AudioMode == SegmentAudioMode.Muted) return null;
+
         // Only apply the extension at native speed: a speed-adjusted segment has no
         // reliable output/source time correspondence to begin with (see
         // PlaysAtNativeRateOnSpeedAdjustedSegment) and must keep its existing hard cap.
@@ -621,8 +669,28 @@ public static class ExportAudioPlan
         var take = available < outputRoom ? available : outputRoom;
         if (take <= TimeSpan.Zero) return null;
 
+        // ...unless the segment is speed-adjusted, in which case the take above is only the
+        // fallback: audible audio on such a segment is always re-timed to fit. The stretch
+        // consumes as much source as maps onto the remaining output room (all of it, when the
+        // file has that much left), and the rendered result is exactly that room long — so a
+        // 2x segment keeps its whole second half instead of dropping it, and a 0.5x segment
+        // has no trailing silence.
+        SegmentAudioStretch? stretch = null;
+        if (speedAdjusted)
+        {
+            var stretchSource = ScaleDuration(outputRoom, speed);
+            if (available < stretchSource) stretchSource = available;
+
+            var stretchOutput = TimeSpan.FromTicks((long)(stretchSource.Ticks / speed));
+            if (stretchOutput > outputRoom) stretchOutput = outputRoom;
+
+            if (stretchSource > TimeSpan.Zero && stretchOutput > TimeSpan.Zero)
+                stretch = new SegmentAudioStretch(speed, audioStart, stretchSource, stretchOutput);
+        }
+
         return new AudioPlacement(
-            sourcePath, kind, audioStart, take, segment.Start + outputLead, speedAdjusted);
+            sourcePath, kind, audioStart, take, segment.Start + outputLead, speedAdjusted,
+            Stretch: stretch);
     }
 
     /// <summary>
