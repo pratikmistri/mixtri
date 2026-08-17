@@ -2232,3 +2232,32 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **But the comment still found something real, just not what it said.** That line was the ONLY one of the six `DialogHelper` call sites using the relative form; every other one (`OpenProjectsPage`, `EditorPage.*`, `SettingsPage`) imports `using Musio_App.Helpers;` and calls `DialogHelper.X` unqualified. So the fix applied is the CONVENTION, not the reviewer's suggestion: added the using directive and dropped the qualifier, which the suggested full qualification would not have matched either.
 - **Generalisable**: an AI reviewer's severity and its stated reason can both be wrong while the line it points at is still worth changing. Check the claim independently, then ask separately whether the code should change anyway — answering only the claim would have left the outlier in place, and accepting the suggestion unexamined would have recorded a false compile error in the history and introduced a third distinct style.
 - **Verified**: `Musio.App` ARM64 Debug clean rebuild, 0 errors, 0 CS warnings. Suite unchanged at **1137 passed, 3 skipped, 0 failed** (App-layer only). Re-registered and relaunched; responding, no new `crash.log`.
+
+## Version 1.4.0 Store packages
+
+- **Feature/area**: Microsoft Store package generation (x64 + ARM64) for the release following 1.3.0.
+- **Hit the exact trap the 1.3.0 entry warned about, which is why it is now a playbook rule.** The
+  in-repo manifest still read `1.3.0.0` — the version already live in the Store — so the first pair of
+  packages built cleanly and would have been rejected on submission. The manifest normally holds the
+  version that was last SHIPPED, not the next one, so packaging straight from a clean checkout is
+  wrong by default. Promoted to `playbooks.md`: check the live Store version first, every time.
+- **Sized the bump from the history rather than guessing**: 89 non-merge commits since the 1.3.0 bump
+  (`b56dc6d`), including multi-track/overlay segments, the editable text-slide animation window, the
+  zoom-handoff rework, per-track volume/mute, and the unsaved-changes prompt. New user-facing
+  features with no breaking change → minor bump, 1.4.0.0.
+- **Two files, always together**: `Package.appxmanifest` `Version="1.4.0.0"` and `SettingsPage.xaml`
+  `Text="Version 1.4.0"`. Found by looking at what the previous bump commit touched instead of
+  grepping for the version string, which also matches unrelated `Microsoft.Graphics.Win2D` 1.3.0
+  package references in both csproj files.
+- **Cleaned only the RELEASE bin/obj, not everything.** The 1.3.0 entry deleted App/Core `bin`/`obj`
+  wholesale between architectures; that also destroys the Debug ARM64 output the locally registered
+  dev install points at, breaking the running app for no benefit. Per-platform-per-configuration
+  directories are already separate, so removing just `bin|obj\<plat>\Release` is enough — confirmed by
+  the per-package PE machine check below coming out correct.
+- **Verified each package by opening it as a zip** rather than trusting the output path: embedded
+  `AppxManifest.xml` gave `PratikMistri.Musio` / `1.4.0.0` / matching `arm64`|`x64`, the PE header of
+  the packaged `Musio.App.exe` gave `ARM64`|`x64`, and `AppxSignature.p7x` was absent in both (Store
+  requires unsigned). 586 entries each, 91.9 MB / 96.6 MB.
+- **Expected, non-blocking**: `Path to mspdbcmf.exe could not be found. A symbols package will not be
+  generated.` Symbol upload is optional for submission.
+- **`*.msix` is already in `.gitignore`**, so staging the collected `artifacts/` folder is safe.

@@ -301,7 +301,7 @@
                     <TextBlock FontWeight="SemiBold" Text="Musio" />
                     <TextBlock
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Text="Version 1.3.0" />
+                        Text="Version 1.4.0" />
                     <TextBlock
                         Margin="0,4,0,0"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"

@@ -28,6 +28,18 @@ caused repeated churn before it was settled; treat them as fixed conventions.
   `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. The current suite
   size is in the 320s–330s range and must stay green.
 - **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
+- **ALWAYS check the LIVE Store version before packaging, and bump past it.** The Store rejects a
+  submission whose version equals one already published, and the in-repo manifest normally still
+  holds the version that was last shipped — so packaging straight from a clean checkout produces
+  packages that cannot be submitted. This has now wasted a full build cycle twice (1.3.0, 1.4.0).
+  A bump touches TWO files that must stay in step: `Package.appxmanifest` (`Version="x.y.z.0"` —
+  the 4th part must be 0 for the Store) and `SettingsPage.xaml`'s `Text="Version x.y.z"`.
+- **Verify the produced `.msix` rather than trusting the path**: open it as a zip and read the
+  embedded `AppxManifest.xml` (`Identity` Name/Version/ProcessorArchitecture) and the PE machine
+  type of `Musio.App.exe` — the per-architecture output directories are easy to mix up, and a
+  wrong-arch payload is only caught by the Store days later. `AppxSignature.p7x` must be ABSENT.
+  The `mspdbcmf.exe` warning (no symbols package) is expected on this host and does not block
+  submission.
 - **Deploy/run locally:** `Remove-AppxPackage` the old registration BEFORE `Add-AppxPackage -Register <AppxManifest.xml>`
   (re-registering over deleted clean-build files fails silently). Launch with
   `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (NOT `explorer.exe`, which returns exit 1).
