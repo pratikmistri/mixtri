@@ -1474,6 +1474,8 @@ public sealed partial class TimelineControl : UserControl
                     ds.FillGeometry(segGeom, isSelected ? VideoClipSelectedColor : VideoClipColor);
                     if (isSelected) ds.DrawGeometry(segGeom, VideoClipSelectedBorder, 2f);
                 }
+
+                DrawSegmentSpeedBadge(ds, video, x1, clipY, segW, clipH);
             }
             else if (segment is TextSlideSegment slide)
             {
@@ -1542,6 +1544,38 @@ public sealed partial class TimelineControl : UserControl
         // Snap guide line.
         if (!double.IsNaN(_segmentSnapGuideX))
             ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
+    }
+
+    /// <summary>
+    /// Draws the "1.5x" pill on a segment whose playback speed is not 1×. The legacy
+    /// clip view tints the whole block instead; on the segment view that would hide the
+    /// filmstrip, so a corner badge carries the same information.
+    /// </summary>
+    private void DrawSegmentSpeedBadge(
+        CanvasDrawingSession ds, VideoSegment video, float x1, float clipY, float segW, float clipH)
+    {
+        if (Math.Abs(video.SpeedFactor - 1.0) <= 0.001) return;
+
+        string label = $"{video.SpeedFactor:0.##}x";
+        float badgeH = Math.Min(15f, clipH - 4);
+        float badgeW = 8f + label.Length * 6.5f;
+        if (badgeH < 9f || segW < badgeW + 8f) return;
+
+        var badgeColor = video.SpeedFactor > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
+        ds.FillRoundedRectangle(x1 + 4, clipY + 3, badgeW, badgeH, 3f, 3f, badgeColor);
+        ds.DrawText(
+            label,
+            new Rect(x1 + 4, clipY + 3, badgeW, badgeH),
+            SpeedLabelTextColor,
+            new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            {
+                FontSize = 10,
+                FontFamily = "Segoe UI",
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+            });
     }
 
     /// <summary>

@@ -523,7 +523,6 @@ public sealed partial class EditorPage
     private void OnVideoClipSelected(object? sender, int? clipIndex)
     {
         ViewModel.SelectedClipIndex = clipIndex;
-        UpdateSpeedPanelVisibility();
 
         // Hide text slide panel when a video clip is selected
         if (clipIndex is not null)
@@ -532,30 +531,9 @@ public sealed partial class EditorPage
             HideTextSlidePanel();
         }
 
-        // Sync combo to match selected clip's current speed
-        if (clipIndex is { } idx && idx >= 0 && idx < ViewModel.Model.Clips.Count)
-        {
-            var clip = ViewModel.Model.Clips[idx];
-            _suppressSpeedApply = true;
-            for (int i = 0; i < SpeedComboBox.Items.Count; i++)
-            {
-                if (SpeedComboBox.Items[i] is ComboBoxItem item &&
-                    double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double s) &&
-                    Math.Abs(s - clip.SpeedFactor) < 0.01)
-                {
-                    SpeedComboBox.SelectedIndex = i;
-                    break;
-                }
-            }
-            _suppressSpeedApply = false;
-        }
-        else
-        {
-            // Reset to 1x when deselected
-            _suppressSpeedApply = true;
-            SpeedComboBox.SelectedIndex = 2;
-            _suppressSpeedApply = false;
-        }
+        // Shows/hides the panel and syncs the combo to whichever selection is live
+        // (legacy clip or primary-track segment).
+        UpdateSpeedPanelVisibility();
     }
 
     private void OnSegmentSelected(object? sender, string? segmentId)
@@ -585,6 +563,10 @@ public sealed partial class EditorPage
                 SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
             }
         }
+
+        // Speed is a per-video-segment property, so the toolbar control follows the
+        // primary-track selection (hidden for text slides and for no selection).
+        UpdateSpeedPanelVisibility();
     }
 
     private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e) =>

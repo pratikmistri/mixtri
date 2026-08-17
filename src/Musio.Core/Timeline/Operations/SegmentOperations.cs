@@ -932,3 +932,91 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
         return true;
     }
 }
+
+/// <summary>
+/// Changes the playback speed of a <see cref="VideoSegment"/>. The source in/out points
+/// are deliberately left alone — the SAME footage plays, just faster or slower — so the
+/// output <see cref="TimelineSegment.Duration"/> is re-derived as
+/// <c>SourceDuration ÷ speed</c> (the invariant every other segment path already assumes,
+/// e.g. <see cref="TrimSegmentEdgeOperation"/>'s <c>SourceDuration = Duration × SpeedFactor</c>).
+/// Following base-track segments re-flow magnetically via
+/// <see cref="TimelineModel.RecalculateSegmentPositions"/>.
+/// </summary>
+/// <remarks>
+/// This is the segment-timeline counterpart of the legacy clip-based
+/// <see cref="ApplyClipSpeedOperation"/>, which only ever operated on
+/// <see cref="TimelineModel.Clips"/> — a list the segment-based editor never populates,
+/// so speed was unreachable in the UI until this existed.
+/// Linked source-time data (audio, clicks, cursor, zoom) needs no rewriting here: it is
+/// all resolved through the owning segment's speed factor at render/export time.
+/// </remarks>
+public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
+{
+    /// <summary>Slowest supported playback (10× slow motion).</summary>
+    public const double MinSpeed = 0.1;
+
+    /// <summary>Fastest supported playback.</summary>
+    public const double MaxSpeed = 10.0;
+
+    /// <summary>Speeds within this distance of each other are treated as identical.</summary>
+    private const double SpeedEpsilon = 0.001;
+
+    private readonly string _segmentId;
+    private readonly double _requestedSpeed;
+
+    private int _index = -1;
+    private TimelineSegment? _previous;
+
+    public override string Description => "Change Speed";
+
+    /// <param name="segmentId">Id of the video segment to re-time.</param>
+    /// <param name="speed">Playback speed; 1.0 = normal, 2.0 = 2× fast, 0.5 = half speed.</param>
+    public ChangeSegmentSpeedOperation(string segmentId, double speed)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _requestedSpeed = speed;
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+
+        double newSpeed = ClampSpeed(_requestedSpeed);
+        double oldSpeed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        if (Math.Abs(newSpeed - oldSpeed) < SpeedEpsilon) return NothingToDo();
+
+        // SourceDuration is the authoritative amount of footage the segment plays. Older
+        // projects (and any segment built without it) can carry zero, in which case the
+        // footage is whatever the current duration covers at the current speed.
+        var sourceDuration = video.SourceDuration > TimeSpan.Zero
+            ? video.SourceDuration
+            : TimeSpan.FromTicks((long)(video.Duration.Ticks * oldSpeed));
+
+        var newDuration = TimeSpan.FromTicks((long)(sourceDuration.Ticks / newSpeed));
+        if (newDuration < TrimSegmentEdgeOperation.MinDuration)
+            newDuration = TrimSegmentEdgeOperation.MinDuration;
+
+        _previous = video;
+        model.Segments[_index] = video with
+        {
+            SpeedFactor = newSpeed,
+            Duration = newDuration,
+            SourceDuration = sourceDuration,
+        };
+
+        return true;
+    }
+
+    private static double ClampSpeed(double speed) =>
+        double.IsNaN(speed) ? 1.0 : Math.Clamp(speed, MinSpeed, MaxSpeed);
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (_previous is null || _index < 0) return false;
+        if (_index >= model.Segments.Count) return false;
+        model.Segments[_index] = _previous;
+        return true;
+    }
+}
