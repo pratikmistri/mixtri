@@ -1,7 +1,7 @@
-# Musio — Screen Studio Clone for Windows
+# Musio — Cinematic Screen Recorder for Windows
 
 ## Problem Statement
-Windows Snipping Tool drops frames during screen recording, and OBS Studio consumes excessive memory. Musio aims to be a lightweight, native Windows screen recording tool that replicates Screen Studio's cinematic recording experience: smooth cursor effects, auto-zoom, customizable backgrounds, timeline editing, and professional export — all with zero frame drops.
+Windows Snipping Tool drops frames during screen recording, and OBS Studio consumes excessive memory. Musio aims to be a lightweight, native Windows screen recording tool that delivers a cinematic recording experience: smooth cursor effects, auto-zoom, customizable backgrounds, timeline editing, and professional export — all with zero frame drops.
 
 ## Tech Stack
 - **Framework**: WinUI 3 (Windows App SDK) — native C#, Fluent Design, minimal memory
@@ -68,7 +68,7 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
 ### F4: Cursor Effects (Core Differentiator)
 - ~~**Cursor hiding**: System cursor hidden during capture; custom cursor rendered in post-processing~~
 - ~~**Path smoothing algorithms** (user-selectable):~~
-  - ~~Spring Physics (damped spring model — Screen Studio's primary approach)~~
+  - ~~Spring Physics (damped spring model — the default and primary approach)~~
   - ~~One Euro Filter (low-pass filter, good for jitter removal)~~
   - ~~Catmull-Rom Spline interpolation~~
   - ~~Configurable smoothing strength: None / Subtle / Medium / Smooth / Ultra Smooth~~
@@ -78,7 +78,7 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
   - ~~System cursor replica~~
   - ~~Custom uploaded cursor image~~
   - ~~Adjustable cursor size (0.5x – 3x)~~
-- ~~**Click animation**: On mouse-down, cursor scales down to ~80% over 100ms then springs back to 100% on mouse-up (easing: cubic-bezier) — mimics Screen Studio's "press" effect~~
+- ~~**Click animation**: On mouse-down, cursor scales down to ~80% over 100ms then springs back to 100% on mouse-up (easing: cubic-bezier) — a tactile "press" effect~~
 - ~~**Click highlight**: Optional ripple/pulse circle emanating from click point~~
 - ~~**Motion blur**: Optional per-frame motion blur based on cursor velocity~~
 - ~~**Auto-hide**: Cursor fades out after N seconds of inactivity, fades back on movement~~
@@ -320,7 +320,7 @@ Musio/
 
 2. **Post-processing model**: All effects (cursor, zoom, background) applied during export, not during capture. This keeps capture lightweight (no frame drops) and allows unlimited adjustments after recording.
 
-3. **Spring physics for smoothing**: Primary smoothing algorithm is a damped spring model (`F = -kx - bv`), matching Screen Studio's approach. Parameters: spring constant `k`, damping `b`, mass `m`. Adjustable via "smoothing strength" slider.
+3. **Spring physics for smoothing**: Primary smoothing algorithm is a damped spring model (`F = -kx - bv`). Parameters: spring constant `k`, damping `b`, mass `m`. Adjustable via "smoothing strength" slider.
 
 4. **Hardware encoding**: Real-time capture uses HW encoder for temp file. Export also uses HW encoder with higher quality settings. Auto-detect: NVENC (NVIDIA) → QSV (Intel) → AMF (AMD) → CPU fallback.
 
