@@ -1005,6 +1005,14 @@ public sealed partial class EditorPage
                     ZoomLevelCombo.Text = kf.ZoomLevel.ToString("0.##", CultureInfo.InvariantCulture) + "x";
                 }
 
+                if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
+                {
+                    var drift = kf.EffectiveDrift;
+                    ZoomDriftToggle.IsChecked = drift.Enabled;
+                    ZoomDriftSlider.Value = drift.Strength * 50.0;
+                    ZoomDriftSlider.IsEnabled = drift.Enabled;
+                }
+
                 _suppressZoomPropertyUpdate = false;
             }
         }
@@ -1141,6 +1149,71 @@ public sealed partial class EditorPage
     {
         if (Timeline?.SelectedZoomKeyframeId is not { } id) return null;
         return ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == id)?.ZoomLevel;
+    }
+
+    // --- Per-segment camera drift ---
+
+    /// <summary>
+    /// True while the pointer is dragging the drift slider's thumb. A drag can raise dozens of
+    /// <see cref="Slider.ValueChanged"/> events, so committing an
+    /// <see cref="UpdateZoomSegmentPropertiesOperation"/> from every one of them would flood the
+    /// undo stack with one entry per pixel of travel. Instead, the drag defers committing until
+    /// <see cref="ZoomDriftSlider_PointerCaptureLost"/> (mirroring how <c>TextEditHandle</c> and
+    /// <c>TextEditRegion</c> drags in EditorPage.TextEditing.cs commit on capture loss rather than
+    /// on every intermediate pointer sample); keyboard/programmatic value changes made while NOT
+    /// dragging still commit immediately from <see cref="ZoomDriftSlider_ValueChanged"/>.
+    /// <see cref="ZoomDriftSlider_PointerPressed"/> and <see cref="ZoomDriftSlider_PointerCaptureLost"/>
+    /// are wired in <c>EditorPage.PropertyPanels.cs</c>'s <c>WirePropertyPanels()</c> via
+    /// <c>AddHandler(..., handledEventsToo: true)</c> rather than declaratively in XAML — the
+    /// Slider's own track/thumb pointer handling marks those routed events Handled, so a plain
+    /// <c>PointerPressed="..."</c> attribute on the Slider itself would commonly never fire.
+    /// </summary>
+    private bool _zoomDriftDragging;
+
+    private void ZoomDriftToggle_Toggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomDriftSlider is not null)
+            ZoomDriftSlider.IsEnabled = ZoomDriftToggle?.IsChecked == true;
+        CommitZoomDriftSettings();
+    }
+
+    private void ZoomDriftSlider_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _zoomDriftDragging = true;
+    }
+
+    private void ZoomDriftSlider_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_zoomDriftDragging) return;
+        _zoomDriftDragging = false;
+        CommitZoomDriftSettings();
+    }
+
+    private void ZoomDriftSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (_zoomDriftDragging) return; // deferred to PointerCaptureLost — see field doc above
+        CommitZoomDriftSettings();
+    }
+
+    private void CommitZoomDriftSettings()
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomDriftToggle is null || ZoomDriftSlider is null) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == selectedId);
+        if (kf is null) return;
+
+        var newDrift = kf.EffectiveDrift with
+        {
+            Enabled = ZoomDriftToggle.IsChecked == true,
+            Strength = (float)(ZoomDriftSlider.Value / 50.0),
+        };
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, drift: newDrift, driftProvided: true);
+        ViewModel.UndoRedoManager.Execute(operation);
     }
 
     // --- Audio waveform loading ---

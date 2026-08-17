@@ -169,4 +169,7 @@ public record CameraDriftSettings
     /// rather than as a camera settling.
     /// </summary>
     public float MaxSlackFraction { get; init; } = 0.7f;
+
+    /// <summary>The tuned defaults used by any zoom segment that carries no explicit settings.</summary>
+    public static readonly CameraDriftSettings Default = new();
 }

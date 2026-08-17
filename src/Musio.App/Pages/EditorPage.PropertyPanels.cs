@@ -53,8 +53,6 @@ public sealed partial class EditorPage
     private ToggleSwitch BorderToggle => PropertiesPanel.Scene.BorderToggle;
     private ToggleSwitch MotionBlurToggle => PropertiesPanel.Scene.MotionBlurToggle;
     private Slider MotionBlurSlider => PropertiesPanel.Scene.MotionBlurSlider;
-    private ToggleSwitch CameraDriftToggle => PropertiesPanel.Scene.CameraDriftToggle;
-    private Slider CameraDriftSlider => PropertiesPanel.Scene.CameraDriftSlider;
 
     // ─── Text slide panel ───────────────────────────────────────────────
 
@@ -206,8 +204,18 @@ public sealed partial class EditorPage
         BorderToggle.Toggled += StyleToggle_Toggled;
         MotionBlurToggle.Toggled += MotionToggle_Toggled;
         MotionBlurSlider.ValueChanged += MotionSlider_ValueChanged;
-        CameraDriftToggle.Toggled += MotionToggle_Toggled;
-        CameraDriftSlider.ValueChanged += MotionSlider_ValueChanged;
+
+        // ZoomDriftSlider's drag-start/end are picked up here rather than via XAML
+        // PointerPressed/PointerCaptureLost attributes: Slider/RangeBase marks those routed
+        // events Handled once its own track/thumb pointer handling claims them, so a plain
+        // declarative hook on the Slider itself commonly never fires. AddHandler with
+        // handledEventsToo:true still gets them, which is what
+        // ZoomDriftSlider_ValueChanged relies on to tell a drag from a single committed
+        // change (see the field doc on _zoomDriftDragging in EditorPage.Timeline.cs).
+        ZoomDriftSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerPressedEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomDriftSlider_PointerPressed), handledEventsToo: true);
+        ZoomDriftSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerCaptureLostEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomDriftSlider_PointerCaptureLost), handledEventsToo: true);
 
         // Text slide
         SlideTextBox.TextChanged += SlideTextBox_TextChanged;

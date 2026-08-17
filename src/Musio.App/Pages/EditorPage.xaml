@@ -465,6 +465,23 @@
                         ToolTipService.ToolTip="Remove selected zoom segment">
                         <FontIcon FontSize="14" Glyph="&#xE74D;" />
                     </Button>
+                    <ToggleButton
+                        x:Name="ZoomDriftToggle"
+                        Height="40"
+                        Padding="8,6"
+                        Checked="ZoomDriftToggle_Toggled"
+                        Unchecked="ZoomDriftToggle_Toggled"
+                        ToolTipService.ToolTip="Keep this zoom segment gently moving (a slow push and pan) for the whole hold">
+                        <FontIcon FontSize="14" Glyph="&#xE9CE;" />
+                    </ToggleButton>
+                    <Slider
+                        x:Name="ZoomDriftSlider"
+                        Width="100"
+                        Height="40"
+                        Minimum="0" Maximum="200"
+                        StepFrequency="5"
+                        ValueChanged="ZoomDriftSlider_ValueChanged"
+                        ToolTipService.ToolTip="Drift strength for this zoom segment" />
                 </StackPanel>
 
                 <SplitButton
