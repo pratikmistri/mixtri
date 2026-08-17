@@ -2317,3 +2317,13 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   - Removing the panel orphaned `EditorViewModel.SelectedSpeed`/`ApplySpeedCommand` (their only caller) — deleted, since `ApplyClipSpeedOperation` targets the dead `Clips` list and was already unreachable. `docs/ACCESSIBILITY_ISSUES.md` referenced `SpeedComboBox` by name and was updated with it.
   - **Deleting named XAML elements needs `obj/` (and the platform `bin/`) cleared** before rebuilding, per the playbook — stale `.g.cs` otherwise keeps the removed `x:Name` fields.
 - **Verified**: clean ARM64 `Musio.App` rebuild -> 0 errors; package re-registered (`Remove-AppxPackage` first, since the clean build deleted the files the old registration pointed at) and launched; suite still **1149 passed, 0 failed, 3 skipped**.
+
+## Segment context menu — flat layout + split/delete
+
+- **Feature/area**: `TimelineControl.ShowVideoSegmentContextMenu`, `EditorPage.DeletePrimarySegment`.
+- **What worked**:
+  - **`MenuFlyout` has no header item**, so a section label has to be a `MenuFlyoutItem` with `IsEnabled = false` (the conventional stand-in). It also keeps the section icon off the options themselves.
+  - Flat `RadioMenuFlyoutItem`s sharing a `GroupName` replaced the `MenuFlyoutSubItem` + `ToggleMenuFlyoutItem` cascade: picking a speed is the whole point of the menu, so a fly-out level to reach it is one hover-and-aim too many, and radio items express "exactly one of these" better than checkmarks.
+  - **"Split at Playhead" is disabled unless the playhead is strictly inside the right-clicked segment.** `SplitAtPlayheadCommand` cuts whatever the playhead is over, so an always-enabled item would silently edit a different block than the menu was opened on.
+  - Delete had to reuse the accelerator's existing path (`RemoveSegmentOperation` + clear `_selectedPrimarySegmentId` + `Timeline.SelectSegment(null)` + `HideTextSlidePanel`), so it was extracted to `DeletePrimarySegment` and called from both. Note `EditorViewModel.DeleteSelectedCommand` is NOT that path — it early-returns on `Clips.Count == 0` and so does nothing on a segment timeline.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors, app relaunched.

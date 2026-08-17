@@ -569,6 +569,28 @@ public sealed partial class EditorPage
     private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
         EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
 
+    private void OnSegmentSplitRequested(object? sender, EventArgs e) =>
+        ViewModel.SplitAtPlayheadCommand.Execute(null);
+
+    private void OnSegmentDeleteRequested(object? sender, string segmentId)
+    {
+        if (!ViewModel.Model.Segments.Any(s => s.Id == segmentId)) return;
+        DeletePrimarySegment(segmentId);
+    }
+
+    /// <summary>
+    /// Ripple-deletes a primary-track segment and drops every bit of page state that
+    /// referenced it. Shared by the Delete accelerator and the segment context menu so the
+    /// two gestures cannot drift into leaving different leftovers behind.
+    /// </summary>
+    private void DeletePrimarySegment(string segmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new RemoveSegmentOperation(segmentId));
+        _selectedPrimarySegmentId = null;
+        Timeline.SelectSegment(null);
+        HideTextSlidePanel();
+    }
+
     /// <summary>
     /// Moves a segment to a new track and/or a new absolute start, in response to the
     /// timeline's vertical/horizontal segment drag. The control raises the intent; the

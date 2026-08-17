@@ -88,6 +88,12 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public event EventHandler<(string Id, double Speed)>? SegmentSpeedChangeRequested;
 
+    /// <summary>Raised when "Split at Playhead" is chosen from a segment's right-click menu.</summary>
+    public event EventHandler? SegmentSplitRequested;
+
+    /// <summary>Raised when "Delete Segment" is chosen from a segment's right-click menu.</summary>
+    public event EventHandler<string>? SegmentDeleteRequested;
+
     /// <summary>
     /// Raised when a text slide's inner animation window is edited from the timeline so the
     /// page can keep preview, properties and undo in one authoritative transaction.
@@ -5190,35 +5196,62 @@ public sealed partial class TimelineControl : UserControl
     private static readonly double[] SpeedPresets = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
 
     /// <summary>
-    /// Builds the video segment's right-click menu: a Speed submenu with the current
-    /// factor checked. The edit itself is the host's (the control raises
-    /// <see cref="SegmentSpeedChangeRequested"/> rather than touching the model), matching
-    /// how <see cref="ZoomTrack_RightTapped"/> requests a zoom removal.
+    /// Builds the video segment's right-click menu: a "Speed" label with the presets listed
+    /// flat beneath it, then the segment actions. Deliberately NOT a cascading submenu —
+    /// picking a speed is the point of the menu, and a fly-out level to reach it is one
+    /// hover-and-aim more than the edit is worth. The edits themselves are the host's (the
+    /// control raises events rather than touching the model), matching how
+    /// <see cref="ZoomTrack_RightTapped"/> requests a zoom removal.
     /// </summary>
     private void ShowVideoSegmentContextMenu(CanvasControl canvas, Point pos, VideoSegment video)
     {
-        double current = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
+        var menu = new MenuFlyout();
 
-        var speedMenu = new MenuFlyoutSubItem
+        // MenuFlyout has no header item, so the label is a disabled entry — the
+        // conventional stand-in, and it also keeps the stopwatch icon off the presets.
+        menu.Items.Add(new MenuFlyoutItem
         {
             Text = "Speed",
             Icon = new FontIcon { Glyph = "\uE916" },
-        };
+            IsEnabled = false,
+        });
 
+        double current = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
         foreach (double preset in SpeedPresets)
         {
             double speed = preset;
-            var item = new ToggleMenuFlyoutItem
+            var item = new RadioMenuFlyoutItem
             {
                 Text = Math.Abs(speed - 1.0) < 0.001 ? "Normal (1x)" : $"{speed:0.##}x",
+                GroupName = "SegmentSpeed",
                 IsChecked = Math.Abs(current - speed) < 0.01,
             };
             item.Click += (_, _) => SegmentSpeedChangeRequested?.Invoke(this, (video.Id, speed));
-            speedMenu.Items.Add(item);
+            menu.Items.Add(item);
         }
 
-        var menu = new MenuFlyout();
-        menu.Items.Add(speedMenu);
+        menu.Items.Add(new MenuFlyoutSeparator());
+
+        var splitItem = new MenuFlyoutItem
+        {
+            Text = "Split at Playhead",
+            Icon = new FontIcon { Glyph = "\uE8C6" },
+            // Splitting always cuts whatever the playhead is over, so offering it while the
+            // playhead sits outside the right-clicked block would silently edit a DIFFERENT
+            // segment than the one whose menu is open.
+            IsEnabled = PlayheadPosition > video.Start && PlayheadPosition < video.End,
+        };
+        splitItem.Click += (_, _) => SegmentSplitRequested?.Invoke(this, EventArgs.Empty);
+        menu.Items.Add(splitItem);
+
+        var deleteItem = new MenuFlyoutItem
+        {
+            Text = "Delete Segment",
+            Icon = new FontIcon { Glyph = "\uE74D" },
+        };
+        deleteItem.Click += (_, _) => SegmentDeleteRequested?.Invoke(this, video.Id);
+        menu.Items.Add(deleteItem);
+
         menu.ShowAt(canvas, pos);
     }
 

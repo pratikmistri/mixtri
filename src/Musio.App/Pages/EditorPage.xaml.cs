@@ -366,6 +366,8 @@ public sealed partial class EditorPage : Page
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
         Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
+        Timeline.SegmentSplitRequested += OnSegmentSplitRequested;
+        Timeline.SegmentDeleteRequested += OnSegmentDeleteRequested;
         Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;
         Timeline.TextSlideWindowChanged += OnTextSlideWindowChanged;
 
