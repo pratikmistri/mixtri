@@ -2327,3 +2327,10 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   - **"Split at Playhead" is disabled unless the playhead is strictly inside the right-clicked segment.** `SplitAtPlayheadCommand` cuts whatever the playhead is over, so an always-enabled item would silently edit a different block than the menu was opened on.
   - Delete had to reuse the accelerator's existing path (`RemoveSegmentOperation` + clear `_selectedPrimarySegmentId` + `Timeline.SelectSegment(null)` + `HideTextSlidePanel`), so it was extracted to `DeletePrimarySegment` and called from both. Note `EditorViewModel.DeleteSelectedCommand` is NOT that path — it early-returns on `Clips.Count == 0` and so does nothing on a segment timeline.
 - **Verified**: `Musio.App` ARM64 Debug -> 0 errors, app relaunched.
+
+## Segment context menu — one gutter, not two
+
+- **Feature/area**: `TimelineControl.ShowVideoSegmentContextMenu`.
+- **Symptom**: the menu had a wide, ragged left margin — a radio bullet in one column, item icons in a second, and text pushed past both.
+- **What worked**: **Do not mix `RadioMenuFlyoutItem`/`ToggleMenuFlyoutItem` with icon-bearing `MenuFlyoutItem`s in one WinUI `MenuFlyout`.** The checkable types reserve a check column IN ADDITION to the icon column the other entries need, so the presenter lays out two empty gutters. Using plain `MenuFlyoutItem`s throughout and marking the active option with a check GLYPH (`\uE73E`) in its Icon slot collapses it to a single column with uniform text alignment.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors, app relaunched.

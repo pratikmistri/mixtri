@@ -5203,12 +5203,19 @@ public sealed partial class TimelineControl : UserControl
     /// control raises events rather than touching the model), matching how
     /// <see cref="ZoomTrack_RightTapped"/> requests a zoom removal.
     /// </summary>
+    /// <remarks>
+    /// Every entry is a plain <see cref="MenuFlyoutItem"/>, and the active speed is marked
+    /// with a check GLYPH in the icon slot rather than by a <c>RadioMenuFlyoutItem</c> /
+    /// <c>ToggleMenuFlyoutItem</c>. Those reserve their own check column IN ADDITION to the
+    /// icon column that the other entries need, so the menu ends up with two empty gutters
+    /// and text pushed twice as far right. One column, one indent.
+    /// </remarks>
     private void ShowVideoSegmentContextMenu(CanvasControl canvas, Point pos, VideoSegment video)
     {
         var menu = new MenuFlyout();
 
         // MenuFlyout has no header item, so the label is a disabled entry — the
-        // conventional stand-in, and it also keeps the stopwatch icon off the presets.
+        // conventional stand-in.
         menu.Items.Add(new MenuFlyoutItem
         {
             Text = "Speed",
@@ -5220,12 +5227,12 @@ public sealed partial class TimelineControl : UserControl
         foreach (double preset in SpeedPresets)
         {
             double speed = preset;
-            var item = new RadioMenuFlyoutItem
+            var item = new MenuFlyoutItem
             {
                 Text = Math.Abs(speed - 1.0) < 0.001 ? "Normal (1x)" : $"{speed:0.##}x",
-                GroupName = "SegmentSpeed",
-                IsChecked = Math.Abs(current - speed) < 0.01,
             };
+            if (Math.Abs(current - speed) < 0.01)
+                item.Icon = new FontIcon { Glyph = "\uE73E" };
             item.Click += (_, _) => SegmentSpeedChangeRequested?.Invoke(this, (video.Id, speed));
             menu.Items.Add(item);
         }
