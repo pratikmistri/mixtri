@@ -2490,3 +2490,11 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: generated slice IDs are now allocated once and reused on redo, so later operations and selection state keep resolving the same segments. The planner summary now documents the recent-click/nearest-pointer fallback for controls without native caret metadata.
 - **What didn't work**: allocating IDs inside each `ExecuteCore` run made redo identity unstable; the original XML summary described the pre-fallback behavior.
 - **Verified**: focused tests **12 passed**; full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` ARM64 Debug build completed with 0 errors.
+
+## Branch setup: per-zoom-segment camera drift
+
+- **Feature/area**: branch scaffolding for moving camera drift from scene level to per zoom segment.
+- **Approaches tried**: surveyed the current ownership before branching — `CameraDriftSettings` lives on `CompositionConfig.CameraDrift` (scene-level), is edited by `ScenePropertiesView`'s `CameraDriftToggle`/`CameraDriftSlider` via `EditorPage.Style.cs`, and is consumed in `FrameCompositor.ApplyCameraDrift` using `ZoomState.SegmentProgress`/`HasSegment`. Per-segment headings already exist (`CameraDrift.HeadingFromSeed` in `ZoomCameraPath`), so the drift math is already segment-relative — only ownership of the settings is scene-wide.
+- **What worked**: creating `feature/per-segment-camera-drift` off `master` with no implementation yet; agreed direction is to MOVE drift onto zoom segments (not an override-with-scene-fallback), including zoom-segment property-pane UI.
+- **What didn't work**: n/a — no implementation attempted in this task.
+- **Notes for the implementation pass**: touch points are the `CameraDriftSettings` owner (`ZoomKeyframe` rather than `CompositionConfig`), `.musio` manifest back-compat for projects that stored scene-level drift, `FrameCompositor`/`SegmentFrameComposer`/`VideoEncoder` resolution of the active segment's settings, undo via `UndoRedoManager.Execute` with `IsManual` promotion per the zoom playbook, and the scene-pane controls being retired.
