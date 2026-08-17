@@ -103,6 +103,13 @@ public sealed class WsolaTimeStretcher
     /// <summary>Scratch for the cross-faded head of a grain; reused to keep the loop allocation-free.</summary>
     private readonly float[] _blend;
 
+    /// <summary>
+    /// Samples of an incomplete frame left over by the last <see cref="Process"/> call, held
+    /// until the next one completes it.
+    /// </summary>
+    private readonly float[] _partialFrame;
+    private int _partialFrameLength;
+
     /// <param name="sampleRate">Sample rate of the signal, in Hz.</param>
     /// <param name="channels">Interleaved channel count (1 = mono, 2 = stereo).</param>
     /// <param name="speed">
@@ -139,6 +146,7 @@ public sealed class WsolaTimeStretcher
         _template = new float[_overlap * channels];
         _templateMono = new float[_overlap];
         _blend = new float[_overlap * channels];
+        _partialFrame = new float[channels];
         _buffer = new float[Math.Max(_required * 2, 1) * channels];
         _mono = new float[Math.Max(_required * 2, 1)];
     }
@@ -187,8 +195,8 @@ public sealed class WsolaTimeStretcher
 
     /// <summary>
     /// Consumes a block of interleaved input, pushing whatever output it completes to
-    /// <paramref name="writer"/>. Blocks may be any length, including partial frames'
-    /// worth of samples across calls.
+    /// <paramref name="writer"/>. Blocks may be any length: a trailing partial frame is
+    /// carried over and completed by the next call.
     /// </summary>
     public void Process(ReadOnlySpan<float> input, WsolaOutputWriter writer)
     {
@@ -264,6 +272,7 @@ public sealed class WsolaTimeStretcher
         _frames = 0;
         _hopRemainder = 0;
         _skipDebt = 0;
+        _partialFrameLength = 0;
         _primed = false;
         Array.Clear(_template);
         Array.Clear(_templateMono);
@@ -388,10 +397,27 @@ public sealed class WsolaTimeStretcher
     }
 
     /// <summary>Appends interleaved input, growing the buffer and its mono view as needed.</summary>
+    /// <remarks>
+    /// A caller is free to chunk its reads anywhere, including mid-frame, so any samples left
+    /// over after the last whole frame are held in <see cref="_partialFrame"/> and prepended
+    /// to the next block. Dropping them instead would not merely lose a sample: every later
+    /// frame would be interleaved one channel out of phase, swapping left and right for the
+    /// rest of the signal.
+    /// </remarks>
     private void Append(ReadOnlySpan<float> input)
     {
-        int newFrames = input.Length / _channels;
-        if (newFrames <= 0) return;
+        int carried = _partialFrameLength;
+        int total = carried + input.Length;
+        int newFrames = total / _channels;
+        int leftover = total - (newFrames * _channels);
+
+        if (newFrames <= 0)
+        {
+            // Not even one whole frame between the carry and this block: keep accumulating.
+            input.CopyTo(_partialFrame.AsSpan(carried));
+            _partialFrameLength = total;
+            return;
+        }
 
         int needed = (_frames + newFrames) * _channels;
         if (_buffer.Length < needed)
@@ -401,7 +427,19 @@ public sealed class WsolaTimeStretcher
             Array.Resize(ref _mono, capacity / _channels);
         }
 
-        input[..(newFrames * _channels)].CopyTo(_buffer.AsSpan(_frames * _channels));
+        int written = _frames * _channels;
+        if (carried > 0)
+        {
+            _partialFrame.AsSpan(0, carried).CopyTo(_buffer.AsSpan(written));
+            written += carried;
+        }
+
+        int consumed = (newFrames * _channels) - carried;
+        input[..consumed].CopyTo(_buffer.AsSpan(written));
+
+        if (leftover > 0)
+            input[consumed..].CopyTo(_partialFrame.AsSpan(0));
+        _partialFrameLength = leftover;
 
         for (int frame = 0; frame < newFrames; frame++)
         {

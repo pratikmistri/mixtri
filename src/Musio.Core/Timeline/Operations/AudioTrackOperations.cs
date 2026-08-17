@@ -75,7 +75,18 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
 {
     private readonly string _segmentId;
     private readonly IReadOnlyList<DetachedAudioSource> _sources;
-    private readonly List<string> _addedTrackIds = [];
+
+    /// <summary>
+    /// The blocks this created, built once and re-added verbatim on redo.
+    /// </summary>
+    /// <remarks>
+    /// Ids must survive an undo/redo round trip: anything else holding one (the timeline's
+    /// selection, a later move or trim operation sitting above this on the redo stack) would
+    /// be pointing at a block that no longer exists after a redo. Reusing the instances is
+    /// how <see cref="AddAudioTrackOperation"/> already achieves it, and why
+    /// <see cref="SplitAudioTrackOperation"/> pins its half's id up front.
+    /// </remarks>
+    private readonly List<AudioTrack> _created = [];
 
     private int _index = -1;
     private SegmentAudioMode _previousMode;
@@ -89,7 +100,7 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
     }
 
     /// <summary>Ids of the blocks this created, so the caller can select one.</summary>
-    public IReadOnlyList<string> CreatedTrackIds => _addedTrackIds;
+    public IReadOnlyList<string> CreatedTrackIds => [.. _created.Select(t => t.Id)];
 
     /// <summary>
     /// Where a segment's recorded audio sits, in the coordinates an
@@ -133,34 +144,39 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
         if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
         if (_sources.Count == 0) return NothingToDo();
 
-        _addedTrackIds.Clear();
-
-        foreach (var source in _sources)
+        // A redo re-adds the very blocks the undo removed, ids and all.
+        if (_created.Count == 0)
         {
-            if (string.IsNullOrWhiteSpace(source.FilePath)) continue;
-            if (ResolveWindow(video, source.OffsetSeconds) is not { } window) continue;
-
-            var track = new AudioTrack
+            foreach (var source in _sources)
             {
-                FilePath = source.FilePath,
-                Name = string.IsNullOrWhiteSpace(source.Name) ? "Recorded audio" : source.Name,
+                if (string.IsNullOrWhiteSpace(source.FilePath)) continue;
+                if (ResolveWindow(video, source.OffsetSeconds) is not { } window) continue;
 
-                // Voice-over rather than music: this is the recording's own speech/system
-                // audio, so it must sit at full level, not ducked under itself.
-                Kind = AudioTrackKind.VoiceOver,
-                StartTime = window.Start,
-                TrimStart = window.TrimStart,
-                Duration = window.Duration,
-                SourceDuration = source.SourceDuration,
-                Volume = 1.0,
-                DetachedFromSegmentId = _segmentId,
-            };
+                _created.Add(new AudioTrack
+                {
+                    FilePath = source.FilePath,
+                    Name = string.IsNullOrWhiteSpace(source.Name) ? "Recorded audio" : source.Name,
 
-            model.AudioTracks.Add(track);
-            _addedTrackIds.Add(track.Id);
+                    // Voice-over rather than music: this is the recording's own speech/system
+                    // audio, so it must sit at full level, not ducked under itself.
+                    Kind = AudioTrackKind.VoiceOver,
+                    StartTime = window.Start,
+                    TrimStart = window.TrimStart,
+                    Duration = window.Duration,
+                    SourceDuration = source.SourceDuration,
+                    Volume = 1.0,
+                    DetachedFromSegmentId = _segmentId,
+                });
+            }
         }
 
-        if (_addedTrackIds.Count == 0) return NothingToDo();
+        if (_created.Count == 0) return NothingToDo();
+
+        foreach (var track in _created)
+        {
+            if (!model.AudioTracks.Any(t => t.Id == track.Id))
+                model.AudioTracks.Add(track);
+        }
 
         AudioTrackEditing.Sort(model.AudioTracks);
 
@@ -173,8 +189,8 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
 
     protected override bool UndoCore(TimelineModel model)
     {
-        foreach (string id in _addedTrackIds)
-            model.AudioTracks.RemoveAll(t => t.Id == id);
+        foreach (var track in _created)
+            model.AudioTracks.RemoveAll(t => t.Id == track.Id);
 
         if (_index >= 0 && _index < model.Segments.Count
             && model.Segments[_index] is VideoSegment video)

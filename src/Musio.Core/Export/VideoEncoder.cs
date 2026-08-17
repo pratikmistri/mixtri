@@ -131,6 +131,12 @@ public class VideoEncoder : IDisposable
         // Re-time whatever asked to be time-stretched, BEFORE anything reads a duration off
         // a placement: from here on a stretched placement is an ordinary WAV placement, and
         // nothing downstream needs to know it was ever speed-adjusted.
+        //
+        // The pre-pass owns the first slice of the progress bar when it has work to do, and
+        // the frame loop below is offset past it, so the reported percentage only ever rises.
+        double stretchProgressFloor = audioPlacements.Any(p => p.Stretch is not null)
+            ? StretchProgressShare
+            : 0;
         audioPlacements = await ApplySegmentAudioStretchAsync(
             audioPlacements, totalFrames, progress, stopwatch, ct);
 
@@ -198,6 +204,7 @@ public class VideoEncoder : IDisposable
                     targetWidth, targetHeight,
                     needsScaling,
                     progress, stopwatch, ct,
+                    progressFloor: stretchProgressFloor,
                     onError: (ex, frameIdx) =>
                     {
                         lock (frameErrorLock)
@@ -333,6 +340,7 @@ public class VideoEncoder : IDisposable
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
+        double progressFloor = 0,
         Action<Exception, int>? onError = null)
     {
         CanvasRenderTarget? outputSurface = null;
@@ -399,10 +407,14 @@ public class VideoEncoder : IDisposable
                     _frameSemaphore.Release();
             }
 
-            // Report progress
+            // Report progress. The frame loop owns everything above the pre-pass's band (see
+            // StretchProgressShare), so its percentage is offset into what is left — without
+            // that, an export long enough for one frame to be worth less than the band would
+            // step BACKWARDS the moment the first frame lands.
             if (progress is not null)
             {
-                double percent = (double)(frameIndex + 1) / totalFrames * 100.0;
+                double frameFraction = (double)(frameIndex + 1) / totalFrames;
+                double percent = progressFloor + (frameFraction * (100.0 - progressFloor));
                 var elapsed = stopwatch.Elapsed;
                 var perFrame = elapsed / (frameIndex + 1);
                 var remaining = perFrame * (totalFrames - frameIndex - 1);
@@ -715,8 +727,9 @@ public class VideoEncoder : IDisposable
     /// <summary>
     /// Share of the export progress bar the time-stretch pre-pass may advance through, in
     /// <see cref="ExportProgress.PercentComplete"/>'s own 0..100 units. Deliberately small:
-    /// the pass is usually seconds against an encode of minutes, and the frame loop reports
-    /// true percentages straight after, so a larger band would visibly jump backwards.
+    /// the pass is usually seconds against an encode of minutes. The frame loop reports its
+    /// own percentage offset past this band (see <see cref="ProduceSampleAsync"/>'s
+    /// <c>progressFloor</c>), so the bar never steps backwards when the first frame lands.
     /// </summary>
     private const double StretchProgressShare = 2.0;
 

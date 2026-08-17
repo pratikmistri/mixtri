@@ -169,6 +169,31 @@ public sealed class WsolaTimeStretcherTests
     }
 
     [TestMethod]
+    public void ChunksThatSplitAFrame_LoseNoSamples()
+    {
+        // An odd-sized stereo block ends mid-frame. Dropping that half-frame would not merely
+        // lose a sample: every later frame would be one channel out of phase, swapping left
+        // and right for the rest of the signal.
+        var input = Sine(seconds: 1, frequency: 300, channels: 2);
+        var oneShot = WsolaTimeStretcher.Stretch(input, channels: 2, Rate, 2.0);
+
+        var chunked = new List<float>();
+        void Collect(ReadOnlySpan<float> block)
+        {
+            foreach (float sample in block) chunked.Add(sample);
+        }
+
+        var stretcher = new WsolaTimeStretcher(Rate, channels: 2, speed: 2.0);
+        for (int i = 0; i < input.Length; i += 777)   // odd: every block ends mid-frame
+            stretcher.Process(input.AsSpan(i, Math.Min(777, input.Length - i)), Collect);
+        stretcher.Flush(Collect);
+
+        CollectionAssert.AreEqual(
+            oneShot, chunked,
+            "A block boundary inside a frame must be carried, not discarded");
+    }
+
+    [TestMethod]
     public void EmptyInput_ProducesEmptyOutput()
     {
         Assert.AreEqual(0, WsolaTimeStretcher.Stretch([], channels: 1, Rate, 2.0).Length);

@@ -60,6 +60,11 @@ public sealed class SegmentAudioRenderer
     /// so the caller can place the file without re-checking its length.
     /// </param>
     /// <returns>Path to the rendered WAV, or <c>null</c> if it could not be produced.</returns>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was signalled. Deliberately NOT folded into the
+    /// <c>null</c> "could not render" result: a cancelled export must stop, not quietly fall
+    /// back to native-rate audio and carry on muxing.
+    /// </exception>
     public string? Render(
         string sourcePath,
         TimeSpan sourceStart,
@@ -118,7 +123,7 @@ public sealed class SegmentAudioRenderer
                 throw;
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Diagnostics.DiagLog.Write("Audio",
                 $"segment audio stretch failed for '{Path.GetFileName(sourcePath)}' " +

@@ -171,6 +171,22 @@ public sealed class SegmentAudioRendererTests
     }
 
     [TestMethod]
+    public void Cancellation_IsNotTreatedAsASoftFailure()
+    {
+        // Fail-soft turns an unrenderable source into native-rate audio and carries on. A
+        // user cancelling the export must NOT be folded into that: it has to stop the export,
+        // not quietly produce a file with drifting audio.
+        string source = WriteTone("mic_8.wav", seconds: 3);
+        var renderer = new SegmentAudioRenderer(TempDirectory);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.ThrowsException<OperationCanceledException>(() => renderer.Render(
+            source, TimeSpan.Zero, TimeSpan.FromSeconds(3), speed: 2.0, TimeSpan.FromSeconds(1.5),
+            cts.Token));
+    }
+
+    [TestMethod]
     public void SourceShorterThanTheRequest_StillFillsTheSegment()
     {
         // A recording that stopped early: the placement's duration is already fixed, so the

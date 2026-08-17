@@ -337,6 +337,40 @@ public sealed class SegmentAudioModeTests
     }
 
     [TestMethod]
+    public void Detach_RedoKeepsTheSameBlockIds()
+    {
+        // The redo stack re-executes the operation, and anything holding a block's id (the
+        // timeline selection, or a later move/trim replayed above this one) would be left
+        // pointing at a block that no longer exists if redo minted new ones.
+        var model = ModelWith(Video(0, 10, speed: 2.0));
+        var operation = new DetachSegmentAudioOperation(model.Segments[0].Id, MicSource());
+
+        operation.Execute(model);
+        var firstIds = model.AudioTracks.Select(t => t.Id).ToList();
+
+        operation.Undo(model);
+        operation.Execute(model);
+
+        CollectionAssert.AreEqual(
+            firstIds, model.AudioTracks.Select(t => t.Id).ToList(),
+            "Redo must restore the same blocks, not equivalent new ones");
+    }
+
+    [TestMethod]
+    public void Detach_RedoDoesNotDuplicateBlocks()
+    {
+        var model = ModelWith(Video(0, 10, speed: 2.0));
+        var operation = new DetachSegmentAudioOperation(model.Segments[0].Id, MicSource());
+
+        operation.Execute(model);
+        operation.Undo(model);
+        operation.Execute(model);
+        operation.Execute(model);
+
+        Assert.AreEqual(1, model.AudioTracks.Count, "Re-executing must be idempotent");
+    }
+
+    [TestMethod]
     public void Detach_AlignsThroughTheAudioOffset()
     {
         // Audio started 1s of source time late: the block cannot read before the file's start,
