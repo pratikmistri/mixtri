@@ -1547,10 +1547,15 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Draws the "1.5x" pill on a segment whose playback speed is not 1×. The legacy
+    /// Draws the "⏱ 1.5x" pill on a segment whose playback speed is not 1×. The legacy
     /// clip view tints the whole block instead; on the segment view that would hide the
     /// filmstrip, so a corner badge carries the same information.
     /// </summary>
+    /// <remarks>
+    /// The stopwatch mark is not decoration: the zoom track labels its segments with a bare
+    /// "2x" too, so a speed badge showing only a multiplier reads as a zoom level on a quick
+    /// scan. The glyph (plus the badge fill) is what separates the two.
+    /// </remarks>
     private void DrawSegmentSpeedBadge(
         CanvasDrawingSession ds, VideoSegment video, float x1, float clipY, float segW, float clipH)
     {
@@ -1558,24 +1563,52 @@ public sealed partial class TimelineControl : UserControl
 
         string label = $"{video.SpeedFactor:0.##}x";
         float badgeH = Math.Min(15f, clipH - 4);
-        float badgeW = 8f + label.Length * 6.5f;
-        if (badgeH < 9f || segW < badgeW + 8f) return;
+        float iconSize = Math.Min(9f, badgeH - 4f);
+        float textW = label.Length * 6.5f;
+        float badgeW = 11f + iconSize + textW;
+        // Drop the whole badge rather than the glyph when space is tight — a bare
+        // multiplier is exactly the ambiguity the glyph exists to remove.
+        if (badgeH < 9f || iconSize < 6f || segW < badgeW + 8f) return;
 
+        float badgeX = x1 + 4;
+        float badgeY = clipY + 3;
         var badgeColor = video.SpeedFactor > 1.0 ? SpeedUpOverlayColor : SlowDownOverlayColor;
-        ds.FillRoundedRectangle(x1 + 4, clipY + 3, badgeW, badgeH, 3f, 3f, badgeColor);
+        ds.FillRoundedRectangle(badgeX, badgeY, badgeW, badgeH, 3f, 3f, badgeColor);
+
+        DrawSpeedGlyph(ds, badgeX + 4f, badgeY + (badgeH - iconSize) / 2f, iconSize, SpeedLabelTextColor);
+
         ds.DrawText(
             label,
-            new Rect(x1 + 4, clipY + 3, badgeW, badgeH),
+            new Rect(badgeX + 6f + iconSize, badgeY, textW, badgeH),
             SpeedLabelTextColor,
             new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
             {
                 FontSize = 10,
                 FontFamily = "Segoe UI",
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
                 VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
                 WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
             });
+    }
+
+    /// <summary>
+    /// Draws a stopwatch mark (dial, crown, two hands) inside the
+    /// <paramref name="size"/>-square box at <paramref name="x"/>,<paramref name="y"/>.
+    /// Drawn from primitives rather than an icon-font glyph because the timeline's Win2D
+    /// surface only ever loads "Segoe UI", and it reads the same for a slowed segment as
+    /// for a sped-up one — unlike a fast-forward chevron.
+    /// </summary>
+    private static void DrawSpeedGlyph(CanvasDrawingSession ds, float x, float y, float size, Color color)
+    {
+        float r = size / 2f - 0.75f;
+        float cx = x + size / 2f;
+        float cy = y + size / 2f + 0.5f;
+
+        ds.DrawCircle(cx, cy, r, color, 1.2f);
+        ds.FillRectangle(cx - 1f, y - 0.5f, 2f, 1.75f, color);
+        ds.DrawLine(cx, cy, cx, cy - r * 0.62f, color, 1.1f);
+        ds.DrawLine(cx, cy, cx + r * 0.58f, cy, color, 1.1f);
     }
 
     /// <summary>

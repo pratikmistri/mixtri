@@ -2290,3 +2290,11 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   - Leaving `OnVideoClipSelected`'s `else` branch (`SpeedComboBox.SelectedIndex = 2`) in place: `OnUndoRedoStateChanged` calls `Timeline.ClearClipSelection()` on EVERY edit, so that branch would have reset the combo to 1x after each speed change. Both selection paths now funnel through one `UpdateSpeedPanelVisibility`/`SyncSpeedComboBox` pair.
   - `dotnet test` still fails at the build step with the known PriGen `MSB4062`; `vswhere -find 'MSBuild\**\Bin\MSBuild.exe'` also returned nothing on this host. Verified route: `& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe' src\Musio.Tests\Musio.Tests.csproj /restore /t:Build /p:Configuration=Debug /p:Platform=x64` then `dotnet test ... --no-build -c Debug -p:Platform=x64` with `DOTNET_ROLL_FORWARD=Major`.
 - **Verified**: `Musio.App` x64 Debug -> 0 errors. Full suite **1149 passed, 0 failed, 3 skipped (1152)**, including 12 new `SegmentSpeedOperationTests`.
+
+## Segment speed badge — stopwatch glyph
+
+- **Feature/area**: `TimelineControl.DrawSegmentSpeedBadge` / `DrawSpeedGlyph`.
+- **Approaches tried**: Considered a Segoe Fluent Icons glyph and a fast-forward double-chevron before settling on a primitive-drawn stopwatch.
+- **What worked**: The timeline's Win2D surface only ever loads `"Segoe UI"`, so icon-font glyphs are not available there — draw marks from primitives (`DrawCircle`/`FillRectangle`/`DrawLine`). A stopwatch also reads correctly for BOTH slowed and sped-up segments, whereas a fast-forward chevron contradicts a `0.5x` label. When the badge no longer fits, the whole badge is dropped rather than just the glyph: a bare multiplier is the exact ambiguity with the zoom track's `2x` labels that the glyph exists to remove.
+- **What didn't work**: n/a — single-pass change.
+- **Verified**: `Musio.App` ARM64 Debug -> 0 errors; app registered from the build output and launched.
