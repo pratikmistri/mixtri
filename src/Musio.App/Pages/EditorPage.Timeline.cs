@@ -652,6 +652,22 @@ public sealed partial class EditorPage
         Timeline.Refresh();
     }
 
+    /// <summary>
+    /// Removes the blocks detached from a segment and lets that segment play its own audio
+    /// again — the matched reverse of <see cref="OnSegmentAudioDetachRequested"/>.
+    /// </summary>
+    private void OnSegmentAudioReattachRequested(object? sender, string segmentId)
+    {
+        ViewModel.UndoRedoManager.Execute(new ReattachSegmentAudioOperation(segmentId));
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", $"re-attached audio to segment {segmentId}");
+
+        Timeline.ClearInsertedAudioSelection();
+        RefreshStretchedAudioIfChanged();
+        RefreshInsertedAudio();
+        Timeline.Refresh();
+    }
+
     private void OnSegmentSplitRequested(object? sender, EventArgs e) =>
         ViewModel.SplitAtPlayheadCommand.Execute(null);
 
@@ -1653,7 +1669,12 @@ public sealed partial class EditorPage
         {
             double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
             if (Math.Abs(speed - 1.0) <= SegmentSpeedEpsilon) continue;
-            if (segment.AudioMode != SegmentAudioMode.TimeStretch) continue;
+
+            // Every audible speed-adjusted segment is re-timed — the mode only decides
+            // whether it sounds at all. Filtering on TimeStretch here would leave a legacy
+            // Native segment out of the signature while ExportAudioPlan still builds a
+            // stretch for it, so its re-renders would never be picked up.
+            if (segment.AudioMode == SegmentAudioMode.Muted) continue;
 
             sb.Append(segment.Id).Append('|')
               .Append(segment.Start.Ticks).Append('|')
@@ -1754,6 +1775,13 @@ public sealed partial class EditorPage
         {
             var project = ProjectService.Instance.CurrentProject;
             if (project is null) return false;
+
+            // The stretched-segment placements carry their channel's gain baked in (it is in
+            // their signature), and the mixer writes straight onto the model rather than
+            // through UndoRedoManager — so nothing else would ever tell that engine a fader
+            // moved. Without this, muting the mic silenced the 1x segments while the
+            // re-timed ones kept playing at full level, which export drops entirely.
+            RefreshStretchedAudioIfChanged();
 
             var audible = GetUnmutedAudioPaths(project);
 

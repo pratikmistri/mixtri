@@ -93,6 +93,21 @@ public class AudioTrack
     /// <summary>When true the track is skipped by preview and export alike, but kept in the project.</summary>
     public bool IsMuted { get; set; }
 
+    /// <summary>
+    /// Id of the <see cref="Timeline.VideoSegment"/> this block was lifted off, when it was
+    /// produced by <c>DetachSegmentAudioOperation</c>; <c>null</c> for an imported
+    /// voice-over or music bed.
+    /// </summary>
+    /// <remarks>
+    /// The segment it names is muted for exactly as long as this block exists — that is the
+    /// invariant detaching establishes, and this back-reference is what lets the editor see
+    /// it. Without it, unmuting that segment would silently sum the same recording twice
+    /// (once bound, once detached), and re-attaching could not find the blocks to remove.
+    /// The link is deliberately one-way and advisory: a block whose segment has been deleted
+    /// is still perfectly playable audio, so nothing cleans it up.
+    /// </remarks>
+    public string? DetachedFromSegmentId { get; set; }
+
     /// <summary>Default gain for a newly inserted track of <paramref name="kind"/>.</summary>
     /// <remarks>
     /// Music is inserted quieter than narration so a freshly added bed does not drown the
@@ -155,6 +170,7 @@ public class AudioTrack
         Duration = Duration,
         Volume = Volume,
         IsMuted = IsMuted,
+        DetachedFromSegmentId = DetachedFromSegmentId,
     };
 
     /// <summary>

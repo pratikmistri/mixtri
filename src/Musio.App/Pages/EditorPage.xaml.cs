@@ -394,6 +394,7 @@ public sealed partial class EditorPage : Page
         Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
         Timeline.SegmentAudioModeChangeRequested += OnSegmentAudioModeChangeRequested;
         Timeline.SegmentAudioDetachRequested += OnSegmentAudioDetachRequested;
+        Timeline.SegmentAudioReattachRequested += OnSegmentAudioReattachRequested;
         Timeline.SegmentSplitRequested += OnSegmentSplitRequested;
         Timeline.SegmentDeleteRequested += OnSegmentDeleteRequested;
         Timeline.SegmentTrackMoveRequested += OnSegmentTrackMoveRequested;

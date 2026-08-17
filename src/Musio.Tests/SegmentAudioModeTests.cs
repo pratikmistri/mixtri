@@ -402,5 +402,90 @@ public sealed class SegmentAudioModeTests
             "Detached audio is not cut at the segment boundary the way bound audio is");
     }
 
+    [TestMethod]
+    public void DetachedBlock_RemembersWhichSegmentItCameFrom()
+    {
+        var model = ModelWith(Video(0, 10, speed: 2.0));
+        string id = model.Segments[0].Id;
+
+        new DetachSegmentAudioOperation(id, MicSource()).Execute(model);
+
+        Assert.AreEqual(id, model.AudioTracks[0].DetachedFromSegmentId);
+        Assert.IsTrue(ReattachSegmentAudioOperation.HasDetachedAudio(model, id));
+    }
+
+    [TestMethod]
+    public void Reattach_RemovesTheBlocksAndUnmutesTheSegment()
+    {
+        // Unmuting a detached segment while its blocks remain would sum the same recording
+        // twice, so re-attaching is the only way back — and it must do both halves.
+        var model = ModelWith(Video(0, 10, speed: 2.0));
+        string id = model.Segments[0].Id;
+        new DetachSegmentAudioOperation(id, MicSource()).Execute(model);
+
+        var reattach = new ReattachSegmentAudioOperation(id);
+        reattach.Execute(model);
+
+        Assert.AreEqual(0, model.AudioTracks.Count, "The detached blocks are gone");
+        Assert.AreEqual(
+            SegmentAudioMode.TimeStretch, ((VideoSegment)model.Segments[0]).AudioMode,
+            "...and the segment is audible again");
+
+        var plan = ExportAudioPlan.Build(NewProject(), model, null);
+        Assert.IsTrue(plan.Any(p => p.SourcePath == PrimaryMic),
+            "The bound copy is back in the export, exactly once");
+    }
+
+    [TestMethod]
+    public void Reattach_IsUndoable()
+    {
+        var model = ModelWith(Video(0, 10, speed: 2.0));
+        string id = model.Segments[0].Id;
+        new DetachSegmentAudioOperation(id, MicSource()).Execute(model);
+
+        var reattach = new ReattachSegmentAudioOperation(id);
+        reattach.Execute(model);
+        reattach.Undo(model);
+
+        Assert.AreEqual(1, model.AudioTracks.Count, "Undo puts the detached block back");
+        Assert.AreEqual(id, model.AudioTracks[0].DetachedFromSegmentId);
+        Assert.AreEqual(
+            SegmentAudioMode.Muted, ((VideoSegment)model.Segments[0]).AudioMode,
+            "...and re-mutes the segment, or the audio would play twice");
+    }
+
+    [TestMethod]
+    public void Reattach_WithNothingDetached_IsANoOp()
+    {
+        var model = ModelWith(Video(0, 10, speed: 2.0, SegmentAudioMode.Muted));
+        var reattach = new ReattachSegmentAudioOperation(model.Segments[0].Id);
+
+        reattach.Execute(model);
+
+        Assert.IsFalse(reattach.ChangedModel);
+        Assert.AreEqual(
+            SegmentAudioMode.Muted, ((VideoSegment)model.Segments[0]).AudioMode,
+            "A hand-muted segment must not be unmuted by a re-attach that found nothing");
+    }
+
+    [TestMethod]
+    public void Reattach_OnlyTouchesItsOwnSegmentsBlocks()
+    {
+        var model = ModelWith(
+            Video(0, 10, speed: 2.0),
+            Video(10, 10, speed: 2.0));
+        string first = model.Segments[0].Id;
+        string second = model.Segments[1].Id;
+
+        new DetachSegmentAudioOperation(first, MicSource()).Execute(model);
+        new DetachSegmentAudioOperation(second, MicSource()).Execute(model);
+
+        new ReattachSegmentAudioOperation(first).Execute(model);
+
+        Assert.AreEqual(1, model.AudioTracks.Count);
+        Assert.AreEqual(second, model.AudioTracks[0].DetachedFromSegmentId);
+        Assert.AreEqual(SegmentAudioMode.Muted, ((VideoSegment)model.Segments[1]).AudioMode);
+    }
+
     #endregion
 }

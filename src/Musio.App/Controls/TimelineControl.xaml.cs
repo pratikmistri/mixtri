@@ -100,6 +100,12 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public event EventHandler<string>? SegmentAudioDetachRequested;
 
+    /// <summary>
+    /// Raised when "Re-attach audio" is chosen: the blocks detached from that segment should
+    /// be removed and the segment should play its own audio again.
+    /// </summary>
+    public event EventHandler<string>? SegmentAudioReattachRequested;
+
     /// <summary>Raised when "Split at Playhead" is chosen from a segment's right-click menu.</summary>
     public event EventHandler? SegmentSplitRequested;
 
@@ -3591,10 +3597,20 @@ public sealed partial class TimelineControl : UserControl
 
         var pos = e.GetPosition(canvas);
         var time = XToTime(pos.X);
-        var segment = model.Segments
-            .OfType<VideoSegment>()
-            .Where(s => !s.IsOverlayTrack)
-            .FirstOrDefault(s => time >= s.Start && time < s.End);
+
+        // Resolve the segment whose block is actually drawn under the cursor. The draw loop
+        // paints every VideoSegment in list order, and overlay inserts are appended, so an
+        // overlay's block lands on top — excluding overlay segments here would act on the
+        // base segment hidden underneath the one the user aimed at. Highest TrackIndex wins,
+        // matching TimelineModel.GetSegmentAtTime.
+        VideoSegment? segment = null;
+        foreach (var candidate in model.Segments.OfType<VideoSegment>())
+        {
+            if (time < candidate.Start || time >= candidate.End) continue;
+            if (segment is null || candidate.TrackIndex >= segment.TrackIndex)
+                segment = candidate;
+        }
+
         if (segment is null) return;
 
         ClearOtherSelections(SelectionKind.Segment);
@@ -5489,6 +5505,22 @@ public sealed partial class TimelineControl : UserControl
         });
 
         bool muted = video.AudioMode == SegmentAudioMode.Muted;
+        bool detached = Model is { } model && ReattachSegmentAudioOperation.HasDetachedAudio(model, video.Id);
+
+        if (detached)
+        {
+            // Its recording is already on the timeline as its own blocks. A plain unmute here
+            // would play the same capture twice, so the only coherent way back is to take the
+            // blocks away again.
+            var reattach = new MenuFlyoutItem
+            {
+                Text = "Re-attach audio (removes detached blocks)",
+                Icon = new FontIcon { Glyph = "\uE72C" },
+            };
+            reattach.Click += (_, _) => SegmentAudioReattachRequested?.Invoke(this, video.Id);
+            menu.Items.Add(reattach);
+            return;
+        }
 
         var toggle = new MenuFlyoutItem
         {

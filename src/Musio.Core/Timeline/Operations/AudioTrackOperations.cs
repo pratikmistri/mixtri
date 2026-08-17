@@ -153,6 +153,7 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
                 Duration = window.Duration,
                 SourceDuration = source.SourceDuration,
                 Volume = 1.0,
+                DetachedFromSegmentId = _segmentId,
             };
 
             model.AudioTracks.Add(track);
@@ -174,6 +175,77 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
     {
         foreach (string id in _addedTrackIds)
             model.AudioTracks.RemoveAll(t => t.Id == id);
+
+        if (_index >= 0 && _index < model.Segments.Count
+            && model.Segments[_index] is VideoSegment video)
+        {
+            video.AudioMode = _previousMode;
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// The reverse of <see cref="DetachSegmentAudioOperation"/>: removes the blocks that were
+/// lifted off a segment and lets the segment play its own audio again.
+/// </summary>
+/// <remarks>
+/// This exists so "unmute" cannot resurrect audio that is already on the timeline. A detached
+/// segment is muted precisely because its recording is playing from its own blocks; unmuting
+/// it while they remain would sum the same capture twice, in preview and in the export. So
+/// the menu offers this instead of a plain unmute whenever detached blocks are present, and
+/// the two edits stay a matched pair.
+/// </remarks>
+public class ReattachSegmentAudioOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly List<AudioTrack> _removed = [];
+
+    private int _index = -1;
+    private SegmentAudioMode _previousMode;
+
+    public override string Description => "Re-attach Segment Audio";
+
+    public ReattachSegmentAudioOperation(string segmentId)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+    }
+
+    /// <summary>Whether any block on <paramref name="model"/> was detached from this segment.</summary>
+    public static bool HasDetachedAudio(TimelineModel model, string segmentId)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return model.AudioTracks.Any(t => t.DetachedFromSegmentId == segmentId);
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+
+        _removed.Clear();
+        _removed.AddRange(model.AudioTracks.Where(t => t.DetachedFromSegmentId == _segmentId));
+        if (_removed.Count == 0) return NothingToDo();
+
+        model.AudioTracks.RemoveAll(t => t.DetachedFromSegmentId == _segmentId);
+
+        _previousMode = video.AudioMode;
+
+        // Back to audible: detaching is the only thing that muted it, so undoing that has to
+        // restore sound, not leave a silent segment with nothing playing over it.
+        video.AudioMode = SegmentAudioMode.TimeStretch;
+
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (_removed.Count == 0) return false;
+
+        model.AudioTracks.AddRange(_removed);
+        AudioTrackEditing.Sort(model.AudioTracks);
 
         if (_index >= 0 && _index < model.Segments.Count
             && model.Segments[_index] is VideoSegment video)
