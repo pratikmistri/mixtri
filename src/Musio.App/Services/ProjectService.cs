@@ -276,6 +276,7 @@ public class ProjectService
         var primarySegment = CreateVideoSegmentFromProject(project);
         CurrentTimeline.Segments.Add(primarySegment);
         CurrentTimeline.RecalculateSegmentPositions();
+        ApplyAutomaticTypingSpeed(project, CurrentTimeline, primarySegment);
 
         // Apply capture-type-specific style defaults at project load time
         // so they're guaranteed to be in place before the editor reads
@@ -333,12 +334,79 @@ public class ProjectService
             new InsertSegmentOnOverlayTrackOperation(segment, CurrentTimeline.PlayheadPosition)
                 .Execute(CurrentTimeline);
         }
+        ApplyAutomaticTypingSpeed(newRecording, CurrentTimeline, segment);
 
         // Executed directly rather than through UndoRedoManager, so the edit signal that
         // normally rides on it does not fire here.
         MarkDirty();
         ProjectChanged?.Invoke(this, EventArgs.Empty);
-        return segment;
+        return CurrentTimeline.Segments
+            .OfType<VideoSegment>()
+            .FirstOrDefault(s => s.Id == segment.Id) ?? segment;
+    }
+
+    private static void ApplyAutomaticTypingSpeed(
+        Project recording,
+        TimelineModel timeline,
+        VideoSegment segment)
+    {
+        if (string.IsNullOrWhiteSpace(recording.KeyboardDataFilePath)
+            || string.IsNullOrWhiteSpace(recording.CursorDataFilePath)
+            || !File.Exists(recording.KeyboardDataFilePath)
+            || !File.Exists(recording.CursorDataFilePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var keyboardEvents = RecordingSession.LoadKeyboardData(recording.KeyboardDataFilePath);
+            var mouseData = MouseHookRecorder.LoadFromFile(recording.CursorDataFilePath);
+            var ranges = TypingActivityDetector.Detect(
+                keyboardEvents,
+                mouseData.StartTimestampTicks,
+                mouseData.TickFrequency,
+                recording.MouseToVideoOffsetSeconds,
+                recording.Duration);
+            if (ranges.Count == 0) return;
+
+            var operation = new AutomaticTypingSpeedOperation(segment.Id, ranges);
+            operation.Execute(timeline);
+            if (operation.ChangedModel)
+            {
+                string? sourceVideoFilePath = string.Equals(
+                    segment.VideoFilePath,
+                    timeline.PrimaryVideoFilePath,
+                    StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : segment.VideoFilePath;
+                var typingZooms = TypingZoomPlanner.Build(
+                    keyboardEvents,
+                    ranges,
+                    mouseData.StartTimestampTicks,
+                    mouseData.TickFrequency,
+                    recording.MouseToVideoOffsetSeconds,
+                    recording.Width,
+                    recording.Height,
+                    recording.CropOffsetX,
+                    recording.CropOffsetY,
+                    sourceVideoFilePath,
+                    mouseData);
+                timeline.ZoomKeyframes.AddRange(typingZooms);
+
+                Musio.Core.Diagnostics.DiagLog.Write(
+                    "Project",
+                    $"accelerated {ranges.Count} typing burst(s) at " +
+                    $"{AutomaticTypingSpeedOperation.TypingSpeed:0.0}x; generated slices are muted; " +
+                    $"added {typingZooms.Count} caret-focused zoom(s)");
+            }
+        }
+        catch (Exception ex)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Project",
+                $"automatic typing acceleration skipped for '{recording.KeyboardDataFilePath}': {ex.Message}");
+        }
     }
 
     /// <summary>

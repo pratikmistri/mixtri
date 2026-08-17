@@ -2861,9 +2861,8 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Finds the video segment that owns a zoom keyframe: the segment matching the
     /// keyframe's source file whose source range contains its Timestamp (falling back
-    /// to the first file-matching segment). Both edges of the keyframe map through this
-    /// single segment so it renders at full width even if an edge slightly overflows
-    /// the clip.
+    /// to the first file-matching segment). This anchors the keyframe to one occurrence
+    /// of a recording even when that source was duplicated or reordered.
     /// </summary>
     private VideoSegment? OwningSegmentForKeyframe(ZoomKeyframe kf)
     {
@@ -2888,11 +2887,10 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Maps a zoom keyframe's source time to an output X by routing through the video
-    /// segment that owns it (primary or appended). Both edges of a keyframe map through
-    /// the same owning segment so the segment renders at its true width. Returns NaN
-    /// when no segment owns the keyframe; falls back to the legacy whole-timeline
-    /// mapping when the timeline has no segments.
+    /// Maps a zoom keyframe's source time to an output X, anchored to the video segment
+    /// that owns it (primary or appended). An edge may traverse directly adjacent,
+    /// source-contiguous pieces of that same occurrence so mixed-speed slices map
+    /// piecewise; it never resolves each edge against an arbitrary first file match.
     /// </summary>
     private double ZoomKeyframeTimeToX(ZoomKeyframe kf, TimeSpan sourceTime)
     {
@@ -2903,11 +2901,7 @@ public sealed partial class TimelineControl : UserControl
         var seg = OwningSegmentForKeyframe(kf);
         if (seg is null) return double.NaN;
 
-        var local = sourceTime - seg.SourceStart;
-        var outLocal = seg.SpeedFactor != 0
-            ? TimeSpan.FromTicks((long)(local.Ticks / seg.SpeedFactor))
-            : local;
-        return TimeToX(seg.Start + outLocal);
+        return TimeToX(model.MapSourceTimeFromOwningSegment(seg, sourceTime));
     }
 
     /// <summary>
@@ -6270,11 +6264,8 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Maps a text overlay's source time to an output X by routing through the video
     /// segment that owns it (primary or appended), mirroring
-    /// <see cref="ZoomKeyframeTimeToX"/>. Both edges of an overlay map through the same
-    /// owning segment so the block renders at its true width. Returns NaN when no
-    /// segment owns the overlay (its recording isn't on the timeline — the block should
-    /// not be drawn); falls back to the legacy whole-timeline mapping when the timeline
-    /// has no segments.
+    /// <see cref="ZoomKeyframeTimeToX"/>. Directly adjacent source-contiguous speed
+    /// pieces are traversed piecewise; unrelated occurrences of the same file are not.
     /// </summary>
     private double TextOverlayTimeToX(TextOverlaySegment overlay, TimeSpan sourceTime)
     {
@@ -6285,11 +6276,7 @@ public sealed partial class TimelineControl : UserControl
         var seg = OwningSegmentForTextOverlay(overlay);
         if (seg is null) return double.NaN;
 
-        var local = sourceTime - seg.SourceStart;
-        var outLocal = seg.SpeedFactor != 0
-            ? TimeSpan.FromTicks((long)(local.Ticks / seg.SpeedFactor))
-            : local;
-        return TimeToX(seg.Start + outLocal);
+        return TimeToX(model.MapSourceTimeFromOwningSegment(seg, sourceTime));
     }
 
     /// <summary>Maps a create-time (in <see cref="_textOverlayCreateFile"/>'s source

@@ -2422,3 +2422,63 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   4. Detaching mutes the segment so its recording is not heard twice, but the menu still offered a plain "Unmute", which resurrected the bound copy alongside the detached blocks. Fixed by giving `AudioTrack` a `DetachedFromSegmentId` back-reference and offering `ReattachSegmentAudioOperation` (remove the blocks AND unmute) instead of a bare unmute. **An invariant established by one command needs the reverse command to exist, or some other control will break it.**
 - **Verified**: suite **1209 passed, 0 failed, 3 skipped** (5 new re-attach/back-reference tests); `Musio.App` ARM64 -> 0 errors; app relaunched clean; branch pushed as two commits.
 - **Note**: `git push` failed once with `send-pack: unexpected disconnect` and then could not prompt for credentials; `gh auth setup-git` fixed it (gh is authenticated with a `repo`-scoped token).
+
+## Automatic typing acceleration
+
+- **Feature/area**: keyboard-event analysis, fresh-recording timeline initialization, segment speed/audio defaults.
+- **Approaches tried**: considered speeding every printable key individually, then grouped unmodified text-editing key-downs into sustained bursts and sliced the source segment around those ranges.
+- **What worked**: `TypingActivityDetector` requires at least three keys, tolerates 1.25s pauses, adds short lead/trail padding, and maps the keyboard's absolute stopwatch ticks through the mouse recording origin and `MouseToVideoOffsetSeconds`. `AutomaticTypingSpeedOperation` preserves source coverage, transition ownership, base/overlay positioning, and the first segment id while applying 1.5x only to typing slices. Those generated slices default to `SegmentAudioMode.Muted`; manual speed edits retain WSOLA time-stretch. Fresh primary and appended recordings are processed, while restored projects and imports are untouched.
+- **What didn't work**: parallel app/test builds contend for `Musio.Core.dll`; validation must run sequentially. Micro-ranges from callers bypassing the detector could create degenerate slices, so the operation independently rejects ranges shorter than the accelerated minimum.
+- **Verified**: suite **1224 passed, 0 failed, 3 skipped**; `Musio.App` ARM64 build completed with 0 errors.
+
+## Automatic typing acceleration branch build and launch
+
+- **Feature/area**: Git branch workflow and local ARM64 deployment.
+- **Approaches tried**: moved the dirty worktree with `git switch -c`, built with the required VS MSBuild ARM64 command, then refreshed the unpackaged app registration.
+- **What worked**: uncommitted changes followed onto `feature/automatic-typing-speed`; removing the previous AppX registration before registering the Debug `AppxManifest.xml` launched the new build successfully.
+- **What didn't work**: the initial manifest glob missed the framework-specific `net9.0-windows10.0.26100.0\win-arm64` output directory; inspecting the build folder resolved the exact path.
+
+## Caret-focused zoom for automatic typing segments
+
+- **Feature/area**: keyboard capture metadata, automatic typing zoom planning, zoom-camera drift, primary/appended auto-zoom generation.
+- **Approaches tried**: considered centering on the mouse or guessing the input box, then captured the native Windows insertion caret and caret HWND client bounds on key-down instead. Planned one padded fixed-centre zoom per typing burst and kept drift enabled at reduced strength.
+- **What worked**: versioned `keyboard.mkbd` while retaining legacy reads; physical caret coordinates use the same crop-offset transform as mouse clicks. `TypingZoomPlanner` fits the recorded caret/control path inside a maximum 1.75x viewport with a 10% safety margin and 0.35 drift scale. Typing keyframes stay in source time, so existing owning-segment mapping keeps them aligned after the 1.5x slice. Click zoom generation now checks specifically for click-derived keyframes, allowing typing and click shots to coexist.
+- **What didn't work / limitation**: mouse position cannot guarantee the insertion caret remains visible. Custom-rendered controls that do not expose a native caret through `GetGUIThreadInfo` cannot be identified reliably, so their automatic typing zoom is skipped rather than guessed.
+- **Verified**: focused caret/zoom tests **39 passed**; suite **1231 passed, 0 failed, 3 skipped**; `Musio.App` ARM64 build completed with 0 errors.
+
+## Automatic typing zoom behavior clarification
+
+- **Feature/area**: automatic typing zoom.
+- **Approaches tried**: confirmed the implemented fresh-recording flow.
+- **What worked**: each detected typing burst adds an editable zoom keyframe when Windows exposes a native text caret.
+- **What didn't work**: controls without an exposed native caret cannot receive a reliable automatic typing zoom.
+
+## Typing zoom fallback after real recording exposed no native caret
+
+- **Feature/area**: `TypingZoomPlanner` custom-control fallback.
+- **Approaches tried**: inspected the latest real `keyboard.mkbd`, `cursor.mcur`, and diagnostic log before changing the heuristic. The recording had 105 text candidates, 0 native caret samples, 2 clicks, and logged `added 0 caret-focused zoom(s)`.
+- **What worked**: when native caret data is absent, use the most recent left click within three seconds of typing (or the nearest recorded pointer sample), frame a broad right-biased context at no more than 1.4x, and reduce drift to 0.20. Native-caret shots still use the tighter 1.75x / 0.35-drift plan.
+- **What didn't work**: skipping custom-rendered controls was too conservative in practice; browsers/editors commonly expose no `GetGUIThreadInfo` caret, so it produced no zoom despite correctly detecting and accelerating the typing burst.
+- **Verified**: focused typing tests **16 passed**; suite **1232 passed, 0 failed, 3 skipped**; `Musio.App` ARM64 build completed with 0 errors.
+
+## Code review: automatic typing acceleration and zoom
+
+- **Feature/area**: full uncommitted typing-speed/caret-zoom branch diff.
+- **Approaches tried**: reviewed recording lifecycle, segment/source-time mapping, binary compatibility, zoom ownership, audio behavior, and tests against the settled playbooks.
+- **What worked**: keyboard format versioning, restored-project gating, primary/appended source tagging, drift-scale propagation, and caret/click coordinate transforms were consistent.
+- **What didn't work / findings**: pausing and resuming clears keyboard events captured before the pause; zoom spans crossing generated 1x/1.5x segment boundaries are mapped through one segment speed, producing incorrect timeline geometry and resize hitboxes.
+
+## Review finding status check
+
+- **Feature/area**: automatic typing branch review findings.
+- **Approaches tried**: re-read the current recording resume path and zoom timeline mapping.
+- **What worked**: confirmed both findings remain reproducible in the current worktree.
+- **What didn't work**: no fixes have yet been applied; resume still clears `_events`, and zoom edges still map through one owning segment speed.
+
+## Automatic typing review fixes
+
+- **Feature/area**: keyboard pause/resume retention and mixed-speed source-time mapping for zoom/text-overlay edges.
+- **Approaches tried**: kept the keyboard hook alive while pausing collection; added owner-anchored traversal across only directly adjacent same-source pieces; reviewed the final branch diff and added focused regression tests.
+- **What worked**: pause/resume preserves earlier events, filters paused events, and rehydrates physically held modifiers before collection resumes. Timeline edges now map piecewise across contiguous 1x/1.5x slices without jumping across slides, source gaps, tracks, or duplicated source occurrences.
+- **What didn't work**: resetting modifiers to false on resume misclassified keys when a modifier remained held. Direct `dotnet test` hit the Windows App SDK PriGen path; VS ARM64 MSBuild followed by `dotnet vstest` was required.
+- **Verified**: full suite **1238 passed, 0 failed, 3 skipped** (1241 total); `Musio.App` ARM64 Debug build completed with 0 errors.

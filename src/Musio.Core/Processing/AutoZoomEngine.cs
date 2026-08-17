@@ -358,7 +358,8 @@ public class AutoZoomEngine
             // A manual keyframe only pins its framing if the user actually authored a region.
             // One promoted just by being moved or resized keeps following the cursor, exactly
             // as it did before the edit.
-            HasFixedCenter: keyframe.UsesAuthoredCenter);
+            HasFixedCenter: keyframe.UsesAuthoredCenter,
+            DriftScale: (float)Math.Clamp(keyframe.DriftScale, 0.0, 1.0));
     }
 
     private static ZoomShot ToZoomShot(ZoomSegment segment)

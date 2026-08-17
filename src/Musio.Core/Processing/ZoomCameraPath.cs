@@ -26,7 +26,8 @@ public readonly record struct ZoomShot(
     float CenterX,
     float CenterY,
     int Seed,
-    bool HasFixedCenter = false);
+    bool HasFixedCenter = false,
+    float DriftScale = 1f);
 
 /// <summary>
 /// The camera state resolved from a <see cref="ZoomCameraPath"/> at one instant.
@@ -191,6 +192,7 @@ public sealed class ZoomCameraPath
                 CenterY = shot.CenterY,
                 Seed = shot.Seed,
                 HasFixedCenter = shot.HasFixedCenter,
+                DriftScale = shot.DriftScale,
                 OriginalRampStart = shot.RampStart,
                 OriginalHoldStart = holdStart,
                 OriginalHoldEnd = holdEnd,
@@ -488,7 +490,7 @@ public sealed class ZoomCameraPath
             progress,
             headingX,
             headingY,
-            1f,
+            Math.Clamp(shot.DriftScale, 0f, 1f),
             shot.HasFixedCenter ? 0f : 1f);
     }
 
@@ -563,7 +565,11 @@ public sealed class ZoomCameraPath
             headingY /= headingLength;
         }
 
-        float driftScale = (float)(1.0 - (0.85 * bump));
+        float shotDriftScale = Lerp(
+            Math.Clamp(from.DriftScale, 0f, 1f),
+            Math.Clamp(to.DriftScale, 0f, 1f),
+            e);
+        float driftScale = (float)(1.0 - (0.85 * bump)) * shotDriftScale;
 
         return new ZoomCameraSample(
             zoom,
@@ -636,6 +642,7 @@ public sealed class ZoomCameraPath
         public float CenterY;
         public int Seed;
         public bool HasFixedCenter;
+        public float DriftScale;
         public double OriginalRampStart;
         public double OriginalHoldStart;
         public double OriginalHoldEnd;
@@ -643,7 +650,17 @@ public sealed class ZoomCameraPath
         public int OriginalIndex;
 
         public readonly ZoomShot ToZoomShot()
-            => new(RampStart, HoldStart, HoldEnd, ReleaseEnd, Zoom, CenterX, CenterY, Seed, HasFixedCenter);
+            => new(
+                RampStart,
+                HoldStart,
+                HoldEnd,
+                ReleaseEnd,
+                Zoom,
+                CenterX,
+                CenterY,
+                Seed,
+                HasFixedCenter,
+                DriftScale);
 
     }
 }

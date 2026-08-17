@@ -353,17 +353,17 @@ public sealed partial class EditorPage
         int cropOffX = project.CropOffsetX;
         int cropOffY = project.CropOffsetY;
         double mouseOffset = project.MouseToVideoOffsetSeconds;
-        // Only generate the PRIMARY recording's auto-zoom keyframes if none exist yet.
+        // Only generate the PRIMARY recording's CLICK auto-zoom keyframes if none exist yet.
         // InitializePreviewAsync re-runs whenever the editor page is reconstructed (e.g.
         // after "Record More" navigates away and back). The TimelineModel is shared and
-        // already carries the user's edits, so regenerating would (a) wipe manual zoom
-        // segments (stored with SourceVideoFilePath == null) and (b) resurrect auto-zooms
-        // the user deleted (tracked in SuppressedClickTicks). Generate once, then preserve.
+        // already carries the user's edits, so regenerating would resurrect auto-zooms the
+        // user deleted (tracked in SuppressedClickTicks). A typing-focus/manual shot does not
+        // count here: it must coexist with the click zooms for the same source.
         // (Appended recordings mirror this exact guard — see GenerateAppendedZoomKeyframes.)
         // A source restored from a package is never regenerated: an empty zoom track is a
         // saved choice there, not a not-yet-populated one.
         if (!ProjectService.Instance.IsRestoredSource(project.VideoFilePath)
-            && !ZoomKeyframesExistForSource(null))
+            && !AutoZoomKeyframesExistForSource(null))
         {
             foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
