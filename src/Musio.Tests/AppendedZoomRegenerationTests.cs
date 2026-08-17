@@ -20,8 +20,8 @@ public sealed class AppendedZoomRegenerationTests
 {
     /// <summary>
     /// Mirrors EditorPage.GenerateAppendedZoomKeyframes: only adds keyframes for
-    /// <paramref name="sourceVideoFilePath"/> if none exist yet for that source, and skips
-    /// any click tracked in <see cref="TimelineModel.SuppressedClickTicks"/>.
+    /// <paramref name="sourceVideoFilePath"/> if no click-generated keyframes exist yet for
+    /// that source, and skips any click tracked in <see cref="TimelineModel.SuppressedClickTicks"/>.
     /// </summary>
     private static void GenerateAppendedZoomKeyframes(
         TimelineModel model, string sourceVideoFilePath, MouseRecordingData? mouse,
@@ -29,7 +29,8 @@ public sealed class AppendedZoomRegenerationTests
         double mouseOffsetSeconds, double maxSourceSeconds)
     {
         bool existsForSource = model.ZoomKeyframes.Any(k =>
-            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
+            k.SourceClickTicks.HasValue
+            && string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
         if (existsForSource) return;
 
         if (mouse is null || mouse.Clicks.Count == 0 || mouse.TickFrequency <= 0) return;
@@ -68,6 +69,25 @@ public sealed class AppendedZoomRegenerationTests
 
         Assert.AreEqual(2, model.ZoomKeyframes.Count);
         Assert.IsTrue(model.ZoomKeyframes.All(k => k.SourceVideoFilePath == "a.mp4"));
+    }
+
+    [TestMethod]
+    public void TypingZoom_DoesNotSuppressClickZoomGeneration()
+    {
+        var model = new TimelineModel();
+        model.ZoomKeyframes.Add(new ZoomKeyframe
+        {
+            Timestamp = TimeSpan.FromSeconds(1),
+            SourceVideoFilePath = "a.mp4",
+            IsManual = true,
+            HasAuthoredCenter = true,
+        });
+        var mouse = MakeMouse(0, 1000, (2000, 300, 400));
+
+        GenerateAppendedZoomKeyframes(model, "a.mp4", mouse, 1920, 1080, 0, 0, 0, 0);
+
+        Assert.AreEqual(2, model.ZoomKeyframes.Count);
+        Assert.AreEqual(1, model.ZoomKeyframes.Count(k => k.SourceClickTicks.HasValue));
     }
 
     [TestMethod]

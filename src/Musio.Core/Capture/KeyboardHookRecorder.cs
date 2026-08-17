@@ -12,7 +12,20 @@ public record KeyPressEvent(
     bool IsCtrl,
     bool IsAlt,
     bool IsShift,
-    bool IsWin);
+    bool IsWin,
+    TextInputFocus? TextFocus = null);
+
+/// <summary>
+/// Best-effort screen-space location of the focused native text control and insertion caret
+/// at one keyboard event. Coordinates are physical pixels for this PerMonitorV2 process.
+/// </summary>
+public readonly record struct TextInputFocus(
+    int CaretX,
+    int CaretY,
+    int BoundsLeft,
+    int BoundsTop,
+    int BoundsRight,
+    int BoundsBottom);
 
 /// <summary>
 /// Records keyboard events at high frequency using a low-level keyboard hook
@@ -51,6 +64,36 @@ public sealed class KeyboardHookRecorder : IDisposable
         public nint dwExtraInfo;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public uint cbSize;
+        public uint flags;
+        public nint hwndActive;
+        public nint hwndFocus;
+        public nint hwndCapture;
+        public nint hwndMenuOwner;
+        public nint hwndMoveSize;
+        public nint hwndCaret;
+        public RECT rcCaret;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern nint SetWindowsHookEx(int idHook, HookInterop.LowLevelKeyboardProc lpfn, nint hMod, uint dwThreadId);
 
@@ -64,6 +107,24 @@ public sealed class KeyboardHookRecorder : IDisposable
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
 
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO threadInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClientToScreen(nint hWnd, ref POINT point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(nint hWnd, out RECT rect);
+
     #endregion
 
     private const int DefaultCapacity = 10_000;
@@ -75,6 +136,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     private readonly object _lock = new();
 
     private bool _disposed;
+    private volatile bool _paused;
     private Thread? _hookThread;
     private uint _hookThreadId;
     private readonly ManualResetEventSlim _hookReady = new(false);
@@ -85,7 +147,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     private volatile bool _shiftDown;
     private volatile bool _winDown;
 
-    public bool IsRecording { get; private set; }
+    public bool IsRecording { get; internal set; }
 
     // ── Recording lifecycle ─────────────────────────────────────────
 
@@ -104,6 +166,7 @@ public sealed class KeyboardHookRecorder : IDisposable
         _altDown = false;
         _shiftDown = false;
         _winDown = false;
+        _paused = false;
 
         _hookReady.Reset();
 
@@ -135,12 +198,46 @@ public sealed class KeyboardHookRecorder : IDisposable
         _hookThread = null;
     }
 
+    public void PauseRecording()
+    {
+        if (!IsRecording)
+            throw new InvalidOperationException("Not recording.");
+        _paused = true;
+    }
+
+    public void ResumeRecording()
+    {
+        if (!IsRecording)
+            throw new InvalidOperationException("Not recording.");
+
+        // Modifier keys can change while collection is paused. Rehydrate their current
+        // physical state before accepting resumed events.
+        _ctrlDown = IsKeyDown(VK_CONTROL);
+        _altDown = IsKeyDown(VK_MENU);
+        _shiftDown = IsKeyDown(VK_SHIFT);
+        _winDown = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+        _paused = false;
+    }
+
     public List<KeyPressEvent> GetRecordedEvents()
     {
         lock (_lock)
         {
             return new List<KeyPressEvent>(_events);
         }
+    }
+
+    internal bool TryRecordEvent(KeyPressEvent evt)
+    {
+        if (!IsRecording || _paused)
+            return false;
+
+        lock (_lock)
+        {
+            _events.Add(evt);
+        }
+
+        return true;
     }
 
     // ── Hook thread ─────────────────────────────────────────────────
@@ -174,7 +271,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     {
         try
         {
-            if (nCode >= 0)
+            if (nCode >= 0 && IsRecording && !_paused)
             {
                 var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
                 int msg = (int)wParam;
@@ -195,12 +292,10 @@ public sealed class KeyboardHookRecorder : IDisposable
                     IsCtrl: _ctrlDown,
                     IsAlt: _altDown,
                     IsShift: _shiftDown,
-                    IsWin: _winDown);
+                    IsWin: _winDown,
+                    TextFocus: isDown ? TryGetTextInputFocus() : null);
 
-                lock (_lock)
-                {
-                    _events.Add(evt);
-                }
+                TryRecordEvent(evt);
             }
         }
         catch (Exception ex)
@@ -209,6 +304,52 @@ public sealed class KeyboardHookRecorder : IDisposable
         }
 
         return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
+    }
+
+    private static TextInputFocus? TryGetTextInputFocus()
+    {
+        nint foreground = GetForegroundWindow();
+        if (foreground == nint.Zero) return null;
+
+        uint threadId = GetWindowThreadProcessId(foreground, out _);
+        if (threadId == 0) return null;
+
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        if (!GetGUIThreadInfo(threadId, ref info) || info.hwndCaret == nint.Zero)
+            return null;
+
+        var caretTopLeft = new POINT { X = info.rcCaret.Left, Y = info.rcCaret.Top };
+        var caretBottomRight = new POINT { X = info.rcCaret.Right, Y = info.rcCaret.Bottom };
+        if (!ClientToScreen(info.hwndCaret, ref caretTopLeft)
+            || !ClientToScreen(info.hwndCaret, ref caretBottomRight))
+        {
+            return null;
+        }
+
+        int caretX = caretTopLeft.X + ((caretBottomRight.X - caretTopLeft.X) / 2);
+        int caretY = caretTopLeft.Y + ((caretBottomRight.Y - caretTopLeft.Y) / 2);
+
+        var boundsTopLeft = new POINT { X = caretX, Y = caretY };
+        var boundsBottomRight = boundsTopLeft;
+        if (GetClientRect(info.hwndCaret, out var client))
+        {
+            boundsTopLeft = new POINT { X = client.Left, Y = client.Top };
+            boundsBottomRight = new POINT { X = client.Right, Y = client.Bottom };
+            if (!ClientToScreen(info.hwndCaret, ref boundsTopLeft)
+                || !ClientToScreen(info.hwndCaret, ref boundsBottomRight))
+            {
+                boundsTopLeft = new POINT { X = caretX, Y = caretY };
+                boundsBottomRight = boundsTopLeft;
+            }
+        }
+
+        return new TextInputFocus(
+            caretX,
+            caretY,
+            Math.Min(boundsTopLeft.X, boundsBottomRight.X),
+            Math.Min(boundsTopLeft.Y, boundsBottomRight.Y),
+            Math.Max(boundsTopLeft.X, boundsBottomRight.X),
+            Math.Max(boundsTopLeft.Y, boundsBottomRight.Y));
     }
 
     private void UpdateModifierState(int vk, bool isDown)
@@ -229,6 +370,9 @@ public sealed class KeyboardHookRecorder : IDisposable
                 break;
         }
     }
+
+    private static bool IsKeyDown(int virtualKey) =>
+        (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 
     /// <summary>
     /// Maps common virtual key codes to human-readable names.

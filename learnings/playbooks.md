@@ -164,9 +164,11 @@ reveals:
 ## Playbook: Zoom-segment time mapping (multi-recording)
 
 - Zoom keyframes are tagged by source file via `ZoomKeyframe.SourceVideoFilePath` (null = primary).
-  **Map BOTH edges of a keyframe through the SINGLE owning segment** (`OwningSegmentForKeyframe`:
-  file match + Timestamp containment), never per-edge first-match (which collapsed appended segments
-  to a thin line) and never the primary-only `XToSourceTime` mapping for appended keyframes.
+  **Anchor BOTH edges to the SINGLE owning segment occurrence** (`OwningSegmentForKeyframe`:
+  file match + Timestamp containment), never arbitrary per-edge first-match (which collapsed appended
+  segments to a thin line) and never the primary-only `XToSourceTime` mapping for appended keyframes.
+  An overflowing edge may traverse only directly adjacent pieces that are contiguous in source,
+  output, track, and list order — required for the 1x/1.5x slices created by automatic typing speed.
 - On any edit (move/resize/property change), promote the keyframe to `IsManual = true` (save the
   previous value for undo). `ZoomKeyframe.MinSegmentDuration = 200ms`. Cut/split overlap logic must
   use the full `Start`/`End` span, not just `Timestamp`.
@@ -203,4 +205,3 @@ reveals:
   and don't change the binary serialization format.
 
 ---
-

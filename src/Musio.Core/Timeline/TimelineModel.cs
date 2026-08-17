@@ -589,6 +589,86 @@ public class TimelineModel
     }
 
     /// <summary>
+    /// Maps <paramref name="sourceTime"/> through the occurrence of a recording identified
+    /// by <paramref name="owner"/>. Times outside the owner may cross directly adjacent
+    /// pieces only when those pieces are contiguous in source, output, track, and list order.
+    /// </summary>
+    /// <remarks>
+    /// This preserves occurrence ownership for duplicated/reordered recordings while allowing
+    /// a zoom or overlay span to cross the 1x/1.5x pieces created by automatic typing speed.
+    /// If no contiguous piece contains the time, the result deliberately falls back to the
+    /// historical owner extrapolation so slightly overflowing authored ranges retain their
+    /// width instead of collapsing onto an unrelated occurrence of the same source file.
+    /// </remarks>
+    public TimeSpan MapSourceTimeFromOwningSegment(VideoSegment owner, TimeSpan sourceTime)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+
+        int ownerIndex = Segments.FindIndex(s => s.Id == owner.Id);
+        if (ownerIndex < 0)
+            return MapWithin(owner, sourceTime);
+
+        VideoSegment target = owner;
+        if (sourceTime < owner.SourceStart)
+        {
+            var current = owner;
+            for (int i = ownerIndex - 1; i >= 0; i--)
+            {
+                if (Segments[i] is not VideoSegment previous
+                    || !AreContiguousSourcePieces(previous, current))
+                {
+                    break;
+                }
+
+                current = previous;
+                if (ContainsSourceTime(current, sourceTime))
+                {
+                    target = current;
+                    break;
+                }
+            }
+        }
+        else if (sourceTime > owner.SourceStart + owner.SourceDuration)
+        {
+            var current = owner;
+            for (int i = ownerIndex + 1; i < Segments.Count; i++)
+            {
+                if (Segments[i] is not VideoSegment next
+                    || !AreContiguousSourcePieces(current, next))
+                {
+                    break;
+                }
+
+                current = next;
+                if (ContainsSourceTime(current, sourceTime))
+                {
+                    target = current;
+                    break;
+                }
+            }
+        }
+
+        return MapWithin(target, sourceTime);
+    }
+
+    private static bool ContainsSourceTime(VideoSegment segment, TimeSpan sourceTime) =>
+        sourceTime >= segment.SourceStart
+        && sourceTime <= segment.SourceStart + segment.SourceDuration;
+
+    private static bool AreContiguousSourcePieces(VideoSegment left, VideoSegment right) =>
+        left.TrackIndex == right.TrackIndex
+        && string.Equals(left.VideoFilePath, right.VideoFilePath, StringComparison.OrdinalIgnoreCase)
+        && left.SourceStart + left.SourceDuration == right.SourceStart
+        && left.End == right.Start;
+
+    private static TimeSpan MapWithin(VideoSegment segment, TimeSpan sourceTime)
+    {
+        var localSource = sourceTime - segment.SourceStart;
+        double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
+        return segment.Start + TimeSpan.FromTicks((long)(localSource.Ticks / speed));
+    }
+
+    /// <summary>
     /// Inverse of <see cref="SourceToOutputTime"/>: maps an output-timeline time
     /// to the corresponding base-track source-video time. Returns null when the output time
     /// falls on a text slide (no underlying source frame); overlay segments are deliberately
@@ -706,6 +786,12 @@ public record ZoomKeyframe
     public TimeSpan PreDuration { get; init; } = TimeSpan.FromMilliseconds(1000);  // graceful anticipatory zoom-in
     public TimeSpan HoldDuration { get; init; } = TimeSpan.FromMilliseconds(1333); // settled dwell on the focal point
     public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(1556); // slow, elegant release back to full frame
+
+    /// <summary>
+    /// Per-shot multiplier for continuous camera drift. Automatic typing zooms lower this
+    /// while keeping drift enabled so the insertion caret retains a generous safety margin.
+    /// </summary>
+    public double DriftScale { get; init; } = 1.0;
 
     /// <summary>
     /// True for keyframes added by the user via the editor UI.

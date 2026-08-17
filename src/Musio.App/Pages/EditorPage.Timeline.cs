@@ -90,15 +90,16 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// True when the model already has at least one zoom keyframe tagged with
+    /// True when the model already has at least one click-generated zoom keyframe tagged with
     /// <paramref name="sourceVideoFilePath"/> (null means the primary recording).
     /// Shared by the primary and appended auto-zoom generation so both apply the
     /// same "generate once, then preserve" rule (see remarks on the primary call site
     /// in <see cref="InitializePreviewAsync"/> and on <see cref="GenerateAppendedZoomKeyframes"/>).
     /// </summary>
-    private bool ZoomKeyframesExistForSource(string? sourceVideoFilePath) =>
+    private bool AutoZoomKeyframesExistForSource(string? sourceVideoFilePath) =>
         ViewModel.Model.ZoomKeyframes.Any(k =>
-            string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
+            k.SourceClickTicks.HasValue
+            && string.Equals(k.SourceVideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Generates auto-zoom keyframes for an appended video segment from its click
@@ -109,7 +110,9 @@ public sealed partial class EditorPage
     /// "Record More" cycles and duplicate-path reloads — so this must NOT
     /// unconditionally replace existing keyframes for the file. Doing so previously wiped
     /// manual edits and resurrected auto-zooms the user deleted. Generate only when this
-    /// source has no keyframes yet, and skip any click tracked in SuppressedClickTicks.
+    /// source has no click-generated keyframes yet, and skip any click tracked in
+    /// SuppressedClickTicks. Other automatic/manual shots (such as typing-focus zooms) must
+    /// not suppress click generation for the same recording.
     /// </summary>
     private void GenerateAppendedZoomKeyframes(VideoSegment seg, MouseRecordingData? mouse)
     {
@@ -119,8 +122,8 @@ public sealed partial class EditorPage
         if (ProjectService.Instance.IsRestoredSource(seg.VideoFilePath))
             return;
 
-        if (ZoomKeyframesExistForSource(seg.VideoFilePath))
-            return; // already generated (or user-edited) for this source — preserve as-is
+        if (AutoZoomKeyframesExistForSource(seg.VideoFilePath))
+            return; // click zooms already generated for this source — preserve as-is
 
         if (mouse is null || mouse.Clicks.Count == 0 || mouse.TickFrequency <= 0) return;
 

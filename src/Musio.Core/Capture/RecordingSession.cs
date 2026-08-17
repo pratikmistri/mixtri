@@ -542,7 +542,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
         _screenEngine?.PauseCapture();
         _mouseRecorder?.PauseRecording();
-        _keyboardRecorder?.StopRecording(); // no pause support; stop recording
+        _keyboardRecorder?.PauseRecording();
         _audioEngine?.PauseRecording();
         _elapsedWatch.Stop();
 
@@ -559,7 +559,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         _elapsedWatch.Start();
         _screenEngine?.ResumeCapture();
         _mouseRecorder?.ResumeRecording();
-        _keyboardRecorder?.StartRecording(); // restart after pause-stop
+        _keyboardRecorder?.ResumeRecording();
         _audioEngine?.ResumeRecording();
 
         State = RecordingState.Recording;
@@ -959,11 +959,16 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         }
     }
 
-    private static void SaveKeyboardData(string filePath, List<KeyPressEvent> events)
+    private const int KeyboardDataMagic = unchecked((int)0xC44B424D);
+    private const int KeyboardDataVersion = 2;
+
+    internal static void SaveKeyboardData(string filePath, List<KeyPressEvent> events)
     {
         using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536);
         using var bw = new BinaryWriter(fs);
 
+        bw.Write(KeyboardDataMagic);
+        bw.Write(KeyboardDataVersion);
         bw.Write(events.Count);
         foreach (var evt in events)
         {
@@ -975,6 +980,16 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             bw.Write(evt.IsAlt);
             bw.Write(evt.IsShift);
             bw.Write(evt.IsWin);
+            bw.Write(evt.TextFocus.HasValue);
+            if (evt.TextFocus is { } focus)
+            {
+                bw.Write(focus.CaretX);
+                bw.Write(focus.CaretY);
+                bw.Write(focus.BoundsLeft);
+                bw.Write(focus.BoundsTop);
+                bw.Write(focus.BoundsRight);
+                bw.Write(focus.BoundsBottom);
+            }
         }
     }
 
@@ -983,19 +998,60 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
         using var br = new BinaryReader(fs);
 
-        int count = br.ReadInt32();
+        int header = br.ReadInt32();
+        bool hasTextFocus;
+        int count;
+        if (header == KeyboardDataMagic)
+        {
+            int version = br.ReadInt32();
+            if (version is < 1 or > KeyboardDataVersion)
+                throw new InvalidDataException($"Unsupported keyboard data version {version}.");
+
+            count = br.ReadInt32();
+            hasTextFocus = version >= 2;
+        }
+        else
+        {
+            count = header;
+            hasTextFocus = false;
+        }
+
+        if (count < 0)
+            throw new InvalidDataException($"Invalid keyboard event count {count}.");
+
         var events = new List<KeyPressEvent>(count);
         for (int i = 0; i < count; i++)
         {
+            long timestampTicks = br.ReadInt64();
+            int virtualKeyCode = br.ReadInt32();
+            string keyName = br.ReadString();
+            bool isDown = br.ReadBoolean();
+            bool isCtrl = br.ReadBoolean();
+            bool isAlt = br.ReadBoolean();
+            bool isShift = br.ReadBoolean();
+            bool isWin = br.ReadBoolean();
+            TextInputFocus? textFocus = null;
+            if (hasTextFocus && br.ReadBoolean())
+            {
+                textFocus = new TextInputFocus(
+                    br.ReadInt32(),
+                    br.ReadInt32(),
+                    br.ReadInt32(),
+                    br.ReadInt32(),
+                    br.ReadInt32(),
+                    br.ReadInt32());
+            }
+
             events.Add(new KeyPressEvent(
-                TimestampTicks: br.ReadInt64(),
-                VirtualKeyCode: br.ReadInt32(),
-                KeyName: br.ReadString(),
-                IsDown: br.ReadBoolean(),
-                IsCtrl: br.ReadBoolean(),
-                IsAlt: br.ReadBoolean(),
-                IsShift: br.ReadBoolean(),
-                IsWin: br.ReadBoolean()));
+                TimestampTicks: timestampTicks,
+                VirtualKeyCode: virtualKeyCode,
+                KeyName: keyName,
+                IsDown: isDown,
+                IsCtrl: isCtrl,
+                IsAlt: isAlt,
+                IsShift: isShift,
+                IsWin: isWin,
+                TextFocus: textFocus));
         }
         return events;
     }

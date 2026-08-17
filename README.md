@@ -11,6 +11,7 @@ Musio is a screen recorder and editor optimized to run natively on Windows. Reco
 - **Screen capture** — Record full screen, a single window, or a custom region at 30 or 60 fps
 - **Cinematic cursor effects** — Automatic zoom-to-click, smooth cursor trails, and highlight animations
 - **Timeline editor** — Trim, split, and adjust speed with a visual timeline and instant preview
+- **Automatic typing pace** — Sustained text-entry bursts are accelerated to 1.5×, muted, and framed with a subtle caret-focused zoom (or a broad click-position fallback for custom text controls)
 - **Segment transitions** — Configurable dissolve, wipe, slide, push, and stylized effects at any timeline cut
 - **Beautiful backgrounds** — Gradient, image, and wallpaper backgrounds behind your recording
 - **Webcam overlay** — Picture-in-picture webcam feed with shape and position controls

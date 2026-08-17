@@ -70,6 +70,35 @@ public sealed class AutoZoomEngineTests
     }
 
     [TestMethod]
+    public void GetZoomState_ManualShotPropagatesPerShotDriftScale()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(5.0, []),
+            1920,
+            1080,
+            TickFrequency);
+        engine.SetManualKeyframes(
+        [
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(1),
+                HoldDuration = TimeSpan.FromSeconds(2),
+                ZoomLevel = 1.75,
+                CenterX = 0.5,
+                CenterY = 0.5,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                DriftScale = 0.35,
+            },
+        ]);
+
+        var state = engine.GetZoomState(1.5);
+
+        Assert.AreEqual(0.35f, state.DriftScale, 0.001f);
+    }
+
+    [TestMethod]
     public void GetZoomState_AfterEaseOut_ReturnsNoZoom()
     {
         var config = new AutoZoomConfig
