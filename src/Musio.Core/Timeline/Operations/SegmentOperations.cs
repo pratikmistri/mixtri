@@ -983,9 +983,8 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
         if (_index < 0) return NothingToDo();
         if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
 
-        double newSpeed = ClampSpeed(_requestedSpeed);
+        double requestedSpeed = ClampSpeed(_requestedSpeed);
         double oldSpeed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
-        if (Math.Abs(newSpeed - oldSpeed) < SpeedEpsilon) return NothingToDo();
 
         // SourceDuration is the authoritative amount of footage the segment plays. Older
         // projects (and any segment built without it) can carry zero, in which case the
@@ -994,9 +993,10 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
             ? video.SourceDuration
             : TimeSpan.FromTicks((long)(video.Duration.Ticks * oldSpeed));
 
+        double newSpeed = CapSpeedToMinDuration(requestedSpeed, sourceDuration);
+        if (Math.Abs(newSpeed - oldSpeed) < SpeedEpsilon) return NothingToDo();
+
         var newDuration = TimeSpan.FromTicks((long)(sourceDuration.Ticks / newSpeed));
-        if (newDuration < TrimSegmentEdgeOperation.MinDuration)
-            newDuration = TrimSegmentEdgeOperation.MinDuration;
 
         _previous = video;
         model.Segments[_index] = video with
@@ -1007,6 +1007,34 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
         };
 
         return true;
+    }
+
+    /// <summary>
+    /// Lowers <paramref name="speed"/> as far as it takes for <paramref name="sourceDuration"/>
+    /// of footage to still occupy <see cref="TrimSegmentEdgeOperation.MinDuration"/> of output.
+    /// </summary>
+    /// <remarks>
+    /// The degenerate-segment guard has to move the SPEED, not the duration. Clamping
+    /// <see cref="TimelineSegment.Duration"/> up while leaving <see cref="VideoSegment.SpeedFactor"/>
+    /// and <see cref="VideoSegment.SourceDuration"/> alone silently breaks the
+    /// <c>SourceDuration = Duration × SpeedFactor</c> invariant that every other segment
+    /// operation computes with — <see cref="SplitSegmentAtTimeOperation"/> derives the split
+    /// offset as <c>Duration × SpeedFactor</c> and subtracts it from <c>SourceDuration</c>,
+    /// so a clamped segment could produce a NEGATIVE second half.
+    /// <para>
+    /// When the footage is so short that even <see cref="MinSpeed"/> cannot stretch it to
+    /// <c>MinDuration</c>, the speed floor wins and the segment stays shorter than the
+    /// minimum: such a segment was already degenerate before this edit, and keeping the
+    /// invariant intact matters more than the floor.
+    /// </para>
+    /// </remarks>
+    private static double CapSpeedToMinDuration(double speed, TimeSpan sourceDuration)
+    {
+        long minTicks = TrimSegmentEdgeOperation.MinDuration.Ticks;
+        if (sourceDuration.Ticks <= 0 || speed <= 0) return speed;
+        if (sourceDuration.Ticks / speed >= minTicks) return speed;
+
+        return ClampSpeed((double)sourceDuration.Ticks / minTicks);
     }
 
     private static double ClampSpeed(double speed) =>

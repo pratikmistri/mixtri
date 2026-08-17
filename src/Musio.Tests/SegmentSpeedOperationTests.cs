@@ -157,15 +157,63 @@ public sealed class SegmentSpeedOperationTests
     }
 
     [TestMethod]
-    public void ChangeSpeed_ExtremeSpeedOnShortSegment_ClampsToMinimumDuration()
+    public void ChangeSpeed_ExtremeSpeedOnShortSegment_CapsSpeedAndKeepsInvariant()
     {
-        // 0.2s of footage at 10x would be 20ms — below the degenerate-segment floor.
+        // 0.2s of footage at 10x would be a 20ms segment — below the degenerate floor.
+        // The SPEED is capped (0.2s / 0.1s = 2x) rather than the duration clamped, because
+        // clamping the duration alone would leave SourceDuration != Duration x SpeedFactor.
         var a = Video(0, 0.2);
         var model = ModelWith(a);
 
         new ChangeSegmentSpeedOperation(a.Id, 10.0).Execute(model);
 
-        Assert.AreEqual(TrimSegmentEdgeOperation.MinDuration, model.Segments[0].Duration);
+        var seg = (VideoSegment)model.Segments[0];
+        Assert.AreEqual(TrimSegmentEdgeOperation.MinDuration, seg.Duration);
+        Assert.AreEqual(2.0, seg.SpeedFactor, 0.001, "Speed capped to what fits the minimum duration");
+        Assert.AreEqual(TimeSpan.FromSeconds(0.2), seg.SourceDuration, "All footage is kept");
+        Assert.AreEqual(
+            seg.SourceDuration.Ticks,
+            (long)(seg.Duration.Ticks * seg.SpeedFactor),
+            "SourceDuration = Duration x SpeedFactor");
+    }
+
+    [TestMethod]
+    public void ChangeSpeed_CappedSegment_StillSplitsIntoNonNegativeHalves()
+    {
+        // Regression: when the speed edit clamped Duration instead of the speed, the segment
+        // was left claiming more source than it had, and splitting it produced a second half
+        // with a NEGATIVE SourceDuration.
+        var a = Video(0, 0.2);
+        var model = ModelWith(a);
+
+        new ChangeSegmentSpeedOperation(a.Id, 10.0).Execute(model);
+        new SplitSegmentAtTimeOperation(TimeSpan.FromMilliseconds(50)).Execute(model);
+
+        Assert.AreEqual(2, model.Segments.Count);
+        foreach (var seg in model.Segments.Cast<VideoSegment>())
+        {
+            Assert.IsTrue(seg.SourceDuration > TimeSpan.Zero, $"Half has {seg.SourceDuration} of source");
+            Assert.IsTrue(seg.Duration > TimeSpan.Zero, $"Half has {seg.Duration} of output");
+        }
+        Assert.AreEqual(
+            TimeSpan.FromSeconds(0.2),
+            model.Segments.Cast<VideoSegment>().Aggregate(TimeSpan.Zero, (sum, s) => sum + s.SourceDuration),
+            "The halves account for exactly the original footage");
+    }
+
+    [TestMethod]
+    public void ChangeSpeed_AlreadyAtItsCappedSpeed_IsNoOp()
+    {
+        // A segment sitting at the floor cannot go faster, so asking for more is not an edit.
+        var a = Video(0, 0.2);
+        var model = ModelWith(a);
+        new ChangeSegmentSpeedOperation(a.Id, 10.0).Execute(model);
+
+        var op = new ChangeSegmentSpeedOperation(model.Segments[0].Id, 4.0);
+        op.Execute(model);
+
+        Assert.IsFalse(op.ChangedModel, "Re-capping to the same speed must not push an undo entry");
+        Assert.AreEqual(2.0, ((VideoSegment)model.Segments[0]).SpeedFactor, 0.001);
     }
 
     [TestMethod]
