@@ -2490,3 +2490,12 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: generated slice IDs are now allocated once and reused on redo, so later operations and selection state keep resolving the same segments. The planner summary now documents the recent-click/nearest-pointer fallback for controls without native caret metadata.
 - **What didn't work**: allocating IDs inside each `ExecuteCore` run made redo identity unstable; the original XML summary described the pre-fallback behavior.
 - **Verified**: focused tests **12 passed**; full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` ARM64 Debug build completed with 0 errors.
+
+## GIF export reachability and sizing
+
+- **Feature/area**: editor Export flyout (`EditorPage.xaml` / `EditorPage.Shortcuts.cs`) and `ExportEngine.ExportGifAsync`.
+- **Approaches tried**: traced the Export button end-to-end before changing anything, to find out whether GIF was missing from Core or only from the UI.
+- **What worked**: GIF was already fully implemented (`GifEncoder`, `ExportEngine` GIF branch, `VideoFormat.GIF`, `ExportViewModel.IsFormatGIF`) — the only gap was that `ExportFlyout_Opened` kicked off an MP4 export the instant the flyout opened, so no format could ever be selected. Added an options panel (MP4 / Animated GIF radio buttons + explicit "Start export" button) as a new first state alongside exporting/exported/error, and moved the preview-pause + `CanExecute` guard into the start handler. Also made the GIF path honour the selected resolution by scaling composed frames through `AspectRatioHelper.ComputeExportDimensions`.
+- **What didn't work**: the pre-existing `ExportViewModel` format radio properties were dead code — no XAML anywhere bound to `IsFormatMP4`/`IsFormatGIF`/`IsFormatWebM`, so a ViewModel-only implementation is not evidence a feature is reachable. `ExportGifAsync` also silently ignored `settings.Resolution`, writing GIFs at the compositor's native size (multi-GB for 2K/4K sources).
+- **Notes**: per the WinUI flyout playbook, radio defaults are applied in `SyncExportOptionsToViewModel()` under `_suppressExportFormatSync`, never as XAML `IsChecked`. `dotnet test` still hits the PriGen MSB4062 error; MSBuild-build the test project first, then `dotnet test --no-build -p:Platform=x64`.
+- **Verified**: full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` x64 Debug build EXIT=0.

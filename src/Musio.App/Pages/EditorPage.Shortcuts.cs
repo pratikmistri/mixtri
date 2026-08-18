@@ -26,6 +26,11 @@ namespace Musio_App.Pages;
 
 public sealed partial class EditorPage
 {
+    /// <summary>
+    /// Guards the export format radio buttons while their state is being pushed from
+    /// the view model, so the resulting Checked events don't write back.
+    /// </summary>
+    private bool _suppressExportFormatSync;
 
     private void UndoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
@@ -231,7 +236,7 @@ public sealed partial class EditorPage
 
     // --- Export flyout ---
 
-    private async void ExportFlyout_Opened(object? sender, object e)
+    private void ExportFlyout_Opened(object? sender, object e)
     {
         if (ExportVM.IsExporting)
         {
@@ -251,6 +256,62 @@ public sealed partial class EditorPage
             return;
         }
 
+        // Show the format options first. The export used to start the moment the
+        // flyout opened, which is why GIF — fully supported by ExportEngine — was
+        // unreachable: there was no point at which a format could be chosen.
+        ExportVM.PrepareForExport();
+        SyncExportOptionsToViewModel();
+        ShowExportOptionsState();
+    }
+
+    /// <summary>
+    /// Pushes the view model's current format onto the option controls. Defaults live
+    /// here rather than in XAML: an IsChecked set in markup fires Checked during
+    /// InitializeComponent, before the suppress flag and x:Name fields exist.
+    /// </summary>
+    private void SyncExportOptionsToViewModel()
+    {
+        if (ExportFormatMp4Radio is null || ExportFormatGifRadio is null) return;
+
+        _suppressExportFormatSync = true;
+        try
+        {
+            ExportFormatMp4Radio.IsChecked = ExportVM.SelectedFormat == VideoFormat.MP4;
+            ExportFormatGifRadio.IsChecked = ExportVM.SelectedFormat == VideoFormat.GIF;
+        }
+        finally
+        {
+            _suppressExportFormatSync = false;
+        }
+
+        UpdateExportFormatHint();
+    }
+
+    private void ExportFormat_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressExportFormatSync) return;
+        if (ExportFormatGifRadio is null) return;
+
+        ExportVM.SelectedFormat = ExportFormatGifRadio.IsChecked == true
+            ? VideoFormat.GIF
+            : VideoFormat.MP4;
+
+        UpdateExportFormatHint();
+    }
+
+    private void UpdateExportFormatHint()
+    {
+        if (ExportGifHintText is null) return;
+
+        ExportGifHintText.Visibility = ExportVM.SelectedFormat == VideoFormat.GIF
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private async void StartExport_Click(object sender, RoutedEventArgs e)
+    {
+        if (ExportVM.IsExporting) return;
+
         // Pause preview playback before export. The export pipeline composites
         // frames on the shared Win2D device; running it concurrently with the
         // preview's per-frame composition can corrupt output frames and crash
@@ -260,8 +321,6 @@ public sealed partial class EditorPage
         try { _insertedAudioPlayer?.Pause(); } catch { /* best-effort */ }
         try { _stretchedAudioPlayer?.Pause(); } catch { /* best-effort */ }
 
-        // Start new export
-        ExportVM.PrepareForExport();
         if (!ExportVM.ExportCommand.CanExecute(null))
         {
             ExportFlyout.Hide();
@@ -285,7 +344,7 @@ public sealed partial class EditorPage
         if (ExportVM.IsExporting) return;
         if (!ExportVM.ExportSucceeded && !ExportVM.ExportFailed) return;
         ExportVM.PrepareForExport();
-        ShowExportingState();
+        ShowExportOptionsState();
     }
 
     private void ExportVM_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -304,8 +363,17 @@ public sealed partial class EditorPage
         }
     }
 
+    private void ShowExportOptionsState()
+    {
+        ExportOptionsPanel.Visibility = Visibility.Visible;
+        ExportingPanel.Visibility = Visibility.Collapsed;
+        ExportedPanel.Visibility = Visibility.Collapsed;
+        ExportErrorPanel.Visibility = Visibility.Collapsed;
+    }
+
     private void ShowExportingState()
     {
+        ExportOptionsPanel.Visibility = Visibility.Collapsed;
         ExportingPanel.Visibility = Visibility.Visible;
         ExportedPanel.Visibility = Visibility.Collapsed;
         ExportErrorPanel.Visibility = Visibility.Collapsed;
@@ -313,6 +381,7 @@ public sealed partial class EditorPage
 
     private void ShowExportedState()
     {
+        ExportOptionsPanel.Visibility = Visibility.Collapsed;
         ExportingPanel.Visibility = Visibility.Collapsed;
         ExportedPanel.Visibility = Visibility.Visible;
         ExportErrorPanel.Visibility = Visibility.Collapsed;
@@ -320,6 +389,7 @@ public sealed partial class EditorPage
 
     private void ShowErrorState()
     {
+        ExportOptionsPanel.Visibility = Visibility.Collapsed;
         ExportingPanel.Visibility = Visibility.Collapsed;
         ExportedPanel.Visibility = Visibility.Collapsed;
         ExportErrorPanel.Visibility = Visibility.Visible;
@@ -340,7 +410,7 @@ public sealed partial class EditorPage
         ExportFlyout.Hide();
         // Reset state so next open starts a fresh export
         ExportVM.PrepareForExport();
-        ShowExportingState();
+        ShowExportOptionsState();
     }
 
     private void AddTextSlide_Click(object sender, RoutedEventArgs e)
