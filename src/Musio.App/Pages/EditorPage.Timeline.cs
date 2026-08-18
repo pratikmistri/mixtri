@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -510,6 +511,11 @@ public sealed partial class EditorPage
 
             UpdateZoomPanelVisibility();
 
+            // Same reasoning as the transition resync above: undo/redo does not change the
+            // zoom selection, so nothing else pushes the reverted keyframe back onto the zoom
+            // pane's toggle/sliders. See SyncZoomUI for why a stale pane is worse than cosmetic.
+            SyncZoomUI(Timeline.SelectedZoomKeyframeId);
+
             // Undo/redo mutates the model directly, so the inserted-audio preview engine and
             // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
             // rebuilt too, or Ctrl+Z after an audio edit would keep playing (and drawing) the
@@ -980,31 +986,68 @@ public sealed partial class EditorPage
 
         UpdateZoomPanelVisibility();
 
-        if (segmentId is not null)
+        if (SyncZoomUI(segmentId))
         {
-            var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == segmentId);
-            if (kf is not null)
-            {
-                _suppressZoomPropertyUpdate = true;
+            // Reveal the zoom pane so its properties are immediately editable on
+            // selection — mirrors SyncTransitionUI / ShowTextSlidePanel. Deliberately kept
+            // OUT of SyncZoomUI: the undo/redo resync reuses that helper, and revealing the
+            // pane from there would let Ctrl+Z steal the panel the user is currently on.
+            PropertiesPanel?.ShowPane(PropertyPaneKind.Zoom);
+        }
+    }
 
+    /// <summary>
+    /// Pushes the zoom keyframe identified by <paramref name="segmentId"/> onto the zoom pane's
+    /// controls, returning whether it resolved to a real keyframe.
+    /// </summary>
+    /// <remarks>
+    /// Purely reads model state onto the controls under <see cref="_suppressZoomPropertyUpdate"/>
+    /// and must never call <c>UndoRedoManager.Execute</c> — mirrors <see cref="SyncTransitionUI"/>.
+    /// <para>
+    /// It is called on selection AND from <see cref="OnUndoRedoStateChanged"/>, and the latter is
+    /// load-bearing: undo/redo leaves <c>SelectedZoomKeyframeId</c> untouched (it only clears the
+    /// selection when the keyframe was removed), so nothing else ever re-fires this sync. Without
+    /// it, Ctrl+Z after a drift or zoom-level edit reverts the model while the toggle/sliders keep
+    /// showing the value that was just undone — and because
+    /// <see cref="CommitZoomDriftSettings"/> and the zoom-level commits read straight off the live
+    /// controls, the user's NEXT edit would silently re-commit that stale value for whichever field
+    /// they didn't touch.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="segmentId"/> deliberately leaves the controls alone rather than
+    /// resetting them: with no selection the zoom slider is holding the level the next drawn
+    /// segment will be created at (see <c>OnZoomSegmentCreated</c>).
+    /// </para>
+    /// </remarks>
+    private bool SyncZoomUI(string? segmentId)
+    {
+        if (segmentId is null) return false;
+
+        // The ZoomLevelSlider/ZoomDriftToggle/ZoomDriftSlider proxies dereference
+        // PropertiesPanel.Zoom, and this now runs from OnUndoRedoStateChanged — which can
+        // fire before the pane's controls exist.
+        if (PropertiesPanel?.Zoom is null) return false;
+
+        var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == segmentId);
+        if (kf is null) return false;
+
+        using (SuppressScope.Enter(ref _suppressZoomPropertyUpdate))
+        {
+            if (ZoomLevelSlider is not null)
                 ZoomLevelSlider.Value = Math.Clamp(kf.ZoomLevel, MinZoomLevel, MaxZoomLevel);
-                UpdateZoomLevelReadout(kf.ZoomLevel);
 
-                if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
-                {
-                    var drift = kf.EffectiveDrift;
-                    ZoomDriftToggle.IsOn = drift.Enabled;
-                    ZoomDriftSlider.Value = drift.Strength * 50.0;
-                    ZoomDriftSlider.IsEnabled = drift.Enabled;
-                }
-
-                _suppressZoomPropertyUpdate = false;
-
-                // Reveal the zoom pane so its properties are immediately editable on
-                // selection — mirrors SyncTransitionUI / ShowTextSlidePanel.
-                PropertiesPanel?.ShowPane(PropertyPaneKind.Zoom);
+            if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
+            {
+                var drift = kf.EffectiveDrift;
+                ZoomDriftToggle.IsOn = drift.Enabled;
+                ZoomDriftSlider.Value = drift.Strength * 50.0;
+                ZoomDriftSlider.IsEnabled = drift.Enabled;
             }
         }
+
+        // The slider assignment above is suppressed, so ValueChanged never runs the readout.
+        UpdateZoomLevelReadout(kf.ZoomLevel);
+        return true;
     }
 
     private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e) =>
