@@ -2490,3 +2490,38 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: generated slice IDs are now allocated once and reused on redo, so later operations and selection state keep resolving the same segments. The planner summary now documents the recent-click/nearest-pointer fallback for controls without native caret metadata.
 - **What didn't work**: allocating IDs inside each `ExecuteCore` run made redo identity unstable; the original XML summary described the pre-fallback behavior.
 - **Verified**: focused tests **12 passed**; full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` ARM64 Debug build completed with 0 errors.
+
+## GIF export reachability and sizing
+
+- **Feature/area**: editor Export flyout (`EditorPage.xaml` / `EditorPage.Shortcuts.cs`) and `ExportEngine.ExportGifAsync`.
+- **Approaches tried**: traced the Export button end-to-end before changing anything, to find out whether GIF was missing from Core or only from the UI.
+- **What worked**: GIF was already fully implemented (`GifEncoder`, `ExportEngine` GIF branch, `VideoFormat.GIF`, `ExportViewModel.IsFormatGIF`) — the only gap was that `ExportFlyout_Opened` kicked off an MP4 export the instant the flyout opened, so no format could ever be selected. Added an options panel (MP4 / Animated GIF radio buttons + explicit "Start export" button) as a new first state alongside exporting/exported/error, and moved the preview-pause + `CanExecute` guard into the start handler. Also made the GIF path honour the selected resolution by scaling composed frames through `AspectRatioHelper.ComputeExportDimensions`.
+- **What didn't work**: the pre-existing `ExportViewModel` format radio properties were dead code — no XAML anywhere bound to `IsFormatMP4`/`IsFormatGIF`/`IsFormatWebM`, so a ViewModel-only implementation is not evidence a feature is reachable. `ExportGifAsync` also silently ignored `settings.Resolution`, writing GIFs at the compositor's native size (multi-GB for 2K/4K sources).
+- **Notes**: per the WinUI flyout playbook, radio defaults are applied in `SyncExportOptionsToViewModel()` under `_suppressExportFormatSync`, never as XAML `IsChecked`. `dotnet test` still hits the PriGen MSB4062 error; MSBuild-build the test project first, then `dotnet test --no-build -p:Platform=x64`.
+- **Verified**: full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` x64 Debug build EXIT=0.
+
+## GIF export slowness: measurement and warning
+
+- **Feature/area**: `GifEncoder` / `ExportEngine` GIF path and the export flyout's GIF option.
+- **Approaches tried**: benchmarked the WIC GIF encoder directly (temporary MSTest harness, 30 frames per size) instead of guessing at hot spots; separately timed a variant with the per-frame `/grctlext/Delay` property call removed.
+- **What worked**: establishing that GIF cost is *entirely* resolution x frame-count. Measured on ARM64: **~14 ms/frame at 480x270, ~46 ms at 960x540, ~58 ms at 640x360, ~390 ms at 1920x1080** — so a 60s/30fps 1080p GIF is ~12 minutes of encoding alone. Added `GifExportEstimator` (~150 ms per megapixel per frame, the conservative middle of the measured 90-190 range) so the flyout warns up front with a concrete estimate, and surfaced `ProgressStatus` (time remaining) in the exporting panel.
+- **What didn't work**: removing the per-frame `SetPropertiesAsync` delay call is NOT an optimization — 386 ms vs 406 ms/frame at 1080p is within noise. There is no cheaper WIC encoder configuration; palette quantization dominates. Do not re-attempt micro-optimizing the encoder loop.
+- **Decision**: the user chose to keep honouring the selected export resolution and fps and warn, rather than silently capping GIF at 480p/15fps. Lowering the export resolution is the documented remedy.
+- **Verified**: full suite **1251 passed, 0 failed, 3 skipped** (1254 total); `Musio.App` ARM64 Debug EXIT=0; app re-registered and launched.
+
+## GIF export code review fixes
+
+- **Feature/area**: `GifExportEstimator`, `ExportEngine.ComposeGifFrameAsync`, export flyout state machine, `AspectRatioHelper`/`FrameCompositor` canvas sizing.
+- **Approaches tried**: ran the code-review agent over the full `fix/gif-export` branch diff, then fixed all three findings.
+- **What worked**: (1) The estimate was predicting from `CurrentProject.Width/Height/Duration`, but the exporter sizes from `SegmentFrameComposer.OutputWidth/Height` (aspect-ratio adjusted) and counts frames from `TimelineMapper.TotalOutputFrames` (post-trim). Extracted the compositor's step-1 canvas rule into `AspectRatioHelper.ComputeCanvasSize` and had BOTH `FrameCompositor.ComputeContentDimensions` and the estimator call it, so they cannot drift; added `ResolveExportedDuration` to prefer `TimelineModel.TotalSegmentsDuration`. (2) Tracked the scaled render target in a nullable local so a mid-draw throw disposes it. (3) The cancel path's queued `ExportFlyout.Hide()` now only fires if the exporting panel is still visible.
+- **What didn't work**: predicting export output size from the raw project dimensions is wrong for every non-Auto aspect ratio — a 1920x1080 source at 9:16 composites to 608x1080, roughly a 3x error in the quoted time. Anything that needs to predict export output size must go through the compositor's own canvas rule, not the project dimensions.
+- **Verified**: full suite **1255 passed, 0 failed, 3 skipped** (1258 total) — including the existing compositor tests, which is the check that mattered for the `FrameCompositor` extraction; `Musio.App` ARM64 Debug EXIT=0; app re-registered and launched.
+
+## CI flake: test host crash from a late Progress callback
+
+- **Feature/area**: `VideoImportServiceTests.Import_CancelledMidTranscode_CleansUpItsImportFolder` (surfaced on PR #96, unrelated to that PR's changes).
+- **Approaches tried**: read the failing CI log rather than assuming the new code was at fault; confirmed the file was untouched by the branch (`git diff master...HEAD` on it is empty) and that prior runs were green.
+- **What worked**: the test PASSED and the host then crashed. `Progress<T>` marshals its callback to the thread pool, so a report can still be in flight after the test body returns and `using var cts` disposes the source; the late `cts.Cancel()` threw `ObjectDisposedException` on a thread-pool thread, which is unhandled and aborts the ENTIRE run (it died at 1129 tests with "Total tests: Unknown" / "Test Run Aborted"). Fixed by cancelling once via `Interlocked.Exchange` and catching `ObjectDisposedException`.
+- **What didn't work**: trusting a green local run — this is timing-dependent and only reproduced on the CI runner; 5 repeat local runs of the test could not reproduce it either way, so the fix is reasoned from the stack trace, not from a local repro.
+- **General rule**: in tests, never call `cts.Cancel()` from inside a `Progress<T>` handler without guarding for disposal — an unhandled exception on a thread-pool thread takes down the whole test host, and the aborted run looks like an unrelated mass failure. `Assert` failures inside such a callback have the same hazard.
+- **Verified**: full suite in **Release** (the configuration CI uses) **1255 passed, 0 failed, 3 skipped**; the previously crashing test run 5x consecutively, green each time.

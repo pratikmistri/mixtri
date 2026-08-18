@@ -189,6 +189,13 @@ public class VideoImportServiceTests
 
         // Progress crosses into the transcode band (0.08..0.85) only after the folder exists,
         // so when we see a transcode-phase value we can both capture the live folder and cancel.
+        //
+        // Progress<T> marshals its callback onto the thread pool, so a report can still be
+        // in flight after the test body has finished and `using` has disposed the source.
+        // Calling Cancel() on it then throws ObjectDisposedException on a thread-pool thread,
+        // which is unhandled and takes down the whole test host mid-run (the test itself
+        // having already passed). Cancel once, and tolerate losing the race with disposal.
+        int cancelRequested = 0;
         var progress = new Progress<double>(p =>
         {
             if (p < 0.12) return;
@@ -198,7 +205,17 @@ public class VideoImportServiceTests
                     .EnumerateDirectories(_root, SessionPaths.ImportFolderPrefix + "*")
                     .FirstOrDefault();
             }
-            cts.Cancel();
+
+            if (Interlocked.Exchange(ref cancelRequested, 1) != 0) return;
+
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The import already finished and the test tore the source down.
+            }
         });
 
         Exception? caught = null;
