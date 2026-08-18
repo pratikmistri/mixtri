@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Text.Json.Serialization;
 using Microsoft.Graphics.Canvas;
 using Musio.Core.AI;
 using Musio.Core.Capture;
@@ -19,8 +20,14 @@ public record CompositionConfig
     /// <summary>Shutter-based camera motion blur for cursor, zoom, and pan movement.</summary>
     public MotionBlurSettings MotionBlur { get; init; } = new();
 
-    /// <summary>Continuous subtle zoom/pan motion applied while a zoom segment is active.</summary>
-    public CameraDriftSettings CameraDrift { get; init; } = new();
+    /// <summary>
+    /// Scene-level camera drift as saved by projects from before drift became a per-zoom-segment
+    /// property. Read ONLY by project load, which copies it onto the project's zoom keyframes and
+    /// then clears it; the renderer never reads it. See ZoomKeyframe.Drift.
+    /// </summary>
+    [JsonPropertyName("CameraDrift")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CameraDriftSettings? LegacyCameraDrift { get; init; }
 
     public SmoothingAlgorithm SmoothingAlgorithm { get; init; } = SmoothingAlgorithm.ZeroPhaseSpring;
     public SmoothingStrength SmoothingStrength { get; init; } = SmoothingStrength.Smooth;
@@ -772,6 +779,7 @@ public class FrameCompositor : IDisposable
             recentred.SegmentHeadingX = zoomState.SegmentHeadingX;
             recentred.SegmentHeadingY = zoomState.SegmentHeadingY;
             recentred.DriftScale = zoomState.DriftScale;
+            recentred.DriftSettings = zoomState.DriftSettings;
             recentred.CursorFollowWeight = zoomState.CursorFollowWeight;
             zoomState = recentred;
         }
@@ -788,7 +796,8 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private ZoomState ApplyCameraDrift(ZoomState zoomState)
     {
-        if (!_config.CameraDrift.Enabled || zoomState.ZoomLevel <= 1f || !zoomState.HasSegment)
+        var settings = zoomState.DriftSettings ?? CameraDriftSettings.Default;
+        if (!settings.Enabled || zoomState.ZoomLevel <= 1f || !zoomState.HasSegment)
             return zoomState;
 
         var vp = _zoomEngine.ComputeViewportForCenter(
@@ -801,7 +810,7 @@ public class FrameCompositor : IDisposable
         float slackY = Math.Max(0f, Math.Min(vp.ViewportY, _sourceHeight - vp.ViewportY - vp.ViewportHeight));
 
         var drift = Musio.Core.Processing.CameraDrift.Evaluate(
-            _config.CameraDrift, zoomState.SegmentProgress, zoomState.ZoomLevel,
+            settings, zoomState.SegmentProgress, zoomState.ZoomLevel,
             vp.ViewportWidth, vp.ViewportHeight, slackX, slackY, zoomState.SegmentHeadingX, zoomState.SegmentHeadingY);
         if (!drift.IsActive) return zoomState;
 
@@ -824,6 +833,7 @@ public class FrameCompositor : IDisposable
         drifted.SegmentHeadingX = zoomState.SegmentHeadingX;
         drifted.SegmentHeadingY = zoomState.SegmentHeadingY;
         drifted.DriftScale = zoomState.DriftScale;
+        drifted.DriftSettings = zoomState.DriftSettings;
         drifted.CursorFollowWeight = zoomState.CursorFollowWeight;
         return drifted;
     }

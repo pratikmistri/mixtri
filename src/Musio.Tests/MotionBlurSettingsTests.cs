@@ -212,5 +212,20 @@ public sealed class MotionBlurSettingsTests
         Assert.IsTrue(settings.PanSweepCycles is > 0f and <= 0.5f);
     }
 
+    [TestMethod]
+    public void Default_MatchesAFreshInstanceFieldForField()
+    {
+        // This is the invariant that makes "a project saved before drift became a
+        // per-zoom-segment property renders identically after the move" true: every
+        // keyframe from such a project has Drift == null, which resolves through
+        // EffectiveDrift to this shared Default — so Default must never drift from
+        // the plain no-args constructor's tuned values.
+        var expected = new CameraDriftSettings();
+
+        Assert.AreEqual(expected, CameraDriftSettings.Default);
+        Assert.AreSame(CameraDriftSettings.Default, CameraDriftSettings.Default,
+            "Default should be a single shared static instance, not reallocated per access");
+    }
+
     #endregion
 }

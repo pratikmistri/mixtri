@@ -249,6 +249,8 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly double? _newCenterX;
     private readonly double? _newCenterY;
     private readonly bool? _newHasAuthoredCenter;
+    private readonly bool _driftProvided;
+    private readonly Musio.Core.Processing.CameraDriftSettings? _newDrift;
     private ZoomKeyframe? _previousKeyframe;
 
     private bool _changed = true;
@@ -264,15 +266,24 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     /// framing back to the live cursor. Leave null to apply the normal rule, where supplying a
     /// centre pins the framing and anything else preserves it.
     /// </param>
+    /// <param name="drift">
+    /// New per-segment drift settings, or <c>null</c> to clear the override back to the built-in
+    /// defaults. Leave <paramref name="driftProvided"/> <c>false</c> (the default) to leave the
+    /// keyframe's drift untouched — <c>null</c> is itself a meaningful value here (clear override),
+    /// so a separate flag is needed to distinguish "not editing drift" from "editing it to null".
+    /// </param>
     public UpdateZoomSegmentPropertiesOperation(string keyframeId,
         double? zoomLevel = null, double? centerX = null, double? centerY = null,
-        bool? hasAuthoredCenter = null)
+        bool? hasAuthoredCenter = null,
+        Musio.Core.Processing.CameraDriftSettings? drift = null, bool driftProvided = false)
     {
         _keyframeId = keyframeId;
         _newZoomLevel = zoomLevel;
         _newCenterX = centerX;
         _newCenterY = centerY;
         _newHasAuthoredCenter = hasAuthoredCenter;
+        _newDrift = drift;
+        _driftProvided = driftProvided;
     }
 
     public void Execute(TimelineModel model)
@@ -299,6 +310,7 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             // the effective value rather than the raw one).
             HasAuthoredCenter = _newHasAuthoredCenter
                 ?? ((_newCenterX is not null || _newCenterY is not null) || kf.UsesAuthoredCenter),
+            Drift = _driftProvided ? _newDrift : kf.Drift,
         };
     }
 

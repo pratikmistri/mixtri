@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Musio.Core.Audio;
 using Musio.Core.Models;
+using Musio.Core.Processing;
 
 namespace Musio.Core.Timeline;
 
@@ -792,6 +793,16 @@ public record ZoomKeyframe
     /// while keeping drift enabled so the insertion caret retains a generous safety margin.
     /// </summary>
     public double DriftScale { get; init; } = 1.0;
+
+    /// <summary>
+    /// Camera drift for THIS zoom segment. Null means the built-in defaults, which is what
+    /// every keyframe created before drift became per-segment carries.
+    /// </summary>
+    public CameraDriftSettings? Drift { get; init; }
+
+    /// <summary>Resolved drift settings for this segment (never null).</summary>
+    [JsonIgnore]
+    public CameraDriftSettings EffectiveDrift => Drift ?? CameraDriftSettings.Default;
 
     /// <summary>
     /// True for keyframes added by the user via the editor UI.

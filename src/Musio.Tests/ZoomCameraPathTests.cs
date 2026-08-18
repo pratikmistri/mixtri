@@ -712,4 +712,46 @@ public sealed class ZoomCameraPathTests
         Assert.IsTrue(minHandoffDriftScale < 0.30f,
             $"Drift should yield to a deliberate handoff move during the transition; minimum was {minHandoffDriftScale:F3}.");
     }
+
+    [TestMethod]
+    public void SingleShot_DriftSettingsAreForwardedOntoEverySample()
+    {
+        // A lone shot (no handoff) must forward its own per-segment Drift onto the
+        // resolved sample through the ramp-in, hold, and release pieces alike.
+        var drift = new CameraDriftSettings { Enabled = false, Strength = 2f };
+        var shot = new ZoomShot(0.0, 1.0, 2.0, 3.0, 2.0f, 200, 200, 1, Drift: drift);
+        var path = ZoomCameraPath.Build([shot]);
+
+        Assert.AreEqual(drift, Sample(path, 0.5).Drift, "ramp-in piece should carry the shot's Drift");
+        Assert.AreEqual(drift, Sample(path, 1.5).Drift, "hold piece should carry the shot's Drift");
+        Assert.AreEqual(drift, Sample(path, 2.5).Drift, "release piece should carry the shot's Drift");
+    }
+
+    [TestMethod]
+    public void Transition_DominantShotsDriftSettingsResolveOnEachSideOfTheHandoff()
+    {
+        // The headline per-segment behaviour for a handoff: CameraDriftSettings is a
+        // reference-typed record and cannot be lerped, so ZoomCameraPath resolves the
+        // DOMINANT shot's settings instead of blending them. This pins that the outgoing
+        // shot's settings apply just after the handoff starts and the incoming shot's
+        // settings apply just before it ends.
+        var fromDrift = new CameraDriftSettings { Enabled = true, Strength = 1f };
+        var toDrift = new CameraDriftSettings { Enabled = false };
+        var path = ZoomCameraPath.Build(
+        [
+            new ZoomShot(0.0, 1.0, 2.0, 3.0, 2.0f, 200, 200, 1, Drift: fromDrift),
+            new ZoomShot(1.9, 2.5, 3.5, 4.5, 2.0f, 1800, 900, 2, Drift: toDrift),
+        ]);
+
+        double handoffStart = path.Shots[0].HoldEnd;
+        double handoffEnd = path.Shots[1].HoldStart;
+
+        var justAfterStart = Sample(path, handoffStart + 0.001);
+        var justBeforeEnd = Sample(path, handoffEnd - 0.001);
+
+        Assert.AreEqual(fromDrift, justAfterStart.Drift,
+            "the outgoing shot's Drift should still dominate right after the handoff begins");
+        Assert.AreEqual(toDrift, justBeforeEnd.Drift,
+            "the incoming shot's Drift should dominate right before the handoff ends");
+    }
 }

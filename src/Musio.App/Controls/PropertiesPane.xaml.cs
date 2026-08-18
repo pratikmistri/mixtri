@@ -18,6 +18,7 @@ public enum PropertyPaneKind
     Video,
     TextOverlay,
     Transition,
+    Zoom,
 }
 
 /// <summary>
@@ -29,7 +30,8 @@ public enum PropertyPaneKind
 /// This control is purely presentational. It owns no editing logic — the hosting
 /// <c>EditorPage</c> reaches into the individual views (<see cref="Scene"/>,
 /// <see cref="TextSlide"/>, <see cref="Cursor"/>, <see cref="Video"/>,
-/// <see cref="TextOverlay"/>, <see cref="Transition"/>) to wire events and push state.
+/// <see cref="TextOverlay"/>, <see cref="Transition"/>, <see cref="Zoom"/>) to wire events
+/// and push state.
 /// </remarks>
 public sealed partial class PropertiesPane : UserControl
 {
@@ -87,6 +89,9 @@ public sealed partial class PropertiesPane : UserControl
 
     /// <summary>Transition boundary panel.</summary>
     public TransitionPropertiesView Transition => TransitionView;
+
+    /// <summary>Selected zoom segment panel.</summary>
+    public ZoomPropertiesView Zoom => ZoomView;
 
     private PropertyPaneKind _selected = PropertyPaneKind.Scene;
     private bool _isOpen = true;
@@ -150,6 +155,7 @@ public sealed partial class PropertiesPane : UserControl
         PropertyPaneKind.Video => VideoTab,
         PropertyPaneKind.TextOverlay => TextOverlayTab,
         PropertyPaneKind.Transition => TransitionTab,
+        PropertyPaneKind.Zoom => ZoomTab,
         _ => SceneTab,
     };
 
@@ -160,6 +166,7 @@ public sealed partial class PropertiesPane : UserControl
         if (tab == VideoTab) return PropertyPaneKind.Video;
         if (tab == TextOverlayTab) return PropertyPaneKind.TextOverlay;
         if (tab == TransitionTab) return PropertyPaneKind.Transition;
+        if (tab == ZoomTab) return PropertyPaneKind.Zoom;
         return PropertyPaneKind.Scene;
     }
 
@@ -170,6 +177,7 @@ public sealed partial class PropertiesPane : UserControl
         PropertyPaneKind.Video => "Video",
         PropertyPaneKind.TextOverlay => "Text Overlay",
         PropertyPaneKind.Transition => "Transition",
+        PropertyPaneKind.Zoom => "Zoom Segment",
         _ => "Scene",
     };
 
@@ -186,6 +194,7 @@ public sealed partial class PropertiesPane : UserControl
         VideoTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Video;
         TextOverlayTab.IsChecked = _isOpen && _selected == PropertyPaneKind.TextOverlay;
         TransitionTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Transition;
+        ZoomTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Zoom;
 
         SceneView.Visibility = Vis(PropertyPaneKind.Scene);
         TextSlideView.Visibility = Vis(PropertyPaneKind.TextSlide);
@@ -193,6 +202,7 @@ public sealed partial class PropertiesPane : UserControl
         VideoView.Visibility = Vis(PropertyPaneKind.Video);
         TextOverlayView.Visibility = Vis(PropertyPaneKind.TextOverlay);
         TransitionView.Visibility = Vis(PropertyPaneKind.Transition);
+        ZoomView.Visibility = Vis(PropertyPaneKind.Zoom);
 
         // Each panel starts at the top rather than inheriting the previous panel's scroll.
         if (_renderedPane != _selected)

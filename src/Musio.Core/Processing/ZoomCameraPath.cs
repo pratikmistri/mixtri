@@ -17,6 +17,11 @@ namespace Musio.Core.Processing;
 /// Stable drift heading seed. Callers derive this from the original ramp start so
 /// preview and export keep the same drift direction even after the path clips holds.
 /// </param>
+/// <param name="DriftScale">Per-shot drift amplitude multiplier.</param>
+/// <param name="Drift">
+/// Per-segment camera drift settings owned by this shot. Null resolves to
+/// <see cref="CameraDriftSettings.Default"/>.
+/// </param>
 public readonly record struct ZoomShot(
     double RampStart,
     double HoldStart,
@@ -27,7 +32,8 @@ public readonly record struct ZoomShot(
     float CenterY,
     int Seed,
     bool HasFixedCenter = false,
-    float DriftScale = 1f);
+    float DriftScale = 1f,
+    CameraDriftSettings? Drift = null);
 
 /// <summary>
 /// The camera state resolved from a <see cref="ZoomCameraPath"/> at one instant.
@@ -59,6 +65,10 @@ public readonly record struct ZoomShot(
 /// keeps the focal point continuous even though its *source* changes.
 /// </para>
 /// </param>
+/// <param name="Drift">
+/// Per-segment camera drift settings resolved for this sample (the dominant shot's
+/// settings during a handoff). Null resolves to <see cref="CameraDriftSettings.Default"/>.
+/// </param>
 public readonly record struct ZoomCameraSample(
     float Zoom,
     float CenterX,
@@ -67,7 +77,8 @@ public readonly record struct ZoomCameraSample(
     float HeadingX,
     float HeadingY,
     float DriftScale,
-    float CursorFollowWeight = 0f);
+    float CursorFollowWeight = 0f,
+    CameraDriftSettings? Drift = null);
 
 /// <summary>
 /// A precomputed, immutable camera path for zoom shots that overlap or nearly touch.
@@ -193,6 +204,7 @@ public sealed class ZoomCameraPath
                 Seed = shot.Seed,
                 HasFixedCenter = shot.HasFixedCenter,
                 DriftScale = shot.DriftScale,
+                Drift = shot.Drift,
                 OriginalRampStart = shot.RampStart,
                 OriginalHoldStart = holdStart,
                 OriginalHoldEnd = holdEnd,
@@ -491,7 +503,8 @@ public sealed class ZoomCameraPath
             headingX,
             headingY,
             Math.Clamp(shot.DriftScale, 0f, 1f),
-            shot.HasFixedCenter ? 0f : 1f);
+            shot.HasFixedCenter ? 0f : 1f,
+            shot.Drift);
     }
 
     private ZoomCameraSample EvaluateTransition(int shotIndex, double timeSeconds)
@@ -571,6 +584,16 @@ public sealed class ZoomCameraPath
             e);
         float driftScale = (float)(1.0 - (0.85 * bump)) * shotDriftScale;
 
+        // CameraDriftSettings is a reference-typed record and cannot be lerped, so pick the
+        // DOMINANT shot's settings instead of interpolating: the outgoing shot's settings apply
+        // while the handoff is still mostly "from" (e < 0.5), the incoming shot's take over once
+        // it is mostly "to" (e >= 0.5). This is safe to make a hard switch rather than a blend
+        // because driftScale above already collapses to ~0.15 in the middle of the move — drift
+        // amplitude is near zero exactly where the switch happens, so the discontinuity is not
+        // visible. Interpolating six independent fields (one of them a bool, Enabled) would be
+        // both meaningless and invisible.
+        CameraDriftSettings? drift = e < 0.5f ? from.Drift : to.Drift;
+
         return new ZoomCameraSample(
             zoom,
             centerX,
@@ -579,7 +602,8 @@ public sealed class ZoomCameraPath
             headingX,
             headingY,
             driftScale,
-            Lerp(from.HasFixedCenter ? 0f : 1f, to.HasFixedCenter ? 0f : 1f, e));
+            Lerp(from.HasFixedCenter ? 0f : 1f, to.HasFixedCenter ? 0f : 1f, e),
+            drift);
     }
 
     private static float Ease(float from, float to, float t)
@@ -643,6 +667,7 @@ public sealed class ZoomCameraPath
         public int Seed;
         public bool HasFixedCenter;
         public float DriftScale;
+        public CameraDriftSettings? Drift;
         public double OriginalRampStart;
         public double OriginalHoldStart;
         public double OriginalHoldEnd;
@@ -660,7 +685,8 @@ public sealed class ZoomCameraPath
                 CenterY,
                 Seed,
                 HasFixedCenter,
-                DriftScale);
+                DriftScale,
+                Drift);
 
     }
 }

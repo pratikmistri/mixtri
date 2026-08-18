@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Musio.Core.Processing;
+using Musio.Core.Projects;
 using Musio.Core.Timeline;
 
 namespace Musio.Tests;
@@ -5,6 +8,77 @@ namespace Musio.Tests;
 [TestClass]
 public sealed class ZoomKeyframeExtendedTests
 {
+    #region EffectiveDrift / per-segment camera drift
+
+    [TestMethod]
+    public void EffectiveDrift_WhenDriftIsNull_ResolvesToTheSharedDefault()
+    {
+        // Null is what every keyframe from before drift became per-segment carries, so
+        // this is the invariant that makes such a project render identically after the move.
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1) };
+
+        Assert.IsNull(kf.Drift);
+        Assert.AreEqual(CameraDriftSettings.Default, kf.EffectiveDrift);
+    }
+
+    [TestMethod]
+    public void EffectiveDrift_WhenDriftIsSet_ReturnsTheExplicitInstance()
+    {
+        var drift = new CameraDriftSettings { Enabled = false, Strength = 2f };
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1), Drift = drift };
+
+        Assert.AreEqual(drift, kf.EffectiveDrift);
+        Assert.AreNotEqual(CameraDriftSettings.Default, kf.EffectiveDrift);
+    }
+
+    [TestMethod]
+    public void Drift_JsonRoundTrips_ThroughTheManifestSerializerOptions()
+    {
+        var kf = new ZoomKeyframe
+        {
+            Timestamp = TimeSpan.FromSeconds(2),
+            Drift = new CameraDriftSettings { Enabled = false, Strength = 2.5f, ZoomAmplitude = 0.1f },
+        };
+
+        string json = JsonSerializer.Serialize(kf, MusioPackage.JsonOptions);
+        var restored = JsonSerializer.Deserialize<ZoomKeyframe>(json, MusioPackage.JsonOptions);
+
+        Assert.IsNotNull(restored);
+        Assert.AreEqual(kf.Drift, restored!.Drift);
+    }
+
+    [TestMethod]
+    public void Drift_WhenNull_RoundTripsAsNull_AndEffectiveDriftStaysTheDefault()
+    {
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1) };
+
+        string json = JsonSerializer.Serialize(kf, MusioPackage.JsonOptions);
+        var restored = JsonSerializer.Deserialize<ZoomKeyframe>(json, MusioPackage.JsonOptions);
+
+        Assert.IsNotNull(restored);
+        Assert.IsNull(restored!.Drift);
+        Assert.AreEqual(CameraDriftSettings.Default, restored.EffectiveDrift);
+    }
+
+    [TestMethod]
+    public void EffectiveDrift_IsNeverSerialized()
+    {
+        // EffectiveDrift is [JsonIgnore] — a manifest must only ever carry the raw Drift
+        // (or its absence), never the resolved computed property.
+        var kf = new ZoomKeyframe
+        {
+            Timestamp = TimeSpan.FromSeconds(1),
+            Drift = new CameraDriftSettings { Enabled = false },
+        };
+
+        string json = JsonSerializer.Serialize(kf, MusioPackage.JsonOptions);
+
+        Assert.IsFalse(json.Contains("EffectiveDrift", StringComparison.Ordinal),
+            "EffectiveDrift must not appear in the serialized manifest");
+    }
+
+    #endregion
+
     #region FromRange
 
     [TestMethod]

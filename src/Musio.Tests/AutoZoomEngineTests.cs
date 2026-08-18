@@ -99,6 +99,147 @@ public sealed class AutoZoomEngineTests
     }
 
     [TestMethod]
+    public void GetZoomState_ManualShotPropagatesPerShotDriftSettings()
+    {
+        // Mirrors GetZoomState_ManualShotPropagatesPerShotDriftScale above, but for the
+        // full per-segment CameraDriftSettings record rather than the scalar DriftScale.
+        var drift = new CameraDriftSettings { Enabled = false, Strength = 2.5f };
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(5.0, []),
+            1920,
+            1080,
+            TickFrequency);
+        engine.SetManualKeyframes(
+        [
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(1),
+                HoldDuration = TimeSpan.FromSeconds(2),
+                ZoomLevel = 1.75,
+                CenterX = 0.5,
+                CenterY = 0.5,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                Drift = drift,
+            },
+        ]);
+
+        var state = engine.GetZoomState(1.5);
+
+        Assert.AreEqual(drift, state.DriftSettings);
+    }
+
+    [TestMethod]
+    public void GetZoomState_TwoAdjacentSegmentsWithDifferentDrift_EachResolveTheirOwnSettings()
+    {
+        // The headline behaviour of the per-segment move: two shots far enough apart to
+        // stay independent must each carry their OWN drift settings rather than sharing
+        // one scene-level setting (or leaking one segment's settings into the other).
+        var disabledDrift = new CameraDriftSettings { Enabled = false };
+        var enabledDrift = new CameraDriftSettings { Enabled = true, Strength = 3f };
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(10.0, []),
+            1920,
+            1080,
+            TickFrequency);
+        engine.SetManualKeyframes(
+        [
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(1),
+                HoldDuration = TimeSpan.FromSeconds(1),
+                ZoomLevel = 2.0,
+                CenterX = 0.25,
+                CenterY = 0.25,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                Drift = disabledDrift,
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(6),
+                HoldDuration = TimeSpan.FromSeconds(1),
+                ZoomLevel = 2.0,
+                CenterX = 0.75,
+                CenterY = 0.75,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                Drift = enabledDrift,
+            },
+        ]);
+
+        var firstState = engine.GetZoomState(1.5);
+        var secondState = engine.GetZoomState(6.5);
+
+        Assert.AreEqual(disabledDrift, firstState.DriftSettings,
+            "the first segment must resolve its own (disabled) drift settings");
+        Assert.AreEqual(enabledDrift, secondState.DriftSettings,
+            "the second segment must resolve its own (enabled) drift settings, unaffected by the first");
+    }
+
+    [TestMethod]
+    public void GetZoomState_DisabledDriftSegment_ProducesNoActiveDrift_WhileDefaultSegmentStillDrifts()
+    {
+        // Resolve through the public state and the real CameraDrift.Evaluate entry point
+        // (never a private member) to prove the disabled per-segment setting actually
+        // suppresses the living-camera motion while a default segment keeps drifting.
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(
+            BuildRecordingWithClicks(10.0, []),
+            1920,
+            1080,
+            TickFrequency);
+        engine.SetManualKeyframes(
+        [
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(1),
+                HoldDuration = TimeSpan.FromSeconds(1),
+                ZoomLevel = 2.0,
+                CenterX = 0.5,
+                CenterY = 0.5,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                Drift = new CameraDriftSettings { Enabled = false },
+            },
+            new ZoomKeyframe
+            {
+                Timestamp = TimeSpan.FromSeconds(6),
+                HoldDuration = TimeSpan.FromSeconds(1),
+                ZoomLevel = 2.0,
+                CenterX = 0.5,
+                CenterY = 0.5,
+                IsManual = true,
+                HasAuthoredCenter = true,
+                // Drift left null: defaults to CameraDriftSettings.Default, which drifts.
+            },
+        ]);
+
+        var disabledState = engine.GetZoomState(1.5);
+        var defaultState = engine.GetZoomState(6.5);
+
+        var disabledResult = CameraDrift.Evaluate(
+            disabledState.DriftSettings ?? CameraDriftSettings.Default,
+            disabledState.SegmentProgress, disabledState.ZoomLevel,
+            disabledState.ViewportWidth, disabledState.ViewportHeight,
+            slackX: 100000f, slackY: 100000f,
+            headingX: disabledState.SegmentHeadingX, headingY: disabledState.SegmentHeadingY);
+        var defaultResult = CameraDrift.Evaluate(
+            defaultState.DriftSettings ?? CameraDriftSettings.Default,
+            defaultState.SegmentProgress, defaultState.ZoomLevel,
+            defaultState.ViewportWidth, defaultState.ViewportHeight,
+            slackX: 100000f, slackY: 100000f,
+            headingX: defaultState.SegmentHeadingX, headingY: defaultState.SegmentHeadingY);
+
+        Assert.IsFalse(disabledResult.IsActive,
+            "a segment carrying Enabled = false must yield no active drift");
+        Assert.IsTrue(defaultResult.IsActive,
+            "a segment with no explicit Drift must still resolve to the drifting default");
+    }
+
+    [TestMethod]
     public void GetZoomState_AfterEaseOut_ReturnsNoZoom()
     {
         var config = new AutoZoomConfig

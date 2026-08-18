@@ -244,6 +244,8 @@ public class ProjectService
                 CurrentTimeline.RecalculateSegmentPositions();
             }
 
+            MigrateLegacySceneCameraDrift();
+
             RecentProjectsStore.Remember(packagePath, result.Project.Name, result.Project.Duration);
 
             // Assigning CurrentComposition above may have flagged a change; a project that
@@ -256,6 +258,54 @@ public class ProjectService
         {
             OpenInFlightPath = null;
         }
+    }
+
+    /// <summary>
+    /// One-way migration of camera drift from its old home — a single scene-level
+    /// setting on <see cref="CompositionConfig"/> — onto the per-segment
+    /// <see cref="ZoomKeyframe.Drift"/> it now lives on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A package saved before drift became per-segment carries its drift settings in
+    /// <see cref="CompositionConfig.LegacyCameraDrift"/> (the manifest's legacy
+    /// <c>"CameraDrift"</c> key — nothing else reads that property any more). Copying it
+    /// onto every keyframe that doesn't already carry its own <see cref="ZoomKeyframe.Drift"/>
+    /// is what keeps a project saved by a shipped build rendering the way its author set it
+    /// up: without this, every keyframe would silently fall back to
+    /// <see cref="CameraDriftSettings.Default"/> the first time the project is opened after
+    /// the format change.
+    /// </para>
+    /// <para>
+    /// Runs exactly once per legacy package: <see cref="CompositionConfig.LegacyCameraDrift"/>
+    /// is cleared immediately after copying it, so the very next save writes only the new
+    /// per-segment form and this method becomes a no-op for that project from then on. It
+    /// never touches <see cref="ZoomKeyframe.IsManual"/>, <c>HasAuthoredCenter</c> or
+    /// <see cref="ZoomKeyframe.DriftScale"/> — this is a format migration, not a user edit.
+    /// </para>
+    /// <para>
+    /// Known limitation: click-driven auto zoom shots synthesized by the engine at runtime
+    /// are not persisted <see cref="ZoomKeyframe"/>s, so they can never receive migrated
+    /// settings and always use <see cref="CameraDriftSettings.Default"/> — same as any brand
+    /// new keyframe.
+    /// </para>
+    /// </remarks>
+    private void MigrateLegacySceneCameraDrift()
+    {
+        var legacyDrift = CurrentComposition.LegacyCameraDrift;
+        if (legacyDrift is null || CurrentTimeline is null) return;
+
+        var keyframes = CurrentTimeline.ZoomKeyframes;
+        for (int i = 0; i < keyframes.Count; i++)
+        {
+            if (keyframes[i].Drift is null)
+                keyframes[i] = keyframes[i] with { Drift = legacyDrift };
+        }
+
+        // ApplyLoadTimeComposition rather than the CurrentComposition setter: clearing the
+        // legacy carrier is normalization of what was just loaded, not a user edit, and must
+        // not flag the freshly opened project dirty.
+        ApplyLoadTimeComposition(CurrentComposition with { LegacyCameraDrift = null });
     }
 
     public void SetProject(Project project)

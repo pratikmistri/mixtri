@@ -15,6 +15,7 @@ using Musio.Core.Projects;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
+using Musio_App.Helpers;
 using Musio_App.Services;
 using Musio_App.ViewModels;
 using Windows.Foundation;
@@ -510,6 +511,11 @@ public sealed partial class EditorPage
 
             UpdateZoomPanelVisibility();
 
+            // Same reasoning as the transition resync above: undo/redo does not change the
+            // zoom selection, so nothing else pushes the reverted keyframe back onto the zoom
+            // pane's toggle/sliders. See SyncZoomUI for why a stale pane is worse than cosmetic.
+            SyncZoomUI(Timeline.SelectedZoomKeyframeId);
+
             // Undo/redo mutates the model directly, so the inserted-audio preview engine and
             // the timeline lane — both DERIVED from TimelineModel.AudioTracks — have to be
             // rebuilt too, or Ctrl+Z after an audio edit would keep playing (and drawing) the
@@ -980,34 +986,68 @@ public sealed partial class EditorPage
 
         UpdateZoomPanelVisibility();
 
-        if (segmentId is not null)
+        if (SyncZoomUI(segmentId))
         {
-            var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == segmentId);
-            if (kf is not null)
+            // Reveal the zoom pane so its properties are immediately editable on
+            // selection — mirrors SyncTransitionUI / ShowTextSlidePanel. Deliberately kept
+            // OUT of SyncZoomUI: the undo/redo resync reuses that helper, and revealing the
+            // pane from there would let Ctrl+Z steal the panel the user is currently on.
+            PropertiesPanel?.ShowPane(PropertyPaneKind.Zoom);
+        }
+    }
+
+    /// <summary>
+    /// Pushes the zoom keyframe identified by <paramref name="segmentId"/> onto the zoom pane's
+    /// controls, returning whether it resolved to a real keyframe.
+    /// </summary>
+    /// <remarks>
+    /// Purely reads model state onto the controls under <see cref="_suppressZoomPropertyUpdate"/>
+    /// and must never call <c>UndoRedoManager.Execute</c> — mirrors <see cref="SyncTransitionUI"/>.
+    /// <para>
+    /// It is called on selection AND from <see cref="OnUndoRedoStateChanged"/>, and the latter is
+    /// load-bearing: undo/redo leaves <c>SelectedZoomKeyframeId</c> untouched (it only clears the
+    /// selection when the keyframe was removed), so nothing else ever re-fires this sync. Without
+    /// it, Ctrl+Z after a drift or zoom-level edit reverts the model while the toggle/sliders keep
+    /// showing the value that was just undone — and because
+    /// <see cref="CommitZoomDriftSettings"/> and the zoom-level commits read straight off the live
+    /// controls, the user's NEXT edit would silently re-commit that stale value for whichever field
+    /// they didn't touch.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="segmentId"/> deliberately leaves the controls alone rather than
+    /// resetting them: with no selection the zoom slider is holding the level the next drawn
+    /// segment will be created at (see <c>OnZoomSegmentCreated</c>).
+    /// </para>
+    /// </remarks>
+    private bool SyncZoomUI(string? segmentId)
+    {
+        if (segmentId is null) return false;
+
+        // The ZoomLevelSlider/ZoomDriftToggle/ZoomDriftSlider proxies dereference
+        // PropertiesPanel.Zoom, and this now runs from OnUndoRedoStateChanged — which can
+        // fire before the pane's controls exist.
+        if (PropertiesPanel?.Zoom is null) return false;
+
+        var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == segmentId);
+        if (kf is null) return false;
+
+        using (SuppressScope.Enter(ref _suppressZoomPropertyUpdate))
+        {
+            if (ZoomLevelSlider is not null)
+                ZoomLevelSlider.Value = Math.Clamp(kf.ZoomLevel, MinZoomLevel, MaxZoomLevel);
+
+            if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
             {
-                _suppressZoomPropertyUpdate = true;
-
-                bool matched = false;
-                for (int i = 0; i < ZoomLevelCombo.Items.Count; i++)
-                {
-                    if (ZoomLevelCombo.Items[i] is ComboBoxItem item &&
-                        double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z) &&
-                        Math.Abs(z - kf.ZoomLevel) < 0.01)
-                    {
-                        ZoomLevelCombo.SelectedIndex = i;
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched)
-                {
-                    ZoomLevelCombo.SelectedIndex = -1;
-                    ZoomLevelCombo.Text = kf.ZoomLevel.ToString("0.##", CultureInfo.InvariantCulture) + "x";
-                }
-
-                _suppressZoomPropertyUpdate = false;
+                var drift = kf.EffectiveDrift;
+                ZoomDriftToggle.IsOn = drift.Enabled;
+                ZoomDriftSlider.Value = drift.Strength * 50.0;
+                ZoomDriftSlider.IsEnabled = drift.Enabled;
             }
         }
+
+        // The slider assignment above is suppressed, so ValueChanged never runs the readout.
+        UpdateZoomLevelReadout(kf.ZoomLevel);
+        return true;
     }
 
     private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e) =>
@@ -1018,10 +1058,7 @@ public sealed partial class EditorPage
 
     private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
     {
-        double zoomLevel = 2.0;
-        if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
-            double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
-            zoomLevel = z;
+        double zoomLevel = Math.Clamp(ZoomLevelSlider.Value, MinZoomLevel, MaxZoomLevel);
 
         // Use cursor position at segment midpoint as zoom center (primary recording
         // only; appended recordings default to centered).
@@ -1078,69 +1115,135 @@ public sealed partial class EditorPage
             OnZoomSegmentRemoveRequested(sender, selectedId);
     }
 
-    private void ZoomLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ZoomLevelSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
         if (Timeline is null) return;
-        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
-        if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
-        if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
+
+        double zoomLevel = Math.Clamp(e.NewValue, MinZoomLevel, MaxZoomLevel);
+        UpdateZoomLevelReadout(zoomLevel);
 
         if (_zoomRegionEditMode)
         {
-            // Update the overlay rectangle size without committing
+            // Live-resize the overlay rectangle without committing anything. Re-clamp the
+            // centre through the same bounds the drag paths use — a second clamp model
+            // here would jump the framing as the level changes.
             _zoomRegionZoomLevel = zoomLevel;
-            UpdateZoomRegionRect();
-            return;
-        }
-
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
-        ViewModel.UndoRedoManager.Execute(operation);
-    }
-
-    private void ZoomLevelCombo_TextSubmitted(ComboBox sender, ComboBoxTextSubmittedEventArgs args)
-    {
-        if (Timeline is null || Timeline.SelectedZoomKeyframeId is not { } selectedId)
-        {
-            args.Handled = true;
-            return;
-        }
-
-        string text = (args.Text ?? string.Empty).Trim().TrimEnd('x', 'X');
-        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
-        {
-            // Restore display from current zoom level
-            SyncZoomLevelComboToFreeform(_zoomRegionEditMode ? _zoomRegionZoomLevel : GetSelectedKeyframeZoom() ?? 2.0);
-            args.Handled = true;
-            return;
-        }
-
-        zoom = Math.Clamp(zoom, MinZoomLevel, MaxZoomLevel);
-
-        if (_zoomRegionEditMode)
-        {
-            _zoomRegionZoomLevel = zoom;
-            // Re-clamp center for new zoom, through the same bounds the drag paths use —
-            // a second clamp model here would jump the framing on a typed zoom level.
-            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(zoom);
+            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(zoomLevel);
             _zoomRegionCenterX = Math.Clamp(_zoomRegionCenterX, minX, maxX);
             _zoomRegionCenterY = Math.Clamp(_zoomRegionCenterY, minY, maxY);
             UpdateZoomRegionRect();
-        }
-        else
-        {
-            var op = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoom);
-            ViewModel.UndoRedoManager.Execute(op);
+            return;
         }
 
-        SyncZoomLevelComboToFreeform(zoom);
-        args.Handled = true;
+        // No selection: the slider is just holding the level the next drawn segment
+        // will be created at (see OnZoomSegmentCreated), so there is nothing to commit.
+        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        // Mid-drag values are deliberately not committed — see _zoomLevelDragging.
+        if (_zoomLevelDragging) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel));
+    }
+
+    /// <summary>
+    /// True while the pointer is dragging the zoom level slider. Mirrors
+    /// <see cref="_zoomDriftDragging"/>: a drag raises a <see cref="Slider.ValueChanged"/>
+    /// per step, and committing an <see cref="UpdateZoomSegmentPropertiesOperation"/> from
+    /// each one would leave the user dozens of undo entries to walk back through for a
+    /// single gesture. The overlay rectangle still tracks every intermediate value while
+    /// in region-edit mode, since that path commits nothing.
+    /// </summary>
+    private bool _zoomLevelDragging;
+
+    private void ZoomLevelSlider_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _zoomLevelDragging = true;
+    }
+
+    private void ZoomLevelSlider_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_zoomLevelDragging) return;
+        _zoomLevelDragging = false;
+
+        if (_suppressZoomPropertyUpdate || _zoomRegionEditMode) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        double zoomLevel = Math.Clamp(ZoomLevelSlider.Value, MinZoomLevel, MaxZoomLevel);
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel));
     }
 
     private double? GetSelectedKeyframeZoom()
     {
         if (Timeline?.SelectedZoomKeyframeId is not { } id) return null;
         return ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == id)?.ZoomLevel;
+    }
+
+    // --- Per-segment camera drift ---
+
+    /// <summary>
+    /// True while the pointer is dragging the drift slider's thumb. A drag can raise dozens of
+    /// <see cref="Slider.ValueChanged"/> events, so committing an
+    /// <see cref="UpdateZoomSegmentPropertiesOperation"/> from every one of them would flood the
+    /// undo stack with one entry per pixel of travel. Instead, the drag defers committing until
+    /// <see cref="ZoomDriftSlider_PointerCaptureLost"/> (mirroring how <c>TextEditHandle</c> and
+    /// <c>TextEditRegion</c> drags in EditorPage.TextEditing.cs commit on capture loss rather than
+    /// on every intermediate pointer sample); keyboard/programmatic value changes made while NOT
+    /// dragging still commit immediately from <see cref="ZoomDriftSlider_ValueChanged"/>.
+    /// <see cref="ZoomDriftSlider_PointerPressed"/> and <see cref="ZoomDriftSlider_PointerCaptureLost"/>
+    /// are wired in <c>EditorPage.PropertyPanels.cs</c>'s <c>WirePropertyPanels()</c> via
+    /// <c>AddHandler(..., handledEventsToo: true)</c> rather than declaratively in XAML — the
+    /// Slider's own track/thumb pointer handling marks those routed events Handled, so a plain
+    /// <c>PointerPressed="..."</c> attribute on the Slider itself would commonly never fire.
+    /// </summary>
+    private bool _zoomDriftDragging;
+
+    private void ZoomDriftToggle_Toggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomDriftSlider is not null)
+            ZoomDriftSlider.IsEnabled = ZoomDriftToggle?.IsOn == true;
+        CommitZoomDriftSettings();
+    }
+
+    private void ZoomDriftSlider_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _zoomDriftDragging = true;
+    }
+
+    private void ZoomDriftSlider_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_zoomDriftDragging) return;
+        _zoomDriftDragging = false;
+        CommitZoomDriftSettings();
+    }
+
+    private void ZoomDriftSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (_zoomDriftDragging) return; // deferred to PointerCaptureLost — see field doc above
+        CommitZoomDriftSettings();
+    }
+
+    private void CommitZoomDriftSettings()
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomDriftToggle is null || ZoomDriftSlider is null) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        var kf = ViewModel.Model.ZoomKeyframes.FirstOrDefault(k => k.Id == selectedId);
+        if (kf is null) return;
+
+        var newDrift = kf.EffectiveDrift with
+        {
+            Enabled = ZoomDriftToggle.IsOn,
+            Strength = (float)(ZoomDriftSlider.Value / 50.0),
+        };
+
+        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, drift: newDrift, driftProvided: true);
+        ViewModel.UndoRedoManager.Execute(operation);
     }
 
     // --- Audio waveform loading ---

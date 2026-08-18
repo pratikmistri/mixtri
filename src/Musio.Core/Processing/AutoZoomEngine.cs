@@ -70,6 +70,13 @@ public struct ZoomState
     /// camera move, then restores it on settled holds.
     /// </summary>
     public float DriftScale;
+
+    /// <summary>
+    /// Drift settings owned by the active zoom segment, or null for the built-in defaults.
+    /// Carried on the state (rather than read from CompositionConfig) because drift is a
+    /// per-segment property: two shots a second apart can legitimately drift differently.
+    /// </summary>
+    public CameraDriftSettings? DriftSettings;
 }
 
 public class AutoZoomEngine
@@ -359,10 +366,13 @@ public class AutoZoomEngine
             // One promoted just by being moved or resized keeps following the cursor, exactly
             // as it did before the edit.
             HasFixedCenter: keyframe.UsesAuthoredCenter,
-            DriftScale: (float)Math.Clamp(keyframe.DriftScale, 0.0, 1.0));
+            DriftScale: (float)Math.Clamp(keyframe.DriftScale, 0.0, 1.0),
+            Drift: keyframe.Drift);
     }
 
     private static ZoomShot ToZoomShot(ZoomSegment segment)
+        // Engine-generated click zooms have no authoring surface for drift settings, so they
+        // pass no Drift and resolve to CameraDriftSettings.Default.
         => new(
             segment.ZoomInStart,
             segment.ZoomInEnd,
@@ -385,6 +395,7 @@ public class AutoZoomEngine
         state.SegmentHeadingX = sample.HeadingX;
         state.SegmentHeadingY = sample.HeadingY;
         state.DriftScale = sample.DriftScale;
+        state.DriftSettings = sample.Drift;
         state.CursorFollowWeight = sample.CursorFollowWeight;
         return state;
     }

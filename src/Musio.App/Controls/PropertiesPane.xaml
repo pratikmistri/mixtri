@@ -176,6 +176,7 @@
                         <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:TextOverlayPropertiesView x:Name="TextOverlayView" x:FieldModifier="public" Visibility="Collapsed" />
                         <panes:TransitionPropertiesView x:Name="TransitionView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:ZoomPropertiesView x:Name="ZoomView" x:FieldModifier="public" Visibility="Collapsed" />
                     </Grid>
                 </ScrollViewer>
 
@@ -288,6 +289,21 @@
                         <Canvas HorizontalAlignment="Center">
                             <TextBlock Style="{StaticResource PaneTabLabelStyle}"
                                        Text="TRANSITION"
+                                       SizeChanged="PaneTabLabel_SizeChanged" />
+                        </Canvas>
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="ZoomTab"
+                              Style="{StaticResource PaneTabStyle}"
+                              Click="PaneTab_Click"
+                              Visibility="Collapsed"
+                              ToolTipService.ToolTip="Zoom"
+                              AutomationProperties.Name="Zoom segment properties">
+                    <StackPanel Style="{StaticResource PaneTabContentStyle}">
+                        <FontIcon Style="{StaticResource PaneTabIconStyle}" Glyph="&#xE8A3;" />
+                        <Canvas HorizontalAlignment="Center">
+                            <TextBlock Style="{StaticResource PaneTabLabelStyle}"
+                                       Text="ZOOM"
                                        SizeChanged="PaneTabLabel_SizeChanged" />
                         </Canvas>
                     </StackPanel>
