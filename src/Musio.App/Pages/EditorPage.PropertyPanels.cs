@@ -56,7 +56,7 @@ public sealed partial class EditorPage
 
     // ─── Zoom segment panel ─────────────────────────────────────────────
 
-    private ComboBox ZoomLevelCombo => PropertiesPanel.Zoom.ZoomLevelCombo;
+    private Slider ZoomLevelSlider => PropertiesPanel.Zoom.ZoomLevelSlider;
     private ToggleSwitch ZoomDriftToggle => PropertiesPanel.Zoom.ZoomDriftToggle;
     private Slider ZoomDriftSlider => PropertiesPanel.Zoom.ZoomDriftSlider;
 
@@ -212,24 +212,35 @@ public sealed partial class EditorPage
         MotionBlurSlider.ValueChanged += MotionSlider_ValueChanged;
 
         // Zoom segment panel
-        ZoomLevelCombo.SelectionChanged += ZoomLevelCombo_SelectionChanged;
-        ZoomLevelCombo.TextSubmitted += ZoomLevelCombo_TextSubmitted;
+        ZoomLevelSlider.ValueChanged += ZoomLevelSlider_ValueChanged;
         PropertiesPanel.Zoom.EditZoomRegionButton.Click += EditZoomRegion_Click;
         PropertiesPanel.Zoom.RemoveZoomSegmentButton.Click += RemoveZoomSegment_Click;
         ZoomDriftToggle.Toggled += ZoomDriftToggle_Toggled;
         ZoomDriftSlider.ValueChanged += ZoomDriftSlider_ValueChanged;
 
-        // ZoomDriftSlider's drag-start/end are picked up here rather than via XAML
+        // The zoom level a newly drawn segment is created at. Set here rather than as a
+        // XAML Value (playbook: a XAML default fires ValueChanged during
+        // InitializeComponent, before the suppress flags exist) — and it has to be set
+        // SOMEWHERE, because a slider left at its Minimum would create every new segment
+        // at 1x, i.e. no zoom at all.
+        ZoomLevelSlider.Value = DefaultNewSegmentZoom;
+        UpdateZoomLevelReadout(DefaultNewSegmentZoom);
+
+        // Both sliders' drag-start/end are picked up here rather than via XAML
         // PointerPressed/PointerCaptureLost attributes: Slider/RangeBase marks those routed
         // events Handled once its own track/thumb pointer handling claims them, so a plain
         // declarative hook on the Slider itself commonly never fires. AddHandler with
-        // handledEventsToo:true still gets them, which is what
-        // ZoomDriftSlider_ValueChanged relies on to tell a drag from a single committed
-        // change (see the field doc on _zoomDriftDragging in EditorPage.Timeline.cs).
+        // handledEventsToo:true still gets them, which is what the ValueChanged handlers
+        // rely on to tell a drag from a single committed change (see the field docs on
+        // _zoomDriftDragging / _zoomLevelDragging in EditorPage.Timeline.cs).
         ZoomDriftSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerPressedEvent,
             new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomDriftSlider_PointerPressed), handledEventsToo: true);
         ZoomDriftSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerCaptureLostEvent,
             new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomDriftSlider_PointerCaptureLost), handledEventsToo: true);
+        ZoomLevelSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerPressedEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomLevelSlider_PointerPressed), handledEventsToo: true);
+        ZoomLevelSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerCaptureLostEvent,
+            new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomLevelSlider_PointerCaptureLost), handledEventsToo: true);
 
         // Text slide
         SlideTextBox.TextChanged += SlideTextBox_TextChanged;

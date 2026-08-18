@@ -13,39 +13,26 @@
         the Save/Export buttons). EditorPage owns all editing logic and undo; this file is
         markup only.
     -->
-    <UserControl.Resources>
-        <!-- Same path geometry as Assets\Icons\Drift.svg (viewBox 0 0 20 20), inlined as a
-             PathIcon Data string (the form already proven in EditorPage.xaml) so it inherits
-             the section header's Foreground and follows the theme, which a fixed-fill
-             SvgImageSource cannot. Keep the two in sync if the shape changes. -->
-        <DataTemplate x:Key="DriftHeaderTemplate">
-            <StackPanel Orientation="Horizontal" Spacing="6">
-                <PathIcon Width="14" Height="14"
-                          Data="M2,7.5 L2,3.5 A1.5,1.5 0 0 1 3.5,2 L7.5,2 L7.5,3.4 L3.4,3.4 L3.4,7.5 Z M18,7.5 L18,3.5 A1.5,1.5 0 0 0 16.5,2 L12.5,2 L12.5,3.4 L16.6,3.4 L16.6,7.5 Z M2,12.5 L2,16.5 A1.5,1.5 0 0 0 3.5,18 L7.5,18 L7.5,16.6 L3.4,16.6 L3.4,12.5 Z M18,12.5 L18,16.5 A1.5,1.5 0 0 1 16.5,18 L12.5,18 L12.5,16.6 L16.6,16.6 L16.6,12.5 Z M4.40,11.50 A6.6,6.6 0 0 1 14.07,9.80 L12.36,10.82 A5.3,5.3 0 0 0 4.61,12.19 Z M12.88,11.30 A1.6,1.6 0 1 0 16.08,11.30 A1.6,1.6 0 1 0 12.88,11.30 Z" />
-                <TextBlock Text="{Binding}" Style="{StaticResource PropertyLabelStyle}" />
-            </StackPanel>
-        </DataTemplate>
-    </UserControl.Resources>
-
     <StackPanel Spacing="20" Margin="0,14,0,18">
 
-        <!-- Zoom level: applies to the selected segment. -->
+        <!-- Zoom level: applies to the selected segment. Minimum/Maximum mirror
+             EditorPage's MinZoomLevel/MaxZoomLevel, which every other zoom path clamps
+             to — a second range model here would let the slider offer a level the
+             region-drag paths immediately clamp away. -->
         <StackPanel Spacing="6">
-            <TextBlock Text="Zoom Level" Style="{StaticResource PropertyLabelStyle}" />
-            <ComboBox
-                x:Name="ZoomLevelCombo"
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="ZoomLevelSlider"
                 x:FieldModifier="public"
-                IsEditable="True"
-                HorizontalAlignment="Stretch"
+                Header="Zoom Level"
+                Minimum="1" Maximum="4"
+                StepFrequency="0.1"
+                SnapsTo="StepValues"
                 ToolTipService.ToolTip="Zoom level applied to the selected segment"
-                AutomationProperties.Name="Zoom level">
-                <ComboBoxItem Content="1x" Tag="1" />
-                <ComboBoxItem Content="1.5x" Tag="1.5" />
-                <ComboBoxItem Content="2x" Tag="2" />
-                <ComboBoxItem Content="2.5x" Tag="2.5" />
-                <ComboBoxItem Content="3x" Tag="3" />
-                <ComboBoxItem Content="4x" Tag="4" />
-            </ComboBox>
+                AutomationProperties.Name="Zoom level" />
+            <TextBlock
+                x:Name="ZoomLevelValueText"
+                x:FieldModifier="public"
+                Style="{StaticResource PropertyHintStyle}" />
         </StackPanel>
 
         <Button
@@ -70,7 +57,7 @@
             <ToggleSwitch
                 x:Name="ZoomDriftToggle"
                 x:FieldModifier="public"
-                HeaderTemplate="{StaticResource DriftHeaderTemplate}"
+                HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
                 Header="Camera Drift"
                 ToolTipService.ToolTip="Keeps this segment gently moving with a slow push and pan across the hold"
                 AutomationProperties.Name="Camera drift" />

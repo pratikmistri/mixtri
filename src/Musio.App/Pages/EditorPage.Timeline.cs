@@ -987,23 +987,8 @@ public sealed partial class EditorPage
             {
                 _suppressZoomPropertyUpdate = true;
 
-                bool matched = false;
-                for (int i = 0; i < ZoomLevelCombo.Items.Count; i++)
-                {
-                    if (ZoomLevelCombo.Items[i] is ComboBoxItem item &&
-                        double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z) &&
-                        Math.Abs(z - kf.ZoomLevel) < 0.01)
-                    {
-                        ZoomLevelCombo.SelectedIndex = i;
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched)
-                {
-                    ZoomLevelCombo.SelectedIndex = -1;
-                    ZoomLevelCombo.Text = kf.ZoomLevel.ToString("0.##", CultureInfo.InvariantCulture) + "x";
-                }
+                ZoomLevelSlider.Value = Math.Clamp(kf.ZoomLevel, MinZoomLevel, MaxZoomLevel);
+                UpdateZoomLevelReadout(kf.ZoomLevel);
 
                 if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
                 {
@@ -1030,10 +1015,7 @@ public sealed partial class EditorPage
 
     private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
     {
-        double zoomLevel = 2.0;
-        if (ZoomLevelCombo.SelectedItem is ComboBoxItem item &&
-            double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double z))
-            zoomLevel = z;
+        double zoomLevel = Math.Clamp(ZoomLevelSlider.Value, MinZoomLevel, MaxZoomLevel);
 
         // Use cursor position at segment midpoint as zoom center (primary recording
         // only; appended recordings default to centered).
@@ -1090,63 +1072,64 @@ public sealed partial class EditorPage
             OnZoomSegmentRemoveRequested(sender, selectedId);
     }
 
-    private void ZoomLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ZoomLevelSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_suppressZoomPropertyUpdate) return;
         if (Timeline is null) return;
-        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
-        if (ZoomLevelCombo.SelectedItem is not ComboBoxItem item) return;
-        if (!double.TryParse(item.Tag?.ToString(), CultureInfo.InvariantCulture, out double zoomLevel)) return;
+
+        double zoomLevel = Math.Clamp(e.NewValue, MinZoomLevel, MaxZoomLevel);
+        UpdateZoomLevelReadout(zoomLevel);
 
         if (_zoomRegionEditMode)
         {
-            // Update the overlay rectangle size without committing
+            // Live-resize the overlay rectangle without committing anything. Re-clamp the
+            // centre through the same bounds the drag paths use — a second clamp model
+            // here would jump the framing as the level changes.
             _zoomRegionZoomLevel = zoomLevel;
-            UpdateZoomRegionRect();
-            return;
-        }
-
-        var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel);
-        ViewModel.UndoRedoManager.Execute(operation);
-    }
-
-    private void ZoomLevelCombo_TextSubmitted(ComboBox sender, ComboBoxTextSubmittedEventArgs args)
-    {
-        if (Timeline is null || Timeline.SelectedZoomKeyframeId is not { } selectedId)
-        {
-            args.Handled = true;
-            return;
-        }
-
-        string text = (args.Text ?? string.Empty).Trim().TrimEnd('x', 'X');
-        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
-        {
-            // Restore display from current zoom level
-            SyncZoomLevelComboToFreeform(_zoomRegionEditMode ? _zoomRegionZoomLevel : GetSelectedKeyframeZoom() ?? 2.0);
-            args.Handled = true;
-            return;
-        }
-
-        zoom = Math.Clamp(zoom, MinZoomLevel, MaxZoomLevel);
-
-        if (_zoomRegionEditMode)
-        {
-            _zoomRegionZoomLevel = zoom;
-            // Re-clamp center for new zoom, through the same bounds the drag paths use —
-            // a second clamp model here would jump the framing on a typed zoom level.
-            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(zoom);
+            (double minX, double maxX, double minY, double maxY) = GetCenterBounds(zoomLevel);
             _zoomRegionCenterX = Math.Clamp(_zoomRegionCenterX, minX, maxX);
             _zoomRegionCenterY = Math.Clamp(_zoomRegionCenterY, minY, maxY);
             UpdateZoomRegionRect();
-        }
-        else
-        {
-            var op = new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoom);
-            ViewModel.UndoRedoManager.Execute(op);
+            return;
         }
 
-        SyncZoomLevelComboToFreeform(zoom);
-        args.Handled = true;
+        // No selection: the slider is just holding the level the next drawn segment
+        // will be created at (see OnZoomSegmentCreated), so there is nothing to commit.
+        if (Timeline.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        // Mid-drag values are deliberately not committed — see _zoomLevelDragging.
+        if (_zoomLevelDragging) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel));
+    }
+
+    /// <summary>
+    /// True while the pointer is dragging the zoom level slider. Mirrors
+    /// <see cref="_zoomDriftDragging"/>: a drag raises a <see cref="Slider.ValueChanged"/>
+    /// per step, and committing an <see cref="UpdateZoomSegmentPropertiesOperation"/> from
+    /// each one would leave the user dozens of undo entries to walk back through for a
+    /// single gesture. The overlay rectangle still tracks every intermediate value while
+    /// in region-edit mode, since that path commits nothing.
+    /// </summary>
+    private bool _zoomLevelDragging;
+
+    private void ZoomLevelSlider_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        _zoomLevelDragging = true;
+    }
+
+    private void ZoomLevelSlider_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_zoomLevelDragging) return;
+        _zoomLevelDragging = false;
+
+        if (_suppressZoomPropertyUpdate || _zoomRegionEditMode) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        double zoomLevel = Math.Clamp(ZoomLevelSlider.Value, MinZoomLevel, MaxZoomLevel);
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, zoomLevel: zoomLevel));
     }
 
     private double? GetSelectedKeyframeZoom()

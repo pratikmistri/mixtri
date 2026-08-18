@@ -644,6 +644,12 @@ public sealed partial class EditorPage : Page
     private const double HandleSize = 10.0;
     private const double MinZoomLevel = 1.0;
     private const double MaxZoomLevel = 4.0;
+
+    /// <summary>
+    /// Zoom level a freshly drawn segment is created at, and the value the zoom slider is
+    /// seeded with. Matches the level the old zoom dropdown pre-selected.
+    /// </summary>
+    private const double DefaultNewSegmentZoom = 2.0;
     private const double CenterSnapThreshold = 0.02; // normalized (~2% of frame)
     private double _dragAnchorDispX, _dragAnchorDispY;
     private double _dragStartCenterDispX, _dragStartCenterDispY;
@@ -1286,7 +1292,7 @@ public sealed partial class EditorPage : Page
             _zoomRegionCenterX = newCx;
             _zoomRegionCenterY = newCy;
             UpdateZoomRegionRect();
-            SyncZoomLevelComboToFreeform(newZoom);
+            SyncZoomLevelSlider(newZoom);
             UpdateSnapGuides(snappedX, snappedY);
         }
 
@@ -1305,12 +1311,24 @@ public sealed partial class EditorPage : Page
         }
     }
 
-    private void SyncZoomLevelComboToFreeform(double zoom)
+    /// <summary>
+    /// Pushes a zoom level onto the panel's slider and its readout without letting the
+    /// round-trip look like a user edit. Used by the region-edit drag paths, which are
+    /// already the authority on the level being shown.
+    /// </summary>
+    private void SyncZoomLevelSlider(double zoom)
     {
-        string text = zoom.ToString("0.##", CultureInfo.InvariantCulture) + "x";
-        if (ZoomLevelCombo.Text == text) return;
+        double clamped = Math.Clamp(zoom, MinZoomLevel, MaxZoomLevel);
         using (SuppressScope.Enter(ref _suppressZoomPropertyUpdate))
-            ZoomLevelCombo.Text = text;
+            ZoomLevelSlider.Value = clamped;
+        UpdateZoomLevelReadout(clamped);
+    }
+
+    /// <summary>Keeps the "2.5x" text under the zoom slider in step with its value.</summary>
+    private void UpdateZoomLevelReadout(double zoom)
+    {
+        if (PropertiesPanel?.Zoom?.ZoomLevelValueText is not { } text) return;
+        text.Text = zoom.ToString("0.##", CultureInfo.InvariantCulture) + "x";
     }
 
     private void UpdateSnapGuides(bool snappedX, bool snappedY)
