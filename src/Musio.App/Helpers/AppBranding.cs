@@ -5,9 +5,10 @@ namespace Musio_App.Helpers;
 /// </summary>
 /// <remarks>
 /// A locally deployed dev build is labelled <c>"Musio (dev)"</c> so it is instantly
-/// distinguishable from the Store build, which stays plain <c>"Musio"</c>. The suffix is
-/// applied to the generated <c>AppxManifest.xml</c> by the <c>ApplyMusioDevBranding</c> target
-/// in <c>Musio.App.csproj</c> — see that target for when it does and does not run.
+/// distinguishable from the Store build, which stays plain <c>"Musio"</c>. It also carries a
+/// separate package identity so the two install side by side. Both are applied to the generated
+/// <c>AppxManifest.xml</c> by the <c>ApplyMusioDevBranding</c> target in <c>Musio.App.csproj</c>
+/// — see that target for when it does and does not run.
 /// <para>
 /// Every in-app surface that shows the app's name reads it from here, so the manifest stays
 /// the single source of truth and no UI has to know whether it is a dev build. Do NOT re-derive
