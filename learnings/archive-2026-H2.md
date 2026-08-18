@@ -2508,3 +2508,11 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What didn't work**: removing the per-frame `SetPropertiesAsync` delay call is NOT an optimization — 386 ms vs 406 ms/frame at 1080p is within noise. There is no cheaper WIC encoder configuration; palette quantization dominates. Do not re-attempt micro-optimizing the encoder loop.
 - **Decision**: the user chose to keep honouring the selected export resolution and fps and warn, rather than silently capping GIF at 480p/15fps. Lowering the export resolution is the documented remedy.
 - **Verified**: full suite **1251 passed, 0 failed, 3 skipped** (1254 total); `Musio.App` ARM64 Debug EXIT=0; app re-registered and launched.
+
+## GIF export code review fixes
+
+- **Feature/area**: `GifExportEstimator`, `ExportEngine.ComposeGifFrameAsync`, export flyout state machine, `AspectRatioHelper`/`FrameCompositor` canvas sizing.
+- **Approaches tried**: ran the code-review agent over the full `fix/gif-export` branch diff, then fixed all three findings.
+- **What worked**: (1) The estimate was predicting from `CurrentProject.Width/Height/Duration`, but the exporter sizes from `SegmentFrameComposer.OutputWidth/Height` (aspect-ratio adjusted) and counts frames from `TimelineMapper.TotalOutputFrames` (post-trim). Extracted the compositor's step-1 canvas rule into `AspectRatioHelper.ComputeCanvasSize` and had BOTH `FrameCompositor.ComputeContentDimensions` and the estimator call it, so they cannot drift; added `ResolveExportedDuration` to prefer `TimelineModel.TotalSegmentsDuration`. (2) Tracked the scaled render target in a nullable local so a mid-draw throw disposes it. (3) The cancel path's queued `ExportFlyout.Hide()` now only fires if the exporting panel is still visible.
+- **What didn't work**: predicting export output size from the raw project dimensions is wrong for every non-Auto aspect ratio — a 1920x1080 source at 9:16 composites to 608x1080, roughly a 3x error in the quoted time. Anything that needs to predict export output size must go through the compositor's own canvas rule, not the project dimensions.
+- **Verified**: full suite **1255 passed, 0 failed, 3 skipped** (1258 total) — including the existing compositor tests, which is the check that mattered for the `FrameCompositor` extraction; `Musio.App` ARM64 Debug EXIT=0; app re-registered and launched.

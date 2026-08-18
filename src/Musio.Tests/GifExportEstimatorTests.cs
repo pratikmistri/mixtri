@@ -1,5 +1,7 @@
 using Musio.Core.Export;
+using Musio.Core.Processing;
 using Musio.Core.Settings;
+using Musio.Core.Timeline;
 
 namespace Musio.Tests;
 
@@ -56,7 +58,8 @@ public class GifExportEstimatorTests
     [TestMethod]
     public void ResolveOutputSize_HonorsSelectedResolution()
     {
-        var (width, height) = GifExportEstimator.ResolveOutputSize(3840, 2160, VideoResolution.HD720);
+        var (width, height) = GifExportEstimator.ResolveOutputSize(
+            3840, 2160, AspectRatio.Auto, VideoResolution.HD720);
 
         Assert.IsTrue(width <= 1280, $"Width {width} exceeded the 720p bound.");
         Assert.IsTrue(height <= 720, $"Height {height} exceeded the 720p bound.");
@@ -65,10 +68,57 @@ public class GifExportEstimatorTests
     [TestMethod]
     public void ResolveOutputSize_NeverUpscalesBeyondSource()
     {
-        var (width, height) = GifExportEstimator.ResolveOutputSize(640, 360, VideoResolution.UHD4K);
+        var (width, height) = GifExportEstimator.ResolveOutputSize(
+            640, 360, AspectRatio.Auto, VideoResolution.UHD4K);
 
         Assert.IsTrue(width <= 640, $"Width {width} upscaled beyond the source.");
         Assert.IsTrue(height <= 360, $"Height {height} upscaled beyond the source.");
+    }
+
+    [TestMethod]
+    public void ResolveOutputSize_AppliesAspectRatio_NotRawSourceSize()
+    {
+        // A 16:9 recording exported at 9:16 composites onto a portrait canvas. Estimating
+        // from the raw 1920x1080 source would claim ~3x the pixels the exporter produces.
+        var (width, height) = GifExportEstimator.ResolveOutputSize(
+            1920, 1080, AspectRatio.Portrait9x16, VideoResolution.HD1080);
+
+        Assert.IsTrue(width < height, $"Expected a portrait result, got {width}x{height}.");
+        Assert.IsTrue(width < 1920, $"Width {width} ignored the 9:16 canvas.");
+    }
+
+    [TestMethod]
+    public void ResolveOutputSize_MatchesCompositorCanvasRule()
+    {
+        var (canvasWidth, canvasHeight) =
+            AspectRatioHelper.ComputeCanvasSize(1920, 1080, AspectRatio.Square1x1);
+
+        Assert.AreEqual(1080, canvasWidth);
+        Assert.AreEqual(1080, canvasHeight);
+    }
+
+    [TestMethod]
+    public void ResolveExportedDuration_PrefersTimelineOverRawRecording()
+    {
+        var timeline = new TimelineModel { Duration = TimeSpan.FromMinutes(10) };
+        timeline.Segments.Add(new TextSlideSegment
+        {
+            Start = TimeSpan.Zero,
+            Duration = TimeSpan.FromSeconds(20),
+        });
+
+        var resolved = GifExportEstimator.ResolveExportedDuration(
+            timeline, TimeSpan.FromMinutes(10));
+
+        Assert.AreEqual(TimeSpan.FromSeconds(20), resolved);
+    }
+
+    [TestMethod]
+    public void ResolveExportedDuration_NoTimeline_FallsBackToProjectDuration()
+    {
+        var resolved = GifExportEstimator.ResolveExportedDuration(null, TimeSpan.FromSeconds(42));
+
+        Assert.AreEqual(TimeSpan.FromSeconds(42), resolved);
     }
 
     [TestMethod]

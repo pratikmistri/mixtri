@@ -188,9 +188,13 @@ public class ExportEngine
             return composed;
         }
 
+        // Tracked in a local so a throw mid-draw (device loss is a real possibility here)
+        // disposes the partially built target instead of leaking it, mirroring how
+        // VideoEncoder hands off its output surface.
+        CanvasRenderTarget? scaled = null;
         try
         {
-            var scaled = Win2DUtils.CreateRenderTarget(
+            scaled = Win2DUtils.CreateRenderTarget(
                 composed.Device, targetWidth, targetHeight, 96, "scaled gif frame");
 
             using (var ds = scaled.CreateDrawingSession())
@@ -201,10 +205,13 @@ public class ExportEngine
                     new Rect(0, 0, composed.SizeInPixels.Width, composed.SizeInPixels.Height));
             }
 
-            return scaled;
+            var result = scaled;
+            scaled = null; // ownership passes to the caller
+            return result;
         }
         finally
         {
+            scaled?.Dispose();
             composed.Dispose();
         }
     }

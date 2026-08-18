@@ -80,6 +80,32 @@ public static class AspectRatioHelper
     }
 
     /// <summary>
+    /// Computes the compositor's output canvas size for a source frame at the given target
+    /// aspect ratio: the target ratio fitted within the source bounds, or the source size
+    /// unchanged for <see cref="AspectRatio.Auto"/>.
+    ///
+    /// <para>Padding is deliberately NOT considered — it insets within the canvas and never
+    /// grows it, so this is the size <c>SegmentFrameComposer.OutputWidth/OutputHeight</c>
+    /// report. Shared with <c>FrameCompositor.ComputeContentDimensions</c> so the export
+    /// pipeline and anything predicting its output cannot drift apart.</para>
+    /// </summary>
+    public static (int Width, int Height) ComputeCanvasSize(
+        int sourceWidth, int sourceHeight, AspectRatio ratio)
+    {
+        if (sourceWidth <= 0 || sourceHeight <= 0)
+            return (sourceWidth, sourceHeight);
+
+        float targetRatio = GetRatioValue(ratio);
+        if (targetRatio <= 0f)
+            return (sourceWidth, sourceHeight);
+
+        float sourceRatio = (float)sourceWidth / sourceHeight;
+        return sourceRatio > targetRatio
+            ? ((int)Math.Round(sourceHeight * (double)targetRatio), sourceHeight)
+            : (sourceWidth, (int)Math.Round(sourceWidth / (double)targetRatio));
+    }
+
+    /// <summary>
     /// Calculates an anchored crop rectangle to convert the source dimensions to the
     /// target aspect ratio. <paramref name="anchorX"/>/<paramref name="anchorY"/> are
     /// in 0..1 and place the crop window within the source: (0,0)=top-left, (0.5,0.5)=center,

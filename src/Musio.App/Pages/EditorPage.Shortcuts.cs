@@ -358,8 +358,13 @@ public sealed partial class EditorPage
                     ShowExportedState();
                 else if (ExportVM.ExportFailed)
                     ShowErrorState();
-                else
-                    ExportFlyout.Hide(); // Cancelled
+                else if (ExportingPanel.Visibility == Visibility.Visible)
+                {
+                    // Cancelled. Only dismiss if the flyout is still showing the export
+                    // that was cancelled — the user may already have reopened it, and a
+                    // blind Hide() would then close the fresh options panel under them.
+                    ExportFlyout.Hide();
+                }
             });
         }
     }

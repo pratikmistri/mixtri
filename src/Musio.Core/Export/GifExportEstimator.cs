@@ -1,5 +1,6 @@
 using Musio.Core.Processing;
 using Musio.Core.Settings;
+using Musio.Core.Timeline;
 
 namespace Musio.Core.Export;
 
@@ -42,12 +43,32 @@ public static class GifExportEstimator
     }
 
     /// <summary>
-    /// Resolves the GIF's output dimensions for the given source size and selected
-    /// resolution, using the same sizing rules the exporter itself applies.
+    /// Resolves the GIF's output dimensions for the given source size, target aspect ratio
+    /// and selected resolution, using the same two steps the exporter itself applies: the
+    /// compositor's canvas size, then the export resolution clamp. Predicting from the raw
+    /// source size alone is wrong for every non-Auto aspect ratio — a 1920x1080 recording
+    /// exported at 9:16 composites to 608x1080, not 1920x1080.
     /// </summary>
     public static (int Width, int Height) ResolveOutputSize(
-        int sourceWidth, int sourceHeight, VideoResolution resolution) =>
-        AspectRatioHelper.ComputeExportDimensions(sourceWidth, sourceHeight, resolution);
+        int sourceWidth, int sourceHeight, AspectRatio aspectRatio, VideoResolution resolution)
+    {
+        var (canvasWidth, canvasHeight) =
+            AspectRatioHelper.ComputeCanvasSize(sourceWidth, sourceHeight, aspectRatio);
+
+        return AspectRatioHelper.ComputeExportDimensions(canvasWidth, canvasHeight, resolution);
+    }
+
+    /// <summary>
+    /// Resolves the duration the GIF will actually cover. The exporter derives its frame
+    /// count from the edited timeline, so the raw recording length is the wrong input
+    /// whenever the project has been trimmed, cut, sped up, or extended with slides and
+    /// appended recordings — a 10-minute recording trimmed to 20 seconds would otherwise
+    /// be quoted in hours.
+    /// </summary>
+    public static TimeSpan ResolveExportedDuration(TimelineModel? timeline, TimeSpan projectDuration) =>
+        timeline is not null && timeline.TotalSegmentsDuration > TimeSpan.Zero
+            ? timeline.TotalSegmentsDuration
+            : projectDuration;
 
     /// <summary>
     /// Formats an estimate for display, e.g. "about 3 min" or "under a minute".

@@ -299,14 +299,18 @@ public partial class ExportViewModel : ObservableObject
         int sourceWidth = CurrentProject.Width > 0 ? CurrentProject.Width : 1920;
         int sourceHeight = CurrentProject.Height > 0 ? CurrentProject.Height : 1080;
 
+        // Match the exporter: it composites at the project's aspect ratio and derives its
+        // frame count from the edited timeline, not from the raw recording.
         var (gifWidth, gifHeight) = GifExportEstimator.ResolveOutputSize(
-            sourceWidth, sourceHeight, SelectedResolution);
+            sourceWidth, sourceHeight, CurrentProject.AspectRatio, SelectedResolution);
 
         // The exporter caps compositor/encode fps at 30, so estimate against the same value.
         int effectiveFps = Math.Min(SelectedFps, 30);
 
-        var estimate = GifExportEstimator.Estimate(
-            gifWidth, gifHeight, effectiveFps, CurrentProject.Duration);
+        var duration = GifExportEstimator.ResolveExportedDuration(
+            ProjectService.Instance.CurrentTimeline, CurrentProject.Duration);
+
+        var estimate = GifExportEstimator.Estimate(gifWidth, gifHeight, effectiveFps, duration);
 
         string formatted = GifExportEstimator.FormatEstimate(estimate);
 
