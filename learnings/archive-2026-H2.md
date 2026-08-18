@@ -2555,3 +2555,11 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What didn't work**: trusting a green local run — this is timing-dependent and only reproduced on the CI runner; 5 repeat local runs of the test could not reproduce it either way, so the fix is reasoned from the stack trace, not from a local repro.
 - **General rule**: in tests, never call `cts.Cancel()` from inside a `Progress<T>` handler without guarding for disposal — an unhandled exception on a thread-pool thread takes down the whole test host, and the aborted run looks like an unrelated mass failure. `Assert` failures inside such a callback have the same hazard.
 - **Verified**: full suite in **Release** (the configuration CI uses) **1255 passed, 0 failed, 3 skipped**; the previously crashing test run 5x consecutively, green each time.
+
+## Merging master into feature/per-segment-camera-drift
+
+- **Feature/area**: branch integration only — no product code authored. `master` at `4a36f87` (GIF export work, PR #96) merged into `feature/per-segment-camera-drift`.
+- **Approaches tried**: straight `git merge master` after `git pull` on master; inspected each conflicted path before resolving.
+- **What worked**: the ONLY conflict was `learnings/archive-2026-H2.md` — both branches appended entries at the tail, which git cannot auto-merge. Resolution is always "keep both blocks, delete the markers"; never pick a side, since the file is an append-only log. The genuinely overlapping code files (`FrameCompositor.cs`, `EditorPage.xaml`) auto-merged cleanly even though master extracted `AspectRatioHelper.ComputeCanvasSize` out of `FrameCompositor.ComputeContentDimensions` while this branch edited `ApplyCameraDrift` — different regions of the same file.
+- **What didn't work**: the first ARM64 build failed with MSB3027/MSB3021 (`Musio.Core.dll` locked by a running `Musio.App`), which is a *lock*, not a compile failure — the C# had already compiled with 0 errors. Building `Musio.Tests.csproj` instead is a useful lock-free way to verify `Musio.Core` while the app is running; the app build needs the process stopped first, per the toolchain playbook.
+- **Verified**: `Musio.App` ARM64 Debug EXIT=0; full suite **1267 passed, 0 failed, 3 skipped** (1270 total).
