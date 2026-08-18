@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Musio.Core.Interop;
+using Musio_App.Helpers;
 using Musio_App.Pages;
 using Windows.Graphics;
 
@@ -16,6 +17,10 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        // Reflects the package manifest, so a locally deployed build reads "Musio (dev)".
+        Title = AppBranding.DisplayName;
+        AppTitleBar.Title = AppBranding.DisplayName;
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);

@@ -95,4 +95,70 @@
     <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">False</PublishTrimmed>
   </PropertyGroup>
+
+  <!--
+    Dev branding: a locally deployed build is named "Musio (dev)" so it is obvious at a
+    glance (Start menu, taskbar, Settings > Apps, in-app title bar) that it is not the
+    Store build. The Store build stays plain "Musio".
+
+    The switch is which KIND of output is being produced, not Debug vs Release — a local
+    deployment is commonly a Release build, so keying off $(Configuration) would mislabel
+    it. MSIX packaging for the Store sets GenerateAppxPackageOnBuild=true (see the MSIX
+    playbook in learnings/playbooks.md), and that is the only build whose name must stay
+    clean. Pass /p:MusioDevBranding=false to force plain naming for any other build.
+  -->
+  <PropertyGroup>
+    <MusioDevBranding Condition="'$(MusioDevBranding)' == '' and '$(GenerateAppxPackageOnBuild)' == 'true'">false</MusioDevBranding>
+    <MusioDevBranding Condition="'$(MusioDevBranding)' == ''">true</MusioDevBranding>
+    <MusioDevBrandingSuffix Condition="'$(MusioDevBrandingSuffix)' == ''">(dev)</MusioDevBrandingSuffix>
+  </PropertyGroup>
+
+  <!--
+    Rewrites the display names in the AppxManifest.xml that lands in the build output —
+    which is exactly the file `Add-AppxPackage -Register` consumes for a dev deployment.
+
+    Both names are read from the CHECKED-IN Package.appxmanifest and written to the OUTPUT
+    copy. That direction matters: the source is never modified, so the target is idempotent
+    even when an incremental build leaves an already-branded manifest in the output (reading
+    the output and appending would produce "Musio (dev) (dev)"). It also means renaming the
+    app only requires editing Package.appxmanifest.
+
+    Properties/DisplayName drives Settings > Apps; VisualElements/@DisplayName drives the
+    Start menu and taskbar. Both are set, or the app is named inconsistently.
+  -->
+  <Target Name="ApplyMusioDevBranding"
+          AfterTargets="Build"
+          Condition="'$(MusioDevBranding)' == 'true' and Exists('$(OutDir)AppxManifest.xml')">
+    <PropertyGroup>
+      <_MusioAppxNamespaces>
+        &lt;Namespace Prefix="d" Uri="http://schemas.microsoft.com/appx/manifest/foundation/windows10" /&gt;
+        &lt;Namespace Prefix="uap" Uri="http://schemas.microsoft.com/appx/manifest/uap/windows10" /&gt;
+      </_MusioAppxNamespaces>
+    </PropertyGroup>
+
+    <XmlPeek XmlInputPath="Package.appxmanifest"
+             Namespaces="$(_MusioAppxNamespaces)"
+             Query="/d:Package/d:Properties/d:DisplayName/text()">
+      <Output TaskParameter="Result" PropertyName="_MusioPackageDisplayName" />
+    </XmlPeek>
+
+    <XmlPeek XmlInputPath="Package.appxmanifest"
+             Namespaces="$(_MusioAppxNamespaces)"
+             Query="/d:Package/d:Applications/d:Application/uap:VisualElements/@DisplayName">
+      <Output TaskParameter="Result" PropertyName="_MusioAppDisplayName" />
+    </XmlPeek>
+
+    <XmlPoke XmlInputPath="$(OutDir)AppxManifest.xml"
+             Namespaces="$(_MusioAppxNamespaces)"
+             Query="/d:Package/d:Properties/d:DisplayName"
+             Value="$(_MusioPackageDisplayName) $(MusioDevBrandingSuffix)" />
+
+    <XmlPoke XmlInputPath="$(OutDir)AppxManifest.xml"
+             Namespaces="$(_MusioAppxNamespaces)"
+             Query="/d:Package/d:Applications/d:Application/uap:VisualElements/@DisplayName"
+             Value="$(_MusioAppDisplayName) $(MusioDevBrandingSuffix)" />
+
+    <Message Importance="high"
+             Text="Dev branding applied: this build is named &quot;$(_MusioAppDisplayName) $(MusioDevBrandingSuffix)&quot;. Build with /p:MusioDevBranding=false for the Store name." />
+  </Target>
 </Project>

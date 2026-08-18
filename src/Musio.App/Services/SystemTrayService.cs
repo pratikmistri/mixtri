@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Musio.Core.Interop;
+using Musio_App.Helpers;
 
 namespace Musio_App.Services;
 
@@ -119,7 +120,7 @@ public sealed class SystemTrayService : IDisposable
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _iconHandle,
-            szTip = "Musio - Screen Recorder",
+            szTip = $"{AppBranding.DisplayName} - Screen Recorder",
             // Initialize remaining string fields to avoid marshalling issues
             szInfo = string.Empty,
             szInfoTitle = string.Empty
