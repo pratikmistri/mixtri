@@ -303,6 +303,7 @@ public sealed partial class EditorPage
     {
         if (ExportGifHintText is null) return;
 
+        ExportVM.RefreshGifEstimate();
         ExportGifHintText.Visibility = ExportVM.SelectedFormat == VideoFormat.GIF
             ? Visibility.Visible
             : Visibility.Collapsed;

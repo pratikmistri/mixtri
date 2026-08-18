@@ -139,6 +139,7 @@ public partial class ExportViewModel : ObservableObject
     partial void OnCurrentProjectChanged(Project? value)
     {
         ExportCommand.NotifyCanExecuteChanged();
+        UpdateGifEstimate();
     }
 
     // --- Export settings ---
@@ -240,6 +241,7 @@ public partial class ExportViewModel : ObservableObject
         OnPropertyChanged(nameof(IsResolution1080));
         OnPropertyChanged(nameof(IsResolution2K));
         OnPropertyChanged(nameof(IsResolution4K));
+        UpdateGifEstimate();
     }
 
     // --- Format helpers ---
@@ -267,6 +269,51 @@ public partial class ExportViewModel : ObservableObject
         OnPropertyChanged(nameof(IsFormatMP4));
         OnPropertyChanged(nameof(IsFormatGIF));
         OnPropertyChanged(nameof(IsFormatWebM));
+        UpdateGifEstimate();
+    }
+
+    /// <summary>
+    /// Warning shown when GIF is selected. GIF keeps the chosen export resolution and
+    /// frame rate — the encoder's palette quantization is the cost, and it scales with
+    /// pixel count — so the user is told up front roughly how long it will take instead
+    /// of discovering it from a stalled-looking progress ring.
+    /// </summary>
+    [ObservableProperty]
+    private string _gifWarningText = string.Empty;
+
+    /// <summary>
+    /// Recomputes the GIF warning. Called when the options UI is shown, because reopening
+    /// the flyout re-assigns the same project instance and therefore raises no change
+    /// notification of its own.
+    /// </summary>
+    public void RefreshGifEstimate() => UpdateGifEstimate();
+
+    private void UpdateGifEstimate()
+    {
+        if (SelectedFormat != VideoFormat.GIF || CurrentProject is null)
+        {
+            GifWarningText = string.Empty;
+            return;
+        }
+
+        int sourceWidth = CurrentProject.Width > 0 ? CurrentProject.Width : 1920;
+        int sourceHeight = CurrentProject.Height > 0 ? CurrentProject.Height : 1080;
+
+        var (gifWidth, gifHeight) = GifExportEstimator.ResolveOutputSize(
+            sourceWidth, sourceHeight, SelectedResolution);
+
+        // The exporter caps compositor/encode fps at 30, so estimate against the same value.
+        int effectiveFps = Math.Min(SelectedFps, 30);
+
+        var estimate = GifExportEstimator.Estimate(
+            gifWidth, gifHeight, effectiveFps, CurrentProject.Duration);
+
+        string formatted = GifExportEstimator.FormatEstimate(estimate);
+
+        GifWarningText = string.IsNullOrEmpty(formatted)
+            ? "GIF has no audio and uses a 256-colour palette."
+            : $"GIF renders at {gifWidth}×{gifHeight}, {effectiveFps} fps — this takes {formatted}. " +
+              "GIF has no audio and uses a 256-colour palette. Choose a lower export resolution to speed it up.";
     }
 
     // --- Quality helpers ---
@@ -321,6 +368,7 @@ public partial class ExportViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IsFps30));
         OnPropertyChanged(nameof(IsFps60));
+        UpdateGifEstimate();
     }
 
     // --- Commands ---

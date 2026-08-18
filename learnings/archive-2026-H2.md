@@ -2499,3 +2499,12 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What didn't work**: the pre-existing `ExportViewModel` format radio properties were dead code — no XAML anywhere bound to `IsFormatMP4`/`IsFormatGIF`/`IsFormatWebM`, so a ViewModel-only implementation is not evidence a feature is reachable. `ExportGifAsync` also silently ignored `settings.Resolution`, writing GIFs at the compositor's native size (multi-GB for 2K/4K sources).
 - **Notes**: per the WinUI flyout playbook, radio defaults are applied in `SyncExportOptionsToViewModel()` under `_suppressExportFormatSync`, never as XAML `IsChecked`. `dotnet test` still hits the PriGen MSB4062 error; MSBuild-build the test project first, then `dotnet test --no-build -p:Platform=x64`.
 - **Verified**: full suite **1239 passed, 0 failed, 3 skipped** (1242 total); `Musio.App` x64 Debug build EXIT=0.
+
+## GIF export slowness: measurement and warning
+
+- **Feature/area**: `GifEncoder` / `ExportEngine` GIF path and the export flyout's GIF option.
+- **Approaches tried**: benchmarked the WIC GIF encoder directly (temporary MSTest harness, 30 frames per size) instead of guessing at hot spots; separately timed a variant with the per-frame `/grctlext/Delay` property call removed.
+- **What worked**: establishing that GIF cost is *entirely* resolution x frame-count. Measured on ARM64: **~14 ms/frame at 480x270, ~46 ms at 960x540, ~58 ms at 640x360, ~390 ms at 1920x1080** — so a 60s/30fps 1080p GIF is ~12 minutes of encoding alone. Added `GifExportEstimator` (~150 ms per megapixel per frame, the conservative middle of the measured 90-190 range) so the flyout warns up front with a concrete estimate, and surfaced `ProgressStatus` (time remaining) in the exporting panel.
+- **What didn't work**: removing the per-frame `SetPropertiesAsync` delay call is NOT an optimization — 386 ms vs 406 ms/frame at 1080p is within noise. There is no cheaper WIC encoder configuration; palette quantization dominates. Do not re-attempt micro-optimizing the encoder loop.
+- **Decision**: the user chose to keep honouring the selected export resolution and fps and warn, rather than silently capping GIF at 480p/15fps. Lowering the export resolution is the documented remedy.
+- **Verified**: full suite **1251 passed, 0 failed, 3 skipped** (1254 total); `Musio.App` ARM64 Debug EXIT=0; app re-registered and launched.

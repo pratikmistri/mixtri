@@ -528,10 +528,10 @@
                                     <TextBlock
                                         x:Name="ExportGifHintText"
                                         FontSize="12"
-                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Foreground="{ThemeResource SystemFillColorCautionBrush}"
                                         TextWrapping="Wrap"
                                         Visibility="Collapsed"
-                                        Text="GIF has no audio and uses a 256-colour palette. File size grows quickly with length — pick a lower resolution for long recordings." />
+                                        Text="{x:Bind ExportVM.GifWarningText, Mode=OneWay}" />
                                     <Button
                                         HorizontalAlignment="Stretch"
                                         Click="StartExport_Click"
@@ -555,6 +555,12 @@
                                         FontSize="14"
                                         TextAlignment="Center"
                                         Text="Exporting…" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ProgressStatus, Mode=OneWay}" />
                                     <Button
                                         HorizontalAlignment="Center"
                                         Click="CancelExport_Click"
