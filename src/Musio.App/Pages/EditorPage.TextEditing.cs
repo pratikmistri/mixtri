@@ -1214,7 +1214,6 @@ public sealed partial class EditorPage
         _suppressSlideEvents = true;
 
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
-        if (ZoomSegmentPanel is not null) ZoomSegmentPanel.Visibility = Visibility.Collapsed;
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;

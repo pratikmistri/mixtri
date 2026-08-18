@@ -54,6 +54,12 @@ public sealed partial class EditorPage
     private ToggleSwitch MotionBlurToggle => PropertiesPanel.Scene.MotionBlurToggle;
     private Slider MotionBlurSlider => PropertiesPanel.Scene.MotionBlurSlider;
 
+    // ─── Zoom segment panel ─────────────────────────────────────────────
+
+    private ComboBox ZoomLevelCombo => PropertiesPanel.Zoom.ZoomLevelCombo;
+    private ToggleSwitch ZoomDriftToggle => PropertiesPanel.Zoom.ZoomDriftToggle;
+    private Slider ZoomDriftSlider => PropertiesPanel.Zoom.ZoomDriftSlider;
+
     // ─── Text slide panel ───────────────────────────────────────────────
 
     private TextBox SlideTextBox => PropertiesPanel.TextSlide.SlideTextBox;
@@ -204,6 +210,14 @@ public sealed partial class EditorPage
         BorderToggle.Toggled += StyleToggle_Toggled;
         MotionBlurToggle.Toggled += MotionToggle_Toggled;
         MotionBlurSlider.ValueChanged += MotionSlider_ValueChanged;
+
+        // Zoom segment panel
+        ZoomLevelCombo.SelectionChanged += ZoomLevelCombo_SelectionChanged;
+        ZoomLevelCombo.TextSubmitted += ZoomLevelCombo_TextSubmitted;
+        PropertiesPanel.Zoom.EditZoomRegionButton.Click += EditZoomRegion_Click;
+        PropertiesPanel.Zoom.RemoveZoomSegmentButton.Click += RemoveZoomSegment_Click;
+        ZoomDriftToggle.Toggled += ZoomDriftToggle_Toggled;
+        ZoomDriftSlider.ValueChanged += ZoomDriftSlider_ValueChanged;
 
         // ZoomDriftSlider's drag-start/end are picked up here rather than via XAML
         // PointerPressed/PointerCaptureLost attributes: Slider/RangeBase marks those routed

@@ -1389,9 +1389,9 @@ public sealed partial class EditorPage : Page
 
     private void UpdateZoomPanelVisibility()
     {
-        if (Timeline is null || ZoomSegmentPanel is null) return;
+        if (Timeline is null || PropertiesPanel is null) return;
         bool hasSelection = Timeline.SelectedZoomKeyframeId is not null;
-        ZoomSegmentPanel.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Zoom, hasSelection);
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]

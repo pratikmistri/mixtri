@@ -1008,12 +1008,16 @@ public sealed partial class EditorPage
                 if (ZoomDriftToggle is not null && ZoomDriftSlider is not null)
                 {
                     var drift = kf.EffectiveDrift;
-                    ZoomDriftToggle.IsChecked = drift.Enabled;
+                    ZoomDriftToggle.IsOn = drift.Enabled;
                     ZoomDriftSlider.Value = drift.Strength * 50.0;
                     ZoomDriftSlider.IsEnabled = drift.Enabled;
                 }
 
                 _suppressZoomPropertyUpdate = false;
+
+                // Reveal the zoom pane so its properties are immediately editable on
+                // selection — mirrors SyncTransitionUI / ShowTextSlidePanel.
+                PropertiesPanel?.ShowPane(PropertyPaneKind.Zoom);
             }
         }
     }
@@ -1174,7 +1178,7 @@ public sealed partial class EditorPage
     {
         if (_suppressZoomPropertyUpdate) return;
         if (ZoomDriftSlider is not null)
-            ZoomDriftSlider.IsEnabled = ZoomDriftToggle?.IsChecked == true;
+            ZoomDriftSlider.IsEnabled = ZoomDriftToggle?.IsOn == true;
         CommitZoomDriftSettings();
     }
 
@@ -1208,7 +1212,7 @@ public sealed partial class EditorPage
 
         var newDrift = kf.EffectiveDrift with
         {
-            Enabled = ZoomDriftToggle.IsChecked == true,
+            Enabled = ZoomDriftToggle.IsOn,
             Strength = (float)(ZoomDriftSlider.Value / 50.0),
         };
 
