@@ -459,12 +459,49 @@
                     <Button.Flyout>
                         <Flyout x:Name="ExportFlyout" Placement="Top">
                             <StackPanel Width="280" Spacing="16" Padding="8">
+                                <!-- Options state: shown before an export starts so the
+                                     output format can be chosen. Defaults are applied in
+                                     SyncExportOptionsToViewModel(), never as XAML IsChecked
+                                     values (those fire Checked during InitializeComponent). -->
+                                <StackPanel
+                                    x:Name="ExportOptionsPanel"
+                                    Spacing="12"
+                                    Visibility="Visible">
+                                    <TextBlock
+                                        FontWeight="SemiBold"
+                                        Text="Format" />
+                                    <StackPanel Spacing="4">
+                                        <RadioButton
+                                            x:Name="ExportFormatMp4Radio"
+                                            Checked="ExportFormat_Checked"
+                                            Content="MP4 video"
+                                            GroupName="ExportFormat" />
+                                        <RadioButton
+                                            x:Name="ExportFormatGifRadio"
+                                            Checked="ExportFormat_Checked"
+                                            Content="Animated GIF"
+                                            GroupName="ExportFormat" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        x:Name="ExportGifHintText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                        TextWrapping="Wrap"
+                                        Visibility="Collapsed"
+                                        Text="{x:Bind ExportVM.GifWarningText, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Stretch"
+                                        Click="StartExport_Click"
+                                        Style="{ThemeResource AccentButtonStyle}"
+                                        Content="Start export" />
+                                </StackPanel>
+
                                 <!-- Exporting state -->
                                 <StackPanel
                                     x:Name="ExportingPanel"
                                     HorizontalAlignment="Center"
                                     Spacing="12"
-                                    Visibility="Visible">
+                                    Visibility="Collapsed">
                                     <ProgressRing
                                         Width="80"
                                         Height="80"
@@ -475,6 +512,12 @@
                                         FontSize="14"
                                         TextAlignment="Center"
                                         Text="Exporting…" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ProgressStatus, Mode=OneWay}" />
                                     <Button
                                         HorizontalAlignment="Center"
                                         Click="CancelExport_Click"

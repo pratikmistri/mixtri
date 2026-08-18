@@ -1308,26 +1308,11 @@ public class FrameCompositor : IDisposable
         float targetRatio = AspectRatioHelper.GetRatioValue(_config.AspectRatio);
 
         // Step 1: compute the output canvas at the target aspect ratio, sized to fit
-        // within the source bounds. Independent of padding.
-        if (targetRatio <= 0f)
-        {
-            _contentWidth = _sourceWidth;
-            _contentHeight = _sourceHeight;
-        }
-        else
-        {
-            float sourceRatio = (float)_sourceWidth / _sourceHeight;
-            if (sourceRatio > targetRatio)
-            {
-                _contentHeight = _sourceHeight;
-                _contentWidth = (int)Math.Round(_sourceHeight * (double)targetRatio);
-            }
-            else
-            {
-                _contentWidth = _sourceWidth;
-                _contentHeight = (int)Math.Round(_sourceWidth / (double)targetRatio);
-            }
-        }
+        // within the source bounds. Independent of padding. Shared with
+        // AspectRatioHelper.ComputeCanvasSize so callers that need to predict this
+        // size (e.g. the GIF export estimate) cannot drift from it.
+        (_contentWidth, _contentHeight) =
+            AspectRatioHelper.ComputeCanvasSize(_sourceWidth, _sourceHeight, _config.AspectRatio);
 
         // Step 2: the user-padding setting reserves at least that many pixels of
         // background on each side. The remaining "max content box" is where the

@@ -1,10 +1,12 @@
 using System.Diagnostics;
+using Microsoft.Graphics.Canvas;
 using Musio.Core.Capture;
 using Musio.Core.Models;
 using Musio.Core.Processing;
 using Musio.Core.Settings;
 using Musio.Core.Timeline;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Windows.Storage;
 
 namespace Musio.Core.Export;
@@ -150,14 +152,68 @@ public class ExportEngine
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? composer.TotalFrames;
 
+        // Honour the selected resolution exactly as the MP4 path does. Without this the
+        // GIF was written at the compositor's native size, so a 2K/4K recording produced
+        // a multi-gigabyte file no matter which resolution the user picked.
+        var (gifWidth, gifHeight) = AspectRatioHelper.ComputeExportDimensions(
+            composer.OutputWidth, composer.OutputHeight, settings.Resolution);
+
         var gifEncoder = new GifEncoder();
         await gifEncoder.EncodeComposedFramesAsync(
-            frameIndex => composer.ComposeFrameAsync(frameIndex, ct),
+            frameIndex => ComposeGifFrameAsync(composer, frameIndex, gifWidth, gifHeight, ct),
             totalFrames,
             settings.Fps,
             outputPath,
             progress,
             ct);
+    }
+
+    /// <summary>
+    /// Composes one output frame and downscales it to the GIF's target size when the
+    /// compositor's native size differs. The composed frame is always disposed here;
+    /// ownership of the returned frame passes to <see cref="GifEncoder"/>.
+    /// </summary>
+    private static async Task<CanvasRenderTarget> ComposeGifFrameAsync(
+        SegmentFrameComposer composer,
+        int frameIndex,
+        int targetWidth,
+        int targetHeight,
+        CancellationToken ct)
+    {
+        var composed = await composer.ComposeFrameAsync(frameIndex, ct);
+
+        if (composed.SizeInPixels.Width == targetWidth &&
+            composed.SizeInPixels.Height == targetHeight)
+        {
+            return composed;
+        }
+
+        // Tracked in a local so a throw mid-draw (device loss is a real possibility here)
+        // disposes the partially built target instead of leaking it, mirroring how
+        // VideoEncoder hands off its output surface.
+        CanvasRenderTarget? scaled = null;
+        try
+        {
+            scaled = Win2DUtils.CreateRenderTarget(
+                composed.Device, targetWidth, targetHeight, 96, "scaled gif frame");
+
+            using (var ds = scaled.CreateDrawingSession())
+            {
+                ds.DrawImage(
+                    composed,
+                    new Rect(0, 0, targetWidth, targetHeight),
+                    new Rect(0, 0, composed.SizeInPixels.Width, composed.SizeInPixels.Height));
+            }
+
+            var result = scaled;
+            scaled = null; // ownership passes to the caller
+            return result;
+        }
+        finally
+        {
+            scaled?.Dispose();
+            composed.Dispose();
+        }
     }
 
     /// <summary>
