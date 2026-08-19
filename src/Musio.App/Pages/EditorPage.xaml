@@ -344,13 +344,13 @@
                 </Button>
                 <Button
                     Padding="8,6"
-                    Command="{x:Bind ViewModel.DeleteSelectedCommand}"
+                    Click="DeleteSelected_Click"
                     ToolTipService.ToolTip="Delete Segment (Del)">
                     <FontIcon FontSize="16" Glyph="&#xE74D;" />
                 </Button>
                 <Button
                     Padding="8,6"
-                    Command="{x:Bind ViewModel.CutSelectionCommand}"
+                    Click="CutSelection_Click"
                     ToolTipService.ToolTip="Cut Selection (Ctrl+X)">
                     <FontIcon FontSize="16" Glyph="&#xE8C6;" />
                 </Button>

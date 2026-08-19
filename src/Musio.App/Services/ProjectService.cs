@@ -308,6 +308,10 @@ public class ProjectService
         ApplyLoadTimeComposition(CurrentComposition with { LegacyCameraDrift = null });
     }
 
+    /// <summary>
+    /// Makes <paramref name="project"/> the current project, replacing any existing timeline
+    /// with a fresh one holding it as the primary base-track segment.
+    /// </summary>
     public void SetProject(Project project)
     {
         CurrentProject = project;
@@ -334,6 +338,13 @@ public class ProjectService
         // Full-screen (Monitor) captures default to zeroed padding/shadow/
         // corner radius/border; users can still override via the Style menu
         // and their edits persist for the lifetime of this project.
+        //
+        // An IMPORTED file lands here too (ImportVideo tags it Monitor) and must keep taking
+        // this branch: an import opens in its true form — the frame the user handed us, at the
+        // size they handed it to us, with nothing composited around it — and adding a
+        // background is then an explicit choice they make by raising the padding. Note this
+        // FORCES the four values rather than merely defaulting them, so an import never
+        // inherits the frame styling of whatever project preceded it.
         if (project.CaptureType is CaptureTargetType.Monitor)
         {
             CurrentComposition = CurrentComposition with
@@ -364,7 +375,7 @@ public class ProjectService
     /// </summary>
     public VideoSegment? AppendRecording(Project newRecording)
     {
-        if (CurrentProject is null || CurrentTimeline is null)
+        if (CurrentProject is null || CurrentTimeline is null || IsTimelineEmpty(CurrentTimeline))
         {
             // No existing project — just set this as the primary
             SetProject(newRecording);
@@ -495,8 +506,9 @@ public class ProjectService
         };
 
         // Importing is also a valid way to START a project; in that case the imported clip is
-        // the primary base-track segment because there is no existing edit to cover.
-        if (CurrentProject is null || CurrentTimeline is null)
+        // the primary base-track segment because there is no existing edit to cover. It opens
+        // unstyled — see the CaptureType branch in SetProject.
+        if (CurrentProject is null || CurrentTimeline is null || IsTimelineEmpty(CurrentTimeline))
         {
             SetProject(project);
             return CurrentTimeline?.Segments
@@ -513,6 +525,26 @@ public class ProjectService
         ProjectChanged?.Invoke(this, EventArgs.Empty);
         return segment;
     }
+
+    /// <summary>
+    /// Treats a timeline the user has emptied out as "no project yet", so the next recording or
+    /// import becomes the primary rather than being appended to a source that is no longer on
+    /// the timeline.
+    /// </summary>
+    /// <remarks>
+    /// Deleting the last clip and recording a new one is the natural retake gesture, but nothing
+    /// about deleting a segment rewrites <see cref="CurrentProject"/> — its VideoFilePath, its
+    /// dimensions and its duration all still describe the discarded take, and those are what the
+    /// preview reader, the filmstrip and the exported frame size are derived from. Requiring the
+    /// timeline to be empty of EVERYTHING (segments, camera moves, overlays and inserted audio)
+    /// keeps the reset off any timeline still holding work: a project with a text slide or a
+    /// music bed left on it takes the ordinary append path, which preserves them.
+    /// </remarks>
+    private static bool IsTimelineEmpty(TimelineModel timeline) =>
+        timeline.Segments.Count == 0
+        && timeline.AudioTracks.Count == 0
+        && timeline.TextOverlays.Count == 0
+        && timeline.CameraSegments.Count == 0;
 
     /// <summary>
     /// Registers a new recording/import as a project source and returns the segment that will

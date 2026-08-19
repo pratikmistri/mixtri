@@ -75,11 +75,30 @@ public sealed partial class EditorPage
     {
         if (IsFocusOnInteractiveControl()) return;
 
+        DeleteSelection();
+        args.Handled = true;
+    }
+
+    /// <summary>
+    /// Toolbar counterpart of the Delete accelerator. Bound to a Click handler rather than to
+    /// <see cref="EditorViewModel.DeleteSelectedCommand"/> because that command only knows the
+    /// legacy <c>TimelineModel.Clips</c> list, which the segment-based editor never populates —
+    /// so the button did nothing at all for a recorded or imported clip.
+    /// </summary>
+    private void DeleteSelected_Click(object sender, RoutedEventArgs e) => DeleteSelection();
+
+    /// <summary>
+    /// Removes whatever the user is currently working on, in the order the timeline layers it:
+    /// an inserted audio block, a camera move, a text overlay, a zoom, then the selected
+    /// primary-track segment. With nothing selected the segment under the playhead is the
+    /// intended target — that is the block the preview is showing.
+    /// </summary>
+    private void DeleteSelection()
+    {
         // If an inserted voice-over/music block is selected, remove it.
         if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
         {
             DeleteInsertedAudioTrack(audioTrackId);
-            args.Handled = true;
             return;
         }
 
@@ -87,7 +106,6 @@ public sealed partial class EditorPage
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
         {
             DeleteCameraSegment(cameraSegId);
-            args.Handled = true;
             return;
         }
 
@@ -95,7 +113,6 @@ public sealed partial class EditorPage
         if (Timeline.SelectedTextOverlayId is { } overlayId)
         {
             DeleteTextOverlay(overlayId);
-            args.Handled = true;
             return;
         }
 
@@ -106,7 +123,6 @@ public sealed partial class EditorPage
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
             UpdateZoomPanelVisibility();
-            args.Handled = true;
             return;
         }
 
@@ -115,20 +131,53 @@ public sealed partial class EditorPage
             ViewModel.Model.Segments.Any(s => s.Id == segId))
         {
             DeletePrimarySegment(segId);
-            args.Handled = true;
             return;
         }
 
+        // Nothing selected: fall back to the segment under the playhead. Routed through the
+        // same helper so an unselected delete leaves exactly as little behind as a selected one.
+        if (ViewModel.Model.Segments.Count > 0)
+        {
+            var (atPlayhead, _) = ViewModel.Model.GetSegmentAtTime(Timeline.PlayheadPosition);
+            if (atPlayhead is not null)
+            {
+                DeletePrimarySegment(atPlayhead.Id);
+                return;
+            }
+        }
+
         ViewModel.DeleteSelectedCommand.Execute(null);
-        args.Handled = true;
     }
 
     private void CutAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (IsFocusOnInteractiveControl()) return;
 
-        ViewModel.CutSelectionCommand.Execute(null);
+        CutSelection();
         args.Handled = true;
+    }
+
+    private void CutSelection_Click(object sender, RoutedEventArgs e) => CutSelection();
+
+    /// <summary>
+    /// Cut is a ripple delete, and on a segment timeline removing a segment already closes the
+    /// gap behind it — so the two gestures are the same edit and share one implementation.
+    /// </summary>
+    /// <remarks>
+    /// The legacy <see cref="EditorViewModel.CutSelectionCommand"/> must not be let anywhere
+    /// near a segment timeline: finding no clips to cut, it FABRICATES one spanning the whole
+    /// duration, which switches the timeline into legacy clip rendering the segment editor
+    /// never otherwise uses.
+    /// </remarks>
+    private void CutSelection()
+    {
+        if (ViewModel.Model.Segments.Count > 0)
+        {
+            DeleteSelection();
+            return;
+        }
+
+        ViewModel.CutSelectionCommand.Execute(null);
     }
 
     private async void SaveAccelerator_Invoked(

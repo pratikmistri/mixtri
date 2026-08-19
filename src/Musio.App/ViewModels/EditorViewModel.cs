@@ -112,6 +112,11 @@ public partial class EditorViewModel : ObservableObject
     [RelayCommand]
     private void CutSelection()
     {
+        // Legacy clip-based timeline only. The segment editor never populates Clips, and the
+        // fabricated clip below would switch the timeline into legacy clip rendering — the
+        // page routes a segment-timeline cut to the segment delete path instead.
+        if (_model.Segments.Count > 0) return;
+
         // If no clips exist, create a default clip first
         if (_model.Clips.Count == 0)
         {
