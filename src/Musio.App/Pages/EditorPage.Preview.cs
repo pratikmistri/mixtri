@@ -330,13 +330,16 @@ public sealed partial class EditorPage
             }
         }
 
-        if (mouseData is null)
-        {
-            // No cursor data — just show raw frames
-            Timeline.Refresh();
-            _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
-            return;
-        }
+        // A primary source with no cursor recording — an imported video, or a recording whose
+        // cursor log is missing — is NOT a reason to abandon the rest of this method. Returning
+        // here used to skip the compositor AND every panel initializer below it, so an
+        // editor-first project (import, then style it) opened with an empty preset list, an
+        // empty wallpaper grid and style sliders still holding their XAML zeros rather than the
+        // project's real values: the first edit then silently wrote Padding = 0 and made the
+        // background it was supposed to change invisible. Fall back to an empty recording
+        // instead — the appended-segment, transition and rebuild paths all already do exactly
+        // this, and FrameCompositor synthesizes a static centre position from it.
+        mouseData ??= new MouseRecordingData();
 
         // Feed cursor data to timeline for track visualization
         ViewModel.Model.CursorData = mouseData;
@@ -449,13 +452,19 @@ public sealed partial class EditorPage
         // from anything the user did, so it must not mark the project as having unsaved edits.
         ProjectService.Instance.ApplyLoadTimeComposition(config);
 
+        // Applied to the renderer's copy only, never to the config persisted above: a source
+        // with no cursor samples must not draw the invented centre cursor, but that is a fact
+        // about this source, not a cursor setting the project should inherit — the same
+        // separation RebuildPreviewRendererCoreAsync makes.
+        var rendererConfig = HideCursorWhenNoSamples(config, mouseData);
+
         try
         {
             var renderer = new PreviewRenderer();
             try
             {
                 await renderer.InitializeAsync(
-                    mouseData, config,
+                    mouseData, rendererConfig,
                     project.Width > 0 ? project.Width : 1920,
                     project.Height > 0 ? project.Height : 1080,
                     project.Duration,
