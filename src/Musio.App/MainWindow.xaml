@@ -18,6 +18,8 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
+        <!--  Both titles are overwritten from AppBranding in the constructor so a dev  -->
+        <!--  build reads "Musio (dev)"; the literals here are the design-time value.  -->
         <TitleBar
             x:Name="AppTitleBar"
             Title="Musio"

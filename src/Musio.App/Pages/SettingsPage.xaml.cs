@@ -17,6 +17,8 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
+        // Reflects the package manifest, so a locally deployed build reads "Musio (dev)".
+        AboutAppNameText.Text = AppBranding.DisplayName;
         Loaded += SettingsPage_Loaded;
     }
 

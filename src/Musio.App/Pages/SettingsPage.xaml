@@ -298,7 +298,10 @@
                 BorderThickness="1"
                 CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="4">
-                    <TextBlock FontWeight="SemiBold" Text="Musio" />
+                    <TextBlock
+                        x:Name="AboutAppNameText"
+                        FontWeight="SemiBold"
+                        Text="Musio" />
                     <TextBlock
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         Text="Version 1.4.0" />

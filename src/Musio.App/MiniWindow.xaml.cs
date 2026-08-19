@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Musio.Core.Interop;
+using Musio_App.Helpers;
 using Musio_App.ViewModels;
 using Windows.Graphics;
 using Windows.UI.ViewManagement;
@@ -76,6 +77,10 @@ public sealed partial class MiniWindow : Window
     public MiniWindow()
     {
         InitializeComponent();
+
+        // Follows the package manifest, so the dev build's pill reads "Musio (dev) Mini".
+        // Mini is the default startup mode, making this the surface most often seen first.
+        Title = $"{AppBranding.DisplayName} Mini";
 
         Toolbar.UseTransparentChrome();
         Toolbar.RecordRequested += (_, _) => RecordRequested?.Invoke(this, EventArgs.Empty);
