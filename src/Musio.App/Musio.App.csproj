@@ -114,6 +114,14 @@
     it. MSIX packaging for the Store sets GenerateAppxPackageOnBuild=true (see the MSIX
     playbook in learnings/playbooks.md), and that is the only build whose name and identity
     must stay clean. Pass /p:MusioDevBranding=false to force Store naming for any other build.
+
+    The plain '$(X)' == 'true' comparisons below are deliberate and are NOT a casing bug:
+    MSBuild's == operator compares strings case-insensitively, so TRUE/True/true all match
+    (verified). They also mirror exactly how the Windows App SDK's own
+    Microsoft.Build.Msix.Packaging.targets tests GenerateAppxPackageOnBuild. Do not "harden"
+    them with [MSBuild]::IsTrue(): that accepts spellings the SDK does not (on/yes), which
+    would let a build skip dev branding while the SDK declines to package it — producing an
+    unbranded dev build. Matching the SDK's interpretation is the point.
   -->
   <PropertyGroup>
     <MusioDevBranding Condition="'$(MusioDevBranding)' == '' and '$(GenerateAppxPackageOnBuild)' == 'true'">false</MusioDevBranding>
