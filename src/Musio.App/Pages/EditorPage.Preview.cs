@@ -182,6 +182,75 @@ public sealed partial class EditorPage
         }
     }
 
+    /// <summary>
+    /// Tears the preview pipeline down to nothing and leaves it that way, for when the project
+    /// itself has been discarded (the user deleted the last segment).
+    /// </summary>
+    /// <remarks>
+    /// The deliberate opposite of the guard at the top of <see cref="InitializePreviewCoreAsync"/>,
+    /// which refuses to destroy a working preview it cannot rebuild. That rule protects against a
+    /// spurious re-init finding no project; here the absence of a project is the intended
+    /// destination, so the teardown is what the user asked for and nothing is scheduled to
+    /// rebuild it. The next recording or import republishes a project, which re-enters
+    /// <see cref="InitializePreviewCoreAsync"/> through ModelReloaded and rebuilds everything.
+    /// <para>
+    /// Every generation counter is bumped first so an init, thumbnail pass or segment-preview
+    /// build still awaiting a decoder disposes what it made instead of publishing it onto an
+    /// editor that is supposed to be empty.
+    /// </para>
+    /// </remarks>
+    private void ResetPreviewToEmptyState()
+    {
+        _previewInitGeneration++;
+        _thumbnailGenerationId++;
+        _segmentPreviewGeneration++;
+
+        Preview.Pause();
+        Preview.ClearFrame();
+        Preview.HideQualityIndicator();
+
+        _styleDebouncer?.Stop();
+        _motionDebouncer?.Stop();
+
+        DisposeOffUiThread(_frameReader);
+        _frameReader = null;
+        TryDispose(_previewRenderer);
+        _previewRenderer = null;
+        _compositorReady = false;
+        TryDispose(_textSlideRenderer);
+        _textSlideRenderer = null;
+        TryDispose(_transitionRenderer);
+        _transitionRenderer = null;
+        DisposeSegmentPreviews();
+        DisposePrimaryStyleRenderers();
+
+        _audioPlayer?.Dispose();
+        _audioPlayer = null;
+        _insertedAudioPlayer?.Dispose();
+        _insertedAudioPlayer = null;
+        _stretchedAudioPlayer?.Dispose();
+        _stretchedAudioPlayer = null;
+
+        TryDispose(_lastWebcamFrame);
+        _lastWebcamFrame = null;
+        try { _webcamComposition?.Clips.Clear(); } catch { /* already torn down */ }
+        _webcamComposition = null;
+
+        Timeline.ClearThumbnails();
+        Timeline.ClearSegmentTrackVisuals();
+        _thumbnailsCompletedForPath = null;
+        _thumbnailsInFlightForPath = null;
+        _thumbnailsDoneForFiles.Clear();
+
+        _adaptivePreviewVideoPath = null;
+        _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        _pendingRenderPosition = null;
+        _pendingRenderForce = false;
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", "timeline emptied; editor reset to zero state");
+    }
+
     private async Task InitializePreviewCoreAsync()
     {
         // Resolved BEFORE any teardown. The teardown below is unconditional, so discovering

@@ -1367,8 +1367,13 @@ public sealed partial class TimelineControl : UserControl
             }
         }
 
-        // If no clips, draw the full duration as one clip
-        if (model.Clips.Count == 0)
+        // If no clips, draw the full duration as one clip — but only for a genuinely legacy
+        // clip timeline, never for a segment timeline whose last segment was just removed.
+        // That model still carries the discarded take's Duration, so this fallback would paint
+        // a filmstrip block for footage the timeline no longer has: a ghost nothing can select
+        // or delete, because hit testing runs over segments and none stands behind it.
+        // PrimaryVideoFilePath is the discriminator — every segment-era project sets it.
+        if (model.Clips.Count == 0 && model.PrimaryVideoFilePath is null)
         {
             float x1 = (float)TimeToX(model.TrimStart);
             float x2 = (float)TimeToX(model.TrimEnd > TimeSpan.Zero ? model.TrimEnd : model.Duration);

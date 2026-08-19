@@ -1082,6 +1082,7 @@ public sealed partial class EditorPage
         _selectedTextSlideId = null;
         HideTextSlidePanel();
         Timeline.InvalidateAllCanvases();
+        ResetProjectIfTimelineEmptied();
     }
 
     private void SlideTextBox_TextChanged(object sender, TextChangedEventArgs e)

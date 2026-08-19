@@ -697,6 +697,54 @@ public sealed partial class EditorPage
         _selectedPrimarySegmentId = null;
         Timeline.SelectSegment(null);
         HideTextSlidePanel();
+        ResetProjectIfTimelineEmptied();
+    }
+
+    /// <summary>
+    /// Drops the whole project once the last segment leaves the timeline, so deleting the only
+    /// clip lands the editor in the same empty state it has before anything is recorded.
+    /// </summary>
+    /// <remarks>
+    /// Removing a segment only edits the timeline. Left alone, the project stayed current with
+    /// its video path, duration, cursor log and audio files intact, so the ruler kept the old
+    /// length and the video track fell through to its legacy full-duration fallback and painted
+    /// a filmstrip block for a segment that no longer existed — one no hit test could select and
+    /// no delete could remove, because there was nothing behind it. Inserting the next clip then
+    /// appeared to "replace" that ghost.
+    /// <para>
+    /// Ordered teardown-then-clear on purpose: the clear republishes an empty timeline through
+    /// ProjectChanged, and the ModelReloaded handler that follows re-enters the preview init,
+    /// which now correctly finds no project and leaves the torn-down pipeline alone.
+    /// </para>
+    /// </remarks>
+    private void ResetProjectIfTimelineEmptied()
+    {
+        if (ViewModel.Model.Segments.Count > 0) return;
+
+        _selectedPrimarySegmentId = null;
+        _selectedTextSlideId = null;
+        HideTextSlidePanel();
+        Timeline.ClearZoomSelection();
+        Timeline.ClearInsertedAudioSelection();
+        UpdateZoomPanelVisibility();
+
+        // Every pane except Scene describes something the timeline no longer holds. Scene is
+        // always available by contract (SetPaneAvailable falls back to it), so hiding the rest
+        // is what leaves the rail showing only what still exists.
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Cursor, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Zoom, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextOverlay, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Transition, false);
+
+        ResetPreviewToEmptyState();
+        ProjectService.Instance.ClearProject();
+
+        // InitializeStyleControls only runs when there is a project to initialise from, so
+        // without this the Scene pane would keep displaying the discarded take's numbers while
+        // the composition behind them has already gone back to defaults.
+        SyncStyleControlsToConfig(ProjectService.Instance.CurrentComposition.Background);
     }
 
     /// <summary>

@@ -547,6 +547,45 @@ public class ProjectService
         && timeline.CameraSegments.Count == 0;
 
     /// <summary>
+    /// Discards the current project entirely and publishes an empty timeline in its place —
+    /// the state the editor is in before anything has ever been recorded or imported.
+    /// </summary>
+    /// <remarks>
+    /// Called when the user deletes the last segment. Removing a segment on its own only edits
+    /// the timeline, which left the project itself behind: its video path, dimensions, duration,
+    /// cursor log and audio files all still described the discarded take, so the ruler kept its
+    /// old length, the video track drew a filmstrip block from the legacy full-duration fallback
+    /// that no hit test could select or delete, and the cursor/camera/mic/system-audio lanes
+    /// stayed populated. Clearing the project is what makes "I deleted my only clip" mean an
+    /// empty editor rather than a half-torn-down one.
+    /// <para>
+    /// The composition is reset with it. A zero state that silently kept the previous take's
+    /// background, cursor and motion settings is not a zero state, and every path that starts
+    /// the next project (<see cref="SetProject"/>, and the import route through it) sets the
+    /// style it wants anyway.
+    /// </para>
+    /// <para>
+    /// This is deliberately NOT undoable: the timeline the undo stack belongs to is replaced
+    /// here, so the manager is rebuilt empty by the <see cref="ProjectChanged"/> subscribers.
+    /// The recording's files are untouched on disk.
+    /// </para>
+    /// </remarks>
+    public void ClearProject()
+    {
+        CurrentProject = null;
+        CurrentPackagePath = null;
+        IsRestoredFromPackage = false;
+        _restoredSourcePaths.Clear();
+        CurrentTimeline = new TimelineModel();
+        ApplyLoadTimeComposition(new CompositionConfig());
+
+        // Nothing left to save, so the close prompt must not offer to save it.
+        MarkSaved();
+
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
     /// Registers a new recording/import as a project source and returns the segment that will
     /// be placed on either the base track or an overlay lane by the caller.
     /// </summary>
