@@ -211,6 +211,10 @@ public sealed partial class EditorPage : Page
 
         Preview.Duration = GetMappedDuration();
 
+        // Before the first preview init: an editor opened with no project must show the
+        // call-out immediately, not a black canvas until something happens to refresh it.
+        UpdateEmptyStateVisibility();
+
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
 
@@ -363,6 +367,7 @@ public sealed partial class EditorPage : Page
                     Timeline.ClearTransitionSelection();
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
+                    UpdateEmptyStateVisibility();
                     ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
                 }
                 catch (Exception ex)

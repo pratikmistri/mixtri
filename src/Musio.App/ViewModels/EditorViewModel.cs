@@ -13,11 +13,7 @@ public partial class EditorViewModel : ObservableObject
     public EditorViewModel()
     {
         var timeline = ProjectService.Instance.CurrentTimeline;
-        _model = timeline ?? new TimelineModel
-        {
-            Duration = TimeSpan.FromSeconds(30),
-            TrimEnd = TimeSpan.FromSeconds(30)
-        };
+        _model = timeline ?? TimelineModel.CreateEmpty();
         _undoRedoManager = new UndoRedoManager(_model);
         _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
         _undoRedoManager.EditPerformed += OnEditPerformed;

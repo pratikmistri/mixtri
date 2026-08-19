@@ -576,7 +576,7 @@ public class ProjectService
         CurrentPackagePath = null;
         IsRestoredFromPackage = false;
         _restoredSourcePaths.Clear();
-        CurrentTimeline = new TimelineModel();
+        CurrentTimeline = TimelineModel.CreateEmpty();
         ApplyLoadTimeComposition(new CompositionConfig());
 
         // Nothing left to save, so the close prompt must not offer to save it.

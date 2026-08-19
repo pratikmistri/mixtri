@@ -19,6 +19,26 @@ public class TimelineModel
     /// </summary>
     public const int BaseTrackIndex = 0;
 
+    /// <summary>
+    /// Ruler length an empty editor shows. A zero-length timeline collapses every track draw
+    /// (they all return early on a non-positive <see cref="DisplayDuration"/>), which leaves the
+    /// editor looking broken rather than merely empty, so the empty state is given a nominal
+    /// span to lay its placeholder out in.
+    /// </summary>
+    public static readonly TimeSpan EmptyDuration = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The timeline an editor with no project shows. Shared so that "nothing recorded yet" and
+    /// "the last clip was just deleted" are the same state rather than two that drift apart —
+    /// the second used to produce a zero-length model, and therefore a blank editor instead of
+    /// the inviting empty one.
+    /// </summary>
+    public static TimelineModel CreateEmpty() => new()
+    {
+        Duration = EmptyDuration,
+        TrimEnd = EmptyDuration,
+    };
+
     public TimeSpan Duration { get; set; }
     public int Fps { get; set; } = 30;
     public TimeSpan PlayheadPosition { get; set; }

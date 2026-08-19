@@ -478,6 +478,25 @@ public sealed partial class EditorPage
     private VideoSegment? SegmentForSource(string? sourceVideoFilePath) =>
         EditorTimelineMediator.SegmentForSource(ViewModel.Model, sourceVideoFilePath, PrimaryVideoPath);
 
+    /// <summary>
+    /// Shows the preview-area call-out whenever the timeline holds nothing, so an editor with
+    /// no clips offers the next action instead of a black rectangle.
+    /// </summary>
+    /// <remarks>
+    /// Keyed on the model rather than on <see cref="ProjectService.CurrentProject"/> so the two
+    /// routes into the empty editor — never having recorded, and having just deleted the last
+    /// clip — cannot diverge. Pairs with the dashed shadow segment the timeline draws under the
+    /// same condition.
+    /// </remarks>
+    private void UpdateEmptyStateVisibility()
+    {
+        if (EmptyStateOverlay is null) return;
+
+        var model = ViewModel.Model;
+        bool isEmpty = model.Segments.Count == 0 && model.Clips.Count == 0;
+        EmptyStateOverlay.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
         DispatcherQueue.TryEnqueue(() =>
@@ -510,6 +529,10 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
+
+            // Undo/redo and every undoable edit funnel through here, which makes this the one
+            // place that reliably sees the timeline gain its first segment or lose its last.
+            UpdateEmptyStateVisibility();
 
             // Same reasoning as the transition resync above: undo/redo does not change the
             // zoom selection, so nothing else pushes the reverted keyframe back onto the zoom
@@ -745,6 +768,8 @@ public sealed partial class EditorPage
         // without this the Scene pane would keep displaying the discarded take's numbers while
         // the composition behind them has already gone back to defaults.
         SyncStyleControlsToConfig(ProjectService.Instance.CurrentComposition.Background);
+
+        UpdateEmptyStateVisibility();
     }
 
     /// <summary>

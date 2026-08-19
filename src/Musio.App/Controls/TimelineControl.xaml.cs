@@ -217,6 +217,8 @@ public sealed partial class TimelineControl : UserControl
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
     private Color TrackHintTextColor;
+    private Color EmptyPlaceholderFill;
+    private Color EmptyPlaceholderStroke;
     private Color ClickStrokeColor;
 
     // Filmstrip thumbnail cache.
@@ -550,6 +552,10 @@ public sealed partial class TimelineControl : UserControl
         TrackCenterLineColor  = GetSystemBrushColor("DividerStrokeColorDefaultBrush", Color.FromArgb(100, 255, 255, 255));
         TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
         TrackHintTextColor    = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(140, 255, 255, 255));
+
+        // ── Empty-state shadow segment — must read as an outline, never as a clip ──
+        EmptyPlaceholderFill   = isDark ? Color.FromArgb(20, 255, 255, 255) : Color.FromArgb(16, 0, 0, 0);
+        EmptyPlaceholderStroke = isDark ? Color.FromArgb(90, 255, 255, 255) : Color.FromArgb(80, 0, 0, 0);
     }
 
     /// <summary>
@@ -1313,6 +1319,16 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
+        // Nothing on the timeline at all: no segments, no legacy clips, no filmstrip to draw
+        // one from. Rather than leave the lane blank, draw the placeholder that invites the
+        // first clip — the same one whether the editor has never held a project or the user
+        // just deleted their last one.
+        if (model.Segments.Count == 0 && model.Clips.Count == 0 && !hasThumbnails)
+        {
+            DrawEmptyVideoTrackPlaceholder(ds, w, h, pad);
+            return;
+        }
+
         // Draw clips
         for (int idx = 0; idx < model.Clips.Count; idx++)
         {
@@ -1429,6 +1445,47 @@ public sealed partial class TimelineControl : UserControl
             float x = (float)TimeToX(model.Clips[i].Start);
             ds.DrawLine(x, 0, x, h, CutLineColor, 1.5f);
         }
+    }
+
+    /// <summary>
+    /// Draws the base lane's "nothing here yet" placeholder: a dashed shadow segment spanning
+    /// the ruler with a one-line prompt in it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately drawn as a SHADOW rather than as a clip. The lane used to fall through to
+    /// the legacy fallback and paint a solid electric-blue block, which reads as a real clip —
+    /// it invites a click, and every gesture aimed at it (select, split, delete, drag) silently
+    /// does nothing, because hit testing runs over segments and there is no segment there. A
+    /// dashed outline over a faint fill says "this is where a clip goes" instead of pretending
+    /// one already does.
+    /// </remarks>
+    private void DrawEmptyVideoTrackPlaceholder(CanvasDrawingSession ds, float w, float h, float pad)
+    {
+        float x1 = (float)TimeToX(TimeSpan.Zero);
+        float x2 = (float)TimeToX(Model?.DisplayDuration ?? TimeSpan.Zero);
+        float blockW = Math.Max(2, x2 - x1);
+        float blockH = Math.Max(2, h - pad * 2);
+
+        using var geom = CanvasGeometry.CreateRoundedRectangle(
+            ds, x1, pad, blockW, blockH, VideoClipCornerRadius, VideoClipCornerRadius);
+        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+
+        ds.FillGeometry(geom, EmptyPlaceholderFill);
+        ds.DrawGeometry(geom, EmptyPlaceholderStroke, 1.2f, dashed);
+
+        using var format = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 12,
+            FontFamily = "Segoe UI",
+            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+        };
+        ds.DrawText(
+            "Record or import a video to start your timeline",
+            new Rect(x1, pad, blockW, blockH),
+            TrackHintTextColor,
+            format);
     }
 
     /// <summary>

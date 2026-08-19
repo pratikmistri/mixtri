@@ -293,6 +293,52 @@
                          KeyDown="TextEditBox_KeyDown"
                          LostFocus="TextEditBox_LostFocus" />
             </Canvas>
+
+            <!--  Empty state: the editor holds no clips, so the preview area carries the
+                  next action instead of a black rectangle. Last child of this grid so it
+                  sits above the canvas and its overlays; collapsed the moment anything
+                  lands on the timeline (see UpdateEmptyStateVisibility).  -->
+            <Grid x:Name="EmptyStateOverlay"
+                  Visibility="Collapsed"
+                  Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            MaxWidth="380"
+                            Spacing="10">
+                    <FontIcon Glyph="&#xE8B9;"
+                              FontSize="40"
+                              HorizontalAlignment="Center"
+                              Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    <TextBlock Text="Nothing on the timeline yet"
+                               HorizontalAlignment="Center"
+                               Style="{ThemeResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="Record your screen or bring in a video you already have. You can add text slides, zooms and a voice over once there is a clip to work on."
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Center"
+                                Spacing="8"
+                                Margin="0,8,0,0">
+                        <Button Click="RecordMore_Click"
+                                Style="{ThemeResource AccentButtonStyle}"
+                                AutomationProperties.Name="Record a new clip">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontSize="14" Glyph="&#xEA3A;" />
+                                <TextBlock Text="Record" />
+                            </StackPanel>
+                        </Button>
+                        <Button Click="ImportVideo_Click"
+                                AutomationProperties.Name="Import a video file">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontSize="14" Glyph="&#xE898;" />
+                                <TextBlock Text="Import Video…" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
         </Grid>
 
             <!-- Adobe-style collapsible properties pane (scene / text slide / mouse / video) -->

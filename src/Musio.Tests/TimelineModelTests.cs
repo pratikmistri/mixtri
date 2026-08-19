@@ -5,6 +5,38 @@ using Musio.Core.Timeline;
 [TestClass]
 public sealed class TimelineModelTests
 {
+    #region CreateEmpty
+
+    [TestMethod]
+    public void CreateEmpty_HoldsNothing()
+    {
+        var model = TimelineModel.CreateEmpty();
+
+        Assert.AreEqual(0, model.Segments.Count);
+        Assert.AreEqual(0, model.Clips.Count);
+        Assert.AreEqual(0, model.ZoomKeyframes.Count);
+        Assert.AreEqual(0, model.CameraSegments.Count);
+        Assert.AreEqual(0, model.TextOverlays.Count);
+        Assert.AreEqual(0, model.AudioTracks.Count);
+        Assert.IsNull(model.CursorData);
+        Assert.IsNull(model.PrimaryVideoFilePath);
+    }
+
+    [TestMethod]
+    public void CreateEmpty_HasPositiveDisplayDuration()
+    {
+        // Every track canvas returns early on a non-positive DisplayDuration, so a
+        // zero-length empty timeline renders as a blank editor rather than as the empty
+        // state with its placeholder. This is the guarantee that keeps them distinguishable.
+        var model = TimelineModel.CreateEmpty();
+
+        Assert.IsTrue(model.DisplayDuration > TimeSpan.Zero,
+            "an empty timeline still needs a ruler to lay its placeholder out on");
+        Assert.AreEqual(TimelineModel.EmptyDuration, model.DisplayDuration);
+    }
+
+    #endregion
+
     #region EffectiveDuration
 
     [TestMethod]
