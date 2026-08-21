@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Musio.Core.Diagnostics;
 using Musio.Core.Projects;
 using Musio_App.Helpers;
@@ -18,6 +19,78 @@ namespace Musio_App.Services;
 /// </remarks>
 public static class ProjectSaveCoordinator
 {
+    /// <summary>What the user chose when asked to save before an action that loses edits.</summary>
+    public enum UnsavedChangesDecision
+    {
+        /// <summary>Keep working: the caller must abandon whatever it was about to do.</summary>
+        Cancel,
+
+        /// <summary>Go ahead and lose the edits.</summary>
+        Discard,
+
+        /// <summary>Go ahead; the project is safely on disk.</summary>
+        Saved,
+    }
+
+    /// <summary>
+    /// True while an unsaved-changes prompt is on screen anywhere in the app. The window's
+    /// X stays clickable behind a <see cref="ContentDialog"/>, and dismissing the window out
+    /// from under the question would hide the dialog while it still owns the decision — the
+    /// exact stranded state that made the tray's Exit appear to do nothing.
+    /// </summary>
+    public static bool IsPromptActive { get; private set; }
+
+    /// <summary>
+    /// Asks whether to save before something that would discard the current edits — closing
+    /// the window, exiting from the tray, or closing the project.
+    /// </summary>
+    /// <param name="question">
+    /// The action being confirmed, e.g. "before closing?" — the only part that differs
+    /// between callers.
+    /// </param>
+    /// <remarks>
+    /// Reports <see cref="UnsavedChangesDecision.Saved"/> only once the save has actually
+    /// succeeded: a cancelled picker or a failed write comes back as
+    /// <see cref="UnsavedChangesDecision.Cancel"/>, never as "go ahead", because this is the
+    /// last moment the edits can be rescued. Cancel and Esc (which reports the same result)
+    /// both mean "keep working".
+    /// </remarks>
+    public static async Task<UnsavedChangesDecision> PromptUnsavedChangesAsync(
+        XamlRoot root, Window? window, string question)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "You have unsaved changes",
+            Content = $"Do you want to save this project {question}",
+            PrimaryButtonText = "Save",
+            SecondaryButtonText = "Don't save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = root,
+        };
+
+        ContentDialogResult choice;
+        IsPromptActive = true;
+        try
+        {
+            choice = await dialog.ShowAsync();
+        }
+        finally
+        {
+            // Cleared before the save runs: the picker that follows is a window of its own,
+            // and holding the flag across it would leave the app unclosable for as long as
+            // the user browsed for a folder.
+            IsPromptActive = false;
+        }
+
+        if (choice == ContentDialogResult.None) return UnsavedChangesDecision.Cancel;
+        if (choice == ContentDialogResult.Secondary) return UnsavedChangesDecision.Discard;
+
+        return await SaveAsync(root, window)
+            ? UnsavedChangesDecision.Saved
+            : UnsavedChangesDecision.Cancel;
+    }
+
     /// <summary>
     /// Saves the current project, prompting for a location when it has never been saved.
     /// </summary>

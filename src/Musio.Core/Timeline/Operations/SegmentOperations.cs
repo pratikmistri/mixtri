@@ -191,6 +191,10 @@ public class RemoveSegmentOperation : SegmentEditOperationBase
     private TimelineSegment? _removedSegment;
     private int _removedIndex;
 
+    // Zoom keyframes the removal orphaned, with the index each held, so Undo puts the
+    // whole edit back — not just the clip.
+    private readonly List<(int Index, ZoomKeyframe Keyframe)> _orphanedKeyframes = [];
+
     public override string Description => "Remove Segment";
 
     public RemoveSegmentOperation(string segmentId)
@@ -204,13 +208,60 @@ public class RemoveSegmentOperation : SegmentEditOperationBase
         if (_removedIndex < 0) return NothingToDo();
         _removedSegment = model.Segments[_removedIndex];
         model.Segments.RemoveAt(_removedIndex);
+
+        // Redo re-enters here, so never accumulate across runs.
+        _orphanedKeyframes.Clear();
+        if (_removedSegment is VideoSegment removedVideo)
+            RemoveOrphanedZoomKeyframes(model, removedVideo);
+
         return true;
+    }
+
+    /// <summary>
+    /// Drops the zoom keyframes whose ONLY remaining home was the clip just deleted.
+    /// </summary>
+    /// <remarks>
+    /// A keyframe is anchored to a source time, not to an output position, and the timeline
+    /// resolves that through whichever kept segment shows the footage. Delete the last
+    /// segment showing it and nothing does — but the keyframe survived in
+    /// <see cref="TimelineModel.ZoomKeyframes"/>, so the zoom track fell back to another
+    /// segment cut from the SAME recording and extrapolated a position outside that
+    /// segment's range: a "ghost" zoom block sitting over unrelated footage (typically a
+    /// text slide), selectable and editable but describing an edit no frame can show.
+    /// <para>
+    /// Scoped deliberately to keyframes the removed clip actually showed
+    /// (<see cref="TimelineModel.ZoomKeyframeIntersects"/>) and that no OTHER kept segment
+    /// still shows — so splitting or duplicating a recording, where a sibling piece still
+    /// covers the same source range, changes nothing, and a keyframe orphaned by some
+    /// earlier edit is not swept up by an unrelated delete.
+    /// </para>
+    /// </remarks>
+    private void RemoveOrphanedZoomKeyframes(TimelineModel model, VideoSegment removed)
+    {
+        for (int i = model.ZoomKeyframes.Count - 1; i >= 0; i--)
+        {
+            var keyframe = model.ZoomKeyframes[i];
+            if (!model.ZoomKeyframeIntersects(keyframe, removed)) continue;
+            if (model.IsZoomKeyframeShown(keyframe)) continue;
+
+            _orphanedKeyframes.Add((i, keyframe));
+            model.ZoomKeyframes.RemoveAt(i);
+        }
     }
 
     protected override bool UndoCore(TimelineModel model)
     {
         if (_removedSegment is null) return false;
         model.Segments.Insert(_removedIndex, _removedSegment);
+
+        // Collected back-to-front, so restore front-to-back or the saved indices shift.
+        for (int i = _orphanedKeyframes.Count - 1; i >= 0; i--)
+        {
+            var (index, keyframe) = _orphanedKeyframes[i];
+            model.ZoomKeyframes.Insert(Math.Min(index, model.ZoomKeyframes.Count), keyframe);
+        }
+        _orphanedKeyframes.Clear();
+
         return true;
     }
 }
@@ -839,7 +890,7 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
         switch (_previous)
         {
             case VideoSegment video:
-                model.Segments[_index] = TrimVideo(video);
+                model.Segments[_index] = TrimVideo(video, _fromStart, _requestedDuration);
                 break;
             case TextSlideSegment slide:
                 model.Segments[_index] = slide with { Duration = ClampDuration(_requestedDuration) };
@@ -881,12 +932,19 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
         trimmed.Start = newStart < TimeSpan.Zero ? TimeSpan.Zero : newStart;
     }
 
-    private VideoSegment TrimVideo(VideoSegment video)
+    /// <summary>
+    /// Applies an edge trim to <paramref name="video"/> and returns the resulting segment,
+    /// without touching any model. Public and static so a caller previewing a trim it has
+    /// not committed yet (the editor's live trim-edge preview) resolves the SAME in/out
+    /// points this operation will write on release — see
+    /// <see cref="ResolveEdgeSourceTime"/>.
+    /// </summary>
+    public static VideoSegment TrimVideo(VideoSegment video, bool fromStart, TimeSpan requestedDuration)
     {
         double speed = video.SpeedFactor != 0 ? video.SpeedFactor : 1.0;
-        var newDuration = ClampDuration(_requestedDuration);
+        var newDuration = ClampDuration(requestedDuration);
 
-        if (!_fromStart)
+        if (!fromStart)
         {
             // Right (out) edge: keep the in-point, change how much footage plays.
             var newSourceDuration = TimeSpan.FromTicks((long)(newDuration.Ticks * speed));
@@ -919,6 +977,38 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
             Duration = newDuration,
             SourceDuration = trimmedSourceDuration,
         };
+    }
+
+    /// <summary>
+    /// What a live preview of an uncommitted edge trim should show: the duration the segment
+    /// would REALLY end up with, and the source instant whose frame the user is choosing —
+    /// the frame that ends up first (in edge) or last (out edge) in the trimmed segment.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Derived from <see cref="TrimVideo"/> rather than reimplementing its arithmetic, so a
+    /// live preview cannot drift from what the commit writes. Both clamps matter to the
+    /// caller: the minimum duration, and (on the in edge) the available head, which can make
+    /// the effective duration SHORTER than the one requested — a readout showing the request
+    /// would then contradict the edit that lands.
+    /// </para>
+    /// <para>
+    /// The out-point a trim produces is EXCLUSIVE, so previewing it verbatim would show the
+    /// first frame the trim throws away. Stepping back a single TICK (not a frame) is what
+    /// makes this exact at any frame rate: every decoder in the app resolves a timestamp to
+    /// <c>floor(seconds x fps)</c>, so one tick inside the out-point always lands on the last
+    /// frame that begins before it — the last frame the trimmed segment plays — whatever fps
+    /// the source happens to have.
+    /// </para>
+    /// </remarks>
+    public static (TimeSpan EffectiveDuration, TimeSpan SourceTime) ResolveEdgePreview(
+        VideoSegment video, bool fromStart, TimeSpan requestedDuration)
+    {
+        var trimmed = TrimVideo(video, fromStart, requestedDuration);
+        if (fromStart) return (trimmed.Duration, trimmed.SourceStart);
+
+        var lastKept = trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1);
+        return (trimmed.Duration, lastKept < trimmed.SourceStart ? trimmed.SourceStart : lastKept);
     }
 
     private static TimeSpan ClampDuration(TimeSpan requested) =>

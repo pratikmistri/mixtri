@@ -25,8 +25,11 @@ caused repeated churn before it was settled; treat them as fixed conventions.
 - After any XAML element rename/restructure, delete `bin/obj` to drop stale `.g.cs`
   (otherwise `COMException: Element not found` → blank page at runtime).
 - **Tests:** the host often lacks the .NET 9 runtime. Run `dotnet test` with
-  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. The current suite
-  size is in the 320s–330s range and must stay green.
+  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. `dotnet test` also
+  hits the same PriGen MSB4062 failure when it tries to BUILD, so build the test project
+  with MSBuild first and then run
+  `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=x64 -c Debug`.
+  The suite must stay green (currently ~1280 tests, 3 skipped).
 - **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
 - **ALWAYS check the LIVE Store version before packaging, and bump past it.** The Store rejects a
   submission whose version equals one already published, and the in-repo manifest normally still

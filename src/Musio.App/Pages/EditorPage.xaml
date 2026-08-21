@@ -492,6 +492,16 @@
                                     <FontIcon Glyph="&#xE792;" />
                                 </MenuFlyoutItem.Icon>
                             </MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem
+                                Click="CloseProject_Click"
+                                Text="Close project"
+                                AutomationProperties.Name="Close project and return to the empty editor"
+                                ToolTipService.ToolTip="Closes the project and returns to the empty editor. Asks to save first.">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8BB;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
                         </MenuFlyout>
                     </SplitButton.Flyout>
                 </SplitButton>

@@ -145,7 +145,8 @@ public sealed partial class EditorPage
             double t = (click.TimestampTicks - mouse.StartTimestampTicks) / mouse.TickFrequency - offset;
             if (t < 0) continue;
             if (maxSrc > 0 && t > maxSrc) continue;
-            keyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+
+            var candidate = new Musio.Core.Timeline.ZoomKeyframe
             {
                 Timestamp = TimeSpan.FromSeconds(t),
                 ZoomLevel = 2.0,
@@ -153,7 +154,14 @@ public sealed partial class EditorPage
                 CenterY = Math.Clamp((click.Y - coy) / (double)sh, 0, 1),
                 SourceClickTicks = click.TimestampTicks,
                 SourceVideoFilePath = seg.VideoFilePath,
-            });
+            };
+
+            // Only keep clicks some segment of this source actually shows — otherwise a
+            // later re-run would resurrect the auto-zooms that deleting one of this
+            // recording's clips had just orphaned (see RemoveSegmentOperation).
+            if (!ViewModel.Model.IsZoomKeyframeShown(candidate)) continue;
+
+            keyframes.Add(candidate);
         }
     }
 
@@ -603,6 +611,11 @@ public sealed partial class EditorPage
     private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
         EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
 
+    private void OnSegmentTrimPreviewChanged(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
+        UpdateTrimEdgePreview(e.Id, e.FromStart, e.NewDuration);
+
+    private void OnSegmentTrimPreviewEnded(object? sender, EventArgs e) => EndTrimEdgePreview();
+
     private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
         EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
 
@@ -743,7 +756,16 @@ public sealed partial class EditorPage
     private void ResetProjectIfTimelineEmptied()
     {
         if (ViewModel.Model.Segments.Count > 0) return;
+        ResetProjectToEmptyState();
+    }
 
+    /// <summary>
+    /// Tears the editor all the way back to the state it has before anything is recorded or
+    /// imported. Shared by the last-segment-deleted path above and the explicit "Close
+    /// project" command, so the two cannot leave different leftovers behind.
+    /// </summary>
+    private void ResetProjectToEmptyState()
+    {
         _selectedPrimarySegmentId = null;
         _selectedTextSlideId = null;
         HideTextSlidePanel();

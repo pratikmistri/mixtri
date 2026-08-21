@@ -17,6 +17,25 @@
             x:Name="PreviewSurface"
             Draw="PreviewSurface_Draw" />
 
+        <!-- Live trim-edge readout, shown only while a segment edge is being dragged. -->
+        <Border
+            x:Name="TrimIndicator"
+            VerticalAlignment="Top"
+            HorizontalAlignment="Center"
+            Margin="0,12,0,0"
+            Padding="12,6"
+            Background="{ThemeResource OverlayDimBrush}"
+            CornerRadius="14"
+            Visibility="Collapsed"
+            IsHitTestVisible="False"
+            AutomationProperties.Name="Trim edge preview">
+            <TextBlock
+                x:Name="TrimIndicatorText"
+                FontSize="13"
+                FontWeight="SemiBold"
+                Foreground="{ThemeResource OverlayForegroundBrush}" />
+        </Border>
+
         <!-- Playback controls overlay at bottom -->
         <StackPanel
             x:Name="PlaybackChrome"
