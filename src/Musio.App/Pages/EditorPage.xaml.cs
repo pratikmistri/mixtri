@@ -211,6 +211,10 @@ public sealed partial class EditorPage : Page
 
         Preview.Duration = GetMappedDuration();
 
+        // Before the first preview init: an editor opened with no project must show the
+        // call-out immediately, not a black canvas until something happens to refresh it.
+        UpdateEmptyStateVisibility();
+
         // Load frames and initialize compositor with cursor effects
         _ = InitializePreviewAsync();
 
@@ -234,7 +238,13 @@ public sealed partial class EditorPage : Page
         // Hide the in-place text editor while playing
         Preview.IsPlayingChanged += (_, playing) =>
         {
-            if (playing) HideTextEditOverlay();
+            if (!playing) return;
+            HideTextEditOverlay();
+
+            // A trim-edge preview pins the surface to one frame; playback starting under it
+            // (the Space accelerator still fires while the timeline holds pointer capture)
+            // would run the audio and playhead on over a frozen picture.
+            EndTrimEdgePreview();
         };
 
         Preview.GoToStartRequested += (_, _) => GoToStart();
@@ -363,6 +373,7 @@ public sealed partial class EditorPage : Page
                     Timeline.ClearTransitionSelection();
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
+                    UpdateEmptyStateVisibility();
                     ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
                 }
                 catch (Exception ex)
@@ -391,6 +402,8 @@ public sealed partial class EditorPage : Page
         // Primary-track segment move / ripple-trim events
         Timeline.SegmentMoveRequested += OnSegmentMoveRequested;
         Timeline.SegmentTrimRequested += OnSegmentTrimRequested;
+        Timeline.SegmentTrimPreviewChanged += OnSegmentTrimPreviewChanged;
+        Timeline.SegmentTrimPreviewEnded += OnSegmentTrimPreviewEnded;
         Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
         Timeline.SegmentAudioModeChangeRequested += OnSegmentAudioModeChangeRequested;
         Timeline.SegmentAudioDetachRequested += OnSegmentAudioDetachRequested;
@@ -1501,6 +1514,97 @@ public sealed partial class EditorPage : Page
             Musio.Core.Diagnostics.DiagLog.Write("Editor", $"Save picker failed: {ex.Message}");
             return null;
         }
+    }
+
+    private async void CloseProject_Click(object sender, RoutedEventArgs e) => await CloseProjectAsync();
+
+    /// <summary>
+    /// Closes the project WITHOUT asking — the caller has already dealt with unsaved edits.
+    /// Used by the shell when the window is dismissed, which ends the editing session.
+    /// </summary>
+    /// <returns>
+    /// False when something in flight owns the project and it was left open; the caller
+    /// should carry on dismissing the window either way.
+    /// </returns>
+    public bool TryCloseProjectForShellDismissal()
+    {
+        // Already empty: nothing to close, and no teardown worth repeating.
+        if (ProjectService.Instance.CurrentProject is null
+            && ViewModel.Model.Segments.Count == 0)
+        {
+            return true;
+        }
+
+        // A save or an export reads the project as it runs and cleans up against it when it
+        // finishes. Pulling it out from under either strands both, and neither is worth
+        // cancelling just because the window was dismissed — the project stays open, exactly
+        // as it did before this ran.
+        if (_isSavingProject || ProjectService.Instance.IsSaveInFlight || ExportVM.IsExporting)
+        {
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor", "window dismissed while save/export in flight; project left open");
+            return false;
+        }
+
+        ResetProjectToEmptyState();
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", "project closed with the window");
+        return true;
+    }
+
+    /// <summary>
+    /// Closes the open project and returns the editor to its empty state, asking about
+    /// unsaved edits first.
+    /// </summary>
+    /// <remarks>
+    /// Until this existed the only route back to an empty editor was deleting every segment
+    /// (which reaches the same <see cref="ResetProjectToEmptyState"/> via
+    /// <c>ResetProjectIfTimelineEmptied</c>) — so a project, once opened, stayed loaded and
+    /// dirty for the life of the process, and the save prompt followed the user to every
+    /// close and exit.
+    /// </remarks>
+    private async Task CloseProjectAsync()
+    {
+        if (_isSavingProject || ProjectService.Instance.IsSaveInFlight) return;
+
+        // An export reads CurrentProject as it runs and cleans up against it when it
+        // finishes; clearing the project out from under it strands both.
+        if (ExportVM.IsExporting)
+        {
+            await ShowProjectDialogAsync(
+                "Export in progress", "Wait for the export to finish before closing the project.");
+            return;
+        }
+
+        // Already empty: nothing to close, and no question worth asking.
+        if (ProjectService.Instance.CurrentProject is null
+            && ViewModel.Model.Segments.Count == 0)
+        {
+            return;
+        }
+
+        if (ProjectService.Instance.HasUnrecoverableWork && XamlRoot is not null)
+        {
+            try
+            {
+                var decision = await ProjectSaveCoordinator.PromptUnsavedChangesAsync(
+                    XamlRoot, App.Current.MainAppWindow, "before closing it?");
+
+                // Cancel, a dismissed picker, or a failed write all mean "keep working" —
+                // closing anyway would discard exactly what the prompt exists to protect.
+                if (decision == ProjectSaveCoordinator.UnsavedChangesDecision.Cancel) return;
+            }
+            catch (Exception ex)
+            {
+                // WinUI refuses a second ContentDialog (an export or import dialog may be
+                // up). Abandon the close rather than proceeding without an answer.
+                Musio.Core.Diagnostics.DiagLog.Write(
+                    "Editor", $"Close-project prompt failed; project left open: {ex.Message}");
+                return;
+            }
+        }
+
+        ResetProjectToEmptyState();
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", "project closed; editor reset to empty state");
     }
 
     /// <summary>

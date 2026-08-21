@@ -13,11 +13,7 @@ public partial class EditorViewModel : ObservableObject
     public EditorViewModel()
     {
         var timeline = ProjectService.Instance.CurrentTimeline;
-        _model = timeline ?? new TimelineModel
-        {
-            Duration = TimeSpan.FromSeconds(30),
-            TrimEnd = TimeSpan.FromSeconds(30)
-        };
+        _model = timeline ?? TimelineModel.CreateEmpty();
         _undoRedoManager = new UndoRedoManager(_model);
         _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
         _undoRedoManager.EditPerformed += OnEditPerformed;
@@ -112,11 +108,20 @@ public partial class EditorViewModel : ObservableObject
     [RelayCommand]
     private void CutSelection()
     {
-        // If no clips exist, create a default clip first
-        if (_model.Clips.Count == 0)
-        {
-            _model.Clips.Add(new TimelineClip(TimeSpan.Zero, _model.Duration, "Clip 1"));
-        }
+        // Legacy clip-based timeline only. The segment editor never populates Clips, and the
+        // fabricated clip below would switch the timeline into legacy clip rendering — the
+        // page routes a segment-timeline cut to the segment delete path instead.
+        if (_model.Segments.Count > 0) return;
+
+        // ...and an EMPTY timeline has nothing to cut. Fabricating a clip there spanned the
+        // whole nominal ruler (TimelineModel.CreateEmpty's 30s), so the ripple delete that
+        // followed took Duration to zero — and every track draw pass bails on a non-positive
+        // DisplayDuration, blanking the ruler, the tracks and the "record or import" prompt.
+        // Undo was worse: the snapshot is captured AFTER the fabrication, so it restored a
+        // solid legacy clip block for footage that does not exist. The empty editor is a
+        // first-class destination on this branch (fresh launch, last clip deleted, Close
+        // project), so this is reachable from one click on the toolbar's Cut button.
+        if (_model.Clips.Count == 0) return;
 
         var playhead = _model.PlayheadPosition;
         int clipIndex = _model.Clips.FindIndex(c => playhead >= c.Start && playhead < c.End);

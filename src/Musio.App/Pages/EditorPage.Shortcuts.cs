@@ -75,11 +75,30 @@ public sealed partial class EditorPage
     {
         if (IsFocusOnInteractiveControl()) return;
 
+        DeleteSelection();
+        args.Handled = true;
+    }
+
+    /// <summary>
+    /// Toolbar counterpart of the Delete accelerator. Bound to a Click handler rather than to
+    /// <see cref="EditorViewModel.DeleteSelectedCommand"/> because that command only knows the
+    /// legacy <c>TimelineModel.Clips</c> list, which the segment-based editor never populates —
+    /// so the button did nothing at all for a recorded or imported clip.
+    /// </summary>
+    private void DeleteSelected_Click(object sender, RoutedEventArgs e) => DeleteSelection();
+
+    /// <summary>
+    /// Removes whatever the user is currently working on, in the order the timeline layers it:
+    /// an inserted audio block, a camera move, a text overlay, a zoom, then the selected
+    /// primary-track segment. With nothing selected the segment under the playhead is the
+    /// intended target — that is the block the preview is showing.
+    /// </summary>
+    private void DeleteSelection()
+    {
         // If an inserted voice-over/music block is selected, remove it.
         if (Timeline.SelectedInsertedAudioTrackId is { } audioTrackId)
         {
             DeleteInsertedAudioTrack(audioTrackId);
-            args.Handled = true;
             return;
         }
 
@@ -87,7 +106,6 @@ public sealed partial class EditorPage
         if (Timeline.SelectedCameraSegmentId is { } cameraSegId)
         {
             DeleteCameraSegment(cameraSegId);
-            args.Handled = true;
             return;
         }
 
@@ -95,7 +113,6 @@ public sealed partial class EditorPage
         if (Timeline.SelectedTextOverlayId is { } overlayId)
         {
             DeleteTextOverlay(overlayId);
-            args.Handled = true;
             return;
         }
 
@@ -106,7 +123,6 @@ public sealed partial class EditorPage
             ViewModel.UndoRedoManager.Execute(operation);
             Timeline.ClearZoomSelection();
             UpdateZoomPanelVisibility();
-            args.Handled = true;
             return;
         }
 
@@ -115,20 +131,53 @@ public sealed partial class EditorPage
             ViewModel.Model.Segments.Any(s => s.Id == segId))
         {
             DeletePrimarySegment(segId);
-            args.Handled = true;
             return;
         }
 
+        // Nothing selected: fall back to the segment under the playhead. Routed through the
+        // same helper so an unselected delete leaves exactly as little behind as a selected one.
+        if (ViewModel.Model.Segments.Count > 0)
+        {
+            var (atPlayhead, _) = ViewModel.Model.GetSegmentAtTime(Timeline.PlayheadPosition);
+            if (atPlayhead is not null)
+            {
+                DeletePrimarySegment(atPlayhead.Id);
+                return;
+            }
+        }
+
         ViewModel.DeleteSelectedCommand.Execute(null);
-        args.Handled = true;
     }
 
     private void CutAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         if (IsFocusOnInteractiveControl()) return;
 
-        ViewModel.CutSelectionCommand.Execute(null);
+        CutSelection();
         args.Handled = true;
+    }
+
+    private void CutSelection_Click(object sender, RoutedEventArgs e) => CutSelection();
+
+    /// <summary>
+    /// Cut is a ripple delete, and on a segment timeline removing a segment already closes the
+    /// gap behind it — so the two gestures are the same edit and share one implementation.
+    /// </summary>
+    /// <remarks>
+    /// The legacy <see cref="EditorViewModel.CutSelectionCommand"/> must not be let anywhere
+    /// near a segment timeline: finding no clips to cut, it FABRICATES one spanning the whole
+    /// duration, which switches the timeline into legacy clip rendering the segment editor
+    /// never otherwise uses.
+    /// </remarks>
+    private void CutSelection()
+    {
+        if (ViewModel.Model.Segments.Count > 0)
+        {
+            DeleteSelection();
+            return;
+        }
+
+        ViewModel.CutSelectionCommand.Execute(null);
     }
 
     private async void SaveAccelerator_Invoked(
@@ -587,6 +636,17 @@ public sealed partial class EditorPage
         // runs, and the imported clip belongs where the user was when they asked for it.
         var insertAt = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
 
+        await ImportVideoFileAsync(file.Path, insertAt);
+    }
+
+    /// <summary>
+    /// Normalises one video file and inserts it at <paramref name="insertAt"/>. Shared by the
+    /// Insert menu, the empty-state button and file drop, so every route in gets the same
+    /// progress, cancellation and error reporting rather than three near-copies of it.
+    /// Returns the inserted segment, or <c>null</c> when the import failed or was cancelled.
+    /// </summary>
+    private async Task<VideoSegment?> ImportVideoFileAsync(string path, TimeSpan insertAt)
+    {
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();
@@ -600,9 +660,10 @@ public sealed partial class EditorPage
 
         var showTask = dialog.ShowAsync();
         string? errorMessage = null;
+        VideoSegment? insertedSegment = null;
         try
         {
-            var result = await VideoImportService.ImportAsync(file.Path, null, progress, cts.Token);
+            var result = await VideoImportService.ImportAsync(path, null, progress, cts.Token);
 
             // The import staying on this page means the editor must be told to reload; the
             // service fires ProjectChanged, which the EditorViewModel turns into a
@@ -610,6 +671,7 @@ public sealed partial class EditorPage
             var inserted = ProjectService.Instance.ImportVideo(result, insertAt);
             if (inserted is not null)
             {
+                insertedSegment = inserted;
                 _selectedPrimarySegmentId = inserted.Id;
                 _selectedTextSlideId = null;
                 Timeline?.SelectSegment(inserted.Id);
@@ -640,6 +702,8 @@ public sealed partial class EditorPage
 
         if (errorMessage is not null)
             await ShowProjectDialogAsync("Could not import video", errorMessage);
+
+        return insertedSegment;
     }
 
     /// <summary>Inserts an external audio file as narration at the playhead.</summary>
@@ -695,6 +759,18 @@ public sealed partial class EditorPage
         // runs, and the track belongs where the user was when they asked for it.
         var startTime = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
 
+        await ImportAudioFileAsync(file.Path, kind, startTime);
+    }
+
+    /// <summary>
+    /// Normalises one audio file and inserts it as an <see cref="AudioTrack"/> starting at
+    /// <paramref name="startTime"/>. Shared by the Insert menu and file drop.
+    /// </summary>
+    private async Task ImportAudioFileAsync(string path, AudioTrackKind kind, TimeSpan startTime)
+    {
+        bool isMusic = kind == AudioTrackKind.Music;
+        string label = isMusic ? "music" : "voice over";
+
         using var cts = new CancellationTokenSource();
         var (dialog, bar) = DialogHelper.BuildProgressDialog(
             XamlRoot, $"Importing {label}", "Converting and importing the audio…", cts);
@@ -707,7 +783,7 @@ public sealed partial class EditorPage
         string? errorMessage = null;
         try
         {
-            var result = await AudioImportService.ImportAsync(file.Path, null, progress, cts.Token);
+            var result = await AudioImportService.ImportAsync(path, null, progress, cts.Token);
 
             // Executed through the undo manager, like every other timeline edit: an inserted
             // track lives on TimelineModel.AudioTracks precisely so Ctrl+Z can take it back.

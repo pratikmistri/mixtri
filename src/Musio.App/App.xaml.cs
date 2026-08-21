@@ -10,6 +10,7 @@ using Musio.Core.Interop;
 using Musio.Core.Projects;
 using Musio.Core.Services;
 using Musio.Core.Settings;
+using Musio.Core.Shell;
 using Windows.ApplicationModel.ExtendedExecution;
 
 // To learn more about WinUI, the WinUI project structure,
@@ -451,7 +452,10 @@ public partial class App : Application
         // recording is the usual case, since ProjectService.SetProject clears
         // CurrentPackagePath. Opening over it would discard it with no prompt, on a
         // window the user may not even be looking at, triggered from another process.
-        if (projects.CurrentProject is not null && projects.CurrentPackagePath is null)
+        // Unsaved EDITS to an already-saved project are exactly as unrecoverable, and this
+        // route has no way to ask: a window repointed at another project, then activated
+        // for the file it was originally keyed to, hit precisely that.
+        if (projects.HasUnrecoverableWork)
         {
             window.ShowShellMessage(
                 "This window has unsaved work, so the project you just opened was not "
@@ -819,23 +823,64 @@ public partial class App : Application
         // Never block an OS- or user-initiated exit.
         if (_isExiting || _window is null) return;
 
-        // Dismissing the window with unsaved edits asks first. The close has to be cancelled
-        // outright because AppWindowClosingEventArgs is evaluated synchronously — there is no
-        // deferral, so the dialog cannot be awaited "inside" the close. The prompt therefore
-        // re-drives whichever dismissal the user originally asked for once they answer.
+        // A save prompt is on screen and still owns the decision. The X stays clickable
+        // behind a ContentDialog, so dismissing here would park the window WITH the dialog
+        // on it — invisible, unanswerable, and blocking every later exit on the guard below.
+        // Cancel the dismissal and leave the question where the user can answer it.
+        if (_promptingUnsavedChanges || ProjectSaveCoordinator.IsPromptActive)
+        {
+            args.Cancel = true;
+            return;
+        }
+
+        // Closing the window ENDS THE EDITING SESSION: the project is closed with it (see
+        // DismissMainWindow), so unsaved edits are genuinely about to be lost and this has to
+        // ask first. The close is cancelled outright because AppWindowClosingEventArgs is
+        // evaluated synchronously — there is no deferral, so the dialog cannot be awaited
+        // "inside" the close. The prompt re-drives the dismissal once the user answers.
         if (TryPromptUnsavedChanges(afterSaveDecision: DismissMainWindow))
         {
             args.Cancel = true;
             return;
         }
 
-        // If the tray isn't available we have no way to bring the app
-        // back, so let the close proceed instead of stranding the process.
-        if (_trayService is null) return;
+        // Nothing to save. With a tray the window is parked rather than closed, so cancel the
+        // close and dismiss by hand; without one, close the project and let the close through.
+        if (_trayService is null)
+        {
+            CloseProjectForDismissal();
+            return;
+        }
 
-        // User clicked the window's X — minimize to tray.
         args.Cancel = true;
-        HideMainWindowToTray();
+        DismissMainWindow();
+    }
+
+    /// <summary>
+    /// Closes the open project as part of dismissing the window, so the app comes back to the
+    /// empty editor rather than to a session the user thought they had ended.
+    /// </summary>
+    /// <remarks>
+    /// Routed through the editor page when it is loaded, because the preview pipeline has to
+    /// be torn down BEFORE the project is cleared — publishing a null project on its own
+    /// leaves the last frame, the filmstrip and the audio players on screen (recorded
+    /// previously against <c>ResetPreviewToEmptyState</c>). With no editor page there is no
+    /// preview to tear down and clearing the service is enough. Skipped outright during a
+    /// recording, which owns the project it is about to produce.
+    /// </remarks>
+    private void CloseProjectForDismissal()
+    {
+        if (_shell?.CurrentState == AppShellState.Recording) return;
+
+        if (_window is MainWindow mainWindow
+            && mainWindow.ContentFrame.Content is EditorPage editor)
+        {
+            editor.TryCloseProjectForShellDismissal();
+            return;
+        }
+
+        if (ProjectService.Instance.CurrentProject is not null)
+            ProjectService.Instance.ClearProject();
     }
 
     /// <summary>
@@ -853,12 +898,70 @@ public partial class App : Application
     {
         if (_isExiting || _dismissalConfirmed) return false;
         if (_promptingUnsavedChanges) return true;
-        if (!ProjectService.Instance.HasUnsavedChanges) return false;
+
+        // NOT HasUnsavedChanges: a freshly captured recording is deliberately clean, but it
+        // has never been written anywhere, so closing over it destroys the whole take with
+        // nothing to reopen. See ProjectService.HasUnrecoverableWork — the same predicate
+        // ServeRedirectedOpen uses to refuse an open, which is the identical question.
+        if (!ProjectService.Instance.HasUnrecoverableWork) return false;
         if (_window?.Content?.XamlRoot is null) return false;
+
+        // A ContentDialog on a hidden window renders nowhere. The tray's Exit item runs with
+        // the window parked in the tray, so without this the app would appear to ignore Exit
+        // entirely while an invisible prompt waited for an answer — and the only way to see
+        // it was to open the app again, where it looked like an unprompted save dialog. A
+        // question the user cannot see is worse than no question.
+        EnsureMainWindowVisible();
 
         _promptingUnsavedChanges = true;
         _ = RunUnsavedChangesPromptAsync(afterSaveDecision);
         return true;
+    }
+
+    /// <summary>
+    /// Brings the full window back on screen if it is parked in the tray, so a modal prompt
+    /// raised from a windowless route (the tray menu) is actually visible.
+    /// </summary>
+    /// <remarks>
+    /// Routed through <see cref="ShellCoordinator.ShowFullWindow"/> rather than a raw
+    /// <c>ShowWindow</c>: poking the HWND leaves the shell state machine believing another
+    /// surface is current, which is the recorded cause of the app later hiding the window out
+    /// from under the user.
+    /// </remarks>
+    private void EnsureMainWindowVisible()
+    {
+        if (_window is null) return;
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+
+            // IsWindowVisible is TRUE for a minimized window, so both states have to be
+            // asked about: parked in the tray (hidden) and minimized to the taskbar. Either
+            // one puts the dialog somewhere the user cannot answer it.
+            if (!NativeMethods.IsWindowVisible(hwnd))
+            {
+                _shell?.ShowFullWindow();
+
+                // The coordinator declines while a recording owns the screen, and a document
+                // instance has no coordinator at all — so verify, and fall back to showing
+                // the HWND directly rather than leaving the prompt invisible.
+                if (!NativeMethods.IsWindowVisible(hwnd))
+                    NativeMethods.ShowWindow(hwnd, SW_SHOW);
+            }
+            else if (NativeMethods.IsIconic(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, SW_RESTORE);
+            }
+
+            _window.Activate();
+        }
+        catch (Exception ex)
+        {
+            // Best effort — the prompt is still shown, and the caller's guard against
+            // proceeding without an answer is what keeps the edits safe either way.
+            DiagLog.Write("Shell", $"Could not surface the window for the save prompt: {ex.Message}");
+        }
     }
 
     private async Task RunUnsavedChangesPromptAsync(Action afterSaveDecision)
@@ -868,31 +971,13 @@ public partial class App : Application
             var root = _window?.Content?.XamlRoot;
             if (root is null) return;
 
-            var dialog = new ContentDialog
-            {
-                Title = "You have unsaved changes",
-                Content = "Do you want to save this project before closing?",
-                PrimaryButtonText = "Save",
-                SecondaryButtonText = "Don't save",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Primary,
-                XamlRoot = root,
-            };
-
-            var choice = await dialog.ShowAsync();
+            var decision = await ProjectSaveCoordinator.PromptUnsavedChangesAsync(
+                root, _window, "before closing?");
 
             // Cancel (and Esc, which reports the same) means "keep working" — the window
-            // stays exactly as it was.
-            if (choice == ContentDialogResult.None) return;
-
-            if (choice == ContentDialogResult.Primary
-                && !await ProjectSaveCoordinator.SaveAsync(root, _window))
-            {
-                // The save failed, or the user backed out of the file picker. Treat that as
-                // Cancel rather than closing anyway: the edits are still unsaved and this is
-                // the last moment they can be rescued.
-                return;
-            }
+            // stays exactly as it was. A failed or abandoned save reports Cancel too: the
+            // edits are still unsaved and this is the last moment they can be rescued.
+            if (decision == ProjectSaveCoordinator.UnsavedChangesDecision.Cancel) return;
 
             // Cleared BEFORE the dismissal runs, and replaced by a one-shot "already asked"
             // flag: closing the window re-raises Closing synchronously, and a still-set
@@ -927,11 +1012,20 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Performs the dismissal the user originally asked for, now that the save question has
-    /// been answered: hide to tray when there is a tray to come back from, otherwise close.
+    /// Performs the dismissal the user asked for, now that the save question has been
+    /// answered: the project is closed with the window, then the window is parked in the
+    /// tray (or closed outright when there is no tray to come back from).
     /// </summary>
+    /// <remarks>
+    /// Closing the project is the point of the dismissal, not a side effect. Parking the
+    /// window with the project still loaded — and still dirty — is what made the tray's Exit
+    /// re-ask on a window nobody could see, and left the user with no way back to an empty
+    /// editor short of deleting every clip.
+    /// </remarks>
     private void DismissMainWindow()
     {
+        CloseProjectForDismissal();
+
         if (_trayService is not null)
         {
             HideMainWindowToTray();

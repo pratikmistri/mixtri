@@ -136,6 +136,111 @@ public sealed partial class EditorPage
     private string? _adaptivePreviewVideoPath;
     private PreviewResolution _previewResolution = new(960, 540);
 
+    // ── Live trim-edge preview ──
+    //
+    // While a segment edge is being dragged the model still holds the UNTRIMMED segment, so
+    // there is no playhead position that maps to the frame at the proposed edge: the render
+    // has to be addressed by (segment, source time) directly. This override is read fresh at
+    // the top of every RenderFrameAtAsync, which means it inherits the existing coalescing
+    // drain loop for free — a sample that arrives while a decode is in flight simply
+    // overwrites it, and the newest edge always wins.
+    private (string SegmentId, TimeSpan SourceTime)? _trimEdgePreview;
+
+    /// <summary>
+    /// Shows the frame at the edge currently being dragged on the timeline. Called for every
+    /// pointer sample of the gesture; the model is not modified.
+    /// </summary>
+    private void UpdateTrimEdgePreview(string segmentId, bool fromStart, TimeSpan newDuration)
+    {
+        // Playback owns the preview surface tick by tick — pinning it to a trim edge would
+        // freeze the picture while the audio ran on. Leave the drag un-previewed instead.
+        if (_pageUnloaded || Preview.IsPlaying) return;
+
+        var segment = ViewModel.Model.Segments.FirstOrDefault(s => s.Id == segmentId);
+
+        // Only footage has a frame at the edge to show, but the readout is worth showing for
+        // every segment kind.
+        if (segment is not VideoSegment seg)
+        {
+            Preview.ShowTrimIndicator(fromStart, newDuration);
+            ClearTrimEdgeFrame();
+            return;
+        }
+
+        // The effective duration — not the requested one — is what the readout reports: the
+        // available head can make a head-trim shorter than what the pointer asked for, and a
+        // badge contradicting the edit that lands is worse than no badge.
+        var (effectiveDuration, sourceTime) =
+            TrimSegmentEdgeOperation.ResolveEdgePreview(seg, fromStart, newDuration);
+        Preview.ShowTrimIndicator(fromStart, effectiveDuration);
+
+        if (_frameReader is null)
+        {
+            ClearTrimEdgeFrame();
+            return;
+        }
+
+        _trimEdgePreview = (segmentId, sourceTime);
+
+        // The position is unused while the override is set (see RenderFrameAtAsync), but the
+        // playhead is what the render falls back to if the override is cleared mid-flight.
+        _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition, force: true);
+    }
+
+    /// <summary>Returns the preview to the playhead once the edge drag is over.</summary>
+    private void EndTrimEdgePreview()
+    {
+        Preview.HideTrimIndicator();
+        ClearTrimEdgeFrame();
+    }
+
+    /// <summary>
+    /// Drops the trim-edge override and puts the playhead's own frame back on screen. Every
+    /// path that abandons the override goes through here — a bare <c>_trimEdgePreview = null</c>
+    /// would strand the edge frame on screen, since preview rendering is event-driven and
+    /// nothing else would ask for a repaint with the playhead where it already is.
+    /// </summary>
+    private void ClearTrimEdgeFrame()
+    {
+        if (_trimEdgePreview is null) return;
+
+        _trimEdgePreview = null;
+
+        // The frame index cache is shared across sources and was last written by the edge
+        // frame, which may sit in completely different footage from the playhead.
+        _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+
+        if (_pageUnloaded || _frameReader is null) return;
+        _ = UpdatePreviewFrameAsync(Timeline.PlayheadPosition, force: true);
+    }
+
+    /// <summary>
+    /// Renders the frame at the trim edge being dragged, addressed by source time rather than
+    /// by playhead position.
+    /// </summary>
+    private async Task RenderTrimEdgeFrameAsync(string segmentId, TimeSpan sourceTime)
+    {
+        if (ViewModel.Model.Segments.FirstOrDefault(s => s.Id == segmentId) is not VideoSegment seg)
+        {
+            // The segment went away mid-gesture (undo, model reload). Clearing from inside
+            // the render is safe: the restore request lands in _pendingRenderPosition and the
+            // drain loop this call belongs to picks it up on its next pass.
+            ClearTrimEdgeFrame();
+            return;
+        }
+
+        CommitActiveTextEditIfAny();
+        _previewSlideId = null;
+
+        // Consecutive edge samples land on different frames of possibly different footage,
+        // and the shared frame-index cache cannot tell those apart on its own.
+        _lastRenderedSegmentId = seg.Id;
+        await EnsurePrimaryRendererForSegmentAsync(seg);
+        await RenderSegmentVideoAsync(seg, sourceTime, force: true);
+        UpdateOverlayEditPreview(seg.VideoFilePath, sourceTime);
+    }
+
     private async Task InitializePreviewAsync()
     {
         // Started fire-and-forget from ModelReloaded, so anything thrown here would be
@@ -182,6 +287,77 @@ public sealed partial class EditorPage
         }
     }
 
+    /// <summary>
+    /// Tears the preview pipeline down to nothing and leaves it that way, for when the project
+    /// itself has been discarded (the user deleted the last segment).
+    /// </summary>
+    /// <remarks>
+    /// The deliberate opposite of the guard at the top of <see cref="InitializePreviewCoreAsync"/>,
+    /// which refuses to destroy a working preview it cannot rebuild. That rule protects against a
+    /// spurious re-init finding no project; here the absence of a project is the intended
+    /// destination, so the teardown is what the user asked for and nothing is scheduled to
+    /// rebuild it. The next recording or import republishes a project, which re-enters
+    /// <see cref="InitializePreviewCoreAsync"/> through ModelReloaded and rebuilds everything.
+    /// <para>
+    /// Every generation counter is bumped first so an init, thumbnail pass or segment-preview
+    /// build still awaiting a decoder disposes what it made instead of publishing it onto an
+    /// editor that is supposed to be empty.
+    /// </para>
+    /// </remarks>
+    private void ResetPreviewToEmptyState()
+    {
+        _previewInitGeneration++;
+        _thumbnailGenerationId++;
+        _segmentPreviewGeneration++;
+
+        Preview.Pause();
+        Preview.ClearFrame();
+        Preview.HideQualityIndicator();
+
+        _styleDebouncer?.Stop();
+        _motionDebouncer?.Stop();
+
+        DisposeOffUiThread(_frameReader);
+        _frameReader = null;
+        TryDispose(_previewRenderer);
+        _previewRenderer = null;
+        _compositorReady = false;
+        TryDispose(_textSlideRenderer);
+        _textSlideRenderer = null;
+        TryDispose(_transitionRenderer);
+        _transitionRenderer = null;
+        DisposeSegmentPreviews();
+        DisposePrimaryStyleRenderers();
+
+        _audioPlayer?.Dispose();
+        _audioPlayer = null;
+        _insertedAudioPlayer?.Dispose();
+        _insertedAudioPlayer = null;
+        _stretchedAudioPlayer?.Dispose();
+        _stretchedAudioPlayer = null;
+
+        TryDispose(_lastWebcamFrame);
+        _lastWebcamFrame = null;
+        try { _webcamComposition?.Clips.Clear(); } catch { /* already torn down */ }
+        _webcamComposition = null;
+
+        Timeline.ClearThumbnails();
+        Timeline.ClearSegmentTrackVisuals();
+        _thumbnailsCompletedForPath = null;
+        _thumbnailsInFlightForPath = null;
+        _thumbnailsDoneForFiles.Clear();
+
+        _adaptivePreviewVideoPath = null;
+        _lastRenderedFrameIndex = -1;
+        _lastRenderedSegmentId = null;
+        _pendingRenderPosition = null;
+        _pendingRenderForce = false;
+        _trimEdgePreview = null;
+        Preview.HideTrimIndicator();
+
+        Musio.Core.Diagnostics.DiagLog.Write("Editor", "timeline emptied; editor reset to zero state");
+    }
+
     private async Task InitializePreviewCoreAsync()
     {
         // Resolved BEFORE any teardown. The teardown below is unconditional, so discovering
@@ -219,6 +395,11 @@ public sealed partial class EditorPage
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
+
+        // The pipeline about to be rebuilt is the one any in-flight trim-edge preview was
+        // rendering through, and the segment it named may not survive the reload.
+        _trimEdgePreview = null;
+        Preview.HideTrimIndicator();
         DisposeSegmentPreviews();
         DisposePrimaryStyleRenderers();
         Timeline.ClearSegmentTrackVisuals();
@@ -330,13 +511,16 @@ public sealed partial class EditorPage
             }
         }
 
-        if (mouseData is null)
-        {
-            // No cursor data — just show raw frames
-            Timeline.Refresh();
-            _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
-            return;
-        }
+        // A primary source with no cursor recording — an imported video, or a recording whose
+        // cursor log is missing — is NOT a reason to abandon the rest of this method. Returning
+        // here used to skip the compositor AND every panel initializer below it, so an
+        // editor-first project (import, then style it) opened with an empty preset list, an
+        // empty wallpaper grid and style sliders still holding their XAML zeros rather than the
+        // project's real values: the first edit then silently wrote Padding = 0 and made the
+        // background it was supposed to change invisible. Fall back to an empty recording
+        // instead — the appended-segment, transition and rebuild paths all already do exactly
+        // this, and FrameCompositor synthesizes a static centre position from it.
+        mouseData ??= new MouseRecordingData();
 
         // Feed cursor data to timeline for track visualization
         ViewModel.Model.CursorData = mouseData;
@@ -365,6 +549,14 @@ public sealed partial class EditorPage
         if (!ProjectService.Instance.IsRestoredSource(project.VideoFilePath)
             && !AutoZoomKeyframesExistForSource(null))
         {
+            // Generation is driven by the RECORDING's clicks, but a keyframe only means
+            // anything if some segment still shows the footage it sits in. Without this a
+            // "Record More" cycle (which reconstructs the page and re-enters here) would
+            // resurrect the auto-zooms that deleting a clip had just orphaned — invisible on
+            // the track, but back in the model and saved with the project. Skipped entirely
+            // for a legacy clip timeline, which has no video segments to be shown by.
+            bool hasVideoSegments = ViewModel.Model.Segments.OfType<VideoSegment>().Any();
+
             foreach (var click in mouseData.Clicks.Where(c => c.IsDown))
             {
                 // Respect deletions: never re-add an auto-zoom the user removed.
@@ -379,14 +571,18 @@ public sealed partial class EditorPage
                 // AutoZoomEngine (which applies the same range rule) refuses to render it,
                 // leaving a visible segment that does nothing.
                 if (project.Duration > TimeSpan.Zero && clickTime > project.Duration.TotalSeconds) continue;
-                ViewModel.Model.ZoomKeyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+
+                var candidate = new Musio.Core.Timeline.ZoomKeyframe
                 {
                     Timestamp = TimeSpan.FromSeconds(clickTime),
                     ZoomLevel = 2.0,
                     CenterX = (click.X * dpiScaleX - cropOffX) / sourceW,
                     CenterY = (click.Y * dpiScaleY - cropOffY) / sourceH,
                     SourceClickTicks = click.TimestampTicks,
-                });
+                };
+                if (hasVideoSegments && !ViewModel.Model.IsZoomKeyframeShown(candidate)) continue;
+
+                ViewModel.Model.ZoomKeyframes.Add(candidate);
             }
         }
 
@@ -449,13 +645,19 @@ public sealed partial class EditorPage
         // from anything the user did, so it must not mark the project as having unsaved edits.
         ProjectService.Instance.ApplyLoadTimeComposition(config);
 
+        // Applied to the renderer's copy only, never to the config persisted above: a source
+        // with no cursor samples must not draw the invented centre cursor, but that is a fact
+        // about this source, not a cursor setting the project should inherit — the same
+        // separation RebuildPreviewRendererCoreAsync makes.
+        var rendererConfig = HideCursorWhenNoSamples(config, mouseData);
+
         try
         {
             var renderer = new PreviewRenderer();
             try
             {
                 await renderer.InitializeAsync(
-                    mouseData, config,
+                    mouseData, rendererConfig,
                     project.Width > 0 ? project.Width : 1920,
                     project.Height > 0 ? project.Height : 1080,
                     project.Duration,
@@ -687,6 +889,15 @@ public sealed partial class EditorPage
     private async Task RenderFrameAtAsync(TimeSpan position, bool force)
     {
         if (_frameReader is null) return;
+
+        // A trim edge is being dragged: the frame the user is choosing lives at a source
+        // instant the (still untrimmed) model maps no output position to, so it takes
+        // priority over `position` for as long as the gesture runs.
+        if (_trimEdgePreview is { } trimEdge)
+        {
+            await RenderTrimEdgeFrameAsync(trimEdge.SegmentId, trimEdge.SourceTime);
+            return;
+        }
 
         // Segment-aware rendering: when the timeline uses segments, check which
         // segment the playhead is over and render text slides directly.

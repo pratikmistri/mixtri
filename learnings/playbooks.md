@@ -25,8 +25,11 @@ caused repeated churn before it was settled; treat them as fixed conventions.
 - After any XAML element rename/restructure, delete `bin/obj` to drop stale `.g.cs`
   (otherwise `COMException: Element not found` → blank page at runtime).
 - **Tests:** the host often lacks the .NET 9 runtime. Run `dotnet test` with
-  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. The current suite
-  size is in the 320s–330s range and must stay green.
+  `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. `dotnet test` also
+  hits the same PriGen MSB4062 failure when it tries to BUILD, so build the test project
+  with MSBuild first and then run
+  `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=x64 -c Debug`.
+  The suite must stay green (currently ~1280 tests, 3 skipped).
 - **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
 - **ALWAYS check the LIVE Store version before packaging, and bump past it.** The Store rejects a
   submission whose version equals one already published, and the in-repo manifest normally still
@@ -203,5 +206,31 @@ reveals:
 - Long-running encode/transcode/mux passes get a cancellation-based watchdog timeout.
 - Throttle pure `WM_MOUSEMOVE` samples (min 4ms interval); never throttle clicks/scrolls/buttons,
   and don't change the binary serialization format.
+
+---
+
+## Playbook: One predicate per safety question
+
+Promoted after three rounds of the same defect (export mute, `HasUnrecoverableWork`, `IsEmpty`).
+
+- **When two call sites answer the same safety question with different expressions, the weaker
+  one is a bug — hoist the predicate instead of fixing the expression.** Every instance so far
+  cost real work: "is the timeline empty?" existed as three variants (`Segments.Count == 0`,
+  segments+clips, and the correct empty-of-EVERYTHING in `ProjectService`), and the weakest one
+  guarded the path that CLEARS THE PROJECT — so deleting the last clip destroyed any music bed
+  or overlay still on the timeline. Current homes: `TimelineModel.IsEmpty` /
+  `TimelineModel.HasNonSegmentContent`, and `ProjectService.HasUnrecoverableWork`.
+- **`HasUnsavedChanges` is NOT the question "would this destroy work?"** A fresh recording is
+  deliberately clean (`SetProject` ends with `MarkSaved()`) yet has never been written anywhere —
+  no package path, no Recents entry, no autosave. Destructive routes (window close, tray Exit,
+  close/open project, last-clip delete, cross-process redirect) must ask
+  `ProjectService.HasUnrecoverableWork` instead.
+- **Guards fail CLOSED.** If the question cannot be put — no `XamlRoot`, or WinUI refusing a
+  second `ContentDialog` — abandon the action; never let it through. Proceeding would discard the
+  work precisely because the guard protecting it could not run.
+- **A dirty flag needs re-auditing whenever the CONSEQUENCE of being clean changes.** Handlers
+  that mutate model state directly (bypassing `UndoRedoManager` and `CurrentComposition`) must
+  call `MarkDirty()` — harmless while the window merely parked itself, silent data loss once
+  closing it started closing the project.
 
 ---

@@ -145,7 +145,8 @@ public sealed partial class EditorPage
             double t = (click.TimestampTicks - mouse.StartTimestampTicks) / mouse.TickFrequency - offset;
             if (t < 0) continue;
             if (maxSrc > 0 && t > maxSrc) continue;
-            keyframes.Add(new Musio.Core.Timeline.ZoomKeyframe
+
+            var candidate = new Musio.Core.Timeline.ZoomKeyframe
             {
                 Timestamp = TimeSpan.FromSeconds(t),
                 ZoomLevel = 2.0,
@@ -153,7 +154,14 @@ public sealed partial class EditorPage
                 CenterY = Math.Clamp((click.Y - coy) / (double)sh, 0, 1),
                 SourceClickTicks = click.TimestampTicks,
                 SourceVideoFilePath = seg.VideoFilePath,
-            });
+            };
+
+            // Only keep clicks some segment of this source actually shows — otherwise a
+            // later re-run would resurrect the auto-zooms that deleting one of this
+            // recording's clips had just orphaned (see RemoveSegmentOperation).
+            if (!ViewModel.Model.IsZoomKeyframeShown(candidate)) continue;
+
+            keyframes.Add(candidate);
         }
     }
 
@@ -478,6 +486,28 @@ public sealed partial class EditorPage
     private VideoSegment? SegmentForSource(string? sourceVideoFilePath) =>
         EditorTimelineMediator.SegmentForSource(ViewModel.Model, sourceVideoFilePath, PrimaryVideoPath);
 
+    /// <summary>
+    /// Shows the preview-area call-out whenever the timeline holds nothing, so an editor with
+    /// no clips offers the next action instead of a black rectangle.
+    /// </summary>
+    /// <remarks>
+    /// Keyed on the model rather than on <see cref="ProjectService.CurrentProject"/> so the two
+    /// routes into the empty editor — never having recorded, and having just deleted the last
+    /// clip — cannot diverge. Pairs with the dashed shadow segment the timeline draws under the
+    /// same condition.
+    /// </remarks>
+    private void UpdateEmptyStateVisibility()
+    {
+        if (EmptyStateOverlay is null) return;
+
+        // TimelineModel.IsEmpty, not "no segments": a timeline still holding a music bed, a
+        // voice-over, a text overlay or a camera move is not empty, and offering "record or
+        // import to start your timeline" over that content misdescribes it.
+        EmptyStateOverlay.Visibility = ViewModel.Model.IsEmpty
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
         DispatcherQueue.TryEnqueue(() =>
@@ -510,6 +540,10 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
+
+            // Undo/redo and every undoable edit funnel through here, which makes this the one
+            // place that reliably sees the timeline gain its first segment or lose its last.
+            UpdateEmptyStateVisibility();
 
             // Same reasoning as the transition resync above: undo/redo does not change the
             // zoom selection, so nothing else pushes the reverted keyframe back onto the zoom
@@ -579,6 +613,11 @@ public sealed partial class EditorPage
 
     private void OnSegmentTrimRequested(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
         EditorTimelineMediator.HandleSegmentTrimRequested(ViewModel, Timeline, e.Id, e.FromStart, e.NewDuration);
+
+    private void OnSegmentTrimPreviewChanged(object? sender, (string Id, bool FromStart, TimeSpan NewDuration) e) =>
+        UpdateTrimEdgePreview(e.Id, e.FromStart, e.NewDuration);
+
+    private void OnSegmentTrimPreviewEnded(object? sender, EventArgs e) => EndTrimEdgePreview();
 
     private void OnSegmentSpeedChangeRequested(object? sender, (string Id, double Speed) e) =>
         EditorTimelineMediator.HandleSegmentSpeedChangeRequested(ViewModel, Timeline, e.Id, e.Speed);
@@ -688,15 +727,151 @@ public sealed partial class EditorPage
 
     /// <summary>
     /// Ripple-deletes a primary-track segment and drops every bit of page state that
-    /// referenced it. Shared by the Delete accelerator and the segment context menu so the
-    /// two gestures cannot drift into leaving different leftovers behind.
+    /// referenced it. Shared by the Delete accelerator, the toolbar button and the segment
+    /// context menu so the gestures cannot drift into leaving different leftovers behind.
     /// </summary>
-    private void DeletePrimarySegment(string segmentId)
+    private void DeletePrimarySegment(string segmentId) => _ = DeletePrimarySegmentAsync(segmentId);
+
+    private async Task DeletePrimarySegmentAsync(string segmentId)
     {
+        if (!await ConfirmProjectClosingDeleteAsync()) return;
+
+        // The confirmation above is awaited, so re-check rather than assuming the timeline
+        // stood still while the dialog was up.
+        if (!ViewModel.Model.Segments.Any(s => s.Id == segmentId)) return;
+
         ViewModel.UndoRedoManager.Execute(new RemoveSegmentOperation(segmentId));
         _selectedPrimarySegmentId = null;
         Timeline.SelectSegment(null);
         HideTextSlidePanel();
+        ResetProjectIfTimelineEmptied();
+    }
+
+    /// <summary>
+    /// Asks before a delete that would take the whole project with it, returning false when
+    /// the user backs out.
+    /// </summary>
+    /// <remarks>
+    /// Removing the LAST segment empties the timeline, which closes the project
+    /// (<see cref="ResetProjectIfTimelineEmptied"/>) — and <c>ClearProject</c> replaces the
+    /// timeline the undo stack belongs to, so <c>EditorViewModel</c> rebuilds
+    /// <c>UndoRedoManager</c> over the new empty model and Ctrl+Z cannot bring any of it
+    /// back. Both halves are deliberate on their own; their composition turns one Del
+    /// keystroke into an irreversible discard of the whole session. Asked only when there is
+    /// something unrecoverable to lose — deleting the last clip of a saved, unmodified
+    /// project costs nothing, since the <c>.musio</c> file is still there.
+    /// <para>
+    /// The trigger is deliberately the same test <see cref="ResetProjectIfTimelineEmptied"/>
+    /// applies, evaluated one delete ahead: a music bed, overlay or camera move left on the
+    /// timeline keeps the project open, so that delete is an ordinary undoable edit and must
+    /// not be dressed up as a closing one.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> ConfirmProjectClosingDeleteAsync()
+    {
+        // Would removing one more segment leave the timeline empty of everything?
+        bool closesProject =
+            ViewModel.Model.Segments.Count <= 1 && !ViewModel.Model.HasNonSegmentContent;
+        if (!closesProject) return true;
+
+        // A save or an export reads the project as it runs — the exporter re-reads
+        // model.Segments per frame — and cleans up against it afterwards. Clearing it
+        // mid-flight yields a file whose second half renders from a different source AND
+        // loses the project it came from. Leaving the clip in place is the safe outcome; the
+        // other two routes into ClearProject already refuse the same way.
+        if (_isSavingProject || ProjectService.Instance.IsSaveInFlight || ExportVM.IsExporting)
+        {
+            await ShowProjectDialogAsync(
+                "Busy",
+                "Wait for the current save or export to finish before deleting the last clip.");
+            return false;
+        }
+
+        if (!ProjectService.Instance.HasUnrecoverableWork) return true;
+
+        // No visual tree means the question cannot be put, and this delete is the one that
+        // cannot be undone — fail closed rather than running it unprompted.
+        if (XamlRoot is null) return false;
+
+        try
+        {
+            var decision = await ProjectSaveCoordinator.PromptUnsavedChangesAsync(
+                XamlRoot, App.Current.MainAppWindow,
+                "before deleting the last clip? That closes the project, and it cannot be undone.");
+
+            return decision != ProjectSaveCoordinator.UnsavedChangesDecision.Cancel;
+        }
+        catch (Exception ex)
+        {
+            // WinUI refuses a second ContentDialog. Abandon the delete rather than running it
+            // unprompted — it is the one delete that cannot be undone.
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor", $"Last-clip delete prompt failed; delete abandoned: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Drops the whole project once the last segment leaves the timeline, so deleting the only
+    /// clip lands the editor in the same empty state it has before anything is recorded.
+    /// </summary>
+    /// <remarks>
+    /// Removing a segment only edits the timeline. Left alone, the project stayed current with
+    /// its video path, duration, cursor log and audio files intact, so the ruler kept the old
+    /// length and the video track fell through to its legacy full-duration fallback and painted
+    /// a filmstrip block for a segment that no longer existed — one no hit test could select and
+    /// no delete could remove, because there was nothing behind it. Inserting the next clip then
+    /// appeared to "replace" that ghost.
+    /// <para>
+    /// Ordered teardown-then-clear on purpose: the clear republishes an empty timeline through
+    /// ProjectChanged, and the ModelReloaded handler that follows re-enters the preview init,
+    /// which now correctly finds no project and leaves the torn-down pipeline alone.
+    /// </para>
+    /// </remarks>
+    private void ResetProjectIfTimelineEmptied()
+    {
+        // Empty of EVERYTHING, not just of segments. Clearing the project throws away the
+        // whole timeline, so deleting the last video clip while a music bed, voice-over,
+        // text overlay or camera move is still on it would silently destroy that work —
+        // which is persisted, and which ProjectService.IsTimelineEmpty already refuses to
+        // treat as an empty timeline for exactly this reason.
+        if (!ViewModel.Model.IsEmpty) return;
+        ResetProjectToEmptyState();
+    }
+
+    /// <summary>
+    /// Tears the editor all the way back to the state it has before anything is recorded or
+    /// imported. Shared by the last-segment-deleted path above and the explicit "Close
+    /// project" command, so the two cannot leave different leftovers behind.
+    /// </summary>
+    private void ResetProjectToEmptyState()
+    {
+        _selectedPrimarySegmentId = null;
+        _selectedTextSlideId = null;
+        HideTextSlidePanel();
+        Timeline.ClearZoomSelection();
+        Timeline.ClearInsertedAudioSelection();
+        UpdateZoomPanelVisibility();
+
+        // Every pane except Scene describes something the timeline no longer holds. Scene is
+        // always available by contract (SetPaneAvailable falls back to it), so hiding the rest
+        // is what leaves the rail showing only what still exists.
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Video, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Cursor, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Zoom, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextOverlay, false);
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Transition, false);
+
+        ResetPreviewToEmptyState();
+        ProjectService.Instance.ClearProject();
+
+        // InitializeStyleControls only runs when there is a project to initialise from, so
+        // without this the Scene pane would keep displaying the discarded take's numbers while
+        // the composition behind them has already gone back to defaults.
+        SyncStyleControlsToConfig(ProjectService.Instance.CurrentComposition.Background);
+
+        UpdateEmptyStateVisibility();
     }
 
     /// <summary>

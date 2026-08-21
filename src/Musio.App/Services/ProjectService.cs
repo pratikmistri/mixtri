@@ -89,6 +89,23 @@ public class ProjectService
     public event EventHandler? UnsavedChangesChanged;
 
     /// <summary>
+    /// True when discarding the current project would destroy work that cannot be got back —
+    /// either it has edits that are not in its <c>.musio</c> file, or it has no file at all.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="HasUnsavedChanges"/> alone is NOT that question, and the difference is a
+    /// whole recording: a fresh capture deliberately starts clean (see the
+    /// <see cref="MarkSaved"/> call at the end of <see cref="SetProject"/> — the prompt is for
+    /// work the user DID, and first-open style defaults are not that), while
+    /// <see cref="CurrentPackagePath"/> stays null until it is saved for the first time.
+    /// Gating a destructive action on the dirty flag alone therefore skips the prompt in
+    /// exactly the case where everything is lost, and nothing else can recover it: an unsaved
+    /// recording is never written to Recents, and there is no autosave.
+    /// </remarks>
+    public bool HasUnrecoverableWork =>
+        CurrentProject is not null && (HasUnsavedChanges || CurrentPackagePath is null);
+
+    /// <summary>
     /// Records that the project differs from its saved file. Safe to call repeatedly; only a
     /// transition raises <see cref="UnsavedChangesChanged"/>.
     /// </summary>
@@ -308,6 +325,10 @@ public class ProjectService
         ApplyLoadTimeComposition(CurrentComposition with { LegacyCameraDrift = null });
     }
 
+    /// <summary>
+    /// Makes <paramref name="project"/> the current project, replacing any existing timeline
+    /// with a fresh one holding it as the primary base-track segment.
+    /// </summary>
     public void SetProject(Project project)
     {
         CurrentProject = project;
@@ -334,6 +355,13 @@ public class ProjectService
         // Full-screen (Monitor) captures default to zeroed padding/shadow/
         // corner radius/border; users can still override via the Style menu
         // and their edits persist for the lifetime of this project.
+        //
+        // An IMPORTED file lands here too (ImportVideo tags it Monitor) and must keep taking
+        // this branch: an import opens in its true form — the frame the user handed us, at the
+        // size they handed it to us, with nothing composited around it — and adding a
+        // background is then an explicit choice they make by raising the padding. Note this
+        // FORCES the four values rather than merely defaulting them, so an import never
+        // inherits the frame styling of whatever project preceded it.
         if (project.CaptureType is CaptureTargetType.Monitor)
         {
             CurrentComposition = CurrentComposition with
@@ -364,7 +392,7 @@ public class ProjectService
     /// </summary>
     public VideoSegment? AppendRecording(Project newRecording)
     {
-        if (CurrentProject is null || CurrentTimeline is null)
+        if (CurrentProject is null || CurrentTimeline is null || IsTimelineEmpty(CurrentTimeline))
         {
             // No existing project — just set this as the primary
             SetProject(newRecording);
@@ -495,8 +523,9 @@ public class ProjectService
         };
 
         // Importing is also a valid way to START a project; in that case the imported clip is
-        // the primary base-track segment because there is no existing edit to cover.
-        if (CurrentProject is null || CurrentTimeline is null)
+        // the primary base-track segment because there is no existing edit to cover. It opens
+        // unstyled — see the CaptureType branch in SetProject.
+        if (CurrentProject is null || CurrentTimeline is null || IsTimelineEmpty(CurrentTimeline))
         {
             SetProject(project);
             return CurrentTimeline?.Segments
@@ -512,6 +541,66 @@ public class ProjectService
         MarkDirty();
         ProjectChanged?.Invoke(this, EventArgs.Empty);
         return segment;
+    }
+
+    /// <summary>
+    /// Treats a timeline the user has emptied out as "no project yet", so the next recording or
+    /// import becomes the primary rather than being appended to a source that is no longer on
+    /// the timeline.
+    /// </summary>
+    /// <remarks>
+    /// Deleting the last clip and recording a new one is the natural retake gesture, but nothing
+    /// about deleting a segment rewrites <see cref="CurrentProject"/> — its VideoFilePath, its
+    /// dimensions and its duration all still describe the discarded take, and those are what the
+    /// preview reader, the filmstrip and the exported frame size are derived from. Requiring the
+    /// timeline to be empty of EVERYTHING (segments, camera moves, overlays and inserted audio)
+    /// keeps the reset off any timeline still holding work: a project with a text slide or a
+    /// music bed left on it takes the ordinary append path, which preserves them.
+    /// <para>
+    /// The rule itself lives on <see cref="TimelineModel.IsEmpty"/> so the editor's empty-state
+    /// call-out and its reset-to-zero-state path apply the identical test — they used to check
+    /// segments alone, which discarded exactly the work this remark describes.
+    /// </para>
+    /// </remarks>
+    private static bool IsTimelineEmpty(TimelineModel timeline) => timeline.IsEmpty;
+
+    /// <summary>
+    /// Discards the current project entirely and publishes an empty timeline in its place —
+    /// the state the editor is in before anything has ever been recorded or imported.
+    /// </summary>
+    /// <remarks>
+    /// Called when the user deletes the last segment. Removing a segment on its own only edits
+    /// the timeline, which left the project itself behind: its video path, dimensions, duration,
+    /// cursor log and audio files all still described the discarded take, so the ruler kept its
+    /// old length, the video track drew a filmstrip block from the legacy full-duration fallback
+    /// that no hit test could select or delete, and the cursor/camera/mic/system-audio lanes
+    /// stayed populated. Clearing the project is what makes "I deleted my only clip" mean an
+    /// empty editor rather than a half-torn-down one.
+    /// <para>
+    /// The composition is reset with it. A zero state that silently kept the previous take's
+    /// background, cursor and motion settings is not a zero state, and every path that starts
+    /// the next project (<see cref="SetProject"/>, and the import route through it) sets the
+    /// style it wants anyway.
+    /// </para>
+    /// <para>
+    /// This is deliberately NOT undoable: the timeline the undo stack belongs to is replaced
+    /// here, so the manager is rebuilt empty by the <see cref="ProjectChanged"/> subscribers.
+    /// The recording's files are untouched on disk.
+    /// </para>
+    /// </remarks>
+    public void ClearProject()
+    {
+        CurrentProject = null;
+        CurrentPackagePath = null;
+        IsRestoredFromPackage = false;
+        _restoredSourcePaths.Clear();
+        CurrentTimeline = TimelineModel.CreateEmpty();
+        ApplyLoadTimeComposition(new CompositionConfig());
+
+        // Nothing left to save, so the close prompt must not offer to save it.
+        MarkSaved();
+
+        ProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>

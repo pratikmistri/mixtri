@@ -19,6 +19,26 @@ public class TimelineModel
     /// </summary>
     public const int BaseTrackIndex = 0;
 
+    /// <summary>
+    /// Ruler length an empty editor shows. A zero-length timeline collapses every track draw
+    /// (they all return early on a non-positive <see cref="DisplayDuration"/>), which leaves the
+    /// editor looking broken rather than merely empty, so the empty state is given a nominal
+    /// span to lay its placeholder out in.
+    /// </summary>
+    public static readonly TimeSpan EmptyDuration = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The timeline an editor with no project shows. Shared so that "nothing recorded yet" and
+    /// "the last clip was just deleted" are the same state rather than two that drift apart —
+    /// the second used to produce a zero-length model, and therefore a blank editor instead of
+    /// the inviting empty one.
+    /// </summary>
+    public static TimelineModel CreateEmpty() => new()
+    {
+        Duration = EmptyDuration,
+        TrimEnd = EmptyDuration,
+    };
+
     public TimeSpan Duration { get; set; }
     public int Fps { get; set; } = 30;
     public TimeSpan PlayheadPosition { get; set; }
@@ -295,6 +315,32 @@ public class TimelineModel
     // Get the effective (trimmed) duration
     [JsonIgnore]
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
+
+    /// <summary>
+    /// Content the user placed on the timeline that is NOT a segment: audio tracks, text
+    /// overlays, camera segments, and legacy clips.
+    /// </summary>
+    /// <remarks>
+    /// Deleting the last video segment does not mean the timeline is finished with — a music
+    /// bed, a voice-over, an overlay or a camera track can easily outlive every clip, and each
+    /// one is persisted work. Anything that reacts to "the timeline is empty now" has to ask
+    /// about these too, or it silently discards them.
+    /// </remarks>
+    [JsonIgnore]
+    public bool HasNonSegmentContent =>
+        Clips.Count > 0
+        || AudioTracks.Count > 0
+        || TextOverlays.Count > 0
+        || CameraSegments.Count > 0;
+
+    /// <summary>
+    /// True when the timeline holds nothing at all — no segments and no
+    /// <see cref="HasNonSegmentContent"/>. The single definition of "empty", shared by the
+    /// editor's empty-state call-out, the reset-to-zero-state path, and the "treat this as no
+    /// project yet" rule that lets the next recording become the primary.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsEmpty => Segments.Count == 0 && !HasNonSegmentContent;
 
     /// <summary>
     /// The total display duration for the timeline ruler and coordinate system.
@@ -655,6 +701,73 @@ public class TimelineModel
     private static bool ContainsSourceTime(VideoSegment segment, TimeSpan sourceTime) =>
         sourceTime >= segment.SourceStart
         && sourceTime <= segment.SourceStart + segment.SourceDuration;
+
+    /// <summary>
+    /// Whether <paramref name="sourceVideoFilePath"/> names the same recording as
+    /// <paramref name="segment"/>. Null means the primary recording — the convention shared
+    /// by <see cref="ZoomKeyframe.SourceVideoFilePath"/> and
+    /// <see cref="TextOverlaySegment.SourceVideoFilePath"/>.
+    /// </summary>
+    public bool SourceMatchesSegment(string? sourceVideoFilePath, VideoSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+
+        return sourceVideoFilePath is null
+            ? PrimaryVideoFilePath is null
+              || string.Equals(segment.VideoFilePath, PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(segment.VideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="segment"/> actually SHOWS any part of a source-time span —
+    /// same recording, and the FULL span overlaps the footage the segment keeps. This is the
+    /// test for "does this authored thing still have a home on the timeline"; anything anchored
+    /// to a source time (zoom keyframes, text overlays) resolves its position through a segment
+    /// that shows it, and has no meaningful position when none does.
+    /// </summary>
+    public bool SourceSpanIntersectsSegment(
+        string? sourceVideoFilePath, TimeSpan spanStart, TimeSpan spanEnd, VideoSegment segment)
+    {
+        if (!SourceMatchesSegment(sourceVideoFilePath, segment)) return false;
+
+        // A degenerate (empty) span — e.g. the zero-duration probe the text-overlay create
+        // preview maps through — has no width to overlap with; test it as the point it is.
+        if (spanEnd <= spanStart) return ContainsSourceTime(segment, spanStart);
+
+        var srcStart = segment.SourceStart;
+        var srcEnd = segment.SourceStart + segment.SourceDuration;
+        return spanEnd > srcStart && spanStart < srcEnd;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="segment"/> shows any part of <paramref name="keyframe"/>. The
+    /// anchor <see cref="ZoomKeyframe.Timestamp"/> counts on its own too, so a keyframe whose
+    /// eases overflow the segment it is anchored in still belongs there.
+    /// </summary>
+    public bool ZoomKeyframeIntersects(ZoomKeyframe keyframe, VideoSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(keyframe);
+        ArgumentNullException.ThrowIfNull(segment);
+
+        return SourceSpanIntersectsSegment(
+                   keyframe.SourceVideoFilePath, keyframe.Start, keyframe.End, segment)
+            || (SourceMatchesSegment(keyframe.SourceVideoFilePath, segment)
+                && ContainsSourceTime(segment, keyframe.Timestamp));
+    }
+
+    /// <summary>
+    /// Whether any video segment still on the timeline shows <paramref name="keyframe"/>.
+    /// A keyframe that no segment shows is unreachable: it renders nowhere sensible (its
+    /// source time maps through no kept range) and affects no exported frame.
+    /// </summary>
+    public bool IsZoomKeyframeShown(ZoomKeyframe keyframe)
+    {
+        foreach (var segment in Segments.OfType<VideoSegment>())
+        {
+            if (ZoomKeyframeIntersects(keyframe, segment)) return true;
+        }
+        return false;
+    }
 
     private static bool AreContiguousSourcePieces(VideoSegment left, VideoSegment right) =>
         left.TrackIndex == right.TrackIndex

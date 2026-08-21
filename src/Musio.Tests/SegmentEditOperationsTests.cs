@@ -173,6 +173,118 @@ public sealed class SegmentEditOperationsTests
         Assert.AreEqual(TrimSegmentEdgeOperation.MinDuration, model.Segments[0].Duration);
     }
 
+    // ── Live trim-edge preview mapping (editor drags the edge; nothing is committed yet) ──
+
+    [TestMethod]
+    public void ResolveEdgePreview_LeftEdge_IsTheCommittedInPoint()
+    {
+        var a = Video(0, 10);
+        var model = ModelWith(a);
+        var requested = TimeSpan.FromSeconds(6);
+
+        var (duration, sourceTime) = TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: true, requested);
+
+        new TrimSegmentEdgeOperation(a.Id, fromStart: true, requested).Execute(model);
+
+        var trimmed = (VideoSegment)model.Segments[0];
+        Assert.AreEqual(trimmed.SourceStart, sourceTime,
+            "The in-edge preview must show the first frame the commit keeps");
+        Assert.AreEqual(trimmed.Duration, duration);
+    }
+
+    [TestMethod]
+    public void ResolveEdgePreview_LeftEdge_ReportsTheHeadClampedDurationNotTheRequestedOne()
+    {
+        // In-point at source 3s: growing by 5s is impossible, only 3s of head exists.
+        var a = Video(3, 7);
+        var model = ModelWith(a);
+        var requested = TimeSpan.FromSeconds(12);
+
+        var (duration, sourceTime) = TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: true, requested);
+
+        new TrimSegmentEdgeOperation(a.Id, fromStart: true, requested).Execute(model);
+
+        var trimmed = (VideoSegment)model.Segments[0];
+        Assert.AreEqual(TimeSpan.Zero, sourceTime);
+        Assert.AreEqual(trimmed.SourceStart, sourceTime);
+        Assert.AreEqual(TimeSpan.FromSeconds(10), duration,
+            "The readout must show the duration the commit really produces, not the request");
+        Assert.AreEqual(trimmed.Duration, duration);
+    }
+
+    [TestMethod]
+    public void ResolveEdgePreview_RightEdge_IsOneTickInsideTheExclusiveOutPoint()
+    {
+        var a = Video(2, 10);
+        var model = ModelWith(a);
+        var requested = TimeSpan.FromSeconds(6);
+
+        var (duration, sourceTime) = TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: false, requested);
+
+        new TrimSegmentEdgeOperation(a.Id, fromStart: false, requested).Execute(model);
+
+        var trimmed = (VideoSegment)model.Segments[0];
+        var exclusiveOut = trimmed.SourceStart + trimmed.SourceDuration;
+        Assert.AreEqual(exclusiveOut - TimeSpan.FromTicks(1), sourceTime);
+        Assert.IsTrue(sourceTime < exclusiveOut,
+            "The out-point is exclusive, so the previewed frame must fall inside the kept range");
+        Assert.AreEqual(trimmed.Duration, duration);
+    }
+
+    [DataRow(24)]
+    [DataRow(30)]
+    [DataRow(60)]
+    [DataTestMethod]
+    public void ResolveEdgePreview_RightEdge_ResolvesToTheLastKeptFrameAtAnyFrameRate(int fps)
+    {
+        var a = Video(0, 10);
+
+        // An out-point deliberately placed part-way through a frame: the last KEPT frame is
+        // the one that begins before it, which is what floor(seconds x fps) — the mapping
+        // every decoder in the app uses — must yield for the previewed instant.
+        var requested = TimeSpan.FromSeconds(6) + TimeSpan.FromMilliseconds(5);
+        var (_, sourceTime) = TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: false, requested);
+
+        int expectedFrame = (int)((requested.TotalSeconds * fps) - 1e-9);
+        Assert.AreEqual(expectedFrame, (int)(sourceTime.TotalSeconds * fps));
+    }
+
+    [TestMethod]
+    public void ResolveEdgePreview_RightEdge_SpeedAdjusted_UsesSourceRate()
+    {
+        // 2x speed: 6s of output consumes 12s of footage from an in-point of 1s.
+        var a = Video(1, 20, speed: 2.0);
+        var model = ModelWith(a);
+        var requested = TimeSpan.FromSeconds(6);
+
+        var (duration, sourceTime) = TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: false, requested);
+
+        new TrimSegmentEdgeOperation(a.Id, fromStart: false, requested).Execute(model);
+
+        var trimmed = (VideoSegment)model.Segments[0];
+        Assert.AreEqual(TimeSpan.FromSeconds(13) - TimeSpan.FromTicks(1), sourceTime);
+        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1), sourceTime);
+        Assert.AreEqual(TimeSpan.FromSeconds(6), duration);
+    }
+
+    [TestMethod]
+    public void ResolveEdgePreview_BelowMinimum_MatchesTheClampedCommit()
+    {
+        var a = Video(4, 10);
+        var model = ModelWith(a);
+
+        var (duration, sourceTime) =
+            TrimSegmentEdgeOperation.ResolveEdgePreview(a, fromStart: false, TimeSpan.Zero);
+
+        new TrimSegmentEdgeOperation(a.Id, fromStart: false, TimeSpan.Zero).Execute(model);
+
+        var trimmed = (VideoSegment)model.Segments[0];
+        Assert.AreEqual(TrimSegmentEdgeOperation.MinDuration, duration);
+        Assert.AreEqual(trimmed.Duration, duration);
+        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1), sourceTime);
+        Assert.IsTrue(sourceTime > trimmed.SourceStart);
+    }
+
     [TestMethod]
     public void TrimTextSlide_ChangesDurationOnly()
     {

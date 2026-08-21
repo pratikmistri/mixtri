@@ -169,6 +169,24 @@ public sealed partial class PreviewCanvas : UserControl
         QualityIndicator.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// Shows which edge is being trimmed and the duration the segment would end up with,
+    /// while the preview surface is pinned to the frame at that edge.
+    /// </summary>
+    public void ShowTrimIndicator(bool fromStart, TimeSpan newDuration)
+    {
+        if (TrimIndicator is null || TrimIndicatorText is null) return;
+
+        TrimIndicatorText.Text = $"Trim {(fromStart ? "in" : "out")} \u00b7 {FormatPreciseTime(newDuration)}";
+        TrimIndicator.Visibility = Visibility.Visible;
+    }
+
+    public void HideTrimIndicator()
+    {
+        if (TrimIndicator is null) return;
+        TrimIndicator.Visibility = Visibility.Collapsed;
+    }
+
     public void ClearFrame()
     {
         SetFrame(null);
@@ -379,5 +397,17 @@ public sealed partial class PreviewCanvas : UserControl
         if (t.TotalMinutes >= 1)
             return $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
         return $"0:{t.Seconds:D2}";
+    }
+
+    /// <summary>
+    /// Millisecond-accurate duration, for readouts (trim) where the whole point is that the
+    /// user can see a change smaller than the one second <see cref="FormatTime"/> resolves.
+    /// </summary>
+    private static string FormatPreciseTime(TimeSpan t)
+    {
+        if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+        return t.TotalMinutes >= 1
+            ? $"{(int)t.TotalMinutes}:{t.Seconds:D2}.{t.Milliseconds:D3}"
+            : $"{t.Seconds}.{t.Milliseconds:D3}s";
     }
 }

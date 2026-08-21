@@ -67,6 +67,13 @@ public sealed partial class TimelineControl : UserControl
     private TimeSpan _textSlideWindowOriginalInStart;
     private TimeSpan _textSlideWindowOriginalOutEnd;
 
+    // Live trim-edge preview: true once SegmentTrimPreviewChanged has been raised for the
+    // current gesture, so exactly one SegmentTrimPreviewEnded closes it out however the
+    // gesture finishes (release, capture loss). _trimPreviewDuration is the last duration
+    // published, so a pointer sample that lands on the same millisecond costs no re-render.
+    private bool _trimPreviewActive;
+    private TimeSpan _trimPreviewDuration;
+
     /// <summary>Raised when a primary-track segment should be moved to a new index (commit).</summary>
     public event EventHandler<(string Id, int TargetIndex)>? SegmentMoveRequested;
 
@@ -78,6 +85,22 @@ public sealed partial class TimelineControl : UserControl
 
     /// <summary>Raised when a primary-track segment edge should be ripple-trimmed (commit).</summary>
     public event EventHandler<(string Id, bool FromStart, TimeSpan NewDuration)>? SegmentTrimRequested;
+
+    /// <summary>
+    /// Raised continuously WHILE a segment edge is being dragged, carrying the exact
+    /// <c>(Id, FromStart, NewDuration)</c> triple that <see cref="SegmentTrimRequested"/>
+    /// would commit if the pointer were released right now, so the host can show the frame
+    /// at the proposed edge. Purely informational — the model is untouched until release.
+    /// </summary>
+    public event EventHandler<(string Id, bool FromStart, TimeSpan NewDuration)>? SegmentTrimPreviewChanged;
+
+    /// <summary>
+    /// Raised once the edge drag that started a <see cref="SegmentTrimPreviewChanged"/> run
+    /// has finished (released or cancelled), so the host can return the preview to the
+    /// playhead. Always follows any <see cref="SegmentTrimRequested"/> the release commits,
+    /// so the restored frame reflects the trimmed model rather than the pre-trim one.
+    /// </summary>
+    public event EventHandler? SegmentTrimPreviewEnded;
 
     /// <summary>
     /// Raised when a playback speed is chosen from a video segment's right-click menu.
@@ -217,6 +240,8 @@ public sealed partial class TimelineControl : UserControl
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
     private Color TrackHintTextColor;
+    private Color EmptyPlaceholderFill;
+    private Color EmptyPlaceholderStroke;
     private Color ClickStrokeColor;
 
     // Filmstrip thumbnail cache.
@@ -550,6 +575,10 @@ public sealed partial class TimelineControl : UserControl
         TrackCenterLineColor  = GetSystemBrushColor("DividerStrokeColorDefaultBrush", Color.FromArgb(100, 255, 255, 255));
         TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
         TrackHintTextColor    = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(140, 255, 255, 255));
+
+        // ── Empty-state shadow segment — must read as an outline, never as a clip ──
+        EmptyPlaceholderFill   = isDark ? Color.FromArgb(20, 255, 255, 255) : Color.FromArgb(16, 0, 0, 0);
+        EmptyPlaceholderStroke = isDark ? Color.FromArgb(90, 255, 255, 255) : Color.FromArgb(80, 0, 0, 0);
     }
 
     /// <summary>
@@ -1126,6 +1155,24 @@ public sealed partial class TimelineControl : UserControl
         TimeCoordinateConverter.XToTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
 
     /// <summary>
+    /// Output-timeline time under a point expressed in THIS CONTROL's coordinate space, for
+    /// gestures the host owns rather than the control — a dropped file, for one.
+    /// </summary>
+    /// <remarks>
+    /// Translates through <c>TimeRulerCanvas</c> rather than using the raw X. The track
+    /// canvases sit in the second grid column, behind a 56px label gutter, so a control-space
+    /// X fed straight to <see cref="XToTime"/> reads about half a second late at typical
+    /// widths — and would read progressively later the more the timeline is zoomed in.
+    /// </remarks>
+    public TimeSpan TimeAtPoint(Point pointInControl)
+    {
+        if (TimeRulerCanvas is null) return Model?.PlayheadPosition ?? TimeSpan.Zero;
+
+        var inCanvas = TransformToVisual(TimeRulerCanvas).TransformPoint(pointInControl);
+        return XToTime(inCanvas.X);
+    }
+
+    /// <summary>
     /// Converts a source-video time (zoom keyframe / cursor timestamp) to an X
     /// coordinate, mapping through segments so it stays aligned with the video
     /// after text slides shift later content.
@@ -1313,6 +1360,16 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
+        // Nothing on the timeline at all: no segments, no legacy clips, no filmstrip to draw
+        // one from. Rather than leave the lane blank, draw the placeholder that invites the
+        // first clip — the same one whether the editor has never held a project or the user
+        // just deleted their last one.
+        if (model.Segments.Count == 0 && model.Clips.Count == 0 && !hasThumbnails)
+        {
+            DrawEmptyVideoTrackPlaceholder(ds, w, h, pad);
+            return;
+        }
+
         // Draw clips
         for (int idx = 0; idx < model.Clips.Count; idx++)
         {
@@ -1367,8 +1424,13 @@ public sealed partial class TimelineControl : UserControl
             }
         }
 
-        // If no clips, draw the full duration as one clip
-        if (model.Clips.Count == 0)
+        // If no clips, draw the full duration as one clip — but only for a genuinely legacy
+        // clip timeline, never for a segment timeline whose last segment was just removed.
+        // That model still carries the discarded take's Duration, so this fallback would paint
+        // a filmstrip block for footage the timeline no longer has: a ghost nothing can select
+        // or delete, because hit testing runs over segments and none stands behind it.
+        // PrimaryVideoFilePath is the discriminator — every segment-era project sets it.
+        if (model.Clips.Count == 0 && model.PrimaryVideoFilePath is null)
         {
             float x1 = (float)TimeToX(model.TrimStart);
             float x2 = (float)TimeToX(model.TrimEnd > TimeSpan.Zero ? model.TrimEnd : model.Duration);
@@ -1424,6 +1486,47 @@ public sealed partial class TimelineControl : UserControl
             float x = (float)TimeToX(model.Clips[i].Start);
             ds.DrawLine(x, 0, x, h, CutLineColor, 1.5f);
         }
+    }
+
+    /// <summary>
+    /// Draws the base lane's "nothing here yet" placeholder: a dashed shadow segment spanning
+    /// the ruler with a one-line prompt in it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately drawn as a SHADOW rather than as a clip. The lane used to fall through to
+    /// the legacy fallback and paint a solid electric-blue block, which reads as a real clip —
+    /// it invites a click, and every gesture aimed at it (select, split, delete, drag) silently
+    /// does nothing, because hit testing runs over segments and there is no segment there. A
+    /// dashed outline over a faint fill says "this is where a clip goes" instead of pretending
+    /// one already does.
+    /// </remarks>
+    private void DrawEmptyVideoTrackPlaceholder(CanvasDrawingSession ds, float w, float h, float pad)
+    {
+        float x1 = (float)TimeToX(TimeSpan.Zero);
+        float x2 = (float)TimeToX(Model?.DisplayDuration ?? TimeSpan.Zero);
+        float blockW = Math.Max(2, x2 - x1);
+        float blockH = Math.Max(2, h - pad * 2);
+
+        using var geom = CanvasGeometry.CreateRoundedRectangle(
+            ds, x1, pad, blockW, blockH, VideoClipCornerRadius, VideoClipCornerRadius);
+        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+
+        ds.FillGeometry(geom, EmptyPlaceholderFill);
+        ds.DrawGeometry(geom, EmptyPlaceholderStroke, 1.2f, dashed);
+
+        using var format = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 12,
+            FontFamily = "Segoe UI",
+            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+        };
+        ds.DrawText(
+            "Record or import a video to start your timeline",
+            new Rect(x1, pad, blockW, blockH),
+            TrackHintTextColor,
+            format);
     }
 
     /// <summary>
@@ -2861,9 +2964,19 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Finds the video segment that owns a zoom keyframe: the segment matching the
     /// keyframe's source file whose source range contains its Timestamp (falling back
-    /// to the first file-matching segment). This anchors the keyframe to one occurrence
-    /// of a recording even when that source was duplicated or reordered.
+    /// to the first file-matching segment that still SHOWS any part of the keyframe).
+    /// This anchors the keyframe to one occurrence of a recording even when that source
+    /// was duplicated or reordered.
     /// </summary>
+    /// <remarks>
+    /// The fallback exists so an authored span whose eases slightly overflow its segment
+    /// keeps its width instead of collapsing — but it must never adopt a segment that shows
+    /// NO part of the keyframe. Doing so extrapolates a position outside that segment's
+    /// range (<see cref="TimelineModel.MapSourceTimeFromOwningSegment"/> deliberately does
+    /// not clamp), which is what painted a "ghost" zoom block over unrelated footage after
+    /// the clip a keyframe belonged to was deleted or trimmed away. With no owner the
+    /// keyframe maps to NaN and the draw and hit-test passes both skip it.
+    /// </remarks>
     private VideoSegment? OwningSegmentForKeyframe(ZoomKeyframe kf)
     {
         var model = Model;
@@ -2872,13 +2985,11 @@ public sealed partial class TimelineControl : UserControl
         VideoSegment? firstMatch = null;
         foreach (var seg in model.Segments.OfType<VideoSegment>())
         {
-            bool match = kf.SourceVideoFilePath is null
-                ? (model.PrimaryVideoFilePath is null ||
-                   string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase))
-                : string.Equals(seg.VideoFilePath, kf.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
-            if (!match) continue;
+            if (!model.SourceMatchesSegment(kf.SourceVideoFilePath, seg)) continue;
 
-            firstMatch ??= seg;
+            if (firstMatch is null && model.ZoomKeyframeIntersects(kf, seg))
+                firstMatch = seg;
+
             var local = kf.Timestamp - seg.SourceStart;
             if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
                 return seg;
@@ -5101,6 +5212,7 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.SegmentRightEdge:
                 _segmentDragCurrentX = SnapX(model, clampedX, _draggedSegmentId, snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
+                RaiseTrimPreview();
                 InvalidateAll();
                 break;
 
@@ -5187,6 +5299,7 @@ public sealed partial class TimelineControl : UserControl
     {
         if (_dragMode == DragMode.None) return;
 
+        EndTrimPreview();
         _draggedSegmentId = null;
         _segmentDragStartX = double.NaN;
         _segmentDragStartY = double.NaN;
@@ -5215,6 +5328,7 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas)
         {
             _dragMode = DragMode.None;
+            EndTrimPreview();
             return;
         }
 
@@ -5225,6 +5339,9 @@ public sealed partial class TimelineControl : UserControl
         {
             VideoTrack_SegmentReleased(model, draggedId);
         }
+
+        // After the commit above, so the host restores the preview from the TRIMMED model.
+        EndTrimPreview();
 
         _draggedSegmentId = null;
         _segmentDragStartX = double.NaN;
@@ -5280,24 +5397,17 @@ public sealed partial class TimelineControl : UserControl
 
             case DragMode.SegmentRightEdge:
             {
-                var newRight = XToTime(_segmentDragCurrentX);
-                var newDuration = newRight - _segmentDragOriginalStart;
-                if (newDuration < TrimSegmentEdgeOperation.MinDuration)
-                    newDuration = TrimSegmentEdgeOperation.MinDuration;
-                if (Math.Abs((newDuration - _segmentDragOriginalDuration).TotalMilliseconds) > 1)
-                    SegmentTrimRequested?.Invoke(this, (draggedId, false, newDuration));
+                if (ComputeSegmentTrim() is not { } trim) break;
+                if (Math.Abs((trim.NewDuration - _segmentDragOriginalDuration).TotalMilliseconds) > 1)
+                    SegmentTrimRequested?.Invoke(this, (draggedId, false, trim.NewDuration));
                 break;
             }
 
             case DragMode.SegmentLeftEdge:
             {
-                var origEnd = _segmentDragOriginalStart + _segmentDragOriginalDuration;
-                var newLeft = XToTime(_segmentDragCurrentX);
-                var newDuration = origEnd - newLeft;
-                if (newDuration < TrimSegmentEdgeOperation.MinDuration)
-                    newDuration = TrimSegmentEdgeOperation.MinDuration;
-                if (Math.Abs((newDuration - _segmentDragOriginalDuration).TotalMilliseconds) > 1)
-                    SegmentTrimRequested?.Invoke(this, (draggedId, true, newDuration));
+                if (ComputeSegmentTrim() is not { } trim) break;
+                if (Math.Abs((trim.NewDuration - _segmentDragOriginalDuration).TotalMilliseconds) > 1)
+                    SegmentTrimRequested?.Invoke(this, (draggedId, true, trim.NewDuration));
                 break;
             }
 
@@ -5334,6 +5444,70 @@ public sealed partial class TimelineControl : UserControl
                 break;
             }
         }
+    }
+
+    /// <summary>
+    /// Resolves the trim the CURRENT edge-drag position represents: which edge is moving and
+    /// the output duration the segment would end up with. Single source of truth shared by
+    /// the live preview (<see cref="RaiseTrimPreview"/>) and the commit
+    /// (<see cref="VideoTrack_SegmentReleased"/>) so the frame shown while dragging can never
+    /// drift from the frame the release actually produces. Returns null when the gesture in
+    /// flight is not an edge trim.
+    /// </summary>
+    private (bool FromStart, TimeSpan NewDuration)? ComputeSegmentTrim()
+    {
+        if (double.IsNaN(_segmentDragCurrentX)) return null;
+
+        TimeSpan newDuration;
+        bool fromStart;
+        switch (_dragMode)
+        {
+            case DragMode.SegmentRightEdge:
+                fromStart = false;
+                newDuration = XToTime(_segmentDragCurrentX) - _segmentDragOriginalStart;
+                break;
+
+            case DragMode.SegmentLeftEdge:
+                fromStart = true;
+                newDuration = _segmentDragOriginalStart + _segmentDragOriginalDuration
+                    - XToTime(_segmentDragCurrentX);
+                break;
+
+            default:
+                return null;
+        }
+
+        if (newDuration < TrimSegmentEdgeOperation.MinDuration)
+            newDuration = TrimSegmentEdgeOperation.MinDuration;
+        return (fromStart, newDuration);
+    }
+
+    /// <summary>Publishes the in-flight edge trim so the host can preview the edge frame.</summary>
+    private void RaiseTrimPreview()
+    {
+        if (_draggedSegmentId is not { } draggedId) return;
+        if (ComputeSegmentTrim() is not { } trim) return;
+
+        // A pointer sample that resolves to the same duration (sub-pixel jitter, or a snap
+        // holding the edge still) would otherwise cost a decode per sample for a frame that
+        // is already on screen.
+        if (_trimPreviewActive && trim.NewDuration == _trimPreviewDuration) return;
+
+        _trimPreviewActive = true;
+        _trimPreviewDuration = trim.NewDuration;
+        SegmentTrimPreviewChanged?.Invoke(this, (draggedId, trim.FromStart, trim.NewDuration));
+    }
+
+    /// <summary>
+    /// Closes out a live trim preview exactly once per gesture, whatever ended it. Called
+    /// AFTER the release has committed, so the host's restore renders the trimmed model.
+    /// </summary>
+    private void EndTrimPreview()
+    {
+        if (!_trimPreviewActive) return;
+        _trimPreviewActive = false;
+        _trimPreviewDuration = default;
+        SegmentTrimPreviewEnded?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
@@ -6235,9 +6409,11 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>
     /// Finds the video segment that owns a text overlay: the segment matching the
     /// overlay's source file whose source range contains its Start (falling back to the
-    /// first file-matching segment). Mirrors <see cref="OwningSegmentForKeyframe"/>
-    /// exactly, using Start as the anchor since a <see cref="TextOverlaySegment"/> (unlike
-    /// a <see cref="ZoomKeyframe"/>) has no single Timestamp to anchor on.
+    /// first file-matching segment that still SHOWS part of it). Mirrors
+    /// <see cref="OwningSegmentForKeyframe"/> exactly, using Start as the anchor since a
+    /// <see cref="TextOverlaySegment"/> (unlike a <see cref="ZoomKeyframe"/>) has no single
+    /// Timestamp to anchor on — including its guard against adopting a segment that shows
+    /// none of it, which would extrapolate a ghost block onto unrelated footage.
     /// </summary>
     private VideoSegment? OwningSegmentForTextOverlay(TextOverlaySegment overlay)
     {
@@ -6247,13 +6423,14 @@ public sealed partial class TimelineControl : UserControl
         VideoSegment? firstMatch = null;
         foreach (var seg in model.Segments.OfType<VideoSegment>())
         {
-            bool match = overlay.SourceVideoFilePath is null
-                ? (model.PrimaryVideoFilePath is null ||
-                   string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase))
-                : string.Equals(seg.VideoFilePath, overlay.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
-            if (!match) continue;
+            if (!model.SourceMatchesSegment(overlay.SourceVideoFilePath, seg)) continue;
 
-            firstMatch ??= seg;
+            if (firstMatch is null && model.SourceSpanIntersectsSegment(
+                    overlay.SourceVideoFilePath, overlay.Start, overlay.End, seg))
+            {
+                firstMatch = seg;
+            }
+
             var local = overlay.Start - seg.SourceStart;
             if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
                 return seg;
