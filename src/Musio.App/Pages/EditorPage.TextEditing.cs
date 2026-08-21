@@ -1074,10 +1074,19 @@ public sealed partial class EditorPage
         }
     }
 
-    private void RemoveTextSlide_Click(object sender, RoutedEventArgs e)
+    private void RemoveTextSlide_Click(object sender, RoutedEventArgs e) => _ = RemoveTextSlideAsync();
+
+    private async Task RemoveTextSlideAsync()
     {
         if (_selectedTextSlideId is null) return;
-        var operation = new RemoveSegmentOperation(_selectedTextSlideId);
+
+        // Same trap as the video-track delete: removing the last segment closes the project,
+        // which rebuilds the undo stack and makes this keystroke irreversible.
+        if (!await ConfirmProjectClosingDeleteAsync()) return;
+        if (_selectedTextSlideId is not { } slideId) return;
+        if (!ViewModel.Model.Segments.Any(s => s.Id == slideId)) return;
+
+        var operation = new RemoveSegmentOperation(slideId);
         ViewModel.UndoRedoManager.Execute(operation);
         _selectedTextSlideId = null;
         HideTextSlidePanel();
@@ -1107,7 +1116,7 @@ public sealed partial class EditorPage
 
         if (Enum.TryParse<TextSlideAnimation>(item.Tag?.ToString(), out var anim))
             slide.Animation = anim;
-        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+        RefreshSlidePreview();
     }
 
     private void SlideDurationBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -1120,6 +1129,13 @@ public sealed partial class EditorPage
 
         slide.Duration = TimeSpan.FromSeconds(args.NewValue);
         ViewModel.Model.RecalculateSegmentPositions();
+
+        // Not RefreshSlidePreview: a duration change re-flows the timeline, so this needs the
+        // heavier InvalidatePreview (full mapper rebuild) below rather than that method's
+        // light repaint. The dirty signal it also carries is still required — these handlers
+        // mutate the segment directly, so nothing else marks the project edited.
+        ProjectService.Instance.MarkDirty();
+
         SyncTextSlideWindowControls(slide);
         Timeline.InvalidateAllCanvases();
         InvalidatePreview();
@@ -1203,7 +1219,7 @@ public sealed partial class EditorPage
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
         if (slide is null) return;
         slide.FontSize = args.NewValue;
-        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
+        RefreshSlidePreview();
     }
 
     private bool _suppressSlideEvents;

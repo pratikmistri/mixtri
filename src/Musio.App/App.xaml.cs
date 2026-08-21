@@ -455,8 +455,7 @@ public partial class App : Application
         // Unsaved EDITS to an already-saved project are exactly as unrecoverable, and this
         // route has no way to ask: a window repointed at another project, then activated
         // for the file it was originally keyed to, hit precisely that.
-        if (projects.CurrentProject is not null
-            && (projects.CurrentPackagePath is null || projects.HasUnsavedChanges))
+        if (projects.HasUnrecoverableWork)
         {
             window.ShowShellMessage(
                 "This window has unsaved work, so the project you just opened was not "
@@ -899,7 +898,12 @@ public partial class App : Application
     {
         if (_isExiting || _dismissalConfirmed) return false;
         if (_promptingUnsavedChanges) return true;
-        if (!ProjectService.Instance.HasUnsavedChanges) return false;
+
+        // NOT HasUnsavedChanges: a freshly captured recording is deliberately clean, but it
+        // has never been written anywhere, so closing over it destroys the whole take with
+        // nothing to reopen. See ProjectService.HasUnrecoverableWork — the same predicate
+        // ServeRedirectedOpen uses to refuse an open, which is the identical question.
+        if (!ProjectService.Instance.HasUnrecoverableWork) return false;
         if (_window?.Content?.XamlRoot is null) return false;
 
         // A ContentDialog on a hidden window renders nowhere. The tray's Exit item runs with

@@ -89,6 +89,23 @@ public class ProjectService
     public event EventHandler? UnsavedChangesChanged;
 
     /// <summary>
+    /// True when discarding the current project would destroy work that cannot be got back —
+    /// either it has edits that are not in its <c>.musio</c> file, or it has no file at all.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="HasUnsavedChanges"/> alone is NOT that question, and the difference is a
+    /// whole recording: a fresh capture deliberately starts clean (see the
+    /// <see cref="MarkSaved"/> call at the end of <see cref="SetProject"/> — the prompt is for
+    /// work the user DID, and first-open style defaults are not that), while
+    /// <see cref="CurrentPackagePath"/> stays null until it is saved for the first time.
+    /// Gating a destructive action on the dirty flag alone therefore skips the prompt in
+    /// exactly the case where everything is lost, and nothing else can recover it: an unsaved
+    /// recording is never written to Recents, and there is no autosave.
+    /// </remarks>
+    public bool HasUnrecoverableWork =>
+        CurrentProject is not null && (HasUnsavedChanges || CurrentPackagePath is null);
+
+    /// <summary>
     /// Records that the project differs from its saved file. Safe to call repeatedly; only a
     /// transition raises <see cref="UnsavedChangesChanged"/>.
     /// </summary>

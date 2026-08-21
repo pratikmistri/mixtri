@@ -1582,7 +1582,7 @@ public sealed partial class EditorPage : Page
             return;
         }
 
-        if (ProjectService.Instance.HasUnsavedChanges && XamlRoot is not null)
+        if (ProjectService.Instance.HasUnrecoverableWork && XamlRoot is not null)
         {
             try
             {

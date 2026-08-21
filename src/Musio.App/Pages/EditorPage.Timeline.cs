@@ -724,16 +724,76 @@ public sealed partial class EditorPage
 
     /// <summary>
     /// Ripple-deletes a primary-track segment and drops every bit of page state that
-    /// referenced it. Shared by the Delete accelerator and the segment context menu so the
-    /// two gestures cannot drift into leaving different leftovers behind.
+    /// referenced it. Shared by the Delete accelerator, the toolbar button and the segment
+    /// context menu so the gestures cannot drift into leaving different leftovers behind.
     /// </summary>
-    private void DeletePrimarySegment(string segmentId)
+    private void DeletePrimarySegment(string segmentId) => _ = DeletePrimarySegmentAsync(segmentId);
+
+    private async Task DeletePrimarySegmentAsync(string segmentId)
     {
+        if (!await ConfirmProjectClosingDeleteAsync()) return;
+
+        // The confirmation above is awaited, so re-check rather than assuming the timeline
+        // stood still while the dialog was up.
+        if (!ViewModel.Model.Segments.Any(s => s.Id == segmentId)) return;
+
         ViewModel.UndoRedoManager.Execute(new RemoveSegmentOperation(segmentId));
         _selectedPrimarySegmentId = null;
         Timeline.SelectSegment(null);
         HideTextSlidePanel();
         ResetProjectIfTimelineEmptied();
+    }
+
+    /// <summary>
+    /// Asks before a delete that would take the whole project with it, returning false when
+    /// the user backs out.
+    /// </summary>
+    /// <remarks>
+    /// Removing the LAST segment empties the timeline, which closes the project
+    /// (<see cref="ResetProjectIfTimelineEmptied"/>) — and <c>ClearProject</c> replaces the
+    /// timeline the undo stack belongs to, so <c>EditorViewModel</c> rebuilds
+    /// <c>UndoRedoManager</c> over the new empty model and Ctrl+Z cannot bring any of it
+    /// back. Both halves are deliberate on their own; their composition turns one Del
+    /// keystroke into an irreversible discard of the whole session. Asked only when there is
+    /// something unrecoverable to lose — deleting the last clip of a saved, unmodified
+    /// project costs nothing, since the <c>.musio</c> file is still there.
+    /// </remarks>
+    private async Task<bool> ConfirmProjectClosingDeleteAsync()
+    {
+        if (ViewModel.Model.Segments.Count > 1) return true;
+
+        // A save or an export reads the project as it runs — the exporter re-reads
+        // model.Segments per frame — and cleans up against it afterwards. Clearing it
+        // mid-flight yields a file whose second half renders from a different source AND
+        // loses the project it came from. Leaving the clip in place is the safe outcome; the
+        // other two routes into ClearProject already refuse the same way.
+        if (_isSavingProject || ProjectService.Instance.IsSaveInFlight || ExportVM.IsExporting)
+        {
+            await ShowProjectDialogAsync(
+                "Busy",
+                "Wait for the current save or export to finish before deleting the last clip.");
+            return false;
+        }
+
+        if (!ProjectService.Instance.HasUnrecoverableWork) return true;
+        if (XamlRoot is null) return true;
+
+        try
+        {
+            var decision = await ProjectSaveCoordinator.PromptUnsavedChangesAsync(
+                XamlRoot, App.Current.MainAppWindow,
+                "before deleting the last clip? That closes the project, and it cannot be undone.");
+
+            return decision != ProjectSaveCoordinator.UnsavedChangesDecision.Cancel;
+        }
+        catch (Exception ex)
+        {
+            // WinUI refuses a second ContentDialog. Abandon the delete rather than running it
+            // unprompted — it is the one delete that cannot be undone.
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor", $"Last-clip delete prompt failed; delete abandoned: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>

@@ -113,11 +113,15 @@ public partial class EditorViewModel : ObservableObject
         // page routes a segment-timeline cut to the segment delete path instead.
         if (_model.Segments.Count > 0) return;
 
-        // If no clips exist, create a default clip first
-        if (_model.Clips.Count == 0)
-        {
-            _model.Clips.Add(new TimelineClip(TimeSpan.Zero, _model.Duration, "Clip 1"));
-        }
+        // ...and an EMPTY timeline has nothing to cut. Fabricating a clip there spanned the
+        // whole nominal ruler (TimelineModel.CreateEmpty's 30s), so the ripple delete that
+        // followed took Duration to zero — and every track draw pass bails on a non-positive
+        // DisplayDuration, blanking the ruler, the tracks and the "record or import" prompt.
+        // Undo was worse: the snapshot is captured AFTER the fabrication, so it restored a
+        // solid legacy clip block for footage that does not exist. The empty editor is a
+        // first-class destination on this branch (fresh launch, last clip deleted, Close
+        // project), so this is reachable from one click on the toolbar's Cut button.
+        if (_model.Clips.Count == 0) return;
 
         var playhead = _model.PlayheadPosition;
         int clipIndex = _model.Clips.FindIndex(c => playhead >= c.Start && playhead < c.End);

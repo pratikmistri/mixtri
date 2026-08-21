@@ -129,6 +129,37 @@ public static class ProjectSaveCoordinator
         }
     }
 
+    /// <summary>
+    /// Guards an action that REPLACES or discards the whole current project — opening
+    /// another one, closing this one, ending the session. Returns false when the user backs
+    /// out, or when the prompt itself could not be shown.
+    /// </summary>
+    /// <remarks>
+    /// Gated on <see cref="ProjectService.HasUnrecoverableWork"/>, not on the dirty flag: a
+    /// freshly captured recording is deliberately clean but has never been written anywhere,
+    /// so replacing it destroys the whole take with nothing to reopen it from — no Recents
+    /// entry, no autosave. A dialog failure (WinUI refuses a second <see cref="ContentDialog"/>)
+    /// abandons the action rather than letting it through, because proceeding would discard
+    /// the work precisely because the guard protecting it failed.
+    /// </remarks>
+    public static async Task<bool> ConfirmDiscardCurrentProjectAsync(
+        XamlRoot? root, Window? window, string question)
+    {
+        if (!ProjectService.Instance.HasUnrecoverableWork) return true;
+        if (root is null) return true;
+
+        try
+        {
+            var decision = await PromptUnsavedChangesAsync(root, window, question);
+            return decision != UnsavedChangesDecision.Cancel;
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Discard-project prompt failed; action abandoned: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>Shows the standard <c>.musio</c> save picker, returning null when cancelled.</summary>
     public static async Task<string?> PickSavePathAsync(string projectName, Window? window)
     {

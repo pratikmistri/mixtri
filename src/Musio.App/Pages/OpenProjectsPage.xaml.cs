@@ -322,6 +322,16 @@ public sealed partial class OpenProjectsPage : Page
 
     private async Task OpenAsync(string packagePath)
     {
+        // Opening REPLACES whatever this window is holding. A never-saved recording is the
+        // dangerous case — it is clean, so the dirty flag says nothing, yet there is no file
+        // to reopen it from. The cross-process route (App.ServeRedirectedOpen) already
+        // refuses on the same predicate; this one can actually ask.
+        if (!await ProjectSaveCoordinator.ConfirmDiscardCurrentProjectAsync(
+                XamlRoot, App.Current.MainAppWindow, "before opening another one?"))
+        {
+            return;
+        }
+
         try
         {
             await ProjectService.Instance.OpenPackageAsync(packagePath);
