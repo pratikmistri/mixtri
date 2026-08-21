@@ -37,6 +37,90 @@ public sealed class TimelineModelTests
 
     #endregion
 
+    #region IsEmpty
+
+    [TestMethod]
+    public void IsEmpty_FreshEmptyTimeline_IsTrue()
+    {
+        Assert.IsTrue(TimelineModel.CreateEmpty().IsEmpty);
+    }
+
+    [TestMethod]
+    public void IsEmpty_WithASegment_IsFalse()
+    {
+        var model = TimelineModel.CreateEmpty();
+        model.Segments.Add(new TextSlideSegment { Duration = TimeSpan.FromSeconds(3) });
+
+        Assert.IsFalse(model.IsEmpty);
+    }
+
+    /// <summary>
+    /// The whole point of the rule: deleting the last video clip must not count as "the
+    /// timeline is empty now" while persisted work of another kind is still on it, because
+    /// the reset that follows would throw all of it away.
+    /// </summary>
+    [DataTestMethod]
+    [DataRow("audio")]
+    [DataRow("overlay")]
+    [DataRow("camera")]
+    [DataRow("clip")]
+    public void IsEmpty_WithNonSegmentContentOnly_IsFalse(string kind)
+    {
+        var model = TimelineModel.CreateEmpty();
+        AddNonSegmentContent(model, kind);
+
+        Assert.AreEqual(0, model.Segments.Count, "the scenario is 'every clip was deleted'");
+        Assert.IsTrue(model.HasNonSegmentContent);
+        Assert.IsFalse(model.IsEmpty, $"a timeline still holding {kind} content is not empty");
+    }
+
+    [TestMethod]
+    public void HasNonSegmentContent_SegmentsAlone_IsFalse()
+    {
+        var model = TimelineModel.CreateEmpty();
+        model.Segments.Add(new TextSlideSegment { Duration = TimeSpan.FromSeconds(3) });
+
+        Assert.IsFalse(model.HasNonSegmentContent);
+    }
+
+    /// <summary>
+    /// Zoom keyframes are excluded deliberately: they are anchored to footage rather than
+    /// authored on their own, so a timeline holding only zooms has nothing left to zoom into
+    /// and must still count as empty.
+    /// </summary>
+    [TestMethod]
+    public void IsEmpty_ZoomKeyframesDoNotCountAsContent()
+    {
+        var model = TimelineModel.CreateEmpty();
+        model.ZoomKeyframes.Add(new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(1) });
+
+        Assert.IsTrue(model.IsEmpty);
+    }
+
+    private static void AddNonSegmentContent(TimelineModel model, string kind)
+    {
+        switch (kind)
+        {
+            case "audio":
+                model.AudioTracks.Add(new Musio.Core.Models.AudioTrack { FilePath = "music.mp3" });
+                break;
+            case "overlay":
+                model.TextOverlays.Add(new TextOverlaySegment { Duration = TimeSpan.FromSeconds(2) });
+                break;
+            case "camera":
+                model.CameraSegments.Add(new CameraSegment { Duration = TimeSpan.FromSeconds(2) });
+                break;
+            case "clip":
+                model.Clips.Add(new TimelineClip(TimeSpan.Zero, TimeSpan.FromSeconds(5), "Clip 1"));
+                break;
+            default:
+                Assert.Fail($"unknown content kind '{kind}'");
+                break;
+        }
+    }
+
+    #endregion
+
     #region EffectiveDuration
 
     [TestMethod]

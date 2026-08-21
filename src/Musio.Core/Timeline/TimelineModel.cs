@@ -317,6 +317,32 @@ public class TimelineModel
     public TimeSpan EffectiveDuration => TrimEnd - TrimStart;
 
     /// <summary>
+    /// Content the user placed on the timeline that is NOT a segment: audio tracks, text
+    /// overlays, camera segments, and legacy clips.
+    /// </summary>
+    /// <remarks>
+    /// Deleting the last video segment does not mean the timeline is finished with — a music
+    /// bed, a voice-over, an overlay or a camera track can easily outlive every clip, and each
+    /// one is persisted work. Anything that reacts to "the timeline is empty now" has to ask
+    /// about these too, or it silently discards them.
+    /// </remarks>
+    [JsonIgnore]
+    public bool HasNonSegmentContent =>
+        Clips.Count > 0
+        || AudioTracks.Count > 0
+        || TextOverlays.Count > 0
+        || CameraSegments.Count > 0;
+
+    /// <summary>
+    /// True when the timeline holds nothing at all — no segments and no
+    /// <see cref="HasNonSegmentContent"/>. The single definition of "empty", shared by the
+    /// editor's empty-state call-out, the reset-to-zero-state path, and the "treat this as no
+    /// project yet" rule that lets the next recording become the primary.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsEmpty => Segments.Count == 0 && !HasNonSegmentContent;
+
+    /// <summary>
     /// The total display duration for the timeline ruler and coordinate system.
     /// Uses segment duration when segments exist, otherwise falls back to source Duration.
     /// </summary>

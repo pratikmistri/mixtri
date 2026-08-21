@@ -208,3 +208,29 @@ reveals:
   and don't change the binary serialization format.
 
 ---
+
+## Playbook: One predicate per safety question
+
+Promoted after three rounds of the same defect (export mute, `HasUnrecoverableWork`, `IsEmpty`).
+
+- **When two call sites answer the same safety question with different expressions, the weaker
+  one is a bug — hoist the predicate instead of fixing the expression.** Every instance so far
+  cost real work: "is the timeline empty?" existed as three variants (`Segments.Count == 0`,
+  segments+clips, and the correct empty-of-EVERYTHING in `ProjectService`), and the weakest one
+  guarded the path that CLEARS THE PROJECT — so deleting the last clip destroyed any music bed
+  or overlay still on the timeline. Current homes: `TimelineModel.IsEmpty` /
+  `TimelineModel.HasNonSegmentContent`, and `ProjectService.HasUnrecoverableWork`.
+- **`HasUnsavedChanges` is NOT the question "would this destroy work?"** A fresh recording is
+  deliberately clean (`SetProject` ends with `MarkSaved()`) yet has never been written anywhere —
+  no package path, no Recents entry, no autosave. Destructive routes (window close, tray Exit,
+  close/open project, last-clip delete, cross-process redirect) must ask
+  `ProjectService.HasUnrecoverableWork` instead.
+- **Guards fail CLOSED.** If the question cannot be put — no `XamlRoot`, or WinUI refusing a
+  second `ContentDialog` — abandon the action; never let it through. Proceeding would discard the
+  work precisely because the guard protecting it could not run.
+- **A dirty flag needs re-auditing whenever the CONSEQUENCE of being clean changes.** Handlers
+  that mutate model state directly (bypassing `UndoRedoManager` and `CurrentComposition`) must
+  call `MarkDirty()` — harmless while the window merely parked itself, silent data loss once
+  closing it started closing the project.
+
+---

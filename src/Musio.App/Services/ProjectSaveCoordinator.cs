@@ -138,15 +138,23 @@ public static class ProjectSaveCoordinator
     /// Gated on <see cref="ProjectService.HasUnrecoverableWork"/>, not on the dirty flag: a
     /// freshly captured recording is deliberately clean but has never been written anywhere,
     /// so replacing it destroys the whole take with nothing to reopen it from — no Recents
-    /// entry, no autosave. A dialog failure (WinUI refuses a second <see cref="ContentDialog"/>)
-    /// abandons the action rather than letting it through, because proceeding would discard
-    /// the work precisely because the guard protecting it failed.
+    /// entry, no autosave. Every failure to ASK is treated as a refusal: a dialog failure
+    /// (WinUI refuses a second <see cref="ContentDialog"/>) and a missing
+    /// <see cref="XamlRoot"/> both abandon the action, because proceeding would discard the
+    /// work precisely because the guard protecting it could not run.
     /// </remarks>
     public static async Task<bool> ConfirmDiscardCurrentProjectAsync(
         XamlRoot? root, Window? window, string question)
     {
+        // Nothing to lose — the action is free to proceed without asking anything.
         if (!ProjectService.Instance.HasUnrecoverableWork) return true;
-        if (root is null) return true;
+
+        // There IS something to lose and no way to ask about it. Fail closed.
+        if (root is null)
+        {
+            DiagLog.Write("Shell", "Discard-project prompt has no XamlRoot; action abandoned.");
+            return false;
+        }
 
         try
         {

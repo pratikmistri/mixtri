@@ -500,9 +500,12 @@ public sealed partial class EditorPage
     {
         if (EmptyStateOverlay is null) return;
 
-        var model = ViewModel.Model;
-        bool isEmpty = model.Segments.Count == 0 && model.Clips.Count == 0;
-        EmptyStateOverlay.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+        // TimelineModel.IsEmpty, not "no segments": a timeline still holding a music bed, a
+        // voice-over, a text overlay or a camera move is not empty, and offering "record or
+        // import to start your timeline" over that content misdescribes it.
+        EmptyStateOverlay.Visibility = ViewModel.Model.IsEmpty
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
@@ -757,10 +760,19 @@ public sealed partial class EditorPage
     /// keystroke into an irreversible discard of the whole session. Asked only when there is
     /// something unrecoverable to lose — deleting the last clip of a saved, unmodified
     /// project costs nothing, since the <c>.musio</c> file is still there.
+    /// <para>
+    /// The trigger is deliberately the same test <see cref="ResetProjectIfTimelineEmptied"/>
+    /// applies, evaluated one delete ahead: a music bed, overlay or camera move left on the
+    /// timeline keeps the project open, so that delete is an ordinary undoable edit and must
+    /// not be dressed up as a closing one.
+    /// </para>
     /// </remarks>
     private async Task<bool> ConfirmProjectClosingDeleteAsync()
     {
-        if (ViewModel.Model.Segments.Count > 1) return true;
+        // Would removing one more segment leave the timeline empty of everything?
+        bool closesProject =
+            ViewModel.Model.Segments.Count <= 1 && !ViewModel.Model.HasNonSegmentContent;
+        if (!closesProject) return true;
 
         // A save or an export reads the project as it runs — the exporter re-reads
         // model.Segments per frame — and cleans up against it afterwards. Clearing it
@@ -776,7 +788,10 @@ public sealed partial class EditorPage
         }
 
         if (!ProjectService.Instance.HasUnrecoverableWork) return true;
-        if (XamlRoot is null) return true;
+
+        // No visual tree means the question cannot be put, and this delete is the one that
+        // cannot be undone — fail closed rather than running it unprompted.
+        if (XamlRoot is null) return false;
 
         try
         {
@@ -815,7 +830,12 @@ public sealed partial class EditorPage
     /// </remarks>
     private void ResetProjectIfTimelineEmptied()
     {
-        if (ViewModel.Model.Segments.Count > 0) return;
+        // Empty of EVERYTHING, not just of segments. Clearing the project throws away the
+        // whole timeline, so deleting the last video clip while a music bed, voice-over,
+        // text overlay or camera move is still on it would silently destroy that work —
+        // which is persisted, and which ProjectService.IsTimelineEmpty already refuses to
+        // treat as an empty timeline for exactly this reason.
+        if (!ViewModel.Model.IsEmpty) return;
         ResetProjectToEmptyState();
     }
 

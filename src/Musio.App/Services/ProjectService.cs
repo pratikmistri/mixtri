@@ -556,12 +556,13 @@ public class ProjectService
     /// timeline to be empty of EVERYTHING (segments, camera moves, overlays and inserted audio)
     /// keeps the reset off any timeline still holding work: a project with a text slide or a
     /// music bed left on it takes the ordinary append path, which preserves them.
+    /// <para>
+    /// The rule itself lives on <see cref="TimelineModel.IsEmpty"/> so the editor's empty-state
+    /// call-out and its reset-to-zero-state path apply the identical test — they used to check
+    /// segments alone, which discarded exactly the work this remark describes.
+    /// </para>
     /// </remarks>
-    private static bool IsTimelineEmpty(TimelineModel timeline) =>
-        timeline.Segments.Count == 0
-        && timeline.AudioTracks.Count == 0
-        && timeline.TextOverlays.Count == 0
-        && timeline.CameraSegments.Count == 0;
+    private static bool IsTimelineEmpty(TimelineModel timeline) => timeline.IsEmpty;
 
     /// <summary>
     /// Discards the current project entirely and publishes an empty timeline in its place —
