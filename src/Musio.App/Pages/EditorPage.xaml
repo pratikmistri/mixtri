@@ -74,7 +74,10 @@
             Modifiers="Control,Shift" />
     </Page.KeyboardAccelerators>
 
-    <Grid>
+    <Grid AllowDrop="True"
+          DragOver="EditorPage_DragOver"
+          DragLeave="EditorPage_DragLeave"
+          Drop="EditorPage_Drop">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -663,5 +666,21 @@
             Subtitle="Use Ctrl+Z / Ctrl+Y to undo and redo edits. Drag the timeline to scrub through your recording."
             IsLightDismissEnabled="True"
             PreferredPlacement="Top" />
+
+        <!--  Drop affordance. Spans the preview, toolbar and timeline (rows 1-3) because the
+              whole editor body is the drop target — the drop's X position over the timeline
+              only chooses WHERE the clip lands, never whether it is accepted. Never hit-test
+              visible: it must not eat the DragOver/Drop it exists to advertise.  -->
+        <Border x:Name="DropHintOverlay"
+                Grid.Row="1"
+                Grid.RowSpan="3"
+                Visibility="Collapsed"
+                IsHitTestVisible="False"
+                Margin="4"
+                CornerRadius="8"
+                BorderThickness="2"
+                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                Background="{ThemeResource AccentFillColorSelectedTextBackgroundBrush}"
+                Opacity="0.35" />
     </Grid>
 </Page>

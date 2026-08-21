@@ -636,6 +636,17 @@ public sealed partial class EditorPage
         // runs, and the imported clip belongs where the user was when they asked for it.
         var insertAt = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
 
+        await ImportVideoFileAsync(file.Path, insertAt);
+    }
+
+    /// <summary>
+    /// Normalises one video file and inserts it at <paramref name="insertAt"/>. Shared by the
+    /// Insert menu, the empty-state button and file drop, so every route in gets the same
+    /// progress, cancellation and error reporting rather than three near-copies of it.
+    /// Returns the inserted segment, or <c>null</c> when the import failed or was cancelled.
+    /// </summary>
+    private async Task<VideoSegment?> ImportVideoFileAsync(string path, TimeSpan insertAt)
+    {
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();
@@ -649,9 +660,10 @@ public sealed partial class EditorPage
 
         var showTask = dialog.ShowAsync();
         string? errorMessage = null;
+        VideoSegment? insertedSegment = null;
         try
         {
-            var result = await VideoImportService.ImportAsync(file.Path, null, progress, cts.Token);
+            var result = await VideoImportService.ImportAsync(path, null, progress, cts.Token);
 
             // The import staying on this page means the editor must be told to reload; the
             // service fires ProjectChanged, which the EditorViewModel turns into a
@@ -659,6 +671,7 @@ public sealed partial class EditorPage
             var inserted = ProjectService.Instance.ImportVideo(result, insertAt);
             if (inserted is not null)
             {
+                insertedSegment = inserted;
                 _selectedPrimarySegmentId = inserted.Id;
                 _selectedTextSlideId = null;
                 Timeline?.SelectSegment(inserted.Id);
@@ -689,6 +702,8 @@ public sealed partial class EditorPage
 
         if (errorMessage is not null)
             await ShowProjectDialogAsync("Could not import video", errorMessage);
+
+        return insertedSegment;
     }
 
     /// <summary>Inserts an external audio file as narration at the playhead.</summary>
@@ -744,6 +759,18 @@ public sealed partial class EditorPage
         // runs, and the track belongs where the user was when they asked for it.
         var startTime = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
 
+        await ImportAudioFileAsync(file.Path, kind, startTime);
+    }
+
+    /// <summary>
+    /// Normalises one audio file and inserts it as an <see cref="AudioTrack"/> starting at
+    /// <paramref name="startTime"/>. Shared by the Insert menu and file drop.
+    /// </summary>
+    private async Task ImportAudioFileAsync(string path, AudioTrackKind kind, TimeSpan startTime)
+    {
+        bool isMusic = kind == AudioTrackKind.Music;
+        string label = isMusic ? "music" : "voice over";
+
         using var cts = new CancellationTokenSource();
         var (dialog, bar) = DialogHelper.BuildProgressDialog(
             XamlRoot, $"Importing {label}", "Converting and importing the audio…", cts);
@@ -756,7 +783,7 @@ public sealed partial class EditorPage
         string? errorMessage = null;
         try
         {
-            var result = await AudioImportService.ImportAsync(file.Path, null, progress, cts.Token);
+            var result = await AudioImportService.ImportAsync(path, null, progress, cts.Token);
 
             // Executed through the undo manager, like every other timeline edit: an inserted
             // track lives on TimelineModel.AudioTracks precisely so Ctrl+Z can take it back.

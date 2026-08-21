@@ -1132,6 +1132,24 @@ public sealed partial class TimelineControl : UserControl
         TimeCoordinateConverter.XToTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
 
     /// <summary>
+    /// Output-timeline time under a point expressed in THIS CONTROL's coordinate space, for
+    /// gestures the host owns rather than the control — a dropped file, for one.
+    /// </summary>
+    /// <remarks>
+    /// Translates through <c>TimeRulerCanvas</c> rather than using the raw X. The track
+    /// canvases sit in the second grid column, behind a 56px label gutter, so a control-space
+    /// X fed straight to <see cref="XToTime"/> reads about half a second late at typical
+    /// widths — and would read progressively later the more the timeline is zoomed in.
+    /// </remarks>
+    public TimeSpan TimeAtPoint(Point pointInControl)
+    {
+        if (TimeRulerCanvas is null) return Model?.PlayheadPosition ?? TimeSpan.Zero;
+
+        var inCanvas = TransformToVisual(TimeRulerCanvas).TransformPoint(pointInControl);
+        return XToTime(inCanvas.X);
+    }
+
+    /// <summary>
     /// Converts a source-video time (zoom keyframe / cursor timestamp) to an X
     /// coordinate, mapping through segments so it stays aligned with the video
     /// after text slides shift later content.
