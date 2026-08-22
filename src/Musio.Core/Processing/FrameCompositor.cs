@@ -696,9 +696,10 @@ public class FrameCompositor : IDisposable
             : CursorPathWarp.Apply(
                 _basePositions,
                 BuildAnchorPoints(),
-                BuildClickFrames(),
+                BuildClickSpans(),
                 _config.OutputFps);
 
+        RecomputeClickDisplacements();
         PrecomputeLastMoveTimes();
     }
 
@@ -733,25 +734,92 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Frame indices of every recorded click, which the warp turns into zero-displacement
-    /// control points so an anchor can never drag the pointer off a click.
+    /// Pairs the recorded click events into presses (button-down → matching button-up), which
+    /// the warp treats as single protected units.
     /// </summary>
-    private List<int> BuildClickFrames()
+    /// <remarks>
+    /// The recorder stores down and up as SEPARATE <see cref="ClickEvent"/>s, typically 50-150ms
+    /// apart. Feeding them in as independent instants let an anchor claim the down while the up
+    /// still pinned the path a few frames later, so the whole displacement had to be delivered
+    /// and withdrawn inside that gap — which is a flash, not a cursor move.
+    /// </remarks>
+    private List<CursorPathWarp.ClickSpan> BuildClickSpans()
     {
-        var frames = new List<int>();
-        if (_mouseData is null || _tickFrequency <= 0) return frames;
+        var spans = new List<CursorPathWarp.ClickSpan>();
+        if (_mouseData is null || _tickFrequency <= 0) return spans;
 
         int last = _basePositions.Count - 1;
-        if (last < 0) return frames;
+        if (last < 0) return spans;
+
+        // Open button-downs awaiting their up. Keyed by button, because a chord (right-click
+        // while holding left) interleaves two presses.
+        var open = new Dictionary<MouseButton, int>();
+
         foreach (var click in _mouseData.Clicks)
         {
             double mouseSeconds = (click.TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
-            int index = FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps);
-            if (index < 0 || index > last) continue;
-            frames.Add(index);
+            int frame = FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps);
+            if (frame < 0 || frame > last) continue;
+
+            if (click.IsDown)
+            {
+                // A second down without an up (the first one's up fell outside the path) still
+                // deserves protection on its own.
+                if (open.TryGetValue(click.Button, out int orphan))
+                    spans.Add(new CursorPathWarp.ClickSpan(orphan, orphan));
+
+                open[click.Button] = frame;
+                continue;
+            }
+
+            if (open.Remove(click.Button, out int downFrame))
+                spans.Add(new CursorPathWarp.ClickSpan(downFrame, frame));
+            else
+                spans.Add(new CursorPathWarp.ClickSpan(frame, frame)); // up with no recorded down
         }
 
-        return frames;
+        // Recording ended mid-press.
+        foreach (int downFrame in open.Values)
+            spans.Add(new CursorPathWarp.ClickSpan(downFrame, downFrame));
+
+        return spans;
+    }
+
+    /// <summary>
+    /// Per-click displacement, parallel to <c>_mouseData.Clicks</c>, so a click absorbed into an
+    /// anchor's motion is DRAWN where the cursor now is rather than where it was recorded.
+    /// </summary>
+    /// <remarks>
+    /// Without this the touch indicator would stay pinned to the original screen position while
+    /// the pointer it represents sits somewhere else. A protected click has zero displacement by
+    /// construction, so this array is all-zero for them and costs nothing.
+    /// </remarks>
+    private (double X, double Y)[] _clickDisplacements = [];
+
+    private void RecomputeClickDisplacements()
+    {
+        if (_mouseData is null || _mouseData.Clicks.Count == 0 || _basePositions.Count == 0)
+        {
+            _clickDisplacements = [];
+            return;
+        }
+
+        var displacements = new (double X, double Y)[_mouseData.Clicks.Count];
+        int last = _basePositions.Count - 1;
+
+        for (int i = 0; i < _mouseData.Clicks.Count; i++)
+        {
+            double mouseSeconds =
+                (_mouseData.Clicks[i].TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
+            int frame = Math.Clamp(
+                FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps), 0, last);
+
+            displacements[i] = (
+                _smoothedPositions[frame].X - _basePositions[frame].X,
+                _smoothedPositions[frame].Y - _basePositions[frame].Y);
+        }
+
+        _clickDisplacements = displacements;
     }
 
     /// <summary>
@@ -1763,8 +1831,12 @@ public class FrameCompositor : IDisposable
 
             // Transform click position from logical to physical, subtract crop offset, then to output space.
             // _sourceAreaOffsetX/Y already includes user-padding plus any AR-fit gap.
-            int cx = (int)((click.X * _coordScaleX - _cropOffsetX - viewport.X) * scaleX + _sourceAreaOffsetX);
-            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY - viewport.Y) * scaleY + _sourceAreaOffsetY);
+            //
+            // The displacement term carries a click that an anchor absorbed to wherever the
+            // repositioned cursor now is; it is exactly zero for every protected click.
+            var (dx, dy) = i < _clickDisplacements.Length ? _clickDisplacements[i] : (0, 0);
+            int cx = (int)((click.X * _coordScaleX - _cropOffsetX + dx - viewport.X) * scaleX + _sourceAreaOffsetX);
+            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY + dy - viewport.Y) * scaleY + _sourceAreaOffsetY);
 
             // Create adjusted click event with shifted timestamp for the renderer
             long adjustedTicks = click.TimestampTicks
@@ -1818,6 +1890,7 @@ public class FrameCompositor : IDisposable
             _smoothedPositions = [];
             _basePositions = [];
             _cursorAnchors = [];
+            _clickDisplacements = [];
             _lastMoveTimes = [];
             _mouseData = null;
             _disposed = true;

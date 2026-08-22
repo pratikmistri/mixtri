@@ -43,12 +43,29 @@ public sealed class CursorPathWarpTests
         Assert.AreEqual(expected.Y, actual.Y, 1e-9, $"{what}: Y at frame {index}");
     }
 
+    /// <summary>A click press, as the recorder produces one: a down and an up a few frames apart.</summary>
+    private static CursorPathWarp.ClickSpan Press(int downFrame, int frames = 3)
+        => new(downFrame, downFrame + frames);
+
+    /// <summary>Largest single-frame step anywhere along a path.</summary>
+    private static double MaxStep(IReadOnlyList<SmoothedPosition> path)
+    {
+        double max = 0;
+        for (int i = 1; i < path.Count; i++)
+        {
+            double dx = path[i].X - path[i - 1].X;
+            double dy = path[i].Y - path[i - 1].Y;
+            max = Math.Max(max, Math.Sqrt((dx * dx) + (dy * dy)));
+        }
+        return max;
+    }
+
     [TestMethod]
     public void Apply_WithNoAnchors_LeavesThePathExactlyAsRecorded()
     {
         var basePath = BuildPath();
 
-        var result = CursorPathWarp.Apply(basePath, [], [60, 120], Fps);
+        var result = CursorPathWarp.Apply(basePath, [], [Press(60), Press(120)], Fps);
 
         Assert.AreEqual(basePath.Count, result.Count);
         for (int i = 0; i < basePath.Count; i++)
@@ -74,14 +91,14 @@ public sealed class CursorPathWarpTests
     [TestMethod]
     public void Apply_LeavesEveryFrameOutsideTheNeighbouringClicksUntouched()
     {
-        // Clicks at 100 and 200 bound the anchor at 150, so the influence window is exactly
+        // Presses at 100 and 200 bound the anchor at 150, so the influence window is exactly
         // (100, 200) — this is the "rest of the journey stays intact" guarantee.
         var basePath = BuildPath();
 
         var result = CursorPathWarp.Apply(
             basePath,
             [new CursorPathWarp.AnchorPoint(150, 900, 700)],
-            [100, 200],
+            [Press(97), Press(200)],
             Fps);
 
         for (int i = 0; i <= 100; i++)
@@ -94,18 +111,20 @@ public sealed class CursorPathWarpTests
     }
 
     [TestMethod]
-    public void Apply_NeverMovesTheCursorOffAClick()
+    public void Apply_NeverMovesTheCursorOffAClickItIsNotNear()
     {
         // Q3: a click is a moment the recording, the touch indicator and auto-zoom all agree
-        // on, so the displacement is pinned to zero there no matter how near an anchor is.
+        // on, so the displacement is pinned to zero across the whole press.
         var basePath = BuildPath();
-        int[] clicks = [140, 160, 250];
 
         var result = CursorPathWarp.Apply(
-            basePath, [new CursorPathWarp.AnchorPoint(150, 900, 700)], clicks, Fps);
+            basePath,
+            [new CursorPathWarp.AnchorPoint(150, 900, 700)],
+            [Press(60), Press(240)],
+            Fps);
 
-        foreach (int click in clicks)
-            AssertSamePosition(basePath[click], result[click], click, "click");
+        foreach (int frame in (int[])[60, 61, 62, 63, 240, 241, 242, 243])
+            AssertSamePosition(basePath[frame], result[frame], frame, "click press");
     }
 
     [TestMethod]
@@ -150,25 +169,78 @@ public sealed class CursorPathWarpTests
         var result = CursorPathWarp.Apply(
             basePath,
             [new CursorPathWarp.AnchorPoint(150, 900, 700)],
-            [100, 200],
+            [Press(97), Press(200)],
             Fps);
 
-        double maxBaseStep = 0;
-        double maxWarpedStep = 0;
-        for (int i = 1; i < result.Count; i++)
-        {
-            maxBaseStep = Math.Max(maxBaseStep, Distance(basePath[i - 1], basePath[i]));
-            maxWarpedStep = Math.Max(maxWarpedStep, Distance(result[i - 1], result[i]));
-        }
+        double maxBaseStep = MaxStep(basePath);
+        double maxWarpedStep = MaxStep(result);
 
         // The warp spreads ~700px over 50 frames, so a smooth field peaks well under the
         // per-frame budget below; a hard switch at a control point would blow straight past it.
         Assert.IsTrue(
             maxWarpedStep < maxBaseStep + 40,
             $"warped path jumps {maxWarpedStep:F1}px in one frame (base {maxBaseStep:F1}px)");
+    }
 
-        static double Distance(SmoothedPosition a, SmoothedPosition b)
-            => Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
+    [TestMethod]
+    public void Apply_AnchoringOnAClickPress_AbsorbsItInsteadOfSnappingBack()
+    {
+        // The reported "abrupt and flashy" bug. A press is a down/up PAIR a few frames apart:
+        // when only the down was claimed, the up pinned the path 3 frames later, so the whole
+        // displacement had to be delivered and withdrawn inside ~100ms.
+        var basePath = BuildPath();
+
+        var result = CursorPathWarp.Apply(
+            basePath,
+            [new CursorPathWarp.AnchorPoint(150, 900, 700)],
+            [Press(150)],
+            Fps);
+
+        Assert.AreEqual(900, result[150].X, 1e-9, "the anchor must still land exactly");
+
+        // The absorbed press must not pull the path back to the recording within a few frames.
+        Assert.AreNotEqual(basePath[153].X, result[153].X, 1e-6,
+            "the button-up frame snapped back to the recorded position");
+
+        Assert.IsTrue(
+            MaxStep(result) < MaxStep(basePath) + 40,
+            $"absorbed press still produced a {MaxStep(result):F1}px single-frame jump");
+    }
+
+    [TestMethod]
+    public void Apply_AnchoringNearAClickPress_AbsorbsItRatherThanSqueezingTheRamp()
+    {
+        // The common case: the user scrubs to roughly the click and drags, landing a few frames
+        // off it. Protecting a press that close would demand the entire move inside that gap.
+        var basePath = BuildPath();
+
+        var result = CursorPathWarp.Apply(
+            basePath,
+            [new CursorPathWarp.AnchorPoint(150, 900, 700)],
+            [Press(146)],
+            Fps);
+
+        Assert.AreEqual(900, result[150].X, 1e-9);
+        Assert.IsTrue(
+            MaxStep(result) < MaxStep(basePath) + 40,
+            $"a nearby press still produced a {MaxStep(result):F1}px single-frame jump");
+    }
+
+    [TestMethod]
+    public void Apply_AbsorbsAPressOnlyWhenItIsCloseEnoughToNeedIt()
+    {
+        // Absorption is a floor for the ramp, not a licence to move every click in sight: a
+        // press comfortably beyond MinRampSeconds still pins the path exactly.
+        var basePath = BuildPath();
+        int farPress = 150 + (int)(CursorPathWarp.MinRampSeconds * Fps) + 10;
+
+        var result = CursorPathWarp.Apply(
+            basePath,
+            [new CursorPathWarp.AnchorPoint(150, 900, 700)],
+            [Press(farPress)],
+            Fps);
+
+        AssertSamePosition(basePath[farPress], result[farPress], farPress, "distant press");
     }
 
     [TestMethod]
@@ -179,7 +251,7 @@ public sealed class CursorPathWarpTests
         var basePath = BuildPath();
 
         var result = CursorPathWarp.Apply(
-            basePath, [new CursorPathWarp.AnchorPoint(150, 900, 700)], [150], Fps);
+            basePath, [new CursorPathWarp.AnchorPoint(150, 900, 700)], [Press(150, frames: 0)], Fps);
 
         Assert.AreEqual(900, result[150].X, 1e-9);
         Assert.AreEqual(700, result[150].Y, 1e-9);
@@ -196,7 +268,7 @@ public sealed class CursorPathWarpTests
         var result = CursorPathWarp.Apply(
             basePath,
             [new CursorPathWarp.AnchorPoint(150, 900, 700)],
-            [100, 200],
+            [Press(97), Press(200)],
             Fps);
 
         Assert.AreNotEqual(

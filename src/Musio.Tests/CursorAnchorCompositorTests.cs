@@ -227,6 +227,56 @@ public sealed class CursorAnchorCompositorTests
     }
 
     [TestMethod]
+    public async Task SyncCursorAnchors_AnchoredOnAClick_DoesNotSnapBackAtTheButtonUp()
+    {
+        // End-to-end cover for BuildClickSpans' down/up pairing, which the pure warp tests
+        // cannot reach. The recorder stores a press as TWO ClickEvents ~100ms apart; treating
+        // them as independent instants let an anchor claim the down while the up dragged the
+        // path back three frames later — the reported "abrupt and flashy" transition.
+        if (!HasDevice()) { Assert.Inconclusive("No Win2D device available."); return; }
+
+        var config = new CompositionConfig
+        {
+            OutputFps = 30,
+            Background = new BackgroundStyle { Type = BackgroundType.SolidColor, Color = "#000000" },
+        };
+
+        var mouse = TestMouseRecordingBuilder.WithPositions(
+            sampleCount: 600,
+            sampleRateHz: 100,
+            positionFunc: i => (100 + (i * 0.5), 60 + (i * 0.25)));
+
+        // A realistic press: down at 3.00s, up at 3.10s.
+        mouse.Clicks.Add(new ClickEvent(
+            (long)(3.00 * mouse.TickFrequency), 250, 135, MouseButton.Left, IsDown: true));
+        mouse.Clicks.Add(new ClickEvent(
+            (long)(3.10 * mouse.TickFrequency), 250, 135, MouseButton.Left, IsDown: false));
+
+        using var compositor = new FrameCompositor(config);
+        await compositor.InitializeAsync(
+            mouse, SourceW, SourceH, duration: TimeSpan.FromSeconds(DurationSeconds));
+
+        compositor.SyncCursorAnchors(
+            [new CursorAnchor { Timestamp = TimeSpan.FromSeconds(3), X = 0.25, Y = 0.75 }]);
+
+        Assert.IsTrue(compositor.TryGetCursorPosition(3.00, out double downX, out double downY));
+        Assert.AreEqual(0.25 * SourceW, downX, 0.5, "the anchor must still land exactly");
+        Assert.AreEqual(0.75 * SourceH, downY, 0.5);
+
+        // Sample across the press and just past it. Every step must stay small; the old
+        // behaviour covered the whole displacement in the ~3 frames between down and up.
+        double previousX = downX, previousY = downY;
+        for (double t = 3.00 + (1.0 / 30); t <= 3.30; t += 1.0 / 30)
+        {
+            Assert.IsTrue(compositor.TryGetCursorPosition(t, out double x, out double y));
+            double step = Math.Sqrt(Math.Pow(x - previousX, 2) + Math.Pow(y - previousY, 2));
+            Assert.IsTrue(step < 25, $"cursor jumped {step:F1}px in one frame at t={t:F2}s");
+            previousX = x;
+            previousY = y;
+        }
+    }
+
+    [TestMethod]
     public async Task SyncCursorAnchors_WithAnEmptyList_RestoresTheRecordedPath()
     {
         var compositor = await BuildAsync();

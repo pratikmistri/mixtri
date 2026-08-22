@@ -11,9 +11,9 @@ namespace Musio.Core.Processing;
 /// </para>
 /// <list type="bullet">
 ///   <item>one per anchor, carrying <c>target - recordedPosition</c> at that frame;</item>
-///   <item>one per click, carrying <b>zero</b> — a click is a moment the recording and the
-///   render agree on (the touch indicator draws at the raw click point, and auto-zoom aims at
-///   it), so an anchor is never allowed to drag the pointer off a click;</item>
+///   <item>two per protected click press, carrying <b>zero</b> — a click is a moment the
+///   recording, the touch indicator and auto-zoom all agree on, so by default an anchor is not
+///   allowed to drag the pointer off one;</item>
 ///   <item>one at each end of the path, carrying zero, so an anchor with no click beyond it
 ///   still eases out instead of dragging the tail of the recording with it.</item>
 /// </list>
@@ -29,19 +29,48 @@ namespace Musio.Core.Processing;
 ///   control point: the warp introduces no velocity discontinuity, and outside the outermost
 ///   control points the path is left bit-for-bit alone.</item>
 /// </list>
+/// <para>
+/// <b>Clicks near an anchor are absorbed rather than protected.</b> Protection is only
+/// meaningful when there is room to blend into it. A click press is a down/up PAIR a few frames
+/// apart, so an anchor placed on or beside one would otherwise have to deliver its whole
+/// displacement and take it away again within a handful of frames — which does not read as a
+/// repositioned cursor, it reads as a flash. Any press within <see cref="MinRampSeconds"/> of an
+/// anchor therefore contributes no control points at all and simply travels with the cursor,
+/// which is also what someone repositioning a cursor at a click actually wants: they are moving
+/// it off whatever it was occluding, and the click belongs with it.
+/// </para>
 /// </remarks>
 public static class CursorPathWarp
 {
     /// <summary>
-    /// How close an anchor has to be to a click before the two are treated as the same moment.
+    /// Shortest span over which a displacement may be introduced or removed. A click press
+    /// closer than this to an anchor is absorbed into the anchor's motion instead of pinning it.
     /// </summary>
-    public const double AnchorClickMergeSeconds = 0.04;
+    /// <remarks>
+    /// This is a FLOOR, not the usual ramp: with no click nearby the blend runs all the way to
+    /// the neighbouring anchor or the end of the recording. It exists only to stop the geometry
+    /// from demanding a move that is too fast to read as movement.
+    /// </remarks>
+    public const double MinRampSeconds = 0.25;
 
     /// <summary>An anchor's target position for one frame of the path, in capture-frame pixels.</summary>
     /// <param name="FrameIndex">Index into the smoothed path.</param>
     /// <param name="X">Target horizontal position, capture-frame pixels.</param>
     /// <param name="Y">Target vertical position, capture-frame pixels.</param>
     public readonly record struct AnchorPoint(int FrameIndex, double X, double Y);
+
+    /// <summary>
+    /// One button press, from button-down to the matching button-up.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a span rather than two independent instants. The recorder stores down and up
+    /// as separate <c>ClickEvent</c>s tens of milliseconds apart, and treating them separately
+    /// let an anchor claim the down while the up still pinned the path — the exact shape of a
+    /// visible snap. A press is protected, or absorbed, as one thing.
+    /// </remarks>
+    /// <param name="StartFrame">Frame of the button-down.</param>
+    /// <param name="EndFrame">Frame of the button-up; equal to <paramref name="StartFrame"/> for an unpaired event.</param>
+    public readonly record struct ClickSpan(int StartFrame, int EndFrame);
 
     private readonly record struct ControlPoint(int FrameIndex, double DeltaX, double DeltaY, bool IsAnchor);
 
@@ -53,28 +82,28 @@ public static class CursorPathWarp
     /// edit starts from the recording again rather than compounding the previous warp.
     /// </param>
     /// <param name="anchors">Anchor targets, in capture-frame pixels. Order does not matter.</param>
-    /// <param name="clickFrames">
-    /// Frame indices of click events. Each contributes a zero-displacement control point unless
-    /// an anchor claims the same moment.
+    /// <param name="clicks">
+    /// Recorded click presses. Each contributes zero-displacement control points unless an anchor
+    /// is close enough to absorb it.
     /// </param>
     /// <param name="outputFps">
-    /// Output frame rate, used to convert the anchor/click merge window into frames and to
-    /// scale the velocity correction.
+    /// Output frame rate, used to convert <see cref="MinRampSeconds"/> into frames and to scale
+    /// the velocity correction.
     /// </param>
     public static List<SmoothedPosition> Apply(
         IReadOnlyList<SmoothedPosition> basePath,
         IReadOnlyList<AnchorPoint> anchors,
-        IReadOnlyList<int> clickFrames,
+        IReadOnlyList<ClickSpan> clicks,
         double outputFps)
     {
         ArgumentNullException.ThrowIfNull(basePath);
         ArgumentNullException.ThrowIfNull(anchors);
-        ArgumentNullException.ThrowIfNull(clickFrames);
+        ArgumentNullException.ThrowIfNull(clicks);
 
         var result = new List<SmoothedPosition>(basePath);
         if (anchors.Count == 0 || result.Count == 0) return result;
 
-        var controls = BuildControlPoints(basePath, anchors, clickFrames, outputFps);
+        var controls = BuildControlPoints(basePath, anchors, clicks, outputFps);
         if (controls.Count == 0) return result;
 
         var displacement = BuildDisplacementField(controls, result.Count);
@@ -83,17 +112,18 @@ public static class CursorPathWarp
     }
 
     /// <summary>
-    /// Merges anchors, click zero-nodes and the two end zero-nodes into one list sorted by
-    /// frame index, with at most one control point per index.
+    /// Merges anchors, the zero-nodes of every protected click press, and the two end zero-nodes
+    /// into one list sorted by frame index, with at most one control point per index.
     /// </summary>
     private static List<ControlPoint> BuildControlPoints(
         IReadOnlyList<SmoothedPosition> basePath,
         IReadOnlyList<AnchorPoint> anchors,
-        IReadOnlyList<int> clickFrames,
+        IReadOnlyList<ClickSpan> clicks,
         double outputFps)
     {
         int last = basePath.Count - 1;
         var byIndex = new Dictionary<int, ControlPoint>();
+        var anchorFrames = new List<int>(anchors.Count);
 
         foreach (var anchor in anchors)
         {
@@ -103,43 +133,48 @@ public static class CursorPathWarp
             // A later anchor at the same frame simply wins; two anchors cannot share an
             // instant, and silently keeping the older one would make the drag look ignored.
             byIndex[i] = new ControlPoint(i, anchor.X - at.X, anchor.Y - at.Y, IsAnchor: true);
+            anchorFrames.Add(i);
         }
 
-        // Anchors are resolved first so this window can be measured against the final set.
-        int mergeFrames = outputFps > 0
-            ? Math.Max(1, (int)Math.Round(AnchorClickMergeSeconds * outputFps))
+        int minRamp = outputFps > 0
+            ? Math.Max(1, (int)Math.Round(MinRampSeconds * outputFps))
             : 1;
 
-        foreach (int clickFrame in clickFrames)
+        foreach (var press in clicks)
         {
-            int i = Math.Clamp(clickFrame, 0, last);
-            if (byIndex.ContainsKey(i)) continue;
+            int start = Math.Clamp(Math.Min(press.StartFrame, press.EndFrame), 0, last);
+            int end = Math.Clamp(Math.Max(press.StartFrame, press.EndFrame), 0, last);
 
-            // An anchor placed ON a click is an unambiguous instruction to move the pointer
-            // there, so it outranks the protect-the-click rule and that click's zero-node is
-            // dropped. This costs nothing visually for a mouse cursor: the click animation is
-            // a scale applied at the pointer's own position, not a separately-placed ripple.
-            if (HasAnchorWithin(byIndex, i, mergeFrames)) continue;
+            // Absorbed: this press travels with the cursor instead of pinning it. Decided for
+            // the press as a WHOLE — pinning one end of it and not the other is what produced
+            // the snap this rule exists to remove.
+            if (IsAbsorbed(anchorFrames, start, end, minRamp)) continue;
 
-            byIndex[i] = new ControlPoint(i, 0, 0, IsAnchor: false);
+            AddZeroNode(byIndex, start);
+            AddZeroNode(byIndex, end);
         }
 
         // Ends last, and only where nothing has claimed them, so an anchor sitting on the very
         // first or last frame is not overwritten by a zero it would then have to fight.
-        if (!byIndex.ContainsKey(0)) byIndex[0] = new ControlPoint(0, 0, 0, IsAnchor: false);
-        if (!byIndex.ContainsKey(last)) byIndex[last] = new ControlPoint(last, 0, 0, IsAnchor: false);
+        AddZeroNode(byIndex, 0);
+        AddZeroNode(byIndex, last);
 
         var controls = new List<ControlPoint>(byIndex.Values);
         controls.Sort(static (a, b) => a.FrameIndex.CompareTo(b.FrameIndex));
         return controls;
+
+        static void AddZeroNode(Dictionary<int, ControlPoint> byIndex, int frame)
+        {
+            if (frame < 0 || byIndex.ContainsKey(frame)) return;
+            byIndex[frame] = new ControlPoint(frame, 0, 0, IsAnchor: false);
+        }
     }
 
-    private static bool HasAnchorWithin(Dictionary<int, ControlPoint> byIndex, int frame, int window)
+    private static bool IsAbsorbed(List<int> anchorFrames, int start, int end, int minRamp)
     {
-        for (int offset = 1; offset <= window; offset++)
+        foreach (int anchor in anchorFrames)
         {
-            if (byIndex.TryGetValue(frame - offset, out var before) && before.IsAnchor) return true;
-            if (byIndex.TryGetValue(frame + offset, out var after) && after.IsAnchor) return true;
+            if (anchor >= start - minRamp && anchor <= end + minRamp) return true;
         }
         return false;
     }
