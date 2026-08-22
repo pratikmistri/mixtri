@@ -177,6 +177,9 @@ public static class MusioPathRewriter
         foreach (var overlay in timeline.TextOverlays)
             Add(overlay.SourceVideoFilePath);
 
+        foreach (var anchor in timeline.CursorAnchors)
+            Add(anchor.SourceVideoFilePath);
+
         // Inserted voice-over/music is irreplaceable in exactly the way a style asset is
         // not: the normalised WAV lives in an app-owned import folder the orphan sweep can
         // reclaim, so dropping it from a package silently would lose the only copy.
@@ -267,6 +270,16 @@ public static class MusioPathRewriter
             timeline.TextOverlays[i] = timeline.TextOverlays[i] with
             {
                 SourceVideoFilePath = ApplyOptional(timeline.TextOverlays[i].SourceVideoFilePath, map),
+            };
+        }
+
+        // Mirrors zoom keyframes: SourceVideoFilePath names the recording whose source-time
+        // space the anchor was authored against, not a distinct asset.
+        for (int i = 0; i < timeline.CursorAnchors.Count; i++)
+        {
+            timeline.CursorAnchors[i] = timeline.CursorAnchors[i] with
+            {
+                SourceVideoFilePath = ApplyOptional(timeline.CursorAnchors[i].SourceVideoFilePath, map),
             };
         }
 

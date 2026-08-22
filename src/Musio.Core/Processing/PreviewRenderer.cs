@@ -170,6 +170,33 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
+    /// Where the cursor is rendered at <paramref name="position"/>, in capture-frame pixels.
+    /// See <see cref="FrameCompositor.TryGetCursorPosition"/>.
+    /// </summary>
+    public bool TryGetCursorPosition(TimeSpan position, out double x, out double y)
+    {
+        x = y = 0;
+        return !_disposed
+            && _compositor is not null
+            && _compositor.TryGetCursorPosition(position.TotalSeconds, out x, out y);
+    }
+
+    /// <summary>
+    /// Syncs the cursor anchors belonging to this preview's source recording to the
+    /// compositor. Call this whenever the active/current preview recording changes and
+    /// whenever an anchor is added, moved, or removed (including undo/redo) — the same
+    /// events that already drive <see cref="UpdateZoomKeyframes"/>.
+    /// Callers should select the anchors with
+    /// <see cref="Export.SegmentFrameComposer.SelectCursorAnchors"/> so preview uses the
+    /// identical per-source ownership rule export does.
+    /// </summary>
+    public void UpdateCursorAnchors(IReadOnlyList<Timeline.CursorAnchor> anchors)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _compositor?.SyncCursorAnchors(anchors);
+    }
+
+    /// <summary>
     /// Syncs the set of suppressed auto-zoom click ticks to the compositor.
     /// Call this when auto-generated zoom segments are deleted or restored (undo).
     /// </summary>

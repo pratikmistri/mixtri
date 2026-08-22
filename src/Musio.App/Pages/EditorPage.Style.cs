@@ -57,17 +57,20 @@ public sealed partial class EditorPage
     {
         using var _ = SuppressScope.Enter(ref _suppressCursorEvents);
 
-        // Cursor type
-        CursorTypeMouse.IsChecked = cursor.Type != CursorType.Touch;
+        // Cursor type. Default/System/Custom all present as "Mouse" — the pane exposes
+        // only the three states a user can pick, and anything that is not Touch or Hidden
+        // draws the pointer glyph.
         CursorTypeTouch.IsChecked = cursor.Type == CursorType.Touch;
+        CursorTypeHidden.IsChecked = cursor.Type == CursorType.Hidden;
+        CursorTypeMouse.IsChecked = cursor.Type is not (CursorType.Touch or CursorType.Hidden);
 
         // Size
         CursorSizeSlider.Value = cursor.Scale;
 
         // Tilt
         CursorTiltToggle.IsOn = cursor.TiltEnabled;
-        CursorTiltToggle.Visibility = cursor.Type != CursorType.Touch
-            ? Visibility.Visible : Visibility.Collapsed;
+
+        UpdateCursorControlVisibility(cursor.Type);
 
         // Color — find matching radio button by Tag
         string cursorColor = (cursor.Color ?? "#FFFFFF").ToUpperInvariant();
@@ -85,12 +88,31 @@ public sealed partial class EditorPage
             first.IsChecked = true;
     }
 
+    /// <summary>
+    /// Shows only the controls the selected cursor type actually uses. Tilt is a property of
+    /// the pointer glyph, so it is meaningless for Touch; a Hidden cursor draws nothing at
+    /// all, so size and colour are meaningless too and the whole set collapses.
+    /// </summary>
+    private void UpdateCursorControlVisibility(CursorType type)
+    {
+        bool hidden = type == CursorType.Hidden;
+        bool drawsGlyph = type is not (CursorType.Touch or CursorType.Hidden);
+
+        var visibleUnlessHidden = hidden ? Visibility.Collapsed : Visibility.Visible;
+        CursorSizeSlider.Visibility = visibleUnlessHidden;
+        CursorColorSection.Visibility = visibleUnlessHidden;
+        CursorTiltToggle.Visibility = drawsGlyph ? Visibility.Visible : Visibility.Collapsed;
+
+        // Anchors displace the recorded PATH. Touch draws at raw click points and Hidden draws
+        // nothing, so in both cases there is no path on screen to reposition.
+        CursorAnchorSection.Visibility = drawsGlyph ? Visibility.Visible : Visibility.Collapsed;
+        UpdateCursorAnchorToggleState();
+    }
+
     private void CursorType_Checked(object sender, RoutedEventArgs e)
     {
         if (_suppressCursorEvents) return;
-        // Show/hide tilt toggle based on cursor type
-        bool isMouse = CursorTypeMouse.IsChecked == true;
-        CursorTiltToggle.Visibility = isMouse ? Visibility.Visible : Visibility.Collapsed;
+        UpdateCursorControlVisibility(ReadCursorTypeFromControls());
         ApplyCursorStyleFromControls();
     }
 
@@ -118,12 +140,37 @@ public sealed partial class EditorPage
         _cursorDebouncer.Schedule();
     }
 
+    /// <summary>
+    /// Resolves the cursor type the three Type radios currently describe.
+    /// <para>
+    /// The pane only offers Mouse / Touch / Hidden, but the model also carries
+    /// <see cref="CursorType.System"/> and <see cref="CursorType.Custom"/>, which no control
+    /// exposes. Both of those draw the pointer glyph and so present as "Mouse" — passing the
+    /// current type through as the Mouse answer keeps a project that carries one of them from
+    /// being silently downgraded to <see cref="CursorType.Default"/> the first time any other
+    /// cursor control is touched.
+    /// </para>
+    /// </summary>
+    private CursorType ReadCursorTypeFromControls(CursorType current)
+    {
+        if (CursorTypeTouch.IsChecked == true) return CursorType.Touch;
+        if (CursorTypeHidden.IsChecked == true) return CursorType.Hidden;
+        return current is CursorType.Touch or CursorType.Hidden ? CursorType.Default : current;
+    }
+
+    /// <summary>
+    /// Overload for callers that only need the visibility answer and have no config in hand.
+    /// </summary>
+    private CursorType ReadCursorTypeFromControls() =>
+        ReadCursorTypeFromControls(
+            ProjectService.Instance.CurrentComposition?.Cursor.Type ?? CursorType.Default);
+
     private void ApplyCursorStyleFromControls()
     {
         var config = ProjectService.Instance.CurrentComposition;
         if (config is null) return;
 
-        var cursorType = CursorTypeTouch.IsChecked == true ? CursorType.Touch : CursorType.Default;
+        var cursorType = ReadCursorTypeFromControls(config.Cursor.Type);
 
         string color = "#FFFFFF";
         foreach (var child in CursorColorPanel.Children)

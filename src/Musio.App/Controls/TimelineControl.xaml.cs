@@ -236,6 +236,8 @@ public sealed partial class TimelineControl : UserControl
     private Color CursorPathXColor;
     private Color CursorPathYColor;
     private Color CursorClickColor;
+    private Color CursorAnchorFillColor;
+    private Color CursorAnchorLineColor;
     private Color SpeedLabelTextColor;
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
@@ -539,6 +541,12 @@ public sealed partial class TimelineControl : UserControl
         CursorPathYColor      = WithAlpha(cursorBase, 150);
         CursorClickColor      = GetBrushColor("TimelineCursorClickBrush", Color.FromArgb(255, 255, 80, 80));
         ClickStrokeColor      = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(255, 120, 120, 120));
+
+        // Cursor anchors read as an EDIT rather than as recorded data, so they take the accent
+        // colour the rest of the editor uses for authored things instead of the cursor orange.
+        var anchorBase        = GetSystemBrushColor("AccentFillColorDefaultBrush", Color.FromArgb(255, 96, 165, 250));
+        CursorAnchorFillColor = WithAlpha(anchorBase, 255);
+        CursorAnchorLineColor = WithAlpha(anchorBase, 90);
 
         // ── Playhead & cut lines — semantic ──
         PlayheadColor         = isDark ? Color.FromArgb(255, 221, 255, 0) : Color.FromArgb(255, 180, 210, 0);
@@ -4773,6 +4781,8 @@ public sealed partial class TimelineControl : UserControl
             }
             if (!drewAny)
                 ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
+
+            DrawCursorAnchors(ds, model, w, h);
             return;
         }
 
@@ -4855,6 +4865,115 @@ public sealed partial class TimelineControl : UserControl
             ds.FillCircle(cx, cy, 3.5f, CursorClickColor);
             ds.DrawCircle(cx, cy, 3.5f, ClickStrokeColor, 1f);
         }
+
+        DrawCursorAnchors(ds, model, w, h);
+    }
+
+    // ─── Cursor anchors (repositioned cursor moments) ───────────────────
+
+    /// <summary>Half-width, in pixels, of a cursor anchor's clickable target.</summary>
+    private const float CursorAnchorHitRadius = 8f;
+
+    /// <summary>
+    /// Raised when the user clicks a cursor anchor marker. The host seeks to it and opens the
+    /// reposition overlay; the control itself owns no anchor state.
+    /// </summary>
+    public event EventHandler<CursorAnchor>? CursorAnchorClicked;
+
+    /// <summary>
+    /// Draws a marker for every cursor anchor over the lane's position curves, so the moments
+    /// the recorded path was overridden are visible next to the path they override.
+    /// </summary>
+    private void DrawCursorAnchors(CanvasDrawingSession ds, TimelineModel model, float w, float h)
+    {
+        foreach (var (anchor, x) in EnumerateCursorAnchorPositions(model))
+        {
+            if (x < -CursorAnchorHitRadius || x > w + CursorAnchorHitRadius) continue;
+
+            float px = (float)x;
+            ds.DrawLine(px, 0, px, h, CursorAnchorLineColor, 1f);
+
+            // A diamond rather than another circle: the lane is already full of round click
+            // dots, and an anchor is a different kind of thing.
+            float cy = h / 2;
+            const float r = 5f;
+            using var diamond = CanvasGeometry.CreatePolygon(ds, [
+                new System.Numerics.Vector2(px, cy - r),
+                new System.Numerics.Vector2(px + r, cy),
+                new System.Numerics.Vector2(px, cy + r),
+                new System.Numerics.Vector2(px - r, cy),
+            ]);
+            ds.FillGeometry(diamond, CursorAnchorFillColor);
+            ds.DrawGeometry(diamond, ClickStrokeColor, 1f);
+        }
+    }
+
+    /// <summary>
+    /// Yields each anchor with its X position on the lane.
+    /// </summary>
+    /// <remarks>
+    /// An anchor's <see cref="CursorAnchor.Timestamp"/> is a SOURCE time in its own recording,
+    /// so on a segment timeline it has to be mapped through the segment that shows that source
+    /// — the same mapping the cursor curves themselves use. Mapping it as an output time would
+    /// scatter markers anywhere a trim or reorder had moved the footage.
+    /// </remarks>
+    private IEnumerable<(CursorAnchor Anchor, double X)> EnumerateCursorAnchorPositions(TimelineModel model)
+    {
+        if (model.CursorAnchors.Count == 0) yield break;
+
+        if (model.Segments.Count > 0)
+        {
+            foreach (var seg in model.Segments.OfType<VideoSegment>())
+            {
+                foreach (var anchor in model.CursorAnchors)
+                {
+                    if (!AnchorBelongsToSegment(anchor, seg, model)) continue;
+
+                    double x = SegmentVideoTimeToX(seg, anchor.Timestamp.TotalSeconds);
+                    if (double.IsNaN(x)) continue;
+                    yield return (anchor, x);
+                }
+            }
+            yield break;
+        }
+
+        // Legacy (pre-segment) projects: the whole timeline is the primary recording.
+        foreach (var anchor in model.CursorAnchors)
+        {
+            if (anchor.SourceVideoFilePath is not null) continue;
+            yield return (anchor, SourceTimeToX(anchor.Timestamp));
+        }
+    }
+
+    private static bool AnchorBelongsToSegment(CursorAnchor anchor, VideoSegment seg, TimelineModel model)
+    {
+        return anchor.SourceVideoFilePath is null
+            ? model.PrimaryVideoFilePath is null
+              || string.Equals(seg.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(seg.VideoFilePath, anchor.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Clicking an anchor marker opens it; clicking anywhere else on the lane scrubs, exactly
+    /// as this track did before markers existed.
+    /// </summary>
+    private void CursorTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (Model is { } model && sender is CanvasControl canvas)
+        {
+            double x = e.GetCurrentPoint(canvas).Position.X;
+
+            foreach (var (anchor, markerX) in EnumerateCursorAnchorPositions(model))
+            {
+                if (Math.Abs(markerX - x) > CursorAnchorHitRadius) continue;
+
+                CursorAnchorClicked?.Invoke(this, anchor);
+                e.Handled = true;
+                return;
+            }
+        }
+
+        Track_PointerPressed(sender, e);
     }
 
     /// <summary>

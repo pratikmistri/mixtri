@@ -456,6 +456,16 @@ public sealed partial class EditorPage
         EditorTimelineMediator.SyncTextOverlaysToRenderer(ViewModel.Model, renderer, sourceVideoFilePath, PrimaryVideoPath);
 
     /// <summary>
+    /// Pushes the cursor anchors that belong to <paramref name="sourceVideoFilePath"/>
+    /// (null = the primary recording) onto <paramref name="renderer"/>'s compositor. Called on
+    /// the same cadence as the overlay sync above: a freshly built renderer regenerates the
+    /// cursor path from the raw recording, so without this an anchored cursor snaps back to
+    /// where it was actually recorded every time the preview pipeline is rebuilt.
+    /// </summary>
+    private void SyncCursorAnchorsToRenderer(PreviewRenderer renderer, string? sourceVideoFilePath) =>
+        EditorTimelineMediator.SyncCursorAnchorsToRenderer(ViewModel.Model, renderer, sourceVideoFilePath, PrimaryVideoPath);
+
+    /// <summary>
     /// The manual zoom keyframes that belong to a single source: the primary recording when
     /// <paramref name="sourceVideoFilePath"/> is null, otherwise the appended recording or
     /// imported video with that path. Each source composites through its own renderer, so its
@@ -564,6 +574,12 @@ public sealed partial class EditorPage
 
             Timeline.Refresh();
             InvalidatePreview();
+
+            // AFTER InvalidatePreview, deliberately: that is what pushes the post-undo anchor
+            // list onto the compositors. Resyncing the overlay first would read the cursor
+            // position from a compositor still holding the anchors that were just undone, and
+            // park the handle where the undone drag left it.
+            SyncCursorAnchorUI();
         });
     }
 

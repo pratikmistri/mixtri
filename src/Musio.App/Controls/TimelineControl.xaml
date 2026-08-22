@@ -149,7 +149,7 @@
             Grid.Row="2"
             Grid.Column="1"
             Draw="CursorTrackCanvas_Draw"
-            PointerPressed="Track_PointerPressed" />
+            PointerPressed="CursorTrack_PointerPressed" />
 
         <canvas:CanvasControl
             x:Name="ZoomTrackCanvas"

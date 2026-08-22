@@ -50,6 +50,20 @@ public class TimelineModel
     public List<SpeedSegment> SpeedSegments { get; } = [];
 
     /// <summary>
+    /// User-authored overrides of where the recorded pointer is at particular instants (see
+    /// <see cref="CursorAnchor"/>). Each anchor's <see cref="CursorAnchor.Timestamp"/> is a
+    /// SOURCE-video time, so anchors stay attached to the footage through trims and reorders,
+    /// and <see cref="CursorAnchor.SourceVideoFilePath"/> scopes them to one recording.
+    /// </summary>
+    /// <remarks>
+    /// Like <see cref="ZoomKeyframes"/>, these are deliberately NOT counted as timeline
+    /// content by <see cref="HasNonSegmentContent"/>: an anchor decorates footage rather than
+    /// standing on its own, so a timeline holding nothing but anchors has nothing left to
+    /// decorate and is still empty.
+    /// </remarks>
+    public List<CursorAnchor> CursorAnchors { get; } = [];
+
+    /// <summary>
     /// Ordered list of segments on the output timeline.
     /// Base-track segments are reflowed contiguously in list order; overlay-track segments keep
     /// absolute starts and render above lower tracks. When empty, the legacy
@@ -325,6 +339,11 @@ public class TimelineModel
     /// bed, a voice-over, an overlay or a camera track can easily outlive every clip, and each
     /// one is persisted work. Anything that reacts to "the timeline is empty now" has to ask
     /// about these too, or it silently discards them.
+    /// <para>
+    /// Zoom keyframes and <see cref="CursorAnchors"/> are deliberately EXCLUDED. Both decorate
+    /// footage rather than standing on their own: with no segments left there is nothing to
+    /// zoom into and no cursor to reposition, so a timeline holding only those is still empty.
+    /// </para>
     /// </remarks>
     [JsonIgnore]
     public bool HasNonSegmentContent =>

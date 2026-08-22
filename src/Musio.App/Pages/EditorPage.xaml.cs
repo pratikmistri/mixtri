@@ -229,6 +229,16 @@ public sealed partial class EditorPage : Page
             if (_zoomRegionEditMode)
                 UpdateZoomRegionRect();
 
+            // Same for the cursor-anchor handle, which is positioned in source-normalised
+            // coordinates through the very same projection. Re-bind first: the playhead may
+            // have moved since the last draw, and the overlay has to follow it rather than
+            // keep editing the moment it was opened on.
+            if (_cursorAnchorEditMode)
+            {
+                RebindCursorAnchorIfPlayheadMoved();
+                UpdateCursorAnchorHandle();
+            }
+
             // Keep the shared text-edit overlay (slide or text overlay) aligned with the
             // preview frame.
             if (TextEditCanvas.Visibility == Visibility.Visible && GetActiveEditTarget() is { } activeTarget)
@@ -392,6 +402,9 @@ public sealed partial class EditorPage : Page
         Timeline.ZoomSegmentResized += OnZoomSegmentResized;
         Timeline.ZoomSegmentCreated += OnZoomSegmentCreated;
         Timeline.ZoomSegmentRemoveRequested += OnZoomSegmentRemoveRequested;
+
+        // Cursor anchors
+        Timeline.CursorAnchorClicked += OnCursorAnchorClicked;
 
         // Video clip selection events
         Timeline.VideoClipSelected += OnVideoClipSelected;
@@ -706,6 +719,10 @@ public sealed partial class EditorPage : Page
 
         // Pause playback and move to the segment for context.
         //
+        // The cursor-anchor overlay shares this grid cell and is declared later, so it would sit
+        // on top of the region picker and swallow its drags. Only one preview overlay can be live.
+        if (_cursorAnchorEditMode) ExitCursorAnchorEditMode();
+
         // kf.Timestamp is a SOURCE time in the owning clip's own time space; the playhead runs
         // in OUTPUT time. Assigning one to the other lands the playhead wherever the arithmetic
         // happens to point — with a text slide ahead of the video it lands inside the SLIDE, so
@@ -770,27 +787,35 @@ public sealed partial class EditorPage : Page
     /// </para>
     /// </summary>
     private TimeSpan ResolveKeyframeOutputTime(ZoomKeyframe kf)
+        => ResolveSourceOutputTime(kf.SourceVideoFilePath, kf.Timestamp);
+
+    /// <summary>
+    /// Source-agnostic form of the mapping above. Shared with cursor anchors, which are stored
+    /// in exactly the same space (a source time plus the recording it belongs to) and must land
+    /// the playhead on exactly the same frame, so the two cannot be allowed to drift apart.
+    /// </summary>
+    private TimeSpan ResolveSourceOutputTime(string? sourceVideoFilePath, TimeSpan sourceTime)
     {
         var model = ViewModel.Model;
 
         // The primary recording already has a tested mapping that walks timeline order and
         // handles slides, trims, reorders and speed changes — use it rather than a second
         // implementation that could drift from it.
-        if (kf.SourceVideoFilePath is null)
-            return model.SourceToOutputTime(kf.Timestamp);
+        if (sourceVideoFilePath is null)
+            return model.SourceToOutputTime(sourceTime);
 
         // An appended/imported clip has its own source clock, which the primary-only mapping
-        // above does not cover, so resolve through the segment that owns this keyframe —
+        // above does not cover, so resolve through the segment that owns this moment —
         // the same rule the timeline uses to draw it (OwningSegmentForKeyframe).
         VideoSegment? firstMatch = null;
         foreach (var seg in model.Segments.OfType<VideoSegment>())
         {
-            if (!string.Equals(seg.VideoFilePath, kf.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(seg.VideoFilePath, sourceVideoFilePath, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             firstMatch ??= seg;
 
-            var local = kf.Timestamp - seg.SourceStart;
+            var local = sourceTime - seg.SourceStart;
             if (local >= TimeSpan.Zero && local <= seg.SourceDuration)
                 return OutputTimeWithin(seg, local);
         }
@@ -799,13 +824,13 @@ public sealed partial class EditorPage : Page
         // cut from that file rather than leaving the playhead adrift.
         if (firstMatch is not null)
         {
-            var local = kf.Timestamp - firstMatch.SourceStart;
+            var local = sourceTime - firstMatch.SourceStart;
             if (local < TimeSpan.Zero) local = TimeSpan.Zero;
             if (local > firstMatch.SourceDuration) local = firstMatch.SourceDuration;
             return OutputTimeWithin(firstMatch, local);
         }
 
-        return kf.Timestamp;
+        return sourceTime;
 
         static TimeSpan OutputTimeWithin(VideoSegment seg, TimeSpan localSourceOffset)
         {
@@ -889,11 +914,23 @@ public sealed partial class EditorPage : Page
     /// to the canvas as before.
     /// </summary>
     private bool TryComputeComposedSourceLayout(out double x, out double y, out double w, out double h)
+        => TryComputeComposedSourceLayout(
+            _zoomRegionSourceFile, _zoomRegionSourceW, _zoomRegionSourceH, out x, out y, out w, out h);
+
+    /// <summary>
+    /// Source-agnostic form of the projection above, so any preview overlay that works in
+    /// source-normalised coordinates (the zoom region picker, the cursor anchor handle) maps
+    /// through the compositor's transform rather than re-deriving it beside it — which is how
+    /// the region rectangle and the rendered frame drifted apart before.
+    /// </summary>
+    private bool TryComputeComposedSourceLayout(
+        string? sourceFile, double sourceW, double sourceH,
+        out double x, out double y, out double w, out double h)
     {
         x = y = w = h = 0;
 
-        if (RendererForSource(_zoomRegionSourceFile) is not { } renderer) return false;
-        if (_zoomRegionSourceW <= 0 || _zoomRegionSourceH <= 0) return false;
+        if (RendererForSource(sourceFile) is not { } renderer) return false;
+        if (sourceW <= 0 || sourceH <= 0) return false;
 
         // Where the composed frame is drawn inside the preview control. ZoomRegionCanvas
         // fills the same grid cell as the preview, so this needs no further translation
@@ -918,8 +955,8 @@ public sealed partial class EditorPage : Page
         double scaleX = area.Width * outToCanvasX / visible.Width;
         double scaleY = area.Height * outToCanvasY / visible.Height;
 
-        w = _zoomRegionSourceW * scaleX;
-        h = _zoomRegionSourceH * scaleY;
+        w = sourceW * scaleX;
+        h = sourceH * scaleY;
         x = layout.X + (area.X * outToCanvasX) - (visible.X * scaleX);
         y = layout.Y + (area.Y * outToCanvasY) - (visible.Y * scaleY);
         return true;

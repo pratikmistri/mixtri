@@ -96,9 +96,14 @@ public sealed partial class EditorPage
 
     private RadioButton CursorTypeMouse => PropertiesPanel.Cursor.CursorTypeMouse;
     private RadioButton CursorTypeTouch => PropertiesPanel.Cursor.CursorTypeTouch;
+    private RadioButton CursorTypeHidden => PropertiesPanel.Cursor.CursorTypeHidden;
     private Slider CursorSizeSlider => PropertiesPanel.Cursor.CursorSizeSlider;
     private ToggleSwitch CursorTiltToggle => PropertiesPanel.Cursor.CursorTiltToggle;
     private StackPanel CursorColorPanel => PropertiesPanel.Cursor.CursorColorPanel;
+    private StackPanel CursorColorSection => PropertiesPanel.Cursor.CursorColorSection;
+    private StackPanel CursorAnchorSection => PropertiesPanel.Cursor.CursorAnchorSection;
+    private Button CursorAnchorEditButton => PropertiesPanel.Cursor.CursorAnchorEditButton;
+    private TextBlock CursorAnchorUnavailableText => PropertiesPanel.Cursor.CursorAnchorUnavailableText;
 
     // ─── Video (camera overlay) panel ───────────────────────────────────
 
@@ -267,8 +272,10 @@ public sealed partial class EditorPage
         // Mouse
         CursorTypeMouse.Checked += CursorType_Checked;
         CursorTypeTouch.Checked += CursorType_Checked;
+        CursorTypeHidden.Checked += CursorType_Checked;
         CursorSizeSlider.ValueChanged += CursorSizeSlider_ValueChanged;
         CursorTiltToggle.Toggled += CursorTiltToggle_Toggled;
+        CursorAnchorEditButton.Click += CursorAnchorEdit_Click;
         foreach (var child in CursorColorPanel.Children)
         {
             if (child is RadioButton swatch)

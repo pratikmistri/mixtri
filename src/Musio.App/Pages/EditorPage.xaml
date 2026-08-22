@@ -200,6 +200,60 @@
                 </StackPanel>
             </Grid>
 
+            <!-- Cursor reposition overlay: drag the pointer to a new place at this moment.
+                 Anchors displace the recorded path around that instant and blend back into
+                 it, so the rest of the journey is untouched — see CursorPathWarp. -->
+            <Grid x:Name="CursorAnchorOverlay" Visibility="Collapsed">
+                <Canvas x:Name="CursorAnchorCanvas"
+                        Background="Transparent"
+                        PointerPressed="CursorAnchorCanvas_PointerPressed"
+                        PointerMoved="CursorAnchorCanvas_PointerMoved"
+                        PointerReleased="CursorAnchorCanvas_PointerReleased"
+                        PointerCaptureLost="CursorAnchorCanvas_PointerCaptureLost"
+                        SizeChanged="CursorAnchorCanvas_SizeChanged">
+                    <Ellipse x:Name="CursorAnchorHandle"
+                             Width="34" Height="34"
+                             Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                             StrokeThickness="2"
+                             Fill="#40000000"
+                             IsHitTestVisible="False" />
+                    <Ellipse x:Name="CursorAnchorHandleDot"
+                             Width="6" Height="6"
+                             Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                             IsHitTestVisible="False" />
+                </Canvas>
+
+                <StackPanel
+                    VerticalAlignment="Top"
+                    HorizontalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    Padding="12,8"
+                    Margin="0,8,0,0"
+                    Background="{ThemeResource OverlayDenseBrush}"
+                    CornerRadius="4">
+                    <FontIcon Glyph="&#xE8B0;" Foreground="{ThemeResource OverlayForegroundBrush}" FontSize="14" />
+                    <TextBlock
+                        x:Name="CursorAnchorHintText"
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource OverlayForegroundBrush}"
+                        Text="Drag the cursor to move it at this moment"
+                        ToolTipService.ToolTip="The rest of the recorded movement is kept — the path is offset around this moment and eases back to the recording before the next click."
+                        FontSize="12" />
+                    <Button
+                        x:Name="CursorAnchorRemoveButton"
+                        Content="Remove"
+                        Click="CursorAnchorRemove_Click"
+                        Padding="12,4"
+                        ToolTipService.ToolTip="Delete the anchor at this moment and restore the recorded path." />
+                    <Button
+                        Content="Done"
+                        Style="{ThemeResource AccentButtonStyle}"
+                        Click="CursorAnchorDone_Click"
+                        Padding="12,4" />
+                </StackPanel>
+            </Grid>
+
             <!-- Shared text edit overlay (reposition + in-place editing), used by both
                  full-screen text slides and text overlays — see EditorPage.xaml.cs's
                  ITextEditTarget abstraction. -->
