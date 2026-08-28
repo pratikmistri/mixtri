@@ -2923,6 +2923,11 @@ public sealed partial class TimelineControl : UserControl
             var earlier = previousByPath[pathIndex];
             previousByPath[pathIndex] = current;
 
+            // AreLinked, not Interpolates: a cut-in pair is still CHAINED — the outgoing
+            // segment holds its zoom across the gap rather than releasing to full frame — and
+            // that is exactly what this connector reports. The cut is shown by dashing the
+            // stroke below, so the indicator states both facts instead of trading one for the
+            // other.
             if (!ZoomCameraPath.AreLinked(earlier, current))
                 continue;
 
@@ -2952,14 +2957,18 @@ public sealed partial class TimelineControl : UserControl
             {
                 StartCap = CanvasCapStyle.Round,
                 EndCap = CanvasCapStyle.Round,
+                // Solid means the camera travels between the two segments; dashed means it
+                // holds and then cuts, because the incoming segment has Animate In off.
+                DashStyle = ZoomCameraPath.Interpolates(earlier, current)
+                    ? CanvasDashStyle.Solid
+                    : CanvasDashStyle.Dash,
             };
             ds.DrawLine(left, bridgeY, right, bridgeY, ZoomSegmentLinkedConnector, 3f, stroke);
         }
     }
 
     private static bool SameZoomPath(ZoomKeyframe a, ZoomKeyframe b)
-        => a.IsManual == b.IsManual &&
-           string.Equals(a.SourceVideoFilePath, b.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+        => ZoomCameraPath.SharesCameraPath(a, b);
 
     /// <summary>
     /// Finds the video segment that owns a zoom keyframe: the segment matching the

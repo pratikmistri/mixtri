@@ -1218,6 +1218,14 @@ public sealed partial class EditorPage
                 ZoomDriftSlider.Value = drift.Strength * 50.0;
                 ZoomDriftSlider.IsEnabled = drift.Enabled;
             }
+
+            if (ZoomAnimateInToggle is not null)
+                ZoomAnimateInToggle.IsOn = kf.AnimateIn;
+
+            if (ZoomAnimateOutToggle is not null)
+                ZoomAnimateOutToggle.IsOn = kf.AnimateOut;
+
+            SyncAnimateOutApplicability(kf);
         }
 
         // The slider assignment above is suppressed, so ValueChanged never runs the readout.
@@ -1419,6 +1427,51 @@ public sealed partial class EditorPage
 
         var operation = new UpdateZoomSegmentPropertiesOperation(selectedId, drift: newDrift, driftProvided: true);
         ViewModel.UndoRedoManager.Execute(operation);
+    }
+
+    // --- Per-segment camera movement (animate in / out) ---
+
+    private void ZoomAnimateInToggle_Toggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomAnimateInToggle is null) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, animateIn: ZoomAnimateInToggle.IsOn));
+    }
+
+    private void ZoomAnimateOutToggle_Toggled(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
+    {
+        if (_suppressZoomPropertyUpdate) return;
+        if (ZoomAnimateOutToggle is null) return;
+        if (Timeline?.SelectedZoomKeyframeId is not { } selectedId) return;
+
+        ViewModel.UndoRedoManager.Execute(
+            new UpdateZoomSegmentPropertiesOperation(selectedId, animateOut: ZoomAnimateOutToggle.IsOn));
+    }
+
+    /// <summary>
+    /// Says so when Animate Out cannot currently do anything, rather than leaving the user to
+    /// discover that a toggle they just flipped changed nothing on screen.
+    /// <para>
+    /// A segment that hands off to a following one never returns to full frame, so it has no
+    /// outward animation to suppress — the move into the next segment is that segment's
+    /// Animate In. The toggle stays ENABLED and its stored value is untouched: pull the two
+    /// segments apart again and it applies immediately, so disabling it would hide a setting
+    /// that is still live rather than merely dormant.
+    /// </para>
+    /// </summary>
+    private void SyncAnimateOutApplicability(Musio.Core.Timeline.ZoomKeyframe keyframe)
+    {
+        if (ZoomAnimateOutHint is null) return;
+
+        bool handsOff = Musio.Core.Processing.ZoomCameraPath.HasLinkedFollower(
+            keyframe, ViewModel.Model.ZoomKeyframes);
+
+        ZoomAnimateOutHint.Text = handsOff
+            ? "This segment runs straight into the next one, so it never returns to full frame — this has no effect until they are moved apart."
+            : "Off holds the zoom to the end of the segment, then cuts back to full frame.";
     }
 
     // --- Audio waveform loading ---

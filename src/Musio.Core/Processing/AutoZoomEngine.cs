@@ -367,12 +367,14 @@ public class AutoZoomEngine
             // as it did before the edit.
             HasFixedCenter: keyframe.UsesAuthoredCenter,
             DriftScale: (float)Math.Clamp(keyframe.DriftScale, 0.0, 1.0),
-            Drift: keyframe.Drift);
+            Drift: keyframe.Drift,
+            AnimateIn: keyframe.AnimateIn,
+            AnimateOut: keyframe.AnimateOut);
     }
 
     private static ZoomShot ToZoomShot(ZoomSegment segment)
-        // Engine-generated click zooms have no authoring surface for drift settings, so they
-        // pass no Drift and resolve to CameraDriftSettings.Default.
+        // Engine-generated click zooms have no authoring surface for drift settings or for
+        // the animate-in/out toggles, so they pass neither and keep the animated defaults.
         => new(
             segment.ZoomInStart,
             segment.ZoomInEnd,

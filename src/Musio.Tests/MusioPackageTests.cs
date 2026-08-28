@@ -165,6 +165,34 @@ public class MusioPackageTests
         CollectionAssert.AreEqual(originalAudio, File.ReadAllBytes(opened.Project.AudioFilePaths[0]));
     }
 
+    /// <summary>
+    /// Animate In / Animate Out are plain bools defaulting to <c>true</c>, so an "off" value is
+    /// <c>default(bool)</c> — exactly the value a <c>WhenWritingDefault</c> ignore condition
+    /// would drop from the manifest, which would then read back as ON and silently discard the
+    /// user's choice. The package writes with <c>WhenWritingNull</c> today; this pins that down
+    /// through the real save/open path rather than against a hand-built options object, since the
+    /// hazard is a change to those shared options.
+    /// </summary>
+    [TestMethod]
+    public async Task SaveThenOpen_PreservesZoomSegmentsWithTheirAnimationTurnedOff()
+    {
+        var (project, timeline) = BuildProject();
+        timeline.ZoomKeyframes[0] = timeline.ZoomKeyframes[0] with
+        {
+            AnimateIn = false,
+            AnimateOut = false,
+        };
+
+        var packagePath = Path.Combine(_root, "project.musio");
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.IsFalse(opened.Timeline.ZoomKeyframes[0].AnimateIn,
+            "A zoom segment saved with Animate In off must reopen with it off.");
+        Assert.IsFalse(opened.Timeline.ZoomKeyframes[0].AnimateOut,
+            "A zoom segment saved with Animate Out off must reopen with it off.");
+    }
+
     [TestMethod]
     public async Task Save_DoesNotMutateTheLiveProject()
     {

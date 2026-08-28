@@ -22,6 +22,16 @@ namespace Musio.Core.Processing;
 /// Per-segment camera drift settings owned by this shot. Null resolves to
 /// <see cref="CameraDriftSettings.Default"/>.
 /// </param>
+/// <param name="AnimateIn">
+/// Whether the camera animates INTO this shot. False cuts instead — the shot's ramp span
+/// plays at its full zoom, and a handoff from the previous shot becomes a jump at this
+/// shot's leading edge rather than an interpolation.
+/// </param>
+/// <param name="AnimateOut">
+/// Whether the camera animates OUT of this shot on its way back to 1×. False holds the zoom
+/// through the release span and cuts at its end. Has no effect while this shot hands off to
+/// a following one, because then it never returns to 1× at all.
+/// </param>
 public readonly record struct ZoomShot(
     double RampStart,
     double HoldStart,
@@ -33,7 +43,9 @@ public readonly record struct ZoomShot(
     int Seed,
     bool HasFixedCenter = false,
     float DriftScale = 1f,
-    CameraDriftSettings? Drift = null);
+    CameraDriftSettings? Drift = null,
+    bool AnimateIn = true,
+    bool AnimateOut = true);
 
 /// <summary>
 /// The camera state resolved from a <see cref="ZoomCameraPath"/> at one instant.
@@ -205,6 +217,8 @@ public sealed class ZoomCameraPath
                 HasFixedCenter = shot.HasFixedCenter,
                 DriftScale = shot.DriftScale,
                 Drift = shot.Drift,
+                AnimateIn = shot.AnimateIn,
+                AnimateOut = shot.AnimateOut,
                 OriginalRampStart = shot.RampStart,
                 OriginalHoldStart = holdStart,
                 OriginalHoldEnd = holdEnd,
@@ -326,6 +340,71 @@ public sealed class ZoomCameraPath
             return false;
 
         return later.Start <= earlier.End + TimeSpan.FromSeconds(LinkGapSeconds);
+    }
+
+    /// <summary>
+    /// Whether the camera actually INTERPOLATES from <paramref name="earlier"/> into
+    /// <paramref name="later"/>, rather than holding until the later segment arrives and then
+    /// cutting to it.
+    /// <para>
+    /// <see cref="AreLinked"/> answers a different and still purely temporal question — "is the
+    /// gap short enough that the camera should not bother returning to 1× in between?" — and
+    /// stays that way because hold repair depends on it. Both remain true of a cut-in pair,
+    /// which is why the timeline still draws its linked-segment connector for one and uses THIS
+    /// to decide whether to dash it. It is the keyframe-level statement of the test
+    /// <see cref="EvaluateTransition"/> makes on the shots themselves, so the track cannot
+    /// promise a move the renderer replaces with a cut.
+    /// </para>
+    /// </summary>
+    public static bool Interpolates(
+        Musio.Core.Timeline.ZoomKeyframe earlier,
+        Musio.Core.Timeline.ZoomKeyframe later)
+        => AreLinked(earlier, later) && later.AnimateIn;
+
+    /// <summary>
+    /// Whether two keyframes belong to the same camera chain, and so can hand off to each
+    /// other at all. Keyframes on different source files are separated by a cut in the
+    /// footage, and click-driven keyframes are chained separately from authored ones.
+    /// </summary>
+    public static bool SharesCameraPath(
+        Musio.Core.Timeline.ZoomKeyframe a,
+        Musio.Core.Timeline.ZoomKeyframe b)
+        => a is not null && b is not null
+            && a.IsManual == b.IsManual
+            && string.Equals(a.SourceVideoFilePath, b.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether <paramref name="keyframe"/> hands the camera straight to a later segment on
+    /// its own chain, and therefore never returns to 1× at its own end.
+    /// <para>
+    /// This is the question <see cref="Musio.Core.Timeline.ZoomKeyframe.AnimateOut"/>'s
+    /// applicability turns on, and it lives here rather than in the editor so the panel that
+    /// reports "this has no effect right now" and the track that draws the chain are reading
+    /// one predicate. <paramref name="keyframes"/> may be in any order.
+    /// </para>
+    /// </summary>
+    public static bool HasLinkedFollower(
+        Musio.Core.Timeline.ZoomKeyframe keyframe,
+        IEnumerable<Musio.Core.Timeline.ZoomKeyframe> keyframes)
+    {
+        if (keyframe is null || keyframes is null)
+            return false;
+
+        // The immediate follower is what matters: a still-later segment cannot link across an
+        // intervening one, because that one would become this segment's follower instead.
+        Musio.Core.Timeline.ZoomKeyframe? follower = null;
+        foreach (var candidate in keyframes)
+        {
+            if (candidate is null || ReferenceEquals(candidate, keyframe)) continue;
+            if (candidate.Id == keyframe.Id) continue;
+            if (!SharesCameraPath(keyframe, candidate)) continue;
+            if (candidate.Timestamp < keyframe.Timestamp) continue;
+
+            if (follower is null || candidate.Timestamp < follower.Timestamp)
+                follower = candidate;
+        }
+
+        return follower is not null && AreLinked(keyframe, follower);
     }
 
     private static bool IsValidShot(ZoomShot shot)
@@ -470,11 +549,20 @@ public sealed class ZoomCameraPath
 
     private ZoomCameraSample EvaluatePiece(Piece piece, double timeSeconds)
     {
+        ShotData data = _shotData[piece.ShotIndex];
+        float zoom = data.Shot.Zoom;
+
+        // A cut is expressed as a HOLD over the span the animation would have occupied, not
+        // as a shorter piece. The span still belongs to the segment — the user authored it by
+        // dragging the block out — so the frame stays zoomed across it and the jump lands on
+        // the span's OUTER edge, which is exactly where the block starts or ends on the
+        // timeline. Trimming the piece instead would move the jump inwards, to a moment with
+        // nothing visible to explain it.
         return piece.Kind switch
         {
-            PieceKind.RampIn => EvaluateSingleShot(_shotData[piece.ShotIndex], timeSeconds, 1f, _shotData[piece.ShotIndex].Shot.Zoom),
-            PieceKind.Hold => EvaluateSingleShot(_shotData[piece.ShotIndex], timeSeconds, _shotData[piece.ShotIndex].Shot.Zoom, _shotData[piece.ShotIndex].Shot.Zoom),
-            PieceKind.Release => EvaluateSingleShot(_shotData[piece.ShotIndex], timeSeconds, _shotData[piece.ShotIndex].Shot.Zoom, 1f),
+            PieceKind.RampIn => EvaluateSingleShot(data, timeSeconds, data.Shot.AnimateIn ? 1f : zoom, zoom),
+            PieceKind.Hold => EvaluateSingleShot(data, timeSeconds, zoom, zoom),
+            PieceKind.Release => EvaluateSingleShot(data, timeSeconds, zoom, data.Shot.AnimateOut ? 1f : zoom),
             PieceKind.Transition => EvaluateTransition(piece.ShotIndex, timeSeconds),
             _ => default,
         };
@@ -513,6 +601,30 @@ public sealed class ZoomCameraPath
         ShotData toData = _shotData[shotIndex + 1];
         ZoomShot from = fromData.Shot;
         ZoomShot to = toData.Shot;
+
+        // The incoming segment opted out of animating in, so the chain CUTS to it instead of
+        // interpolating. The cut lands on that segment's own leading edge — the instant its
+        // block starts on the timeline — clamped into this window, so the jump is on something
+        // the user authored and can see rather than on whatever slack the repair step left
+        // over. (The window is not always B's ramp: when the linked pair has a real gap between
+        // them, RepairLinkedHolds opens the window as soon as A stops holding, so that the
+        // camera never releases toward 1x in between. Cutting there would fire the jump early,
+        // at a moment with nothing on the timeline to explain it.)
+        //
+        // Until the cut the outgoing shot simply holds, which is what keeps a cut from
+        // reintroducing the pump out to full frame that the chained path exists to remove.
+        //
+        // The linkage itself is deliberately left intact: unlinking the pair would give the
+        // outgoing shot a release piece and the incoming shot a ramp piece over overlapping
+        // source time, breaking the one-active-piece invariant that TryEvaluate's binary
+        // search depends on. Only the interpretation of the window changes.
+        if (!to.AnimateIn)
+        {
+            double cutAt = Math.Clamp(to.RampStart, from.HoldEnd, to.HoldStart);
+            return timeSeconds < cutAt
+                ? EvaluateSingleShot(fromData, timeSeconds, from.Zoom, from.Zoom)
+                : EvaluateSingleShot(toData, timeSeconds, to.Zoom, to.Zoom);
+        }
 
         double duration = to.HoldStart - from.HoldEnd;
         float u = duration > SmallDuration
@@ -668,6 +780,8 @@ public sealed class ZoomCameraPath
         public bool HasFixedCenter;
         public float DriftScale;
         public CameraDriftSettings? Drift;
+        public bool AnimateIn;
+        public bool AnimateOut;
         public double OriginalRampStart;
         public double OriginalHoldStart;
         public double OriginalHoldEnd;
@@ -686,7 +800,9 @@ public sealed class ZoomCameraPath
                 Seed,
                 HasFixedCenter,
                 DriftScale,
-                Drift);
+                Drift,
+                AnimateIn,
+                AnimateOut);
 
     }
 }

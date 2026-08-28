@@ -59,6 +59,9 @@ public sealed partial class EditorPage
     private Slider ZoomLevelSlider => PropertiesPanel.Zoom.ZoomLevelSlider;
     private ToggleSwitch ZoomDriftToggle => PropertiesPanel.Zoom.ZoomDriftToggle;
     private Slider ZoomDriftSlider => PropertiesPanel.Zoom.ZoomDriftSlider;
+    private ToggleSwitch ZoomAnimateInToggle => PropertiesPanel.Zoom.ZoomAnimateInToggle;
+    private ToggleSwitch ZoomAnimateOutToggle => PropertiesPanel.Zoom.ZoomAnimateOutToggle;
+    private TextBlock ZoomAnimateOutHint => PropertiesPanel.Zoom.ZoomAnimateOutHint;
 
     // ─── Text slide panel ───────────────────────────────────────────────
 
@@ -217,6 +220,8 @@ public sealed partial class EditorPage
         PropertiesPanel.Zoom.RemoveZoomSegmentButton.Click += RemoveZoomSegment_Click;
         ZoomDriftToggle.Toggled += ZoomDriftToggle_Toggled;
         ZoomDriftSlider.ValueChanged += ZoomDriftSlider_ValueChanged;
+        ZoomAnimateInToggle.Toggled += ZoomAnimateInToggle_Toggled;
+        ZoomAnimateOutToggle.Toggled += ZoomAnimateOutToggle_Toggled;
 
         // The zoom level a newly drawn segment is created at. Set here rather than as a
         // XAML Value (playbook: a XAML default fires ValueChanged during

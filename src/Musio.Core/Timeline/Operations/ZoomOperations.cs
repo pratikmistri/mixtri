@@ -251,6 +251,8 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     private readonly bool? _newHasAuthoredCenter;
     private readonly bool _driftProvided;
     private readonly Musio.Core.Processing.CameraDriftSettings? _newDrift;
+    private readonly bool? _newAnimateIn;
+    private readonly bool? _newAnimateOut;
     private ZoomKeyframe? _previousKeyframe;
 
     private bool _changed = true;
@@ -272,10 +274,17 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
     /// keyframe's drift untouched — <c>null</c> is itself a meaningful value here (clear override),
     /// so a separate flag is needed to distinguish "not editing drift" from "editing it to null".
     /// </param>
+    /// <param name="animateIn">
+    /// New <see cref="ZoomKeyframe.AnimateIn"/>, or null to leave it alone. Unlike
+    /// <paramref name="drift"/> this needs no companion flag: null is not a meaningful value
+    /// for a plain bool, so "not editing it" and "editing it" are already distinguishable.
+    /// </param>
+    /// <param name="animateOut">New <see cref="ZoomKeyframe.AnimateOut"/>, or null to leave it alone.</param>
     public UpdateZoomSegmentPropertiesOperation(string keyframeId,
         double? zoomLevel = null, double? centerX = null, double? centerY = null,
         bool? hasAuthoredCenter = null,
-        Musio.Core.Processing.CameraDriftSettings? drift = null, bool driftProvided = false)
+        Musio.Core.Processing.CameraDriftSettings? drift = null, bool driftProvided = false,
+        bool? animateIn = null, bool? animateOut = null)
     {
         _keyframeId = keyframeId;
         _newZoomLevel = zoomLevel;
@@ -284,6 +293,8 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
         _newHasAuthoredCenter = hasAuthoredCenter;
         _newDrift = drift;
         _driftProvided = driftProvided;
+        _newAnimateIn = animateIn;
+        _newAnimateOut = animateOut;
     }
 
     public void Execute(TimelineModel model)
@@ -311,6 +322,8 @@ public class UpdateZoomSegmentPropertiesOperation : IEditOperation
             HasAuthoredCenter = _newHasAuthoredCenter
                 ?? ((_newCenterX is not null || _newCenterY is not null) || kf.UsesAuthoredCenter),
             Drift = _driftProvided ? _newDrift : kf.Drift,
+            AnimateIn = _newAnimateIn ?? kf.AnimateIn,
+            AnimateOut = _newAnimateOut ?? kf.AnimateOut,
         };
     }
 
