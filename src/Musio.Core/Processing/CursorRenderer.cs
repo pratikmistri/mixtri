@@ -873,16 +873,16 @@ public class CursorRenderer : IDisposable
     }
 
     /// <summary>
-    /// Creates the classic pointer arrow shape using <see cref="CanvasPathBuilder"/>.
-    /// The shape is defined at the origin with the hotspot (tip) at (0, 0).
-    /// </summary>
-    /// <summary>
     /// Bounds of <see cref="CreateDefaultCursorGeometry"/> relative to its hotspot, used only
     /// when the glyph library failed to build and that hard-coded arrow is what draws. Keep in
     /// step with the path below.
     /// </summary>
     private static readonly Rect FallbackArrowBounds = new(0, 0, 15, 27);
 
+    /// <summary>
+    /// Creates the classic pointer arrow shape using <see cref="CanvasPathBuilder"/>.
+    /// The shape is defined at the origin with the hotspot (tip) at (0, 0).
+    /// </summary>
     private static CanvasGeometry CreateDefaultCursorGeometry(ICanvasResourceCreator creator)
     {
         using var builder = new CanvasPathBuilder(creator);
