@@ -363,7 +363,10 @@ public class InsertSegmentOnOverlayTrackOperation : SegmentEditOperationBase
             : Math.Max(1, _trackIndex);
 
         _segment.TrackIndex = track;
-        _segment.Start = start;
+        // An explicitly requested lane gets the same no-overlap guarantee the auto-placed one
+        // gets from FindFreeOverlayTrack, so which overload a caller reached for cannot decide
+        // whether two segments end up sharing a row.
+        _segment.Start = model.ResolveNonOverlappingStart(_segment, track, start);
         ResolvedTrackIndex = track;
         model.Segments.Add(_segment);
         return true;
@@ -381,6 +384,8 @@ public class InsertSegmentOnOverlayTrackOperation : SegmentEditOperationBase
 
 /// <summary>
 /// Moves a full-frame segment between absolute overlay lanes and the contiguous base chain.
+/// A lane holds mutually exclusive segments, so a drop onto occupied time is resolved to the
+/// nearest free spot on that lane rather than stacked on top of what is already there.
 /// Undo restores a full segment-list snapshot because base reflow and overlay z-order make a
 /// hand-written inverse easy to get subtly wrong.
 /// </summary>
@@ -431,7 +436,11 @@ public class MoveSegmentOnTrackOperation : SegmentEditOperationBase
                 ? segment.Start
                 : ClampNonNegative(_newStart);
             segment.TrackIndex = targetTrack;
-            segment.Start = ClampToNoGap(model, segment, start);
+            // Overlap resolution comes LAST: the tail clamp can only pull a start backwards
+            // (towards content), so running it afterwards could drop the segment straight back
+            // on top of the neighbour this just cleared.
+            segment.Start = model.ResolveNonOverlappingStart(
+                segment, targetTrack, ClampToNoGap(model, segment, start));
         }
 
         _didMove = true;
