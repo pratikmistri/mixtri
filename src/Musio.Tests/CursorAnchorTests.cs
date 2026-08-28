@@ -139,6 +139,97 @@ public sealed class CursorAnchorTests
         Assert.AreEqual(TimeSpan.FromSeconds(8), model.CursorAnchors[1].Timestamp);
     }
 
+    [TestMethod]
+    public void Retime_MovesTheAnchorInTimeAndKeepsItsPositionAndId()
+    {
+        var model = BuildModel();
+        var undo = new UndoRedoManager(model);
+
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(4), 0.25, 0.75));
+        string id = model.CursorAnchors[0].Id;
+
+        undo.Execute(new RetimeCursorAnchorOperation(id, TimeSpan.FromSeconds(9)));
+
+        Assert.AreEqual(TimeSpan.FromSeconds(9), model.CursorAnchors[0].Timestamp);
+        Assert.AreEqual(0.25, model.CursorAnchors[0].X);
+        Assert.AreEqual(0.75, model.CursorAnchors[0].Y);
+        Assert.AreEqual(id, model.CursorAnchors[0].Id, "re-timing must not re-identify the anchor");
+    }
+
+    [TestMethod]
+    public void Retime_ThenUndo_RestoresThePreviousMoment()
+    {
+        var model = BuildModel();
+        var undo = new UndoRedoManager(model);
+
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(4), 0.25, 0.75));
+        string id = model.CursorAnchors[0].Id;
+
+        undo.Execute(new RetimeCursorAnchorOperation(id, TimeSpan.FromSeconds(9)));
+        undo.Undo();
+
+        Assert.AreEqual(TimeSpan.FromSeconds(4), model.CursorAnchors[0].Timestamp);
+        Assert.AreEqual(id, model.CursorAnchors[0].Id);
+    }
+
+    [TestMethod]
+    public void Retime_KeepsAnchorsSortedByTime()
+    {
+        // CursorPathWarp blends towards NEIGHBOURING anchors, so an out-of-order list would
+        // make a dragged anchor blend towards the wrong one.
+        var model = BuildModel();
+        var undo = new UndoRedoManager(model);
+
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(2), 0.1, 0.1));
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(8), 0.2, 0.2));
+        string earlyId = model.CursorAnchors[0].Id;
+
+        undo.Execute(new RetimeCursorAnchorOperation(earlyId, TimeSpan.FromSeconds(20)));
+
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.CursorAnchors[0].Timestamp);
+        Assert.AreEqual(TimeSpan.FromSeconds(20), model.CursorAnchors[1].Timestamp);
+        Assert.AreEqual(earlyId, model.CursorAnchors[1].Id);
+
+        undo.Undo();
+        Assert.AreEqual(TimeSpan.FromSeconds(2), model.CursorAnchors[0].Timestamp);
+        Assert.AreEqual(TimeSpan.FromSeconds(8), model.CursorAnchors[1].Timestamp);
+    }
+
+    [TestMethod]
+    public void Retime_ToTheSameMoment_ReportsNoChange()
+    {
+        var model = BuildModel();
+        model.CursorAnchors.Add(new CursorAnchor { Id = "a", Timestamp = TimeSpan.FromSeconds(3) });
+
+        var operation = new RetimeCursorAnchorOperation("a", TimeSpan.FromSeconds(3));
+        operation.Execute(model);
+
+        Assert.IsFalse(operation.ChangedModel,
+            "a drag that lands where it started must not become an undo entry that undoes nothing");
+    }
+
+    [TestMethod]
+    public void Retime_AnAnchorThatNoLongerExists_ReportsNoChange()
+    {
+        var model = BuildModel();
+        var operation = new RetimeCursorAnchorOperation("missing", TimeSpan.FromSeconds(3));
+
+        operation.Execute(model);
+
+        Assert.IsFalse(operation.ChangedModel);
+    }
+
+    [TestMethod]
+    public void Retime_ClampsANegativeMomentToZero()
+    {
+        var model = BuildModel();
+        model.CursorAnchors.Add(new CursorAnchor { Id = "a", Timestamp = TimeSpan.FromSeconds(3) });
+
+        new RetimeCursorAnchorOperation("a", TimeSpan.FromSeconds(-5)).Execute(model);
+
+        Assert.AreEqual(TimeSpan.Zero, model.CursorAnchors[0].Timestamp);
+    }
+
     // ── Per-source ownership ──
 
     [TestMethod]

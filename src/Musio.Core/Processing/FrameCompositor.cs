@@ -668,6 +668,22 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// The box the cursor drawn at <paramref name="timeSeconds"/> occupies, relative to its
+    /// hotspot and in output pixels. Resolves the SHAPE the cursor has at that moment, which is
+    /// what makes the box fit — the arrow hangs down-right of its hotspot while the I-beam and
+    /// the resize arrows straddle theirs. See <see cref="CursorRenderer.GetDrawnCursorBounds"/>.
+    /// </summary>
+    public bool TryGetDrawnCursorBounds(double timeSeconds, out Rect bounds)
+    {
+        bounds = default;
+        if (_disposed || _smoothedPositions.Count == 0) return false;
+
+        var shape = _smoothedPositions[ResolveCursorIndex(timeSeconds)].Shape;
+        bounds = _cursorRenderer.GetDrawnCursorBounds(shape);
+        return bounds.Width > 0 && bounds.Height > 0;
+    }
+
+    /// <summary>
     /// Sets the cursor anchors belonging to this compositor's source recording and re-warps the
     /// cursor path. Call this when the user adds, moves, or removes an anchor (including
     /// undo/redo), and once up front when a compositor is created for preview or export.

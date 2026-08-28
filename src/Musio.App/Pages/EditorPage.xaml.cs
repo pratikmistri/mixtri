@@ -381,6 +381,16 @@ public sealed partial class EditorPage : Page
                     Timeline.ClearZoomSelection();
                     Timeline.ClearClipSelection();
                     Timeline.ClearTransitionSelection();
+                    // The segment selection belongs to the model being replaced. Dropped only
+                    // when the new model has no such segment — an import selects the clip it
+                    // just inserted BEFORE this handler is dispatched, and that selection is
+                    // still valid — but never carried over as a name the new timeline has
+                    // never heard of, which silently retargets every edit routed through it.
+                    if (Timeline.SelectedSegmentId is { } keptId &&
+                        !ViewModel.Model.Segments.Any(s => s.Id == keptId))
+                    {
+                        Timeline.ClearSegmentSelection();
+                    }
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
                     UpdateEmptyStateVisibility();
@@ -405,6 +415,8 @@ public sealed partial class EditorPage : Page
 
         // Cursor anchors
         Timeline.CursorAnchorClicked += OnCursorAnchorClicked;
+        Timeline.CursorAnchorMoved += OnCursorAnchorMoved;
+        Timeline.CursorAnchorRemoveRequested += OnCursorAnchorRemoveRequested;
 
         // Video clip selection events
         Timeline.VideoClipSelected += OnVideoClipSelected;
@@ -959,6 +971,29 @@ public sealed partial class EditorPage : Page
         h = sourceH * scaleY;
         x = layout.X + (area.X * outToCanvasX) - (visible.X * scaleX);
         y = layout.Y + (area.Y * outToCanvasY) - (visible.Y * scaleY);
+        return true;
+    }
+
+    /// <summary>
+    /// Canvas pixels per compositor OUTPUT pixel. The projection above answers "where is this
+    /// source point on screen"; this answers "how big is something drawn in output space" —
+    /// which is a different question for anything the compositor draws at a fixed output size
+    /// regardless of zoom, the rendered cursor being the one that matters.
+    /// </summary>
+    private bool TryComputeOutputToCanvasScale(string? sourceFile, out double scaleX, out double scaleY)
+    {
+        scaleX = scaleY = 0;
+
+        if (RendererForSource(sourceFile) is not { } renderer) return false;
+
+        var layout = Preview.FrameLayoutRect;
+        if (layout.Width <= 0 || layout.Height <= 0) return false;
+
+        int outW = renderer.OutputWidth, outH = renderer.OutputHeight;
+        if (outW <= 0 || outH <= 0) return false;
+
+        scaleX = layout.Width / outW;
+        scaleY = layout.Height / outH;
         return true;
     }
 

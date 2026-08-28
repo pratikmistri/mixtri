@@ -436,6 +436,84 @@ public sealed class CursorShapeTests
         }
     }
 
+    /// <summary>
+    /// The reposition affordance frames the DRAWN cursor, so it needs each glyph's box in the
+    /// only origin the rest of the pipeline speaks: the hotspot. These assertions bite because
+    /// the shapes genuinely sit differently around it — the arrow hangs entirely down-right of
+    /// its tip, while the I-beam and resize arrows straddle their centre.
+    /// </summary>
+    [TestMethod]
+    public void CursorGeometryLibrary_ReportsBoundsRelativeToTheHotspot()
+    {
+        CanvasDevice? device = TryCreateDevice();
+        if (device is null)
+        {
+            Assert.Inconclusive("Win2D CanvasDevice unavailable in this environment.");
+            return;
+        }
+
+        using (device)
+        {
+            var glyphs = CursorGeometryLibrary.Build(device);
+            try
+            {
+                foreach (var (shape, glyph) in glyphs)
+                {
+                    var raw = glyph.Geometry.ComputeBounds();
+                    Assert.AreEqual(raw.Width, glyph.Bounds.Width, 0.01,
+                        $"{shape} bounds width should match the geometry's.");
+                    Assert.AreEqual(raw.Height, glyph.Bounds.Height, 0.01,
+                        $"{shape} bounds height should match the geometry's.");
+                    Assert.AreEqual(raw.X - glyph.Hotspot.X, glyph.Bounds.X, 0.01,
+                        $"{shape} bounds X should be measured from the hotspot.");
+                    Assert.AreEqual(raw.Y - glyph.Hotspot.Y, glyph.Bounds.Y, 0.01,
+                        $"{shape} bounds Y should be measured from the hotspot.");
+                }
+
+                // The arrow's hotspot is its tip, so the glyph occupies only the down-right
+                // quadrant: a box centred on the hotspot would miss it entirely.
+                var arrow = glyphs[CursorShape.Arrow].Bounds;
+                Assert.IsTrue(arrow.X >= -0.5 && arrow.Y >= -0.5,
+                    $"Arrow should hang down-right of its tip, got ({arrow.X:F1}, {arrow.Y:F1}).");
+
+                // The I-beam is centred on its hotspot, so its box must straddle it.
+                var ibeam = glyphs[CursorShape.IBeam].Bounds;
+                Assert.IsTrue(ibeam.X < 0 && ibeam.Y < 0,
+                    $"I-beam should straddle its hotspot, got ({ibeam.X:F1}, {ibeam.Y:F1}).");
+                Assert.IsTrue(ibeam.X + ibeam.Width > 0 && ibeam.Y + ibeam.Height > 0,
+                    "I-beam box should extend past its hotspot on both axes.");
+            }
+            finally
+            {
+                foreach (var g in glyphs.Values) g.Geometry.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The drawn box has to scale with <see cref="CursorStyle.Scale"/> — the cursor is drawn in
+    /// output pixels at that multiplier — and must be empty for a cursor that draws nothing, so
+    /// the editor falls back to a fixed target rather than framing a zero-size glyph.
+    /// </summary>
+    [TestMethod]
+    public void GetDrawnCursorBounds_ScalesWithStyle_AndIsEmptyWhenHidden()
+    {
+        using var single = new CursorRenderer(new CursorStyle { Type = CursorType.Default, Scale = 1.0f });
+        using var quad = new CursorRenderer(new CursorStyle { Type = CursorType.Default, Scale = 4.0f });
+        using var hidden = new CursorRenderer(new CursorStyle { Type = CursorType.Hidden, Scale = 4.0f });
+
+        var one = single.GetDrawnCursorBounds(CursorShape.Arrow);
+        var four = quad.GetDrawnCursorBounds(CursorShape.Arrow);
+
+        Assert.IsTrue(one.Width > 0 && one.Height > 0, "A drawn cursor must report a box.");
+        Assert.AreEqual(one.Width * 4, four.Width, 0.01, "Box width should scale with CursorStyle.Scale.");
+        Assert.AreEqual(one.Height * 4, four.Height, 0.01, "Box height should scale with CursorStyle.Scale.");
+
+        var none = hidden.GetDrawnCursorBounds(CursorShape.Arrow);
+        Assert.AreEqual(0, none.Width, "A hidden cursor draws nothing, so it has no box.");
+        Assert.AreEqual(0, none.Height, "A hidden cursor draws nothing, so it has no box.");
+    }
+
     private static CanvasDevice? TryCreateDevice()
     {
         try

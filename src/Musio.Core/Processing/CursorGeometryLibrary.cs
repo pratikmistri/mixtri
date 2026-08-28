@@ -3,6 +3,7 @@ using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Musio.Core.Models;
+using Windows.Foundation;
 
 namespace Musio.Core.Processing;
 
@@ -10,7 +11,15 @@ namespace Musio.Core.Processing;
 /// A cursor glyph: a filled vector silhouette plus the hotspot (in the glyph's own
 /// coordinate space) that should align with the real on-screen pointer point.
 /// </summary>
-public readonly record struct CursorGlyph(CanvasGeometry Geometry, Vector2 Hotspot);
+/// <param name="Bounds">
+/// The glyph's bounding box expressed RELATIVE TO ITS HOTSPOT, in the same units the
+/// geometry is drawn in (i.e. before <see cref="Models.CursorStyle.Scale"/>). This is what an
+/// editing affordance needs in order to frame the drawn cursor: the hotspot is the only point
+/// the rest of the pipeline knows about, and every shape sits differently around it — the
+/// arrow's is its tip, so the whole glyph hangs down-right, while the I-beam and the resize
+/// arrows are centred on theirs.
+/// </param>
+public readonly record struct CursorGlyph(CanvasGeometry Geometry, Vector2 Hotspot, Rect Bounds);
 
 /// <summary>
 /// Builds <see cref="CanvasGeometry"/> glyphs for the supported <see cref="CursorShape"/>
@@ -109,7 +118,7 @@ public static class CursorGeometryLibrary
                     geometry = scaled;
                     hotspot *= def.Scale;
                 }
-                result[shape] = new CursorGlyph(geometry, hotspot);
+                result[shape] = new CursorGlyph(geometry, hotspot, ComputeHotspotRelativeBounds(geometry, hotspot));
             }
         }
         catch
@@ -121,6 +130,17 @@ public static class CursorGeometryLibrary
             throw;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Measures a built glyph and re-expresses its box relative to the hotspot, which is the
+    /// origin every consumer of a cursor position works in. Read from the geometry rather than
+    /// declared beside the path data, so re-authoring a shape cannot leave a stale box behind.
+    /// </summary>
+    private static Rect ComputeHotspotRelativeBounds(CanvasGeometry geometry, Vector2 hotspot)
+    {
+        var bounds = geometry.ComputeBounds();
+        return new Rect(bounds.X - hotspot.X, bounds.Y - hotspot.Y, bounds.Width, bounds.Height);
     }
 
     /// <summary>

@@ -5,6 +5,7 @@ using Musio.Core.Processing;
 using Musio.Core.Timeline;
 using Musio_App.Controls;
 using Musio_App.Services;
+using Windows.Foundation;
 
 namespace Musio_App.Pages;
 
@@ -58,6 +59,30 @@ public sealed partial class EditorPage
     private double _cursorAnchorNormY;
 
     /// <summary>
+    /// The grab box in canvas pixels, kept from the last <see cref="UpdateCursorAnchorHandle"/>
+    /// so a press can be tested against exactly the outline the user can see.
+    /// </summary>
+    private Rect _cursorAnchorHandleRect;
+
+    /// <summary>
+    /// Canvas-pixel offset from the pointer to the cursor's hotspot, captured when a drag
+    /// starts inside the box. Preserving it is what makes grabbing the cursor feel like moving
+    /// an object rather than teleporting it: without it, the hotspot would snap under the
+    /// pointer on the first sample and the glyph would jump out from under the user's grip.
+    /// </summary>
+    private double _cursorAnchorGrabOffsetX;
+    private double _cursorAnchorGrabOffsetY;
+
+    /// <summary>Breathing room between the drawn glyph and the outline that frames it.</summary>
+    private const double CursorHandlePadding = 4;
+
+    /// <summary>
+    /// Floor on the grab box, so a small cursor (or one the pipeline cannot measure) still
+    /// offers a target big enough to hit.
+    /// </summary>
+    private const double CursorHandleMinSize = 28;
+
+    /// <summary>
     /// How close, in source time, an existing anchor has to be to the playhead before entering
     /// the mode edits it rather than creating a second one beside it. Anchors closer together
     /// than this would fight each other for the same frame.
@@ -75,6 +100,69 @@ public sealed partial class EditorPage
         }
 
         EnterCursorAnchorEditMode();
+    }
+
+    /// <summary>
+    /// Double-clicking the pointer in the preview opens reposition mode on it, so the gesture
+    /// starts on the thing being edited rather than in a side pane.
+    /// </summary>
+    /// <remarks>
+    /// Double- rather than single-click deliberately: a single click on the preview is free for
+    /// other uses, and a mode that opened on any stray click over the pointer would be a
+    /// surprise. Bound on <c>Preview</c>, which shares its grid cell with the overlay canvases —
+    /// the same assumption <see cref="TryComputeComposedSourceLayout"/> makes — so no coordinate
+    /// translation is needed. While a mode IS open its overlay is visible and hit-testable, so
+    /// this never competes with an in-flight drag.
+    /// </remarks>
+    private void Preview_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (_cursorAnchorEditMode || _zoomRegionEditMode) return;
+        if (!CursorPathIsRepositionable) return;
+
+        if (!TryResolveRenderedCursorBox(out var box)) return;
+        if (!RectContains(box, e.GetPosition(Preview))) return;
+
+        PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Cursor, true);
+        PropertiesPanel.ShowPane(PropertyPaneKind.Cursor);
+
+        EnterCursorAnchorEditMode();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// The box the pointer occupies on screen right now, WITHOUT binding the mode to it — the
+    /// hit test has to be able to say "no" and leave the editor exactly as it found it.
+    /// </summary>
+    private bool TryResolveRenderedCursorBox(out Rect box)
+    {
+        box = default;
+
+        if (GetPlayheadSourceTimeForOverlay() is not { } placement) return false;
+        var (sourceFile, sourceTime) = placement;
+
+        if (RendererForSource(sourceFile) is not { } renderer
+            || !renderer.TryGetCursorPosition(sourceTime, out double px, out double py))
+        {
+            return false;
+        }
+
+        ResolveOverlaySourceSize(sourceFile, out double sourceW, out double sourceH);
+        if (sourceW <= 0 || sourceH <= 0) return false;
+
+        var (nx, ny) = ResolveDrawnCursorNormalizedPosition(
+            FindCursorAnchorNear(sourceFile, sourceTime), px, py, sourceW, sourceH);
+
+        if (!TryComputeComposedSourceLayout(
+                sourceFile, sourceW, sourceH,
+                out double fx, out double fy, out double fw, out double fh)
+            || fw <= 0 || fh <= 0)
+        {
+            return false;
+        }
+
+        box = ComputeCursorHandleBox(
+            sourceFile, sourceTime, fx + (nx * fw), fy + (ny * fh));
+        return box.Width > 0 && box.Height > 0;
     }
 
     private void EnterCursorAnchorEditMode()
@@ -132,14 +220,7 @@ public sealed partial class EditorPage
             return false;
         }
 
-        var project = ProjectService.Instance.CurrentProject;
-        var owning = SegmentForSource(sourceFile);
-        _cursorAnchorSourceW = owning is { SourceWidth: > 0 }
-            ? owning.SourceWidth
-            : (project?.Width > 0 ? project.Width : 1920);
-        _cursorAnchorSourceH = owning is { SourceHeight: > 0 }
-            ? owning.SourceHeight
-            : (project?.Height > 0 ? project.Height : 1080);
+        ResolveOverlaySourceSize(sourceFile, out _cursorAnchorSourceW, out _cursorAnchorSourceH);
 
         _cursorAnchorSourceFile = sourceFile;
         _cursorAnchorSourceTime = sourceTime;
@@ -150,18 +231,41 @@ public sealed partial class EditorPage
         var existing = FindCursorAnchorNear(sourceFile, sourceTime);
         _cursorAnchorId = existing?.Id;
 
-        if (existing is not null)
-        {
-            _cursorAnchorNormX = existing.X;
-            _cursorAnchorNormY = existing.Y;
-        }
-        else
-        {
-            _cursorAnchorNormX = Math.Clamp(px / _cursorAnchorSourceW, 0, 1);
-            _cursorAnchorNormY = Math.Clamp(py / _cursorAnchorSourceH, 0, 1);
-        }
+        (_cursorAnchorNormX, _cursorAnchorNormY) = ResolveDrawnCursorNormalizedPosition(
+            existing, px, py, _cursorAnchorSourceW, _cursorAnchorSourceH);
 
         return true;
+    }
+
+    /// <summary>
+    /// The source dimensions an overlay works in for <paramref name="sourceFile"/>, falling back
+    /// to the project's and finally to 1080p so a projection is always possible.
+    /// </summary>
+    private void ResolveOverlaySourceSize(string? sourceFile, out double width, out double height)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var owning = SegmentForSource(sourceFile);
+
+        width = owning is { SourceWidth: > 0 }
+            ? owning.SourceWidth
+            : (project?.Width > 0 ? project.Width : 1920);
+        height = owning is { SourceHeight: > 0 }
+            ? owning.SourceHeight
+            : (project?.Height > 0 ? project.Height : 1080);
+    }
+
+    /// <summary>
+    /// Where the pointer is actually DRAWN at a moment, normalized to the source frame: an
+    /// anchor already claiming that moment wins over the recorded path, because the anchor is
+    /// what the frame on screen shows. Shared by the binding and the hit test so a double-click
+    /// cannot aim at a different pointer than the one the handle will appear around.
+    /// </summary>
+    private static (double X, double Y) ResolveDrawnCursorNormalizedPosition(
+        CursorAnchor? existing, double recordedX, double recordedY, double sourceW, double sourceH)
+    {
+        if (existing is not null) return (existing.X, existing.Y);
+
+        return (Math.Clamp(recordedX / sourceW, 0, 1), Math.Clamp(recordedY / sourceH, 0, 1));
     }
 
     /// <summary>
@@ -231,13 +335,49 @@ public sealed partial class EditorPage
     {
         if (!_cursorAnchorEditMode) return;
 
+        var point = e.GetCurrentPoint(CursorAnchorCanvas).Position;
+
         _isDraggingCursorAnchor = true;
         CursorAnchorCanvas.CapturePointer(e.Pointer);
 
-        // Pressing anywhere moves the cursor there: the handle is a target, not a grab-only
-        // widget, and requiring a precise grab on a 34px ring makes small corrections fiddly.
-        ApplyCursorAnchorDrag(e.GetCurrentPoint(CursorAnchorCanvas).Position);
+        // Grabbing the cursor's own box moves it FROM where it is, keeping the grip offset so
+        // the glyph doesn't jump out from under the pointer. Pressing anywhere else still sends
+        // it there outright: the box is a handle, not a gate, and demanding a precise grab makes
+        // coarse placement needlessly fiddly.
+        if (_cursorAnchorHandleRect.Width > 0 && RectContains(_cursorAnchorHandleRect, point))
+        {
+            var (hotspotX, hotspotY) = CurrentCursorAnchorHotspot();
+            _cursorAnchorGrabOffsetX = hotspotX - point.X;
+            _cursorAnchorGrabOffsetY = hotspotY - point.Y;
+        }
+        else
+        {
+            _cursorAnchorGrabOffsetX = 0;
+            _cursorAnchorGrabOffsetY = 0;
+            ApplyCursorAnchorDrag(point);
+        }
+
         e.Handled = true;
+    }
+
+    private static bool RectContains(Rect rect, Windows.Foundation.Point point) =>
+        point.X >= rect.X && point.X <= rect.X + rect.Width &&
+        point.Y >= rect.Y && point.Y <= rect.Y + rect.Height;
+
+    /// <summary>
+    /// Where the cursor's hotspot currently sits on the overlay canvas, from the same
+    /// projection <see cref="UpdateCursorAnchorHandle"/> draws through.
+    /// </summary>
+    private (double X, double Y) CurrentCursorAnchorHotspot()
+    {
+        if (!TryComputeComposedSourceLayout(
+                _cursorAnchorSourceFile, _cursorAnchorSourceW, _cursorAnchorSourceH,
+                out double fx, out double fy, out double fw, out double fh))
+        {
+            return (0, 0);
+        }
+
+        return (fx + (_cursorAnchorNormX * fw), fy + (_cursorAnchorNormY * fh));
     }
 
     private void CursorAnchorCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
@@ -281,7 +421,11 @@ public sealed partial class EditorPage
     /// </summary>
     private void ApplyCursorAnchorDrag(Windows.Foundation.Point point)
     {
-        if (!TryCanvasPointToNormalizedSource(point, out double nx, out double ny)) return;
+        var grabbed = new Windows.Foundation.Point(
+            point.X + _cursorAnchorGrabOffsetX,
+            point.Y + _cursorAnchorGrabOffsetY);
+
+        if (!TryCanvasPointToNormalizedSource(grabbed, out double nx, out double ny)) return;
 
         _cursorAnchorNormX = nx;
         _cursorAnchorNormY = ny;
@@ -356,7 +500,7 @@ public sealed partial class EditorPage
 
     private void UpdateCursorAnchorHandle()
     {
-        if (!_cursorAnchorEditMode || CursorAnchorHandle is null || CursorAnchorHandleDot is null) return;
+        if (!_cursorAnchorEditMode || CursorAnchorHandle is null) return;
 
         if (!TryComputeComposedSourceLayout(
                 _cursorAnchorSourceFile, _cursorAnchorSourceW, _cursorAnchorSourceH,
@@ -366,20 +510,56 @@ public sealed partial class EditorPage
             // The compositor has not drawn yet. Hiding rather than parking the handle at the
             // origin avoids pointing at a place the cursor is not.
             CursorAnchorHandle.Visibility = Visibility.Collapsed;
-            CursorAnchorHandleDot.Visibility = Visibility.Collapsed;
+            _cursorAnchorHandleRect = default;
             return;
         }
 
-        double x = fx + (_cursorAnchorNormX * fw);
-        double y = fy + (_cursorAnchorNormY * fh);
+        double hotspotX = fx + (_cursorAnchorNormX * fw);
+        double hotspotY = fy + (_cursorAnchorNormY * fh);
 
-        Canvas.SetLeft(CursorAnchorHandle, x - (CursorAnchorHandle.Width / 2));
-        Canvas.SetTop(CursorAnchorHandle, y - (CursorAnchorHandle.Height / 2));
-        Canvas.SetLeft(CursorAnchorHandleDot, x - (CursorAnchorHandleDot.Width / 2));
-        Canvas.SetTop(CursorAnchorHandleDot, y - (CursorAnchorHandleDot.Height / 2));
+        var box = ComputeCursorHandleBox(_cursorAnchorSourceFile, _cursorAnchorSourceTime, hotspotX, hotspotY);
+        _cursorAnchorHandleRect = box;
 
+        CursorAnchorHandle.Width = box.Width;
+        CursorAnchorHandle.Height = box.Height;
+        Canvas.SetLeft(CursorAnchorHandle, box.X);
+        Canvas.SetTop(CursorAnchorHandle, box.Y);
         CursorAnchorHandle.Visibility = Visibility.Visible;
-        CursorAnchorHandleDot.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// The box to draw and grab, in canvas pixels: the cursor's own drawn bounds around the
+    /// hotspot, inflated a little so the outline sits clear of the glyph rather than clipping it.
+    /// </summary>
+    /// <remarks>
+    /// The cursor is drawn in the compositor's OUTPUT space at <c>CursorStyle.Scale</c> and is
+    /// NOT scaled by the zoom, so the box converts through the output→canvas factor rather than
+    /// the source→canvas one the hotspot uses. Falls back to a fixed square centred on the
+    /// hotspot whenever the pipeline cannot report bounds, so the affordance never disappears —
+    /// an anchor with nothing to grab reads as a broken overlay.
+    /// </remarks>
+    private Rect ComputeCursorHandleBox(
+        string? sourceFile, TimeSpan sourceTime, double hotspotX, double hotspotY)
+    {
+        if (RendererForSource(sourceFile) is { } renderer
+            && renderer.TryGetDrawnCursorBounds(sourceTime, out var drawn)
+            && TryComputeOutputToCanvasScale(sourceFile, out double sx, out double sy))
+        {
+            double w = (drawn.Width * sx) + (2 * CursorHandlePadding);
+            double h = (drawn.Height * sy) + (2 * CursorHandlePadding);
+
+            if (w >= CursorHandleMinSize && h >= CursorHandleMinSize)
+            {
+                return new Rect(
+                    hotspotX + (drawn.X * sx) - CursorHandlePadding,
+                    hotspotY + (drawn.Y * sy) - CursorHandlePadding,
+                    w, h);
+            }
+        }
+
+        return new Rect(
+            hotspotX - (CursorHandleMinSize / 2), hotspotY - (CursorHandleMinSize / 2),
+            CursorHandleMinSize, CursorHandleMinSize);
     }
 
     // ─── Model helpers ──────────────────────────────────────────────────
@@ -536,6 +716,42 @@ public sealed partial class EditorPage
         EnterCursorAnchorEditMode();
     }
 
+    /// <summary>
+    /// Commits a marker drag: the anchor keeps where it puts the pointer in the frame and moves
+    /// to a different moment of its own recording.
+    /// </summary>
+    /// <remarks>
+    /// The reposition overlay is bound to ONE moment (<see cref="_cursorAnchorSourceTime"/>,
+    /// resolved from the playhead). Re-timing the anchor it is editing would leave it authoring
+    /// a frame the anchor no longer belongs to, so the mode is closed first; the marker is still
+    /// there to click when the user wants it back.
+    /// </remarks>
+    private void OnCursorAnchorMoved(object? sender, (string Id, TimeSpan NewTimestamp) e)
+    {
+        if (_cursorAnchorEditMode && _cursorAnchorId == e.Id) ExitCursorAnchorEditMode();
+
+        // OnUndoRedoStateChanged re-pushes the committed anchor list onto every renderer and
+        // repaints the lane, so nothing else has to be resynced here.
+        ViewModel.UndoRedoManager.Execute(new RetimeCursorAnchorOperation(e.Id, e.NewTimestamp));
+    }
+
+    private void OnCursorAnchorRemoveRequested(object? sender, string anchorId) =>
+        RemoveCursorAnchor(anchorId);
+
+    /// <summary>
+    /// Removes an anchor selected on the timeline — the marker's context menu and the Delete
+    /// key share this. Distinct from <see cref="CursorAnchorRemove_Click"/>, which removes the
+    /// anchor the reposition overlay is currently bound to and therefore has to leave that
+    /// overlay open and re-based on the recorded path.
+    /// </summary>
+    private void RemoveCursorAnchor(string anchorId)
+    {
+        if (_cursorAnchorEditMode && _cursorAnchorId == anchorId) ExitCursorAnchorEditMode();
+
+        ViewModel.UndoRedoManager.Execute(new RemoveCursorAnchorOperation(anchorId));
+        Timeline.ClearCursorAnchorSelection();
+    }
+
     // ─── Pane chrome ────────────────────────────────────────────────────
 
     private void UpdateCursorAnchorChrome()
@@ -554,6 +770,25 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
+    /// Whether the current cursor style draws the recorded path at all, and so whether an anchor
+    /// against it would mean anything. Touch renders at raw click points and Hidden renders
+    /// nothing, so both would have the user authoring an edit against something invisible.
+    /// </summary>
+    /// <remarks>
+    /// One predicate, two gates: the pane's toggle and the preview double-click. Asking the
+    /// question twice is how they would drift into disagreeing about when the mode is offered.
+    /// </remarks>
+    private bool CursorPathIsRepositionable
+    {
+        get
+        {
+            var config = ProjectService.Instance.CurrentComposition;
+            var type = (SelectedVideoSegment?.CursorStyleOverride ?? config?.Cursor)?.Type ?? CursorType.Default;
+            return type is not (CursorType.Touch or CursorType.Hidden);
+        }
+    }
+
+    /// <summary>
     /// Keeps the pane's toggle in step with the mode, and disables it entirely for cursor types
     /// that do not draw the recorded path: Touch renders at raw click points and Hidden renders
     /// nothing, so an anchor would be authored against something invisible.
@@ -562,9 +797,7 @@ public sealed partial class EditorPage
     {
         if (CursorAnchorEditButton is null) return;
 
-        var config = ProjectService.Instance.CurrentComposition;
-        var type = (SelectedVideoSegment?.CursorStyleOverride ?? config?.Cursor)?.Type ?? CursorType.Default;
-        bool drawsPath = type is not (CursorType.Touch or CursorType.Hidden);
+        bool drawsPath = CursorPathIsRepositionable;
 
         CursorAnchorEditButton.IsEnabled = drawsPath;
         CursorAnchorEditButton.Content = _cursorAnchorEditMode ? "Done repositioning" : "Reposition cursor";

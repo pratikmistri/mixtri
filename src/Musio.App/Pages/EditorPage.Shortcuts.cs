@@ -116,6 +116,13 @@ public sealed partial class EditorPage
             return;
         }
 
+        // If a cursor keyframe (mouse-move anchor) is selected on the cursor lane, remove it.
+        if (Timeline.SelectedCursorAnchorId is { } cursorAnchorId)
+        {
+            RemoveCursorAnchor(cursorAnchorId);
+            return;
+        }
+
         // If a zoom segment is selected, remove it instead of deleting a clip segment
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {
@@ -126,8 +133,11 @@ public sealed partial class EditorPage
             return;
         }
 
-        // If a primary-track segment is selected, ripple-delete it.
-        if (_selectedPrimarySegmentId is { } segId &&
+        // If a primary-track segment is selected, ripple-delete it. The timeline control owns
+        // this selection; the page's mirror is only a fallback for the rare selection set
+        // before the control was told about it.
+        var selectedSegmentId = Timeline.SelectedSegmentId ?? _selectedPrimarySegmentId;
+        if (selectedSegmentId is { } segId &&
             ViewModel.Model.Segments.Any(s => s.Id == segId))
         {
             DeletePrimarySegment(segId);
@@ -144,6 +154,12 @@ public sealed partial class EditorPage
                 DeletePrimarySegment(atPlayhead.Id);
                 return;
             }
+
+            // Selected nothing, and the playhead is over nothing. Silent no-ops here read as
+            // "the Delete button is broken", so say so.
+            Musio.Core.Diagnostics.DiagLog.Write(
+                "Editor",
+                $"delete resolved no target: no selection and no segment at {Timeline.PlayheadPosition}");
         }
 
         ViewModel.DeleteSelectedCommand.Execute(null);

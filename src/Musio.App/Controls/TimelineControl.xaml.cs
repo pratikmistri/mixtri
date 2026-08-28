@@ -38,7 +38,7 @@ public sealed partial class TimelineControl : UserControl
         set => SetValue(PlayheadPositionProperty, value);
     }
 
-    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, TextSlideWindowInEdge, TextSlideWindowOutEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge }
+    private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, TextSlideWindowInEdge, TextSlideWindowOutEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge, CursorAnchorBody }
     private DragMode _dragMode = DragMode.None;
 
     // ── Primary-track (video / text slide) segment drag state ──
@@ -2555,7 +2555,7 @@ public sealed partial class TimelineControl : UserControl
     // subset of Clear*Selection() calls.
 
     /// <summary>The distinct selection surfaces this control exposes. See <see cref="ClearOtherSelections"/>.</summary>
-    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio }
+    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio, CursorAnchor }
 
     /// <summary>
     /// Re-entrancy guard for <see cref="ClearOtherSelections"/>. EditorPage's
@@ -2586,6 +2586,7 @@ public sealed partial class TimelineControl : UserControl
             if (keep != SelectionKind.TextOverlay) ClearTextOverlaySelection();
             if (keep != SelectionKind.Transition) ClearTransitionSelection();
             if (keep != SelectionKind.InsertedAudio) ClearInsertedAudioSelection();
+            if (keep != SelectionKind.CursorAnchor) ClearCursorAnchorSelection();
         }
         finally
         {
@@ -2611,14 +2612,43 @@ public sealed partial class TimelineControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Clears the primary-track segment selection without touching any other selection kind —
+    /// for callers that must drop a segment that no longer exists while leaving the zoom,
+    /// camera, overlay and inserted-audio selections exactly as the user left them.
+    /// </summary>
+    public void ClearSegmentSelection()
+    {
+        if (_selectedSegmentId is null) return;
+        ClearSegmentSelectionOnly();
+        InvalidateAudioLanes();
+    }
+
     /// <summary>Currently selected segment ID for text slide highlighting.</summary>
     private string? _selectedSegmentId;
 
+    /// <summary>
+    /// The primary-track segment this control currently paints as selected, or null. This is
+    /// the single source of truth for that question — see <see cref="SelectSegment"/>.
+    /// </summary>
+    public string? SelectedSegmentId => _selectedSegmentId;
+
     /// <summary>Sets the selected segment ID (called from EditorPage).</summary>
+    /// <remarks>
+    /// Raises <see cref="SegmentSelected"/> on a real change, exactly as the pointer paths and
+    /// <see cref="ClearSegmentSelectionOnly"/> do. Staying silent here let the control paint a
+    /// segment as selected while EditorPage's mirror of that selection still named a different
+    /// one — or one a split had already replaced — and Delete then fell back to the segment
+    /// under the playhead: it removed the wrong block, or silently nothing at all when the
+    /// playhead sat past the end. Every programmatic re-selection after a move/trim/speed/
+    /// track-move commit goes through here, so this is the one place that can keep them in step.
+    /// </remarks>
     public void SelectSegment(string? segmentId)
     {
         ClearOtherSelections(segmentId is null ? SelectionKind.None : SelectionKind.Segment);
+        bool changed = _selectedSegmentId != segmentId;
         _selectedSegmentId = segmentId;
+        if (changed) SegmentSelected?.Invoke(this, segmentId);
         VideoTrackCanvas?.Invalidate();
 
         // The recorded-audio lanes outline the selected segment's block too, so they have to
@@ -4875,10 +4905,60 @@ public sealed partial class TimelineControl : UserControl
     private const float CursorAnchorHitRadius = 8f;
 
     /// <summary>
+    /// How far, in pixels, the pointer has to travel before a press on an anchor marker counts
+    /// as a re-time rather than a click. Below it the gesture stays a click, which is what opens
+    /// the reposition overlay — so a slightly shaky click never silently moves the anchor.
+    /// </summary>
+    private const double CursorAnchorDragThreshold = 3.0;
+
+    // ── Cursor anchor selection & drag state ──
+    private string? _selectedCursorAnchorId;
+    private double _cursorAnchorDragStartX = double.NaN;
+    private double _cursorAnchorDragCurrentX = double.NaN;
+    private bool _cursorAnchorDragMoved;
+
+    /// <summary>The Id of the currently selected cursor anchor (mouse-move keyframe), or null.</summary>
+    public string? SelectedCursorAnchorId => _selectedCursorAnchorId;
+
+    /// <summary>Raised when a cursor anchor is selected or deselected (null = deselected).</summary>
+    public event EventHandler<string?>? CursorAnchorSelected;
+
+    /// <summary>
+    /// Raised when an anchor marker drag completes. Carries the anchor Id and its new
+    /// timestamp in the OWNING recording's source time — the same domain
+    /// <see cref="CursorAnchor.Timestamp"/> is stored in.
+    /// </summary>
+    public event EventHandler<(string Id, TimeSpan NewTimestamp)>? CursorAnchorMoved;
+
+    /// <summary>Raised when the user asks for an anchor to be removed (right-click menu).</summary>
+    public event EventHandler<string>? CursorAnchorRemoveRequested;
+
+    /// <summary>
     /// Raised when the user clicks a cursor anchor marker. The host seeks to it and opens the
     /// reposition overlay; the control itself owns no anchor state.
     /// </summary>
     public event EventHandler<CursorAnchor>? CursorAnchorClicked;
+
+    /// <summary>Selects an anchor by Id (called from EditorPage), or clears with null.</summary>
+    public void SelectCursorAnchor(string? anchorId)
+    {
+        ClearOtherSelections(anchorId is null ? SelectionKind.None : SelectionKind.CursorAnchor);
+        bool changed = _selectedCursorAnchorId != anchorId;
+        _selectedCursorAnchorId = anchorId;
+        if (changed) CursorAnchorSelected?.Invoke(this, anchorId);
+        CursorTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>Clears the selected cursor anchor, mirroring <see cref="ClearZoomSelection"/> et al.</summary>
+    public void ClearCursorAnchorSelection()
+    {
+        if (_selectedCursorAnchorId is not null)
+        {
+            _selectedCursorAnchorId = null;
+            CursorAnchorSelected?.Invoke(this, null);
+            CursorTrackCanvas?.Invalidate();
+        }
+    }
 
     /// <summary>
     /// Draws a marker for every cursor anchor over the lane's position curves, so the moments
@@ -4886,17 +4966,25 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private void DrawCursorAnchors(CanvasDrawingSession ds, TimelineModel model, float w, float h)
     {
-        foreach (var (anchor, x) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, rawX) in EnumerateCursorAnchorPositions(model))
         {
+            // A drag in flight is previewed at the pointer, not at the committed timestamp —
+            // the model is only touched once, on release.
+            double x = anchor.Id == _selectedCursorAnchorId && _cursorAnchorDragMoved
+                       && !double.IsNaN(_cursorAnchorDragCurrentX)
+                ? _cursorAnchorDragCurrentX
+                : rawX;
+
             if (x < -CursorAnchorHitRadius || x > w + CursorAnchorHitRadius) continue;
 
+            bool isSelected = anchor.Id == _selectedCursorAnchorId;
             float px = (float)x;
-            ds.DrawLine(px, 0, px, h, CursorAnchorLineColor, 1f);
+            ds.DrawLine(px, 0, px, h, CursorAnchorLineColor, isSelected ? 2f : 1f);
 
             // A diamond rather than another circle: the lane is already full of round click
             // dots, and an anchor is a different kind of thing.
             float cy = h / 2;
-            const float r = 5f;
+            float r = isSelected ? 7f : 5f;
             using var diamond = CanvasGeometry.CreatePolygon(ds, [
                 new System.Numerics.Vector2(px, cy - r),
                 new System.Numerics.Vector2(px + r, cy),
@@ -4904,7 +4992,7 @@ public sealed partial class TimelineControl : UserControl
                 new System.Numerics.Vector2(px - r, cy),
             ]);
             ds.FillGeometry(diamond, CursorAnchorFillColor);
-            ds.DrawGeometry(diamond, ClickStrokeColor, 1f);
+            ds.DrawGeometry(diamond, isSelected ? VideoClipSelectedBorder : ClickStrokeColor, isSelected ? 2f : 1f);
         }
     }
 
@@ -4954,26 +5042,181 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Clicking an anchor marker opens it; clicking anywhere else on the lane scrubs, exactly
-    /// as this track did before markers existed.
+    /// Presses on an anchor marker select it and arm a re-time drag; presses anywhere else on
+    /// the lane deselect and scrub, exactly as this track did before markers existed.
     /// </summary>
+    /// <remarks>
+    /// The click that opens the reposition overlay is raised on RELEASE, not here — a press
+    /// cannot yet know whether the user is clicking or starting to drag, and opening a modal
+    /// preview overlay under a live pointer would steal the drag.
+    /// </remarks>
     private void CursorTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (Model is { } model && sender is CanvasControl canvas)
         {
-            double x = e.GetCurrentPoint(canvas).Position.X;
-
-            foreach (var (anchor, markerX) in EnumerateCursorAnchorPositions(model))
+            if (HitTestCursorAnchor(model, e.GetCurrentPoint(canvas).Position.X) is { } anchor)
             {
-                if (Math.Abs(markerX - x) > CursorAnchorHitRadius) continue;
+                ClearOtherSelections(SelectionKind.CursorAnchor);
+                bool changed = _selectedCursorAnchorId != anchor.Id;
+                _selectedCursorAnchorId = anchor.Id;
+                if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
 
-                CursorAnchorClicked?.Invoke(this, anchor);
+                _cursorAnchorDragStartX = e.GetCurrentPoint(canvas).Position.X;
+                _cursorAnchorDragCurrentX = _cursorAnchorDragStartX;
+                _cursorAnchorDragMoved = false;
+                _dragMode = DragMode.CursorAnchorBody;
+
+                canvas.CapturePointer(e.Pointer);
+                canvas.Invalidate();
                 e.Handled = true;
                 return;
             }
+
+            // Empty lane: drop every selection, including this one.
+            ClearOtherSelections(SelectionKind.None);
         }
 
         Track_PointerPressed(sender, e);
+    }
+
+    private void CursorTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+        var pos = e.GetCurrentPoint(canvas).Position;
+
+        switch (_dragMode)
+        {
+            case DragMode.CursorAnchorBody:
+                _cursorAnchorDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                if (!_cursorAnchorDragMoved &&
+                    Math.Abs(pos.X - _cursorAnchorDragStartX) >= CursorAnchorDragThreshold)
+                {
+                    _cursorAnchorDragMoved = true;
+                }
+                SetCursor(InputSystemCursorShape.SizeWestEast);
+                canvas.Invalidate();
+                break;
+
+            case DragMode.Playhead:
+                PlayheadPosition = XToTime(pos.X);
+                break;
+
+            case DragMode.None:
+                SetCursor(Model is { } model && HitTestCursorAnchor(model, pos.X) is not null
+                    ? InputSystemCursorShape.SizeWestEast
+                    : InputSystemCursorShape.Arrow);
+                break;
+        }
+    }
+
+    private void CursorTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas)
+        {
+            _dragMode = DragMode.None;
+            return;
+        }
+
+        if (_dragMode == DragMode.CursorAnchorBody && _selectedCursorAnchorId is { } anchorId)
+        {
+            var anchor = Model?.CursorAnchors.FirstOrDefault(a => a.Id == anchorId);
+
+            if (anchor is null)
+            {
+                // The anchor went away mid-gesture (undo on another thread, project reload):
+                // drop the drag rather than committing a move against a stale id.
+            }
+            else if (_cursorAnchorDragMoved)
+            {
+                // Map the pointer straight through the anchor's OWN file-time domain rather
+                // than applying a pixel delta: a marker is a point, so the ≤8px grab offset is
+                // not worth preserving, and a direct mapping always lands on a time some
+                // segment of that file actually shows (XToKeyframeFileTime clamps to the
+                // nearest segment edge), so the marker can never be dragged out of sight.
+                var newTimestamp = XToKeyframeFileTime(
+                    Math.Clamp(_cursorAnchorDragCurrentX, 0, canvas.ActualWidth),
+                    anchor.SourceVideoFilePath);
+
+                if (newTimestamp is not null && newTimestamp.Value != anchor.Timestamp)
+                    CursorAnchorMoved?.Invoke(this, (anchorId, newTimestamp.Value));
+                // else: unmappable in this file's time domain — reject the move and leave the
+                // anchor where it was.
+            }
+            else
+            {
+                CursorAnchorClicked?.Invoke(this, anchor);
+            }
+        }
+
+        ResetCursorAnchorDrag();
+        _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
+        canvas.ReleasePointerCapture(e.Pointer);
+        canvas.Invalidate();
+    }
+
+    private void CursorTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        // Also covers the empty-lane scrub started by Track_PointerPressed: leaving _dragMode
+        // on Playhead would keep every later hover over this lane dragging the playhead.
+        if (_dragMode is not (DragMode.CursorAnchorBody or DragMode.Playhead)) return;
+
+        ResetCursorAnchorDrag();
+        _dragMode = DragMode.None;
+        SetCursor(InputSystemCursorShape.Arrow);
+        CursorTrackCanvas?.Invalidate();
+    }
+
+    private void ResetCursorAnchorDrag()
+    {
+        _cursorAnchorDragStartX = double.NaN;
+        _cursorAnchorDragCurrentX = double.NaN;
+        _cursorAnchorDragMoved = false;
+    }
+
+    private void CursorTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (Model is not { } model || sender is not CanvasControl canvas) return;
+
+        var pos = e.GetPosition(canvas);
+        if (HitTestCursorAnchor(model, pos.X) is not { } anchor) return;
+
+        ClearOtherSelections(SelectionKind.CursorAnchor);
+        bool changed = _selectedCursorAnchorId != anchor.Id;
+        _selectedCursorAnchorId = anchor.Id;
+        if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
+        canvas.Invalidate();
+
+        var menu = new MenuFlyout();
+        var removeItem = new MenuFlyoutItem
+        {
+            Text = "Remove Cursor Move",
+            Icon = new FontIcon { Glyph = "\uE74D" },
+        };
+        removeItem.Click += (_, _) => CursorAnchorRemoveRequested?.Invoke(this, anchor.Id);
+        menu.Items.Add(removeItem);
+        menu.ShowAt(canvas, pos);
+    }
+
+    /// <summary>
+    /// The anchor whose marker is under <paramref name="x"/>, or null. Nearest-first so
+    /// overlapping markers resolve to the one the user aimed at.
+    /// </summary>
+    private CursorAnchor? HitTestCursorAnchor(TimelineModel model, double x)
+    {
+        CursorAnchor? best = null;
+        double bestDistance = double.MaxValue;
+
+        foreach (var (anchor, markerX) in EnumerateCursorAnchorPositions(model))
+        {
+            double distance = Math.Abs(markerX - x);
+            if (distance > CursorAnchorHitRadius || distance >= bestDistance) continue;
+
+            best = anchor;
+            bestDistance = distance;
+        }
+
+        return best;
     }
 
     /// <summary>

@@ -100,6 +100,69 @@ public class MoveCursorAnchorOperation : IEditOperation
     }
 }
 
+/// <summary>
+/// Moves an existing cursor anchor to a different moment, keeping its position.
+/// </summary>
+/// <remarks>
+/// The counterpart of <see cref="MoveCursorAnchorOperation"/>, which moves the anchor in the
+/// FRAME. This one moves it in TIME, and is what a drag of the anchor's marker along the
+/// timeline's cursor lane commits. The list is re-sorted afterwards because
+/// <see cref="AddCursorAnchorOperation"/> establishes timestamp order and
+/// <c>CursorPathWarp</c> builds its control points from neighbouring anchors — an
+/// out-of-order list would blend towards the wrong neighbour.
+/// </remarks>
+public class RetimeCursorAnchorOperation : IEditOperation
+{
+    private readonly string _anchorId;
+    private readonly TimeSpan _newTimestamp;
+    private TimeSpan _previousTimestamp;
+
+    public string Description => "Move Cursor Keyframe";
+
+    private bool _changed = true;
+    /// <inheritdoc />
+    public bool ChangedModel => _changed;
+
+    public RetimeCursorAnchorOperation(string anchorId, TimeSpan newTimestamp)
+    {
+        _anchorId = anchorId ?? throw new ArgumentNullException(nameof(anchorId));
+        _newTimestamp = newTimestamp < TimeSpan.Zero ? TimeSpan.Zero : newTimestamp;
+    }
+
+    public void Execute(TimelineModel model)
+    {
+        int index = model.CursorAnchors.FindIndex(a => a.Id == _anchorId);
+        if (index < 0)
+        {
+            _changed = false;
+            return;
+        }
+
+        var anchor = model.CursorAnchors[index];
+        if (anchor.Timestamp == _newTimestamp)
+        {
+            _changed = false;
+            return;
+        }
+
+        _changed = true;
+        _previousTimestamp = anchor.Timestamp;
+        model.CursorAnchors[index] = anchor with { Timestamp = _newTimestamp };
+        model.CursorAnchors.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+    }
+
+    public void Undo(TimelineModel model)
+    {
+        if (!_changed) return;
+
+        int index = model.CursorAnchors.FindIndex(a => a.Id == _anchorId);
+        if (index < 0) return;
+
+        model.CursorAnchors[index] = model.CursorAnchors[index] with { Timestamp = _previousTimestamp };
+        model.CursorAnchors.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+    }
+}
+
 /// <summary>Removes a cursor anchor, restoring the recorded path around that moment.</summary>
 public class RemoveCursorAnchorOperation : IEditOperation
 {

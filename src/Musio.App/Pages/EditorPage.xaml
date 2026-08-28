@@ -102,7 +102,8 @@
 
         <Grid Grid.Column="0">
             <controls:PreviewCanvas
-                x:Name="Preview" />
+                x:Name="Preview"
+                DoubleTapped="Preview_DoubleTapped" />
 
             <!-- Webcam position overlay (drag to move) -->
             <Canvas x:Name="WebcamOverlayCanvas"
@@ -211,16 +212,14 @@
                         PointerReleased="CursorAnchorCanvas_PointerReleased"
                         PointerCaptureLost="CursorAnchorCanvas_PointerCaptureLost"
                         SizeChanged="CursorAnchorCanvas_SizeChanged">
-                    <Ellipse x:Name="CursorAnchorHandle"
-                             Width="34" Height="34"
-                             Stroke="{ThemeResource AccentFillColorDefaultBrush}"
-                             StrokeThickness="2"
-                             Fill="#40000000"
-                             IsHitTestVisible="False" />
-                    <Ellipse x:Name="CursorAnchorHandleDot"
-                             Width="6" Height="6"
-                             Fill="{ThemeResource AccentFillColorDefaultBrush}"
-                             IsHitTestVisible="False" />
+                    <Rectangle x:Name="CursorAnchorHandle"
+                               Width="34" Height="34"
+                               RadiusX="3" RadiusY="3"
+                               Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                               StrokeThickness="1.5"
+                               StrokeDashArray="3,2"
+                               Fill="#24000000"
+                               IsHitTestVisible="False" />
                 </Canvas>
 
                 <StackPanel

@@ -149,7 +149,13 @@
             Grid.Row="2"
             Grid.Column="1"
             Draw="CursorTrackCanvas_Draw"
-            PointerPressed="CursorTrack_PointerPressed" />
+            PointerPressed="CursorTrack_PointerPressed"
+            PointerMoved="CursorTrack_PointerMoved"
+            PointerReleased="CursorTrack_PointerReleased"
+            PointerCaptureLost="CursorTrack_PointerCaptureLost"
+            PointerCanceled="CursorTrack_PointerCaptureLost"
+            RightTapped="CursorTrack_RightTapped"
+            AutomationProperties.Name="Cursor track" />
 
         <canvas:CanvasControl
             x:Name="ZoomTrackCanvas"

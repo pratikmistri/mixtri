@@ -182,6 +182,19 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
+    /// The box the cursor drawn at <paramref name="position"/> occupies, relative to its
+    /// hotspot and in compositor OUTPUT pixels.
+    /// See <see cref="FrameCompositor.TryGetDrawnCursorBounds"/>.
+    /// </summary>
+    public bool TryGetDrawnCursorBounds(TimeSpan position, out Rect bounds)
+    {
+        bounds = default;
+        return !_disposed
+            && _compositor is not null
+            && _compositor.TryGetDrawnCursorBounds(position.TotalSeconds, out bounds);
+    }
+
+    /// <summary>
     /// Syncs the cursor anchors belonging to this preview's source recording to the
     /// compositor. Call this whenever the active/current preview recording changes and
     /// whenever an anchor is added, moved, or removed (including undo/redo) — the same

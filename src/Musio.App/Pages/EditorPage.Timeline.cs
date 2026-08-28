@@ -532,7 +532,27 @@ public sealed partial class EditorPage
                 Timeline.ClearZoomSelection();
             }
 
+            // Same for a cursor keyframe: an undone "move cursor" removes the anchor outright,
+            // and a selection naming nothing would leave Delete retargeting the segment under
+            // the playhead.
+            if (Timeline.SelectedCursorAnchorId is { } anchorId &&
+                !ViewModel.Model.CursorAnchors.Any(a => a.Id == anchorId))
+            {
+                Timeline.ClearCursorAnchorSelection();
+            }
+
             Timeline.ClearClipSelection();
+
+            // Every undoable edit funnels through here, so this is the one place that reliably
+            // sees the selected segment disappear — a split replaces it with two new ids, an
+            // undone insert removes it outright. Left behind, the id names nothing: the track
+            // paints no highlight while Delete and the style panes still believe something is
+            // selected, and the delete then silently retargets the segment under the playhead.
+            if (Timeline.SelectedSegmentId is { } selectedSegmentId &&
+                !ViewModel.Model.Segments.Any(s => s.Id == selectedSegmentId))
+            {
+                Timeline.ClearSegmentSelection();
+            }
 
             // Re-sync the transition pane to whatever the model holds post-undo/redo — without
             // this, Ctrl+Z after a transition edit leaves the pane showing the value that was
