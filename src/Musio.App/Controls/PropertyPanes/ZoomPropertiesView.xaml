@@ -75,50 +75,6 @@
             ToolTipService.ToolTip="50% is the tuned default"
             AutomationProperties.Name="Drift amount" />
 
-        <!-- Section break: extra margin gives the divider room to read as a real
-             separator rather than another row in the stack. -->
-        <Border Height="1" Margin="0,-6"
-                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
-
-        <TextBlock Text="Camera Movement" Style="{StaticResource PropertySectionHeaderStyle}" />
-
-        <!--
-            Animate In / Animate Out turn the segment's ease at each end into a cut. Both are
-            rendering-only: the segment keeps its span on the timeline, and the pre-roll or
-            release simply plays at full zoom instead of ramping. See ZoomKeyframe.AnimateIn /
-            AnimateOut for why the span is preserved rather than collapsed.
-
-            No IsOn default here — per the flyout/control playbook a XAML default fires Toggled
-            during InitializeComponent, before the suppress flags exist. SyncZoomUI sets both.
-        -->
-        <StackPanel Spacing="6">
-            <ToggleSwitch
-                x:Name="ZoomAnimateInToggle"
-                x:FieldModifier="public"
-                HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                Header="Animate In"
-                ToolTipService.ToolTip="Off cuts straight to the zoom instead of easing in, and cuts rather than interpolating from a preceding segment"
-                AutomationProperties.Name="Animate in" />
-            <TextBlock
-                Style="{StaticResource PropertyHintStyle}"
-                Text="Off cuts straight to the zoom, including from a preceding segment." />
-        </StackPanel>
-
-        <StackPanel Spacing="6">
-            <ToggleSwitch
-                x:Name="ZoomAnimateOutToggle"
-                x:FieldModifier="public"
-                HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                Header="Animate Out"
-                ToolTipService.ToolTip="Off holds the zoom to the end of the segment and cuts back to full frame"
-                AutomationProperties.Name="Animate out" />
-            <TextBlock
-                x:Name="ZoomAnimateOutHint"
-                x:FieldModifier="public"
-                Style="{StaticResource PropertyHintStyle}"
-                Text="Off holds the zoom to the end of the segment, then cuts back to full frame." />
-        </StackPanel>
-
         <Button
             x:Name="RemoveZoomSegmentButton"
             x:FieldModifier="public"

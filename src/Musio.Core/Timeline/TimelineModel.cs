@@ -1002,39 +1002,6 @@ public record ZoomKeyframe
     public TimeSpan PostDuration { get; init; } = TimeSpan.FromMilliseconds(1556); // slow, elegant release back to full frame
 
     /// <summary>
-    /// Whether the camera ANIMATES into this segment. When false it cuts instead: the frame
-    /// is already at <see cref="ZoomLevel"/> from <see cref="Start"/>, so the leading
-    /// <see cref="PreDuration"/> plays as extra hold rather than as a ramp up from 1×.
-    /// <para>
-    /// This is a rendering choice only — it deliberately does NOT shorten the segment.
-    /// Collapsing <see cref="PreDuration"/> instead would move the block on the timeline and
-    /// would have to remember the old value to be undoable; keeping the span means toggling
-    /// back restores the original motion exactly and the block never moves under the user.
-    /// </para>
-    /// <para>
-    /// It also governs the handoff from a preceding segment close enough to be linked (see
-    /// <see cref="Musio.Core.Processing.ZoomCameraPath.Interpolates"/>). Without that, the
-    /// toggle would appear to do nothing for exactly the segments that sit close together —
-    /// the case where the anticipatory move is most visible — because there the ramp has been
-    /// replaced by an interpolation from the previous shot.
-    /// </para>
-    /// </summary>
-    public bool AnimateIn { get; init; } = true;
-
-    /// <summary>
-    /// Whether the camera ANIMATES out of this segment. When false it cuts instead: the frame
-    /// holds <see cref="ZoomLevel"/> through <see cref="End"/> and returns to 1× there.
-    /// <para>
-    /// This governs the release to full frame ONLY. A segment linked to a following one never
-    /// returns to full frame — it hands the camera straight over — so there is no outward
-    /// animation for this to suppress, and the move into the next segment belongs to that
-    /// segment's <see cref="AnimateIn"/>. Each boundary is therefore owned by exactly one
-    /// flag, which is what keeps two adjacent segments from disagreeing about the join.
-    /// </para>
-    /// </summary>
-    public bool AnimateOut { get; init; } = true;
-
-    /// <summary>
     /// Per-shot multiplier for continuous camera drift. Automatic typing zooms lower this
     /// while keeping drift enabled so the insertion caret retains a generous safety margin.
     /// </summary>
