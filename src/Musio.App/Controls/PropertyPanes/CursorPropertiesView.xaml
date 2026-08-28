@@ -44,10 +44,10 @@
 
     <StackPanel Spacing="20" Margin="0,14,0,18">
 
-        <!-- Cursor type: Mouse / Touch -->
+        <!-- Cursor type: Mouse / Touch / Hidden -->
         <StackPanel Spacing="6">
             <TextBlock Text="Type" Style="{StaticResource PropertyLabelStyle}" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
+            <StackPanel Spacing="2">
                 <RadioButton
                     x:Name="CursorTypeMouse"
                     x:FieldModifier="public"
@@ -57,6 +57,11 @@
                     x:Name="CursorTypeTouch"
                     x:FieldModifier="public"
                     Content="Touch"
+                    GroupName="CursorType" />
+                <RadioButton
+                    x:Name="CursorTypeHidden"
+                    x:FieldModifier="public"
+                    Content="Hidden"
                     GroupName="CursorType" />
             </StackPanel>
         </StackPanel>
@@ -76,8 +81,28 @@
             x:FieldModifier="public"
             Header="Tilt" />
 
+        <!-- Reposition the cursor at the playhead. Authors a cursor anchor: the recorded
+             path is offset around that moment and eases back into the recording, so the
+             rest of the movement is preserved. -->
+        <StackPanel x:Name="CursorAnchorSection" x:FieldModifier="public" Spacing="6">
+            <TextBlock Text="Position" Style="{StaticResource PropertyLabelStyle}" />
+            <Button
+                x:Name="CursorAnchorEditButton"
+                x:FieldModifier="public"
+                Content="Reposition cursor"
+                HorizontalAlignment="Stretch"
+                ToolTipService.ToolTip="Move the playhead to the moment you want to change, then drag the cursor in the preview. The rest of the recorded movement is kept." />
+            <TextBlock
+                x:Name="CursorAnchorUnavailableText"
+                x:FieldModifier="public"
+                Visibility="Collapsed"
+                TextWrapping="Wrap"
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
         <!-- Color presets -->
-        <StackPanel Spacing="6">
+        <StackPanel x:Name="CursorColorSection" x:FieldModifier="public" Spacing="6">
             <TextBlock Text="Color" Style="{StaticResource PropertyLabelStyle}" />
             <StackPanel x:Name="CursorColorPanel" x:FieldModifier="public" Orientation="Horizontal" Spacing="8">
                 <RadioButton GroupName="CursorColor" Tag="#FFFFFF" Background="White"

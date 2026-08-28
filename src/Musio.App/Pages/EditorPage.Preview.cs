@@ -1430,6 +1430,7 @@ public sealed partial class EditorPage
             renderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
             renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
             SyncTextOverlaysToRenderer(renderer, null);
+            SyncCursorAnchorsToRenderer(renderer, null);
         }
         catch (Exception ex)
         {
@@ -1886,6 +1887,7 @@ public sealed partial class EditorPage
                 renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
                 renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
                 SyncTextOverlaysToRenderer(renderer, seg.VideoFilePath);
+                SyncCursorAnchorsToRenderer(renderer, seg.VideoFilePath);
 
                 if (Abandoned())
                 {

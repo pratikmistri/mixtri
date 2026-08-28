@@ -138,6 +138,23 @@ internal static class EditorTimelineMediator
     }
 
     /// <summary>
+    /// Pushes the cursor anchors that belong to <paramref name="sourceVideoFilePath"/>
+    /// (null = the primary recording, resolved against <paramref name="primaryVideoPath"/>)
+    /// onto <paramref name="renderer"/>'s compositor, using the exact same
+    /// <see cref="SegmentFrameComposer.SelectCursorAnchors"/> ownership rule export uses, so a
+    /// repositioned cursor cannot warp the preview and not the exported file. A no-op when
+    /// there is no primary video to resolve the "primary" case against.
+    /// </summary>
+    public static void SyncCursorAnchorsToRenderer(
+        TimelineModel model, PreviewRenderer renderer, string? sourceVideoFilePath, string? primaryVideoPath)
+    {
+        var videoFilePath = sourceVideoFilePath ?? primaryVideoPath;
+        if (string.IsNullOrEmpty(videoFilePath)) return;
+
+        renderer.UpdateCursorAnchors(SegmentFrameComposer.SelectCursorAnchors(model, videoFilePath));
+    }
+
+    /// <summary>
     /// Pushes the model's zoom state — manual keyframes plus the suppressed auto-zoom click
     /// ticks — onto the primary preview renderer. Must run after every renderer rebuild as
     /// well as on every model change; skipping the suppressed ticks brings back auto-zoom
@@ -153,6 +170,7 @@ internal static class EditorTimelineMediator
         renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, null));
         renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
         SyncTextOverlaysToRenderer(model, renderer, null, primaryVideoPath);
+        SyncCursorAnchorsToRenderer(model, renderer, null, primaryVideoPath);
     }
 
     /// <summary>
@@ -176,6 +194,7 @@ internal static class EditorTimelineMediator
             renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, seg.VideoFilePath));
             renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
             SyncTextOverlaysToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
+            SyncCursorAnchorsToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
         }
     }
 

@@ -265,6 +265,25 @@ public sealed class SegmentFrameComposer : IDisposable
     }
 
     /// <summary>
+    /// Returns every cursor anchor authored against <paramref name="videoFilePath"/>'s
+    /// source-time space, using the same ownership rule as <see cref="SelectTextOverlays"/>.
+    /// <para>
+    /// Preview and export must both select through this so a repositioned cursor cannot warp
+    /// one pipeline's path and not the other's — the same reason the text-overlay selector
+    /// exists.
+    /// </para>
+    /// </summary>
+    public static List<CursorAnchor> SelectCursorAnchors(TimelineModel timeline, string videoFilePath)
+    {
+        ArgumentNullException.ThrowIfNull(timeline);
+
+        return timeline.CursorAnchors
+            .Where(a => BelongsToSource(a.SourceVideoFilePath, videoFilePath, timeline.PrimaryVideoFilePath))
+            .OrderBy(a => a.Timestamp)
+            .ToList();
+    }
+
+    /// <summary>
     /// True when <paramref name="keyframe"/> was authored against
     /// <paramref name="videoFilePath"/>'s source-time space.
     /// </summary>
@@ -1011,10 +1030,10 @@ public sealed class SegmentFrameComposer : IDisposable
     /// <summary>
     /// Applies every per-source-file piece of state a compositor needs beyond its base
     /// <see cref="CompositionConfig"/>: manual zoom keyframes, suppressed auto-zoom clicks,
-    /// and text overlays, each filtered to the ones belonging to
+    /// text overlays, and cursor anchors, each filtered to the ones belonging to
     /// <paramref name="videoFilePath"/>. Called for both the primary recording's context
-    /// and every appended/imported recording's context, so overlays and zooms authored
-    /// against one source never bleed onto another.
+    /// and every appended/imported recording's context, so overlays, zooms and anchors
+    /// authored against one source never bleed onto another.
     /// </summary>
     private static void SyncZoomState(FrameCompositor compositor, TimelineModel? timeline, string videoFilePath)
     {
@@ -1022,6 +1041,7 @@ public sealed class SegmentFrameComposer : IDisposable
 
         compositor.SyncManualZoomKeyframes(SelectManualZoomKeyframes(timeline, videoFilePath));
         compositor.SyncTextOverlays(SelectTextOverlays(timeline, videoFilePath));
+        compositor.SyncCursorAnchors(SelectCursorAnchors(timeline, videoFilePath));
 
         // Suppressed ticks are raw click timestamps from the recording that produced
         // them, so they can only ever match that recording's auto-zoom segments.

@@ -76,6 +76,17 @@ public class FrameCompositor : IDisposable
 
     private List<SmoothedPosition> _smoothedPositions = [];
     private double[] _lastMoveTimes = [];
+
+    /// <summary>
+    /// The smoothed path exactly as the recording produced it, before any cursor anchors are
+    /// applied. <see cref="ApplyCursorAnchors"/> always re-warps from this rather than from
+    /// <see cref="_smoothedPositions"/>, so repeated syncs while the user drags an anchor
+    /// cannot compound one warp on top of the last.
+    /// </summary>
+    private List<SmoothedPosition> _basePositions = [];
+
+    /// <summary>Anchors belonging to THIS compositor's source recording. See <see cref="CursorAnchor"/>.</summary>
+    private IReadOnlyList<CursorAnchor> _cursorAnchors = [];
     private MouseRecordingData? _mouseData;
     private CanvasBitmap? _webcamFrame;
     private int _sourceWidth;
@@ -455,8 +466,13 @@ public class FrameCompositor : IDisposable
             TotalFrames = _smoothedPositions.Count;
         }
 
-        // Precompute per-frame "last move" timestamps for cursor auto-hide
-        PrecomputeLastMoveTimes();
+        // Freeze the recorded path only once the frame count is final, so a later re-warp
+        // starts from a base of exactly the right length. ApplyCursorAnchors also refreshes
+        // the auto-hide table, which is why PrecomputeLastMoveTimes is not called separately
+        // here: auto-hide is derived from the path's velocity, so it has to see the WARPED
+        // path or a repositioned cursor would fade on the recording's timings, not its own.
+        _basePositions = [.. _smoothedPositions];
+        ApplyCursorAnchors();
 
         // Build auto-zoom timeline with scaled coordinates and time offset + capture latency.
         // The duration is passed so clicks outside the video (e.g. a click just before
@@ -627,6 +643,199 @@ public class FrameCompositor : IDisposable
     public void SyncManualZoomKeyframes(IReadOnlyList<Timeline.ZoomKeyframe> keyframes)
     {
         _zoomEngine.SetManualKeyframes(keyframes);
+    }
+
+    /// <summary>
+    /// Where the cursor is rendered at <paramref name="timeSeconds"/> (timeline time), in
+    /// capture-frame pixels — the same answer <see cref="ComposeFrame(CanvasBitmap, double)"/>
+    /// draws with, so it already includes smoothing and any applied cursor anchors.
+    /// </summary>
+    /// <remarks>
+    /// This is what lets the editor's anchor handle start exactly on the pointer the user can
+    /// see. Deriving it in the editor instead would mean re-implementing the smoother, the
+    /// warp and the time→frame mapping, and the handle would drift from the render the moment
+    /// any of the three changed.
+    /// </remarks>
+    public bool TryGetCursorPosition(double timeSeconds, out double x, out double y)
+    {
+        x = y = 0;
+        if (_disposed || _smoothedPositions.Count == 0) return false;
+
+        var position = _smoothedPositions[ResolveCursorIndex(timeSeconds)];
+        x = position.X;
+        y = position.Y;
+        return true;
+    }
+
+    /// <summary>
+    /// The box the cursor drawn at <paramref name="timeSeconds"/> occupies, relative to its
+    /// hotspot and in output pixels. Resolves the SHAPE the cursor has at that moment, which is
+    /// what makes the box fit — the arrow hangs down-right of its hotspot while the I-beam and
+    /// the resize arrows straddle theirs. See <see cref="CursorRenderer.GetDrawnCursorBounds"/>.
+    /// </summary>
+    public bool TryGetDrawnCursorBounds(double timeSeconds, out Rect bounds)
+    {
+        bounds = default;
+        if (_disposed || _smoothedPositions.Count == 0) return false;
+
+        var shape = _smoothedPositions[ResolveCursorIndex(timeSeconds)].Shape;
+        bounds = _cursorRenderer.GetDrawnCursorBounds(shape);
+        return bounds.Width > 0 && bounds.Height > 0;
+    }
+
+    /// <summary>
+    /// Sets the cursor anchors belonging to this compositor's source recording and re-warps the
+    /// cursor path. Call this when the user adds, moves, or removes an anchor (including
+    /// undo/redo), and once up front when a compositor is created for preview or export.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors <see cref="SyncManualZoomKeyframes"/>: cheap enough to call on every drag sample,
+    /// and safe to call before <see cref="InitializeAsync"/> — the anchors are simply held until
+    /// there is a path to apply them to.
+    /// </remarks>
+    public void SyncCursorAnchors(IReadOnlyList<CursorAnchor> anchors)
+    {
+        _cursorAnchors = anchors ?? [];
+        if (_basePositions.Count == 0) return;
+
+        ApplyCursorAnchors();
+    }
+
+    /// <summary>
+    /// Rebuilds <see cref="_smoothedPositions"/> from <see cref="_basePositions"/> with the
+    /// current anchors applied, then refreshes everything derived from the path.
+    /// </summary>
+    private void ApplyCursorAnchors()
+    {
+        _smoothedPositions = _cursorAnchors.Count == 0
+            ? [.. _basePositions]
+            : CursorPathWarp.Apply(
+                _basePositions,
+                BuildAnchorPoints(),
+                BuildClickSpans(),
+                _config.OutputFps);
+
+        RecomputeClickDisplacements();
+        PrecomputeLastMoveTimes();
+    }
+
+    /// <summary>
+    /// Converts anchors from storage form (source time + normalized position) into the path's
+    /// own space (frame index + capture-frame pixels).
+    /// </summary>
+    private List<CursorPathWarp.AnchorPoint> BuildAnchorPoints()
+    {
+        var points = new List<CursorPathWarp.AnchorPoint>(_cursorAnchors.Count);
+        int last = _basePositions.Count - 1;
+        if (last < 0) return points;
+
+        foreach (var anchor in _cursorAnchors)
+        {
+            // Same time→index formula ComposeFrame uses, so an anchor lands on exactly the
+            // frame the user was looking at when they dragged it.
+            int index = Math.Clamp(
+                FrameTimeConverter.TimeToFrameRounded(
+                    anchor.Timestamp.TotalSeconds + _mouseTimeOffset, _config.OutputFps),
+                0, last);
+
+            // The path has already had the crop offset subtracted, so it spans 0.._sourceWidth
+            // — normalized source coordinates map straight onto it with no offset term.
+            points.Add(new CursorPathWarp.AnchorPoint(
+                index,
+                anchor.X * _sourceWidth,
+                anchor.Y * _sourceHeight));
+        }
+
+        return points;
+    }
+
+    /// <summary>
+    /// Pairs the recorded click events into presses (button-down → matching button-up), which
+    /// the warp treats as single protected units.
+    /// </summary>
+    /// <remarks>
+    /// The recorder stores down and up as SEPARATE <see cref="ClickEvent"/>s, typically 50-150ms
+    /// apart. Feeding them in as independent instants let an anchor claim the down while the up
+    /// still pinned the path a few frames later, so the whole displacement had to be delivered
+    /// and withdrawn inside that gap — which is a flash, not a cursor move.
+    /// </remarks>
+    private List<CursorPathWarp.ClickSpan> BuildClickSpans()
+    {
+        var spans = new List<CursorPathWarp.ClickSpan>();
+        if (_mouseData is null || _tickFrequency <= 0) return spans;
+
+        int last = _basePositions.Count - 1;
+        if (last < 0) return spans;
+
+        // Open button-downs awaiting their up. Keyed by button, because a chord (right-click
+        // while holding left) interleaves two presses.
+        var open = new Dictionary<MouseButton, int>();
+
+        foreach (var click in _mouseData.Clicks)
+        {
+            double mouseSeconds = (click.TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
+            int frame = FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps);
+            if (frame < 0 || frame > last) continue;
+
+            if (click.IsDown)
+            {
+                // A second down without an up (the first one's up fell outside the path) still
+                // deserves protection on its own.
+                if (open.TryGetValue(click.Button, out int orphan))
+                    spans.Add(new CursorPathWarp.ClickSpan(orphan, orphan));
+
+                open[click.Button] = frame;
+                continue;
+            }
+
+            if (open.Remove(click.Button, out int downFrame))
+                spans.Add(new CursorPathWarp.ClickSpan(downFrame, frame));
+            else
+                spans.Add(new CursorPathWarp.ClickSpan(frame, frame)); // up with no recorded down
+        }
+
+        // Recording ended mid-press.
+        foreach (int downFrame in open.Values)
+            spans.Add(new CursorPathWarp.ClickSpan(downFrame, downFrame));
+
+        return spans;
+    }
+
+    /// <summary>
+    /// Per-click displacement, parallel to <c>_mouseData.Clicks</c>, so a click absorbed into an
+    /// anchor's motion is DRAWN where the cursor now is rather than where it was recorded.
+    /// </summary>
+    /// <remarks>
+    /// Without this the touch indicator would stay pinned to the original screen position while
+    /// the pointer it represents sits somewhere else. A protected click has zero displacement by
+    /// construction, so this array is all-zero for them and costs nothing.
+    /// </remarks>
+    private (double X, double Y)[] _clickDisplacements = [];
+
+    private void RecomputeClickDisplacements()
+    {
+        if (_mouseData is null || _mouseData.Clicks.Count == 0 || _basePositions.Count == 0)
+        {
+            _clickDisplacements = [];
+            return;
+        }
+
+        var displacements = new (double X, double Y)[_mouseData.Clicks.Count];
+        int last = _basePositions.Count - 1;
+
+        for (int i = 0; i < _mouseData.Clicks.Count; i++)
+        {
+            double mouseSeconds =
+                (_mouseData.Clicks[i].TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
+            int frame = Math.Clamp(
+                FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps), 0, last);
+
+            displacements[i] = (
+                _smoothedPositions[frame].X - _basePositions[frame].X,
+                _smoothedPositions[frame].Y - _basePositions[frame].Y);
+        }
+
+        _clickDisplacements = displacements;
     }
 
     /// <summary>
@@ -1638,8 +1847,12 @@ public class FrameCompositor : IDisposable
 
             // Transform click position from logical to physical, subtract crop offset, then to output space.
             // _sourceAreaOffsetX/Y already includes user-padding plus any AR-fit gap.
-            int cx = (int)((click.X * _coordScaleX - _cropOffsetX - viewport.X) * scaleX + _sourceAreaOffsetX);
-            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY - viewport.Y) * scaleY + _sourceAreaOffsetY);
+            //
+            // The displacement term carries a click that an anchor absorbed to wherever the
+            // repositioned cursor now is; it is exactly zero for every protected click.
+            var (dx, dy) = i < _clickDisplacements.Length ? _clickDisplacements[i] : (0, 0);
+            int cx = (int)((click.X * _coordScaleX - _cropOffsetX + dx - viewport.X) * scaleX + _sourceAreaOffsetX);
+            int cy = (int)((click.Y * _coordScaleY - _cropOffsetY + dy - viewport.Y) * scaleY + _sourceAreaOffsetY);
 
             // Create adjusted click event with shifted timestamp for the renderer
             long adjustedTicks = click.TimestampTicks
@@ -1691,6 +1904,9 @@ public class FrameCompositor : IDisposable
             _webcamCompositor?.Dispose();
             _textOverlayRenderer?.Dispose();
             _smoothedPositions = [];
+            _basePositions = [];
+            _cursorAnchors = [];
+            _clickDisplacements = [];
             _lastMoveTimes = [];
             _mouseData = null;
             _disposed = true;

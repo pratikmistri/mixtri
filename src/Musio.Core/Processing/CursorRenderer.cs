@@ -8,7 +8,27 @@ using Windows.UI;
 
 namespace Musio.Core.Processing;
 
-public enum CursorType { Default, System, Custom, Touch }
+/// <summary>
+/// How (or whether) the recorded pointer is drawn onto the frame.
+/// <para>
+/// Serialized by name (<c>MusioPackage.JsonOptions</c> registers a
+/// <c>JsonStringEnumConverter</c>), so every value here is part of the on-disk format:
+/// members may be appended but never renamed or removed.
+/// </para>
+/// </summary>
+public enum CursorType
+{
+    Default,
+    System,
+    Custom,
+    Touch,
+
+    /// <summary>
+    /// Draw no pointer at all — no glyph, no click animation, no motion blur and no touch
+    /// indicator. Distinct from auto-hide, which only fades the pointer while it rests.
+    /// </summary>
+    Hidden,
+}
 
 public record CursorStyle
 {
@@ -83,6 +103,10 @@ public class CursorRenderer : IDisposable
         _defaultCursorGeometry = null;
         DisposeGlyphs();
 
+        // A hidden cursor draws nothing, so it needs no bitmap and no glyph atlas. Leaving
+        // early keeps a hidden pointer from allocating GPU resources it can never use.
+        if (_style.Type == CursorType.Hidden) return;
+
         if (_style.Type == CursorType.Custom && !string.IsNullOrEmpty(_style.CustomImagePath))
         {
             try
@@ -145,6 +169,12 @@ public class CursorRenderer : IDisposable
         MotionBlurSettings? motionBlur = null,
         Vector2 cameraVelocity = default)
     {
+        // Hidden: draw nothing at all. This has to be the FIRST check so that it also
+        // suppresses the touch indicators, the click scale animation and both motion-blur
+        // paths below — "hide the cursor" means every mark this renderer makes, not just
+        // the glyph.
+        if (_style.Type == CursorType.Hidden) return;
+
         // Touch cursor: render at click positions only (float up, tap, fade out)
         if (_style.Type == CursorType.Touch)
         {
@@ -196,6 +226,7 @@ public class CursorRenderer : IDisposable
     private const float TouchTotalDuration = TouchPreRoll + TouchTapDownDuration + TouchTapUpDuration + TouchFadeOutDuration;
     private const float TouchFloatDistance = 40f;         // pixels to float up
     private const float TouchTapScale = 0.6f;            // scale down to 60% on tap
+    private const float TouchRadiusUnscaled = 12f;       // circle radius at scale = 1
 
     /// <summary>
     /// Renders touch indicators at click-down positions. Consecutive clicks whose
@@ -599,6 +630,46 @@ public class CursorRenderer : IDisposable
     }
 
     /// <summary>
+    /// The box the cursor actually occupies when drawn, expressed relative to its hotspot and
+    /// in OUTPUT pixels — the space <see cref="RenderFrame"/> draws in, so it is a fixed
+    /// on-screen size no matter how far the frame is zoomed. Returns an empty rect when nothing
+    /// is drawn (<see cref="CursorType.Hidden"/>).
+    /// </summary>
+    /// <remarks>
+    /// Exists for the editor's reposition affordance, which has to frame the DRAWN cursor while
+    /// every other part of the pipeline speaks only in hotspots. Deliberately excludes the click
+    /// animation's transient scale: a box that breathed with each click would be impossible to
+    /// aim at. Read from the same glyphs <see cref="DrawDefaultCursor"/> renders, so a
+    /// re-authored shape cannot leave the box behind.
+    /// </remarks>
+    public Rect GetDrawnCursorBounds(CursorShape shape)
+    {
+        if (_style.Type == CursorType.Hidden) return default;
+
+        float scale = Math.Clamp(_style.Scale, 1.0f, 6.0f);
+
+        if (_cursorBitmap != null && _style.Type == CursorType.Custom)
+        {
+            // Drawn from the hotspot without centering — see DrawBitmapCursor.
+            return new Rect(0, 0, _cursorBitmap.Size.Width * scale, _cursorBitmap.Size.Height * scale);
+        }
+
+        if (_style.Type == CursorType.Touch)
+        {
+            double radius = TouchRadiusUnscaled * scale;
+            return new Rect(-radius, -radius, radius * 2, radius * 2);
+        }
+
+        var bounds = _glyphs is not null && _glyphs.TryGetValue(shape, out var glyph)
+            ? glyph.Bounds
+            : FallbackArrowBounds;
+
+        return new Rect(
+            bounds.X * scale, bounds.Y * scale,
+            bounds.Width * scale, bounds.Height * scale);
+    }
+
+    /// <summary>
     /// Conservative half-extent of a rendered cursor around its hotspot, used to size the
     /// shutter-blur scratch target. Vector glyphs are normalized to ~26-30px; bitmap
     /// cursors are drawn from the hotspot without centering, so their full extent is used.
@@ -701,7 +772,7 @@ public class CursorRenderer : IDisposable
     {
         if (opacity <= 0f) return;
 
-        float radius = 12f * scale;
+        float radius = TouchRadiusUnscaled * scale;
         var baseColor = ParseCursorColor(1f);
 
         // Radial gradient fill offset downward — bright spot below center creates a crescent
@@ -800,6 +871,13 @@ public class CursorRenderer : IDisposable
             ? Color.FromArgb(a, 30, 30, 30)     // dark outline for light fills
             : Color.FromArgb(a, 220, 220, 220);  // light outline for dark fills
     }
+
+    /// <summary>
+    /// Bounds of <see cref="CreateDefaultCursorGeometry"/> relative to its hotspot, used only
+    /// when the glyph library failed to build and that hard-coded arrow is what draws. Keep in
+    /// step with the path below.
+    /// </summary>
+    private static readonly Rect FallbackArrowBounds = new(0, 0, 15, 27);
 
     /// <summary>
     /// Creates the classic pointer arrow shape using <see cref="CanvasPathBuilder"/>.

@@ -270,6 +270,79 @@ public class MusioPackageTests
     }
 
     [TestMethod]
+    public async Task SaveThenOpen_PreservesCursorAnchorsAndRewritesTheirSourcePaths()
+    {
+        // An anchor's SourceVideoFilePath is a back-reference to a recording that MOVES when a
+        // project is packaged and reopened elsewhere. Leaving it pointing at the saving
+        // machine's path would silently orphan the anchor: the cursor would snap back to where
+        // it was recorded, with nothing to explain why. Mirrors the zoom-keyframe rule.
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        string savedVideoPath = project.VideoFilePath!;
+        timeline.CursorAnchors.Add(new CursorAnchor
+        {
+            Timestamp = TimeSpan.FromSeconds(4),
+            X = 0.25,
+            Y = 0.75,
+        });
+        timeline.CursorAnchors.Add(new CursorAnchor
+        {
+            Timestamp = TimeSpan.FromSeconds(6),
+            X = 0.5,
+            Y = 0.5,
+            SourceVideoFilePath = savedVideoPath,
+        });
+
+        await MusioPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.AreEqual(2, opened.Timeline.CursorAnchors.Count);
+
+        var primaryAnchor = opened.Timeline.CursorAnchors.Single(a => a.SourceVideoFilePath is null);
+        Assert.AreEqual(TimeSpan.FromSeconds(4), primaryAnchor.Timestamp);
+        Assert.AreEqual(0.25, primaryAnchor.X);
+        Assert.AreEqual(0.75, primaryAnchor.Y);
+
+        var sourced = opened.Timeline.CursorAnchors.Single(a => a.SourceVideoFilePath is not null);
+        Assert.AreEqual(opened.Project.VideoFilePath, sourced.SourceVideoFilePath,
+            "the anchor must follow the recording to its restored location");
+        Assert.IsFalse(
+            sourced.SourceVideoFilePath!.StartsWith(_sourceFolder, StringComparison.OrdinalIgnoreCase),
+            "the restored path must not point back at the machine that saved it");
+    }
+
+    [TestMethod]
+    public async Task SaveThenOpen_PreservesHiddenCursorType_GloballyAndPerSegment()
+    {
+        // CursorType is serialized BY NAME (MusioPackage.JsonOptions registers a
+        // JsonStringEnumConverter), so a newly appended member is only safe if it actually
+        // round-trips under that name — both on the global composition and on the per-segment
+        // override, which is the surface that lets one clip hide its cursor.
+        var (project, timeline) = BuildProject();
+        var packagePath = Path.Combine(_root, "project.musio");
+
+        var video = timeline.Segments.OfType<VideoSegment>().Single();
+        timeline.Segments[timeline.Segments.IndexOf(video)] = video with
+        {
+            CursorStyleOverride = new CursorStyle { Type = CursorType.Hidden },
+        };
+
+        var composition = new CompositionConfig
+        {
+            Cursor = new CursorStyle { Type = CursorType.Hidden },
+        };
+
+        await MusioPackageService.SaveAsync(packagePath, project, composition, timeline);
+        var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
+
+        Assert.AreEqual(CursorType.Hidden, opened.Composition.Cursor.Type);
+        Assert.AreEqual(
+            CursorType.Hidden,
+            opened.Timeline.Segments.OfType<VideoSegment>().Single().CursorStyleOverride!.Type);
+    }
+
+    [TestMethod]
     public async Task SaveThenOpen_PreservesEveryEditableSetting()
     {
         // Guards the whole "reopening loses my work" class of bug: text slides, cursor,
