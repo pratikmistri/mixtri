@@ -108,6 +108,40 @@ public sealed class CursorAnchorTests
     }
 
     [TestMethod]
+    public void Move_ToTheSamePosition_ReportsNoChange()
+    {
+        // A press on the cursor handle that never travels, or a drag that ends where it
+        // started, must not spend an undo entry that visibly does nothing.
+        var model = BuildModel();
+        var undo = new UndoRedoManager(model);
+
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(4), 0.25, 0.75));
+        string id = model.CursorAnchors[0].Id;
+
+        var operation = new MoveCursorAnchorOperation(id, 0.25, 0.75);
+        operation.Execute(model);
+
+        Assert.IsFalse(operation.ChangedModel,
+            "an operation that changed nothing must not become an undo entry that undoes nothing");
+    }
+
+    [TestMethod]
+    public void Move_ToTheSamePosition_LeavesTheUndoStackOnTheAddAlone()
+    {
+        // The first Ctrl+Z after a no-op drag has to undo the ADD, not a phantom move.
+        var model = BuildModel();
+        var undo = new UndoRedoManager(model);
+
+        undo.Execute(new AddCursorAnchorOperation(TimeSpan.FromSeconds(4), 0.25, 0.75));
+        string id = model.CursorAnchors[0].Id;
+
+        undo.Execute(new MoveCursorAnchorOperation(id, 0.25, 0.75));
+        undo.Undo();
+
+        Assert.AreEqual(0, model.CursorAnchors.Count);
+    }
+
+    [TestMethod]
     public void Remove_ThenUndo_RestoresTheAnchorWithItsIdAndPosition()
     {
         var model = BuildModel();

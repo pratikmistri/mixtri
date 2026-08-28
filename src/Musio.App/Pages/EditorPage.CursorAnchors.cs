@@ -36,6 +36,24 @@ public sealed partial class EditorPage
     private bool _cursorAnchorEditMode;
     private bool _isDraggingCursorAnchor;
 
+    /// <summary>
+    /// A press landed inside the grab box but has not yet travelled far enough to be a drag.
+    /// </summary>
+    /// <remarks>
+    /// Pressing the handle displaces nothing on its own — it only records the grip offset — so
+    /// arming <see cref="_isDraggingCursorAnchor"/> there would let a plain click commit an
+    /// anchor whose target is exactly where the recording already put the pointer. That
+    /// phantom is not harmless: it spends an undo entry that appears to do nothing, leaves a
+    /// permanent marker on the cursor lane, and becomes a control point that cuts short the
+    /// blend window of every neighbouring anchor. The gesture arms on the first move past
+    /// <see cref="CursorAnchorDragThreshold"/> instead. The out-of-box teleport still arms
+    /// immediately, because that press HAS already moved the cursor.
+    /// </remarks>
+    private bool _cursorAnchorPressPending;
+
+    /// <summary>Canvas point the current press started at, for the drag threshold.</summary>
+    private Point _cursorAnchorPressOrigin;
+
     /// <summary>Source recording the anchor belongs to; null means the primary recording.</summary>
     private string? _cursorAnchorSourceFile;
 
@@ -75,6 +93,12 @@ public sealed partial class EditorPage
 
     /// <summary>Breathing room between the drawn glyph and the outline that frames it.</summary>
     private const double CursorHandlePadding = 4;
+
+    /// <summary>
+    /// Canvas pixels a press inside the grab box must travel before it counts as a reposition.
+    /// Matches the timeline lane's threshold of the same name.
+    /// </summary>
+    private const double CursorAnchorDragThreshold = 3.0;
 
     /// <summary>
     /// Floor on the grab box, so a small cursor (or one the pipeline cannot measure) still
@@ -276,7 +300,7 @@ public sealed partial class EditorPage
     /// </summary>
     private void RebindCursorAnchorIfPlayheadMoved()
     {
-        if (!_cursorAnchorEditMode || _isDraggingCursorAnchor) return;
+        if (!_cursorAnchorEditMode || _isDraggingCursorAnchor || _cursorAnchorPressPending) return;
         if (Timeline.PlayheadPosition == _cursorAnchorOutputTime) return;
 
         if (!TryBindCursorAnchorToPlayhead(out string? reason))
@@ -295,6 +319,7 @@ public sealed partial class EditorPage
     {
         _cursorAnchorEditMode = false;
         _isDraggingCursorAnchor = false;
+        _cursorAnchorPressPending = false;
         _cursorAnchorId = null;
 
         if (CursorAnchorOverlay is not null)
@@ -335,9 +360,16 @@ public sealed partial class EditorPage
     {
         if (!_cursorAnchorEditMode) return;
 
-        var point = e.GetCurrentPoint(CursorAnchorCanvas).Position;
+        var current = e.GetCurrentPoint(CursorAnchorCanvas);
 
-        _isDraggingCursorAnchor = true;
+        // Secondary buttons do not reposition anything. Letting one through would arm the
+        // gesture and commit an anchor on release from a press the user never aimed with.
+        if (current.Properties.IsRightButtonPressed || current.Properties.IsMiddleButtonPressed)
+            return;
+
+        var point = current.Position;
+
+        _cursorAnchorPressOrigin = point;
         CursorAnchorCanvas.CapturePointer(e.Pointer);
 
         // Grabbing the cursor's own box moves it FROM where it is, keeping the grip offset so
@@ -349,11 +381,16 @@ public sealed partial class EditorPage
             var (hotspotX, hotspotY) = CurrentCursorAnchorHotspot();
             _cursorAnchorGrabOffsetX = hotspotX - point.X;
             _cursorAnchorGrabOffsetY = hotspotY - point.Y;
+
+            // Nothing has moved yet, so this is not a drag until the pointer says so.
+            _cursorAnchorPressPending = true;
         }
         else
         {
             _cursorAnchorGrabOffsetX = 0;
             _cursorAnchorGrabOffsetY = 0;
+            _cursorAnchorPressPending = false;
+            _isDraggingCursorAnchor = true;
             ApplyCursorAnchorDrag(point);
         }
 
@@ -382,9 +419,25 @@ public sealed partial class EditorPage
 
     private void CursorAnchorCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (!_cursorAnchorEditMode || !_isDraggingCursorAnchor) return;
+        if (!_cursorAnchorEditMode) return;
 
-        ApplyCursorAnchorDrag(e.GetCurrentPoint(CursorAnchorCanvas).Position);
+        var point = e.GetCurrentPoint(CursorAnchorCanvas).Position;
+
+        if (_cursorAnchorPressPending)
+        {
+            if (Math.Abs(point.X - _cursorAnchorPressOrigin.X) < CursorAnchorDragThreshold &&
+                Math.Abs(point.Y - _cursorAnchorPressOrigin.Y) < CursorAnchorDragThreshold)
+            {
+                return;
+            }
+
+            _cursorAnchorPressPending = false;
+            _isDraggingCursorAnchor = true;
+        }
+
+        if (!_isDraggingCursorAnchor) return;
+
+        ApplyCursorAnchorDrag(point);
         e.Handled = true;
     }
 
@@ -451,6 +504,10 @@ public sealed partial class EditorPage
     /// </remarks>
     private void CommitCursorAnchorDrag()
     {
+        // Cleared unconditionally: a press that never became a drag still has to stop being
+        // pending, whichever of the two release paths gets here first.
+        _cursorAnchorPressPending = false;
+
         if (!_isDraggingCursorAnchor) return;
         _isDraggingCursorAnchor = false;
 

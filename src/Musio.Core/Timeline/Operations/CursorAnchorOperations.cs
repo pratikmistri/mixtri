@@ -80,6 +80,15 @@ public class MoveCursorAnchorOperation : IEditOperation
 
         _changed = true;
         var anchor = model.CursorAnchors[index];
+        if (anchor.X == _newX && anchor.Y == _newY)
+        {
+            // A gesture that ended where it started is not an edit. Reporting a change here
+            // would spend an undo entry that visibly does nothing — the same defect
+            // RetimeCursorAnchorOperation guards against for the timestamp.
+            _changed = false;
+            return;
+        }
+
         _previousX = anchor.X;
         _previousY = anchor.Y;
         model.CursorAnchors[index] = anchor with { X = _newX, Y = _newY };
