@@ -67,7 +67,9 @@ public class TimelineModel
 
     /// <summary>
     /// Full-frame overlay segments ordered by visual lane and absolute start; overlays are
-    /// independent of the base-track reflow and may intentionally overlap.
+    /// independent of the base-track reflow and may intentionally overlap segments on OTHER
+    /// lanes (that is what <see cref="IsCoveredByHigherTrack"/> resolves). Two segments on the
+    /// SAME lane may never overlap — see <see cref="TrackRangeIsFree"/>.
     /// </summary>
     [JsonIgnore]
     public IEnumerable<TimelineSegment> OverlaySegments =>
@@ -521,6 +523,32 @@ public class TimelineModel
     }
 
     /// <summary>
+    /// Whether the half-open range [<paramref name="start"/>, <paramref name="end"/>) is free of
+    /// every segment on <paramref name="trackIndex"/> except <paramref name="ignore"/>. Touching
+    /// endpoints count as free so adjacent segments may abut exactly.
+    /// </summary>
+    /// <remarks>
+    /// This is the SINGLE answer to "may a full-frame segment sit here?" — placement
+    /// (<see cref="FindFreeOverlayTrack"/>) and repositioning
+    /// (<see cref="ResolveNonOverlappingStart"/>) both route through it. They used to disagree:
+    /// insertion searched for a free lane while a drag between lanes only clamped the tail, so
+    /// dropping a segment onto an occupied lane silently stacked two segments in one row where
+    /// the later one visually swallowed the other.
+    /// </remarks>
+    public bool TrackRangeIsFree(int trackIndex, TimeSpan start, TimeSpan end, TimelineSegment? ignore = null)
+    {
+        foreach (var segment in Segments)
+        {
+            if (segment.TrackIndex != trackIndex) continue;
+            if (ReferenceEquals(segment, ignore)) continue;
+            if (RangesIntersect(start, end, segment.Start, segment.End))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Finds the first overlay track whose half-open range does not intersect an existing
     /// segment on that track. Touching endpoints are allowed so adjacent overlays do not burn
     /// extra lanes.
@@ -532,20 +560,92 @@ public class TimelineModel
 
         for (int track = 1; ; track++)
         {
-            bool collides = false;
-            foreach (var segment in Segments)
-            {
-                if (segment.TrackIndex != track) continue;
-                if (RangesIntersect(rangeStart, rangeEnd, segment.Start, segment.End))
-                {
-                    collides = true;
-                    break;
-                }
-            }
-
-            if (!collides)
+            if (TrackRangeIsFree(track, rangeStart, rangeEnd))
                 return track;
         }
+    }
+
+    /// <summary>
+    /// Resolves the start closest to <paramref name="desiredStart"/> at which
+    /// <paramref name="moving"/> fits on <paramref name="trackIndex"/> without overlapping
+    /// anything already there. Returns <paramref name="desiredStart"/> unchanged when the
+    /// requested spot is already free, so a drop into open space is never nudged.
+    /// </summary>
+    /// <remarks>
+    /// A lane is a row of mutually exclusive segments, so a colliding drop has to resolve to
+    /// SOME legal spot rather than be written through: whichever segment lost the race would
+    /// otherwise be covered by its own lane-mate, unreachable and unrenderable, with the model
+    /// giving no hint that two segments claim the same instant. The candidate set is the free
+    /// gaps between the occupied ranges plus the open-ended tail after the last one, which is
+    /// why this always succeeds — the tail can host any duration. Ties resolve to the earlier
+    /// start so a segment dropped dead-centre on a neighbour snaps back the way it came.
+    /// </remarks>
+    public TimeSpan ResolveNonOverlappingStart(TimelineSegment moving, int trackIndex, TimeSpan desiredStart)
+    {
+        ArgumentNullException.ThrowIfNull(moving);
+
+        var duration = moving.Duration < TimeSpan.Zero ? TimeSpan.Zero : moving.Duration;
+        var start = desiredStart < TimeSpan.Zero ? TimeSpan.Zero : desiredStart;
+        if (TrackRangeIsFree(trackIndex, start, start + duration, moving))
+            return start;
+
+        var occupied = new List<(TimeSpan Start, TimeSpan End)>();
+        foreach (var segment in Segments)
+        {
+            if (segment.TrackIndex != trackIndex) continue;
+            if (ReferenceEquals(segment, moving)) continue;
+            if (segment.End > segment.Start)
+                occupied.Add((segment.Start, segment.End));
+        }
+
+        occupied.Sort(static (a, b) =>
+        {
+            int cmp = a.Start.CompareTo(b.Start);
+            return cmp != 0 ? cmp : a.End.CompareTo(b.End);
+        });
+
+        // Coalesce, so a lane that already contains overlaps (a legacy project, or a segment
+        // grown by a trim) still yields gaps that are genuinely free rather than gaps measured
+        // against one arbitrary member of the pile.
+        var merged = new List<(TimeSpan Start, TimeSpan End)>();
+        foreach (var range in occupied)
+        {
+            if (merged.Count == 0 || range.Start > merged[^1].End)
+                merged.Add(range);
+            else if (range.End > merged[^1].End)
+                merged[^1] = (merged[^1].Start, range.End);
+        }
+
+        var best = TimeSpan.MinValue;
+        var bestDistance = TimeSpan.MaxValue;
+
+        void Consider(TimeSpan gapStart, TimeSpan? gapEnd)
+        {
+            if (gapEnd is { } limit && limit - gapStart < duration) return;
+
+            var candidate = start < gapStart ? gapStart : start;
+            if (gapEnd is { } end && candidate + duration > end)
+                candidate = end - duration;
+            if (candidate < TimeSpan.Zero) candidate = TimeSpan.Zero;
+
+            var distance = candidate > start ? candidate - start : start - candidate;
+            if (distance < bestDistance || (distance == bestDistance && candidate < best))
+            {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+
+        var cursor = TimeSpan.Zero;
+        foreach (var range in merged)
+        {
+            if (range.Start > cursor)
+                Consider(cursor, range.Start);
+            cursor = Max(cursor, range.End);
+        }
+        Consider(cursor, null);
+
+        return best;
     }
 
     /// <summary>
