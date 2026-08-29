@@ -235,11 +235,33 @@ public class TimelineModel
     public MouseRecordingData? CursorData { get; set; }
 
     /// <summary>
-    /// Source click ticks whose auto-zoom segments have been suppressed (deleted or
-    /// converted to manual by the user). Persisted so the suppression survives
+    /// Source click ticks whose AUTO-ZOOM has been suppressed — because the user deleted the
+    /// generated segment, or edited it into a manual one. Persisted so the suppression survives
     /// undo/redo and is applied during both preview and export.
     /// </summary>
+    /// <remarks>
+    /// This says nothing about the click itself. The click still happens: it still draws its
+    /// ripple and still pins the cursor path during the press. Only the automatic zoom it would
+    /// otherwise have generated is cancelled. Whether the user disabled the CLICK is a separate
+    /// question with a separate answer — see <see cref="DisabledClickTicks"/>.
+    /// </remarks>
     public HashSet<long> SuppressedClickTicks { get; } = [];
+
+    /// <summary>
+    /// Source click ticks the user has explicitly disabled on the timeline. A disabled click is
+    /// treated as never having happened: no auto-zoom, no click ripple in the rendered frame,
+    /// and no protected span pinning the cursor path during the press.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately SEPARATE from <see cref="SuppressedClickTicks"/> rather than sharing it.
+    /// The two answer different questions, and the difference is not academic: every project
+    /// saved before this field existed carries suppressed ticks accumulated from ordinary
+    /// auto-zoom editing, and reading those as disabled clicks retroactively silences the
+    /// ripple and the cursor-path protection on footage the user never touched. Being a new
+    /// field, this one is empty for every existing project, which is exactly the compatibility
+    /// the shared flag could not offer.
+    /// </remarks>
+    public HashSet<long> DisabledClickTicks { get; } = [];
 
     /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.

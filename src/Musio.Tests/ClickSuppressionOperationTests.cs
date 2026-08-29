@@ -3,11 +3,12 @@ using Musio.Core.Timeline;
 namespace Musio.Tests;
 
 /// <summary>
-/// Disabling a recorded click is a single flag (<see cref="TimelineModel.SuppressedClickTicks"/>)
-/// shared by three consumers — the auto-zoom engine, the click ripple, and the cursor-path
-/// protection — and by two ROUTES: this operation, and the implicit suppression that happens
-/// when an auto-zoom's generated segment is first edited or deleted. These tests pin the
-/// interaction between those two routes, which is where the sharing can lose information.
+/// Disabling a recorded click writes to <see cref="TimelineModel.DisabledClickTicks"/>, which
+/// is deliberately SEPARATE from <see cref="TimelineModel.SuppressedClickTicks"/>. The two
+/// answer different questions — "was this click's auto-zoom cancelled?" versus "did the user
+/// disable this click?" — and briefly sharing one set retroactively disabled every click in
+/// every existing project, because those projects accumulate suppressed ticks from ordinary
+/// auto-zoom editing. These tests pin the separation.
 /// </summary>
 [TestClass]
 public sealed class ClickSuppressionOperationTests
@@ -23,7 +24,7 @@ public sealed class ClickSuppressionOperationTests
 
         new SetClickSuppressedOperation(ClickTicks, suppress: true).Execute(model);
 
-        Assert.IsTrue(model.SuppressedClickTicks.Contains(ClickTicks));
+        Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
     }
 
     [TestMethod]
@@ -35,31 +36,31 @@ public sealed class ClickSuppressionOperationTests
         op.Execute(model);
         op.Undo(model);
 
-        Assert.IsFalse(model.SuppressedClickTicks.Contains(ClickTicks));
+        Assert.IsFalse(model.DisabledClickTicks.Contains(ClickTicks));
     }
 
     [TestMethod]
     public void Restore_RemovesTheTick()
     {
         var model = Model();
-        model.SuppressedClickTicks.Add(ClickTicks);
+        model.DisabledClickTicks.Add(ClickTicks);
 
         new SetClickSuppressedOperation(ClickTicks, suppress: false).Execute(model);
 
-        Assert.IsFalse(model.SuppressedClickTicks.Contains(ClickTicks));
+        Assert.IsFalse(model.DisabledClickTicks.Contains(ClickTicks));
     }
 
     [TestMethod]
     public void Restore_Undo_PutsTheTickBack()
     {
         var model = Model();
-        model.SuppressedClickTicks.Add(ClickTicks);
+        model.DisabledClickTicks.Add(ClickTicks);
         var op = new SetClickSuppressedOperation(ClickTicks, suppress: false);
 
         op.Execute(model);
         op.Undo(model);
 
-        Assert.IsTrue(model.SuppressedClickTicks.Contains(ClickTicks));
+        Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
     }
 
     /// <summary>
@@ -70,7 +71,7 @@ public sealed class ClickSuppressionOperationTests
     public void Suppress_WhenAlreadySuppressed_ReportsNoChange()
     {
         var model = Model();
-        model.SuppressedClickTicks.Add(ClickTicks);
+        model.DisabledClickTicks.Add(ClickTicks);
 
         var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
         op.Execute(model);
@@ -90,17 +91,15 @@ public sealed class ClickSuppressionOperationTests
     }
 
     /// <summary>
-    /// The load-bearing case. The click was ALREADY suppressed because the user had deleted its
-    /// auto-zoom segment; a redundant explicit suppress is then undone. Undo must restore the
-    /// PREVIOUS membership, not unconditionally remove the tick — otherwise undoing this action
-    /// silently revives an auto-zoom the user removed by a completely different route.
+    /// The regression this separation exists for. Deleting an auto-zoom segment suppresses its
+    /// source click so the engine stops regenerating it — an ordinary edit that every project
+    /// accumulates. That must NOT disable the click: the ripple and the cursor-path protection
+    /// belong to the click, not to the zoom it happened to generate.
     /// </summary>
     [TestMethod]
-    public void Undo_RestoresPreviousMembership_NotUnconditionalRemoval()
+    public void DeletingAnAutoZoom_SuppressesItsZoom_ButDoesNotDisableTheClick()
     {
         var model = Model();
-
-        // Route 1: the auto-zoom's own deletion suppressed the click.
         var keyframe = new ZoomKeyframe
         {
             Timestamp = TimeSpan.FromSeconds(2),
@@ -109,16 +108,50 @@ public sealed class ClickSuppressionOperationTests
             SourceClickTicks = ClickTicks,
         };
         model.ZoomKeyframes.Add(keyframe);
-        new RemoveZoomKeyframeOperation(keyframe.Id).Execute(model);
-        Assert.IsTrue(model.SuppressedClickTicks.Contains(ClickTicks), "precondition");
 
-        // Route 2: an explicit suppress that changes nothing, then undone.
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
-        op.Execute(model);
-        op.Undo(model);
+        new RemoveZoomKeyframeOperation(keyframe.Id).Execute(model);
 
         Assert.IsTrue(model.SuppressedClickTicks.Contains(ClickTicks),
-            "Undoing a redundant suppress must not revive an auto-zoom removed by deleting its segment");
+            "the auto-zoom must stay suppressed so the engine does not regenerate it");
+        Assert.IsFalse(model.DisabledClickTicks.Contains(ClickTicks),
+            "deleting a zoom must never disable the click that generated it");
+    }
+
+    /// <summary>
+    /// Backward compatibility, stated directly: a project restored with suppressed ticks and no
+    /// disabled ticks — which is every project saved before this feature — has no disabled
+    /// clicks at all.
+    /// </summary>
+    [TestMethod]
+    public void ProjectWithOnlyLegacySuppressions_HasNoDisabledClicks()
+    {
+        var model = Model();
+        model.SuppressedClickTicks.Add(ClickTicks);
+        model.SuppressedClickTicks.Add(90_000_000L);
+        model.SuppressedClickTicks.Add(150_000_000L);
+
+        Assert.AreEqual(0, model.DisabledClickTicks.Count);
+    }
+
+    /// <summary>
+    /// The two sets are independent in the other direction too: disabling a click must not
+    /// quietly write into the auto-zoom suppression set, or undoing the disable would leave a
+    /// suppression behind that nothing can now remove.
+    /// </summary>
+    [TestMethod]
+    public void DisablingAClick_DoesNotWriteToTheZoomSuppressionSet()
+    {
+        var model = Model();
+
+        var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
+        op.Execute(model);
+
+        Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
+        Assert.AreEqual(0, model.SuppressedClickTicks.Count);
+
+        op.Undo(model);
+        Assert.AreEqual(0, model.DisabledClickTicks.Count);
+        Assert.AreEqual(0, model.SuppressedClickTicks.Count);
     }
 
     /// <summary>
@@ -129,11 +162,11 @@ public sealed class ClickSuppressionOperationTests
     {
         var model = Model();
         const long other = 90_000_000L;
-        model.SuppressedClickTicks.Add(other);
+        model.DisabledClickTicks.Add(other);
 
         new SetClickSuppressedOperation(ClickTicks, suppress: true).Execute(model);
 
-        Assert.IsTrue(model.SuppressedClickTicks.Contains(ClickTicks));
-        Assert.IsTrue(model.SuppressedClickTicks.Contains(other));
+        Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
+        Assert.IsTrue(model.DisabledClickTicks.Contains(other));
     }
 }

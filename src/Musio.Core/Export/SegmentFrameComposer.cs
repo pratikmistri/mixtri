@@ -1047,6 +1047,12 @@ public sealed class SegmentFrameComposer : IDisposable
         // them, so they can only ever match that recording's auto-zoom segments.
         if (timeline.SuppressedClickTicks.Count > 0)
             compositor.SyncSuppressedClickTicks(timeline.SuppressedClickTicks);
+
+        // Disabled clicks additionally drop their ripple and their cursor-path protection, so
+        // the export has to be told about them separately — this is the pass that writes the
+        // finished file, and a click the user deleted must not appear in it.
+        if (timeline.DisabledClickTicks.Count > 0)
+            compositor.SyncDisabledClickTicks(timeline.DisabledClickTicks);
     }
 
     private bool IsPrimarySource(string videoFilePath)

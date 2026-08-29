@@ -5432,7 +5432,7 @@ public sealed partial class TimelineControl : UserControl
             if (column == lastColumn) continue;
             lastColumn = column;
 
-            bool suppressed = model is not null && model.SuppressedClickTicks.Contains(click.TimestampTicks);
+            bool suppressed = model is not null && model.DisabledClickTicks.Contains(click.TimestampTicks);
             bool isSelected = _selectedClickTicks == click.TimestampTicks;
 
             float cx = (float)x;
@@ -5976,7 +5976,7 @@ public sealed partial class TimelineControl : UserControl
             if (clickChanged) ClickMarkerSelected?.Invoke(this, click.TimestampTicks);
             canvas.Invalidate();
 
-            bool suppressed = model.SuppressedClickTicks.Contains(click.TimestampTicks);
+            bool suppressed = model.DisabledClickTicks.Contains(click.TimestampTicks);
             var clickMenu = new MenuFlyout();
             var toggleItem = new MenuFlyoutItem
             {

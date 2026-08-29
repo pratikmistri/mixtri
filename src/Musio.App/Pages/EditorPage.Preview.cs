@@ -1429,6 +1429,7 @@ public sealed partial class EditorPage
 
             renderer.UpdateZoomKeyframes(ManualKeyframesForSource(null));
             renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+            renderer.UpdateDisabledClickTicks(ViewModel.Model.DisabledClickTicks);
             SyncTextOverlaysToRenderer(renderer, null);
             SyncCursorAnchorsToRenderer(renderer, null);
         }
@@ -1886,6 +1887,7 @@ public sealed partial class EditorPage
                 // this is what makes a zoom created on it actually render.
                 renderer.UpdateZoomKeyframes(ManualKeyframesForSource(seg.VideoFilePath));
                 renderer.UpdateSuppressedClickTicks(ViewModel.Model.SuppressedClickTicks);
+                renderer.UpdateDisabledClickTicks(ViewModel.Model.DisabledClickTicks);
                 SyncTextOverlaysToRenderer(renderer, seg.VideoFilePath);
                 SyncCursorAnchorsToRenderer(renderer, seg.VideoFilePath);
 

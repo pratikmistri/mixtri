@@ -169,6 +169,7 @@ internal static class EditorTimelineMediator
         // appended recordings' keyframes belong to their own segment/source space.
         renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, null));
         renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
+        renderer.UpdateDisabledClickTicks(model.DisabledClickTicks);
         SyncTextOverlaysToRenderer(model, renderer, null, primaryVideoPath);
         SyncCursorAnchorsToRenderer(model, renderer, null, primaryVideoPath);
     }
@@ -193,6 +194,7 @@ internal static class EditorTimelineMediator
 
             renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, seg.VideoFilePath));
             renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
+            renderer.UpdateDisabledClickTicks(model.DisabledClickTicks);
             SyncTextOverlaysToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
             SyncCursorAnchorsToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
         }
