@@ -669,11 +669,23 @@ public sealed partial class TimelineControl : UserControl
     // so trimming one clip cannot make unrelated chips jump bands under the pointer.
     //
     // The bands are deliberately compact: the compaction more than pays for the duplication up
-    // to three tracks (one track is 52px SHORTER than the two global lanes it replaces), and
-    // the cursor band is a density ribbon rather than the old dual X/Y plot, which was never
-    // legible at this height and was never hit-testable either.
-    private const double ZoomBandHeight = 22;
-    private const double CursorBandHeight = 16;
+    // to three tracks, and the cursor band is a movement-density ribbon rather than the old
+    // dual X/Y plot, which was never legible at this height and was never hit-testable either.
+    private const double ZoomBandHeight = 28;
+    private const double CursorBandHeight = 20;
+
+    /// <summary>
+    /// Strip along the TOP of the cursor band reserved for click markers, so the movement
+    /// ribbon rising from the bottom can never bury them.
+    /// </summary>
+    /// <remarks>
+    /// Clicks are the discrete, high-value events on this band — the thing a user scans for —
+    /// while the ribbon is continuous context. Sharing one vertical space made the ribbon's
+    /// peaks swallow exactly the clicks that matter most, since a click is usually preceded by
+    /// a burst of movement. Giving each its own rail means neither can hide the other at any
+    /// density.
+    /// </remarks>
+    private const float CursorClickRailHeight = 7f;
 
     /// <summary>
     /// Height of a peer track group. Also the unit a segment drag travels through
@@ -3072,11 +3084,9 @@ public sealed partial class TimelineControl : UserControl
     private const float ZoomSegmentCornerRadius = 4;
 
     /// <summary>
-    /// Inset of a zoom chip inside its band. Tightened from 6 when the zoom lane moved from a
-    /// 50px global row to a 22px per-track band — the old inset left a 10px chip, too short for
-    /// its own level label.
+    /// Inset of a zoom chip inside its band.
     /// </summary>
-    private const float ZoomSegmentVerticalPadding = 3;
+    private const float ZoomSegmentVerticalPadding = 4;
 
     /// <summary>
     /// Which track's zoom band a keyframe belongs in: the track of the segment that owns it.
@@ -3264,11 +3274,11 @@ public sealed partial class TimelineControl : UserControl
             if (segW > 30)
             {
                 string label = $"{kf.ZoomLevel:0.#}x";
-                ds.DrawText(label, x1 + 5, segY + segH / 2 - 6,
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 8,
                     muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                     {
-                        FontSize = 10,
+                        FontSize = 11,
                         FontFamily = "Segoe UI",
                         FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                     });
@@ -5252,8 +5262,8 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Draws one segment's cursor telemetry as a per-pixel movement-density ribbon rising from
-    /// the bottom of its band, plus its click dots.
+    /// Draws one segment's cursor telemetry as a smoothed movement-density envelope rising from
+    /// the bottom of its band, with its click markers on the reserved rail above.
     /// </summary>
     private void DrawSegmentCursorRibbon(
         CanvasDrawingSession ds, VideoSegment seg, SegmentTrackVisual visual,
@@ -5300,43 +5310,128 @@ public sealed partial class TimelineControl : UserControl
             hasPrev = true;
         }
 
+        DrawMovementEnvelope(ds, travel, left, columns, bandY, bandH);
+        DrawClickMarkers(ds, cursor.Clicks, bandY, bandH, w,
+            click => SegmentVideoTimeToX(seg, (click.TimestampTicks - startTicks) / tickFreq - offset));
+    }
+
+    /// <summary>
+    /// Paints a column-per-pixel travel array as a smooth filled envelope rising from the
+    /// bottom of a cursor band.
+    /// </summary>
+    /// <remarks>
+    /// Raw per-pixel totals are spiky for a reason that is an artefact of sampling rather than
+    /// of the gesture: a column's total depends on how many hook samples happened to land in
+    /// that pixel, so even a perfectly steady sweep reads as a comb. Two box passes approximate
+    /// a Gaussian and give a smooth movement the smooth silhouette it actually has.
+    /// </remarks>
+    private void DrawMovementEnvelope(
+        CanvasDrawingSession ds, float[] travel, int left, int columns, float bandY, float bandH)
+    {
+        BoxSmoothInPlace(travel, 2);
+        BoxSmoothInPlace(travel, 2);
+
         float max = 0f;
         foreach (var t in travel)
             if (t > max) max = t;
 
+        float ribbonTop = bandY + CursorClickRailHeight;
         float baseline = bandY + bandH - 1f;
+        float maxBar = Math.Max(1f, baseline - ribbonTop);
 
         if (max <= 0)
         {
             // Recorded, but the pointer never moved. A flat baseline still distinguishes
             // "this footage has cursor data" from "this track has none".
-            ds.DrawLine(left, baseline, right, baseline, TrackEmptyLineColor, 1f);
+            ds.DrawLine(left, baseline, left + columns, baseline, TrackEmptyLineColor, 1f);
+            return;
         }
-        else
+
+        // Square root rather than linear: one fast flick would otherwise set the normalizer
+        // high enough to flatten ordinary movement into the baseline.
+        var tops = new float[columns];
+        for (int i = 0; i < columns; i++)
+            tops[i] = baseline - (float)Math.Sqrt(travel[i] / max) * maxBar;
+
+        using (var fill = new CanvasPathBuilder(ds))
         {
-            float maxBar = Math.Max(1f, bandH - 3f);
+            fill.BeginFigure(left, baseline);
             for (int i = 0; i < columns; i++)
-            {
-                if (travel[i] <= 0) continue;
+                fill.AddLine(left + i, tops[i]);
+            fill.AddLine(left + columns - 1, baseline);
+            fill.EndFigure(CanvasFigureLoop.Closed);
 
-                // Square root rather than linear: one fast flick would otherwise set the
-                // normalizer so high that ordinary movement flattens into the baseline.
-                float mag = (float)Math.Sqrt(travel[i] / max);
-                float barH = Math.Max(1f, mag * maxBar);
-                ds.FillRectangle(left + i, baseline - barH, 1f, barH, CursorPathXColor);
-            }
+            using var fillGeometry = CanvasGeometry.CreatePath(fill);
+            ds.FillGeometry(fillGeometry, WithAlpha(CursorPathXColor, 90));
         }
 
-        foreach (var click in cursor.Clicks)
+        // A brighter top edge keeps the envelope's shape readable where the fill is only a
+        // pixel or two tall.
+        using (var edge = new CanvasPathBuilder(ds))
+        {
+            edge.BeginFigure(left, tops[0]);
+            for (int i = 1; i < columns; i++)
+                edge.AddLine(left + i, tops[i]);
+            edge.EndFigure(CanvasFigureLoop.Open);
+
+            using var edgeGeometry = CanvasGeometry.CreatePath(edge);
+            ds.DrawGeometry(edgeGeometry, WithAlpha(CursorPathXColor, 220), 1f);
+        }
+    }
+
+    /// <summary>
+    /// Draws click markers on the cursor band's top rail, with a faint stem down to the
+    /// baseline so the exact instant stays readable against the envelope.
+    /// </summary>
+    /// <remarks>
+    /// Deduplicated per pixel column. A double-click, or any burst landing inside one pixel,
+    /// otherwise stacks identical circles on the same spot — wasted draw calls that also darken
+    /// that marker's outline relative to its neighbours, reading as an emphasis that means
+    /// nothing.
+    /// </remarks>
+    private void DrawClickMarkers(
+        CanvasDrawingSession ds, IEnumerable<ClickEvent> clicks,
+        float bandY, float bandH, float w, Func<ClickEvent, double> xForClick)
+    {
+        float railCenter = bandY + CursorClickRailHeight / 2f;
+        float baseline = bandY + bandH - 1f;
+        int lastColumn = int.MinValue;
+
+        foreach (var click in clicks)
         {
             if (!click.IsDown) continue;
-            double fileVideoSec = (click.TimestampTicks - startTicks) / tickFreq - offset;
-            double x = SegmentVideoTimeToX(seg, fileVideoSec);
+
+            double x = xForClick(click);
             if (double.IsNaN(x) || x < -3 || x > w + 3) continue;
 
-            float cy = bandY + bandH / 2f;
-            ds.FillCircle((float)x, cy, 2.5f, CursorClickColor);
-            ds.DrawCircle((float)x, cy, 2.5f, ClickStrokeColor, 0.8f);
+            int column = (int)Math.Round(x);
+            if (column == lastColumn) continue;
+            lastColumn = column;
+
+            float cx = (float)x;
+            ds.DrawLine(cx, railCenter, cx, baseline, WithAlpha(CursorClickColor, 70), 1f);
+            ds.FillCircle(cx, railCenter, 2.5f, CursorClickColor);
+            ds.DrawCircle(cx, railCenter, 2.5f, ClickStrokeColor, 0.8f);
+        }
+    }
+
+    /// <summary>
+    /// In-place box blur with the given radius, normalized by the actual (edge-clamped) window
+    /// so the ends are not dragged towards zero.
+    /// </summary>
+    private static void BoxSmoothInPlace(float[] values, int radius)
+    {
+        if (radius < 1 || values.Length == 0) return;
+
+        var prefix = new float[values.Length + 1];
+        for (int i = 0; i < values.Length; i++)
+            prefix[i + 1] = prefix[i] + values[i];
+
+        for (int i = 0; i < values.Length; i++)
+        {
+            int lo = Math.Max(0, i - radius);
+            int hi = Math.Min(values.Length - 1, i + radius);
+            values[i] = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
         }
     }
 
@@ -5380,38 +5475,10 @@ public sealed partial class TimelineControl : UserControl
             hasPrev = true;
         }
 
-        float max = 0f;
-        foreach (var t in travel)
-            if (t > max) max = t;
-
-        float baseline = bandY + bandH - 1f;
-        if (max <= 0)
-        {
-            ds.DrawLine(0, baseline, w, baseline, TrackEmptyLineColor, 1f);
-        }
-        else
-        {
-            float maxBar = Math.Max(1f, bandH - 3f);
-            for (int i = 0; i < columns; i++)
-            {
-                if (travel[i] <= 0) continue;
-                float mag = (float)Math.Sqrt(travel[i] / max);
-                float barH = Math.Max(1f, mag * maxBar);
-                ds.FillRectangle(i, baseline - barH, 1f, barH, CursorPathXColor);
-            }
-        }
-
-        foreach (var click in cursorData.Clicks)
-        {
-            if (!click.IsDown) continue;
-            double timeSec = (click.TimestampTicks - startTicks) / tickFreq - mouseOffset;
-            float cx = (float)SourceTimeToX(TimeSpan.FromSeconds(timeSec));
-            if (cx < -3 || cx > w + 3) continue;
-
-            float cy = bandY + bandH / 2f;
-            ds.FillCircle(cx, cy, 2.5f, CursorClickColor);
-            ds.DrawCircle(cx, cy, 2.5f, ClickStrokeColor, 0.8f);
-        }
+        DrawMovementEnvelope(ds, travel, 0, columns, bandY, bandH);
+        DrawClickMarkers(ds, cursorData.Clicks, bandY, bandH, w,
+            click => SourceTimeToX(TimeSpan.FromSeconds(
+                (click.TimestampTicks - startTicks) / tickFreq - mouseOffset)));
     }
 
     // ─── Cursor anchors (repositioned cursor moments) ───────────────────
