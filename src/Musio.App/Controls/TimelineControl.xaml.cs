@@ -5669,6 +5669,22 @@ public sealed partial class TimelineControl : UserControl
 
     // ── Cursor anchor selection & drag state ──
     private string? _selectedCursorAnchorId;
+
+    /// <summary>
+    /// The segment OCCURRENCE the selected anchor was clicked in, or null on legacy
+    /// (pre-segment) projects.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CursorAnchor.Id"/> identifies the anchor in its RECORDING, not one of its
+    /// placements on the timeline. When the same recording appears on two tracks — a duplicated
+    /// or split segment — the anchor is drawn once per occurrence, and an id-keyed selection
+    /// therefore lit every copy at once and previewed the re-time drag on all of them. Kept
+    /// alongside the id rather than replacing it: every OPERATION still addresses the anchor by
+    /// id (there is one anchor, however many times its footage appears), and only the selection
+    /// and drag preview are scoped to the copy the pointer is on.
+    /// </remarks>
+    private string? _selectedCursorAnchorSegmentId;
+
     private double _cursorAnchorDragStartX = double.NaN;
     private double _cursorAnchorDragCurrentX = double.NaN;
     private bool _cursorAnchorDragMoved;
@@ -5696,11 +5712,17 @@ public sealed partial class TimelineControl : UserControl
     public event EventHandler<CursorAnchor>? CursorAnchorClicked;
 
     /// <summary>Selects an anchor by Id (called from EditorPage), or clears with null.</summary>
+    /// <remarks>
+    /// A programmatic selection names no occurrence, so the marker highlights in every copy of
+    /// the footage — which is the honest rendering of "this anchor is selected" when the caller
+    /// did not say which copy it meant. A pointer selection always names one.
+    /// </remarks>
     public void SelectCursorAnchor(string? anchorId)
     {
         ClearOtherSelections(anchorId is null ? SelectionKind.None : SelectionKind.CursorAnchor);
         bool changed = _selectedCursorAnchorId != anchorId;
         _selectedCursorAnchorId = anchorId;
+        _selectedCursorAnchorSegmentId = null;
         if (changed) CursorAnchorSelected?.Invoke(this, anchorId);
         VideoTrackCanvas?.Invalidate();
     }
@@ -5711,10 +5733,21 @@ public sealed partial class TimelineControl : UserControl
         if (_selectedCursorAnchorId is not null)
         {
             _selectedCursorAnchorId = null;
+            _selectedCursorAnchorSegmentId = null;
             CursorAnchorSelected?.Invoke(this, null);
             VideoTrackCanvas?.Invalidate();
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="anchor"/>, as drawn in <paramref name="segmentId"/>'s copy of the
+    /// footage, is the selected marker. A selection made without an occurrence
+    /// (<see cref="SelectCursorAnchor"/>) matches every copy.
+    /// </summary>
+    private bool IsSelectedAnchorOccurrence(CursorAnchor anchor, string? segmentId)
+        => anchor.Id == _selectedCursorAnchorId
+           && (_selectedCursorAnchorSegmentId is null
+               || string.Equals(_selectedCursorAnchorSegmentId, segmentId, StringComparison.Ordinal));
 
     /// <summary>
     /// Draws a marker for every cursor anchor over the lane's position curves, so the moments
@@ -5723,20 +5756,21 @@ public sealed partial class TimelineControl : UserControl
     private void DrawCursorAnchors(
         CanvasDrawingSession ds, TimelineModel model, int trackIndex, float bandY, float bandH, float w)
     {
-        foreach (var (anchor, anchorTrack, rawX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, rawX) in EnumerateCursorAnchorPositions(model))
         {
             if (anchorTrack != trackIndex) continue;
 
+            bool isSelected = IsSelectedAnchorOccurrence(anchor, segmentId);
+
             // A drag in flight is previewed at the pointer, not at the committed timestamp —
-            // the model is only touched once, on release.
-            double x = anchor.Id == _selectedCursorAnchorId && _cursorAnchorDragMoved
-                       && !double.IsNaN(_cursorAnchorDragCurrentX)
+            // the model is only touched once, on release. Scoped to the copy being dragged, or
+            // every copy of the footage would slide along with the pointer.
+            double x = isSelected && _cursorAnchorDragMoved && !double.IsNaN(_cursorAnchorDragCurrentX)
                 ? _cursorAnchorDragCurrentX
                 : rawX;
 
             if (x < -CursorAnchorHitRadius || x > w + CursorAnchorHitRadius) continue;
 
-            bool isSelected = anchor.Id == _selectedCursorAnchorId;
             float px = (float)x;
             ds.DrawLine(px, bandY, px, bandY + bandH, CursorAnchorLineColor, isSelected ? 2f : 1f);
 
@@ -5764,7 +5798,7 @@ public sealed partial class TimelineControl : UserControl
     /// — the same mapping the cursor curves themselves use. Mapping it as an output time would
     /// scatter markers anywhere a trim or reorder had moved the footage.
     /// </remarks>
-    private IEnumerable<(CursorAnchor Anchor, int TrackIndex, double X)> EnumerateCursorAnchorPositions(TimelineModel model)
+    private IEnumerable<(CursorAnchor Anchor, int TrackIndex, string? SegmentId, double X)> EnumerateCursorAnchorPositions(TimelineModel model)
     {
         if (model.CursorAnchors.Count == 0) yield break;
 
@@ -5778,7 +5812,7 @@ public sealed partial class TimelineControl : UserControl
 
                     double x = SegmentVideoTimeToX(seg, anchor.Timestamp.TotalSeconds);
                     if (double.IsNaN(x)) continue;
-                    yield return (anchor, seg.TrackIndex, x);
+                    yield return (anchor, seg.TrackIndex, seg.Id, x);
                 }
             }
             yield break;
@@ -5788,7 +5822,7 @@ public sealed partial class TimelineControl : UserControl
         foreach (var anchor in model.CursorAnchors)
         {
             if (anchor.SourceVideoFilePath is not null) continue;
-            yield return (anchor, TimelineModel.BaseTrackIndex, SourceTimeToX(anchor.Timestamp));
+            yield return (anchor, TimelineModel.BaseTrackIndex, null, SourceTimeToX(anchor.Timestamp));
         }
     }
 
@@ -5816,12 +5850,14 @@ public sealed partial class TimelineControl : UserControl
             var pos = e.GetCurrentPoint(canvas).Position;
             int track = VideoTrackIndexFromY(model, pos.Y);
 
-            if (HitTestCursorAnchor(model, pos.X, track) is { } anchor)
+            if (HitTestCursorAnchor(model, pos.X, track) is { } anchorHit)
             {
                 ClearOtherSelections(SelectionKind.CursorAnchor);
-                bool changed = _selectedCursorAnchorId != anchor.Id;
-                _selectedCursorAnchorId = anchor.Id;
-                if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
+                bool changed = _selectedCursorAnchorId != anchorHit.Anchor.Id
+                    || _selectedCursorAnchorSegmentId != anchorHit.SegmentId;
+                _selectedCursorAnchorId = anchorHit.Anchor.Id;
+                _selectedCursorAnchorSegmentId = anchorHit.SegmentId;
+                if (changed) CursorAnchorSelected?.Invoke(this, anchorHit.Anchor.Id);
 
                 _cursorAnchorDragStartX = pos.X;
                 _cursorAnchorDragCurrentX = _cursorAnchorDragStartX;
@@ -5966,11 +6002,14 @@ public sealed partial class TimelineControl : UserControl
         var pos = e.GetPosition(canvas);
         int track = VideoTrackIndexFromY(model, pos.Y);
 
-        if (HitTestCursorAnchor(model, pos.X, track) is { } anchor)
+        if (HitTestCursorAnchor(model, pos.X, track) is { } anchorHit)
         {
+            var anchor = anchorHit.Anchor;
             ClearOtherSelections(SelectionKind.CursorAnchor);
-            bool anchorChanged = _selectedCursorAnchorId != anchor.Id;
+            bool anchorChanged = _selectedCursorAnchorId != anchor.Id
+                || _selectedCursorAnchorSegmentId != anchorHit.SegmentId;
             _selectedCursorAnchorId = anchor.Id;
+            _selectedCursorAnchorSegmentId = anchorHit.SegmentId;
             if (anchorChanged) CursorAnchorSelected?.Invoke(this, anchor.Id);
             canvas.Invalidate();
 
@@ -6013,22 +6052,22 @@ public sealed partial class TimelineControl : UserControl
 
     /// <summary>
     /// The anchor whose marker is under <paramref name="x"/> on <paramref name="trackIndex"/>'s
-    /// cursor band, or null. Nearest-first so overlapping markers resolve to the one the user
-    /// aimed at.
+    /// cursor band, or null, together with the segment occurrence it was found in.
+    /// Nearest-first so overlapping markers resolve to the one the user aimed at.
     /// </summary>
-    private CursorAnchor? HitTestCursorAnchor(TimelineModel model, double x, int trackIndex)
+    private (CursorAnchor Anchor, string? SegmentId)? HitTestCursorAnchor(TimelineModel model, double x, int trackIndex)
     {
-        CursorAnchor? best = null;
+        (CursorAnchor Anchor, string? SegmentId)? best = null;
         double bestDistance = double.MaxValue;
 
-        foreach (var (anchor, anchorTrack, markerX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, markerX) in EnumerateCursorAnchorPositions(model))
         {
             if (anchorTrack != trackIndex) continue;
 
             double distance = Math.Abs(markerX - x);
             if (distance > CursorAnchorHitRadius || distance >= bestDistance) continue;
 
-            best = anchor;
+            best = (anchor, segmentId);
             bestDistance = distance;
         }
 
