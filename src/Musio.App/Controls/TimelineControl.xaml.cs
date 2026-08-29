@@ -388,6 +388,9 @@ public sealed partial class TimelineControl : UserControl
             _hintLaneRevealTarget = 0;
             _hintLaneArmed = false;
             _hintLaneLatched = false;
+
+            // Holds one float[] per visible segment; nothing else releases it.
+            _cursorRibbonCache.Clear();
         };
     }
 
@@ -3125,6 +3128,23 @@ public sealed partial class TimelineControl : UserControl
         => OwningSegmentForKeyframe(kf)?.TrackIndex ?? TimelineModel.BaseTrackIndex;
 
     /// <summary>
+    /// Resolves every keyframe's band once, instead of once per (track, keyframe).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ZoomBandTrackIndex"/> calls <see cref="OwningSegmentForKeyframe"/>, which
+    /// scans the segment list — so resolving inside the per-track draw loop made the pass
+    /// O(tracks × keyframes × segments), and the hover hit-test paid O(keyframes × segments) on
+    /// every pointer move. Both now build this map once per pass.
+    /// </remarks>
+    private Dictionary<string, int> BuildZoomBandTrackMap(IEnumerable<ZoomKeyframe> keyframes)
+    {
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var kf in keyframes)
+            map[kf.Id] = ZoomBandTrackIndex(kf);
+        return map;
+    }
+
+    /// <summary>
     /// Dims the stretches of each track group that a higher track covers. The top-most track
     /// at any instant is the one the finished video shows, so a covered stretch of a lower
     /// track contributes nothing to the export — dimming it is decluttering AND truthful.
@@ -3186,6 +3206,8 @@ public sealed partial class TimelineControl : UserControl
             .ThenBy(k => k.Start)
             .ToList();
 
+        var bandByKeyframe = BuildZoomBandTrackMap(sorted);
+
         for (int track = 0; track < realCount; track++)
         {
             var (bandY, bandH) = TrackBandBounds(track, trackCount, TrackBand.Zoom);
@@ -3193,7 +3215,7 @@ public sealed partial class TimelineControl : UserControl
 
             ds.FillRectangle(0, bandY, w, bandH, ZoomTrackBackground);
 
-            var mine = sorted.Where(k => ZoomBandTrackIndex(k) == track).ToList();
+            var mine = sorted.Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track).ToList();
             DrawZoomBand(ds, model, mine, track, bandY, bandH, w);
         }
 
@@ -3541,8 +3563,9 @@ public sealed partial class TimelineControl : UserControl
             return (null, ZoomHitTarget.None);
 
         // Check segments in reverse order (last drawn = on top)
+        var bandByKeyframe = BuildZoomBandTrackMap(model.ZoomKeyframes);
         var sorted = model.ZoomKeyframes
-            .Where(k => ZoomBandTrackIndex(k) == track)
+            .Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track)
             .OrderBy(k => k.Timestamp)
             .ThenBy(k => k.Start)
             .ToList();
@@ -5246,6 +5269,12 @@ public sealed partial class TimelineControl : UserControl
     {
         if (model.DisplayDuration.TotalSeconds <= 0) return;
 
+        // Entries are keyed by segment id, so a deleted, split or reloaded segment leaves one
+        // behind. Cheap to detect and cheap to drop — the next repaint rebuilds whatever is
+        // still on the timeline.
+        if (_cursorRibbonCache.Count > model.Segments.Count + 8)
+            _cursorRibbonCache.Clear();
+
         int trackCount = VideoDisplayTrackCount(model);
         int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
 
@@ -5285,6 +5314,36 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
+    /// Smoothed movement-density columns for one segment, cached so a repaint that changes
+    /// nothing about the ribbon does not rebuild it.
+    /// </summary>
+    /// <remarks>
+    /// This exists because folding the bands into <c>VideoTrackCanvas</c> quietly invalidated an
+    /// older optimization's premise. A segment-body drag deliberately invalidates ONLY that
+    /// canvas on every pointer sample (repainting all ten was the original stutter), which was
+    /// cheap while the canvas held just filmstrips — but the ribbon walks EVERY cursor sample
+    /// of every visible segment, tens of thousands of them with a square root each, and the
+    /// bands are computed from COMMITTED model state so a horizontal drag reproduces byte-
+    /// identical output every sample. The general lesson: when work moves into a surface, any
+    /// optimization justified by that surface being cheap has to be re-checked.
+    /// </remarks>
+    private readonly Dictionary<string, (string Key, float[] Travel, int Left, int Columns)> _cursorRibbonCache
+        = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Everything the ribbon's shape depends on. Band Y is deliberately NOT included: the group
+    /// layout shifts while the drop-hint lane animates, but that only moves the ribbon, it does
+    /// not change its columns — so the cheap redraw still happens every frame while the
+    /// expensive column rebuild does not.
+    /// </summary>
+    private string BuildRibbonCacheKey(VideoSegment seg, MouseRecordingData cursor, int left, int columns)
+    {
+        var model = Model;
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{seg.SourceStart.Ticks}|{seg.SourceDuration.Ticks}|{seg.Start.Ticks}|{seg.Duration.Ticks}|{seg.SpeedFactor}|{left}|{columns}|{cursor.Samples.Count}|{cursor.StartTimestampTicks}|{model?.ZoomLevel ?? 1}|{model?.ScrollOffset ?? 0}");
+    }
+
+    /// <summary>
     /// Draws one segment's cursor telemetry as a smoothed movement-density envelope rising from
     /// the bottom of its band, with its click markers on the reserved rail above.
     /// </summary>
@@ -5306,54 +5365,67 @@ public sealed partial class TimelineControl : UserControl
         long startTicks = cursor.StartTimestampTicks;
         double offset = visual.MouseToVideoOffsetSeconds;
 
-        // Total pointer travel accumulated into the pixel column it happened in.
-        var travel = new float[columns];
-        int prevX = 0, prevY = 0;
-        bool hasPrev = false;
-
-        foreach (var sample in cursor.Samples)
+        string cacheKey = BuildRibbonCacheKey(seg, cursor, left, columns);
+        if (!_cursorRibbonCache.TryGetValue(seg.Id, out var cached) || !string.Equals(cached.Key, cacheKey, StringComparison.Ordinal))
         {
-            double fileVideoSec = (sample.TimestampTicks - startTicks) / tickFreq - offset;
-            double x = SegmentVideoTimeToX(seg, fileVideoSec);
-            if (double.IsNaN(x)) { hasPrev = false; continue; }
+            // Total pointer travel accumulated into the pixel column it happened in.
+            var travel = new float[columns];
+            int prevX = 0, prevY = 0;
+            bool hasPrev = false;
 
-            if (hasPrev)
+            foreach (var sample in cursor.Samples)
             {
-                int col = (int)Math.Floor(x) - left;
-                if (col >= 0 && col < columns)
+                double fileVideoSec = (sample.TimestampTicks - startTicks) / tickFreq - offset;
+                double x = SegmentVideoTimeToX(seg, fileVideoSec);
+                if (double.IsNaN(x)) { hasPrev = false; continue; }
+
+                if (hasPrev)
                 {
-                    double dx = sample.X - prevX;
-                    double dy = sample.Y - prevY;
-                    travel[col] += (float)Math.Sqrt(dx * dx + dy * dy);
+                    int col = (int)Math.Floor(x) - left;
+                    if (col >= 0 && col < columns)
+                    {
+                        double dx = sample.X - prevX;
+                        double dy = sample.Y - prevY;
+                        travel[col] += (float)Math.Sqrt(dx * dx + dy * dy);
+                    }
                 }
+
+                prevX = sample.X;
+                prevY = sample.Y;
+                hasPrev = true;
             }
 
-            prevX = sample.X;
-            prevY = sample.Y;
-            hasPrev = true;
+            // Smoothed once, into the cache — DrawMovementEnvelope must not mutate what it is
+            // handed, or a cache hit would re-smooth an already-smoothed array and flatten the
+            // envelope a little more on every repaint.
+            BoxSmoothInPlace(travel, 2);
+            BoxSmoothInPlace(travel, 2);
+
+            cached = (cacheKey, travel, left, columns);
+            _cursorRibbonCache[seg.Id] = cached;
         }
 
-        DrawMovementEnvelope(ds, travel, left, columns, bandY, bandH);
+        DrawMovementEnvelope(ds, cached.Travel, cached.Left, cached.Columns, bandY, bandH);
         DrawClickMarkers(ds, cursor.Clicks, seg.Id, bandY, bandH, w,
             click => SegmentVideoTimeToX(seg, (click.TimestampTicks - startTicks) / tickFreq - offset));
     }
 
     /// <summary>
-    /// Paints a column-per-pixel travel array as a smooth filled envelope rising from the
-    /// bottom of a cursor band.
+    /// Paints an already-smoothed column-per-pixel travel array as a filled envelope rising from
+    /// the bottom of a cursor band.
     /// </summary>
     /// <remarks>
     /// Raw per-pixel totals are spiky for a reason that is an artefact of sampling rather than
     /// of the gesture: a column's total depends on how many hook samples happened to land in
     /// that pixel, so even a perfectly steady sweep reads as a comb. Two box passes approximate
-    /// a Gaussian and give a smooth movement the smooth silhouette it actually has.
+    /// a Gaussian and give a smooth movement the smooth silhouette it actually has — but that
+    /// smoothing is the CALLER's job, done once when the columns are built. This method must
+    /// not mutate <paramref name="travel"/>: it is handed a cached array, and re-smoothing on
+    /// every repaint would flatten the envelope a little further each frame.
     /// </remarks>
     private void DrawMovementEnvelope(
         CanvasDrawingSession ds, float[] travel, int left, int columns, float bandY, float bandH)
     {
-        BoxSmoothInPlace(travel, 2);
-        BoxSmoothInPlace(travel, 2);
-
         float max = 0f;
         foreach (var t in travel)
             if (t > max) max = t;
@@ -5526,6 +5598,12 @@ public sealed partial class TimelineControl : UserControl
             prevY = sample.Y;
             hasPrev = true;
         }
+
+        // Smoothing is the caller's job now that DrawMovementEnvelope is handed cached arrays.
+        // The legacy path has no segment to cache against, so it smooths in place each time —
+        // it is a single-recording projection and never repaints during a segment drag.
+        BoxSmoothInPlace(travel, 2);
+        BoxSmoothInPlace(travel, 2);
 
         DrawMovementEnvelope(ds, travel, 0, columns, bandY, bandH);
         DrawClickMarkers(ds, cursorData.Clicks, null, bandY, bandH, w,
