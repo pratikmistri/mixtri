@@ -2854,7 +2854,7 @@ public sealed partial class TimelineControl : UserControl
     // subset of Clear*Selection() calls.
 
     /// <summary>The distinct selection surfaces this control exposes. See <see cref="ClearOtherSelections"/>.</summary>
-    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio, CursorAnchor }
+    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio, CursorAnchor, Click }
 
     /// <summary>
     /// Re-entrancy guard for <see cref="ClearOtherSelections"/>. EditorPage's
@@ -2886,6 +2886,7 @@ public sealed partial class TimelineControl : UserControl
             if (keep != SelectionKind.Transition) ClearTransitionSelection();
             if (keep != SelectionKind.InsertedAudio) ClearInsertedAudioSelection();
             if (keep != SelectionKind.CursorAnchor) ClearCursorAnchorSelection();
+            if (keep != SelectionKind.Click) ClearClickSelection();
         }
         finally
         {
@@ -5415,6 +5416,7 @@ public sealed partial class TimelineControl : UserControl
         CanvasDrawingSession ds, IEnumerable<ClickEvent> clicks,
         float bandY, float bandH, float w, Func<ClickEvent, double> xForClick)
     {
+        var model = Model;
         float railCenter = bandY + CursorClickRailHeight / 2f;
         float baseline = bandY + bandH - 1f;
         int lastColumn = int.MinValue;
@@ -5430,10 +5432,29 @@ public sealed partial class TimelineControl : UserControl
             if (column == lastColumn) continue;
             lastColumn = column;
 
+            bool suppressed = model is not null && model.SuppressedClickTicks.Contains(click.TimestampTicks);
+            bool isSelected = _selectedClickTicks == click.TimestampTicks;
+
             float cx = (float)x;
+            float r = isSelected ? 3.5f : 2.5f;
+
+            if (suppressed)
+            {
+                // Hollow, not gone. The user has to be able to see what they disabled and put
+                // it back — especially since suppressing also drops the click's cursor-path
+                // protection, whose effect is visible in the render but whose cause would not
+                // be if the marker simply vanished.
+                ds.DrawCircle(cx, railCenter, r, WithAlpha(CursorClickColor, 130), 1.2f);
+                if (isSelected)
+                    ds.DrawCircle(cx, railCenter, r + 2f, VideoClipSelectedBorder, 1.5f);
+                continue;
+            }
+
             ds.DrawLine(cx, railCenter, cx, baseline, WithAlpha(CursorClickColor, 70), 1f);
-            ds.FillCircle(cx, railCenter, 2.5f, CursorClickColor);
-            ds.DrawCircle(cx, railCenter, 2.5f, ClickStrokeColor, 0.8f);
+            ds.FillCircle(cx, railCenter, r, CursorClickColor);
+            ds.DrawCircle(cx, railCenter, r,
+                isSelected ? VideoClipSelectedBorder : ClickStrokeColor,
+                isSelected ? 1.8f : 0.8f);
         }
     }
 
@@ -5501,6 +5522,119 @@ public sealed partial class TimelineControl : UserControl
         DrawClickMarkers(ds, cursorData.Clicks, bandY, bandH, w,
             click => SourceTimeToX(TimeSpan.FromSeconds(
                 (click.TimestampTicks - startTicks) / tickFreq - mouseOffset)));
+    }
+
+    // ─── Click markers (recorded mouse presses) ─────────────────────────
+
+    /// <summary>Half-width, in pixels, of a click marker's clickable target.</summary>
+    private const float ClickMarkerHitRadius = 6f;
+
+    /// <summary>
+    /// Raw <see cref="ClickEvent.TimestampTicks"/> of the selected click marker, or null.
+    /// Identity is the tick rather than an index, because the marker list is rebuilt from
+    /// telemetry on every draw and an index would not survive a trim or a reorder.
+    /// </summary>
+    private long? _selectedClickTicks;
+
+    /// <summary>Raised when a click marker is selected on the timeline, or deselected (null).</summary>
+    public event EventHandler<long?>? ClickMarkerSelected;
+
+    /// <summary>
+    /// Raised when the user asks to disable or restore a click. The bool is the requested
+    /// state: true = suppress it, false = bring it back.
+    /// </summary>
+    public event EventHandler<(long ClickTicks, bool Suppress)>? ClickSuppressionRequested;
+
+    /// <summary>The selected click marker's tick, or null.</summary>
+    public long? SelectedClickTicks => _selectedClickTicks;
+
+    private void ClearClickSelection()
+    {
+        if (_selectedClickTicks is null) return;
+        _selectedClickTicks = null;
+        ClickMarkerSelected?.Invoke(this, null);
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>
+    /// Disables or restores the selected click. Shared by the Delete key and the marker's
+    /// context menu so both take exactly the same route through the undo stack.
+    /// </summary>
+    public bool RequestSelectedClickSuppression(bool suppress)
+    {
+        if (_selectedClickTicks is not long ticks) return false;
+        ClickSuppressionRequested?.Invoke(this, (ticks, suppress));
+        return true;
+    }
+
+    /// <summary>
+    /// The click marker under <paramref name="x"/> on <paramref name="trackIndex"/>'s cursor
+    /// band, or null. Nearest-first so a dense burst resolves to the one aimed at.
+    /// </summary>
+    /// <remarks>
+    /// Enumerates the same per-segment, per-track projection the draw pass uses, so a marker is
+    /// never hit-testable at a position it is not painted at.
+    /// </remarks>
+    private ClickEvent? HitTestClickMarker(TimelineModel model, double x, int trackIndex)
+    {
+        ClickEvent? best = null;
+        double bestDistance = double.MaxValue;
+
+        foreach (var (click, markerX) in EnumerateClickMarkerPositions(model, trackIndex))
+        {
+            double distance = Math.Abs(markerX - x);
+            if (distance > ClickMarkerHitRadius || distance >= bestDistance) continue;
+
+            best = click;
+            bestDistance = distance;
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Yields each button-down click on <paramref name="trackIndex"/>'s cursor band with its X.
+    /// </summary>
+    private IEnumerable<(ClickEvent Click, double X)> EnumerateClickMarkerPositions(
+        TimelineModel model, int trackIndex)
+    {
+        if (model.Segments.Count > 0)
+        {
+            foreach (var seg in model.Segments.OfType<VideoSegment>())
+            {
+                if (seg.TrackIndex != trackIndex) continue;
+
+                var visual = ResolveTrackVisual(seg, model);
+                if (visual?.Cursor is not { Samples.Count: > 0 } cursor) continue;
+
+                double tickFreq = cursor.TickFrequency > 0 ? cursor.TickFrequency : 1.0;
+                long startTicks = cursor.StartTimestampTicks;
+                double offset = visual.MouseToVideoOffsetSeconds;
+
+                foreach (var click in cursor.Clicks)
+                {
+                    if (!click.IsDown) continue;
+                    double x = SegmentVideoTimeToX(
+                        seg, (click.TimestampTicks - startTicks) / tickFreq - offset);
+                    if (double.IsNaN(x)) continue;
+                    yield return (click, x);
+                }
+            }
+            yield break;
+        }
+
+        // Legacy (pre-segment) projects: the whole timeline is the primary recording.
+        if (trackIndex != TimelineModel.BaseTrackIndex) yield break;
+        if (model.CursorData is not { Samples.Count: > 0 } legacy) yield break;
+
+        double legacyFreq = legacy.TickFrequency > 0 ? legacy.TickFrequency : 1.0;
+        foreach (var click in legacy.Clicks)
+        {
+            if (!click.IsDown) continue;
+            double seconds = (click.TimestampTicks - legacy.StartTimestampTicks) / legacyFreq
+                             - model.MouseToVideoOffsetSeconds;
+            yield return (click, SourceTimeToX(TimeSpan.FromSeconds(seconds)));
+        }
     }
 
     // ─── Cursor anchors (repositioned cursor moments) ───────────────────
@@ -5682,6 +5816,21 @@ public sealed partial class TimelineControl : UserControl
                 return;
             }
 
+            // Anchors win over click markers where both land on the same pixel: an anchor is
+            // something the user authored, a click is recorded telemetry, and the authored
+            // thing is the one they are more likely to be reaching for.
+            if (HitTestClickMarker(model, pos.X, track) is { } click)
+            {
+                ClearOtherSelections(SelectionKind.Click);
+                bool changed = _selectedClickTicks != click.TimestampTicks;
+                _selectedClickTicks = click.TimestampTicks;
+                if (changed) ClickMarkerSelected?.Invoke(this, click.TimestampTicks);
+
+                canvas.Invalidate();
+                e.Handled = true;
+                return;
+            }
+
             // Empty lane: drop every selection, including this one.
             ClearOtherSelections(SelectionKind.None);
         }
@@ -5712,11 +5861,19 @@ public sealed partial class TimelineControl : UserControl
                 break;
 
             case DragMode.None:
-                SetCursor(Model is { } model
-                    && HitTestCursorAnchor(model, pos.X, VideoTrackIndexFromY(model, pos.Y)) is not null
-                    ? InputSystemCursorShape.SizeWestEast
-                    : InputSystemCursorShape.Arrow);
+            {
+                var hoverShape = InputSystemCursorShape.Arrow;
+                if (Model is { } model)
+                {
+                    int hoverTrack = VideoTrackIndexFromY(model, pos.Y);
+                    if (HitTestCursorAnchor(model, pos.X, hoverTrack) is not null)
+                        hoverShape = InputSystemCursorShape.SizeWestEast;   // anchors re-time by dragging
+                    else if (HitTestClickMarker(model, pos.X, hoverTrack) is not null)
+                        hoverShape = InputSystemCursorShape.Hand;           // clicks select, they do not drag
+                }
+                SetCursor(hoverShape);
                 break;
+            }
         }
     }
 
@@ -5788,23 +5945,50 @@ public sealed partial class TimelineControl : UserControl
         if (Model is not { } model || sender is not CanvasControl canvas) return;
 
         var pos = e.GetPosition(canvas);
-        if (HitTestCursorAnchor(model, pos.X, VideoTrackIndexFromY(model, pos.Y)) is not { } anchor) return;
+        int track = VideoTrackIndexFromY(model, pos.Y);
 
-        ClearOtherSelections(SelectionKind.CursorAnchor);
-        bool changed = _selectedCursorAnchorId != anchor.Id;
-        _selectedCursorAnchorId = anchor.Id;
-        if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
-        canvas.Invalidate();
-
-        var menu = new MenuFlyout();
-        var removeItem = new MenuFlyoutItem
+        if (HitTestCursorAnchor(model, pos.X, track) is { } anchor)
         {
-            Text = "Remove Cursor Move",
-            Icon = new FontIcon { Glyph = "\uE74D" },
-        };
-        removeItem.Click += (_, _) => CursorAnchorRemoveRequested?.Invoke(this, anchor.Id);
-        menu.Items.Add(removeItem);
-        menu.ShowAt(canvas, pos);
+            ClearOtherSelections(SelectionKind.CursorAnchor);
+            bool anchorChanged = _selectedCursorAnchorId != anchor.Id;
+            _selectedCursorAnchorId = anchor.Id;
+            if (anchorChanged) CursorAnchorSelected?.Invoke(this, anchor.Id);
+            canvas.Invalidate();
+
+            var anchorMenu = new MenuFlyout();
+            var removeItem = new MenuFlyoutItem
+            {
+                Text = "Remove Cursor Move",
+                Icon = new FontIcon { Glyph = "\uE74D" },
+            };
+            removeItem.Click += (_, _) => CursorAnchorRemoveRequested?.Invoke(this, anchor.Id);
+            anchorMenu.Items.Add(removeItem);
+            anchorMenu.ShowAt(canvas, pos);
+            e.Handled = true;
+            return;
+        }
+
+        if (HitTestClickMarker(model, pos.X, track) is { } click)
+        {
+            ClearOtherSelections(SelectionKind.Click);
+            bool clickChanged = _selectedClickTicks != click.TimestampTicks;
+            _selectedClickTicks = click.TimestampTicks;
+            if (clickChanged) ClickMarkerSelected?.Invoke(this, click.TimestampTicks);
+            canvas.Invalidate();
+
+            bool suppressed = model.SuppressedClickTicks.Contains(click.TimestampTicks);
+            var clickMenu = new MenuFlyout();
+            var toggleItem = new MenuFlyoutItem
+            {
+                Text = suppressed ? "Restore Click" : "Delete Click",
+                Icon = new FontIcon { Glyph = suppressed ? "\uE7A7" : "\uE74D" },
+            };
+            toggleItem.Click += (_, _) =>
+                ClickSuppressionRequested?.Invoke(this, (click.TimestampTicks, !suppressed));
+            clickMenu.Items.Add(toggleItem);
+            clickMenu.ShowAt(canvas, pos);
+            e.Handled = true;
+        }
     }
 
     /// <summary>

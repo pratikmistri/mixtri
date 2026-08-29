@@ -1323,6 +1323,27 @@ public sealed partial class EditorPage
     private void OnZoomSegmentRemoveRequested(object? sender, string keyframeId) =>
         EditorTimelineMediator.HandleZoomSegmentRemoveRequested(ViewModel, Timeline, keyframeId, UpdateZoomPanelVisibility);
 
+    /// <summary>
+    /// Disables or restores a recorded click the user selected on the cursor lane.
+    /// </summary>
+    /// <remarks>
+    /// A suppressed click stops generating its auto-zoom, stops drawing its ripple, and stops
+    /// pinning the cursor path during the press — so all three consumers have to be re-synced.
+    /// <see cref="InvalidatePreview"/> is the single place that pushes
+    /// <see cref="TimelineModel.SuppressedClickTicks"/> to the primary renderer AND to every
+    /// appended/imported segment renderer, which is why the refresh goes through it rather
+    /// than touching the compositor directly: a click on an appended recording would otherwise
+    /// change nothing visible.
+    /// </remarks>
+    private void OnClickSuppressionRequested(object? sender, (long ClickTicks, bool Suppress) e)
+    {
+        var operation = new SetClickSuppressedOperation(e.ClickTicks, e.Suppress);
+        ViewModel.UndoRedoManager.Execute(operation);
+        if (!operation.ChangedModel) return;
+
+        InvalidatePreview();
+    }
+
     private void RemoveZoomSegment_Click(object sender, Microsoft.UI.Xaml.RoutedEventArgs e)
     {
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
