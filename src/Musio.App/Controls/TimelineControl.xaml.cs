@@ -1560,7 +1560,9 @@ public sealed partial class TimelineControl : UserControl
     // group down while the drop-hint lane opens. Anything positioned independently would drift
     // out of its lane exactly when the timeline is being rearranged.
     private const string TrackLabelGlyphVideo = "\uE714";   // Segoe Fluent Icons — Video
-    private const string TrackLabelGlyphZoom = "\uE71E";    // Zoom
+    private const string TrackLabelGlyphZoom = "\uE8A3";    // ZoomIn — the plain Zoom glyph (E71E)
+                                                            // is the search magnifier and read as
+                                                            // "find" rather than "magnify"
     private const string TrackLabelGlyphMouse = "\uE962";   // Mouse
 
     /// <summary>Left inset of the glyph, and the x the caption starts at, inside the 56px label column.</summary>
