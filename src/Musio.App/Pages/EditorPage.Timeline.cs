@@ -1327,17 +1327,22 @@ public sealed partial class EditorPage
     /// Disables or restores a recorded click the user selected on the cursor lane.
     /// </summary>
     /// <remarks>
-    /// A suppressed click stops generating its auto-zoom, stops drawing its ripple, and stops
+    /// A DISABLED click stops generating its auto-zoom, stops drawing its ripple, and stops
     /// pinning the cursor path during the press — so all three consumers have to be re-synced.
-    /// <see cref="InvalidatePreview"/> is the single place that pushes
-    /// <see cref="TimelineModel.SuppressedClickTicks"/> to the primary renderer AND to every
-    /// appended/imported segment renderer, which is why the refresh goes through it rather
-    /// than touching the compositor directly: a click on an appended recording would otherwise
-    /// change nothing visible.
+    /// This writes <see cref="TimelineModel.DisabledClickTicks"/>, NOT
+    /// <see cref="TimelineModel.SuppressedClickTicks"/>: the latter records only that a click's
+    /// auto-zoom was cancelled, and every pre-existing project carries ticks in it from
+    /// ordinary zoom editing.
+    /// <para>
+    /// <see cref="InvalidatePreview"/> is the single place that pushes BOTH sets to the primary
+    /// renderer AND to every appended/imported segment renderer, which is why the refresh goes
+    /// through it rather than touching the compositor directly: a click on an appended
+    /// recording would otherwise change nothing visible.
+    /// </para>
     /// </remarks>
-    private void OnClickSuppressionRequested(object? sender, (long ClickTicks, bool Suppress) e)
+    private void OnClickDisableRequested(object? sender, (long ClickTicks, bool Disable) e)
     {
-        var operation = new SetClickSuppressedOperation(e.ClickTicks, e.Suppress);
+        var operation = new SetClickDisabledOperation(e.ClickTicks, e.Disable);
         ViewModel.UndoRedoManager.Execute(operation);
         if (!operation.ChangedModel) return;
 

@@ -11,7 +11,7 @@ namespace Musio.Tests;
 /// auto-zoom editing. These tests pin the separation.
 /// </summary>
 [TestClass]
-public sealed class ClickSuppressionOperationTests
+public sealed class ClickDisableOperationTests
 {
     private const long ClickTicks = 20_000_000L;
 
@@ -22,7 +22,7 @@ public sealed class ClickSuppressionOperationTests
     {
         var model = Model();
 
-        new SetClickSuppressedOperation(ClickTicks, suppress: true).Execute(model);
+        new SetClickDisabledOperation(ClickTicks, disable: true).Execute(model);
 
         Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
     }
@@ -31,7 +31,7 @@ public sealed class ClickSuppressionOperationTests
     public void Suppress_Undo_RemovesTheTick()
     {
         var model = Model();
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
+        var op = new SetClickDisabledOperation(ClickTicks, disable: true);
 
         op.Execute(model);
         op.Undo(model);
@@ -45,7 +45,7 @@ public sealed class ClickSuppressionOperationTests
         var model = Model();
         model.DisabledClickTicks.Add(ClickTicks);
 
-        new SetClickSuppressedOperation(ClickTicks, suppress: false).Execute(model);
+        new SetClickDisabledOperation(ClickTicks, disable: false).Execute(model);
 
         Assert.IsFalse(model.DisabledClickTicks.Contains(ClickTicks));
     }
@@ -55,7 +55,7 @@ public sealed class ClickSuppressionOperationTests
     {
         var model = Model();
         model.DisabledClickTicks.Add(ClickTicks);
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: false);
+        var op = new SetClickDisabledOperation(ClickTicks, disable: false);
 
         op.Execute(model);
         op.Undo(model);
@@ -73,7 +73,7 @@ public sealed class ClickSuppressionOperationTests
         var model = Model();
         model.DisabledClickTicks.Add(ClickTicks);
 
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
+        var op = new SetClickDisabledOperation(ClickTicks, disable: true);
         op.Execute(model);
 
         Assert.IsFalse(op.ChangedModel);
@@ -84,7 +84,7 @@ public sealed class ClickSuppressionOperationTests
     {
         var model = Model();
 
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: false);
+        var op = new SetClickDisabledOperation(ClickTicks, disable: false);
         op.Execute(model);
 
         Assert.IsFalse(op.ChangedModel);
@@ -143,7 +143,7 @@ public sealed class ClickSuppressionOperationTests
     {
         var model = Model();
 
-        var op = new SetClickSuppressedOperation(ClickTicks, suppress: true);
+        var op = new SetClickDisabledOperation(ClickTicks, disable: true);
         op.Execute(model);
 
         Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
@@ -164,7 +164,7 @@ public sealed class ClickSuppressionOperationTests
         const long other = 90_000_000L;
         model.DisabledClickTicks.Add(other);
 
-        new SetClickSuppressedOperation(ClickTicks, suppress: true).Execute(model);
+        new SetClickDisabledOperation(ClickTicks, disable: true).Execute(model);
 
         Assert.IsTrue(model.DisabledClickTicks.Contains(ClickTicks));
         Assert.IsTrue(model.DisabledClickTicks.Contains(other));

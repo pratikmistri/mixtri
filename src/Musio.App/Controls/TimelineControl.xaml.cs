@@ -896,14 +896,15 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private bool HintLaneVisible => _hintLaneReveal > 0.0005 || _hintLaneRevealTarget > 0;
 
-    /// <summary>Height the hint lane occupies right now (0 = folded, one full group = open).</summary>
+    /// <summary>Height the hint lane occupies right now (0 = folded, one full row PITCH = open).</summary>
     /// <remarks>
-    /// Sized to a whole track GROUP, not just a video band. The drop that accepts the hint
-    /// creates a real track which immediately occupies its full group height, and
-    /// <see cref="SyncHintLaneReveal"/> skips the fold-away in exactly that case because "the
-    /// real row already occupies that height". A hint only as tall as the video band would
-    /// break that invariant and pop the timeline by the two bands' worth of difference on the
-    /// release frame.
+    /// Sized to a whole row PITCH — a peer group PLUS the <see cref="TrackGroupGap"/> that
+    /// separates it from its neighbour — not to a group's height alone. The drop that accepts
+    /// the hint creates a real track which immediately occupies exactly that much vertical
+    /// space, and <see cref="SyncHintLaneReveal"/> skips the fold-away in that case because
+    /// "the real row already occupies that height". Sizing this to the group alone would break
+    /// that invariant and pop the timeline by the gap's worth of difference on the release
+    /// frame.
     /// </remarks>
     private float HintLaneBandHeight =>
         HintLaneVisible
@@ -5508,7 +5509,7 @@ public sealed partial class TimelineControl : UserControl
             // is a fact about the footage, and the compositor that renders it is shared by
             // every segment showing that source file. Two copies of the same recording
             // therefore both show it hollow, which is truthful rather than a cascade.
-            bool suppressed = model is not null && model.DisabledClickTicks.Contains(click.TimestampTicks);
+            bool disabled = model is not null && model.DisabledClickTicks.Contains(click.TimestampTicks);
 
             // SELECTION, by contrast, is about the marker the pointer is on, so it is scoped to
             // this occurrence.
@@ -5519,10 +5520,10 @@ public sealed partial class TimelineControl : UserControl
             float cx = (float)x;
             float r = isSelected ? 3.5f : 2.5f;
 
-            if (suppressed)
+            if (disabled)
             {
                 // Hollow, not gone. The user has to be able to see what they disabled and put
-                // it back — especially since suppressing also drops the click's cursor-path
+                // it back — especially since disabling also drops the click's cursor-path
                 // protection, whose effect is visible in the render but whose cause would not
                 // be if the marker simply vanished.
                 ds.DrawCircle(cx, railCenter, r, WithAlpha(CursorClickColor, 130), 1.2f);
@@ -5635,9 +5636,9 @@ public sealed partial class TimelineControl : UserControl
 
     /// <summary>
     /// Raised when the user asks to disable or restore a click. The bool is the requested
-    /// state: true = suppress it, false = bring it back.
+    /// state: true = disable it, false = bring it back.
     /// </summary>
-    public event EventHandler<(long ClickTicks, bool Suppress)>? ClickSuppressionRequested;
+    public event EventHandler<(long ClickTicks, bool Disable)>? ClickDisableRequested;
 
     /// <summary>The selected click marker's tick, or null.</summary>
     public long? SelectedClickTicks => _selectedClick?.Ticks;
@@ -5654,10 +5655,10 @@ public sealed partial class TimelineControl : UserControl
     /// Disables or restores the selected click. Shared by the Delete key and the marker's
     /// context menu so both take exactly the same route through the undo stack.
     /// </summary>
-    public bool RequestSelectedClickSuppression(bool suppress)
+    public bool RequestSelectedClickDisabled(bool disable)
     {
         if (_selectedClick is not { } selected) return false;
-        ClickSuppressionRequested?.Invoke(this, (selected.Ticks, suppress));
+        ClickDisableRequested?.Invoke(this, (selected.Ticks, disable));
         return true;
     }
 
@@ -6113,15 +6114,15 @@ public sealed partial class TimelineControl : UserControl
             if (clickChanged) ClickMarkerSelected?.Invoke(this, hit.Click.TimestampTicks);
             canvas.Invalidate();
 
-            bool suppressed = model.DisabledClickTicks.Contains(hit.Click.TimestampTicks);
+            bool disabled = model.DisabledClickTicks.Contains(hit.Click.TimestampTicks);
             var clickMenu = new MenuFlyout();
             var toggleItem = new MenuFlyoutItem
             {
-                Text = suppressed ? "Restore Click" : "Delete Click",
-                Icon = new FontIcon { Glyph = suppressed ? "\uE7A7" : "\uE74D" },
+                Text = disabled ? "Restore Click" : "Delete Click",
+                Icon = new FontIcon { Glyph = disabled ? "\uE7A7" : "\uE74D" },
             };
             toggleItem.Click += (_, _) =>
-                ClickSuppressionRequested?.Invoke(this, (hit.Click.TimestampTicks, !suppressed));
+                ClickDisableRequested?.Invoke(this, (hit.Click.TimestampTicks, !disabled));
             clickMenu.Items.Add(toggleItem);
             clickMenu.ShowAt(canvas, pos);
             e.Handled = true;

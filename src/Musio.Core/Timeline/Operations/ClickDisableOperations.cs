@@ -19,39 +19,41 @@ namespace Musio.Core.Timeline;
 /// AUTO-ZOOM was cancelled, and every project saved before this feature carries ticks
 /// accumulated from ordinary auto-zoom editing. Reusing it would have retroactively disabled
 /// every one of those clicks on projects the user never touched — which is exactly what
-/// happened when the two were briefly shared.
+/// happened when the two were briefly shared. The naming here says "disabled" throughout for
+/// the same reason: the two sets are one word apart and one of the confusions is a data-loss
+/// bug, so the code must never make the reader guess which one it means.
 /// </para>
 /// </remarks>
-public class SetClickSuppressedOperation : IEditOperation
+public class SetClickDisabledOperation : IEditOperation
 {
     private readonly long _clickTicks;
-    private readonly bool _suppress;
-    private bool _wasSuppressed;
+    private readonly bool _disable;
+    private bool _wasDisabled;
 
-    public string Description => _suppress ? "Delete Click" : "Restore Click";
+    public string Description => _disable ? "Delete Click" : "Restore Click";
 
     private bool _changed = true;
     /// <inheritdoc />
     public bool ChangedModel => _changed;
 
-    public SetClickSuppressedOperation(long clickTicks, bool suppress)
+    public SetClickDisabledOperation(long clickTicks, bool disable)
     {
         _clickTicks = clickTicks;
-        _suppress = suppress;
+        _disable = disable;
     }
 
     public void Execute(TimelineModel model)
     {
         ArgumentNullException.ThrowIfNull(model);
 
-        _wasSuppressed = model.DisabledClickTicks.Contains(_clickTicks);
+        _wasDisabled = model.DisabledClickTicks.Contains(_clickTicks);
 
         // Asking for the state it is already in changes nothing, and must not reach the undo
         // stack — otherwise Ctrl+Z appears to do nothing.
-        _changed = _wasSuppressed != _suppress;
+        _changed = _wasDisabled != _disable;
         if (!_changed) return;
 
-        if (_suppress)
+        if (_disable)
             model.DisabledClickTicks.Add(_clickTicks);
         else
             model.DisabledClickTicks.Remove(_clickTicks);
@@ -62,7 +64,7 @@ public class SetClickSuppressedOperation : IEditOperation
         ArgumentNullException.ThrowIfNull(model);
         if (!_changed) return;
 
-        if (_wasSuppressed)
+        if (_wasDisabled)
             model.DisabledClickTicks.Add(_clickTicks);
         else
             model.DisabledClickTicks.Remove(_clickTicks);

@@ -720,11 +720,16 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Rebuilds everything derived from the effective click list after the set of suppressed
+    /// Rebuilds everything derived from the effective click list after the set of DISABLED
     /// clicks changes: the protected spans feed the path warp, and the displacements are
     /// computed from the warped path, so both are stale the moment a click is disabled or
     /// restored. No-op before there is a path to rebuild.
     /// </summary>
+    /// <remarks>
+    /// Only the disabled set reaches here. Changing <see cref="_suppressedClickTicks"/> cancels
+    /// an auto-zoom and nothing else, so it leaves the cursor path untouched and needs no
+    /// rebuild.
+    /// </remarks>
     private void InvalidateClickDerivedState()
     {
         if (_basePositions.Count == 0) return;
@@ -787,7 +792,7 @@ public class FrameCompositor : IDisposable
         {
             // A disabled click gets no protected span: the user has said this press is not a
             // moment the pointer must be pinned to.
-            if (IsClickSuppressed(click)) continue;
+            if (IsClickDisabled(click)) continue;
 
             double mouseSeconds = (click.TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
             int frame = FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps);
@@ -909,8 +914,12 @@ public class FrameCompositor : IDisposable
         _zoomEngine.SetSuppressedClickTicks(union);
     }
 
-    /// <summary>Whether a click has been disabled outright by the user.</summary>
-    private bool IsClickSuppressed(ClickEvent click)
+    /// <summary>
+    /// Whether a click has been DISABLED outright by the user — as opposed to merely having its
+    /// auto-zoom suppressed, which leaves the click itself intact. Only the ripple and the
+    /// protected cursor spans consult this.
+    /// </summary>
+    private bool IsClickDisabled(ClickEvent click)
         => _disabledClickTicks.Count > 0 && _disabledClickTicks.Contains(click.TimestampTicks);
 
     /// <summary>
@@ -1913,7 +1922,7 @@ public class FrameCompositor : IDisposable
 
             // A disabled click draws no ripple. Skipped here rather than filtered out of the
             // list up front so _clickDisplacements stays index-parallel with _mouseData.Clicks.
-            if (IsClickSuppressed(click))
+            if (IsClickDisabled(click))
                 continue;
 
             // Transform click position from logical to physical, subtract crop offset, then to output space.
