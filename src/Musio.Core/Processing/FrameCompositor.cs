@@ -720,6 +720,23 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
+    /// Rebuilds everything derived from the effective click list after the set of DISABLED
+    /// clicks changes: the protected spans feed the path warp, and the displacements are
+    /// computed from the warped path, so both are stale the moment a click is disabled or
+    /// restored. No-op before there is a path to rebuild.
+    /// </summary>
+    /// <remarks>
+    /// Only the disabled set reaches here. Changing <see cref="_suppressedClickTicks"/> cancels
+    /// an auto-zoom and nothing else, so it leaves the cursor path untouched and needs no
+    /// rebuild.
+    /// </remarks>
+    private void InvalidateClickDerivedState()
+    {
+        if (_basePositions.Count == 0) return;
+        ApplyCursorAnchors();
+    }
+
+    /// <summary>
     /// Converts anchors from storage form (source time + normalized position) into the path's
     /// own space (frame index + capture-frame pixels).
     /// </summary>
@@ -773,6 +790,10 @@ public class FrameCompositor : IDisposable
 
         foreach (var click in _mouseData.Clicks)
         {
+            // A disabled click gets no protected span: the user has said this press is not a
+            // moment the pointer must be pinned to.
+            if (IsClickDisabled(click)) continue;
+
             double mouseSeconds = (click.TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
             int frame = FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps);
             if (frame < 0 || frame > last) continue;
@@ -839,13 +860,67 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Updates which auto-generated click zooms are suppressed (i.e. deleted by the user).
-    /// Triggers a rebuild of the auto-zoom segments, excluding suppressed clicks.
+    /// The clicks the user has explicitly DISABLED, by raw
+    /// <see cref="ClickEvent.TimestampTicks"/>.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from the auto-zoom suppression set. A suppressed click still happens — it just
+    /// generates no automatic zoom; a DISABLED click is treated as never having happened, so it
+    /// also draws no ripple and contributes no protected
+    /// <see cref="CursorPathWarp.ClickSpan"/>. Merging the two silently reinterpreted every
+    /// existing project's accumulated zoom suppressions as disabled clicks.
+    /// </remarks>
+    private IReadOnlyCollection<long> _disabledClickTicks = [];
+
+    /// <summary>
+    /// Updates which clicks have had their AUTO-ZOOM suppressed. Affects zoom generation only;
+    /// the click still ripples and still pins the cursor path.
     /// </summary>
     public void SyncSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
     {
-        _zoomEngine.SetSuppressedClickTicks(suppressedTicks);
+        _suppressedClickTicks = suppressedTicks ?? [];
+        SyncZoomEngineSuppression();
     }
+
+    /// <summary>
+    /// Updates which clicks the user has disabled outright.
+    /// </summary>
+    public void SyncDisabledClickTicks(IReadOnlyCollection<long> disabledTicks)
+    {
+        _disabledClickTicks = disabledTicks ?? [];
+
+        // A disabled click must not generate a zoom either, so the engine sees both sets.
+        SyncZoomEngineSuppression();
+
+        // The protected spans are precomputed from the click list, and the displacements from
+        // the resulting warped path, so both are stale the moment a click is disabled or
+        // restored. Filtering only at the draw call would leave the path pinned by a span
+        // computed before the change.
+        InvalidateClickDerivedState();
+    }
+
+    private IReadOnlyCollection<long> _suppressedClickTicks = [];
+
+    private void SyncZoomEngineSuppression()
+    {
+        if (_disabledClickTicks.Count == 0)
+        {
+            _zoomEngine.SetSuppressedClickTicks(_suppressedClickTicks);
+            return;
+        }
+
+        var union = new HashSet<long>(_suppressedClickTicks);
+        union.UnionWith(_disabledClickTicks);
+        _zoomEngine.SetSuppressedClickTicks(union);
+    }
+
+    /// <summary>
+    /// Whether a click has been DISABLED outright by the user — as opposed to merely having its
+    /// auto-zoom suppressed, which leaves the click itself intact. Only the ripple and the
+    /// protected cursor spans consult this.
+    /// </summary>
+    private bool IsClickDisabled(ClickEvent click)
+        => _disabledClickTicks.Count > 0 && _disabledClickTicks.Contains(click.TimestampTicks);
 
     /// <summary>
     /// Sets the text overlays that belong to this compositor's source recording.
@@ -1844,6 +1919,11 @@ public class FrameCompositor : IDisposable
             var click = clicks[i];
             if (click.TimestampTicks > windowEndTicks)
                 break;
+
+            // A disabled click draws no ripple. Skipped here rather than filtered out of the
+            // list up front so _clickDisplacements stays index-parallel with _mouseData.Clicks.
+            if (IsClickDisabled(click))
+                continue;
 
             // Transform click position from logical to physical, subtract crop offset, then to output space.
             // _sourceAreaOffsetX/Y already includes user-padding plus any AR-fit gap.

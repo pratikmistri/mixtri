@@ -220,6 +220,17 @@ public class PreviewRenderer : IDisposable
     }
 
     /// <summary>
+    /// Syncs the set of clicks the user has DISABLED outright to the compositor. Distinct from
+    /// the auto-zoom suppression above: a disabled click also draws no ripple and no longer
+    /// pins the cursor path during its press.
+    /// </summary>
+    public void UpdateDisabledClickTicks(IReadOnlyCollection<long> disabledTicks)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _compositor?.SyncDisabledClickTicks(disabledTicks);
+    }
+
+    /// <summary>
     /// Sets the current webcam frame for overlay compositing.
     /// </summary>
     public void SetWebcamFrame(CanvasBitmap? webcamFrame)

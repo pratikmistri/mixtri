@@ -179,11 +179,27 @@ public sealed partial class TimelineControl : UserControl
     private TimeSpan _zoomDragOriginalStart;
     private TimeSpan _zoomDragOriginalEnd;
 
+    /// <summary>
+    /// The segment occurrence the dragged chip resolved to when the drag STARTED, captured
+    /// before the move so the commit can pin it there. Resolving again after the timestamp
+    /// changed is exactly what let a drag hand the chip to a neighbouring clip.
+    /// </summary>
+    private string? _zoomDragOwningSegmentId;
+
     // Drag-to-create state
     private TimeSpan _zoomCreateStart;
     private TimeSpan _zoomCreateEnd;
     private bool _zoomCreateActive;
     private string? _zoomCreateFile;
+
+    /// <summary>Video track whose zoom band the in-flight drag-to-create started on.</summary>
+    private int _zoomCreateTrackIndex;
+
+    /// <summary>
+    /// Id of the segment OCCURRENCE the in-flight drag-to-create started on, pinned onto the
+    /// new keyframe so it renders in that clip's band rather than the first file match.
+    /// </summary>
+    private string? _zoomCreateSegmentId;
     private const double ZoomCreateDragThreshold = 5.0; // pixels before creating
 
     // Colors — resolved from WinUI system theme resources (see ResolveThemeColors)
@@ -203,6 +219,15 @@ public sealed partial class TimelineControl : UserControl
     private Color TrimHandleColor;
     private Color TrimHandleBorderColor;
     private Color ZoomTrackBackground;
+
+    /// <summary>
+    /// Scrim laid over the stretches of a track group that a higher track covers. Neutral and
+    /// translucent so it washes the content towards the background — the covered footage is
+    /// still readable and still editable, it just stops competing with the take that actually
+    /// reaches the finished video.
+    /// </summary>
+    private Color CoveredTrackScrim;
+
     private Color ZoomSegmentFill;
     private Color ZoomSegmentAutoFill;
     private Color ZoomSegmentSelectedFill;
@@ -363,6 +388,9 @@ public sealed partial class TimelineControl : UserControl
             _hintLaneRevealTarget = 0;
             _hintLaneArmed = false;
             _hintLaneLatched = false;
+
+            // Holds one float[] per visible segment; nothing else releases it.
+            _cursorRibbonCache.Clear();
         };
     }
 
@@ -377,8 +405,6 @@ public sealed partial class TimelineControl : UserControl
     {
         yield return TimeRulerCanvas;
         yield return VideoTrackCanvas;
-        yield return CursorTrackCanvas;
-        yield return ZoomTrackCanvas;
         yield return CameraTrackCanvas;
         yield return TextTrackCanvas;
         yield return AudioTrackCanvas;
@@ -484,6 +510,12 @@ public sealed partial class TimelineControl : UserControl
         ZoomTrackBackground  = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
         AudioTrackBackground = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
         CursorTrackBackground = GetSystemBrushColor("CardBackgroundFillColorSecondaryBrush", Color.FromArgb(255, 28, 28, 28));
+
+        // Derived from the track background rather than a fixed grey, so the scrim washes
+        // covered content towards whatever the current theme's surface actually is.
+        CoveredTrackScrim = WithAlpha(
+            GetSystemBrushColor("SolidBackgroundFillColorBaseBrush", Color.FromArgb(255, 32, 32, 32)),
+            170);
 
         // ── Ruler — system text colors ──
         RulerTickColor = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(255, 135, 135, 135));
@@ -600,8 +632,6 @@ public sealed partial class TimelineControl : UserControl
 
         TimeRulerCanvas?.Invalidate();
         VideoTrackCanvas?.Invalidate();
-        CursorTrackCanvas?.Invalidate();
-        ZoomTrackCanvas?.Invalidate();
         CameraTrackCanvas?.Invalidate();
         TextTrackCanvas?.Invalidate();
         AudioTrackCanvas?.Invalidate();
@@ -618,7 +648,6 @@ public sealed partial class TimelineControl : UserControl
     // Natural heights of the tracks that are only shown when the recording actually has
     // data for them. Kept here rather than read back from the RowDefinition because a
     // collapsed row's height is zeroed, so the original value would be lost.
-    private const double CursorRowHeight = 40;
     private const double CameraRowHeight = 44;
     private const double AudioRowHeight = 40;
     private const double MicRowHeight = 40;
@@ -629,27 +658,104 @@ public sealed partial class TimelineControl : UserControl
     private const double BaseVideoTrackHeight = 80;
     private const double OverlayVideoTrackHeight = 44;
 
+    // ── Per-track band group (video + zoom + cursor) ──
+    //
+    // Zoom keyframes and cursor telemetry used to live on ONE global lane each, while video
+    // was already multi-track. Two recordings overlapping in output time — which is the whole
+    // point of an overlay track — therefore painted their chips into the same band at the same
+    // X, and HitTestZoomSegment returns the first hit walking back to front, so every buried
+    // chip was unreachable rather than merely untidy.
+    //
+    // Each video track now carries its own zoom and cursor band directly beneath it, resolved
+    // from the chip's OWNING segment (OwningSegmentForKeyframe / seg.TrackIndex). A chip's row
+    // is therefore a property of its own footage and never of whatever happens to overlap it,
+    // so trimming one clip cannot make unrelated chips jump bands under the pointer.
+    //
+    // The bands are deliberately compact: the compaction more than pays for the duplication up
+    // to three tracks, and the cursor band is a movement-density ribbon rather than the old
+    // dual X/Y plot, which was never legible at this height and was never hit-testable either.
+    private const double ZoomBandHeight = 28;
+    private const double CursorBandHeight = 20;
+
+    /// <summary>
+    /// Strip along the TOP of the cursor band reserved for click markers, so the movement
+    /// ribbon rising from the bottom can never bury them.
+    /// </summary>
+    /// <remarks>
+    /// Clicks are the discrete, high-value events on this band — the thing a user scans for —
+    /// while the ribbon is continuous context. Sharing one vertical space made the ribbon's
+    /// peaks swallow exactly the clicks that matter most, since a click is usually preceded by
+    /// a burst of movement. Giving each its own rail means neither can hide the other at any
+    /// density.
+    /// </remarks>
+    private const float CursorClickRailHeight = 7f;
+
+    /// <summary>
+    /// Blank space between two adjacent track groups.
+    /// </summary>
+    /// <remarks>
+    /// Without it a group's cursor band sits flush against the next group's filmstrip, and the
+    /// two read as one continuous block — which defeats the point of grouping the bands under
+    /// the track they belong to. The gap is part of the row PITCH, not of any band: it belongs
+    /// to no track, so nothing is drawn in it and a press there hit-tests nothing.
+    /// </remarks>
+    private const float TrackGroupGap = 7f;
+
+    /// <summary>
+    /// Height of a peer track group. Also the height the drop-hint lane opens to.
+    /// </summary>
+    /// <remarks>
+    /// A lone base track is taller than this — see <see cref="VideoBandHeightFor"/> — which is
+    /// why group offsets are summed rather than multiplied by this constant. Vertical spacing
+    /// between groups is <see cref="TrackRowPitch"/>, which adds <see cref="TrackGroupGap"/>.
+    /// </remarks>
+    private const double OverlayTrackGroupHeight = OverlayVideoTrackHeight + ZoomBandHeight + CursorBandHeight;
+
+    /// <summary>
+    /// Vertical distance from one peer group's top to the next one's — the group plus the gap
+    /// between them. This is the unit a segment drag travels through
+    /// (<see cref="ResolveDragTrackIndex"/>): using the bare group height would make the drag
+    /// reach a lane before the pointer had actually crossed into it.
+    /// </summary>
+    private const double TrackRowPitch = OverlayTrackGroupHeight + TrackGroupGap;
+
+    /// <summary>
+    /// The three horizontal bands a single video track's group is divided into, top to bottom.
+    /// </summary>
+    private enum TrackBand
+    {
+        /// <summary>The filmstrip / text-slide row.</summary>
+        Video,
+
+        /// <summary>Zoom chips owned by segments on this track.</summary>
+        Zoom,
+
+        /// <summary>Cursor density ribbon, click dots and anchor markers for this track.</summary>
+        Cursor,
+    }
+
     /// <summary>
     /// Collapses the tracks that visualise recorded media the current project does not
-    /// have — cursor, camera, system audio and microphone — so the timeline only spends
+    /// have — camera, system audio and microphone — so the timeline only spends
     /// vertical space on tracks with something to show. Video, zoom and text always stay
     /// visible: those are authoring surfaces the user creates content on (you drag on the
     /// zoom track to make a zoom), so hiding them when empty would hide the feature.
     /// A collapsed row is zero-height <em>and</em> its label/canvas are collapsed, so it
     /// cannot be hit-tested or draw a sliver.
     /// </summary>
+    /// <remarks>
+    /// The cursor band is no longer collapsible: it is a band inside each video track's group
+    /// rather than a row of its own, and a group is a fixed shape. A project with no cursor
+    /// telemetry simply draws the band's empty baseline.
+    /// </remarks>
     private void UpdateTrackVisibility()
     {
         UpdateVideoTrackHeight();
 
         // The XAML may not be realised yet when the model is assigned during construction.
-        if (CursorRow is null || AudioRow is null) return;
+        if (CameraRow is null || AudioRow is null) return;
 
         var model = Model;
-
-        bool hasCursor = model is not null &&
-            (model.CursorData?.Samples.Count > 0 ||
-             _trackVisualsByFile.Values.Any(v => v.Cursor?.Samples.Count > 0));
 
         bool hasCamera = model is not null &&
             (model.CameraSegments.Count > 0 ||
@@ -666,7 +772,6 @@ public sealed partial class TimelineControl : UserControl
              _trackVisualsByFile.Values.Any(v => v.MicWaveform is { Length: > 0 }) ||
              HasAudioFile(model, mic: true));
 
-        ApplyTrackVisibility(CursorRow, CursorTrackLabel, CursorTrackCanvas, hasCursor, CursorRowHeight);
         ApplyTrackVisibility(CameraRow, CameraTrackLabel, CameraTrackCanvas, hasCamera, CameraRowHeight);
         ApplyTrackVisibility(AudioRow, AudioTrackLabel, AudioTrackCanvas, hasSystemAudio, AudioRowHeight);
         ApplyTrackVisibility(MicRow, MicTrackLabel, MicTrackCanvas, hasMicAudio, MicRowHeight);
@@ -702,7 +807,15 @@ public sealed partial class TimelineControl : UserControl
     private double VideoTrackHeight(TimelineModel? model)
     {
         int used = Math.Max(1, model?.VideoTrackCount ?? 1);
-        return BaseVideoTrackHeight + (used - 1) * OverlayVideoTrackHeight + HintLaneBandHeight;
+
+        double total = 0;
+        for (int t = 0; t < used; t++)
+            total += TrackGroupHeightFor(t, used);
+
+        // Gaps sit BETWEEN groups, so there is one fewer of them than there are groups.
+        total += TrackGroupGap * Math.Max(0, used - 1);
+
+        return total + HintLaneBandHeight;
     }
 
     // ── Transient overlay drop-hint lane ──
@@ -783,10 +896,19 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private bool HintLaneVisible => _hintLaneReveal > 0.0005 || _hintLaneRevealTarget > 0;
 
-    /// <summary>Height the hint lane occupies right now (0 = folded, 44 = fully open).</summary>
+    /// <summary>Height the hint lane occupies right now (0 = folded, one full row PITCH = open).</summary>
+    /// <remarks>
+    /// Sized to a whole row PITCH — a peer group PLUS the <see cref="TrackGroupGap"/> that
+    /// separates it from its neighbour — not to a group's height alone. The drop that accepts
+    /// the hint creates a real track which immediately occupies exactly that much vertical
+    /// space, and <see cref="SyncHintLaneReveal"/> skips the fold-away in that case because
+    /// "the real row already occupies that height". Sizing this to the group alone would break
+    /// that invariant and pop the timeline by the gap's worth of difference on the release
+    /// frame.
+    /// </remarks>
     private float HintLaneBandHeight =>
         HintLaneVisible
-            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * OverlayVideoTrackHeight)
+            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * TrackRowPitch)
             : 0f;
 
     /// <summary>
@@ -810,7 +932,7 @@ public sealed partial class TimelineControl : UserControl
 
         // Clamped so a fling far outside the track band can't spin the stepping loops below.
         double rows = Math.Clamp(
-            (_segmentDragStartY - y) / OverlayVideoTrackHeight,
+            (_segmentDragStartY - y) / TrackRowPitch,
             -(used + 2),
             used + 2);
 
@@ -1101,14 +1223,22 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
     public event EventHandler<string?>? ZoomSegmentSelected;
 
-    /// <summary>Raised when a zoom segment drag completes. Carries the keyframe Id and new timestamp.</summary>
-    public event EventHandler<(string Id, TimeSpan NewTimestamp)>? ZoomSegmentMoved;
+    /// <summary>Raised when a zoom segment drag completes. Carries the keyframe Id, new timestamp, and the segment occurrence it was dragged within.</summary>
+    public event EventHandler<(string Id, TimeSpan NewTimestamp, string? OwningSegmentId)>? ZoomSegmentMoved;
 
     /// <summary>Raised when a zoom segment is resized. Carries the keyframe Id, whether it was the start edge, and the new edge time.</summary>
     public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? ZoomSegmentResized;
 
-    /// <summary>Raised when a new zoom segment is created by dragging. Carries the start and end times.</summary>
-    public event EventHandler<(TimeSpan Start, TimeSpan End, string? FilePath)>? ZoomSegmentCreated;
+    /// <summary>
+    /// Raised when a new zoom segment is created by dragging. Carries the start and end times,
+    /// the owning source file, and the id of the segment OCCURRENCE the drag started on.
+    /// </summary>
+    /// <remarks>
+    /// The occurrence id is what pins the new keyframe to the clip the user actually pointed
+    /// at. The file path cannot do that job: the same recording may appear on several tracks,
+    /// and a null path matches every segment when the project has no primary file.
+    /// </remarks>
+    public event EventHandler<(TimeSpan Start, TimeSpan End, string? FilePath, string? OwningSegmentId)>? ZoomSegmentCreated;
 
     /// <summary>Raised when the user requests removal of a zoom segment.</summary>
     public event EventHandler<string>? ZoomSegmentRemoveRequested;
@@ -1121,7 +1251,7 @@ public sealed partial class TimelineControl : UserControl
         {
             if (_selectedZoomKeyframeId == value) return;
             _selectedZoomKeyframeId = value;
-            ZoomTrackCanvas?.Invalidate();
+            VideoTrackCanvas?.Invalidate();
         }
     }
 
@@ -1364,9 +1494,50 @@ public sealed partial class TimelineControl : UserControl
         {
             DrawVideoTrackFromSegments(ds, model, w, h, hasThumbnails);
 
+            // The zoom and cursor bands live in this same canvas so each one can sit directly
+            // beneath the video band it belongs to — a CanvasControl cannot span grid rows, so
+            // interleaving them any other way is not possible.
+            DrawZoomBands(ds, model, w);
+            DrawCursorBands(ds, model, w);
+            DrawCoveredRangeScrim(ds, model, w);
+
             // Trim handles + speed overlays don't apply to the segment view
             return;
         }
+
+        // ── Legacy clip path ──
+        //
+        // Everything below predates per-track groups and measures from the top of the canvas
+        // with the canvas's FULL height. The canvas is now a stack of track groups, so drawing
+        // it unchanged would spill a legacy filmstrip straight over the zoom and cursor bands.
+        // Translating the session confines it to the base track's video band without touching
+        // any of the arithmetic inside.
+        int legacyTrackCount = VideoDisplayTrackCount(model);
+        var (legacyBandY, legacyBandH, _) = VideoTrackRowBounds(TimelineModel.BaseTrackIndex, legacyTrackCount);
+        var previousTransform = ds.Transform;
+        ds.Transform = System.Numerics.Matrix3x2.CreateTranslation(0, legacyBandY);
+        h = legacyBandH;
+
+        try
+        {
+            DrawLegacyVideoTrack(ds, model, w, h, hasThumbnails, pad);
+        }
+        finally
+        {
+            ds.Transform = previousTransform;
+        }
+
+        DrawZoomBands(ds, model, w);
+        DrawCursorBands(ds, model, w);
+    }
+
+    /// <summary>
+    /// The pre-segment clip/filmstrip renderer. Draws from y=0 with <paramref name="h"/> as its
+    /// whole height; the caller translates the session so it lands in the base video band.
+    /// </summary>
+    private void DrawLegacyVideoTrack(
+        CanvasDrawingSession ds, TimelineModel model, float w, float h, bool hasThumbnails, float pad)
+    {
 
         // Nothing on the timeline at all: no segments, no legacy clips, no filmstrip to draw
         // one from. Rather than leave the lane blank, draw the placeholder that invites the
@@ -1811,19 +1982,67 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
-    /// Maps a logical full-frame video track to its on-canvas row. Track 0 remains the
-    /// historical 80px base lane at the bottom; higher overlay tracks stack upward.
+    /// Height of one track's VIDEO band.
     /// </summary>
     /// <remarks>
-    /// The transient drop-hint lane (always the topmost index when present) is only as tall as
-    /// <see cref="HintLaneBandHeight"/>, which eases between 0 and a full lane while it opens
-    /// and folds. Every real lane is therefore offset by that partial band rather than by a
-    /// whole row, so the tracks slide down smoothly instead of teleporting. The hint lane's
-    /// padding is scaled by the same fraction, which keeps the clip height it yields positive
-    /// throughout — an unscaled 6px pad would exceed a 4px-tall band and make the segment
-    /// being dragged into the lane vanish for the first frames of the reveal.
+    /// The base track is taller only while it is the ONLY track — there is nothing for it to be
+    /// a peer of, and the extra height buys a more readable filmstrip. The moment a second
+    /// track exists they are peers, and a single taller lane reads as a hierarchy the model
+    /// does not have, so every track shares one height.
+    /// <para>
+    /// While the drop hint is opening, the base's extra height is eased away by the SAME
+    /// reveal fraction. Without that the base would still be 80px tall at the instant of the
+    /// drop and snap to 44px on the next layout pass — a visible step on release, which is
+    /// precisely the artefact the hint lane's reveal animation exists to remove.
+    /// </para>
     /// </remarks>
-    private (float Y, float Height, float Pad) VideoTrackRowBounds(int trackIndex, int trackCount)
+    private double VideoBandHeightFor(int trackIndex, int realCount)
+    {
+        if (trackIndex != TimelineModel.BaseTrackIndex || realCount > 1)
+            return OverlayVideoTrackHeight;
+
+        double reveal = HintLaneVisible ? Math.Clamp(_hintLaneReveal, 0, 1) : 0;
+        return BaseVideoTrackHeight - (BaseVideoTrackHeight - OverlayVideoTrackHeight) * reveal;
+    }
+
+    /// <summary>Vertical inset of the clip inside its video band, eased in step with the height.</summary>
+    private float VideoBandPaddingFor(int trackIndex, int realCount)
+    {
+        if (trackIndex != TimelineModel.BaseTrackIndex || realCount > 1)
+            return OverlayVideoTrackVerticalPadding;
+
+        double reveal = HintLaneVisible ? Math.Clamp(_hintLaneReveal, 0, 1) : 0;
+        return (float)(BaseVideoTrackVerticalPadding
+            - (BaseVideoTrackVerticalPadding - OverlayVideoTrackVerticalPadding) * reveal);
+    }
+
+    /// <summary>Height of a whole track group: its video band plus its zoom and cursor bands.</summary>
+    private double TrackGroupHeightFor(int trackIndex, int realCount)
+        => VideoBandHeightFor(trackIndex, realCount) + ZoomBandHeight + CursorBandHeight;
+
+    /// <summary>
+    /// Maps a logical full-frame video track to its on-canvas GROUP: the video band plus the
+    /// zoom and cursor bands that belong to that track, as one contiguous block. Track 0
+    /// remains the base lane at the bottom; higher overlay tracks stack upward.
+    /// </summary>
+    /// <remarks>
+    /// This is the single geometry authority for the video canvas. Everything that needs a row
+    /// — drawing, hit testing, drop indicators — resolves through here or through
+    /// <see cref="TrackBandBounds"/>, so a band can never be drawn in one place and
+    /// hit-tested in another.
+    /// <para>
+    /// Groups are summed rather than multiplied because the base group can differ in height
+    /// (see <see cref="VideoBandHeightFor"/>). With more than one track they are all equal and
+    /// the sum degenerates to a multiplication anyway.
+    /// </para>
+    /// <para>
+    /// The transient drop-hint lane (always the topmost index when present) is only as tall as
+    /// <see cref="HintLaneBandHeight"/>, which eases between 0 and a full group while it opens
+    /// and folds. Every real group is therefore offset by that partial band rather than by a
+    /// whole row, so the tracks slide down smoothly instead of teleporting.
+    /// </para>
+    /// </remarks>
+    private (float Y, float Height) TrackGroupBounds(int trackIndex, int trackCount)
     {
         trackCount = Math.Max(1, trackCount);
         trackIndex = Math.Clamp(trackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
@@ -1833,38 +2052,122 @@ public sealed partial class TimelineControl : UserControl
         int realCount = Math.Max(1, hasHintLane ? trackCount - 1 : trackCount);
 
         if (hasHintLane && trackIndex == trackCount - 1)
+            return (0f, hintBand);
+
+        // Stack downward from the hint band: the highest track sits directly under it and the
+        // base lands at the bottom. Each step adds the gap that separates the two groups.
+        float y = hintBand;
+        for (int t = realCount - 1; t > trackIndex; t--)
+            y += (float)TrackGroupHeightFor(t, realCount) + TrackGroupGap;
+
+        return (y, (float)TrackGroupHeightFor(trackIndex, realCount));
+    }
+
+    /// <summary>
+    /// Bounds of one band within a track's group. The hint lane has no zoom or cursor bands —
+    /// it stands for a track that does not exist yet — so those return zero height there and
+    /// every caller skips them.
+    /// </summary>
+    private (float Y, float Height) TrackBandBounds(int trackIndex, int trackCount, TrackBand band)
+    {
+        var (groupY, groupH) = TrackGroupBounds(trackIndex, trackCount);
+
+        bool isHintLane = HintLaneVisible && trackIndex >= Math.Max(1, trackCount) - 1;
+        if (isHintLane)
+            return band == TrackBand.Video ? (groupY, groupH) : (groupY + groupH, 0f);
+
+        int realCount = Math.Max(1, HintLaneVisible ? Math.Max(1, trackCount) - 1 : Math.Max(1, trackCount));
+        float videoH = (float)VideoBandHeightFor(trackIndex, realCount);
+
+        return band switch
+        {
+            TrackBand.Video => (groupY, videoH),
+            TrackBand.Zoom => (groupY + videoH, (float)ZoomBandHeight),
+            _ => (groupY + videoH + (float)ZoomBandHeight, (float)CursorBandHeight),
+        };
+    }
+
+    /// <summary>
+    /// Maps a logical full-frame video track to its filmstrip row — the VIDEO band of its
+    /// group. Kept as the name every existing draw and hit-test site calls so folding the zoom
+    /// and cursor bands in did not have to touch them.
+    /// </summary>
+    /// <remarks>
+    /// The hint lane's padding is scaled by the reveal fraction, which keeps the clip height it
+    /// yields positive throughout — an unscaled 6px pad would exceed a 4px-tall band and make
+    /// the segment being dragged into the lane vanish for the first frames of the reveal.
+    /// </remarks>
+    private (float Y, float Height, float Pad) VideoTrackRowBounds(int trackIndex, int trackCount)
+    {
+        trackCount = Math.Max(1, trackCount);
+        trackIndex = Math.Clamp(trackIndex, TimelineModel.BaseTrackIndex, trackCount - 1);
+
+        var (y, h) = TrackBandBounds(trackIndex, trackCount, TrackBand.Video);
+
+        if (HintLaneVisible && trackIndex == trackCount - 1)
         {
             float reveal = (float)Math.Clamp(_hintLaneReveal, 0, 1);
-            return (0f, hintBand, OverlayVideoTrackVerticalPadding * reveal);
+            return (y, h, OverlayVideoTrackVerticalPadding * reveal);
         }
 
-        if (trackIndex == TimelineModel.BaseTrackIndex)
-        {
-            float y = hintBand + (float)((realCount - 1) * OverlayVideoTrackHeight);
-            return (y, (float)BaseVideoTrackHeight, BaseVideoTrackVerticalPadding);
-        }
-
-        float rowY = hintBand + (float)((realCount - 1 - trackIndex) * OverlayVideoTrackHeight);
-        return (rowY, (float)OverlayVideoTrackHeight, OverlayVideoTrackVerticalPadding);
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
+        return (y, h, VideoBandPaddingFor(trackIndex, realCount));
     }
 
     /// <summary>
     /// Resolves the video lane under the pointer before segment hit-testing so overlapping
-    /// full-frame blocks on different tracks are independently selectable.
+    /// full-frame blocks on different tracks are independently selectable. Resolves the whole
+    /// GROUP, so a press on a track's zoom or cursor band reports that same track.
     /// </summary>
+    /// <remarks>
+    /// Walks the real group bounds top-down rather than dividing by a fixed row height, so it
+    /// stays correct while the base group is a different height from its peers (a lone base
+    /// track, or one mid-way through the drop hint's reveal).
+    /// </remarks>
     private int VideoTrackIndexFromY(TimelineModel model, double y)
     {
         int trackCount = VideoDisplayTrackCount(model);
         int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
 
-        // Measured from below the (possibly partly open) hint band, so hit-testing agrees with
-        // the row geometry mid-animation instead of being a lane out.
-        double localY = y - HintLaneBandHeight;
-        double overlayBandHeight = (realCount - 1) * OverlayVideoTrackHeight;
-        if (localY >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
+        for (int t = realCount - 1; t > TimelineModel.BaseTrackIndex; t--)
+        {
+            var (groupY, groupH) = TrackGroupBounds(t, trackCount);
+            if (y < groupY + groupH) return t;
+        }
 
-        int visualRow = Math.Clamp((int)(Math.Max(0, localY) / OverlayVideoTrackHeight), 0, Math.Max(0, realCount - 2));
-        return realCount - 1 - visualRow;
+        return TimelineModel.BaseTrackIndex;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="mode"/> is one of the gestures owned by a zoom band, and so must
+    /// keep being routed there for the rest of the drag regardless of where the pointer is now.
+    /// </summary>
+    private static bool IsZoomBandDrag(DragMode mode) => mode is
+        DragMode.ZoomSegmentBody or
+        DragMode.ZoomSegmentLeftEdge or
+        DragMode.ZoomSegmentRightEdge or
+        DragMode.ZoomSegmentCreate;
+
+    /// <summary>
+    /// Resolves which band of which track the pointer is over. Returns null for the hint lane,
+    /// which has no zoom or cursor band to address.
+    /// </summary>
+    private (int TrackIndex, TrackBand Band)? TrackBandFromY(TimelineModel model, double y)
+    {
+        int trackCount = VideoDisplayTrackCount(model);
+        int track = VideoTrackIndexFromY(model, y);
+
+        if (HintLaneVisible && y < HintLaneBandHeight)
+            return null;
+
+        foreach (var band in new[] { TrackBand.Video, TrackBand.Zoom, TrackBand.Cursor })
+        {
+            var (bandY, bandH) = TrackBandBounds(track, trackCount, band);
+            if (bandH > 0 && y >= bandY && y < bandY + bandH)
+                return (track, band);
+        }
+
+        return (track, TrackBand.Video);
     }
 
     /// <summary>
@@ -2555,7 +2858,7 @@ public sealed partial class TimelineControl : UserControl
     // subset of Clear*Selection() calls.
 
     /// <summary>The distinct selection surfaces this control exposes. See <see cref="ClearOtherSelections"/>.</summary>
-    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio, CursorAnchor }
+    private enum SelectionKind { None, Clip, Segment, Zoom, Camera, TextOverlay, Transition, InsertedAudio, CursorAnchor, Click }
 
     /// <summary>
     /// Re-entrancy guard for <see cref="ClearOtherSelections"/>. EditorPage's
@@ -2587,6 +2890,7 @@ public sealed partial class TimelineControl : UserControl
             if (keep != SelectionKind.Transition) ClearTransitionSelection();
             if (keep != SelectionKind.InsertedAudio) ClearInsertedAudioSelection();
             if (keep != SelectionKind.CursorAnchor) ClearCursorAnchorSelection();
+            if (keep != SelectionKind.Click) ClearClickSelection();
         }
         finally
         {
@@ -2805,41 +3109,169 @@ public sealed partial class TimelineControl : UserControl
 
     private const double ZoomSegmentEdgeHitWidth = 8;
     private const float ZoomSegmentCornerRadius = 4;
-    private const float ZoomSegmentVerticalPadding = 6;
 
-    private void ZoomTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    /// <summary>
+    /// Inset of a zoom chip inside its band.
+    /// </summary>
+    private const float ZoomSegmentVerticalPadding = 4;
+
+    /// <summary>
+    /// Which track's zoom band a keyframe belongs in: the track of the segment that owns it.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole point of the per-track bands. Resolving the row from the OWNING
+    /// segment makes a chip's vertical position a property of its own footage, so it never
+    /// moves because some unrelated clip was trimmed. A keyframe with no owner maps to NaN in
+    /// <see cref="ZoomKeyframeTimeToX"/> and is skipped by both the draw and the hit test, so
+    /// the base-track fallback here is never actually painted.
+    /// </remarks>
+    private int ZoomBandTrackIndex(ZoomKeyframe kf)
+        => OwningSegmentForKeyframe(kf)?.TrackIndex ?? TimelineModel.BaseTrackIndex;
+
+    /// <summary>
+    /// Resolves every keyframe's band once, instead of once per (track, keyframe).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ZoomBandTrackIndex"/> calls <see cref="OwningSegmentForKeyframe"/>, which
+    /// scans the segment list — so resolving inside the per-track draw loop made the pass
+    /// O(tracks × keyframes × segments), and the hover hit-test paid O(keyframes × segments) on
+    /// every pointer move. Both now build this map once per pass.
+    /// </remarks>
+    private Dictionary<string, int> BuildZoomBandTrackMap(IEnumerable<ZoomKeyframe> keyframes)
     {
-        var ds = args.DrawingSession;
-        var model = Model;
-        float w = (float)sender.ActualWidth;
-        float h = (float)sender.ActualHeight;
+        var map = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var kf in keyframes)
+            map[kf.Id] = ZoomBandTrackIndex(kf);
+        return map;
+    }
 
-        ds.Clear(ZoomTrackBackground);
+    /// <summary>
+    /// Dims the stretches of each track group that a higher track covers. The top-most track
+    /// at any instant is the one the finished video shows, so a covered stretch of a lower
+    /// track contributes nothing to the export — dimming it is decluttering AND truthful.
+    /// </summary>
+    /// <remarks>
+    /// Drawn as a final pass over the whole canvas rather than inline with each group, for the
+    /// same reason the inserted-audio lane draws its trim headroom as a background pass: a
+    /// group's scrim is wider than any one chip in it, so painting it inline would let a lower
+    /// track's scrim fall across a higher track's content drawn earlier.
+    /// <para>
+    /// Scoped to the covered RANGE, not the whole group. A base segment is usually only partly
+    /// covered by a shorter overlay, and dimming all of it would claim the visible part is
+    /// discarded too. Covered ranges come from <see cref="TimelineModel.CoveredRanges"/> — the
+    /// same coalescing pass that decides <see cref="TimelineModel.VisibleRanges"/>, so what the
+    /// timeline dims and what the export replaces cannot drift apart.
+    /// </para>
+    /// </remarks>
+    private void DrawCoveredRangeScrim(CanvasDrawingSession ds, TimelineModel model, float w)
+    {
+        if (model.Segments.Count == 0) return;
 
-        if (model is null || model.Duration.TotalSeconds <= 0)
-            return;
+        int trackCount = VideoDisplayTrackCount(model);
 
-        // Draw zoom segments as rounded rectangles
+        foreach (var segment in model.Segments)
+        {
+            // A segment being dragged is drawn at the pointer, not at its committed time, so a
+            // scrim computed from the model would sit somewhere the block no longer is.
+            if (segment.Id == _draggedSegmentId) continue;
+
+            var covered = model.CoveredRanges(segment);
+            if (covered.Count == 0) continue;
+
+            var (groupY, groupH) = TrackGroupBounds(segment.TrackIndex, trackCount);
+            if (groupH <= 0) continue;
+
+            foreach (var (start, end) in covered)
+            {
+                float x1 = (float)TimeToX(start);
+                float x2 = (float)TimeToX(end);
+                if (x2 < 0 || x1 > w) continue;
+
+                ds.FillRectangle(x1, groupY, Math.Max(1f, x2 - x1), groupH, CoveredTrackScrim);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Draws every track's zoom band, each directly beneath the video band it belongs to.
+    /// </summary>
+    private void DrawZoomBands(CanvasDrawingSession ds, TimelineModel model, float w)
+    {
+        if (model.DisplayDuration.TotalSeconds <= 0) return;
+
+        int trackCount = VideoDisplayTrackCount(model);
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
+
         var sorted = model.ZoomKeyframes
             .OrderBy(k => k.Timestamp)
             .ThenBy(k => k.Start)
             .ToList();
 
-        // Empty state: the hint belongs on the track it describes, where the user is
-        // looking, rather than in the toolbar.
+        var bandByKeyframe = BuildZoomBandTrackMap(sorted);
+
+        for (int track = 0; track < realCount; track++)
+        {
+            var (bandY, bandH) = TrackBandBounds(track, trackCount, TrackBand.Zoom);
+            if (bandH <= 0) continue;
+
+            ds.FillRectangle(0, bandY, w, bandH, ZoomTrackBackground);
+
+            var mine = sorted.Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track).ToList();
+            DrawZoomBand(ds, model, mine, track, bandY, bandH, w);
+        }
+
+        // The create-preview follows the pointer's own band rather than a keyframe's owner —
+        // there is no keyframe yet to own it.
+        if (_zoomCreateActive && _dragMode == DragMode.ZoomSegmentCreate)
+        {
+            var (cy, ch) = TrackBandBounds(_zoomCreateTrackIndex, trackCount, TrackBand.Zoom);
+            if (ch > 0)
+            {
+                float cx1 = (float)ZoomCreateTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd);
+                float cx2 = (float)ZoomCreateTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart);
+                float cw = Math.Max(2, cx2 - cx1);
+                float py = cy + ZoomSegmentVerticalPadding;
+                float ph = ch - ZoomSegmentVerticalPadding * 2;
+
+                using var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, py, cw, ph, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
+                ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
+                ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
+                    new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Draws one track's zoom chips into <paramref name="bandY"/>/<paramref name="bandH"/>.
+    /// </summary>
+    private void DrawZoomBand(
+        CanvasDrawingSession ds,
+        TimelineModel model,
+        IReadOnlyList<ZoomKeyframe> sorted,
+        int trackIndex,
+        float bandY,
+        float bandH,
+        float w)
+    {
+        // Empty state: the hint belongs on the track it describes, where the user is looking,
+        // rather than in the toolbar. Only the base band carries it — repeating it on every
+        // track would turn an invitation into wallpaper.
         if (sorted.Count == 0)
         {
-            using var hintFormat = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+            if (trackIndex == TimelineModel.BaseTrackIndex && model.ZoomKeyframes.Count == 0)
             {
-                FontSize = 11,
-                FontFamily = "Segoe UI",
-                FontStyle = Windows.UI.Text.FontStyle.Italic,
-                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-            };
+                using var hintFormat = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+                {
+                    FontSize = 10,
+                    FontFamily = "Segoe UI",
+                    FontStyle = Windows.UI.Text.FontStyle.Italic,
+                    HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
+                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+                };
 
-            ds.DrawText("Drag on zoom track to add segment",
-                new Rect(0, 0, w, h), TrackHintTextColor, hintFormat);
+                ds.DrawText("Drag on zoom track to add segment",
+                    new Rect(0, bandY, w, bandH), TrackHintTextColor, hintFormat);
+            }
             return;
         }
 
@@ -2851,7 +3283,7 @@ public sealed partial class TimelineControl : UserControl
         if (selectedKeyframe is not null)
             drawOrder.Add(selectedKeyframe);
 
-        bool hasSelection = selectedKeyframe is not null;
+        bool hasSelection = _selectedZoomKeyframeId is not null;
 
         foreach (var kf in drawOrder)
         {
@@ -2861,8 +3293,9 @@ public sealed partial class TimelineControl : UserControl
             if (x2 < 0 || x1 > w) continue;
 
             float segW = Math.Max(2, x2 - x1);
-            float segY = ZoomSegmentVerticalPadding;
-            float segH = h - ZoomSegmentVerticalPadding * 2;
+            float segY = bandY + ZoomSegmentVerticalPadding;
+            float segH = bandH - ZoomSegmentVerticalPadding * 2;
+            if (segH <= 0) continue;
 
             bool isSelected = kf.Id == _selectedZoomKeyframeId;
             bool isEditable = kf.IsManual;
@@ -2887,7 +3320,7 @@ public sealed partial class TimelineControl : UserControl
             if (segW > 30)
             {
                 string label = $"{kf.ZoomLevel:0.#}x";
-                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7,
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 8,
                     muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
                     new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
                     {
@@ -2911,42 +3344,23 @@ public sealed partial class TimelineControl : UserControl
             }
         }
 
-        DrawZoomLinkedSegmentIndicators(ds, sorted, w, h);
-
-        // Draw create-preview if dragging to create
-        if (_zoomCreateActive && _dragMode == DragMode.ZoomSegmentCreate)
-        {
-            float cx1 = (float)ZoomCreateTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd);
-            float cx2 = (float)ZoomCreateTimeToX(_zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart);
-            float cw = Math.Max(2, cx2 - cx1);
-            float cy = ZoomSegmentVerticalPadding;
-            float ch = h - ZoomSegmentVerticalPadding * 2;
-
-            using var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
-            ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
-            ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
-                new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
-        }
-
-        if (!double.IsNaN(_segmentSnapGuideX))
-        {
-            var snapGuideColor = Color.FromArgb(255, 255, 214, 10);
-            ds.DrawLine((float)_segmentSnapGuideX, 0, (float)_segmentSnapGuideX, h, snapGuideColor, 1f);
-        }
+        DrawZoomLinkedSegmentIndicators(ds, sorted, bandY, bandH, w);
     }
 
     private void DrawZoomLinkedSegmentIndicators(
         CanvasDrawingSession ds,
         IReadOnlyList<ZoomKeyframe> sorted,
-        float w,
-        float h)
+        float bandY,
+        float bandH,
+        float w)
     {
         if (sorted.Count < 2)
             return;
 
         var previousByPath = new List<ZoomKeyframe>();
-        float segY = ZoomSegmentVerticalPadding;
-        float segH = h - ZoomSegmentVerticalPadding * 2;
+        float segY = bandY + ZoomSegmentVerticalPadding;
+        float segH = bandH - ZoomSegmentVerticalPadding * 2;
+        if (segH <= 0) return;
         float bridgeY = segY + Math.Max(2f, segH - 5f);
 
         foreach (var current in sorted)
@@ -3000,14 +3414,29 @@ public sealed partial class TimelineControl : UserControl
            string.Equals(a.SourceVideoFilePath, b.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Finds the video segment that owns a zoom keyframe: the segment matching the
-    /// keyframe's source file whose source range contains its Timestamp (falling back
-    /// to the first file-matching segment that still SHOWS any part of the keyframe).
-    /// This anchors the keyframe to one occurrence of a recording even when that source
-    /// was duplicated or reordered.
+    /// Finds the video segment that owns a zoom keyframe.
     /// </summary>
     /// <remarks>
-    /// The fallback exists so an authored span whose eases slightly overflow its segment
+    /// Resolution order matters:
+    /// <list type="number">
+    /// <item><description>
+    /// The pinned <see cref="ZoomKeyframe.OwningSegmentId"/>, when it still resolves. This is
+    /// the only key that identifies an OCCURRENCE. File path alone does not: the same
+    /// recording can sit on two tracks at once, and a null path matches every segment when
+    /// <see cref="TimelineModel.PrimaryVideoFilePath"/> is null — in which case the searches
+    /// below return whatever comes first in list order, which is how a chip ended up in
+    /// another track's band and hopped clips as it was dragged.
+    /// </description></item>
+    /// <item><description>
+    /// Otherwise the segment matching the keyframe's source file whose source range contains
+    /// its Timestamp — the historical behaviour, kept for auto-generated keyframes and for
+    /// projects saved before the pin existed.
+    /// </description></item>
+    /// <item><description>
+    /// Otherwise the first file-matching segment that still SHOWS any part of the keyframe.
+    /// </description></item>
+    /// </list>
+    /// The last fallback exists so an authored span whose eases slightly overflow its segment
     /// keeps its width instead of collapsing — but it must never adopt a segment that shows
     /// NO part of the keyframe. Doing so extrapolates a position outside that segment's
     /// range (<see cref="TimelineModel.MapSourceTimeFromOwningSegment"/> deliberately does
@@ -3019,6 +3448,16 @@ public sealed partial class TimelineControl : UserControl
     {
         var model = Model;
         if (model is null) return null;
+
+        if (kf.OwningSegmentId is { Length: > 0 } pinned)
+        {
+            foreach (var seg in model.Segments.OfType<VideoSegment>())
+            {
+                if (string.Equals(seg.Id, pinned, StringComparison.Ordinal))
+                    return seg;
+            }
+            // Fall through: the pinned occurrence is gone (deleted, or replaced by a split).
+        }
 
         VideoSegment? firstMatch = null;
         foreach (var seg in model.Segments.OfType<VideoSegment>())
@@ -3107,18 +3546,27 @@ public sealed partial class TimelineControl : UserControl
     private (string? Id, ZoomHitTarget Target) HitTestZoomSegment(double posX, double posY)
     {
         var model = Model;
-        if (model is null || ZoomTrackCanvas is null) return (null, ZoomHitTarget.None);
+        if (model is null) return (null, ZoomHitTarget.None);
 
-        float h = (float)ZoomTrackCanvas.ActualHeight;
-        float segY = ZoomSegmentVerticalPadding;
-        float segH = h - ZoomSegmentVerticalPadding * 2;
+        // Resolve the band FIRST, then consider only the chips that belong to it. Without this
+        // a press would still reach a chip from a different recording that merely overlaps in
+        // time — the very collision the per-track bands exist to remove.
+        int trackCount = VideoDisplayTrackCount(model);
+        int track = VideoTrackIndexFromY(model, posY);
+        var (bandY, bandH) = TrackBandBounds(track, trackCount, TrackBand.Zoom);
+        if (bandH <= 0) return (null, ZoomHitTarget.None);
+
+        float segY = bandY + ZoomSegmentVerticalPadding;
+        float segH = bandH - ZoomSegmentVerticalPadding * 2;
 
         // Check if Y is within segment vertical bounds
         if (posY < segY || posY > segY + segH)
             return (null, ZoomHitTarget.None);
 
         // Check segments in reverse order (last drawn = on top)
+        var bandByKeyframe = BuildZoomBandTrackMap(model.ZoomKeyframes);
         var sorted = model.ZoomKeyframes
+            .Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track)
             .OrderBy(k => k.Timestamp)
             .ThenBy(k => k.Start)
             .ToList();
@@ -3176,14 +3624,36 @@ public sealed partial class TimelineControl : UserControl
     /// keyframe with a raw output-time value in a source-time field. Returns <c>null</c>
     /// only when the timeline has no video segment at all to clamp against.
     /// </summary>
-    private TimeSpan? XToSegmentVideoTime(double x, out string? filePath)
+    /// <param name="trackIndex">
+    /// When non-negative, only segments on that video track are considered. Drag-to-create on a
+    /// per-track zoom band must attach to footage on the band's OWN track — resolving across all
+    /// tracks would tag the new keyframe with a recording from a different lane and immediately
+    /// draw it in a band the user was not pointing at.
+    /// </param>
+    private TimeSpan? XToSegmentVideoTime(double x, out string? filePath, int trackIndex = -1)
+    {
+        var result = XToSegmentVideoTime(x, out filePath, out _, trackIndex);
+        return result;
+    }
+
+    /// <param name="segmentId">
+    /// Id of the segment the X resolved against. Callers that pin an authored thing to an
+    /// occurrence need this — the file path alone cannot identify which copy of a recording
+    /// was pointed at.
+    /// </param>
+    private TimeSpan? XToSegmentVideoTime(double x, out string? filePath, out string? segmentId, int trackIndex = -1)
     {
         filePath = null;
+        segmentId = null;
         var model = Model;
         var outputTime = XToTime(x);
         if (model is null || model.Segments.Count == 0) return outputTime;
 
-        var videoSegments = model.Segments.OfType<VideoSegment>().ToList();
+        var videoSegments = model.Segments.OfType<VideoSegment>()
+            .Where(seg => trackIndex < 0 || seg.TrackIndex == trackIndex)
+            .ToList();
+        if (videoSegments.Count == 0) return null;
+
         var containing = videoSegments.FirstOrDefault(seg => outputTime >= seg.Start && outputTime < seg.End);
 
         VideoSegment target;
@@ -3204,6 +3674,7 @@ public sealed partial class TimelineControl : UserControl
         bool isPrimary = model.PrimaryVideoFilePath is null ||
             string.Equals(target.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase);
         filePath = isPrimary ? null : target.VideoFilePath;
+        segmentId = target.Id;
         var local = mappingOutputTime - target.Start;
         return target.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * target.SpeedFactor));
     }
@@ -3257,7 +3728,8 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not CanvasControl canvas || TimeRulerCanvas is null) return;
+        var model = Model;
+        if (sender is not CanvasControl canvas || TimeRulerCanvas is null || model is null) return;
         var pos = e.GetCurrentPoint(canvas).Position;
         _segmentSnapGuideX = double.NaN;
 
@@ -3278,6 +3750,7 @@ public sealed partial class TimelineControl : UserControl
             _zoomDragOriginalTimestamp = kf.Timestamp;
             _zoomDragOriginalStart = kf.Start;
             _zoomDragOriginalEnd = kf.End;
+            _zoomDragOwningSegmentId = kf.OwningSegmentId ?? OwningSegmentForKeyframe(kf)?.Id;
 
             switch (hitTarget)
             {
@@ -3306,15 +3779,17 @@ public sealed partial class TimelineControl : UserControl
             _zoomDragStartX = pos.X;
             _zoomDragCurrentX = pos.X;
             _zoomCreateActive = false;
+            _zoomCreateTrackIndex = VideoTrackIndexFromY(model, pos.Y);
             PlayheadPosition = XToTime(pos.X);
 
-            var start = XToSegmentVideoTime(pos.X, out _zoomCreateFile);
+            var start = XToSegmentVideoTime(pos.X, out _zoomCreateFile, out _zoomCreateSegmentId, _zoomCreateTrackIndex);
             if (start is null)
             {
                 // No video segment anywhere to attach a zoom keyframe to — reject the
                 // gesture rather than stamping an output-time value into a source-time
                 // field, and leave no transient drag state behind.
                 _zoomCreateFile = null;
+                _zoomCreateSegmentId = null;
                 _dragMode = DragMode.None;
                 _zoomDragStartX = double.NaN;
                 _zoomDragCurrentX = double.NaN;
@@ -3436,7 +3911,7 @@ public sealed partial class TimelineControl : UserControl
                     if (startTime is not null && movedTime is not null)
                     {
                         var newTimestamp = _zoomDragOriginalTimestamp + (movedTime.Value - startTime.Value);
-                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp, _zoomDragOwningSegmentId));
                     }
                     // else: unmappable in this file's time domain — reject the move,
                     // leaving the keyframe at its original position.
@@ -3470,7 +3945,7 @@ public sealed partial class TimelineControl : UserControl
                 var end = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart;
                 if ((end - start) >= ZoomKeyframe.MinSegmentDuration)
                 {
-                    ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile));
+                    ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile, _zoomCreateSegmentId));
                 }
                 _zoomCreateActive = false;
                 break;
@@ -4779,124 +5254,484 @@ public sealed partial class TimelineControl : UserControl
 
     // --- Cursor Path Track ---
 
-    private void CursorTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    /// <summary>
+    /// Draws every track's cursor band, each directly beneath the zoom band of the same track.
+    /// </summary>
+    /// <remarks>
+    /// The band is a movement-density ribbon rather than the dual X/Y polyline plot the old
+    /// global lane drew. Two reasons, and the second is the load-bearing one: at this height
+    /// there is no room for a legible plot, and the plot was never hit-testable in the first
+    /// place — only anchors and click dots respond to a pointer — so scoping the paths down
+    /// costs no interaction at all. It also removes a genuine lie: the old plot normalized each
+    /// segment against its OWN coordinate spread, so equal heights in two recordings meant
+    /// different screen positions while looking directly comparable.
+    /// </remarks>
+    private void DrawCursorBands(CanvasDrawingSession ds, TimelineModel model, float w)
     {
-        var ds = args.DrawingSession;
-        var model = Model;
-        float w = (float)sender.ActualWidth;
-        float h = (float)sender.ActualHeight;
+        if (model.DisplayDuration.TotalSeconds <= 0) return;
 
-        ds.Clear(CursorTrackBackground);
+        // Entries are keyed by segment id, so a deleted, split or reloaded segment leaves one
+        // behind. Cheap to detect and cheap to drop — the next repaint rebuilds whatever is
+        // still on the timeline.
+        if (_cursorRibbonCache.Count > model.Segments.Count + 8)
+            _cursorRibbonCache.Clear();
 
-        if (model is null || model.DisplayDuration.TotalSeconds <= 0)
+        int trackCount = VideoDisplayTrackCount(model);
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
+
+        for (int track = 0; track < realCount; track++)
         {
-            ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
-            return;
-        }
+            var (bandY, bandH) = TrackBandBounds(track, trackCount, TrackBand.Cursor);
+            if (bandH <= 0) continue;
 
-        // Segment-based timeline: draw each video segment's OWN cursor data within
-        // its output range so appended recordings show their own track and the
-        // markers move with the segment.
-        if (model.Segments.Count > 0)
-        {
+            ds.FillRectangle(0, bandY, w, bandH, CursorTrackBackground);
+
             bool drewAny = false;
             foreach (var seg in model.Segments.OfType<VideoSegment>())
             {
+                if (seg.TrackIndex != track) continue;
+
                 var visual = ResolveTrackVisual(seg, model);
                 if (visual?.Cursor is { Samples.Count: > 0 })
                 {
-                    DrawSegmentCursor(ds, sender, seg, visual, w, h);
+                    DrawSegmentCursorRibbon(ds, seg, visual, bandY, bandH, w);
                     drewAny = true;
                 }
             }
-            if (!drewAny)
-                ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
 
-            DrawCursorAnchors(ds, model, w, h);
+            // Legacy (pre-segment) projects have no segment to attribute telemetry to; the
+            // whole timeline is the primary recording and belongs in the base band.
+            if (!drewAny && model.Segments.Count == 0 && track == TimelineModel.BaseTrackIndex)
+            {
+                DrawLegacyCursorRibbon(ds, model, bandY, bandH, w);
+                drewAny = true;
+            }
+
+            if (!drewAny)
+                ds.DrawLine(0, bandY + bandH / 2, w, bandY + bandH / 2, TrackEmptyLineColor, 0.5f);
+
+            DrawCursorAnchors(ds, model, track, bandY, bandH, w);
+        }
+    }
+
+    /// <summary>
+    /// Smoothed movement-density columns for one segment, cached so a repaint that changes
+    /// nothing about the ribbon does not rebuild it.
+    /// </summary>
+    /// <remarks>
+    /// This exists because folding the bands into <c>VideoTrackCanvas</c> quietly invalidated an
+    /// older optimization's premise. A segment-body drag deliberately invalidates ONLY that
+    /// canvas on every pointer sample (repainting all ten was the original stutter), which was
+    /// cheap while the canvas held just filmstrips — but the ribbon walks EVERY cursor sample
+    /// of every visible segment, tens of thousands of them with a square root each, and the
+    /// bands are computed from COMMITTED model state so a horizontal drag reproduces byte-
+    /// identical output every sample. The general lesson: when work moves into a surface, any
+    /// optimization justified by that surface being cheap has to be re-checked.
+    /// </remarks>
+    private readonly Dictionary<string, (string Key, float[] Travel, int Left, int Columns)> _cursorRibbonCache
+        = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Everything the ribbon's shape depends on. Band Y is deliberately NOT included: the group
+    /// layout shifts while the drop-hint lane animates, but that only moves the ribbon, it does
+    /// not change its columns — so the cheap redraw still happens every frame while the
+    /// expensive column rebuild does not.
+    /// </summary>
+    private string BuildRibbonCacheKey(VideoSegment seg, MouseRecordingData cursor, int left, int columns)
+    {
+        var model = Model;
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{seg.SourceStart.Ticks}|{seg.SourceDuration.Ticks}|{seg.Start.Ticks}|{seg.Duration.Ticks}|{seg.SpeedFactor}|{left}|{columns}|{cursor.Samples.Count}|{cursor.StartTimestampTicks}|{model?.ZoomLevel ?? 1}|{model?.ScrollOffset ?? 0}");
+    }
+
+    /// <summary>
+    /// Draws one segment's cursor telemetry as a smoothed movement-density envelope rising from
+    /// the bottom of its band, with its click markers on the reserved rail above.
+    /// </summary>
+    private void DrawSegmentCursorRibbon(
+        CanvasDrawingSession ds, VideoSegment seg, SegmentTrackVisual visual,
+        float bandY, float bandH, float w)
+    {
+        var cursor = visual.Cursor!;
+        float segX1 = (float)TimeToX(seg.Start);
+        float segX2 = (float)TimeToX(seg.End);
+        if (segX2 < 0 || segX1 > w) return;
+
+        int left = Math.Max(0, (int)Math.Floor(segX1));
+        int right = Math.Min((int)Math.Ceiling(w), (int)Math.Ceiling(segX2));
+        int columns = right - left;
+        if (columns <= 0) return;
+
+        double tickFreq = cursor.TickFrequency > 0 ? cursor.TickFrequency : 1.0;
+        long startTicks = cursor.StartTimestampTicks;
+        double offset = visual.MouseToVideoOffsetSeconds;
+
+        string cacheKey = BuildRibbonCacheKey(seg, cursor, left, columns);
+        if (!_cursorRibbonCache.TryGetValue(seg.Id, out var cached) || !string.Equals(cached.Key, cacheKey, StringComparison.Ordinal))
+        {
+            // Total pointer travel accumulated into the pixel column it happened in.
+            var travel = new float[columns];
+            int prevX = 0, prevY = 0;
+            bool hasPrev = false;
+
+            foreach (var sample in cursor.Samples)
+            {
+                double fileVideoSec = (sample.TimestampTicks - startTicks) / tickFreq - offset;
+                double x = SegmentVideoTimeToX(seg, fileVideoSec);
+                if (double.IsNaN(x)) { hasPrev = false; continue; }
+
+                if (hasPrev)
+                {
+                    int col = (int)Math.Floor(x) - left;
+                    if (col >= 0 && col < columns)
+                    {
+                        double dx = sample.X - prevX;
+                        double dy = sample.Y - prevY;
+                        travel[col] += (float)Math.Sqrt(dx * dx + dy * dy);
+                    }
+                }
+
+                prevX = sample.X;
+                prevY = sample.Y;
+                hasPrev = true;
+            }
+
+            // Smoothed once, into the cache — DrawMovementEnvelope must not mutate what it is
+            // handed, or a cache hit would re-smooth an already-smoothed array and flatten the
+            // envelope a little more on every repaint.
+            BoxSmoothInPlace(travel, 2);
+            BoxSmoothInPlace(travel, 2);
+
+            cached = (cacheKey, travel, left, columns);
+            _cursorRibbonCache[seg.Id] = cached;
+        }
+
+        DrawMovementEnvelope(ds, cached.Travel, cached.Left, cached.Columns, bandY, bandH);
+        DrawClickMarkers(ds, cursor.Clicks, seg.Id, bandY, bandH, w,
+            click => SegmentVideoTimeToX(seg, (click.TimestampTicks - startTicks) / tickFreq - offset));
+    }
+
+    /// <summary>
+    /// Paints an already-smoothed column-per-pixel travel array as a filled envelope rising from
+    /// the bottom of a cursor band.
+    /// </summary>
+    /// <remarks>
+    /// Raw per-pixel totals are spiky for a reason that is an artefact of sampling rather than
+    /// of the gesture: a column's total depends on how many hook samples happened to land in
+    /// that pixel, so even a perfectly steady sweep reads as a comb. Two box passes approximate
+    /// a Gaussian and give a smooth movement the smooth silhouette it actually has — but that
+    /// smoothing is the CALLER's job, done once when the columns are built. This method must
+    /// not mutate <paramref name="travel"/>: it is handed a cached array, and re-smoothing on
+    /// every repaint would flatten the envelope a little further each frame.
+    /// </remarks>
+    private void DrawMovementEnvelope(
+        CanvasDrawingSession ds, float[] travel, int left, int columns, float bandY, float bandH)
+    {
+        float max = 0f;
+        foreach (var t in travel)
+            if (t > max) max = t;
+
+        float ribbonTop = bandY + CursorClickRailHeight;
+        float baseline = bandY + bandH - 1f;
+        float maxBar = Math.Max(1f, baseline - ribbonTop);
+
+        if (max <= 0)
+        {
+            // Recorded, but the pointer never moved. A flat baseline still distinguishes
+            // "this footage has cursor data" from "this track has none".
+            ds.DrawLine(left, baseline, left + columns, baseline, TrackEmptyLineColor, 1f);
             return;
         }
 
-        // ── Legacy single-recording cursor path ──
+        // Square root rather than linear: one fast flick would otherwise set the normalizer
+        // high enough to flatten ordinary movement into the baseline.
+        var tops = new float[columns];
+        for (int i = 0; i < columns; i++)
+            tops[i] = baseline - (float)Math.Sqrt(travel[i] / max) * maxBar;
+
+        using (var fill = new CanvasPathBuilder(ds))
+        {
+            fill.BeginFigure(left, baseline);
+            for (int i = 0; i < columns; i++)
+                fill.AddLine(left + i, tops[i]);
+            fill.AddLine(left + columns - 1, baseline);
+            fill.EndFigure(CanvasFigureLoop.Closed);
+
+            using var fillGeometry = CanvasGeometry.CreatePath(fill);
+            ds.FillGeometry(fillGeometry, WithAlpha(CursorPathXColor, 90));
+        }
+
+        // A brighter top edge keeps the envelope's shape readable where the fill is only a
+        // pixel or two tall.
+        using (var edge = new CanvasPathBuilder(ds))
+        {
+            edge.BeginFigure(left, tops[0]);
+            for (int i = 1; i < columns; i++)
+                edge.AddLine(left + i, tops[i]);
+            edge.EndFigure(CanvasFigureLoop.Open);
+
+            using var edgeGeometry = CanvasGeometry.CreatePath(edge);
+            ds.DrawGeometry(edgeGeometry, WithAlpha(CursorPathXColor, 220), 1f);
+        }
+    }
+
+    /// <summary>
+    /// Draws click markers on the cursor band's top rail, with a faint stem down to the
+    /// baseline so the exact instant stays readable against the envelope.
+    /// </summary>
+    /// <remarks>
+    /// Deduplicated per pixel column. A double-click, or any burst landing inside one pixel,
+    /// otherwise stacks identical circles on the same spot — wasted draw calls that also darken
+    /// that marker's outline relative to its neighbours, reading as an emphasis that means
+    /// nothing.
+    /// </remarks>
+    private void DrawClickMarkers(
+        CanvasDrawingSession ds, IEnumerable<ClickEvent> clicks, string? segmentId,
+        float bandY, float bandH, float w, Func<ClickEvent, double> xForClick)
+    {
+        var model = Model;
+        float railCenter = bandY + CursorClickRailHeight / 2f;
+        float baseline = bandY + bandH - 1f;
+        int lastColumn = int.MinValue;
+
+        foreach (var click in clicks)
+        {
+            if (!click.IsDown) continue;
+
+            double x = xForClick(click);
+            if (double.IsNaN(x) || x < -3 || x > w + 3) continue;
+
+            int column = (int)Math.Round(x);
+            if (column == lastColumn) continue;
+            lastColumn = column;
+
+            // Disabled state is keyed by TICK, not by occurrence, and deliberately so: a click
+            // is a fact about the footage, and the compositor that renders it is shared by
+            // every segment showing that source file. Two copies of the same recording
+            // therefore both show it hollow, which is truthful rather than a cascade.
+            bool disabled = model is not null && model.DisabledClickTicks.Contains(click.TimestampTicks);
+
+            // SELECTION, by contrast, is about the marker the pointer is on, so it is scoped to
+            // this occurrence.
+            bool isSelected = _selectedClick is { } sel
+                && sel.Ticks == click.TimestampTicks
+                && string.Equals(sel.SegmentId, segmentId, StringComparison.Ordinal);
+
+            float cx = (float)x;
+            float r = isSelected ? 3.5f : 2.5f;
+
+            if (disabled)
+            {
+                // Hollow, not gone. The user has to be able to see what they disabled and put
+                // it back — especially since disabling also drops the click's cursor-path
+                // protection, whose effect is visible in the render but whose cause would not
+                // be if the marker simply vanished.
+                ds.DrawCircle(cx, railCenter, r, WithAlpha(CursorClickColor, 130), 1.2f);
+                if (isSelected)
+                    ds.DrawCircle(cx, railCenter, r + 2f, VideoClipSelectedBorder, 1.5f);
+                continue;
+            }
+
+            ds.DrawLine(cx, railCenter, cx, baseline, WithAlpha(CursorClickColor, 70), 1f);
+            ds.FillCircle(cx, railCenter, r, CursorClickColor);
+            ds.DrawCircle(cx, railCenter, r,
+                isSelected ? VideoClipSelectedBorder : ClickStrokeColor,
+                isSelected ? 1.8f : 0.8f);
+        }
+    }
+
+    /// <summary>
+    /// In-place box blur with the given radius, normalized by the actual (edge-clamped) window
+    /// so the ends are not dragged towards zero.
+    /// </summary>
+    private static void BoxSmoothInPlace(float[] values, int radius)
+    {
+        if (radius < 1 || values.Length == 0) return;
+
+        var prefix = new float[values.Length + 1];
+        for (int i = 0; i < values.Length; i++)
+            prefix[i + 1] = prefix[i] + values[i];
+
+        for (int i = 0; i < values.Length; i++)
+        {
+            int lo = Math.Max(0, i - radius);
+            int hi = Math.Min(values.Length - 1, i + radius);
+            values[i] = (prefix[hi + 1] - prefix[lo]) / (hi - lo + 1);
+        }
+    }
+
+    /// <summary>
+    /// Legacy (pre-segment) projects keep their cursor telemetry on the model rather than on a
+    /// per-file track visual, and have no segments to attribute it to. It is drawn as the same
+    /// density ribbon, in the base track's band.
+    /// </summary>
+    private void DrawLegacyCursorRibbon(CanvasDrawingSession ds, TimelineModel model, float bandY, float bandH, float w)
+    {
         var cursorData = model.CursorData;
         if (cursorData is null || cursorData.Samples.Count == 0)
         {
-            ds.DrawLine(0, h / 2, w, h / 2, TrackEmptyLineColor, 0.5f);
+            ds.DrawLine(0, bandY + bandH / 2, w, bandY + bandH / 2, TrackEmptyLineColor, 0.5f);
             return;
         }
 
-        // Determine cursor coordinate ranges for normalization
-        int minX = int.MaxValue, maxX = int.MinValue;
-        int minY = int.MaxValue, maxY = int.MinValue;
-        foreach (var sample in cursorData.Samples)
-        {
-            if (sample.X < minX) minX = sample.X;
-            if (sample.X > maxX) maxX = sample.X;
-            if (sample.Y < minY) minY = sample.Y;
-            if (sample.Y > maxY) maxY = sample.Y;
-        }
-
-        int rangeX = Math.Max(1, maxX - minX);
-        int rangeY = Math.Max(1, maxY - minY);
-        float margin = 4f;
-        float drawHeight = h - margin * 2;
         double tickFreq = cursorData.TickFrequency > 0 ? cursorData.TickFrequency : 1.0;
         long startTicks = cursorData.StartTimestampTicks;
         double mouseOffset = model.MouseToVideoOffsetSeconds;
 
-        // Draw X-position path (blue) and Y-position path (orange)
-        if (cursorData.Samples.Count > 1)
+        int columns = Math.Max(1, (int)Math.Ceiling(w));
+        var travel = new float[columns];
+        int prevX = 0, prevY = 0;
+        bool hasPrev = false;
+
+        foreach (var sample in cursorData.Samples)
         {
-            using var xPathBuilder = new CanvasPathBuilder(sender);
-            using var yPathBuilder = new CanvasPathBuilder(sender);
-            bool xStarted = false, yStarted = false;
+            double timeSec = (sample.TimestampTicks - startTicks) / tickFreq - mouseOffset;
+            double x = SourceTimeToX(TimeSpan.FromSeconds(timeSec));
 
-            foreach (var sample in cursorData.Samples)
+            if (hasPrev && x >= 0 && x < columns)
             {
-                double timeSec = (sample.TimestampTicks - startTicks) / tickFreq - mouseOffset;
-                float px = (float)SourceTimeToX(TimeSpan.FromSeconds(timeSec));
-                if (px < -1 || px > w + 1) continue;
-
-                float normX = (float)(sample.X - minX) / rangeX;
-                float normY = (float)(sample.Y - minY) / rangeY;
-                float yPosX = margin + (1f - normX) * drawHeight;
-                float yPosY = margin + normY * drawHeight;
-
-                if (!xStarted) { xPathBuilder.BeginFigure(px, yPosX); xStarted = true; }
-                else xPathBuilder.AddLine(px, yPosX);
-
-                if (!yStarted) { yPathBuilder.BeginFigure(px, yPosY); yStarted = true; }
-                else yPathBuilder.AddLine(px, yPosY);
+                double dx = sample.X - prevX;
+                double dy = sample.Y - prevY;
+                travel[(int)x] += (float)Math.Sqrt(dx * dx + dy * dy);
             }
 
-            if (xStarted)
-            {
-                xPathBuilder.EndFigure(CanvasFigureLoop.Open);
-                using var xGeometry = CanvasGeometry.CreatePath(xPathBuilder);
-                ds.DrawGeometry(xGeometry, CursorPathXColor, 1.2f);
-            }
-            if (yStarted)
-            {
-                yPathBuilder.EndFigure(CanvasFigureLoop.Open);
-                using var yGeometry = CanvasGeometry.CreatePath(yPathBuilder);
-                ds.DrawGeometry(yGeometry, CursorPathYColor, 1.2f);
-            }
+            prevX = sample.X;
+            prevY = sample.Y;
+            hasPrev = true;
         }
 
-        // Draw click events as dots
-        foreach (var click in cursorData.Clicks)
+        // Smoothing is the caller's job now that DrawMovementEnvelope is handed cached arrays.
+        // The legacy path has no segment to cache against, so it smooths in place each time —
+        // it is a single-recording projection and never repaints during a segment drag.
+        BoxSmoothInPlace(travel, 2);
+        BoxSmoothInPlace(travel, 2);
+
+        DrawMovementEnvelope(ds, travel, 0, columns, bandY, bandH);
+        DrawClickMarkers(ds, cursorData.Clicks, null, bandY, bandH, w,
+            click => SourceTimeToX(TimeSpan.FromSeconds(
+                (click.TimestampTicks - startTicks) / tickFreq - mouseOffset)));
+    }
+
+    // ─── Click markers (recorded mouse presses) ─────────────────────────
+
+    /// <summary>Half-width, in pixels, of a click marker's clickable target.</summary>
+    private const float ClickMarkerHitRadius = 6f;
+
+    /// <summary>
+    /// The selected click marker: the segment OCCURRENCE it was clicked in, plus its raw
+    /// <see cref="ClickEvent.TimestampTicks"/>. Null when nothing is selected.
+    /// </summary>
+    /// <remarks>
+    /// The tick alone is not an occurrence identity. When the same recording appears on two
+    /// tracks — a duplicated or split segment — both copies carry identical ticks, so a
+    /// tick-keyed selection lit up every copy at once and made a single click feel like it was
+    /// cascading across tracks. Selection is about what the pointer is on, so it is keyed by
+    /// where the marker was drawn. <c>SegmentId</c> is null on legacy (pre-segment) projects,
+    /// which have exactly one implicit occurrence.
+    /// </remarks>
+    private (string? SegmentId, long Ticks)? _selectedClick;
+
+    /// <summary>Raised when a click marker is selected on the timeline, or deselected (null).</summary>
+    public event EventHandler<long?>? ClickMarkerSelected;
+
+    /// <summary>
+    /// Raised when the user asks to disable or restore a click. The bool is the requested
+    /// state: true = disable it, false = bring it back.
+    /// </summary>
+    public event EventHandler<(long ClickTicks, bool Disable)>? ClickDisableRequested;
+
+    /// <summary>The selected click marker's tick, or null.</summary>
+    public long? SelectedClickTicks => _selectedClick?.Ticks;
+
+    private void ClearClickSelection()
+    {
+        if (_selectedClick is null) return;
+        _selectedClick = null;
+        ClickMarkerSelected?.Invoke(this, null);
+        VideoTrackCanvas?.Invalidate();
+    }
+
+    /// <summary>
+    /// Disables or restores the selected click. Shared by the Delete key and the marker's
+    /// context menu so both take exactly the same route through the undo stack.
+    /// </summary>
+    public bool RequestSelectedClickDisabled(bool disable)
+    {
+        if (_selectedClick is not { } selected) return false;
+        ClickDisableRequested?.Invoke(this, (selected.Ticks, disable));
+        return true;
+    }
+
+    /// <summary>
+    /// The click marker under <paramref name="x"/> on <paramref name="trackIndex"/>'s cursor
+    /// band, or null, together with the segment occurrence it was found in. Nearest-first so a
+    /// dense burst resolves to the one aimed at.
+    /// </summary>
+    /// <remarks>
+    /// Enumerates the same per-segment, per-track projection the draw pass uses, so a marker is
+    /// never hit-testable at a position it is not painted at.
+    /// </remarks>
+    private (ClickEvent Click, string? SegmentId)? HitTestClickMarker(TimelineModel model, double x, int trackIndex)
+    {
+        (ClickEvent Click, string? SegmentId)? best = null;
+        double bestDistance = double.MaxValue;
+
+        foreach (var (click, segmentId, markerX) in EnumerateClickMarkerPositions(model, trackIndex))
+        {
+            double distance = Math.Abs(markerX - x);
+            if (distance > ClickMarkerHitRadius || distance >= bestDistance) continue;
+
+            best = (click, segmentId);
+            bestDistance = distance;
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Yields each button-down click on <paramref name="trackIndex"/>'s cursor band with the
+    /// segment occurrence it belongs to and its X.
+    /// </summary>
+    private IEnumerable<(ClickEvent Click, string? SegmentId, double X)> EnumerateClickMarkerPositions(
+        TimelineModel model, int trackIndex)
+    {
+        if (model.Segments.Count > 0)
+        {
+            foreach (var seg in model.Segments.OfType<VideoSegment>())
+            {
+                if (seg.TrackIndex != trackIndex) continue;
+
+                var visual = ResolveTrackVisual(seg, model);
+                if (visual?.Cursor is not { Samples.Count: > 0 } cursor) continue;
+
+                double tickFreq = cursor.TickFrequency > 0 ? cursor.TickFrequency : 1.0;
+                long startTicks = cursor.StartTimestampTicks;
+                double offset = visual.MouseToVideoOffsetSeconds;
+
+                foreach (var click in cursor.Clicks)
+                {
+                    if (!click.IsDown) continue;
+                    double x = SegmentVideoTimeToX(
+                        seg, (click.TimestampTicks - startTicks) / tickFreq - offset);
+                    if (double.IsNaN(x)) continue;
+                    yield return (click, seg.Id, x);
+                }
+            }
+            yield break;
+        }
+
+        // Legacy (pre-segment) projects: the whole timeline is the primary recording.
+        if (trackIndex != TimelineModel.BaseTrackIndex) yield break;
+        if (model.CursorData is not { Samples.Count: > 0 } legacy) yield break;
+
+        double legacyFreq = legacy.TickFrequency > 0 ? legacy.TickFrequency : 1.0;
+        foreach (var click in legacy.Clicks)
         {
             if (!click.IsDown) continue;
-            double timeSec = (click.TimestampTicks - startTicks) / tickFreq - mouseOffset;
-            float cx = (float)SourceTimeToX(TimeSpan.FromSeconds(timeSec));
-            if (cx < -4 || cx > w + 4) continue;
-
-            float normY = (float)(click.Y - minY) / rangeY;
-            float cy = margin + normY * drawHeight;
-            ds.FillCircle(cx, cy, 3.5f, CursorClickColor);
-            ds.DrawCircle(cx, cy, 3.5f, ClickStrokeColor, 1f);
+            double seconds = (click.TimestampTicks - legacy.StartTimestampTicks) / legacyFreq
+                             - model.MouseToVideoOffsetSeconds;
+            yield return (click, null, SourceTimeToX(TimeSpan.FromSeconds(seconds)));
         }
-
-        DrawCursorAnchors(ds, model, w, h);
     }
 
     // ─── Cursor anchors (repositioned cursor moments) ───────────────────
@@ -4913,6 +5748,22 @@ public sealed partial class TimelineControl : UserControl
 
     // ── Cursor anchor selection & drag state ──
     private string? _selectedCursorAnchorId;
+
+    /// <summary>
+    /// The segment OCCURRENCE the selected anchor was clicked in, or null on legacy
+    /// (pre-segment) projects.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CursorAnchor.Id"/> identifies the anchor in its RECORDING, not one of its
+    /// placements on the timeline. When the same recording appears on two tracks — a duplicated
+    /// or split segment — the anchor is drawn once per occurrence, and an id-keyed selection
+    /// therefore lit every copy at once and previewed the re-time drag on all of them. Kept
+    /// alongside the id rather than replacing it: every OPERATION still addresses the anchor by
+    /// id (there is one anchor, however many times its footage appears), and only the selection
+    /// and drag preview are scoped to the copy the pointer is on.
+    /// </remarks>
+    private string? _selectedCursorAnchorSegmentId;
+
     private double _cursorAnchorDragStartX = double.NaN;
     private double _cursorAnchorDragCurrentX = double.NaN;
     private bool _cursorAnchorDragMoved;
@@ -4940,13 +5791,19 @@ public sealed partial class TimelineControl : UserControl
     public event EventHandler<CursorAnchor>? CursorAnchorClicked;
 
     /// <summary>Selects an anchor by Id (called from EditorPage), or clears with null.</summary>
+    /// <remarks>
+    /// A programmatic selection names no occurrence, so the marker highlights in every copy of
+    /// the footage — which is the honest rendering of "this anchor is selected" when the caller
+    /// did not say which copy it meant. A pointer selection always names one.
+    /// </remarks>
     public void SelectCursorAnchor(string? anchorId)
     {
         ClearOtherSelections(anchorId is null ? SelectionKind.None : SelectionKind.CursorAnchor);
         bool changed = _selectedCursorAnchorId != anchorId;
         _selectedCursorAnchorId = anchorId;
+        _selectedCursorAnchorSegmentId = null;
         if (changed) CursorAnchorSelected?.Invoke(this, anchorId);
-        CursorTrackCanvas?.Invalidate();
+        VideoTrackCanvas?.Invalidate();
     }
 
     /// <summary>Clears the selected cursor anchor, mirroring <see cref="ClearZoomSelection"/> et al.</summary>
@@ -4955,36 +5812,51 @@ public sealed partial class TimelineControl : UserControl
         if (_selectedCursorAnchorId is not null)
         {
             _selectedCursorAnchorId = null;
+            _selectedCursorAnchorSegmentId = null;
             CursorAnchorSelected?.Invoke(this, null);
-            CursorTrackCanvas?.Invalidate();
+            VideoTrackCanvas?.Invalidate();
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="anchor"/>, as drawn in <paramref name="segmentId"/>'s copy of the
+    /// footage, is the selected marker. A selection made without an occurrence
+    /// (<see cref="SelectCursorAnchor"/>) matches every copy.
+    /// </summary>
+    private bool IsSelectedAnchorOccurrence(CursorAnchor anchor, string? segmentId)
+        => anchor.Id == _selectedCursorAnchorId
+           && (_selectedCursorAnchorSegmentId is null
+               || string.Equals(_selectedCursorAnchorSegmentId, segmentId, StringComparison.Ordinal));
 
     /// <summary>
     /// Draws a marker for every cursor anchor over the lane's position curves, so the moments
     /// the recorded path was overridden are visible next to the path they override.
     /// </summary>
-    private void DrawCursorAnchors(CanvasDrawingSession ds, TimelineModel model, float w, float h)
+    private void DrawCursorAnchors(
+        CanvasDrawingSession ds, TimelineModel model, int trackIndex, float bandY, float bandH, float w)
     {
-        foreach (var (anchor, rawX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, rawX) in EnumerateCursorAnchorPositions(model))
         {
+            if (anchorTrack != trackIndex) continue;
+
+            bool isSelected = IsSelectedAnchorOccurrence(anchor, segmentId);
+
             // A drag in flight is previewed at the pointer, not at the committed timestamp —
-            // the model is only touched once, on release.
-            double x = anchor.Id == _selectedCursorAnchorId && _cursorAnchorDragMoved
-                       && !double.IsNaN(_cursorAnchorDragCurrentX)
+            // the model is only touched once, on release. Scoped to the copy being dragged, or
+            // every copy of the footage would slide along with the pointer.
+            double x = isSelected && _cursorAnchorDragMoved && !double.IsNaN(_cursorAnchorDragCurrentX)
                 ? _cursorAnchorDragCurrentX
                 : rawX;
 
             if (x < -CursorAnchorHitRadius || x > w + CursorAnchorHitRadius) continue;
 
-            bool isSelected = anchor.Id == _selectedCursorAnchorId;
             float px = (float)x;
-            ds.DrawLine(px, 0, px, h, CursorAnchorLineColor, isSelected ? 2f : 1f);
+            ds.DrawLine(px, bandY, px, bandY + bandH, CursorAnchorLineColor, isSelected ? 2f : 1f);
 
             // A diamond rather than another circle: the lane is already full of round click
             // dots, and an anchor is a different kind of thing.
-            float cy = h / 2;
-            float r = isSelected ? 7f : 5f;
+            float cy = bandY + bandH / 2;
+            float r = isSelected ? 5.5f : 4f;
             using var diamond = CanvasGeometry.CreatePolygon(ds, [
                 new System.Numerics.Vector2(px, cy - r),
                 new System.Numerics.Vector2(px + r, cy),
@@ -5005,7 +5877,7 @@ public sealed partial class TimelineControl : UserControl
     /// — the same mapping the cursor curves themselves use. Mapping it as an output time would
     /// scatter markers anywhere a trim or reorder had moved the footage.
     /// </remarks>
-    private IEnumerable<(CursorAnchor Anchor, double X)> EnumerateCursorAnchorPositions(TimelineModel model)
+    private IEnumerable<(CursorAnchor Anchor, int TrackIndex, string? SegmentId, double X)> EnumerateCursorAnchorPositions(TimelineModel model)
     {
         if (model.CursorAnchors.Count == 0) yield break;
 
@@ -5019,7 +5891,7 @@ public sealed partial class TimelineControl : UserControl
 
                     double x = SegmentVideoTimeToX(seg, anchor.Timestamp.TotalSeconds);
                     if (double.IsNaN(x)) continue;
-                    yield return (anchor, x);
+                    yield return (anchor, seg.TrackIndex, seg.Id, x);
                 }
             }
             yield break;
@@ -5029,7 +5901,7 @@ public sealed partial class TimelineControl : UserControl
         foreach (var anchor in model.CursorAnchors)
         {
             if (anchor.SourceVideoFilePath is not null) continue;
-            yield return (anchor, SourceTimeToX(anchor.Timestamp));
+            yield return (anchor, TimelineModel.BaseTrackIndex, null, SourceTimeToX(anchor.Timestamp));
         }
     }
 
@@ -5054,19 +5926,40 @@ public sealed partial class TimelineControl : UserControl
     {
         if (Model is { } model && sender is CanvasControl canvas)
         {
-            if (HitTestCursorAnchor(model, e.GetCurrentPoint(canvas).Position.X) is { } anchor)
+            var pos = e.GetCurrentPoint(canvas).Position;
+            int track = VideoTrackIndexFromY(model, pos.Y);
+
+            if (HitTestCursorAnchor(model, pos.X, track) is { } anchorHit)
             {
                 ClearOtherSelections(SelectionKind.CursorAnchor);
-                bool changed = _selectedCursorAnchorId != anchor.Id;
-                _selectedCursorAnchorId = anchor.Id;
-                if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
+                bool changed = _selectedCursorAnchorId != anchorHit.Anchor.Id
+                    || _selectedCursorAnchorSegmentId != anchorHit.SegmentId;
+                _selectedCursorAnchorId = anchorHit.Anchor.Id;
+                _selectedCursorAnchorSegmentId = anchorHit.SegmentId;
+                if (changed) CursorAnchorSelected?.Invoke(this, anchorHit.Anchor.Id);
 
-                _cursorAnchorDragStartX = e.GetCurrentPoint(canvas).Position.X;
+                _cursorAnchorDragStartX = pos.X;
                 _cursorAnchorDragCurrentX = _cursorAnchorDragStartX;
                 _cursorAnchorDragMoved = false;
                 _dragMode = DragMode.CursorAnchorBody;
 
                 canvas.CapturePointer(e.Pointer);
+                canvas.Invalidate();
+                e.Handled = true;
+                return;
+            }
+
+            // Anchors win over click markers where both land on the same pixel: an anchor is
+            // something the user authored, a click is recorded telemetry, and the authored
+            // thing is the one they are more likely to be reaching for.
+            if (HitTestClickMarker(model, pos.X, track) is { } hit)
+            {
+                ClearOtherSelections(SelectionKind.Click);
+                var picked = (hit.SegmentId, hit.Click.TimestampTicks);
+                bool changed = _selectedClick != picked;
+                _selectedClick = picked;
+                if (changed) ClickMarkerSelected?.Invoke(this, hit.Click.TimestampTicks);
+
                 canvas.Invalidate();
                 e.Handled = true;
                 return;
@@ -5102,10 +5995,19 @@ public sealed partial class TimelineControl : UserControl
                 break;
 
             case DragMode.None:
-                SetCursor(Model is { } model && HitTestCursorAnchor(model, pos.X) is not null
-                    ? InputSystemCursorShape.SizeWestEast
-                    : InputSystemCursorShape.Arrow);
+            {
+                var hoverShape = InputSystemCursorShape.Arrow;
+                if (Model is { } model)
+                {
+                    int hoverTrack = VideoTrackIndexFromY(model, pos.Y);
+                    if (HitTestCursorAnchor(model, pos.X, hoverTrack) is not null)
+                        hoverShape = InputSystemCursorShape.SizeWestEast;   // anchors re-time by dragging
+                    else if (HitTestClickMarker(model, pos.X, hoverTrack) is not null)
+                        hoverShape = InputSystemCursorShape.Hand;           // clicks select, they do not drag
+                }
+                SetCursor(hoverShape);
                 break;
+            }
         }
     }
 
@@ -5155,18 +6057,6 @@ public sealed partial class TimelineControl : UserControl
         canvas.Invalidate();
     }
 
-    private void CursorTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
-    {
-        // Also covers the empty-lane scrub started by Track_PointerPressed: leaving _dragMode
-        // on Playhead would keep every later hover over this lane dragging the playhead.
-        if (_dragMode is not (DragMode.CursorAnchorBody or DragMode.Playhead)) return;
-
-        ResetCursorAnchorDrag();
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        CursorTrackCanvas?.Invalidate();
-    }
-
     private void ResetCursorAnchorDrag()
     {
         _cursorAnchorDragStartX = double.NaN;
@@ -5174,45 +6064,89 @@ public sealed partial class TimelineControl : UserControl
         _cursorAnchorDragMoved = false;
     }
 
+    /// <summary>Clears the transient state of a zoom chip drag or drag-to-create.</summary>
+    private void ResetZoomDrag()
+    {
+        _zoomDragStartX = double.NaN;
+        _zoomDragCurrentX = double.NaN;
+        _zoomCreateActive = false;
+        _zoomCreateFile = null;
+        _zoomCreateSegmentId = null;
+    }
+
     private void CursorTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if (Model is not { } model || sender is not CanvasControl canvas) return;
 
         var pos = e.GetPosition(canvas);
-        if (HitTestCursorAnchor(model, pos.X) is not { } anchor) return;
+        int track = VideoTrackIndexFromY(model, pos.Y);
 
-        ClearOtherSelections(SelectionKind.CursorAnchor);
-        bool changed = _selectedCursorAnchorId != anchor.Id;
-        _selectedCursorAnchorId = anchor.Id;
-        if (changed) CursorAnchorSelected?.Invoke(this, anchor.Id);
-        canvas.Invalidate();
-
-        var menu = new MenuFlyout();
-        var removeItem = new MenuFlyoutItem
+        if (HitTestCursorAnchor(model, pos.X, track) is { } anchorHit)
         {
-            Text = "Remove Cursor Move",
-            Icon = new FontIcon { Glyph = "\uE74D" },
-        };
-        removeItem.Click += (_, _) => CursorAnchorRemoveRequested?.Invoke(this, anchor.Id);
-        menu.Items.Add(removeItem);
-        menu.ShowAt(canvas, pos);
+            var anchor = anchorHit.Anchor;
+            ClearOtherSelections(SelectionKind.CursorAnchor);
+            bool anchorChanged = _selectedCursorAnchorId != anchor.Id
+                || _selectedCursorAnchorSegmentId != anchorHit.SegmentId;
+            _selectedCursorAnchorId = anchor.Id;
+            _selectedCursorAnchorSegmentId = anchorHit.SegmentId;
+            if (anchorChanged) CursorAnchorSelected?.Invoke(this, anchor.Id);
+            canvas.Invalidate();
+
+            var anchorMenu = new MenuFlyout();
+            var removeItem = new MenuFlyoutItem
+            {
+                Text = "Remove Cursor Move",
+                Icon = new FontIcon { Glyph = "\uE74D" },
+            };
+            removeItem.Click += (_, _) => CursorAnchorRemoveRequested?.Invoke(this, anchor.Id);
+            anchorMenu.Items.Add(removeItem);
+            anchorMenu.ShowAt(canvas, pos);
+            e.Handled = true;
+            return;
+        }
+
+        if (HitTestClickMarker(model, pos.X, track) is { } hit)
+        {
+            ClearOtherSelections(SelectionKind.Click);
+            var picked = (hit.SegmentId, hit.Click.TimestampTicks);
+            bool clickChanged = _selectedClick != picked;
+            _selectedClick = picked;
+            if (clickChanged) ClickMarkerSelected?.Invoke(this, hit.Click.TimestampTicks);
+            canvas.Invalidate();
+
+            bool disabled = model.DisabledClickTicks.Contains(hit.Click.TimestampTicks);
+            var clickMenu = new MenuFlyout();
+            var toggleItem = new MenuFlyoutItem
+            {
+                Text = disabled ? "Restore Click" : "Delete Click",
+                Icon = new FontIcon { Glyph = disabled ? "\uE7A7" : "\uE74D" },
+            };
+            toggleItem.Click += (_, _) =>
+                ClickDisableRequested?.Invoke(this, (hit.Click.TimestampTicks, !disabled));
+            clickMenu.Items.Add(toggleItem);
+            clickMenu.ShowAt(canvas, pos);
+            e.Handled = true;
+        }
     }
 
     /// <summary>
-    /// The anchor whose marker is under <paramref name="x"/>, or null. Nearest-first so
-    /// overlapping markers resolve to the one the user aimed at.
+    /// The anchor whose marker is under <paramref name="x"/> on <paramref name="trackIndex"/>'s
+    /// cursor band, or null, together with the segment occurrence it was found in.
+    /// Nearest-first so overlapping markers resolve to the one the user aimed at.
     /// </summary>
-    private CursorAnchor? HitTestCursorAnchor(TimelineModel model, double x)
+    private (CursorAnchor Anchor, string? SegmentId)? HitTestCursorAnchor(TimelineModel model, double x, int trackIndex)
     {
-        CursorAnchor? best = null;
+        (CursorAnchor Anchor, string? SegmentId)? best = null;
         double bestDistance = double.MaxValue;
 
-        foreach (var (anchor, markerX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, markerX) in EnumerateCursorAnchorPositions(model))
         {
+            if (anchorTrack != trackIndex) continue;
+
             double distance = Math.Abs(markerX - x);
             if (distance > CursorAnchorHitRadius || distance >= bestDistance) continue;
 
-            best = anchor;
+            best = (anchor, segmentId);
             bestDistance = distance;
         }
 
@@ -5263,79 +6197,6 @@ public sealed partial class TimelineControl : UserControl
         return null;
     }
 
-    /// <summary>Draws one segment's cursor path + click dots within its output range.</summary>
-    private void DrawSegmentCursor(CanvasDrawingSession ds, CanvasControl sender,
-        VideoSegment seg, SegmentTrackVisual visual, float w, float h)
-    {
-        var cursor = visual.Cursor!;
-        float segX1 = (float)TimeToX(seg.Start);
-        float segX2 = (float)TimeToX(seg.End);
-        if (segX2 < 0 || segX1 > w) return;
-
-        // Normalize within this segment's coordinate spread.
-        int minX = int.MaxValue, maxX = int.MinValue, minY = int.MaxValue, maxY = int.MinValue;
-        foreach (var s in cursor.Samples)
-        {
-            if (s.X < minX) minX = s.X; if (s.X > maxX) maxX = s.X;
-            if (s.Y < minY) minY = s.Y; if (s.Y > maxY) maxY = s.Y;
-        }
-        int rangeX = Math.Max(1, maxX - minX);
-        int rangeY = Math.Max(1, maxY - minY);
-        float margin = 4f;
-        float drawHeight = h - margin * 2;
-        double tickFreq = cursor.TickFrequency > 0 ? cursor.TickFrequency : 1.0;
-        long startTicks = cursor.StartTimestampTicks;
-        double offset = visual.MouseToVideoOffsetSeconds;
-
-        using var xPath = new CanvasPathBuilder(sender);
-        using var yPath = new CanvasPathBuilder(sender);
-        bool xStarted = false, yStarted = false;
-
-        foreach (var sample in cursor.Samples)
-        {
-            double fileVideoSec = (sample.TimestampTicks - startTicks) / tickFreq - offset;
-            double x = SegmentVideoTimeToX(seg, fileVideoSec);
-            if (double.IsNaN(x)) continue;
-            float px = (float)x;
-
-            float normX = (float)(sample.X - minX) / rangeX;
-            float normY = (float)(sample.Y - minY) / rangeY;
-            float yPosX = margin + (1f - normX) * drawHeight;
-            float yPosY = margin + normY * drawHeight;
-
-            if (!xStarted) { xPath.BeginFigure(px, yPosX); xStarted = true; }
-            else xPath.AddLine(px, yPosX);
-            if (!yStarted) { yPath.BeginFigure(px, yPosY); yStarted = true; }
-            else yPath.AddLine(px, yPosY);
-        }
-
-        if (xStarted)
-        {
-            xPath.EndFigure(CanvasFigureLoop.Open);
-            using var g = CanvasGeometry.CreatePath(xPath);
-            ds.DrawGeometry(g, CursorPathXColor, 1.2f);
-        }
-        if (yStarted)
-        {
-            yPath.EndFigure(CanvasFigureLoop.Open);
-            using var g = CanvasGeometry.CreatePath(yPath);
-            ds.DrawGeometry(g, CursorPathYColor, 1.2f);
-        }
-
-        foreach (var click in cursor.Clicks)
-        {
-            if (!click.IsDown) continue;
-            double fileVideoSec = (click.TimestampTicks - startTicks) / tickFreq - offset;
-            double x = SegmentVideoTimeToX(seg, fileVideoSec);
-            if (double.IsNaN(x)) continue;
-
-            float normY = (float)(click.Y - minY) / rangeY;
-            float cy = margin + normY * drawHeight;
-            ds.FillCircle((float)x, cy, 3.5f, CursorClickColor);
-            ds.DrawCircle((float)x, cy, 3.5f, ClickStrokeColor, 1f);
-        }
-    }
-
     // --- Interaction ---
 
     private void Track_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -5356,6 +6217,16 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || sender is not CanvasControl canvas) return;
 
         var pos = e.GetCurrentPoint(canvas).Position;
+
+        switch (TrackBandFromY(model, pos.Y)?.Band)
+        {
+            case TrackBand.Zoom:
+                ZoomTrack_PointerPressed(sender, e);
+                return;
+            case TrackBand.Cursor:
+                CursorTrack_PointerPressed(sender, e);
+                return;
+        }
 
         // Segment-based timeline (video + text slides): select / move / ripple-trim.
         if (model.Segments.Count > 0)
@@ -5516,6 +6387,25 @@ public sealed partial class TimelineControl : UserControl
 
         var pos = e.GetCurrentPoint(canvas).Position;
 
+        // A gesture in flight stays with the handler that started it — the pointer routinely
+        // leaves the band it was pressed in while dragging, and re-resolving by Y mid-drag
+        // would hand the rest of the gesture to a different state machine.
+        if (IsZoomBandDrag(_dragMode)) { ZoomTrack_PointerMoved(sender, e); return; }
+        if (_dragMode == DragMode.CursorAnchorBody) { CursorTrack_PointerMoved(sender, e); return; }
+
+        if (_dragMode == DragMode.None)
+        {
+            switch (TrackBandFromY(model, pos.Y)?.Band)
+            {
+                case TrackBand.Zoom:
+                    ZoomTrack_PointerMoved(sender, e);
+                    return;
+                case TrackBand.Cursor:
+                    CursorTrack_PointerMoved(sender, e);
+                    return;
+            }
+        }
+
         // Segment-based timeline interactions.
         if (model.Segments.Count > 0)
         {
@@ -5657,9 +6547,20 @@ public sealed partial class TimelineControl : UserControl
     /// the drop-hint lane and the canvas height it forces — would stay latched with no
     /// gesture left to clear it.
     /// </summary>
+    /// <remarks>
+    /// This is the ONLY capture-lost handler on the video canvas, and that canvas now owns the
+    /// zoom and cursor bands too. It therefore has to clear THEIR transient state as well —
+    /// the separate lanes that used to do it have no canvas of their own to raise the event
+    /// any more. Leaving a zoom drag latched would keep the chip following the pointer with no
+    /// gesture behind it; leaving <see cref="DragMode.Playhead"/> set would make every later
+    /// hover over the group scrub the playhead.
+    /// </remarks>
     private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
         if (_dragMode == DragMode.None) return;
+
+        ResetCursorAnchorDrag();
+        ResetZoomDrag();
 
         EndTrimPreview();
         _draggedSegmentId = null;
@@ -5693,6 +6594,10 @@ public sealed partial class TimelineControl : UserControl
             EndTrimPreview();
             return;
         }
+
+        // Same rule as PointerMoved: the gesture is finished by whoever started it.
+        if (IsZoomBandDrag(_dragMode)) { ZoomTrack_PointerReleased(sender, e); return; }
+        if (_dragMode == DragMode.CursorAnchorBody) { CursorTrack_PointerReleased(sender, e); return; }
 
         // Captured before the commit, which may itself add the lane the hint was offering.
         int usedTracksBeforeDrop = Math.Max(1, model?.VideoTrackCount ?? 1);
@@ -5884,6 +6789,19 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetPosition(canvas);
+
+        if (Model is { } bandModel)
+        {
+            switch (TrackBandFromY(bandModel, pos.Y)?.Band)
+            {
+                case TrackBand.Zoom:
+                    ZoomTrack_RightTapped(sender, e);
+                    return;
+                case TrackBand.Cursor:
+                    CursorTrack_RightTapped(sender, e);
+                    return;
+            }
+        }
 
         var (hitId, chipHit) = HitTestTransitionChip(pos.X, pos.Y);
         if (chipHit && hitId is not null)

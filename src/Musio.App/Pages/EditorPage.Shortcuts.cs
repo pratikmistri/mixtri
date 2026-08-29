@@ -123,6 +123,13 @@ public sealed partial class EditorPage
             return;
         }
 
+        // If a click marker is selected on the cursor lane, disable it. Ordered next to the
+        // cursor anchor for the same reason it sits beside it on the lane: both are the most
+        // specific, most recently touched thing there, and a selected marker must win over the
+        // zoom or segment that also spans that instant.
+        if (Timeline.SelectedClickTicks is not null && Timeline.RequestSelectedClickDisabled(true))
+            return;
+
         // If a zoom segment is selected, remove it instead of deleting a clip segment
         if (Timeline.SelectedZoomKeyframeId is { } selectedId)
         {

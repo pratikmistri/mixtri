@@ -418,6 +418,9 @@ public sealed partial class EditorPage : Page
         Timeline.CursorAnchorMoved += OnCursorAnchorMoved;
         Timeline.CursorAnchorRemoveRequested += OnCursorAnchorRemoveRequested;
 
+        // Click markers (recorded mouse presses)
+        Timeline.ClickDisableRequested += OnClickDisableRequested;
+
         // Video clip selection events
         Timeline.VideoClipSelected += OnVideoClipSelected;
 

@@ -82,6 +82,80 @@ public sealed class EditOperationsExtendedTests
         Assert.IsFalse(model.SuppressedClickTicks.Contains(clickTicks), "Undo should unsuppress");
     }
 
+    // ── Occupancy pinning ──
+    //
+    // SourceVideoFilePath is not a sufficient key for WHICH copy of a recording a zoom belongs
+    // to: the same file can sit on several tracks, and when PrimaryVideoFilePath is null a null
+    // path matches every segment there is. Resolution then fell through to "first match in list
+    // order", so a chip rendered in another clip's band and hopped clips as it was dragged.
+    // Editing pins the occurrence, exactly as it promotes IsManual.
+
+    [TestMethod]
+    public void MoveZoomKeyframe_PinsTheOwningSegmentItWasDraggedWithin()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(10) };
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(2), ZoomLevel = 2.0, IsManual = true };
+        model.ZoomKeyframes.Add(kf);
+
+        new MoveZoomKeyframeOperation(kf.Id, TimeSpan.FromSeconds(5), "segment-a").Execute(model);
+
+        Assert.AreEqual("segment-a", model.ZoomKeyframes[0].OwningSegmentId);
+    }
+
+    /// <summary>
+    /// A keyframe that already names its occurrence keeps it. Re-pinning on every move would
+    /// let a drag that momentarily resolved elsewhere rewrite ownership permanently.
+    /// </summary>
+    [TestMethod]
+    public void MoveZoomKeyframe_DoesNotRepinAnAlreadyPinnedKeyframe()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(10) };
+        var kf = new ZoomKeyframe
+        {
+            Timestamp = TimeSpan.FromSeconds(2),
+            ZoomLevel = 2.0,
+            IsManual = true,
+            OwningSegmentId = "original-segment",
+        };
+        model.ZoomKeyframes.Add(kf);
+
+        new MoveZoomKeyframeOperation(kf.Id, TimeSpan.FromSeconds(5), "some-other-segment").Execute(model);
+
+        Assert.AreEqual("original-segment", model.ZoomKeyframes[0].OwningSegmentId);
+    }
+
+    [TestMethod]
+    public void MoveZoomKeyframe_Undo_RestoresTheUnpinnedState()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(10) };
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(2), ZoomLevel = 2.0, IsManual = true };
+        model.ZoomKeyframes.Add(kf);
+
+        var op = new MoveZoomKeyframeOperation(kf.Id, TimeSpan.FromSeconds(5), "segment-a");
+        op.Execute(model);
+        op.Undo(model);
+
+        Assert.IsNull(model.ZoomKeyframes[0].OwningSegmentId,
+            "Undo must leave the keyframe unpinned, not pinned to where the undone drag put it");
+        Assert.AreEqual(TimeSpan.FromSeconds(2), model.ZoomKeyframes[0].Timestamp);
+    }
+
+    /// <summary>
+    /// Callers that have no occurrence to offer (keyboard nudges, auto-generated edits) must
+    /// leave the keyframe exactly as unpinned as they found it.
+    /// </summary>
+    [TestMethod]
+    public void MoveZoomKeyframe_WithNoSegmentOffered_LeavesTheKeyframeUnpinned()
+    {
+        var model = new TimelineModel { Duration = TimeSpan.FromSeconds(10) };
+        var kf = new ZoomKeyframe { Timestamp = TimeSpan.FromSeconds(2), ZoomLevel = 2.0, IsManual = true };
+        model.ZoomKeyframes.Add(kf);
+
+        new MoveZoomKeyframeOperation(kf.Id, TimeSpan.FromSeconds(5)).Execute(model);
+
+        Assert.IsNull(model.ZoomKeyframes[0].OwningSegmentId);
+    }
+
     #endregion
 
     #region AddZoomSegmentOperation

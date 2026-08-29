@@ -374,6 +374,7 @@ public class MusioPackageTests
         timeline.CameraSegments[0].FullscreenEnabled = true;
         timeline.IsMicAudioMuted = true;
         timeline.SuppressedClickTicks.Add(123456789L);
+        timeline.DisabledClickTicks.Add(987654321L);
 
         await MusioPackageService.SaveAsync(packagePath, project, composition, timeline);
         var opened = await MusioPackageService.OpenAsync(packagePath, _workingRoot);
@@ -413,6 +414,12 @@ public class MusioPackageTests
         // Track state
         Assert.IsTrue(opened.Timeline.IsMicAudioMuted);
         CollectionAssert.Contains(opened.Timeline.SuppressedClickTicks.ToList(), 123456789L);
+
+        // Disabled clicks are a SEPARATE persisted set from the auto-zoom suppressions; a
+        // project must round-trip both without either leaking into the other.
+        CollectionAssert.Contains(opened.Timeline.DisabledClickTicks.ToList(), 987654321L);
+        CollectionAssert.DoesNotContain(opened.Timeline.DisabledClickTicks.ToList(), 123456789L);
+        CollectionAssert.DoesNotContain(opened.Timeline.SuppressedClickTicks.ToList(), 987654321L);
     }
 
     [TestMethod]

@@ -70,8 +70,8 @@ internal static class EditorTimelineMediator
     public static void HandleCameraSegmentResized(EditorViewModel viewModel, string id, bool isStartEdge, TimeSpan newEdgeTime) =>
         viewModel.UndoRedoManager.Execute(new TrimCameraSegmentOperation(id, isStartEdge, newEdgeTime));
 
-    public static void HandleZoomSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newTimestamp) =>
-        viewModel.UndoRedoManager.Execute(new MoveZoomKeyframeOperation(id, newTimestamp));
+    public static void HandleZoomSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newTimestamp, string? owningSegmentId = null) =>
+        viewModel.UndoRedoManager.Execute(new MoveZoomKeyframeOperation(id, newTimestamp, owningSegmentId));
 
     public static void HandleZoomSegmentResized(EditorViewModel viewModel, string id, bool isStartEdge, TimeSpan newEdgeTime) =>
         viewModel.UndoRedoManager.Execute(new ResizeZoomSegmentOperation(id, isStartEdge, newEdgeTime));
@@ -169,6 +169,7 @@ internal static class EditorTimelineMediator
         // appended recordings' keyframes belong to their own segment/source space.
         renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, null));
         renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
+        renderer.UpdateDisabledClickTicks(model.DisabledClickTicks);
         SyncTextOverlaysToRenderer(model, renderer, null, primaryVideoPath);
         SyncCursorAnchorsToRenderer(model, renderer, null, primaryVideoPath);
     }
@@ -193,6 +194,7 @@ internal static class EditorTimelineMediator
 
             renderer.UpdateZoomKeyframes(ManualKeyframesForSource(model, seg.VideoFilePath));
             renderer.UpdateSuppressedClickTicks(model.SuppressedClickTicks);
+            renderer.UpdateDisabledClickTicks(model.DisabledClickTicks);
             SyncTextOverlaysToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
             SyncCursorAnchorsToRenderer(model, renderer, seg.VideoFilePath, primaryVideoPath);
         }

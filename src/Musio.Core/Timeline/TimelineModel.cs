@@ -235,11 +235,33 @@ public class TimelineModel
     public MouseRecordingData? CursorData { get; set; }
 
     /// <summary>
-    /// Source click ticks whose auto-zoom segments have been suppressed (deleted or
-    /// converted to manual by the user). Persisted so the suppression survives
+    /// Source click ticks whose AUTO-ZOOM has been suppressed — because the user deleted the
+    /// generated segment, or edited it into a manual one. Persisted so the suppression survives
     /// undo/redo and is applied during both preview and export.
     /// </summary>
+    /// <remarks>
+    /// This says nothing about the click itself. The click still happens: it still draws its
+    /// ripple and still pins the cursor path during the press. Only the automatic zoom it would
+    /// otherwise have generated is cancelled. Whether the user disabled the CLICK is a separate
+    /// question with a separate answer — see <see cref="DisabledClickTicks"/>.
+    /// </remarks>
     public HashSet<long> SuppressedClickTicks { get; } = [];
+
+    /// <summary>
+    /// Source click ticks the user has explicitly disabled on the timeline. A disabled click is
+    /// treated as never having happened: no auto-zoom, no click ripple in the rendered frame,
+    /// and no protected span pinning the cursor path during the press.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately SEPARATE from <see cref="SuppressedClickTicks"/> rather than sharing it.
+    /// The two answer different questions, and the difference is not academic: every project
+    /// saved before this field existed carries suppressed ticks accumulated from ordinary
+    /// auto-zoom editing, and reading those as disabled clicks retroactively silences the
+    /// ripple and the cursor-path protection on footage the user never touched. Being a new
+    /// field, this one is empty for every existing project, which is exactly the compatibility
+    /// the shared flag could not offer.
+    /// </remarks>
+    public HashSet<long> DisabledClickTicks { get; } = [];
 
     /// <summary>
     /// Time offset in seconds between mouse recording start and video frame 0.
@@ -481,11 +503,17 @@ public class TimelineModel
     }
 
     /// <summary>
-    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that are not
-    /// covered by any higher full-frame track. Covers are coalesced before subtraction so
-    /// overlapping overlays do not create duplicate or inverted visible spans.
+    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that ARE
+    /// covered by a higher full-frame track, coalesced and clipped to the segment. These are
+    /// the stretches the finished video shows another track's picture instead of this one's.
     /// </summary>
-    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> VisibleRanges(TimelineSegment segment)
+    /// <remarks>
+    /// This is the shared coalescing pass behind <see cref="VisibleRanges"/>, which is simply
+    /// its complement within the segment. Deriving both from one pass keeps them from
+    /// disagreeing about which instants are covered — the timeline dims exactly the stretches
+    /// the export replaces.
+    /// </remarks>
+    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> CoveredRanges(TimelineSegment segment)
     {
         ArgumentNullException.ThrowIfNull(segment);
 
@@ -505,7 +533,7 @@ public class TimelineModel
         }
 
         if (covers.Count == 0)
-            return [(segmentStart, segmentEnd)];
+            return [];
 
         covers.Sort(static (a, b) =>
         {
@@ -525,6 +553,27 @@ public class TimelineModel
             if (cover.End > merged[^1].End)
                 merged[^1] = (merged[^1].Start, cover.End);
         }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that are not
+    /// covered by any higher full-frame track. Covers are coalesced before subtraction so
+    /// overlapping overlays do not create duplicate or inverted visible spans.
+    /// </summary>
+    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> VisibleRanges(TimelineSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+
+        var segmentStart = segment.Start;
+        var segmentEnd = segment.End;
+        if (segmentEnd <= segmentStart)
+            return [];
+
+        var merged = CoveredRanges(segment);
+        if (merged.Count == 0)
+            return [(segmentStart, segmentEnd)];
 
         var visible = new List<(TimeSpan Start, TimeSpan End)>();
         var cursor = segmentStart;
@@ -1090,6 +1139,27 @@ public record ZoomKeyframe
     /// available for appended recordings.
     /// </summary>
     public string? SourceVideoFilePath { get; init; }
+
+    /// <summary>
+    /// Id of the <see cref="VideoSegment"/> occurrence this keyframe was authored against, or
+    /// null when it is not pinned to one (auto-generated keyframes, and every project saved
+    /// before this field existed).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SourceVideoFilePath"/> alone is NOT a sufficient key for an occurrence. The
+    /// same recording can appear on several tracks at once, and when
+    /// <see cref="TimelineModel.PrimaryVideoFilePath"/> is null a null file path matches every
+    /// segment there is — so resolution fell through to "first match in list order", which is
+    /// neither the occurrence the user pointed at nor stable as the keyframe is dragged
+    /// through time. Pinning the occurrence is what makes a zoom chip stay in the band of the
+    /// clip it belongs to.
+    /// <para>
+    /// Deliberately a soft reference: an id that no longer resolves (the clip was deleted, or
+    /// split into new segments) falls back to the file+time search rather than orphaning the
+    /// keyframe, which is also what keeps old projects working unchanged.
+    /// </para>
+    /// </remarks>
+    public string? OwningSegmentId { get; init; }
 
     /// <summary>When the zoom-in animation begins.</summary>
     [JsonIgnore]
