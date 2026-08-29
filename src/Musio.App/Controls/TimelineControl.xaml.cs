@@ -675,9 +675,14 @@ public sealed partial class TimelineControl : UserControl
     private const double ZoomBandHeight = 22;
     private const double CursorBandHeight = 16;
 
-    /// <summary>Height of one whole track group: the video band plus its zoom and cursor bands.</summary>
-    private const double BaseTrackGroupHeight = BaseVideoTrackHeight + ZoomBandHeight + CursorBandHeight;
-
+    /// <summary>
+    /// Height of a peer track group. Also the unit a segment drag travels through
+    /// (<see cref="ResolveDragTrackIndex"/>) and the height the drop-hint lane opens to.
+    /// </summary>
+    /// <remarks>
+    /// A lone base track is taller than this — see <see cref="VideoBandHeightFor"/> — which is
+    /// why group offsets are summed rather than multiplied by this constant.
+    /// </remarks>
     private const double OverlayTrackGroupHeight = OverlayVideoTrackHeight + ZoomBandHeight + CursorBandHeight;
 
     /// <summary>
@@ -768,7 +773,12 @@ public sealed partial class TimelineControl : UserControl
     private double VideoTrackHeight(TimelineModel? model)
     {
         int used = Math.Max(1, model?.VideoTrackCount ?? 1);
-        return BaseTrackGroupHeight + (used - 1) * OverlayTrackGroupHeight + HintLaneBandHeight;
+
+        double total = 0;
+        for (int t = 0; t < used; t++)
+            total += TrackGroupHeightFor(t, used);
+
+        return total + HintLaneBandHeight;
     }
 
     // ── Transient overlay drop-hint lane ──
@@ -1934,15 +1944,59 @@ public sealed partial class TimelineControl : UserControl
     }
 
     /// <summary>
+    /// Height of one track's VIDEO band.
+    /// </summary>
+    /// <remarks>
+    /// The base track is taller only while it is the ONLY track — there is nothing for it to be
+    /// a peer of, and the extra height buys a more readable filmstrip. The moment a second
+    /// track exists they are peers, and a single taller lane reads as a hierarchy the model
+    /// does not have, so every track shares one height.
+    /// <para>
+    /// While the drop hint is opening, the base's extra height is eased away by the SAME
+    /// reveal fraction. Without that the base would still be 80px tall at the instant of the
+    /// drop and snap to 44px on the next layout pass — a visible step on release, which is
+    /// precisely the artefact the hint lane's reveal animation exists to remove.
+    /// </para>
+    /// </remarks>
+    private double VideoBandHeightFor(int trackIndex, int realCount)
+    {
+        if (trackIndex != TimelineModel.BaseTrackIndex || realCount > 1)
+            return OverlayVideoTrackHeight;
+
+        double reveal = HintLaneVisible ? Math.Clamp(_hintLaneReveal, 0, 1) : 0;
+        return BaseVideoTrackHeight - (BaseVideoTrackHeight - OverlayVideoTrackHeight) * reveal;
+    }
+
+    /// <summary>Vertical inset of the clip inside its video band, eased in step with the height.</summary>
+    private float VideoBandPaddingFor(int trackIndex, int realCount)
+    {
+        if (trackIndex != TimelineModel.BaseTrackIndex || realCount > 1)
+            return OverlayVideoTrackVerticalPadding;
+
+        double reveal = HintLaneVisible ? Math.Clamp(_hintLaneReveal, 0, 1) : 0;
+        return (float)(BaseVideoTrackVerticalPadding
+            - (BaseVideoTrackVerticalPadding - OverlayVideoTrackVerticalPadding) * reveal);
+    }
+
+    /// <summary>Height of a whole track group: its video band plus its zoom and cursor bands.</summary>
+    private double TrackGroupHeightFor(int trackIndex, int realCount)
+        => VideoBandHeightFor(trackIndex, realCount) + ZoomBandHeight + CursorBandHeight;
+
+    /// <summary>
     /// Maps a logical full-frame video track to its on-canvas GROUP: the video band plus the
     /// zoom and cursor bands that belong to that track, as one contiguous block. Track 0
-    /// remains the historical base lane at the bottom; higher overlay tracks stack upward.
+    /// remains the base lane at the bottom; higher overlay tracks stack upward.
     /// </summary>
     /// <remarks>
     /// This is the single geometry authority for the video canvas. Everything that needs a row
     /// — drawing, hit testing, drop indicators — resolves through here or through
     /// <see cref="TrackBandBounds"/>, so a band can never be drawn in one place and
     /// hit-tested in another.
+    /// <para>
+    /// Groups are summed rather than multiplied because the base group can differ in height
+    /// (see <see cref="VideoBandHeightFor"/>). With more than one track they are all equal and
+    /// the sum degenerates to a multiplication anyway.
+    /// </para>
     /// <para>
     /// The transient drop-hint lane (always the topmost index when present) is only as tall as
     /// <see cref="HintLaneBandHeight"/>, which eases between 0 and a full group while it opens
@@ -1962,14 +2016,13 @@ public sealed partial class TimelineControl : UserControl
         if (hasHintLane && trackIndex == trackCount - 1)
             return (0f, hintBand);
 
-        if (trackIndex == TimelineModel.BaseTrackIndex)
-        {
-            float y = hintBand + (float)((realCount - 1) * OverlayTrackGroupHeight);
-            return (y, (float)BaseTrackGroupHeight);
-        }
+        // Stack downward from the hint band: the highest track sits directly under it and the
+        // base lands at the bottom.
+        float y = hintBand;
+        for (int t = realCount - 1; t > trackIndex; t--)
+            y += (float)TrackGroupHeightFor(t, realCount);
 
-        float rowY = hintBand + (float)((realCount - 1 - trackIndex) * OverlayTrackGroupHeight);
-        return (rowY, (float)OverlayTrackGroupHeight);
+        return (y, (float)TrackGroupHeightFor(trackIndex, realCount));
     }
 
     /// <summary>
@@ -1985,9 +2038,8 @@ public sealed partial class TimelineControl : UserControl
         if (isHintLane)
             return band == TrackBand.Video ? (groupY, groupH) : (groupY + groupH, 0f);
 
-        float videoH = trackIndex == TimelineModel.BaseTrackIndex
-            ? (float)BaseVideoTrackHeight
-            : (float)OverlayVideoTrackHeight;
+        int realCount = Math.Max(1, HintLaneVisible ? Math.Max(1, trackCount) - 1 : Math.Max(1, trackCount));
+        float videoH = (float)VideoBandHeightFor(trackIndex, realCount);
 
         return band switch
         {
@@ -2020,11 +2072,8 @@ public sealed partial class TimelineControl : UserControl
             return (y, h, OverlayVideoTrackVerticalPadding * reveal);
         }
 
-        float pad = trackIndex == TimelineModel.BaseTrackIndex
-            ? BaseVideoTrackVerticalPadding
-            : OverlayVideoTrackVerticalPadding;
-
-        return (y, h, pad);
+        int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
+        return (y, h, VideoBandPaddingFor(trackIndex, realCount));
     }
 
     /// <summary>
@@ -2032,19 +2081,23 @@ public sealed partial class TimelineControl : UserControl
     /// full-frame blocks on different tracks are independently selectable. Resolves the whole
     /// GROUP, so a press on a track's zoom or cursor band reports that same track.
     /// </summary>
+    /// <remarks>
+    /// Walks the real group bounds top-down rather than dividing by a fixed row height, so it
+    /// stays correct while the base group is a different height from its peers (a lone base
+    /// track, or one mid-way through the drop hint's reveal).
+    /// </remarks>
     private int VideoTrackIndexFromY(TimelineModel model, double y)
     {
         int trackCount = VideoDisplayTrackCount(model);
         int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
 
-        // Measured from below the (possibly partly open) hint band, so hit-testing agrees with
-        // the row geometry mid-animation instead of being a lane out.
-        double localY = y - HintLaneBandHeight;
-        double overlayBandHeight = (realCount - 1) * OverlayTrackGroupHeight;
-        if (localY >= overlayBandHeight) return TimelineModel.BaseTrackIndex;
+        for (int t = realCount - 1; t > TimelineModel.BaseTrackIndex; t--)
+        {
+            var (groupY, groupH) = TrackGroupBounds(t, trackCount);
+            if (y < groupY + groupH) return t;
+        }
 
-        int visualRow = Math.Clamp((int)(Math.Max(0, localY) / OverlayTrackGroupHeight), 0, Math.Max(0, realCount - 2));
-        return realCount - 1 - visualRow;
+        return TimelineModel.BaseTrackIndex;
     }
 
     /// <summary>
