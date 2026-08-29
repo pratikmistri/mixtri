@@ -688,14 +688,33 @@ public sealed partial class TimelineControl : UserControl
     private const float CursorClickRailHeight = 7f;
 
     /// <summary>
-    /// Height of a peer track group. Also the unit a segment drag travels through
-    /// (<see cref="ResolveDragTrackIndex"/>) and the height the drop-hint lane opens to.
+    /// Blank space between two adjacent track groups.
+    /// </summary>
+    /// <remarks>
+    /// Without it a group's cursor band sits flush against the next group's filmstrip, and the
+    /// two read as one continuous block — which defeats the point of grouping the bands under
+    /// the track they belong to. The gap is part of the row PITCH, not of any band: it belongs
+    /// to no track, so nothing is drawn in it and a press there hit-tests nothing.
+    /// </remarks>
+    private const float TrackGroupGap = 7f;
+
+    /// <summary>
+    /// Height of a peer track group. Also the height the drop-hint lane opens to.
     /// </summary>
     /// <remarks>
     /// A lone base track is taller than this — see <see cref="VideoBandHeightFor"/> — which is
-    /// why group offsets are summed rather than multiplied by this constant.
+    /// why group offsets are summed rather than multiplied by this constant. Vertical spacing
+    /// between groups is <see cref="TrackRowPitch"/>, which adds <see cref="TrackGroupGap"/>.
     /// </remarks>
     private const double OverlayTrackGroupHeight = OverlayVideoTrackHeight + ZoomBandHeight + CursorBandHeight;
+
+    /// <summary>
+    /// Vertical distance from one peer group's top to the next one's — the group plus the gap
+    /// between them. This is the unit a segment drag travels through
+    /// (<see cref="ResolveDragTrackIndex"/>): using the bare group height would make the drag
+    /// reach a lane before the pointer had actually crossed into it.
+    /// </summary>
+    private const double TrackRowPitch = OverlayTrackGroupHeight + TrackGroupGap;
 
     /// <summary>
     /// The three horizontal bands a single video track's group is divided into, top to bottom.
@@ -790,6 +809,9 @@ public sealed partial class TimelineControl : UserControl
         for (int t = 0; t < used; t++)
             total += TrackGroupHeightFor(t, used);
 
+        // Gaps sit BETWEEN groups, so there is one fewer of them than there are groups.
+        total += TrackGroupGap * Math.Max(0, used - 1);
+
         return total + HintLaneBandHeight;
     }
 
@@ -882,7 +904,7 @@ public sealed partial class TimelineControl : UserControl
     /// </remarks>
     private float HintLaneBandHeight =>
         HintLaneVisible
-            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * OverlayTrackGroupHeight)
+            ? (float)(Math.Clamp(_hintLaneReveal, 0, 1) * TrackRowPitch)
             : 0f;
 
     /// <summary>
@@ -906,7 +928,7 @@ public sealed partial class TimelineControl : UserControl
 
         // Clamped so a fling far outside the track band can't spin the stepping loops below.
         double rows = Math.Clamp(
-            (_segmentDragStartY - y) / OverlayTrackGroupHeight,
+            (_segmentDragStartY - y) / TrackRowPitch,
             -(used + 2),
             used + 2);
 
@@ -2029,10 +2051,10 @@ public sealed partial class TimelineControl : UserControl
             return (0f, hintBand);
 
         // Stack downward from the hint band: the highest track sits directly under it and the
-        // base lands at the bottom.
+        // base lands at the bottom. Each step adds the gap that separates the two groups.
         float y = hintBand;
         for (int t = realCount - 1; t > trackIndex; t--)
-            y += (float)TrackGroupHeightFor(t, realCount);
+            y += (float)TrackGroupHeightFor(t, realCount) + TrackGroupGap;
 
         return (y, (float)TrackGroupHeightFor(trackIndex, realCount));
     }
