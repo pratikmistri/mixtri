@@ -1118,6 +1118,27 @@ public record ZoomKeyframe
     /// </summary>
     public string? SourceVideoFilePath { get; init; }
 
+    /// <summary>
+    /// Id of the <see cref="VideoSegment"/> occurrence this keyframe was authored against, or
+    /// null when it is not pinned to one (auto-generated keyframes, and every project saved
+    /// before this field existed).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SourceVideoFilePath"/> alone is NOT a sufficient key for an occurrence. The
+    /// same recording can appear on several tracks at once, and when
+    /// <see cref="TimelineModel.PrimaryVideoFilePath"/> is null a null file path matches every
+    /// segment there is — so resolution fell through to "first match in list order", which is
+    /// neither the occurrence the user pointed at nor stable as the keyframe is dragged
+    /// through time. Pinning the occurrence is what makes a zoom chip stay in the band of the
+    /// clip it belongs to.
+    /// <para>
+    /// Deliberately a soft reference: an id that no longer resolves (the clip was deleted, or
+    /// split into new segments) falls back to the file+time search rather than orphaning the
+    /// keyframe, which is also what keeps old projects working unchanged.
+    /// </para>
+    /// </remarks>
+    public string? OwningSegmentId { get; init; }
+
     /// <summary>When the zoom-in animation begins.</summary>
     [JsonIgnore]
     public TimeSpan Start => Timestamp - PreDuration;

@@ -70,8 +70,8 @@ internal static class EditorTimelineMediator
     public static void HandleCameraSegmentResized(EditorViewModel viewModel, string id, bool isStartEdge, TimeSpan newEdgeTime) =>
         viewModel.UndoRedoManager.Execute(new TrimCameraSegmentOperation(id, isStartEdge, newEdgeTime));
 
-    public static void HandleZoomSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newTimestamp) =>
-        viewModel.UndoRedoManager.Execute(new MoveZoomKeyframeOperation(id, newTimestamp));
+    public static void HandleZoomSegmentMoved(EditorViewModel viewModel, string id, TimeSpan newTimestamp, string? owningSegmentId = null) =>
+        viewModel.UndoRedoManager.Execute(new MoveZoomKeyframeOperation(id, newTimestamp, owningSegmentId));
 
     public static void HandleZoomSegmentResized(EditorViewModel viewModel, string id, bool isStartEdge, TimeSpan newEdgeTime) =>
         viewModel.UndoRedoManager.Execute(new ResizeZoomSegmentOperation(id, isStartEdge, newEdgeTime));

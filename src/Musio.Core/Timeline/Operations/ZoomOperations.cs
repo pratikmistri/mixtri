@@ -4,8 +4,10 @@ public class MoveZoomKeyframeOperation : IEditOperation
 {
     private readonly string _keyframeId;
     private readonly TimeSpan _newTimestamp;
+    private readonly string? _owningSegmentId;
     private TimeSpan _previousTimestamp;
     private bool _previousIsManual;
+    private string? _previousOwningSegmentId;
 
     public string Description => "Move Zoom Point";
 
@@ -13,10 +15,18 @@ public class MoveZoomKeyframeOperation : IEditOperation
     /// <inheritdoc />
     public bool ChangedModel => _changed;
 
-    public MoveZoomKeyframeOperation(string keyframeId, TimeSpan newTimestamp)
+    /// <param name="owningSegmentId">
+    /// The segment occurrence the chip was resolved against when the drag STARTED. Moving a
+    /// keyframe changes its timestamp, and an unpinned keyframe re-resolves its owner from
+    /// (file, time) — so without this a drag could hand the chip to a different clip, and it
+    /// would jump to that clip's band on release. Pinning the owner the user was actually
+    /// dragging is what makes a move stay within its own footage.
+    /// </param>
+    public MoveZoomKeyframeOperation(string keyframeId, TimeSpan newTimestamp, string? owningSegmentId = null)
     {
         _keyframeId = keyframeId;
         _newTimestamp = newTimestamp;
+        _owningSegmentId = owningSegmentId;
     }
 
     public void Execute(TimelineModel model)
@@ -26,11 +36,15 @@ public class MoveZoomKeyframeOperation : IEditOperation
         if (index < 0) { _changed = false; return; }
         _previousTimestamp = model.ZoomKeyframes[index].Timestamp;
         _previousIsManual = model.ZoomKeyframes[index].IsManual;
+        _previousOwningSegmentId = model.ZoomKeyframes[index].OwningSegmentId;
         var sourceClickTicks = model.ZoomKeyframes[index].SourceClickTicks;
         model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with
         {
             Timestamp = _newTimestamp,
             IsManual = true,
+            // Editing pins the occurrence, exactly as it promotes IsManual: both record a
+            // decision the user just made. An already-pinned keyframe keeps its pin.
+            OwningSegmentId = _previousOwningSegmentId ?? _owningSegmentId,
             // Moving is not a framing decision. Carry the effective value across so promotion
             // cannot flip a click-driven zoom to a pinned one via the IsManual fallback.
             HasAuthoredCenter = model.ZoomKeyframes[index].UsesAuthoredCenter,
@@ -49,7 +63,12 @@ public class MoveZoomKeyframeOperation : IEditOperation
         // Restore suppression state before reverting the keyframe
         ZoomOperationHelpers.RestoreClickSuppression(model, _previousIsManual, model.ZoomKeyframes[index].SourceClickTicks);
 
-        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with { Timestamp = _previousTimestamp, IsManual = _previousIsManual };
+        model.ZoomKeyframes[index] = model.ZoomKeyframes[index] with
+        {
+            Timestamp = _previousTimestamp,
+            IsManual = _previousIsManual,
+            OwningSegmentId = _previousOwningSegmentId,
+        };
     }
 }
 

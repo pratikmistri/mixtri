@@ -1261,13 +1261,13 @@ public sealed partial class EditorPage
         return true;
     }
 
-    private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp) e) =>
-        EditorTimelineMediator.HandleZoomSegmentMoved(ViewModel, e.Id, e.NewTimestamp);
+    private void OnZoomSegmentMoved(object? sender, (string Id, TimeSpan NewTimestamp, string? OwningSegmentId) e) =>
+        EditorTimelineMediator.HandleZoomSegmentMoved(ViewModel, e.Id, e.NewTimestamp, e.OwningSegmentId);
 
     private void OnZoomSegmentResized(object? sender, (string Id, bool IsStartEdge, TimeSpan NewEdgeTime) e) =>
         EditorTimelineMediator.HandleZoomSegmentResized(ViewModel, e.Id, e.IsStartEdge, e.NewEdgeTime);
 
-    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath) e)
+    private void OnZoomSegmentCreated(object? sender, (TimeSpan Start, TimeSpan End, string? FilePath, string? OwningSegmentId) e)
     {
         double zoomLevel = Math.Clamp(ZoomLevelSlider.Value, MinZoomLevel, MaxZoomLevel);
 
@@ -1295,11 +1295,14 @@ public sealed partial class EditorPage
         }
 
         // Build the keyframe tagged with the owning source file so it renders on the
-        // correct clip and (for the primary) drives the zoom engine.
+        // correct clip and (for the primary) drives the zoom engine, and pinned to the
+        // segment OCCURRENCE the drag started on so it stays in that clip's band — the file
+        // path cannot identify which copy of a recording was pointed at.
         var keyframe = Musio.Core.Timeline.ZoomKeyframe.FromRange(e.Start, e.End, zoomLevel,
             Math.Clamp(cx, 0, 1), Math.Clamp(cy, 0, 1)) with
         {
             SourceVideoFilePath = e.FilePath,
+            OwningSegmentId = e.OwningSegmentId,
         };
         var operation = new AddZoomSegmentOperation(keyframe);
         ViewModel.UndoRedoManager.Execute(operation);

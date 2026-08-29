@@ -179,6 +179,13 @@ public sealed partial class TimelineControl : UserControl
     private TimeSpan _zoomDragOriginalStart;
     private TimeSpan _zoomDragOriginalEnd;
 
+    /// <summary>
+    /// The segment occurrence the dragged chip resolved to when the drag STARTED, captured
+    /// before the move so the commit can pin it there. Resolving again after the timestamp
+    /// changed is exactly what let a drag hand the chip to a neighbouring clip.
+    /// </summary>
+    private string? _zoomDragOwningSegmentId;
+
     // Drag-to-create state
     private TimeSpan _zoomCreateStart;
     private TimeSpan _zoomCreateEnd;
@@ -187,6 +194,12 @@ public sealed partial class TimelineControl : UserControl
 
     /// <summary>Video track whose zoom band the in-flight drag-to-create started on.</summary>
     private int _zoomCreateTrackIndex;
+
+    /// <summary>
+    /// Id of the segment OCCURRENCE the in-flight drag-to-create started on, pinned onto the
+    /// new keyframe so it renders in that clip's band rather than the first file match.
+    /// </summary>
+    private string? _zoomCreateSegmentId;
     private const double ZoomCreateDragThreshold = 5.0; // pixels before creating
 
     // Colors — resolved from WinUI system theme resources (see ResolveThemeColors)
@@ -1162,14 +1175,22 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>Raised when a zoom segment is selected or deselected (null = deselected).</summary>
     public event EventHandler<string?>? ZoomSegmentSelected;
 
-    /// <summary>Raised when a zoom segment drag completes. Carries the keyframe Id and new timestamp.</summary>
-    public event EventHandler<(string Id, TimeSpan NewTimestamp)>? ZoomSegmentMoved;
+    /// <summary>Raised when a zoom segment drag completes. Carries the keyframe Id, new timestamp, and the segment occurrence it was dragged within.</summary>
+    public event EventHandler<(string Id, TimeSpan NewTimestamp, string? OwningSegmentId)>? ZoomSegmentMoved;
 
     /// <summary>Raised when a zoom segment is resized. Carries the keyframe Id, whether it was the start edge, and the new edge time.</summary>
     public event EventHandler<(string Id, bool IsStartEdge, TimeSpan NewEdgeTime)>? ZoomSegmentResized;
 
-    /// <summary>Raised when a new zoom segment is created by dragging. Carries the start and end times.</summary>
-    public event EventHandler<(TimeSpan Start, TimeSpan End, string? FilePath)>? ZoomSegmentCreated;
+    /// <summary>
+    /// Raised when a new zoom segment is created by dragging. Carries the start and end times,
+    /// the owning source file, and the id of the segment OCCURRENCE the drag started on.
+    /// </summary>
+    /// <remarks>
+    /// The occurrence id is what pins the new keyframe to the clip the user actually pointed
+    /// at. The file path cannot do that job: the same recording may appear on several tracks,
+    /// and a null path matches every segment when the project has no primary file.
+    /// </remarks>
+    public event EventHandler<(TimeSpan Start, TimeSpan End, string? FilePath, string? OwningSegmentId)>? ZoomSegmentCreated;
 
     /// <summary>Raised when the user requests removal of a zoom segment.</summary>
     public event EventHandler<string>? ZoomSegmentRemoveRequested;
@@ -3284,14 +3305,29 @@ public sealed partial class TimelineControl : UserControl
            string.Equals(a.SourceVideoFilePath, b.SourceVideoFilePath, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Finds the video segment that owns a zoom keyframe: the segment matching the
-    /// keyframe's source file whose source range contains its Timestamp (falling back
-    /// to the first file-matching segment that still SHOWS any part of the keyframe).
-    /// This anchors the keyframe to one occurrence of a recording even when that source
-    /// was duplicated or reordered.
+    /// Finds the video segment that owns a zoom keyframe.
     /// </summary>
     /// <remarks>
-    /// The fallback exists so an authored span whose eases slightly overflow its segment
+    /// Resolution order matters:
+    /// <list type="number">
+    /// <item><description>
+    /// The pinned <see cref="ZoomKeyframe.OwningSegmentId"/>, when it still resolves. This is
+    /// the only key that identifies an OCCURRENCE. File path alone does not: the same
+    /// recording can sit on two tracks at once, and a null path matches every segment when
+    /// <see cref="TimelineModel.PrimaryVideoFilePath"/> is null — in which case the searches
+    /// below return whatever comes first in list order, which is how a chip ended up in
+    /// another track's band and hopped clips as it was dragged.
+    /// </description></item>
+    /// <item><description>
+    /// Otherwise the segment matching the keyframe's source file whose source range contains
+    /// its Timestamp — the historical behaviour, kept for auto-generated keyframes and for
+    /// projects saved before the pin existed.
+    /// </description></item>
+    /// <item><description>
+    /// Otherwise the first file-matching segment that still SHOWS any part of the keyframe.
+    /// </description></item>
+    /// </list>
+    /// The last fallback exists so an authored span whose eases slightly overflow its segment
     /// keeps its width instead of collapsing — but it must never adopt a segment that shows
     /// NO part of the keyframe. Doing so extrapolates a position outside that segment's
     /// range (<see cref="TimelineModel.MapSourceTimeFromOwningSegment"/> deliberately does
@@ -3303,6 +3339,16 @@ public sealed partial class TimelineControl : UserControl
     {
         var model = Model;
         if (model is null) return null;
+
+        if (kf.OwningSegmentId is { Length: > 0 } pinned)
+        {
+            foreach (var seg in model.Segments.OfType<VideoSegment>())
+            {
+                if (string.Equals(seg.Id, pinned, StringComparison.Ordinal))
+                    return seg;
+            }
+            // Fall through: the pinned occurrence is gone (deleted, or replaced by a split).
+        }
 
         VideoSegment? firstMatch = null;
         foreach (var seg in model.Segments.OfType<VideoSegment>())
@@ -3476,7 +3522,19 @@ public sealed partial class TimelineControl : UserControl
     /// </param>
     private TimeSpan? XToSegmentVideoTime(double x, out string? filePath, int trackIndex = -1)
     {
+        var result = XToSegmentVideoTime(x, out filePath, out _, trackIndex);
+        return result;
+    }
+
+    /// <param name="segmentId">
+    /// Id of the segment the X resolved against. Callers that pin an authored thing to an
+    /// occurrence need this — the file path alone cannot identify which copy of a recording
+    /// was pointed at.
+    /// </param>
+    private TimeSpan? XToSegmentVideoTime(double x, out string? filePath, out string? segmentId, int trackIndex = -1)
+    {
         filePath = null;
+        segmentId = null;
         var model = Model;
         var outputTime = XToTime(x);
         if (model is null || model.Segments.Count == 0) return outputTime;
@@ -3506,6 +3564,7 @@ public sealed partial class TimelineControl : UserControl
         bool isPrimary = model.PrimaryVideoFilePath is null ||
             string.Equals(target.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase);
         filePath = isPrimary ? null : target.VideoFilePath;
+        segmentId = target.Id;
         var local = mappingOutputTime - target.Start;
         return target.SourceStart + TimeSpan.FromTicks((long)(local.Ticks * target.SpeedFactor));
     }
@@ -3581,6 +3640,7 @@ public sealed partial class TimelineControl : UserControl
             _zoomDragOriginalTimestamp = kf.Timestamp;
             _zoomDragOriginalStart = kf.Start;
             _zoomDragOriginalEnd = kf.End;
+            _zoomDragOwningSegmentId = kf.OwningSegmentId ?? OwningSegmentForKeyframe(kf)?.Id;
 
             switch (hitTarget)
             {
@@ -3612,13 +3672,14 @@ public sealed partial class TimelineControl : UserControl
             _zoomCreateTrackIndex = VideoTrackIndexFromY(model, pos.Y);
             PlayheadPosition = XToTime(pos.X);
 
-            var start = XToSegmentVideoTime(pos.X, out _zoomCreateFile, _zoomCreateTrackIndex);
+            var start = XToSegmentVideoTime(pos.X, out _zoomCreateFile, out _zoomCreateSegmentId, _zoomCreateTrackIndex);
             if (start is null)
             {
                 // No video segment anywhere to attach a zoom keyframe to — reject the
                 // gesture rather than stamping an output-time value into a source-time
                 // field, and leave no transient drag state behind.
                 _zoomCreateFile = null;
+                _zoomCreateSegmentId = null;
                 _dragMode = DragMode.None;
                 _zoomDragStartX = double.NaN;
                 _zoomDragCurrentX = double.NaN;
@@ -3740,7 +3801,7 @@ public sealed partial class TimelineControl : UserControl
                     if (startTime is not null && movedTime is not null)
                     {
                         var newTimestamp = _zoomDragOriginalTimestamp + (movedTime.Value - startTime.Value);
-                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp));
+                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp, _zoomDragOwningSegmentId));
                     }
                     // else: unmappable in this file's time domain — reject the move,
                     // leaving the keyframe at its original position.
@@ -3774,7 +3835,7 @@ public sealed partial class TimelineControl : UserControl
                 var end = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart;
                 if ((end - start) >= ZoomKeyframe.MinSegmentDuration)
                 {
-                    ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile));
+                    ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile, _zoomCreateSegmentId));
                 }
                 _zoomCreateActive = false;
                 break;
@@ -5577,6 +5638,7 @@ public sealed partial class TimelineControl : UserControl
         _zoomDragCurrentX = double.NaN;
         _zoomCreateActive = false;
         _zoomCreateFile = null;
+        _zoomCreateSegmentId = null;
     }
 
     private void CursorTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
