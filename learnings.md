@@ -1214,3 +1214,31 @@ This file tracks approaches tried, what worked, and what didn't for each feature
 **What didn't work:** N/A — first approach worked.
 
 **Build notes:** The `dotnet build` CLI fails on Musio.Core/App due to missing WinAppSDK packaging tasks (`ExpandPriContent`). Use MSBuild from VS (`"C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe"`) for building. Tests require `DOTNET_ROLL_FORWARD=LatestMajor` since .NET 9 runtime is not installed (only 8 and 10).
+
+
+---
+
+## Build Path Length & MSIX Sideload — Worktree Workflow
+
+**Feature/area:** Build pipeline from a deep git-worktree path
+
+**Problem:** Git worktree paths like `C:\Users\prmistri\source\repos\copilot-worktrees\musio\prmistri-microsoft-issue-23-remove-last-user-click-observed-to-stop-d3b9c2\...` exceed Windows' 260-char `MAX_PATH` limit during MSBuild's Copy task for WindowsAppSDK assemblies. The MSBuild Copy task does not use long-path-aware APIs, so it fails with `Could not find a part of the path`. `LongPathsEnabled=0` and not modifiable without admin.
+
+**What worked:**
+1. `subst W: <worktree-path>` to map the worktree to a short drive letter, then build from `W:\` so all paths stay well under 260 chars.
+2. Build via `[System.Diagnostics.Process]::Start()` wrapper (per existing ARM64 learning).
+3. `MSBuild.exe src\Musio.App\Musio.App.csproj /restore /t:Build /p:Configuration=Debug /p:Platform=ARM64` from `W:\` — produces `Musio.App.exe` AND `AppxManifest.xml` automatically.
+4. Register with `Add-AppxPackage -Register <real path>\AppxManifest.xml -ForceApplicationShutdown` using the REAL absolute path (the deployment service doesn't see per-user `subst` drives).
+5. Launch: `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'`.
+
+**What didn't work:**
+- Pre-creating destination dirs manually (e.g. `New-Item win-x64`) — they get clobbered during build and the Copy task still fails.
+- Building without `subst` — fails with `MSB3027/MSB3021` on Copy tasks for `Microsoft.Windows.ApplicationModel.*.dll` files (path length issue, not a permissions issue).
+- Registering AppxManifest.xml via the `subst W:` path — Deployment fails with `HRESULT 0x80073CF0 / 0x80070003` (deployment service can't resolve the per-user drive).
+- Manually unzipping WindowsAppSDK `.msix` files into `obj\.../MsixContent` — works around the `Unzip` task failure once, but the next Copy task fails again at path length.
+
+**Pitfalls:**
+- A partial build that produces a smaller-than-expected `Musio.App.exe` (e.g. 137 KB instead of 259 KB) crashes at startup with `REGDB_E_CLASSNOTREG` (0x80040154) inside `Microsoft.UI.Xaml.dll`. Indicates incomplete XAML compilation / payload. Fix: clean `bin\` and `obj\` for both `Musio.App` and `Musio.Core`, then rebuild fresh.
+- Developer Mode (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\AllowDevelopmentWithoutDevLicense=1`) must be enabled before `Add-AppxPackage -Register` will accept an unsigned package. Without it: `HRESULT 0x80073CFF` (needs developer license or sideloading-enabled system).
+- If a Store-installed version is registered, sideloading the same package fails with `HRESULT 0x80073CFB`. Uninstall first with `Get-AppxPackage -Name *Musio* | Remove-AppxPackage`.
+- `Add-AppxPackage` progress output floods stdout and can drown other output. Redirect to a log file via the wrapper script.
