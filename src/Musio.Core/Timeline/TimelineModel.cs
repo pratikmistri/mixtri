@@ -481,11 +481,17 @@ public class TimelineModel
     }
 
     /// <summary>
-    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that are not
-    /// covered by any higher full-frame track. Covers are coalesced before subtraction so
-    /// overlapping overlays do not create duplicate or inverted visible spans.
+    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that ARE
+    /// covered by a higher full-frame track, coalesced and clipped to the segment. These are
+    /// the stretches the finished video shows another track's picture instead of this one's.
     /// </summary>
-    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> VisibleRanges(TimelineSegment segment)
+    /// <remarks>
+    /// This is the shared coalescing pass behind <see cref="VisibleRanges"/>, which is simply
+    /// its complement within the segment. Deriving both from one pass keeps them from
+    /// disagreeing about which instants are covered — the timeline dims exactly the stretches
+    /// the export replaces.
+    /// </remarks>
+    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> CoveredRanges(TimelineSegment segment)
     {
         ArgumentNullException.ThrowIfNull(segment);
 
@@ -505,7 +511,7 @@ public class TimelineModel
         }
 
         if (covers.Count == 0)
-            return [(segmentStart, segmentEnd)];
+            return [];
 
         covers.Sort(static (a, b) =>
         {
@@ -525,6 +531,27 @@ public class TimelineModel
             if (cover.End > merged[^1].End)
                 merged[^1] = (merged[^1].Start, cover.End);
         }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Returns the absolute output-time sub-ranges of <paramref name="segment"/> that are not
+    /// covered by any higher full-frame track. Covers are coalesced before subtraction so
+    /// overlapping overlays do not create duplicate or inverted visible spans.
+    /// </summary>
+    public IReadOnlyList<(TimeSpan Start, TimeSpan End)> VisibleRanges(TimelineSegment segment)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+
+        var segmentStart = segment.Start;
+        var segmentEnd = segment.End;
+        if (segmentEnd <= segmentStart)
+            return [];
+
+        var merged = CoveredRanges(segment);
+        if (merged.Count == 0)
+            return [(segmentStart, segmentEnd)];
 
         var visible = new List<(TimeSpan Start, TimeSpan End)>();
         var cursor = segmentStart;

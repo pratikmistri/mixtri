@@ -20,11 +20,9 @@
             <RowDefinition Height="30" />
             <!-- Time ruler -->
             <RowDefinition Height="Auto" />
-            <!-- Video track: the canvas owns its dynamic height so overlay rows grow instead of clipping. -->
-            <RowDefinition x:Name="CursorRow" Height="40" />
-            <!-- Cursor path track -->
-            <RowDefinition Height="50" />
-            <!-- Zoom segments track -->
+            <!-- Video track group stack: one group per video track, each carrying its own
+                 video / zoom / cursor bands. The canvas owns its dynamic height so overlay
+                 groups grow it instead of clipping. -->
             <RowDefinition x:Name="CameraRow" Height="44" />
             <!-- Camera track -->
             <RowDefinition Height="44" />
@@ -42,21 +40,15 @@
         <!-- Track labels -->
         <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
         <Border Grid.Row="1" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="4,0">
-            <TextBlock Text="Video" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
+            <TextBlock Text="Video" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Top" Margin="0,6,0,0" />
         </Border>
-        <Border x:Name="CursorTrackLabel" Grid.Row="2" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
-            <TextBlock Text="Cursor" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
-        </Border>
-        <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
-            <TextBlock Text="Zoom" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
-        </Border>
-        <Border x:Name="CameraTrackLabel" Grid.Row="4" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+        <Border x:Name="CameraTrackLabel" Grid.Row="2" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
             <TextBlock Text="Camera" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+        <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
             <TextBlock Text="Text" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
         </Border>
-        <Border x:Name="AudioTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+        <Border x:Name="AudioTrackLabel" Grid.Row="4" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
             <Button x:Name="AudioMuteButton"
                     Click="AudioTrackLabel_Click"
                     Tag="System"
@@ -72,7 +64,7 @@
                 </StackPanel>
             </Button>
         </Border>
-        <Border x:Name="MicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+        <Border x:Name="MicTrackLabel" Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
             <Button x:Name="MicMuteButton"
                     Click="AudioTrackLabel_Click"
                     Tag="Mic"
@@ -89,7 +81,7 @@
             </Button>
         </Border>
 
-        <Border x:Name="VoiceOverTrackLabel" Grid.Row="8" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+        <Border x:Name="VoiceOverTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
             <Button x:Name="VoiceOverLabelButton"
                     Click="AudioTrackLabel_Click"
                     Tag="VoiceOver"
@@ -105,7 +97,7 @@
                 </StackPanel>
             </Button>
         </Border>
-        <Border x:Name="MusicTrackLabel" Grid.Row="9" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+        <Border x:Name="MusicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
             <Button x:Name="MusicLabelButton"
                     Click="AudioTrackLabel_Click"
                     Tag="Music"
@@ -134,7 +126,7 @@
             x:Name="VideoTrackCanvas"
             Grid.Row="1"
             Grid.Column="1"
-            Height="80"
+            Height="118"
             Draw="VideoTrackCanvas_Draw"
             PointerMoved="VideoTrack_PointerMoved"
             PointerExited="VideoTrack_PointerExited"
@@ -142,34 +134,12 @@
             PointerReleased="VideoTrack_PointerReleased"
             PointerCaptureLost="VideoTrack_PointerCaptureLost"
             PointerCanceled="VideoTrack_PointerCaptureLost"
-            RightTapped="VideoTrack_RightTapped" />
-
-        <canvas:CanvasControl
-            x:Name="CursorTrackCanvas"
-            Grid.Row="2"
-            Grid.Column="1"
-            Draw="CursorTrackCanvas_Draw"
-            PointerPressed="CursorTrack_PointerPressed"
-            PointerMoved="CursorTrack_PointerMoved"
-            PointerReleased="CursorTrack_PointerReleased"
-            PointerCaptureLost="CursorTrack_PointerCaptureLost"
-            PointerCanceled="CursorTrack_PointerCaptureLost"
-            RightTapped="CursorTrack_RightTapped"
-            AutomationProperties.Name="Cursor track" />
-
-        <canvas:CanvasControl
-            x:Name="ZoomTrackCanvas"
-            Grid.Row="3"
-            Grid.Column="1"
-            Draw="ZoomTrackCanvas_Draw"
-            PointerPressed="ZoomTrack_PointerPressed"
-            PointerMoved="ZoomTrack_PointerMoved"
-            PointerReleased="ZoomTrack_PointerReleased"
-            RightTapped="ZoomTrack_RightTapped" />
+            RightTapped="VideoTrack_RightTapped"
+            AutomationProperties.Name="Video, zoom and cursor tracks" />
 
         <canvas:CanvasControl
             x:Name="CameraTrackCanvas"
-            Grid.Row="4"
+            Grid.Row="2"
             Grid.Column="1"
             Draw="CameraTrackCanvas_Draw"
             PointerPressed="CameraTrack_PointerPressed"
@@ -179,7 +149,7 @@
 
         <canvas:CanvasControl
             x:Name="TextTrackCanvas"
-            Grid.Row="5"
+            Grid.Row="3"
             Grid.Column="1"
             Draw="TextTrackCanvas_Draw"
             PointerPressed="TextTrack_PointerPressed"
@@ -191,7 +161,7 @@
 
         <canvas:CanvasControl
             x:Name="AudioTrackCanvas"
-            Grid.Row="6"
+            Grid.Row="4"
             Grid.Column="1"
             Draw="AudioTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed"
@@ -199,7 +169,7 @@
 
         <canvas:CanvasControl
             x:Name="MicTrackCanvas"
-            Grid.Row="7"
+            Grid.Row="5"
             Grid.Column="1"
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed"
@@ -207,7 +177,7 @@
 
         <canvas:CanvasControl
             x:Name="VoiceOverTrackCanvas"
-            Grid.Row="8"
+            Grid.Row="6"
             Grid.Column="1"
             Visibility="Collapsed"
             Draw="VoiceOverTrackCanvas_Draw"
@@ -219,7 +189,7 @@
 
         <canvas:CanvasControl
             x:Name="MusicTrackCanvas"
-            Grid.Row="9"
+            Grid.Row="7"
             Grid.Column="1"
             Visibility="Collapsed"
             Draw="MusicTrackCanvas_Draw"
@@ -235,7 +205,7 @@
         <Border
             x:Name="PlayheadLine"
             Grid.Row="0"
-            Grid.RowSpan="10"
+            Grid.RowSpan="8"
             Grid.Column="1"
             Width="2"
             HorizontalAlignment="Left"

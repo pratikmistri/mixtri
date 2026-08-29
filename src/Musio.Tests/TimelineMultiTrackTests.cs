@@ -139,6 +139,115 @@ public sealed class TimelineMultiTrackTests
         AssertRanges(model.VisibleRanges(segment), (S(0), S(2)), (S(8), S(10)));
     }
 
+    // ── CoveredRanges: the complement the timeline dims ──
+    //
+    // The per-track band groups desaturate exactly the stretches a higher track covers, so
+    // CoveredRanges and VisibleRanges must stay exact complements of each other within a
+    // segment. They share one coalescing pass for that reason; these tests pin the pairing.
+
+    [TestMethod]
+    public void CoveredRanges_UncoveredSegmentReturnsEmpty()
+    {
+        var segment = Video(0, 10);
+        var model = ModelWith(segment);
+
+        Assert.AreEqual(0, model.CoveredRanges(segment).Count);
+    }
+
+    [TestMethod]
+    public void CoveredRanges_FullyCoveredSegmentReturnsItsWholeSpan()
+    {
+        var segment = Video(0, 10);
+        var cover = Slide(10) with { TrackIndex = 1, Start = S(0) };
+        var model = ModelWith(segment, cover);
+
+        AssertRanges(model.CoveredRanges(segment), (S(0), S(10)));
+    }
+
+    [TestMethod]
+    public void CoveredRanges_ReturnsOnlyTheCoveredSubRange()
+    {
+        var segment = Video(0, 10);
+        var cover = Slide(2) with { TrackIndex = 1, Start = S(2) };
+        var model = ModelWith(segment, cover);
+
+        AssertRanges(model.CoveredRanges(segment), (S(2), S(4)));
+    }
+
+    [TestMethod]
+    public void CoveredRanges_CoalescesOverlappingCoversIntoOne()
+    {
+        var segment = Video(0, 10);
+        var firstCover = Slide(4) with { TrackIndex = 1, Start = S(2) };
+        var overlappingCover = Slide(4) with { TrackIndex = 2, Start = S(4) };
+        var model = ModelWith(segment, firstCover, overlappingCover);
+
+        AssertRanges(model.CoveredRanges(segment), (S(2), S(8)));
+    }
+
+    /// <summary>
+    /// A cover is clipped to the segment it covers, so a scrim can never be painted outside
+    /// the block it belongs to — an overhanging overlay would otherwise dim its neighbours.
+    /// </summary>
+    /// <remarks>
+    /// Uses an OVERLAY segment as the subject: base-track segments are reflowed contiguously
+    /// in list order, so an explicit <see cref="TimelineSegment.Start"/> on track 0 is not
+    /// honoured and the clip could only ever be observed at its end.
+    /// </remarks>
+    [TestMethod]
+    public void CoveredRanges_ClipsAnOverhangingCoverToTheSegment()
+    {
+        var baseSegment = Video(0, 20);
+        var subject = Slide(4) with { TrackIndex = 1, Start = S(2) };
+        var overhangingCover = Slide(10) with { TrackIndex = 2, Start = S(0) };
+        var model = ModelWith(baseSegment, subject, overhangingCover);
+
+        AssertRanges(model.CoveredRanges(subject), (S(2), S(6)));
+    }
+
+    /// <summary>
+    /// A lower track never covers a higher one: only strictly-higher TrackIndex counts, which
+    /// is what stops the top-most take from being dimmed by the footage underneath it.
+    /// </summary>
+    [TestMethod]
+    public void CoveredRanges_IgnoresSameAndLowerTracks()
+    {
+        var overlay = Video(0, 10) with { TrackIndex = 1 };
+        var baseSegment = Slide(10) with { TrackIndex = 0, Start = S(0) };
+        var sameTrackNeighbour = Slide(2) with { TrackIndex = 1, Start = S(20) };
+        var model = ModelWith(baseSegment, overlay, sameTrackNeighbour);
+
+        Assert.AreEqual(0, model.CoveredRanges(overlay).Count);
+    }
+
+    /// <summary>
+    /// The pairing itself: every instant of a segment is either visible or covered, never both
+    /// and never neither. The timeline dims what the export discards, and the two answers come
+    /// from one pass so they cannot drift.
+    /// </summary>
+    [TestMethod]
+    public void CoveredRanges_AndVisibleRanges_PartitionTheSegmentExactly()
+    {
+        var segment = Video(0, 10);
+        var firstCover = Slide(2) with { TrackIndex = 1, Start = S(1) };
+        var secondCover = Slide(3) with { TrackIndex = 2, Start = S(6) };
+        var model = ModelWith(segment, firstCover, secondCover);
+
+        var union = model.VisibleRanges(segment)
+            .Concat(model.CoveredRanges(segment))
+            .OrderBy(r => r.Start)
+            .ToList();
+
+        // Contiguous, non-overlapping, and spanning the whole segment.
+        Assert.AreEqual(segment.Start, union[0].Start);
+        Assert.AreEqual(segment.End, union[^1].End);
+        for (int i = 1; i < union.Count; i++)
+            Assert.AreEqual(union[i - 1].End, union[i].Start, $"gap or overlap at index {i}");
+
+        var totalCovered = model.CoveredRanges(segment).Aggregate(TimeSpan.Zero, (a, r) => a + (r.End - r.Start));
+        Assert.AreEqual(S(5), totalCovered);
+    }
+
     /// <summary>
     /// Pure base-track edits are the compatibility floor: the new track model must leave the
     /// historical contiguous lookup, duration, and slide-adjacent transition fallback intact.
