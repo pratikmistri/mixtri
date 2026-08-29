@@ -60,4 +60,12 @@ musio/
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License, Version 2.0 — see the [LICENSE](LICENSE) file
+for details.
+
+If you redistribute Musio or a derivative work, the license requires you to retain copyright and
+attribution notices and to include the attribution from the [NOTICE](NOTICE) file in your
+redistribution (e.g., in a NOTICE file, documentation, or a credits screen). Please keep the
+credit visible in your product's about/credits screen or documentation.
+
+Releases published before this change remain available under the MIT License.
