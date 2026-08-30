@@ -267,6 +267,7 @@ public sealed partial class TimelineControl : UserControl
     private Color TrackCenterLineColor;
     private Color TrackEmptyLineColor;
     private Color TrackHintTextColor;
+    private Color TrackLabelTextColor;
     private Color EmptyPlaceholderFill;
     private Color EmptyPlaceholderStroke;
     private Color ClickStrokeColor;
@@ -615,6 +616,11 @@ public sealed partial class TimelineControl : UserControl
         TrackCenterLineColor  = GetSystemBrushColor("DividerStrokeColorDefaultBrush", Color.FromArgb(100, 255, 255, 255));
         TrackEmptyLineColor   = GetSystemBrushColor("ControlStrokeColorDefaultBrush", Color.FromArgb(60, 255, 255, 255));
         TrackHintTextColor    = GetSystemBrushColor("TextFillColorTertiaryBrush", Color.FromArgb(140, 255, 255, 255));
+        // Matches the Foreground the XAML track labels (Camera / Text / Audio …) use, so the
+        // drawn video-group captions are indistinguishable from the static ones above them.
+        TrackLabelTextColor   = GetSystemBrushColor("TextFillColorSecondaryBrush", Color.FromArgb(200, 255, 255, 255));
+        // Dropped so the captions pick the new theme's colour up on the next layout pass.
+        _trackLabelBrush = null;
 
         // ── Empty-state shadow segment — must read as an outline, never as a clip ──
         EmptyPlaceholderFill   = isDark ? Color.FromArgb(20, 255, 255, 255) : Color.FromArgb(16, 0, 0, 0);
@@ -751,6 +757,7 @@ public sealed partial class TimelineControl : UserControl
     private void UpdateTrackVisibility()
     {
         UpdateVideoTrackHeight();
+        UpdateVideoTrackLabels();
 
         // The XAML may not be realised yet when the model is assigned during construction.
         if (CameraRow is null || AudioRow is null) return;
@@ -1010,6 +1017,11 @@ public sealed partial class TimelineControl : UserControl
 
         UpdateVideoTrackHeight();
         VideoTrackCanvas?.Invalidate();
+        // The bands MOVE while the lane eases open (and the base band shrinks), so the captions
+        // beside them have to be re-positioned on the same tick or they sit in the wrong lane
+        // for the length of the animation. This is a XAML layout pass over at most nine small
+        // rows, not a canvas repaint.
+        UpdateVideoTrackLabels();
     }
 
     /// <summary>
@@ -1530,6 +1542,164 @@ public sealed partial class TimelineControl : UserControl
         DrawZoomBands(ds, model, w);
         DrawCursorBands(ds, model, w);
     }
+
+    // ── Video-group band captions ──
+    //
+    // The video row's label used to be a single static "Video" TextBlock, which named only the
+    // topmost of the THREE bands the row actually contains: the filmstrip, the zoom chips and
+    // the cursor ribbon. The zoom and mouse lanes are authoring surfaces (you drag on the zoom
+    // band to create a zoom), so leaving them unnamed hid two features behind an unlabelled
+    // strip of pixels.
+    //
+    // They are POSITIONED rather than laid out in a grid because the bands are not grid rows:
+    // their offsets come from TrackBandBounds, which eases the base band's height and slides
+    // every group down while the drop-hint lane opens. Anything positioned independently
+    // drifts out of its lane exactly when the timeline is being rearranged.
+    //
+    // They are plain XAML rather than a tenth CanvasControl, and that is deliberate. Every
+    // extra CanvasControl multiplies the silent device-loss hazard the crash playbook exists
+    // for — the per-track-lane round rejected per-track canvases for exactly this reason and
+    // added ZERO new ones. It also fails better: when a GPU device removal blanks every canvas
+    // in the window, these captions keep rendering, because XAML text does not live on the
+    // lost device.
+    private const string TrackLabelGlyphVideo = "\uE714";   // Segoe Fluent Icons — Video
+    private const string TrackLabelGlyphZoom = "\uE8A3";    // ZoomIn — the plain Zoom glyph (E71E)
+                                                            // is the search magnifier and read as
+                                                            // "find" rather than "magnify"
+    private const string TrackLabelGlyphMouse = "\uE962";   // Mouse
+
+    /// <summary>Left inset of the caption row inside the 56px label column.</summary>
+    private const double TrackLabelInsetX = 5;
+
+    /// <summary>
+    /// Legibility floor: a band shorter than this cannot fit the 12px icon without clipping
+    /// it, so it is left uncaptioned rather than half-drawn.
+    /// </summary>
+    /// <remarks>
+    /// A guard, not a routine path. The drop-hint lane — the one band that really does ease
+    /// up from zero height — is never captioned at all, since the loop covers only the real
+    /// tracks. What this floor protects against is that band heights are derived and animated
+    /// (<see cref="VideoBandHeightFor"/> eases the base band while the hint lane opens), so a
+    /// pass landing mid-animation must not leave a clipped caption behind.
+    /// </remarks>
+    private const float TrackLabelMinBandHeight = 14f;
+
+    /// <summary>
+    /// Caption rows, reused across layout passes. The drop-hint reveal re-runs this every
+    /// frame it animates, so rows are re-positioned rather than rebuilt — recreating nine
+    /// elements per tick would churn the visual tree through the one animation this column
+    /// has to stay glued to.
+    /// </summary>
+    private readonly List<StackPanel> _videoLabelRows = new();
+
+    /// <summary>
+    /// Re-positions the video row's band captions. Called from the same two places the video
+    /// canvas's own height is updated (<see cref="UpdateTrackVisibility"/> and the hint-lane
+    /// reveal tick), so the captions and the bands they name can never be laid out from
+    /// different geometry.
+    /// </summary>
+    private void UpdateVideoTrackLabels()
+    {
+        if (VideoTrackLabels is null) return;
+
+        // Same count the canvas beside this column lays its groups out with, so the captions
+        // are resolved from identical geometry rather than a parallel guess at the track count.
+        int displayCount = VideoDisplayTrackCount(Model);
+        int realCount = HintLaneVisible ? Math.Max(1, displayCount - 1) : Math.Max(1, displayCount);
+
+        int used = 0;
+        for (int track = 0; track < realCount; track++)
+        {
+            // Every group names its own video lane — that is what distinguishes one group from
+            // the next. V0 is the base lane, matching both the internal track index and the
+            // drop-hint lane's own "V{n}" caption.
+            PlaceTrackBandLabel(
+                ref used, TrackBandBounds(track, displayCount, TrackBand.Video),
+                TrackLabelGlyphVideo, $"V{track}", $"Video track {track}");
+
+            // The zoom and cursor bands are marked on every group — they are per-track bands
+            // and each one needs to be identifiable — but with the ICON ALONE. Their captions
+            // are identical in every group, so repeating the words down a 56px column is noise
+            // the glyph already carries; the video caption above is the only text that varies.
+            PlaceTrackBandLabel(
+                ref used, TrackBandBounds(track, displayCount, TrackBand.Zoom),
+                TrackLabelGlyphZoom, null, $"Zoom track {track}");
+            PlaceTrackBandLabel(
+                ref used, TrackBandBounds(track, displayCount, TrackBand.Cursor),
+                TrackLabelGlyphMouse, null, $"Mouse track {track}");
+        }
+
+        // Rows left over from a taller layout are hidden rather than removed, so the next pass
+        // can claim them again without allocating.
+        for (int i = used; i < _videoLabelRows.Count; i++)
+            _videoLabelRows[i].Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Positions one band's caption, claiming the next reusable row. <paramref name="text"/>
+    /// may be null, which shows the icon on its own — see the call site for why the zoom and
+    /// cursor bands are marked that way.
+    /// </summary>
+    private void PlaceTrackBandLabel(
+        ref int index, (float Y, float Height) band, string glyph, string? text, string automationName)
+    {
+        if (band.Height < TrackLabelMinBandHeight) return;
+
+        var row = GetOrCreateLabelRow(index++);
+        var icon = (FontIcon)row.Children[0];
+        var caption = (TextBlock)row.Children[1];
+
+        icon.Glyph = glyph;
+        icon.Foreground = TrackLabelBrush;
+        caption.Foreground = TrackLabelBrush;
+        caption.Text = text ?? string.Empty;
+        caption.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
+
+        // The row is sized to the WHOLE band and centres its contents, so alignment never
+        // depends on measuring the glyph — which is what would drift as fonts or scaling change.
+        row.Height = band.Height;
+        Canvas.SetTop(row, band.Y);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(row, automationName);
+        row.Visibility = Visibility.Visible;
+    }
+
+    private StackPanel GetOrCreateLabelRow(int index)
+    {
+        while (_videoLabelRows.Count <= index)
+        {
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            row.Children.Add(new FontIcon
+            {
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            row.Children.Add(new TextBlock
+            {
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextWrapping = TextWrapping.NoWrap,
+            });
+            Canvas.SetLeft(row, TrackLabelInsetX);
+            VideoTrackLabels.Children.Add(row);
+            _videoLabelRows.Add(row);
+        }
+
+        return _videoLabelRows[index];
+    }
+
+    /// <summary>
+    /// Brush for the band captions, rebuilt whenever the theme colours are resolved so the
+    /// captions follow a light/dark switch like every other label in this column.
+    /// </summary>
+    private Microsoft.UI.Xaml.Media.SolidColorBrush TrackLabelBrush =>
+        _trackLabelBrush ??= new Microsoft.UI.Xaml.Media.SolidColorBrush(TrackLabelTextColor);
+
+    private Microsoft.UI.Xaml.Media.SolidColorBrush? _trackLabelBrush;
 
     /// <summary>
     /// The pre-segment clip/filmstrip renderer. Draws from y=0 with <paramref name="h"/> as its
