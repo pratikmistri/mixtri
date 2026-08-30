@@ -19,13 +19,13 @@ The requested attribution string is:
 
 Prior licensing
 ---------------
-Versions of Mixtri released before the relicensing to Apache License 2.0 were distributed under
-the MIT License, Copyright (c) 2026 Pratik Mistri. Those releases remain available under the MIT
-License terms.
+Versions released before the relicensing to Apache License 2.0 — published under the project's
+former name, Musio — were distributed under the MIT License, Copyright (c) 2026 Pratik Mistri.
+Those releases remain available under the MIT License terms.
 
-Trademarks
-----------
-"Mixtri" and the Mixtri logo are trademarks of Pratik Mistri. The Apache License 2.0 grants no
-trademark rights (see Section 6). Forks and derivative works must not use the Mixtri name or logo
-in a way that suggests endorsement by, or affiliation with, the original project without
-permission.
+Name and branding
+-----------------
+The Apache License 2.0 grants no rights to use the project's names or logos (see Section 6).
+Please do not use "Mixtri", "Musio" (the project's former name), or the project's logo in a way
+that suggests your fork or derivative work is endorsed by, or affiliated with, the original
+project.
