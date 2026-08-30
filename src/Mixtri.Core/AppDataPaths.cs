@@ -62,6 +62,25 @@ public static class AppDataPaths
     public static IReadOnlyList<string> AllVideosFolders => [VideosFolder, LegacyVideosFolder];
 
     /// <summary>
+    /// True when this machine holds data written before the rename — i.e. the user ran Musio.
+    /// </summary>
+    /// <remarks>
+    /// Used to tell an UPGRADING install from a fresh one, which is the difference between
+    /// "Musio is now Mixtri" being useful and being baffling. A clean install never creates
+    /// <see cref="LegacyRoot"/>, so its absence is a reliable "this user is new". The reverse
+    /// is deliberately not assumed: the folder surviving an uninstall only means the notice is
+    /// shown once to someone who may not need it, which is far cheaper than withholding it.
+    /// </remarks>
+    public static bool HasLegacyData
+    {
+        get
+        {
+            try { return Directory.Exists(LegacyRoot); }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>
     /// Both roots, current first. For sweeps and scans that must cover data written on either
     /// side of the rename.
     /// </summary>

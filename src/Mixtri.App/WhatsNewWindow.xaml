@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Mixtri_App.WhatsNewWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- MeasureAndCentre() sizes the window from this grid's desired size, so the width set
+         here is what drives the window's width. -->
+    <Grid x:Name="RootGrid" CornerRadius="12" Padding="28,20,28,22" Width="440">
+        <StackPanel Spacing="16">
+
+            <!-- The only region handed to SetTitleBar, so the frameless window can be moved.
+                 A ContentPresenter rather than a TextBlock so a notice can supply a richer
+                 heading (the rename shows both brand marks); the default is plain text. -->
+            <ContentPresenter
+                x:Name="HeadingHost"
+                Background="Transparent"
+                VerticalAlignment="Center" />
+
+            <!-- Paragraphs are supplied by the caller so this window can carry any
+                 release's notes, not just the rename it was written for. -->
+            <ItemsControl x:Name="Paragraphs">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="10" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock
+                            TextWrapping="Wrap"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="{Binding}" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Extra top margin on top of the panel's spacing: the button is an action, and
+                 sitting it as close to the text as the paragraphs are to each other made it
+                 read as part of the copy. -->
+            <Button
+                x:Name="DismissButton"
+                Click="DismissButton_Click"
+                HorizontalAlignment="Right"
+                Margin="0,12,0,0"
+                MinWidth="100"
+                Style="{ThemeResource AccentButtonStyle}" />
+        </StackPanel>
+    </Grid>
+</Window>

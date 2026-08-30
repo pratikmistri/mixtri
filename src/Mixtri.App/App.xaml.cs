@@ -547,6 +547,10 @@ public partial class App : Application
                 hasFileActivation: activationPath is not null));
         _shell.Start();
 
+        // Shown AFTER the shell, so the configured startup surface (Mini by default) is
+        // already up and the notice sits centred over it rather than replacing it.
+        TryShowRebrandNotice(mainWindow, isDocumentInstance: activationPath is not null);
+
         // Release captured JPEGs from finalized sessions in the background. Every root is
         // swept: the LocalAppData sessions folders (current AND pre-rename, since sessions
         // recorded as Musio are never moved and would otherwise leak disk forever), and the
@@ -599,6 +603,43 @@ public partial class App : Application
             // race the open already in flight, since CurrentPackagePath isn't set yet.
             var reopen = IsSameProjectPath(pendingPath, activationPath) ? null : pendingPath;
             mainWindow.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(reopen));
+        }
+    }
+
+    /// <summary>
+    /// Shows the one-time Musio → Mixtri notice, if this launch should carry it.
+    /// </summary>
+    /// <remarks>
+    /// Best-effort by design: this is an informational message, and nothing about failing to
+    /// show it should be allowed to disturb a launch that is otherwise fine.
+    /// </remarks>
+    private static void TryShowRebrandNotice(MainWindow mainWindow, bool isDocumentInstance)
+    {
+        try
+        {
+            if (!WhatsNewNotice.ShouldShow(
+                    hasSeenNotice: AppSettings.Instance.HasSeenRebrandNotice,
+                    isRelevant: Mixtri.Core.AppDataPaths.HasLegacyData,
+                    isDocumentInstance: isDocumentInstance))
+                return;
+
+            // Queued rather than shown inline: OnLaunched is still wiring up, and the shell
+            // has only just been told to present its startup surface.
+            mainWindow.DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    WhatsNewWindow.CreateRebrandNotice().Activate();
+                }
+                catch (Exception ex)
+                {
+                    DiagLog.Write("WhatsNew", $"Could not show the rebrand notice: {ex.Message}");
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("WhatsNew", $"Rebrand notice check failed: {ex.Message}");
         }
     }
 

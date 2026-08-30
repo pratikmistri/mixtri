@@ -99,6 +99,19 @@ public sealed class AppSettings
         set => Set(nameof(CaptureQuality), value.ToString());
     }
 
+    /// <summary>
+    /// True once the user has dismissed the one-time "Musio is now Mixtri" notice.
+    /// </summary>
+    /// <remarks>
+    /// Written on DISMISSAL rather than on display, so a launch that is killed before the user
+    /// reads it shows the notice again next time rather than burning it silently.
+    /// </remarks>
+    public bool HasSeenRebrandNotice
+    {
+        get => Get(Shell.WhatsNewNotice.RebrandSeenSettingKey, false);
+        set => Set(Shell.WhatsNewNotice.RebrandSeenSettingKey, value);
+    }
+
     private T GetEnum<T>(string key, T defaultValue) where T : struct, Enum
     {
         var raw = Get(key, defaultValue.ToString());
