@@ -1,4 +1,4 @@
-namespace Mixtri.Tests;
+﻿namespace Mixtri.Tests;
 
 [TestClass]
 public sealed class Test1

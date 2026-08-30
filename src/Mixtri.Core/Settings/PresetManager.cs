@@ -15,26 +15,43 @@ public class PresetManager
 
     private readonly string _exportPresetsFolder;
     private readonly string _brandPresetsFolder;
+    private readonly string? _legacyExportPresetsFolder;
+    private readonly string? _legacyBrandPresetsFolder;
 
     public PresetManager()
     {
         string localFolder;
+        string? legacyLocalFolder = null;
+
         try
         {
+            // Packaged: this is package-scoped storage, keyed on an identity that did NOT
+            // change with the Musio → Mixtri rename, so there is no legacy location here.
             localFolder = ApplicationData.Current.LocalFolder.Path;
         }
         catch
         {
-            // Unpackaged app — use the shared LocalAppData root instead
+            // Unpackaged: this IS name-scoped, so the rename moved it. Presets saved before
+            // the rename sit under the old root and must still be found.
             localFolder = AppDataPaths.Root;
+            legacyLocalFolder = AppDataPaths.LegacyRoot;
         }
 
-        _exportPresetsFolder = Path.Combine(localFolder, "ExportPresets");
-        _brandPresetsFolder = Path.Combine(localFolder, "BrandPresets");
+        _exportPresetsFolder = Path.Combine(localFolder, ExportPresetsFolderName);
+        _brandPresetsFolder = Path.Combine(localFolder, BrandPresetsFolderName);
+
+        if (legacyLocalFolder is not null)
+        {
+            _legacyExportPresetsFolder = Path.Combine(legacyLocalFolder, ExportPresetsFolderName);
+            _legacyBrandPresetsFolder = Path.Combine(legacyLocalFolder, BrandPresetsFolderName);
+        }
 
         Directory.CreateDirectory(_exportPresetsFolder);
         Directory.CreateDirectory(_brandPresetsFolder);
     }
+
+    private const string ExportPresetsFolderName = "ExportPresets";
+    private const string BrandPresetsFolderName = "BrandPresets";
 
     // --- Export Presets ---
 
@@ -47,12 +64,12 @@ public class PresetManager
 
     public List<ExportPreset> LoadExportPresets()
     {
-        return LoadPresets<ExportPreset>(_exportPresetsFolder);
+        return LoadPresets<ExportPreset>(_exportPresetsFolder, _legacyExportPresetsFolder);
     }
 
     public void DeleteExportPreset(string name)
     {
-        DeletePreset(_exportPresetsFolder, name);
+        DeletePreset(_exportPresetsFolder, _legacyExportPresetsFolder, name);
     }
 
     // --- Brand Presets ---
@@ -66,46 +83,79 @@ public class PresetManager
 
     public List<BrandPreset> LoadBrandPresets()
     {
-        return LoadPresets<BrandPreset>(_brandPresetsFolder);
+        return LoadPresets<BrandPreset>(_brandPresetsFolder, _legacyBrandPresetsFolder);
     }
 
     public void DeleteBrandPreset(string name)
     {
-        DeletePreset(_brandPresetsFolder, name);
+        DeletePreset(_brandPresetsFolder, _legacyBrandPresetsFolder, name);
     }
 
     // --- Helpers ---
 
-    private static List<T> LoadPresets<T>(string folder)
+    /// <summary>
+    /// Loads every preset in <paramref name="folder"/>, plus any in
+    /// <paramref name="legacyFolder"/> that the current folder does not already provide.
+    /// </summary>
+    /// <remarks>
+    /// Current folder first, so a preset re-saved after the rename shadows its pre-rename
+    /// copy instead of appearing twice. Saving always writes to the current folder, so
+    /// editing a legacy preset migrates it. <c>internal</c> rather than private purely so
+    /// tests can drive it against temp folders — the constructor picks real machine paths.
+    /// </remarks>
+    internal static List<T> LoadPresets<T>(string folder, string? legacyFolder)
     {
         var presets = new List<T>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (!Directory.Exists(folder))
-            return presets;
-
-        foreach (var file in Directory.GetFiles(folder, "*.json"))
+        foreach (var dir in new[] { folder, legacyFolder })
         {
-            try
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+                continue;
+
+            foreach (var file in Directory.GetFiles(dir, "*.json"))
             {
-                var json = File.ReadAllText(file);
-                var preset = JsonSerializer.Deserialize<T>(json, JsonOptions);
-                if (preset is not null)
-                    presets.Add(preset);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[PresetManager] Failed to load preset '{file}': {ex.Message}");
+                // File names come from GetPresetPath, so they are a stable identity for
+                // the preset and are what makes "current wins" work.
+                if (!seen.Add(Path.GetFileName(file)))
+                    continue;
+
+                try
+                {
+                    var json = File.ReadAllText(file);
+                    var preset = JsonSerializer.Deserialize<T>(json, JsonOptions);
+                    if (preset is not null)
+                        presets.Add(preset);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[PresetManager] Failed to load preset '{file}': {ex.Message}");
+                }
             }
         }
 
         return presets;
     }
 
-    private static void DeletePreset(string folder, string name)
+    /// <summary>
+    /// Deletes a preset from the current folder and from the pre-rename one.
+    /// </summary>
+    /// <remarks>
+    /// Deleting from the legacy folder is the one place this code writes there. It has to:
+    /// a preset that exists ONLY in the legacy folder would otherwise be reloaded by
+    /// <see cref="LoadPresets{T}"/> and reappear immediately after the user deleted it.
+    /// </remarks>
+    internal static void DeletePreset(string folder, string? legacyFolder, string name)
     {
-        var filePath = GetPresetPath(folder, name);
-        if (File.Exists(filePath))
-            File.Delete(filePath);
+        foreach (var dir in new[] { folder, legacyFolder })
+        {
+            if (string.IsNullOrEmpty(dir))
+                continue;
+
+            var filePath = GetPresetPath(dir, name);
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
     }
 
     private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
