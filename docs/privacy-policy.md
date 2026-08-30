@@ -1,19 +1,19 @@
 # Privacy Policy
 
-**Musio — Screen Recording App**
+**Mixtri — Screen Recording App**
 **Last updated: April 18, 2026**
 
 ## Overview
 
-Musio is a screen recording and video editing application for Windows. Your privacy is important to us. This privacy policy explains what data Musio accesses, how it is used, and your rights regarding that data.
+Mixtri is a screen recording and video editing application for Windows. Your privacy is important to us. This privacy policy explains what data Mixtri accesses, how it is used, and your rights regarding that data.
 
 ## Data Collection
 
-**Musio does not collect, transmit, or share any personal data.** The app operates entirely offline on your device. There are no servers, no analytics, no telemetry, and no network connections.
+**Mixtri does not collect, transmit, or share any personal data.** The app operates entirely offline on your device. There are no servers, no analytics, no telemetry, and no network connections.
 
 ## Device Permissions
 
-Musio requests the following device permissions solely to provide its core functionality:
+Mixtri requests the following device permissions solely to provide its core functionality:
 
 - **Screen Capture** — Used to record your screen content. Screen recordings are saved only to locations you choose on your device.
 - **Microphone** — Used to capture audio during screen recordings, if you enable this option. Audio is saved locally as part of your recording.
@@ -23,31 +23,31 @@ These permissions are requested only when needed and can be revoked at any time 
 
 ## Data Storage
 
-All data created and used by Musio is stored locally on your device, including:
+All data created and used by Mixtri is stored locally on your device, including:
 
 - Screen recordings and exported videos (saved to a location you choose)
 - App preferences and settings (stored in the app's local data folder)
 - Export presets and brand presets (stored in the app's local data folder)
 
-Musio does not store data in the cloud or on any external servers.
+Mixtri does not store data in the cloud or on any external servers.
 
 ## Data Sharing
 
-Musio does not share any data with third parties. No data leaves your device through the app.
+Mixtri does not share any data with third parties. No data leaves your device through the app.
 
 ## Children's Privacy
 
-Musio does not knowingly collect any personal information from anyone, including children under the age of 13.
+Mixtri does not knowingly collect any personal information from anyone, including children under the age of 13.
 
 ## Changes to This Policy
 
-We may update this privacy policy from time to time. Any changes will be reflected by updating the "Last updated" date at the top of this page. Continued use of Musio after changes constitutes acceptance of the updated policy.
+We may update this privacy policy from time to time. Any changes will be reflected by updating the "Last updated" date at the top of this page. Continued use of Mixtri after changes constitutes acceptance of the updated policy.
 
 ## Contact
 
 If you have questions about this privacy policy, please open an issue on our GitHub repository:
-https://github.com/pratikmistri/musio/issues
+https://github.com/pratikmistri/mixtri/issues
 
 ---
 
-*This privacy policy applies to the Musio application distributed through the Microsoft Store and GitHub.*
+*This privacy policy applies to the Mixtri application distributed through the Microsoft Store and GitHub.*

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.PropertyPanes.ZoomPropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!--
+        Properties for the currently selected zoom segment (moved out of the old
+        ZoomSegmentPanel toolbar strip in EditorPage.xaml, which ran out of room next to
+        the Save/Export buttons). EditorPage owns all editing logic and undo; this file is
+        markup only.
+    -->
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <!-- Zoom level: applies to the selected segment. Minimum/Maximum mirror
+             EditorPage's MinZoomLevel/MaxZoomLevel, which every other zoom path clamps
+             to — a second range model here would let the slider offer a level the
+             region-drag paths immediately clamp away. -->
+        <StackPanel Spacing="6">
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="ZoomLevelSlider"
+                x:FieldModifier="public"
+                Header="Zoom Level"
+                Minimum="1" Maximum="4"
+                StepFrequency="0.1"
+                SnapsTo="StepValues"
+                ToolTipService.ToolTip="Zoom level applied to the selected segment"
+                AutomationProperties.Name="Zoom level" />
+            <TextBlock
+                x:Name="ZoomLevelValueText"
+                x:FieldModifier="public"
+                Style="{StaticResource PropertyHintStyle}" />
+        </StackPanel>
+
+        <Button
+            x:Name="EditZoomRegionButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Position the zoom visually on the frame"
+            AutomationProperties.Name="Edit zoom region">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE78A;" />
+                <TextBlock Text="Edit Region" />
+            </StackPanel>
+        </Button>
+
+        <!-- Section break: extra margin gives the divider room to read as a real
+             separator rather than another row in the stack. -->
+        <Border Height="1" Margin="0,-6"
+                Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
+        <!-- Camera drift: per-segment, not scene-wide (see hint below). -->
+        <StackPanel Spacing="6">
+            <ToggleSwitch
+                x:Name="ZoomDriftToggle"
+                x:FieldModifier="public"
+                HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                Header="Camera Drift"
+                ToolTipService.ToolTip="Keeps this segment gently moving with a slow push and pan across the hold"
+                AutomationProperties.Name="Camera drift" />
+            <TextBlock
+                Style="{StaticResource PropertyHintStyle}"
+                Text="Applies to this zoom segment only, not the whole scene." />
+        </StackPanel>
+
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="ZoomDriftSlider"
+            x:FieldModifier="public"
+            Header="Drift Amount"
+            Minimum="0" Maximum="200"
+            StepFrequency="5"
+            ToolTipService.ToolTip="50% is the tuned default"
+            AutomationProperties.Name="Drift amount" />
+
+        <Button
+            x:Name="RemoveZoomSegmentButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Remove the selected zoom segment"
+            AutomationProperties.Name="Remove zoom segment">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                <TextBlock Text="Remove Zoom Segment" />
+            </StackPanel>
+        </Button>
+    </StackPanel>
+</UserControl>

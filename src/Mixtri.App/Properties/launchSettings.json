@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Mixtri.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Mixtri.App (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

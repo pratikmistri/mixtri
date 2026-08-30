@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.PropertyPanes.TextSlidePropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <StackPanel Spacing="6">
+            <TextBlock Text="Text" Style="{StaticResource PropertyLabelStyle}" />
+            <TextBox
+                x:Name="SlideTextBox"
+                x:FieldModifier="public"
+                AcceptsReturn="True"
+                TextWrapping="Wrap"
+                MinHeight="60"
+                PlaceholderText="Slide text..." />
+        </StackPanel>
+
+        <StackPanel Spacing="6">
+            <TextBlock Text="Animation" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="SlideAnimationCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch">
+                <ComboBoxItem Content="None" Tag="None" />
+                <ComboBoxItem Content="Fade In" Tag="FadeIn" />
+                <ComboBoxItem Content="Slide Up" Tag="SlideUp" />
+                <ComboBoxItem Content="Slide Down" Tag="SlideDown" />
+                <ComboBoxItem Content="Slide Left" Tag="SlideLeft" />
+                <ComboBoxItem Content="Slide Right" Tag="SlideRight" />
+                <ComboBoxItem Content="Scale Pop" Tag="ScalePop" />
+                <ComboBoxItem Content="Zoom Blur In" Tag="ZoomBlurIn" />
+                <ComboBoxItem Content="Reveal (Wipe)" Tag="Reveal" />
+                <ComboBoxItem Content="Typewriter" Tag="TypeWriter" />
+                <ComboBoxItem Content="Typewriter + Caret" Tag="TypewriterCaret" />
+                <ComboBoxItem Content="Cascade Fade Up" Tag="CascadeFadeUp" />
+                <ComboBoxItem Content="Cascade Pop" Tag="CascadePop" />
+                <ComboBoxItem Content="Wave" Tag="Wave" />
+                <ComboBoxItem Content="Tracking In" Tag="TrackingIn" />
+                <ComboBoxItem Content="Rotate In" Tag="RotateIn" />
+                <ComboBoxItem Content="Bounce In" Tag="BounceIn" />
+            </ComboBox>
+        </StackPanel>
+
+        <StackPanel Spacing="6">
+            <TextBlock Text="Font" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="SlideFontCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch">
+                <ComboBoxItem Content="Segoe UI" Tag="Segoe UI" FontFamily="Segoe UI" />
+                <ComboBoxItem Content="Segoe UI Variable" Tag="Segoe UI Variable" FontFamily="Segoe UI Variable" />
+                <ComboBoxItem Content="Arial" Tag="Arial" FontFamily="Arial" />
+                <ComboBoxItem Content="Calibri" Tag="Calibri" FontFamily="Calibri" />
+                <ComboBoxItem Content="Cambria" Tag="Cambria" FontFamily="Cambria" />
+                <ComboBoxItem Content="Georgia" Tag="Georgia" FontFamily="Georgia" />
+                <ComboBoxItem Content="Times New Roman" Tag="Times New Roman" FontFamily="Times New Roman" />
+                <ComboBoxItem Content="Verdana" Tag="Verdana" FontFamily="Verdana" />
+                <ComboBoxItem Content="Tahoma" Tag="Tahoma" FontFamily="Tahoma" />
+                <ComboBoxItem Content="Trebuchet MS" Tag="Trebuchet MS" FontFamily="Trebuchet MS" />
+                <ComboBoxItem Content="Consolas" Tag="Consolas" FontFamily="Consolas" />
+                <ComboBoxItem Content="Courier New" Tag="Courier New" FontFamily="Courier New" />
+                <ComboBoxItem Content="Comic Sans MS" Tag="Comic Sans MS" FontFamily="Comic Sans MS" />
+                <ComboBoxItem Content="Impact" Tag="Impact" FontFamily="Impact" />
+            </ComboBox>
+        </StackPanel>
+
+        <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Spacing="6">
+                <TextBlock Text="Duration (s)" Style="{StaticResource PropertyLabelStyle}" />
+                <NumberBox
+                    x:Name="SlideDurationBox"
+                    x:FieldModifier="public"
+                    Minimum="0.5"
+                    Maximum="30"
+                    SpinButtonPlacementMode="Inline"
+                    SmallChange="0.5" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="6">
+                <TextBlock Text="Font Size" Style="{StaticResource PropertyLabelStyle}" />
+                <NumberBox
+                    x:Name="SlideFontSizeBox"
+                    x:FieldModifier="public"
+                    Minimum="12"
+                    Maximum="200"
+                    SpinButtonPlacementMode="Inline"
+                    SmallChange="4" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Text color -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Text Color" Style="{StaticResource PropertyLabelStyle}" />
+            <DropDownButton HorizontalAlignment="Stretch">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border
+                        x:Name="SlideTextColorSwatch"
+                        x:FieldModifier="public"
+                        Width="20" Height="20"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" />
+                    <TextBlock x:Name="SlideTextColorText" x:FieldModifier="public" Text="#FFFFFF" VerticalAlignment="Center" />
+                </StackPanel>
+                <DropDownButton.Flyout>
+                    <Flyout>
+                        <ColorPicker
+                            x:Name="SlideTextColorPicker"
+                            x:FieldModifier="public"
+                            IsAlphaEnabled="False"
+                            IsHexInputVisible="True" />
+                    </Flyout>
+                </DropDownButton.Flyout>
+            </DropDownButton>
+        </StackPanel>
+
+        <!-- Formatting: bold / italic / alignment -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Formatting" Style="{StaticResource PropertyLabelStyle}" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <ToggleButton x:Name="SlideBoldToggle" x:FieldModifier="public" Padding="8,6"
+                              ToolTipService.ToolTip="Bold">
+                    <FontIcon FontSize="14" Glyph="&#xE8DD;" />
+                </ToggleButton>
+                <ToggleButton x:Name="SlideItalicToggle" x:FieldModifier="public" Padding="8,6"
+                              ToolTipService.ToolTip="Italic">
+                    <FontIcon FontSize="14" Glyph="&#xE8DB;" />
+                </ToggleButton>
+                <ctk:Segmented x:Name="SlideAlignSegmented" x:FieldModifier="public"
+                               VerticalAlignment="Stretch">
+                    <ctk:SegmentedItem Tag="Left" ToolTipService.ToolTip="Align left">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E4;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Tag="Center" ToolTipService.ToolTip="Align center">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E3;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                    <ctk:SegmentedItem Tag="Right" ToolTipService.ToolTip="Align right">
+                        <ctk:SegmentedItem.Icon>
+                            <FontIcon FontSize="14" Glyph="&#xE8E2;" />
+                        </ctk:SegmentedItem.Icon>
+                    </ctk:SegmentedItem>
+                </ctk:Segmented>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Background type -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Background" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="SlideBgTypeCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch">
+                <ComboBoxItem Content="Solid" Tag="Solid" />
+                <ComboBoxItem Content="Gradient" Tag="Gradient" />
+                <ComboBoxItem Content="Image" Tag="Image" />
+            </ComboBox>
+        </StackPanel>
+
+        <!-- Solid color / gradient start color -->
+        <StackPanel x:Name="SlideColorPanel" x:FieldModifier="public" Spacing="6">
+            <TextBlock x:Name="SlideColorLabel" x:FieldModifier="public" Text="Color" Style="{StaticResource PropertyLabelStyle}" />
+            <DropDownButton HorizontalAlignment="Stretch">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Border
+                        x:Name="SlideBgColorSwatch"
+                        x:FieldModifier="public"
+                        Width="20" Height="20"
+                        CornerRadius="{StaticResource SmallCornerRadius}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" />
+                    <TextBlock x:Name="SlideBgColorText" x:FieldModifier="public" Text="#1E1E1E" VerticalAlignment="Center" />
+                </StackPanel>
+                <DropDownButton.Flyout>
+                    <Flyout>
+                        <ColorPicker
+                            x:Name="SlideBgColorPicker"
+                            x:FieldModifier="public"
+                            IsAlphaEnabled="False"
+                            IsHexInputVisible="True" />
+                    </Flyout>
+                </DropDownButton.Flyout>
+            </DropDownButton>
+        </StackPanel>
+
+        <!-- Gradient controls -->
+        <StackPanel x:Name="SlideGradientPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
+            <TextBlock Text="Presets" Style="{StaticResource PropertyLabelStyle}" />
+            <!-- Grows to fit its tiles; the panel's ScrollViewer owns the overflow so the
+                 user never gets a second scrollbar nested inside the pane. -->
+            <GridView
+                x:Name="SlideGradientPresets"
+                x:FieldModifier="public"
+                Padding="0"
+                ScrollViewer.VerticalScrollMode="Disabled"
+                ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                ScrollViewer.HorizontalScrollMode="Disabled"
+                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                SelectionMode="Single" />
+            <StackPanel Spacing="6">
+                <TextBlock Text="End Color" Style="{StaticResource PropertyLabelStyle}" />
+                <DropDownButton HorizontalAlignment="Stretch">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Border
+                            x:Name="SlideGradEndColorSwatch"
+                            x:FieldModifier="public"
+                            Width="20" Height="20"
+                            CornerRadius="{StaticResource SmallCornerRadius}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" />
+                        <TextBlock x:Name="SlideGradEndColorText" x:FieldModifier="public" Text="#16213E" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <Flyout>
+                            <ColorPicker
+                                x:Name="SlideGradEndColorPicker"
+                                x:FieldModifier="public"
+                                IsAlphaEnabled="False"
+                                IsHexInputVisible="True" />
+                        </Flyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideGradAngleSlider"
+                x:FieldModifier="public"
+                Header="Angle"
+                Minimum="0" Maximum="360"
+                StepFrequency="5" />
+        </StackPanel>
+
+        <!-- Image picker -->
+        <StackPanel x:Name="SlideImagePanel" x:FieldModifier="public" Spacing="6" Visibility="Collapsed">
+            <Button x:Name="ChooseSlideImageButton" x:FieldModifier="public" HorizontalAlignment="Stretch">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon FontSize="14" Glyph="&#xEB9F;" />
+                    <TextBlock Text="Choose Image…" />
+                </StackPanel>
+            </Button>
+            <TextBlock x:Name="SlideImagePathText" x:FieldModifier="public"
+                       Style="{StaticResource PropertyHintStyle}"
+                       TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <!-- Animation window: last, because it tunes the text animation chosen at the top
+             against the finished slide, and its ranges depend on the slide duration. -->
+        <StackPanel Spacing="10">
+            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInAtSlider"
+                x:FieldModifier="public"
+                Header="Text in at (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutBySlider"
+                x:FieldModifier="public"
+                Header="Text out by (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInRampSlider"
+                x:FieldModifier="public"
+                Header="In ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutRampSlider"
+                x:FieldModifier="public"
+                Header="Out ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+        </StackPanel>
+
+        <Button
+            x:Name="RemoveSlideButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Remove selected text slide">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                <TextBlock Text="Remove Slide" />
+            </StackPanel>
+        </Button>
+    </StackPanel>
+</UserControl>

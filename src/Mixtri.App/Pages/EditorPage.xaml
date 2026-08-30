@@ -1,0 +1,749 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Mixtri_App.Pages.EditorPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Mixtri_App.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Mixtri_App.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- Every accelerator below is page-scoped rather than owned by a button, so WinUI has
+         no sensible element to anchor its automatic "Ctrl+Z" key-combination tooltip to and
+         parks it against the page itself - it surfaced unprompted over the timeline. Hidden
+         suppresses only that framework tooltip; the shortcuts still work, and the ones worth
+         advertising are already spelled out in the toolbar buttons' own tooltips (see
+         ViewModel.UndoTooltip, "Undo: <action> (Ctrl+Z)"). -->
+    <Page.KeyboardAcceleratorPlacementMode>Hidden</Page.KeyboardAcceleratorPlacementMode>
+
+    <Page.Resources>
+        <!-- Shown explicitly via ShowAt after a save. It lives here rather than on the
+             button because SplitButton already owns its Flyout property for the dropdown. -->
+        <Flyout x:Key="SavedFlyout" x:Name="SavedFlyout" Placement="Top">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <FontIcon
+                    FontSize="16"
+                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                    Glyph="&#xE73E;" />
+                <TextBlock VerticalAlignment="Center" Text="Saved" />
+                <TextBlock
+                    x:Name="SavedFlyoutText"
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Flyout>
+    </Page.Resources>
+
+
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator
+            Key="Z"
+            Invoked="UndoAccelerator_Invoked"
+            Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="Y"
+            Invoked="RedoAccelerator_Invoked"
+            Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="S"
+            Invoked="SplitAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="Delete"
+            Invoked="DeleteAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="X"
+            Invoked="CutAccelerator_Invoked"
+            Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="Space"
+            Invoked="PlayPauseAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="Home"
+            Invoked="GoToStartAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="End"
+            Invoked="GoToEndAccelerator_Invoked" />
+        <KeyboardAccelerator
+            Key="S"
+            Invoked="SaveAccelerator_Invoked"
+            Modifiers="Control" />
+        <KeyboardAccelerator
+            Key="S"
+            Invoked="SaveAsAccelerator_Invoked"
+            Modifiers="Control,Shift" />
+    </Page.KeyboardAccelerators>
+
+    <Grid AllowDrop="True"
+          DragOver="EditorPage_DragOver"
+          DragLeave="EditorPage_DragLeave"
+          Drop="EditorPage_Drop">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- InfoBar for editor status -->
+        <InfoBar
+            x:Name="EditorInfoBar"
+            Grid.Row="0"
+            IsOpen="False"
+            IsClosable="True"
+            Severity="Informational" />
+
+        <!-- Preview canvas (+ overlays) docked next to the properties pane -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+        <Grid Grid.Column="0">
+            <controls:PreviewCanvas
+                x:Name="Preview"
+                DoubleTapped="Preview_DoubleTapped" />
+
+            <!-- Webcam position overlay (drag to move) -->
+            <Canvas x:Name="WebcamOverlayCanvas"
+                    SizeChanged="WebcamOverlay_SizeChanged">
+                <Border x:Name="WebcamOverlayRect"
+                        Background="Transparent"
+                        Visibility="Collapsed"
+                        PointerPressed="WebcamOverlay_PointerPressed"
+                        PointerMoved="WebcamOverlay_PointerMoved"
+                        PointerReleased="WebcamOverlay_PointerReleased" />
+            </Canvas>
+
+            <!-- Zoom region edit overlay -->
+            <Grid x:Name="ZoomRegionOverlay" Visibility="Collapsed">
+                <Canvas x:Name="ZoomRegionCanvas"
+                        Background="Transparent"
+                        PointerPressed="ZoomRegionCanvas_PointerPressed"
+                        PointerMoved="ZoomRegionCanvas_PointerMoved"
+                        PointerReleased="ZoomRegionCanvas_PointerReleased"
+                        SizeChanged="ZoomRegionCanvas_SizeChanged">
+                    <Rectangle x:Name="DimTop" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
+                    <Rectangle x:Name="DimBottom" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
+                    <Rectangle x:Name="DimLeft" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
+                    <Rectangle x:Name="DimRight" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
+                    <Rectangle x:Name="ZoomRegionRect"
+                               Stroke="{ThemeResource OverlayForegroundBrush}" StrokeThickness="1"
+                               StrokeDashArray="6,3"
+                               Fill="Transparent"
+                               IsHitTestVisible="False" />
+                    <Line x:Name="SnapGuideV" Stroke="{ThemeResource AccentFillColorDefaultBrush}" StrokeThickness="1" StrokeDashArray="3,3"
+                          Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Line x:Name="SnapGuideH" Stroke="{ThemeResource AccentFillColorDefaultBrush}" StrokeThickness="1" StrokeDashArray="3,3"
+                          Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleTL" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleTR" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleBL" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+                    <Rectangle x:Name="HandleBR" Width="10" Height="10"
+                               Fill="White" Stroke="Black" StrokeThickness="1"
+                               IsHitTestVisible="False" />
+
+                    <!-- Where the mouse is at this moment. Shown only when the picker falls
+                         back to the RAW frame (compositor not ready): a composed frame draws
+                         the real cursor itself. Hidden for sources with no cursor data,
+                         e.g. imported clips. -->
+                    <Ellipse x:Name="ZoomRegionCursorMarker"
+                             Width="16" Height="16"
+                             Stroke="White" StrokeThickness="2"
+                             Fill="#80000000"
+                             Visibility="Collapsed"
+                             IsHitTestVisible="False" />
+                    <Ellipse x:Name="ZoomRegionCursorDot"
+                             Width="4" Height="4"
+                             Fill="White"
+                             Visibility="Collapsed"
+                             IsHitTestVisible="False" />
+                </Canvas>
+
+                <StackPanel
+                    VerticalAlignment="Top"
+                    HorizontalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    Padding="12,8"
+                    Margin="0,8,0,0"
+                    Background="{ThemeResource OverlayDenseBrush}"
+                    CornerRadius="4">
+                    <FontIcon Glyph="&#xE78A;" Foreground="{ThemeResource OverlayForegroundBrush}" FontSize="14" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource OverlayForegroundBrush}"
+                        Text="Drag to position zoom region · Alt-drag a corner to resize from the centre"
+                        ToolTipService.ToolTip="Drag inside the region to move it, or a corner to resize. Hold Alt while resizing to keep the centre fixed; hold Shift while moving to bypass centre snapping."
+                        FontSize="12" />
+                    <Button
+                        x:Name="ZoomRegionFollowMouseButton"
+                        Content="Follow mouse"
+                        Click="ZoomRegionFollowMouse_Click"
+                        Padding="12,4"
+                        ToolTipService.ToolTip="Stop holding this region and let the zoom follow the mouse instead. Keeps the zoom level you have set here." />
+                    <Button
+                        Content="Apply"
+                        Style="{ThemeResource AccentButtonStyle}"
+                        Click="ZoomRegionApply_Click"
+                        Padding="12,4" />
+                    <Button
+                        Content="Cancel"
+                        Click="ZoomRegionCancel_Click"
+                        Padding="12,4" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Cursor reposition overlay: drag the pointer to a new place at this moment.
+                 Anchors displace the recorded path around that instant and blend back into
+                 it, so the rest of the journey is untouched — see CursorPathWarp. -->
+            <Grid x:Name="CursorAnchorOverlay" Visibility="Collapsed">
+                <Canvas x:Name="CursorAnchorCanvas"
+                        Background="Transparent"
+                        PointerPressed="CursorAnchorCanvas_PointerPressed"
+                        PointerMoved="CursorAnchorCanvas_PointerMoved"
+                        PointerReleased="CursorAnchorCanvas_PointerReleased"
+                        PointerCaptureLost="CursorAnchorCanvas_PointerCaptureLost"
+                        SizeChanged="CursorAnchorCanvas_SizeChanged">
+                    <Rectangle x:Name="CursorAnchorHandle"
+                               Width="34" Height="34"
+                               RadiusX="3" RadiusY="3"
+                               Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                               StrokeThickness="1.5"
+                               StrokeDashArray="3,2"
+                               Fill="#24000000"
+                               IsHitTestVisible="False" />
+                </Canvas>
+
+                <StackPanel
+                    VerticalAlignment="Top"
+                    HorizontalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    Padding="12,8"
+                    Margin="0,8,0,0"
+                    Background="{ThemeResource OverlayDenseBrush}"
+                    CornerRadius="4">
+                    <FontIcon Glyph="&#xE8B0;" Foreground="{ThemeResource OverlayForegroundBrush}" FontSize="14" />
+                    <TextBlock
+                        x:Name="CursorAnchorHintText"
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource OverlayForegroundBrush}"
+                        Text="Drag the cursor to move it at this moment"
+                        ToolTipService.ToolTip="The rest of the recorded movement is kept — the path is offset around this moment and eases back to the recording before the next click."
+                        FontSize="12" />
+                    <Button
+                        x:Name="CursorAnchorRemoveButton"
+                        Content="Remove"
+                        Click="CursorAnchorRemove_Click"
+                        Padding="12,4"
+                        ToolTipService.ToolTip="Delete the anchor at this moment and restore the recorded path." />
+                    <Button
+                        Content="Done"
+                        Style="{ThemeResource AccentButtonStyle}"
+                        Click="CursorAnchorDone_Click"
+                        Padding="12,4" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Shared text edit overlay (reposition + in-place editing), used by both
+                 full-screen text slides and text overlays — see EditorPage.xaml.cs's
+                 ITextEditTarget abstraction. -->
+            <Canvas x:Name="TextEditCanvas" Visibility="Collapsed">
+                <Border x:Name="TextEditRegion"
+                        AutomationProperties.Name="Text edit region"
+                        BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                        BorderThickness="1.5"
+                        CornerRadius="2"
+                        DoubleTapped="TextEditRegion_DoubleTapped"
+                        PointerEntered="TextEditRegion_PointerEntered"
+                        PointerExited="TextEditRegion_PointerExited"
+                        PointerPressed="TextEditRegion_PointerPressed"
+                        PointerMoved="TextEditRegion_PointerMoved"
+                        PointerReleased="TextEditRegion_PointerReleased"
+                        PointerCaptureLost="TextEditRegion_PointerCaptureLost"
+                        PointerCanceled="TextEditRegion_PointerCanceled">
+                    <Border.Background>
+                        <SolidColorBrush Color="{ThemeResource SystemAccentColor}" Opacity="0.06" />
+                    </Border.Background>
+                </Border>
+
+                <!-- Resize grabbers: 4 corners + 4 edge midpoints, matching
+                     RegionSelectorOverlay's TL/T/TR/L/R/BL/B/BR handle convention (same
+                     Tag values, hit-test names and cursor mapping) so the box can be
+                     resized on any edge/corner independently. The overlay's box decides
+                     where its text wraps, so it is draggable directly on the preview;
+                     text slides have a fixed box and hide these. -->
+                <Border x:Name="TextEditHandleTL" Tag="TL" AutomationProperties.Name="Text box handle top-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleT" Tag="T" AutomationProperties.Name="Text box handle top"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleTR" Tag="TR" AutomationProperties.Name="Text box handle top-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleL" Tag="L" AutomationProperties.Name="Text box handle left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleR" Tag="R" AutomationProperties.Name="Text box handle right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBL" Tag="BL" AutomationProperties.Name="Text box handle bottom-left"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleB" Tag="B" AutomationProperties.Name="Text box handle bottom"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <Border x:Name="TextEditHandleBR" Tag="BR" AutomationProperties.Name="Text box handle bottom-right"
+                        Visibility="Collapsed" Width="8" Height="8" CornerRadius="4"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        PointerEntered="TextEditHandle_PointerEntered" PointerExited="TextEditHandle_PointerExited"
+                        PointerPressed="TextEditHandle_PointerPressed" PointerMoved="TextEditHandle_PointerMoved"
+                        PointerReleased="TextEditHandle_PointerReleased" PointerCaptureLost="TextEditHandle_PointerCaptureLost"
+                        PointerCanceled="TextEditHandle_PointerCanceled" />
+                <TextBox x:Name="TextEditBox"
+                         AutomationProperties.Name="Text edit box"
+                         Visibility="Collapsed"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         TextChanged="TextEditBox_TextChanged"
+                         KeyDown="TextEditBox_KeyDown"
+                         LostFocus="TextEditBox_LostFocus" />
+            </Canvas>
+
+            <!--  Empty state: the editor holds no clips, so the preview area carries the
+                  next action instead of a black rectangle. Last child of this grid so it
+                  sits above the canvas and its overlays; collapsed the moment anything
+                  lands on the timeline (see UpdateEmptyStateVisibility).
+
+                  Deliberately just an icon, a line and two equal buttons. The prose that used
+                  to sit here restated the button labels and the timeline placeholder's own
+                  prompt, and neither action is the recommended one — a user arrives here
+                  either wanting to capture something or wanting footage they already have,
+                  so accenting one of them would be guessing at that.  -->
+            <Grid x:Name="EmptyStateOverlay"
+                  Visibility="Collapsed"
+                  Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="16">
+                    <StackPanel HorizontalAlignment="Center" Spacing="8">
+                        <FontIcon Glyph="&#xE8B9;"
+                                  FontSize="24"
+                                  HorizontalAlignment="Center"
+                                  Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Text="Nothing on the timeline yet"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Center"
+                                Spacing="8">
+                        <Button Click="RecordMore_Click"
+                                AutomationProperties.Name="Record a new clip">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontSize="14" Glyph="&#xEA3A;" />
+                                <TextBlock Text="Record" />
+                            </StackPanel>
+                        </Button>
+                        <Button Click="ImportVideo_Click"
+                                AutomationProperties.Name="Import a video file">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontSize="14" Glyph="&#xE898;" />
+                                <TextBlock Text="Import Video…" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+            <!-- Adobe-style collapsible properties pane (scene / text slide / mouse / video) -->
+            <controls:PropertiesPane
+                x:Name="PropertiesPanel"
+                Grid.Column="1" />
+        </Grid>
+
+        <!-- Editor toolbar -->
+        <Grid
+            Grid.Row="2"
+            Padding="8,4"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0,1,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Undo / Redo buttons -->
+            <StackPanel
+                Grid.Column="0"
+                Orientation="Horizontal"
+                Spacing="4">
+                <Button
+                    Padding="8,6"
+                    Command="{x:Bind ViewModel.UndoCommand}"
+                    IsEnabled="{x:Bind ViewModel.CanUndo, Mode=OneWay}"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.UndoTooltip, Mode=OneWay}">
+                    <FontIcon FontSize="16" Glyph="&#xE7A7;" />
+                </Button>
+                <Button
+                    Padding="8,6"
+                    Command="{x:Bind ViewModel.RedoCommand}"
+                    IsEnabled="{x:Bind ViewModel.CanRedo, Mode=OneWay}"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.RedoTooltip, Mode=OneWay}">
+                    <FontIcon FontSize="16" Glyph="&#xE7A6;" />
+                </Button>
+
+                <AppBarSeparator />
+
+                <Button
+                    Padding="8,6"
+                    Command="{x:Bind ViewModel.SplitAtPlayheadCommand}"
+                    ToolTipService.ToolTip="Split at Playhead (S)">
+                    <PathIcon Data="M 4,2 C 2.5,2 2,3.5 2,5 L 2,15 C 2,16.5 2.5,18 4,18 L 7,18 L 7,16 L 4.5,16 C 3.7,16 4,15 4,14.5 L 4,5.5 C 4,5 3.7,4 4.5,4 L 7,4 L 7,2 Z  M 16,2 C 17.5,2 18,3.5 18,5 L 18,15 C 18,16.5 17.5,18 16,18 L 13,18 L 13,16 L 15.5,16 C 16.3,16 16,15 16,14.5 L 16,5.5 C 16,5 16.3,4 15.5,4 L 13,4 L 13,2 Z  M 9.5,1 L 10.5,1 L 10.5,19 L 9.5,19 Z" />
+                </Button>
+                <Button
+                    Padding="8,6"
+                    Click="DeleteSelected_Click"
+                    ToolTipService.ToolTip="Delete Segment (Del)">
+                    <FontIcon FontSize="16" Glyph="&#xE74D;" />
+                </Button>
+                <Button
+                    Padding="8,6"
+                    Click="CutSelection_Click"
+                    ToolTipService.ToolTip="Cut Selection (Ctrl+X)">
+                    <FontIcon FontSize="16" Glyph="&#xE8C6;" />
+                </Button>
+
+                <AppBarSeparator />
+
+                <DropDownButton
+                    Padding="8,6"
+                    ToolTipService.ToolTip="Insert a segment into the timeline">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon FontSize="14" Glyph="&#xE710;" />
+                        <TextBlock Text="Insert" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <MenuFlyout Placement="Top">
+                            <MenuFlyoutItem
+                                Text="Text Slide"
+                                Click="AddTextSlide_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D2;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Text Overlay"
+                                Click="AddTextOverlay_Click"
+                                AutomationProperties.Name="Insert text overlay">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D3;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Record More"
+                                Click="RecordMore_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xEA3A;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Import Video…"
+                                Click="ImportVideo_Click">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE898;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem
+                                Text="Voice Over…"
+                                Click="ImportVoiceOver_Click"
+                                AutomationProperties.Name="Insert voice over audio">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE720;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem
+                                Text="Music…"
+                                Click="ImportMusic_Click"
+                                AutomationProperties.Name="Insert background music">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8D6;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+
+            <!-- Speed controls -->
+            <StackPanel
+                Grid.Column="2"
+                Orientation="Horizontal"
+                Spacing="8"
+                VerticalAlignment="Center">
+
+                <SplitButton
+                    x:Name="SaveProjectButton"
+                    Height="40"
+                    Click="SaveProject_Click"
+                    ToolTipService.ToolTip="Save project (Ctrl+S). Saves back to the same .mixtri file once it has one.">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE74E;" />
+                        <TextBlock Text="Save" />
+                    </StackPanel>
+                    <SplitButton.Flyout>
+                        <MenuFlyout Placement="Top">
+                            <MenuFlyoutItem
+                                Click="SaveProjectAs_Click"
+                                Text="Save as… (Ctrl+Shift+S)">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE792;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem
+                                Click="CloseProject_Click"
+                                Text="Close project"
+                                AutomationProperties.Name="Close project and return to the empty editor"
+                                ToolTipService.ToolTip="Closes the project and returns to the empty editor. Asks to save first.">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8BB;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </SplitButton.Flyout>
+                </SplitButton>
+
+                <Button
+                    x:Name="ExportButton"
+                    Height="40"
+                    Padding="8,6"
+                    Style="{ThemeResource AccentButtonStyle}"
+                    ToolTipService.ToolTip="Export recording">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon FontSize="14" Glyph="&#xE898;" />
+                        <TextBlock Text="Export" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout x:Name="ExportFlyout" Placement="Top">
+                            <StackPanel Width="280" Spacing="16" Padding="8">
+                                <!-- Options state: shown before an export starts so the
+                                     output format can be chosen. Defaults are applied in
+                                     SyncExportOptionsToViewModel(), never as XAML IsChecked
+                                     values (those fire Checked during InitializeComponent). -->
+                                <StackPanel
+                                    x:Name="ExportOptionsPanel"
+                                    Spacing="12"
+                                    Visibility="Visible">
+                                    <TextBlock
+                                        FontWeight="SemiBold"
+                                        Text="Format" />
+                                    <StackPanel Spacing="4">
+                                        <RadioButton
+                                            x:Name="ExportFormatMp4Radio"
+                                            Checked="ExportFormat_Checked"
+                                            Content="MP4 video"
+                                            GroupName="ExportFormat" />
+                                        <RadioButton
+                                            x:Name="ExportFormatGifRadio"
+                                            Checked="ExportFormat_Checked"
+                                            Content="Animated GIF"
+                                            GroupName="ExportFormat" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        x:Name="ExportGifHintText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                        TextWrapping="Wrap"
+                                        Visibility="Collapsed"
+                                        Text="{x:Bind ExportVM.GifWarningText, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Stretch"
+                                        Click="StartExport_Click"
+                                        Style="{ThemeResource AccentButtonStyle}"
+                                        Content="Start export" />
+                                </StackPanel>
+
+                                <!-- Exporting state -->
+                                <StackPanel
+                                    x:Name="ExportingPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <ProgressRing
+                                        Width="80"
+                                        Height="80"
+                                        IsIndeterminate="False"
+                                        Maximum="100"
+                                        Value="{x:Bind ExportVM.ProgressPercent, Mode=OneWay}" />
+                                    <TextBlock
+                                        FontSize="14"
+                                        TextAlignment="Center"
+                                        Text="Exporting…" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ProgressStatus, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CancelExport_Click"
+                                        Content="Cancel" />
+                                </StackPanel>
+
+                                <!-- Success state -->
+                                <StackPanel
+                                    x:Name="ExportedPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                        Glyph="&#xE73E;" />
+                                    <TextBlock
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Exported!" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        IsTextSelectionEnabled="True"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ExportedFilePath, Mode=OneWay}" />
+                                    <StackPanel
+                                        HorizontalAlignment="Center"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                        <Button
+                                            Click="OpenFileLocation_Click"
+                                            Style="{ThemeResource AccentButtonStyle}"
+                                            Content="Open file location" />
+                                        <Button
+                                            Click="CloseFlyout_Click"
+                                            Content="Close" />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Error state -->
+                                <StackPanel
+                                    x:Name="ExportErrorPanel"
+                                    HorizontalAlignment="Center"
+                                    Spacing="12"
+                                    Visibility="Collapsed">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="40"
+                                        Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                        Glyph="&#xE783;" />
+                                    <TextBlock
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        Text="Export Failed" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        Text="{x:Bind ExportVM.ErrorMessage, Mode=OneWay}" />
+                                    <Button
+                                        HorizontalAlignment="Center"
+                                        Click="CloseFlyout_Click"
+                                        Content="Close" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- Timeline editor control -->
+        <!-- OneWay is required: x:Bind defaults to OneTime, which left the control bound
+             to whichever TimelineModel existed when the page was built. Opening a project
+             into an already-constructed editor swaps the model, and a OneTime bind kept
+             rendering the previous one - blank cursor/zoom/camera tracks. -->
+        <!-- The height is deliberately left unset so the Auto row sizes to the control's
+             own track rows. A fixed height silently clips whichever tracks fall past it
+             (the mic track was already cut off, and adding the text overlay track pushed
+             system audio off too), and it would have to be hand-edited every time a track
+             is added or resized. -->
+        <controls:TimelineControl
+            x:Name="Timeline"
+            Grid.Row="3"
+            Margin="0,4,0,0"
+            Model="{x:Bind ViewModel.Model, Mode=OneWay}" />
+
+        <!-- TeachingTip for first-run editor hints -->
+        <TeachingTip
+            x:Name="EditorTip"
+            Title="Editor Shortcuts"
+            Subtitle="Use Ctrl+Z / Ctrl+Y to undo and redo edits. Drag the timeline to scrub through your recording."
+            IsLightDismissEnabled="True"
+            PreferredPlacement="Top" />
+
+        <!--  Drop affordance. Spans the preview, toolbar and timeline (rows 1-3) because the
+              whole editor body is the drop target — the drop's X position over the timeline
+              only chooses WHERE the clip lands, never whether it is accepted. Never hit-test
+              visible: it must not eat the DragOver/Drop it exists to advertise.  -->
+        <Border x:Name="DropHintOverlay"
+                Grid.Row="1"
+                Grid.RowSpan="3"
+                Visibility="Collapsed"
+                IsHitTestVisible="False"
+                Margin="4"
+                CornerRadius="8"
+                BorderThickness="2"
+                BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                Background="{ThemeResource AccentFillColorSelectedTextBackgroundBrush}"
+                Opacity="0.35" />
+    </Grid>
+</Page>

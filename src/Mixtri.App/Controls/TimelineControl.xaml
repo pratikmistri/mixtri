@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.TimelineControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid
+        PointerWheelChanged="Grid_PointerWheelChanged">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="56" />
+            <!-- Track labels -->
+            <ColumnDefinition Width="*" />
+            <!-- Track canvases -->
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="30" />
+            <!-- Time ruler -->
+            <RowDefinition Height="Auto" />
+            <!-- Video track group stack: one group per video track, each carrying its own
+                 video / zoom / cursor bands. The canvas owns its dynamic height so overlay
+                 groups grow it instead of clipping. -->
+            <RowDefinition x:Name="CameraRow" Height="44" />
+            <!-- Camera track -->
+            <RowDefinition Height="44" />
+            <!-- Text overlay track -->
+            <RowDefinition x:Name="AudioRow" Height="40" />
+            <!-- System audio track -->
+            <RowDefinition x:Name="MicRow" Height="40" />
+            <!-- Mic audio track -->
+            <RowDefinition x:Name="VoiceOverRow" Height="0" />
+            <!-- Inserted voice-over track -->
+            <RowDefinition x:Name="MusicRow" Height="0" />
+            <!-- Inserted music track -->
+        </Grid.RowDefinitions>
+
+        <!-- Track labels -->
+        <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+        <!-- The video row is a STACK of bands (video / zoom / cursor per track), so its label
+             cannot be a single static TextBlock. The captions are plain XAML positioned from
+             the same band geometry the canvas next to it draws with — deliberately NOT a
+             CanvasControl: every extra CanvasControl multiplies the silent device-loss hazard
+             the crash playbook exists for, and XAML keeps rendering when a GPU loss has
+             blanked every canvas in the window. -->
+        <Border Grid.Row="1" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="0">
+            <Canvas x:Name="VideoTrackLabels" IsHitTestVisible="False" />
+        </Border>
+        <Border x:Name="CameraTrackLabel" Grid.Row="2" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+            <TextBlock Text="Camera" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
+        </Border>
+        <Border Grid.Row="3" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
+            <TextBlock Text="Text" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
+        </Border>
+        <Border x:Name="AudioTrackLabel" Grid.Row="4" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+            <Button x:Name="AudioMuteButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="System"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="System audio volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="AudioMuteIcon" Glyph="&#xE767;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Audio" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+        <Border x:Name="MicTrackLabel" Grid.Row="5" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0">
+            <Button x:Name="MicMuteButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="Mic"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Microphone volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="MicMuteIcon" Glyph="&#xE767;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Mic" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+
+        <Border x:Name="VoiceOverTrackLabel" Grid.Row="6" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+            <Button x:Name="VoiceOverLabelButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="VoiceOver"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Voice over lane volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="VoiceOverMuteIcon" Glyph="&#xE720;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Voice" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+        <Border x:Name="MusicTrackLabel" Grid.Row="7" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="0" Visibility="Collapsed">
+            <Button x:Name="MusicLabelButton"
+                    Click="AudioTrackLabel_Click"
+                    Tag="Music"
+                    Padding="4,0" MinWidth="0" MinHeight="0"
+                    HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                    HorizontalContentAlignment="Left"
+                    Background="Transparent" BorderThickness="0"
+                    ToolTipService.ToolTip="Music lane volume and mute">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
+                    <FontIcon x:Name="MusicMuteIcon" Glyph="&#xE8D6;" FontSize="12"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="Music" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="10" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+
+        <!-- Canvases -->
+        <canvas:CanvasControl
+            x:Name="TimeRulerCanvas"
+            Grid.Row="0"
+            Grid.Column="1"
+            Draw="TimeRulerCanvas_Draw"
+            PointerPressed="Track_PointerPressed" />
+
+        <canvas:CanvasControl
+            x:Name="VideoTrackCanvas"
+            Grid.Row="1"
+            Grid.Column="1"
+            Height="118"
+            Draw="VideoTrackCanvas_Draw"
+            PointerMoved="VideoTrack_PointerMoved"
+            PointerExited="VideoTrack_PointerExited"
+            PointerPressed="VideoTrack_PointerPressed"
+            PointerReleased="VideoTrack_PointerReleased"
+            PointerCaptureLost="VideoTrack_PointerCaptureLost"
+            PointerCanceled="VideoTrack_PointerCaptureLost"
+            RightTapped="VideoTrack_RightTapped"
+            AutomationProperties.Name="Video, zoom and cursor tracks" />
+
+        <canvas:CanvasControl
+            x:Name="CameraTrackCanvas"
+            Grid.Row="2"
+            Grid.Column="1"
+            Draw="CameraTrackCanvas_Draw"
+            PointerPressed="CameraTrack_PointerPressed"
+            PointerMoved="CameraTrack_PointerMoved"
+            PointerReleased="CameraTrack_PointerReleased"
+            RightTapped="CameraTrack_RightTapped" />
+
+        <canvas:CanvasControl
+            x:Name="TextTrackCanvas"
+            Grid.Row="3"
+            Grid.Column="1"
+            Draw="TextTrackCanvas_Draw"
+            PointerPressed="TextTrack_PointerPressed"
+            PointerMoved="TextTrack_PointerMoved"
+            PointerReleased="TextTrack_PointerReleased"
+            RightTapped="TextTrack_RightTapped"
+            DoubleTapped="TextTrack_DoubleTapped"
+            AutomationProperties.Name="Text overlay track" />
+
+        <canvas:CanvasControl
+            x:Name="AudioTrackCanvas"
+            Grid.Row="4"
+            Grid.Column="1"
+            Draw="AudioTrackCanvas_Draw"
+            PointerPressed="Track_PointerPressed"
+            RightTapped="RecordedAudioTrack_RightTapped" />
+
+        <canvas:CanvasControl
+            x:Name="MicTrackCanvas"
+            Grid.Row="5"
+            Grid.Column="1"
+            Draw="MicTrackCanvas_Draw"
+            PointerPressed="Track_PointerPressed"
+            RightTapped="RecordedAudioTrack_RightTapped" />
+
+        <canvas:CanvasControl
+            x:Name="VoiceOverTrackCanvas"
+            Grid.Row="6"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="VoiceOverTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Voice over track" />
+
+        <canvas:CanvasControl
+            x:Name="MusicTrackCanvas"
+            Grid.Row="7"
+            Grid.Column="1"
+            Visibility="Collapsed"
+            Draw="MusicTrackCanvas_Draw"
+            PointerPressed="AudioTrackLane_PointerPressed"
+            PointerMoved="AudioTrackLane_PointerMoved"
+            PointerReleased="AudioTrackLane_PointerReleased"
+            RightTapped="AudioTrackLane_RightTapped"
+            AutomationProperties.Name="Music track" />
+
+        <!-- Playhead overlay line — the only visual moved on a playback tick / scrub
+             (see UpdatePlayheadVisual). Purely decorative: not hit-testable, and kept out
+             of the automation tree so it isn't announced while playing. -->
+        <Border
+            x:Name="PlayheadLine"
+            Grid.Row="0"
+            Grid.RowSpan="8"
+            Grid.Column="1"
+            Width="2"
+            HorizontalAlignment="Left"
+            Background="{ThemeResource TimelinePlayheadOverlayBrush}"
+            AutomationProperties.AccessibilityView="Raw"
+            IsHitTestVisible="False" />
+    </Grid>
+</UserControl>
