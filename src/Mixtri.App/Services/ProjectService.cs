@@ -167,9 +167,8 @@ public class ProjectService
     /// Lives under LocalAppData rather than beside the package so opening a project from
     /// a read-only location (a network share, a downloads folder) still works.
     /// </remarks>
-    public static string PackageCacheRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Mixtri", "OpenProjects");
+    public static string PackageCacheRoot =>
+        Mixtri.Core.AppDataPaths.Resolve("OpenProjects");
 
     /// <summary>
     /// Saves the current project, composition and timeline into a single

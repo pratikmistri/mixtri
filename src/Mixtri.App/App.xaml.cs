@@ -43,9 +43,8 @@ public partial class App : Application
     /// Initializes the singleton application object.  This is the first line of authored code
     /// executed, and as such is the logical equivalent of main() or WinMain().
     /// </summary>
-    private static readonly string LogPath = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Mixtri", "crash.log");
+    private static readonly string LogPath =
+        Mixtri.Core.AppDataPaths.Resolve("crash.log");
 
     public App()
     {
@@ -548,19 +547,23 @@ public partial class App : Application
                 hasFileActivation: activationPath is not null));
         _shell.Start();
 
-        // Release captured JPEGs from finalized sessions in the background. Both roots are
-        // swept: the LocalAppData sessions folder used now, and the user's save folder,
-        // which holds sessions recorded before they moved out of it.
+        // Release captured JPEGs from finalized sessions in the background. Every root is
+        // swept: the LocalAppData sessions folders (current AND pre-rename, since sessions
+        // recorded as Musio are never moved and would otherwise leak disk forever), and the
+        // user's save folder, which holds sessions recorded before they moved out of it.
         var savePath = AppSettings.Instance.DefaultSavePath;
         _ = System.Threading.Tasks.Task.Run(() =>
         {
-            SessionCleanupService.CleanupExportedSessions(Mixtri.Core.Capture.SessionPaths.SessionsRoot);
+            foreach (var root in Mixtri.Core.Capture.SessionPaths.AllSessionsRoots)
+                SessionCleanupService.CleanupExportedSessions(root);
+
             if (!string.IsNullOrWhiteSpace(savePath))
                 SessionCleanupService.CleanupExportedSessions(savePath);
 
-            // Aimed only at the app-owned imports root, never at savePath: the sweep matches
+            // Aimed only at the app-owned imports roots, never at savePath: the sweep matches
             // import_* by name, and the user's save folder is theirs to put anything in.
-            SessionCleanupService.CleanupOrphanedImports(Mixtri.Core.Capture.SessionPaths.ImportsRoot);
+            foreach (var root in Mixtri.Core.Capture.SessionPaths.AllImportsRoots)
+                SessionCleanupService.CleanupOrphanedImports(root);
         });
 
         if (activationPath is not null)

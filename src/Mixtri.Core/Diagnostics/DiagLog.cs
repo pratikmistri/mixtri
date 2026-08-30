@@ -20,9 +20,7 @@ public static class DiagLog
     {
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Mixtri");
+            var dir = AppDataPaths.Root;
             Directory.CreateDirectory(dir);
             return Path.Combine(dir, "diag.log");
         }

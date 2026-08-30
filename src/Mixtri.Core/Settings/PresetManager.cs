@@ -25,9 +25,8 @@ public class PresetManager
         }
         catch
         {
-            // Unpackaged app — use AppData\Local\Mixtri instead
-            localFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Mixtri");
+            // Unpackaged app — use the shared LocalAppData root instead
+            localFolder = AppDataPaths.Root;
         }
 
         _exportPresetsFolder = Path.Combine(localFolder, "ExportPresets");

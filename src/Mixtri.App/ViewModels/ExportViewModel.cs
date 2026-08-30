@@ -75,8 +75,7 @@ public partial class ExportViewModel : ObservableObject
     {
         if (CurrentProject is null) return;
 
-        string videosDir = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-        string mixtriDir = Path.Combine(videosDir, "Mixtri");
+        string mixtriDir = Mixtri.Core.AppDataPaths.VideosFolder;
         Directory.CreateDirectory(mixtriDir);
 
         string safeName = SanitizeFileName(CurrentProject.Name);

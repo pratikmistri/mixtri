@@ -167,8 +167,11 @@ public sealed partial class OpenProjectsPage : Page
             yield return configured;
 
         yield return Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-        yield return System.IO.Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Mixtri");
+
+        // Both the current and pre-rename Videos folders: projects the user saved into
+        // Videos\Musio before the rename must keep showing up here.
+        foreach (var folder in Mixtri.Core.AppDataPaths.AllVideosFolders)
+            yield return folder;
     }
 
     /// <summary>

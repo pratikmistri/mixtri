@@ -21,14 +21,22 @@ public static class SessionPaths
     /// Root under which each recording creates its own <c>session_*</c> working folder.
     /// </summary>
     /// <remarks>
-    /// The folder is still named "Musio" after the rename to Mixtri, deliberately. It holds LIVE
-    /// working state — in-progress recordings and the media extracted from an open project — so
-    /// renaming it would orphan any session a user had not yet saved. It is never surfaced in the
-    /// UI. Change it only together with a migration that moves the existing folder's contents.
+    /// New sessions are written under the current <see cref="AppDataPaths.Root"/>. Sessions
+    /// recorded before the Musio → Mixtri rename are NOT moved and do not need to be: a project
+    /// stores absolute paths to its media, so they keep resolving wherever they sit. What must
+    /// span both roots is the cleanup sweep — see <see cref="AllSessionsRoots"/>, without which
+    /// pre-rename sessions would never be reclaimed and would leak disk forever.
     /// </remarks>
-    public static string SessionsRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Musio", SessionsFolderName);
+    public static string SessionsRoot => AppDataPaths.Resolve(SessionsFolderName);
+
+    /// <summary>Pre-rename sessions root. Swept for cleanup; never written to.</summary>
+    public static string LegacySessionsRoot => AppDataPaths.ResolveLegacy(SessionsFolderName);
+
+    /// <summary>
+    /// Every root that may hold session or import working folders, current first. Cleanup
+    /// sweeps must cover all of these.
+    /// </summary>
+    public static IReadOnlyList<string> AllSessionsRoots => [SessionsRoot, LegacySessionsRoot];
 
     /// <summary>
     /// Root under which each external-video import creates its own <c>import_*</c> working
@@ -43,6 +51,14 @@ public static class SessionPaths
     /// sweep — an import has no captured JPEGs to reclaim and no recording lifecycle to end.
     /// </remarks>
     public static string ImportsRoot => SessionsRoot;
+
+    /// <summary>
+    /// Every root that may hold import working folders, current first. Mirrors
+    /// <see cref="AllSessionsRoots"/> for the same reason <see cref="ImportsRoot"/> mirrors
+    /// <see cref="SessionsRoot"/>, and is kept as its own member so a caller sweeping imports
+    /// reads as sweeping imports.
+    /// </summary>
+    public static IReadOnlyList<string> AllImportsRoots => AllSessionsRoots;
 
     /// <summary>
     /// Creates and returns a fresh, empty <c>import_&lt;guid&gt;</c> folder under
