@@ -21,19 +21,19 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 ## M0 - UI layer decomposition (blocked on a DI seam)
 
 - [ ] **OPT-001: Introduce an `IProjectService` seam and dependency injection**
-  - **Evidence:** `src/Musio.App/Services/ProjectService.cs:17`
+  - **Evidence:** `src/Mixtri.App/Services/ProjectService.cs:17`
     (`public static ProjectService Instance => _instance ??= new();`),
-    `src/Musio.Core/Settings/AppSettings.cs:12`
+    `src/Mixtri.Core/Settings/AppSettings.cs:12`
     (`public static AppSettings Instance => _instance.Value;`),
-    `src/Musio.Core/Settings/ShellSettings.cs:12`
+    `src/Mixtri.Core/Settings/ShellSettings.cs:12`
     (`public static ShellSettings Instance { get; } = new();`).
     `ProjectService.Instance` is referenced **68** times across the
-    `src/Musio.App/Pages/EditorPage*.cs` partials alone (`EditorPage.Style.cs` 37,
+    `src/Mixtri.App/Pages/EditorPage*.cs` partials alone (`EditorPage.Style.cs` 37,
     `EditorPage.Preview.cs` 16, `EditorPage.xaml.cs` 8, `EditorPage.Timeline.cs` 6,
     `EditorPage.Shortcuts.cs` 1), plus **7** in
-    `src/Musio.App/ViewModels/ExportViewModel.cs`, **4** in
-    `src/Musio.App/ViewModels/EditorViewModel.cs`, and **1** in
-    `src/Musio.App/Pages/OpenProjectsPage.xaml.cs`. There is no DI container anywhere in
+    `src/Mixtri.App/ViewModels/ExportViewModel.cs`, **4** in
+    `src/Mixtri.App/ViewModels/EditorViewModel.cs`, and **1** in
+    `src/Mixtri.App/Pages/OpenProjectsPage.xaml.cs`. There is no DI container anywhere in
     the app.
   - This is why no UI logic is unit-testable, and it is a prerequisite for
     OPT-002/003/004 below — extracting a controller class without a seam just relocates
@@ -45,14 +45,14 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-002: Extract `EditorPreviewController`**
   - **Evidence:** the async re-entrancy guards are declared in
-    `src/Musio.App/Pages/EditorPage.xaml.cs` — `_segmentPreviewGeneration` (line 57),
+    `src/Mixtri.App/Pages/EditorPage.xaml.cs` — `_segmentPreviewGeneration` (line 57),
     `_primaryPreviewStateGeneration` (line 73), `_previewInitGeneration` (line 85) — and
     are incremented from the conductor at lines 334, 456, 458. Their ~23 remaining
-    check/increment sites now live in `src/Musio.App/Pages/EditorPage.Preview.cs`
+    check/increment sites now live in `src/Mixtri.App/Pages/EditorPage.Preview.cs`
     (`_previewInitGeneration`: 189, 276, 297, 449, 477, 605, 615, 625;
     `_primaryPreviewStateGeneration`: 78, 646, 956, 963, 979, 1116, 1163;
     `_segmentPreviewGeneration`: 107, 1013, 1021, 1030, 1416, 1422), with one further
-    cross-file read in `src/Musio.App/Pages/EditorPage.Timeline.cs:1129`. Adaptive-quality
+    cross-file read in `src/Mixtri.App/Pages/EditorPage.Timeline.cs:1129`. Adaptive-quality
     and graphics-device recovery logic sits in the same `EditorPage.Preview.cs` partial.
   - Wave 1 relocated this logic out of the monolith into the `EditorPage.Preview.cs`
     partial, but a partial is still the *same class*: the fields remain `EditorPage`
@@ -65,9 +65,9 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     dependency rather than being a `partial class EditorPage` member.
 
 - [ ] **OPT-003: Extract `EditorStyleController`**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.Style.cs` — `SyncStyleControlsToConfig`
+  - **Evidence:** `src/Mixtri.App/Pages/EditorPage.Style.cs` — `SyncStyleControlsToConfig`
     is declared at line 326 and called from lines 197 and 528, plus
-    `src/Musio.App/Pages/EditorPage.Timeline.cs:593`. The method and its callers are
+    `src/Mixtri.App/Pages/EditorPage.Timeline.cs:593`. The method and its callers are
     deeply coupled to XAML named elements (`BgTypeCombo`, `WallpaperGrid`, `BgColorText`,
     and related controls declared in `EditorPage.xaml`), which are code-generated fields —
     extracting this needs either `x:FieldModifier="public"` on those elements or a
@@ -80,7 +80,7 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     the named XAML elements or a thin view-model wrapper around them.
 
 - [ ] **OPT-004: Extract `EditorTextEditController`**
-  - **Evidence:** `src/Musio.App/Pages/EditorPage.TextEditing.cs` — the
+  - **Evidence:** `src/Mixtri.App/Pages/EditorPage.TextEditing.cs` — the
     `SlideTextEditTarget` (declared line 2258) and `OverlayTextEditTarget` (declared line
     2343) adapters implement `ITextEditTarget` and hold a back-reference to the enclosing
     `EditorPage page` (constructors at lines 2263 and 2362); they call back into the page
@@ -99,9 +99,9 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 - [ ] **OPT-101: `ColorPickerRow` UserControl**
   - **Evidence:** the `DropDownButton` + swatch + flyout `ColorPicker` block is repeated
     **9x** (~14 lines each) across
-    `src/Musio.App/Controls/PropertyPanes/ScenePropertiesView.xaml:439,465`,
-    `src/Musio.App/Controls/PropertyPanes/TextOverlayPropertiesView.xaml:199,400,501,536`,
-    `src/Musio.App/Controls/PropertyPanes/TextSlidePropertiesView.xaml:103,175,214`.
+    `src/Mixtri.App/Controls/PropertyPanes/ScenePropertiesView.xaml:439,465`,
+    `src/Mixtri.App/Controls/PropertyPanes/TextOverlayPropertiesView.xaml:199,400,501,536`,
+    `src/Mixtri.App/Controls/PropertyPanes/TextSlidePropertiesView.xaml:103,175,214`.
     (Note: these views live under `Controls/PropertyPanes/`, not `Views/` as an earlier
     draft of this backlog assumed; line numbers have also shifted by a few lines from
     the original audit and are corrected above.)
@@ -117,9 +117,9 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 - [ ] **OPT-102: `TextFormattingToolbar` UserControl**
   - **Evidence:** the Bold/Italic/alignment toggle row (`<!-- Formatting: bold / italic /
     alignment -->`) is duplicated at
-    `src/Musio.App/Controls/PropertyPanes/TextOverlayPropertiesView.xaml:222-259`
+    `src/Mixtri.App/Controls/PropertyPanes/TextOverlayPropertiesView.xaml:222-259`
     (`OverlayBoldToggle`, `OverlayItalicToggle`, `OverlayAlignSegmented`) and
-    `src/Musio.App/Controls/PropertyPanes/TextSlidePropertiesView.xaml:126-158`
+    `src/Mixtri.App/Controls/PropertyPanes/TextSlidePropertiesView.xaml:126-158`
     (`SlideBoldToggle`, `SlideItalicToggle`, `SlideAlignSegmented`) — ~35-38 lines each.
     Line numbers corrected from the original audit (previously cited as 224-260/128-160).
   - Same code-behind-binding problem as OPT-101: each toggle/segmented control is
@@ -131,13 +131,13 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 - [ ] **OPT-103: `LabeledSection` implicit style**
   - **Evidence:** the `<StackPanel Spacing="6"><TextBlock
     Style="{StaticResource PropertyLabelStyle}"/>` wrapper appears **38x** across the 6
-    property panes in `src/Musio.App/Controls/PropertyPanes/`
+    property panes in `src/Mixtri.App/Controls/PropertyPanes/`
     (`CursorPropertiesView.xaml` x2, `ScenePropertiesView.xaml` x7,
     `TextOverlayPropertiesView.xaml` x15, `TextSlidePropertiesView.xaml` x11,
     `TransitionPropertiesView.xaml` x2, `VideoPropertiesView.xaml` x1). The original
     audit estimated "~44x"; the verified count from a repo-wide search is 38 — corrected
     here.
-  - `src/Musio.App/Themes/PropertyPaneStyles.xaml:52` already defines a
+  - `src/Mixtri.App/Themes/PropertyPaneStyles.xaml:52` already defines a
     `PropertyHeaderTemplate` (`<DataTemplate x:Key="PropertyHeaderTemplate">`) that
     solves this for controls with a built-in `Header`; this item covers the remaining
     hand-written `TextBlock` + content wrapper cases.
@@ -146,9 +146,9 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     replace the 38 wrapper blocks.
 
 - [ ] **OPT-104: Delete `Converters/CheckedToBrushConverter.cs`**
-  - **Evidence:** `src/Musio.App/Converters/CheckedToBrushConverter.cs` (52 lines,
+  - **Evidence:** `src/Mixtri.App/Converters/CheckedToBrushConverter.cs` (52 lines,
     confirmed) is the app's only `IValueConverter` implementation and is referenced only
-    from `src/Musio.App/Controls/PropertyPanes/ScenePropertiesView.xaml`. CommunityToolkit
+    from `src/Mixtri.App/Controls/PropertyPanes/ScenePropertiesView.xaml`. CommunityToolkit
     is already referenced there (`xmlns:ctk="using:CommunityToolkit.WinUI.Controls"` at
     line 7 of that file, used for `ctk:Segmented`/`ctk:SegmentedItem` at lines 303-321),
     so `BoolToObjectConverter` from `CommunityToolkit.WinUI.Converters` may replace it —
@@ -165,7 +165,7 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-105: Wire `PointerCaptureLost`/`PointerCanceled` on the zoom, camera and
       text-overlay tracks**
-  - **Evidence:** `src/Musio.App/Controls/TimelineControl.xaml.cs` — `ZoomTrack_*`,
+  - **Evidence:** `src/Mixtri.App/Controls/TimelineControl.xaml.cs` — `ZoomTrack_*`,
     `CameraTrack_*` and `TextTrack_*` each call `CapturePointer` in their
     `*_PointerPressed` handler, but only `*_PointerReleased` releases it. None of the
     three wires `PointerCaptureLost` or `PointerCanceled` (only `VideoTrack` wires
@@ -183,7 +183,7 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-106: Reconsider `TrackGestureHandler<TSegment>` once the tracks converge**
   - **Evidence:** the zoom/camera/text-overlay gesture stacks in
-    `src/Musio.App/Controls/TimelineControl.xaml.cs` are structurally parallel but diverge
+    `src/Mixtri.App/Controls/TimelineControl.xaml.cs` are structurally parallel but diverge
     behaviourally in five ways: zoom shows a `MenuFlyout` on right-tap while camera and text
     remove immediately; zoom only permits an edge grab once the segment is already selected;
     zoom and text resolve the create-domain across recordings while camera is primary-only;
@@ -215,7 +215,7 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
   - The segments themselves carry a correct `VideoFilePath` (the log prints it), so only the
     `Project.VideoFilePath` field is empty; the likely gap is the package/session restore
     path (`ProjectService.OpenPackageAsync` → `CurrentProject = result.Project`) not
-    repopulating it, while `MusioPathRewriter` does rewrite it when present.
+    repopulating it, while `MixtriPathRewriter` does rewrite it when present.
   - Diagnostics for this are in place: `GenerateAllTimelineThumbnailsAsync` logs
     `primary pass skipped: the project has no VideoFilePath`, and
     `GenerateTimelineThumbnailsAsync` distinguishes "extraction returned nothing" from
@@ -237,11 +237,11 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 ## M2 - Core pipeline
 
 - [ ] **OPT-201: `TrackOperation<TSegment>` generic base**
-  - **Evidence:** `src/Musio.Core/Timeline/Operations/CameraOperations.cs` (5 classes:
+  - **Evidence:** `src/Mixtri.Core/Timeline/Operations/CameraOperations.cs` (5 classes:
     `AddCameraSegmentOperation:5`, `MoveCameraSegmentOperation:42`,
     `TrimCameraSegmentOperation:75`, `RemoveCameraSegmentOperation:135`,
     `UpdateCameraSegmentPropertiesOperation:163`) and
-    `src/Musio.Core/Timeline/Operations/TextOverlayOperations.cs` (5 structurally
+    `src/Mixtri.Core/Timeline/Operations/TextOverlayOperations.cs` (5 structurally
     parallel classes: `AddTextOverlayOperation:5`, `MoveTextOverlayOperation:42`,
     `TrimTextOverlayOperation:75`, `RemoveTextOverlayOperation:135`,
     `UpdateTextOverlayPropertiesOperation:170`). Both operation sets re-sort their track
@@ -255,14 +255,14 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-202: `BlurEffectGraph` wrapper**
   - **Evidence:** Win2D blur effect graphs are built three different ways: (1)
-    `src/Musio.Core/Processing/TextOverlayRenderer.cs:400-428`
+    `src/Mixtri.Core/Processing/TextOverlayRenderer.cs:400-428`
     (`EnsureBlurEffectGraph`) caches a `BorderEffect -> GaussianBlurEffect` chain in
     fields `_blurBorderEffect`/`_blurGaussianEffect` (correct — reused across frames);
-    (2) `src/Musio.Core/Processing/BackgroundCompositor.cs:627-651`
+    (2) `src/Mixtri.Core/Processing/BackgroundCompositor.cs:627-651`
     (`DrawBlurBackground`, called once per `Compose` at line 181) allocates a fresh
     `Transform2DEffect -> GaussianBlurEffect` chain **every draw** — a per-frame
     allocation on the hot path; (3)
-    `src/Musio.Core/Processing/TransitionRenderer.cs:431-464` builds an inline
+    `src/Mixtri.Core/Processing/TransitionRenderer.cs:431-464` builds an inline
     `Transform2DEffect -> GaussianBlurEffect` chain in `using` blocks per transition
     frame. Correction from the original audit: only case (1) actually uses
     `BorderEffect`; cases (2) and (3) chain off `Transform2DEffect`, not `BorderEffect`.
@@ -277,11 +277,11 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 
 - [ ] **OPT-203: `DisposableBase` or a Roslyn analyzer for the disposal-guard pattern**
   - **Evidence:** the `private bool _disposed;` field appears in 22 files under
-    `src/Musio.Core/` (e.g. `Capture/AudioCaptureEngine.cs`,
+    `src/Mixtri.Core/` (e.g. `Capture/AudioCaptureEngine.cs`,
     `Processing/BackgroundCompositor.cs`, `Processing/FrameCompositor.cs`,
     `Export/SegmentFrameComposer.cs`, `Processing/PreviewRenderer.cs`, and 17 more), and
     `ObjectDisposedException.ThrowIf(...)` appears at ~29 call sites across
-    `src/Musio.Core/` (several files have more than one guard site, e.g.
+    `src/Mixtri.Core/` (several files have more than one guard site, e.g.
     `PreviewRenderer.cs` has 6, `RecordingSession.cs` has 4). The original audit
     estimated "~25 classes / ~30 guard sites"; the verified counts (22 / 29) are close
     and are corrected here.
@@ -297,12 +297,12 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
     `renderer.UpdateZoomKeyframes(...)` followed by
     `renderer.UpdateSuppressedClickTicks(...)` (and, at one call site, also
     `UpdateTextOverlays(...)`) at four separate places:
-    `src/Musio.App/Pages/EditorPage.Preview.cs:1147-1148` and `1520-1521`, and
-    `src/Musio.App/Pages/EditorPage.Timeline.cs:425-426` (plus `UpdateTextOverlays` at
+    `src/Mixtri.App/Pages/EditorPage.Preview.cs:1147-1148` and `1520-1521`, and
+    `src/Mixtri.App/Pages/EditorPage.Timeline.cs:425-426` (plus `UpdateTextOverlays` at
     444) and `475-476`. Each of
     `PreviewRenderer.UpdateZoomKeyframes`/`UpdateTextOverlays`/`UpdateSuppressedClickTicks`
-    (`src/Musio.Core/Processing/PreviewRenderer.cs:95-119`) is a thin wrapper that calls
-    a single `FrameCompositor.Sync*` method. `src/Musio.Core/Export/SegmentFrameComposer.cs:1003`
+    (`src/Mixtri.Core/Processing/PreviewRenderer.cs:95-119`) is a thin wrapper that calls
+    a single `FrameCompositor.Sync*` method. `src/Mixtri.Core/Export/SegmentFrameComposer.cs:1003`
     has a **private static** `SyncZoomState(FrameCompositor, TimelineModel?, string)`
     that combines the same three sync calls plus a null/empty-collection guard.
     Correction from the original audit: `SyncZoomState` is `private`, not `public` —
@@ -321,10 +321,10 @@ Priority (maintainability-focused; does not reuse the P0-P3 stability scale in `
 ## M3 - Tests
 
 - [ ] **OPT-301: Assertion helpers for repeated count-pair asserts**
-  - **Evidence:** `src/Musio.Tests/VideoWriterQueueTests.cs` has the
+  - **Evidence:** `src/Mixtri.Tests/VideoWriterQueueTests.cs` has the
     `Assert.AreEqual(N, writer.FrameCount, ...)` +
     `Assert.AreEqual(N, CountFrameFiles(writer))` pair **5** times (lines 105/107,
-    129/131, 147/148, 166/167, 192/194); `src/Musio.Tests/MouseHookRecorderTests.cs` has
+    129/131, 147/148, 166/167, 192/194); `src/Mixtri.Tests/MouseHookRecorderTests.cs` has
     `Samples.Count`/`Clicks.Count` assertions scattered across ~13 lines (e.g. 131-132,
     186, 198, 257-258, 308, 314, 346, 376, 378, 403, 404, 431), not all of which are
     adjacent pairs. Correction from the original audit: it cited "11" and "8"

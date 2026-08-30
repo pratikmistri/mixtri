@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.PropertyPanes.TransitionPropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!--
+        Properties for a selected timeline boundary (TimelineControl's TransitionSelected /
+        TransitionRemoveRequested events, keyed by the incoming segment's Id).
+
+        Two states this view must be able to express distinctly (see TimelineSegment.InTransition):
+          - "Automatic" (Tag="Unset")  -> incoming.InTransition == null. Falls back to the legacy
+            500ms crossfade at a text-slide boundary, or a hard cut everywhere else.
+          - "Hard Cut" (Tag="None")   -> an EXPLICIT TransitionConfig { Type = None }, which
+            suppresses even the legacy fallback.
+        Everything else is a real dissolve/effect, picked in two steps (Family, then Variant)
+        rather than one 20-item list, so the picker stays scannable. EditorPage owns all the
+        editing logic and undo; this file is markup only.
+    -->
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <!-- Type: family first, then the specific effect within that family. -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Type" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="TransitionFamilyCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.Name="Transition family">
+                <ComboBoxItem Content="Automatic (Default)" Tag="Unset" />
+                <ComboBoxItem Content="Hard Cut (None)" Tag="None" />
+                <ComboBoxItem Content="Dissolve" Tag="Dissolve" />
+                <ComboBoxItem Content="Slide" Tag="Slide" />
+                <ComboBoxItem Content="Push" Tag="Push" />
+                <ComboBoxItem Content="Wipe" Tag="Wipe" />
+                <ComboBoxItem Content="Stylised" Tag="Stylised" />
+            </ComboBox>
+            <TextBlock
+                x:Name="TransitionAutomaticHint"
+                x:FieldModifier="public"
+                Style="{StaticResource PropertyHintStyle}"
+                Text="Not configured. Uses the 500ms default crossfade next to a text slide, or a hard cut everywhere else." />
+            <!-- Populated in code (its contents depend on the selected family) — see
+                 EditorPage.SyncTransitionVariantOptions. -->
+            <ComboBox
+                x:Name="TransitionVariantCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                Visibility="Collapsed"
+                AutomationProperties.Name="Transition variant" />
+        </StackPanel>
+
+        <!-- Duration: the dial only ever goes as far as the transition can actually run. -->
+        <StackPanel Spacing="6">
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="TransitionDurationSlider"
+                x:FieldModifier="public"
+                Header="Duration (seconds)"
+                Minimum="0.1" Maximum="2.0"
+                StepFrequency="0.05"
+                SnapsTo="StepValues"
+                AutomationProperties.Name="Transition duration" />
+            <TextBlock
+                x:Name="TransitionDurationClampHint"
+                x:FieldModifier="public"
+                Style="{StaticResource PropertyHintStyle}"
+                Visibility="Collapsed"
+                Text="Limited by a neighbouring segment's length — dragging further will not make the dissolve any longer." />
+        </StackPanel>
+
+        <!-- Easing -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Easing" Style="{StaticResource PropertyLabelStyle}" />
+            <ComboBox
+                x:Name="TransitionEasingCombo"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.Name="Transition easing">
+                <ComboBoxItem Content="Linear" Tag="Linear" />
+                <ComboBoxItem Content="Ease In" Tag="EaseIn" />
+                <ComboBoxItem Content="Ease Out" Tag="EaseOut" />
+                <ComboBoxItem Content="Ease In + Out" Tag="EaseInOut" />
+            </ComboBox>
+        </StackPanel>
+
+        <Button
+            x:Name="ApplyTransitionToAllButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Apply this type, duration and easing to every boundary on the timeline"
+            AutomationProperties.Name="Apply to all boundaries">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE8EE;" />
+                <TextBlock Text="Apply to All Boundaries" />
+            </StackPanel>
+        </Button>
+
+        <Button
+            x:Name="RemoveTransitionButton"
+            x:FieldModifier="public"
+            HorizontalAlignment="Stretch"
+            ToolTipService.ToolTip="Clear this boundary back to Automatic"
+            AutomationProperties.Name="Remove transition">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                <TextBlock Text="Remove Transition" />
+            </StackPanel>
+        </Button>
+    </StackPanel>
+</UserControl>

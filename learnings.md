@@ -10,7 +10,7 @@ agents do not have to load ~500 KB of history at the start of every task.
   encoding, WinUI flyout pitfalls, compositor coordinate model, zoom-segment time mapping,
   crash/freeze invariants). Read this at the start of every task.
 - **`learnings/archive-2026-H1.md`** — older half of the chronological, per-fix history
-  (consolidated entries through the single-file .musio project format work).
+  (consolidated entries through the single-file .mixtri project format work).
 - **`learnings/archive-2026-H2.md`** — newer half of the chronological, per-fix history
   (MP4-backed-editing regressions through the most recent entry). New entries are
   appended to the END of this file.

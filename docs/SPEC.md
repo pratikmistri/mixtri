@@ -1,7 +1,7 @@
-# Musio — Cinematic Screen Recorder for Windows
+# Mixtri — Cinematic Screen Recorder for Windows
 
 ## Problem Statement
-Windows Snipping Tool drops frames during screen recording, and OBS Studio consumes excessive memory. Musio aims to be a lightweight, native Windows screen recording tool that delivers a cinematic recording experience: smooth cursor effects, auto-zoom, customizable backgrounds, timeline editing, and professional export — all with zero frame drops.
+Windows Snipping Tool drops frames during screen recording, and OBS Studio consumes excessive memory. Mixtri aims to be a lightweight, native Windows screen recording tool that delivers a cinematic recording experience: smooth cursor effects, auto-zoom, customizable backgrounds, timeline editing, and professional export — all with zero frame drops.
 
 ## Tech Stack
 - **Framework**: WinUI 3 (Windows App SDK) — native C#, Fluent Design, minimal memory
@@ -10,14 +10,14 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
 - **2D Rendering**: Win2D (`Microsoft.Graphics.Win2D`) — GPU-accelerated Direct2D for timeline, cursor effects, canvas composition
 - **Video Encoding**: Media Foundation + `Windows.Media.Transcoding` for hardware-accelerated export (NVENC/QSV/AMF auto-detected)
 - **Composition**: Custom rendering pipeline via Direct3D11 interop for combining screen + cursor + zoom + background layers
-- **Storage**: Local SQLite (via `Microsoft.Data.Sqlite`) for project metadata, presets, region memory — **not used**; settings/presets/region memory live in `Windows.Storage.ApplicationData`, and projects are `.musio` packages
+- **Storage**: Local SQLite (via `Microsoft.Data.Sqlite`) for project metadata, presets, region memory — **not used**; settings/presets/region memory live in `Windows.Storage.ApplicationData`, and projects are `.mixtri` packages
 - **Audio**: `Windows.Media.Capture` / WASAPI for system audio + microphone
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                     Musio WinUI 3 App                   │
+│                     Mixtri WinUI 3 App                   │
 ├──────────┬──────────┬──────────┬────────────┬───────────┤
 │  Region  │ Capture  │ Timeline │  Composer  │  Export   │
 │ Selector │  Engine  │  Editor  │   Engine   │  Pipeline │
@@ -158,8 +158,8 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
 - ~~Filter: show only modifier combos or all keys~~
 
 ### F12: AI Captions / Subtitles
-> ⚠️ **Engine-only.** `Musio.Core/AI/*` is implemented and unit-tested, but nothing in
-> `Musio.App` calls it — there is no UI entry point, so this feature is not user-reachable.
+> ⚠️ **Engine-only.** `Mixtri.Core/AI/*` is implemented and unit-tested, but nothing in
+> `Mixtri.App` calls it — there is no UI entry point, so this feature is not user-reachable.
 - ~~On-device speech-to-text using Windows Speech Recognition~~ or Whisper.cpp
 - ~~Auto-generate SRT/VTT subtitle tracks~~
 - ~~Burn-in subtitles during export (customizable font, size, position, background)~~
@@ -181,10 +181,10 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
 ## Project Structure
 
 ```
-Musio/
-├── Musio.sln
+Mixtri/
+├── Mixtri.sln
 ├── src/
-│   ├── Musio.App/                     # WinUI 3 App (entry point, App.xaml)
+│   ├── Mixtri.App/                     # WinUI 3 App (entry point, App.xaml)
 │   │   ├── Views/                     # XAML pages
 │   │   │   ├── MainWindow.xaml        # Shell with navigation
 │   │   │   ├── RecordingPage.xaml     # Pre-recording setup UI
@@ -200,7 +200,7 @@ Musio/
 │   │   ├── Converters/               # Value converters
 │   │   └── Assets/                   # Icons, cursors, wallpapers
 │   │
-│   ├── Musio.Core/                    # Core logic library (.NET class library)
+│   ├── Mixtri.Core/                    # Core logic library (.NET class library)
 │   │   ├── Capture/
 │   │   │   ├── ScreenCaptureEngine.cs     # WGC integration
 │   │   │   ├── MouseHookRecorder.cs       # Low-level mouse hook
@@ -236,7 +236,7 @@ Musio/
 │   │       ├── AppSettings.cs             # App-wide settings
 │   │       └── RegionMemory.cs            # Remember last capture region
 │   │
-│   └── Musio.Tests/                   # Unit + integration tests
+│   └── Mixtri.Tests/                   # Unit + integration tests
 │       ├── CursorSmootherTests.cs
 │       ├── AutoZoomEngineTests.cs
 │       └── TimelineModelTests.cs
@@ -257,7 +257,7 @@ Musio/
 > Same legend as above: ~~struck through~~ = done, plain = outstanding, `⚠️` = partial.
 
 ### Phase 1: Project Foundation
-- ~~`setup-solution` — Create WinUI 3 solution with Musio.App, Musio.Core, Musio.Tests projects. Add NuGet packages: Microsoft.Graphics.Win2D, Microsoft.Data.Sqlite, CommunityToolkit.Mvvm~~ *(Sqlite dropped — see Tech Stack note)*
+- ~~`setup-solution` — Create WinUI 3 solution with Mixtri.App, Mixtri.Core, Mixtri.Tests projects. Add NuGet packages: Microsoft.Graphics.Win2D, Microsoft.Data.Sqlite, CommunityToolkit.Mvvm~~ *(Sqlite dropped — see Tech Stack note)*
 - ~~`app-shell` — Build MainWindow with NavigationView (Recording, Editor, Export, Settings pages). Implement MVVM infrastructure with CommunityToolkit.Mvvm~~
 - ~~`settings-infra` — Implement AppSettings using Windows.Storage.ApplicationData for persisting preferences, region memory, and presets~~
 
@@ -307,7 +307,7 @@ Musio/
 - Multi-recording append onto one timeline, with per-source zoom-keyframe mapping
 - Segment transitions (dissolve, wipe, slide, push, stylized)
 - Animated text slides and text overlays
-- `.musio` project packaging, file-type association, recent/open-projects page
+- `.mixtri` project packaging, file-type association, recent/open-projects page
 - Mini recording window + recording overlay, shell state machine
 - Media import (audio/video), audio playback engine with crossfades
 - Graphics device-loss recovery, diagnostics logging, crash hardening
@@ -324,11 +324,11 @@ Musio/
 
 4. **Hardware encoding**: Real-time capture uses HW encoder for temp file. Export also uses HW encoder with higher quality settings. Auto-detect: NVENC (NVIDIA) → QSV (Intel) → AMF (AMD) → CPU fallback.
 
-5. **Project file format**: A recording session produces a working folder under `%LOCALAPPDATA%\Musio\Sessions\session_*` (raw video MP4, cursor/keyboard data, audio tracks). A session is working state, not a deliverable, so the user's Videos folder only ever receives things they asked for: a saved `.musio` project or an exported MP4. Saving bundles the session into a single `.musio` file — a ZIP with a `manifest.json` plus stored media entries — so a project is one item in Explorer, portable, and re-openable for non-destructive editing. Compression is per entry: already-compressed media is stored verbatim, PCM audio and event logs are deflated.
+5. **Project file format**: A recording session produces a working folder under `%LOCALAPPDATA%\Mixtri\Sessions\session_*` (raw video MP4, cursor/keyboard data, audio tracks). A session is working state, not a deliverable, so the user's Videos folder only ever receives things they asked for: a saved `.mixtri` project or an exported MP4. Saving bundles the session into a single `.mixtri` file — a ZIP with a `manifest.json` plus stored media entries — so a project is one item in Explorer, portable, and re-openable for non-destructive editing. Compression is per entry: already-compressed media is stored verbatim, PCM audio and event logs are deflated.
 
 6. **Captured frames are a scratch buffer, not an archive**: `VideoWriter` writes one JPEG per frame during capture as a write-ahead buffer, then encodes `video.mp4` and deletes them as soon as finalization succeeds (and only then — if it fails they are the sole copy). Finalization transcodes to `video.mp4.partial` and moves it into place only after every check passes, then writes a `finalized.marker`; cleanup requires that marker, so an interrupted or pre-orientation-fix session keeps its frames. The editor and exporter read frames through `VideoFrameReader`, which prefers those JPEGs when present and otherwise decodes the MP4 via `MediaPlayer` frame-server mode. The MP4 is the durable master, which is what keeps a project editable long after its frames are gone. Its bitrate is set by the **Capture quality** setting (12/30/60 Mbps base at 1080p, scaled by pixel count), encoded with a ~1s GOP so scrubbing never rewinds far. Filmstrip thumbnails come from `MediaComposition.GetThumbnailsAsync` instead, because sparse access through a single-position decoder is an order of magnitude slower and contends with the preview.
 
-7. **Audio stays uncompressed**: Capture converts the WASAPI mix format down to 16-bit PCM, but no further. A/V alignment is derived from the first captured sample, and compressed codecs prepend encoder priming samples that would silently shift it; size is recovered by deflating the WAV inside the `.musio` package instead.
+7. **Audio stays uncompressed**: Capture converts the WASAPI mix format down to 16-bit PCM, but no further. A/V alignment is derived from the first captured sample, and compressed codecs prepend encoder priming samples that would silently shift it; size is recovered by deflating the WAV inside the `.mixtri` package instead.
 
 ---
 

@@ -28,17 +28,17 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Restore dependencies
-        run: dotnet restore src/Musio.Tests/Musio.Tests.csproj
+        run: dotnet restore src/Mixtri.Tests/Mixtri.Tests.csproj
 
       - name: Build
-        run: msbuild src/Musio.Tests/Musio.Tests.csproj /p:Configuration=Release /p:Platform=AnyCPU /t:Build /v:minimal
+        run: msbuild src/Mixtri.Tests/Mixtri.Tests.csproj /p:Configuration=Release /p:Platform=AnyCPU /t:Build /v:minimal
 
       - name: Run tests
-        run: dotnet test src/Musio.Tests/Musio.Tests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+        run: dotnet test src/Mixtri.Tests/Mixtri.Tests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: src/Musio.Tests/TestResults/*.trx
+          path: src/Mixtri.Tests/TestResults/*.trx

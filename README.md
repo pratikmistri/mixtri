@@ -1,10 +1,13 @@
-# Musio
+# Mixtri
 
 **Professional screen recording with cinematic cursor effects for Windows.**
 
-Musio is a screen recorder and editor optimized to run natively on Windows. Record your screen, add beautiful effects, and export polished videos — all from a native Windows app.
+Mixtri is a screen recorder and editor optimized to run natively on Windows. Record your screen, add beautiful effects, and export polished videos — all from a native Windows app.
 
-![Musio Screenshot](docs/screenshot.png)
+> **Formerly Musio.** The app was renamed to Mixtri; it is the same project, and the Store listing
+> updates in place. Projects saved as `.musio` still open — Mixtri saves new ones as `.mixtri`.
+
+![Mixtri Screenshot](docs/screenshot.png)
 
 ## Features
 
@@ -29,33 +32,33 @@ Musio is a screen recorder and editor optimized to run natively on Windows. Reco
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/musio.git
-cd musio
+git clone https://github.com/pratikmistri/mixtri.git
+cd mixtri
 
 # Restore and build
 dotnet restore
-dotnet build src\Musio.App\Musio.App.csproj
+dotnet build src\Mixtri.App\Mixtri.App.csproj
 
 # Run (requires Windows 10 1809+)
-dotnet run --project src\Musio.App\Musio.App.csproj
+dotnet run --project src\Mixtri.App\Mixtri.App.csproj
 ```
 
-Or open `Musio.sln` in Visual Studio and press **F5**.
+Or open `Mixtri.sln` in Visual Studio and press **F5**.
 
 ## Architecture
 
 ```
-musio/
+mixtri/
 ├── src/
-│   ├── Musio.App/          # WinUI 3 front-end (XAML pages, view models, controls)
+│   ├── Mixtri.App/          # WinUI 3 front-end (XAML pages, view models, controls)
 │   │   ├── Pages/          # RecordingPage, EditorPage, ExportPage, SettingsPage
 │   │   ├── Controls/       # PreviewCanvas, TimelineControl, RegionSelector
 │   │   ├── ViewModels/     # MVVM view models (CommunityToolkit.Mvvm)
 │   │   ├── Helpers/        # DialogHelper and UI utilities
 │   │   └── Services/       # App-level services
-│   └── Musio.Core/         # Platform-independent capture & editing engine
+│   └── Mixtri.Core/         # Platform-independent capture & editing engine
 ├── docs/                   # Documentation and assets
-└── Musio.sln               # Solution file
+└── Mixtri.sln               # Solution file
 ```
 
 ## License
@@ -63,7 +66,7 @@ musio/
 This project is licensed under the Apache License, Version 2.0 — see the [LICENSE](LICENSE) file
 for details.
 
-If you redistribute Musio or a derivative work, the license requires you to retain copyright and
+If you redistribute Mixtri or a derivative work, the license requires you to retain copyright and
 attribution notices and to include the attribution from the [NOTICE](NOTICE) file in your
 redistribution (e.g., in a NOTICE file, documentation, or a credits screen). Please keep the
 credit visible in your product's about/credits screen or documentation.

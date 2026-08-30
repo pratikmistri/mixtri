@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="Mixtri_App.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:Mixtri_App.Pages"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer Padding="16">
+        <StackPanel MaxWidth="800" HorizontalAlignment="Center" Spacing="8">
+            <StackPanel.ChildrenTransitions>
+                <EntranceThemeTransition FromVerticalOffset="40" />
+            </StackPanel.ChildrenTransitions>
+
+            <!-- Page header -->
+            <StackPanel Spacing="4" Margin="0,0,0,8">
+                <TextBlock
+                    FontSize="28"
+                    FontWeight="SemiBold"
+                    Text="Settings" />
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Text="Customize Mixtri to fit your workflow" />
+            </StackPanel>
+
+            <!-- General -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="General" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        x:Name="StartupModeCombo"
+                        Header="Open Mixtri in"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="StartupModeCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Choose whether Mixtri launches as the compact Mini toolbar or the full app window">
+                        <ComboBoxItem Content="Mini mode (compact toolbar)" Tag="Mini" />
+                        <ComboBoxItem Content="Full app window" Tag="Full" />
+                    </ComboBox>
+                    <ComboBox
+                        x:Name="ThemeSelector"
+                        Header="Theme"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="2"
+                        SelectionChanged="ThemeSelector_SelectionChanged"
+                        ToolTipService.ToolTip="Choose app color theme">
+                        <ComboBoxItem Content="Light" />
+                        <ComboBoxItem Content="Dark" />
+                        <ComboBoxItem Content="System default" />
+                    </ComboBox>
+                    <TextBox
+                        Header="Default save location"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="C:\Users\Videos\Mixtri"
+                        IsReadOnly="True"
+                        ToolTipService.ToolTip="Default folder for saved recordings" />
+                </StackPanel>
+            </Border>
+
+            <!-- Recording Defaults -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Recording Defaults" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        Header="Default FPS"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="0"
+                        ToolTipService.ToolTip="Default frame rate for new recordings">
+                        <ComboBoxItem Content="30 fps" />
+                        <ComboBoxItem Content="60 fps" />
+                    </ComboBox>
+                    <ComboBox
+                        Header="Default capture mode"
+                        HorizontalAlignment="Stretch"
+                        SelectedIndex="0"
+                        ToolTipService.ToolTip="Default screen capture mode">
+                        <ComboBoxItem Content="Full Screen" />
+                        <ComboBoxItem Content="Window" />
+                        <ComboBoxItem Content="Custom Region" />
+                    </ComboBox>
+                    <ComboBox
+                        x:Name="CaptureQualityCombo"
+                        Header="Capture quality"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="CaptureQualityCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Quality of the recording kept on disk for future edits. Higher settings preserve more detail through repeated exports, at the cost of disk space.">
+                        <ComboBoxItem Content="Balanced (12 Mbps base)" Tag="Balanced" />
+                        <ComboBoxItem Content="High fidelity (30 Mbps base)" Tag="HighFidelity" />
+                        <ComboBoxItem Content="Master (60 Mbps base)" Tag="Master" />
+                    </ComboBox>
+                </StackPanel>
+            </Border>
+
+            <!-- Export Defaults -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Export Defaults" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="16">
+                    <ComboBox
+                        x:Name="ExportResolutionCombo"
+                        Header="Maximum export resolution"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="ExportResolutionCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Caps export size; aspect ratio is always preserved. Smaller recordings are not upscaled.">
+                        <ComboBoxItem Content="720p (HD)" Tag="HD720" />
+                        <ComboBoxItem Content="1080p (Full HD)" Tag="HD1080" />
+                        <ComboBoxItem Content="1440p (QHD / 2K)" Tag="QHD" />
+                        <ComboBoxItem Content="2160p (4K UHD)" Tag="UHD4K" />
+                    </ComboBox>
+                    <ComboBox
+                        x:Name="ExportQualityCombo"
+                        Header="Export quality"
+                        HorizontalAlignment="Stretch"
+                        SelectionChanged="ExportQualityCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Controls H.264 bitrate. Higher quality = larger files.">
+                        <ComboBoxItem Content="Draft (5 Mbps base)" Tag="Draft" />
+                        <ComboBoxItem Content="Standard (10 Mbps base)" Tag="Standard" />
+                        <ComboBoxItem Content="High (20 Mbps base)" Tag="High" />
+                        <ComboBoxItem Content="Ultra (50 Mbps base)" Tag="Ultra" />
+                    </ComboBox>
+                </StackPanel>
+            </Border>
+
+            <!-- Audio -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Audio" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="16">
+                    <ToggleSwitch
+                        x:Name="SystemAudioToggle"
+                        Header="System Audio"
+                        IsOn="True"
+                        Toggled="SystemAudioToggle_Toggled"
+                        ToolTipService.ToolTip="Capture desktop audio output" />
+                    <ComboBox
+                        Header="System Audio Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default output"
+                        ToolTipService.ToolTip="Select audio output device" />
+                    <ToggleSwitch
+                        x:Name="MicToggle"
+                        Header="Microphone"
+                        Toggled="MicToggle_Toggled"
+                        ToolTipService.ToolTip="Record microphone input" />
+                    <ComboBox
+                        Header="Microphone Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default microphone"
+                        ToolTipService.ToolTip="Select microphone input device" />
+                </StackPanel>
+            </Border>
+
+            <!-- Webcam -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Webcam" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="16">
+                    <ToggleSwitch
+                        x:Name="WebcamToggle"
+                        Header="Enable Webcam"
+                        Toggled="WebcamToggle_Toggled"
+                        ToolTipService.ToolTip="Show webcam overlay in recording" />
+                    <ComboBox
+                        x:Name="WebcamDeviceCombo"
+                        Header="Webcam Device"
+                        HorizontalAlignment="Stretch"
+                        PlaceholderText="Default camera"
+                        DisplayMemberPath="Name"
+                        SelectionChanged="WebcamDeviceCombo_SelectionChanged"
+                        ToolTipService.ToolTip="Select webcam device" />
+                </StackPanel>
+            </Border>
+
+            <!-- Hotkeys -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="Hotkeys" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="12">
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Timeline-editing shortcuts are disabled while typing or adjusting a control."
+                        TextWrapping="Wrap" />
+
+                    <Grid ColumnSpacing="24" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" FontWeight="SemiBold" Text="Open Mini mode (global)" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" FontFamily="Consolas" Text="Win+Shift+X" />
+                        <TextBlock Grid.Row="1" Text="Split at playhead" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" FontFamily="Consolas" Text="S" />
+                        <TextBlock Grid.Row="2" Text="Play or pause" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" FontFamily="Consolas" Text="Space" />
+                        <TextBlock Grid.Row="3" Text="Delete selected segment" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" FontFamily="Consolas" Text="Delete" />
+                        <TextBlock Grid.Row="4" Text="Cut timeline selection" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+X" />
+                        <TextBlock Grid.Row="5" Text="Undo project edit" />
+                        <TextBlock Grid.Row="5" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Z" />
+                        <TextBlock Grid.Row="6" Text="Redo project edit" />
+                        <TextBlock Grid.Row="6" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Y" />
+                        <TextBlock Grid.Row="7" Text="Save project" />
+                        <TextBlock Grid.Row="7" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+S" />
+                        <TextBlock Grid.Row="8" Text="Save project as" />
+                        <TextBlock Grid.Row="8" Grid.Column="1" FontFamily="Consolas" Text="Ctrl+Shift+S" />
+                    </Grid>
+
+                    <InfoBar
+                        x:Name="MiniHotkeyInfoBar"
+                        IsOpen="True"
+                        IsClosable="False"
+                        Severity="Informational"
+                        Message="Win+Shift+X reveals Mini mode from any app; it never starts or stops recording." />
+                </StackPanel>
+            </Border>
+
+            <!-- About -->
+            <TextBlock
+                Margin="0,16,0,8"
+                FontSize="16"
+                FontWeight="SemiBold"
+                Text="About" />
+
+            <Border
+                Padding="16"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource SectionCardCornerRadius}">
+                <StackPanel Spacing="4">
+                    <TextBlock
+                        x:Name="AboutAppNameText"
+                        FontWeight="SemiBold"
+                        Text="Mixtri" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Version 1.4.1" />
+                    <TextBlock
+                        Margin="0,4,0,0"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Professional screen recording with cinematic cursor effects, auto-zoom, and beautiful backgrounds."
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

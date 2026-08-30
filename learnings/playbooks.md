@@ -18,9 +18,9 @@ caused repeated churn before it was settled; treat them as fixed conventions.
   (e.g. `C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe`).
 - If direct `& MSBuild.exe` is blocked by shell permissions, invoke it through a
   `[System.Diagnostics.Process]::Start()` wrapper with redirected stdout/stderr.
-- Standard build args: `Musio.App.csproj /restore /t:Build /p:Configuration=<Debug|Release> /p:Platform=<x64|ARM64>`.
+- Standard build args: `Mixtri.App.csproj /restore /t:Build /p:Configuration=<Debug|Release> /p:Platform=<x64|ARM64>`.
   Always include `/restore` — a bare `/t:Build` after deleting `bin/obj` fails NuGet restore.
-- **Clean rebuild = kill the running `Musio.App` process first, then delete `bin/obj`.**
+- **Clean rebuild = kill the running `Mixtri.App` process first, then delete `bin/obj`.**
   Locked DLLs make MSBuild `/t:Clean` fail silently (look for the PID in MSB3061 warnings).
 - After any XAML element rename/restructure, delete `bin/obj` to drop stale `.g.cs`
   (otherwise `COMException: Element not found` → blank page at runtime).
@@ -28,9 +28,9 @@ caused repeated churn before it was settled; treat them as fixed conventions.
   `DOTNET_ROLL_FORWARD=Major` to roll forward to the installed runtime. `dotnet test` also
   hits the same PriGen MSB4062 failure when it tries to BUILD, so build the test project
   with MSBuild first and then run
-  `dotnet test src\Musio.Tests\Musio.Tests.csproj --no-build -p:Platform=x64 -c Debug`.
+  `dotnet test src\Mixtri.Tests\Mixtri.Tests.csproj --no-build -p:Platform=x64 -c Debug`.
   The suite must stay green (currently ~1280 tests, 3 skipped).
-- **MSIX (unsigned, for Store):** `msbuild Musio.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
+- **MSIX (unsigned, for Store):** `msbuild Mixtri.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
 - **ALWAYS check the LIVE Store version before packaging, and bump past it.** The Store rejects a
   submission whose version equals one already published, and the in-repo manifest normally still
   holds the version that was last shipped — so packaging straight from a clean checkout produces
@@ -39,13 +39,16 @@ caused repeated churn before it was settled; treat them as fixed conventions.
   the 4th part must be 0 for the Store) and `SettingsPage.xaml`'s `Text="Version x.y.z"`.
 - **Verify the produced `.msix` rather than trusting the path**: open it as a zip and read the
   embedded `AppxManifest.xml` (`Identity` Name/Version/ProcessorArchitecture) and the PE machine
-  type of `Musio.App.exe` — the per-architecture output directories are easy to mix up, and a
+  type of `Mixtri.App.exe` — the per-architecture output directories are easy to mix up, and a
   wrong-arch payload is only caught by the Store days later. `AppxSignature.p7x` must be ABSENT.
   The `mspdbcmf.exe` warning (no symbols package) is expected on this host and does not block
   submission.
 - **Deploy/run locally:** `Remove-AppxPackage` the old registration BEFORE `Add-AppxPackage -Register <AppxManifest.xml>`
   (re-registering over deleted clean-build files fails silently). Launch with
   `Start-Process 'shell:AppsFolder\PratikMistri.Musio_9gph0n9984scy!App'` (NOT `explorer.exe`, which returns exit 1).
+  The PFN keeps the pre-rename `Musio` spelling on purpose: `Package.appxmanifest` deliberately
+  retains `Identity/@Name="PratikMistri.Musio"` so Store upgrades keep flowing to existing installs.
+  Only the user-visible display name is `Mixtri`. Do NOT "fix" this string to match the new app name.
 
 ## Playbook: DPI & capture coordinate transforms (region / window / monitor)
 

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.PropertyPanes.VideoPropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <!-- Shape -->
+        <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="WebcamShapeCombo"
+            x:FieldModifier="public"
+            Header="Shape"
+            HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="Circle" Tag="Circle" />
+            <ComboBoxItem Content="Square" Tag="RoundedRect" />
+        </ComboBox>
+
+        <!-- Border width -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Border Thickness" Style="{StaticResource PropertyLabelStyle}" />
+            <Slider
+                x:Name="WebcamBorderSlider"
+                x:FieldModifier="public"
+                Minimum="0"
+                Maximum="20"
+                StepFrequency="1"
+                Value="8" />
+        </StackPanel>
+
+        <!-- Mirror -->
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="WebcamMirrorToggle"
+            x:FieldModifier="public"
+            Header="Mirror" />
+
+        <!-- Per-segment fullscreen animation -->
+        <StackPanel x:Name="CameraFullscreenPanel" x:FieldModifier="public" Spacing="12" Visibility="Collapsed">
+            <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="CameraFullscreenToggle"
+                x:FieldModifier="public"
+                Header="Expand to full screen" />
+            <ComboBox HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="CameraFullscreenModeCombo"
+                x:FieldModifier="public"
+                Header="Animation"
+                HorizontalAlignment="Stretch"
+                Visibility="Collapsed">
+                <ComboBoxItem Content="Zoom out and back" Tag="Highlight" />
+                <ComboBoxItem Content="Start full screen, reveal video" Tag="Reveal" />
+            </ComboBox>
+            <TextBlock
+                x:Name="CameraFullscreenHint"
+                x:FieldModifier="public"
+                Text="The selected camera segment grows to fill the screen, holds, then shrinks back."
+                Style="{StaticResource PropertyHintStyle}" />
+            <Button
+                x:Name="CameraDeleteButton"
+                x:FieldModifier="public"
+                HorizontalAlignment="Stretch"
+                ToolTipService.ToolTip="Delete the selected camera segment (Del)">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                    <TextBlock Text="Delete camera segment" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

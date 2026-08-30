@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:uap6="http://schemas.microsoft.com/appx/manifest/uap/windows10/6"
+  IgnorableNamespaces="uap rescap uap6">
+
+  <!--
+    Identity/@Name is deliberately still "PratikMistri.Musio" after the rename to Mixtri, and
+    must NOT be "corrected" to match the new name. Windows and the Store key an installed app on
+    its identity, which is never shown to the user: changing it would publish a SECOND, unrelated
+    listing that existing installs do not upgrade to, abandoning their ratings and reviews. The
+    user-visible name lives in Properties/DisplayName and VisualElements/@DisplayName below.
+    Publisher is likewise untouched, so the package family name stays
+    PratikMistri.Musio_9gph0n9984scy (the suffix hashes Publisher, not Name) and every
+    shell:AppsFolder launch string in learnings/ remains correct.
+  -->
+  <Identity
+    Name="PratikMistri.Musio"
+    Publisher="CN=DB824FDD-FEC0-4A79-9296-AFAF43C81090"
+    Version="1.4.1.0" />
+
+  <Properties>
+    <DisplayName>Mixtri</DisplayName>
+    <PublisherDisplayName>Pratik Mistri</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26226.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+      Executable="$targetnametoken$.exe"
+      EntryPoint="$targetentrypoint$">
+      <uap:VisualElements
+        DisplayName="Mixtri"
+        Description="Professional screen recording with cinematic cursor effects, auto-zoom, and beautiful backgrounds"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- Makes a project one item in Explorer: a .mixtri file opens straight
+             into the editor instead of exposing a session folder.
+
+             Both extensions are registered. .musio is the pre-rename format and is byte-identical
+             to .mixtri, so projects users already saved keep opening by double-click; the app only
+             ever WRITES .mixtri (see MixtriPackage.FileExtension). The association's Name attribute
+             stays "musioproject" for the same reason Identity does — it is an internal ProgId that
+             the shell has already registered against existing files, and renaming it would drop
+             those files' icons and open-with entries. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="musioproject">
+            <uap:DisplayName>Mixtri Project</uap:DisplayName>
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.mixtri</uap:FileType>
+              <uap:FileType>.musio</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <uap6:Capability Name="graphicsCapture" />
+    <DeviceCapability Name="microphone" />
+    <DeviceCapability Name="webcam" />
+  </Capabilities>
+</Package>

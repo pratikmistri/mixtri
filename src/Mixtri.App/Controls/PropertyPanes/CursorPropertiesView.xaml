@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Mixtri_App.Controls.PropertyPanes.CursorPropertiesView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <UserControl.Resources>
+        <!-- Color swatch radio: a filled circle that grows an accent selection ring when
+             checked. The swatch color comes from the RadioButton's Background. -->
+        <Style x:Key="CursorColorSwatchStyle" TargetType="RadioButton">
+            <Setter Property="MinWidth" Value="0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid>
+                            <Ellipse Width="28" Height="28"
+                                     Fill="{TemplateBinding Background}"
+                                     Stroke="{ThemeResource CardStrokeColorDefaultBrush}"
+                                     StrokeThickness="1" />
+                            <Ellipse x:Name="SelectionRing" Width="34" Height="34"
+                                     Stroke="{ThemeResource AccentFillColorDefaultBrush}"
+                                     StrokeThickness="2" Visibility="Collapsed" />
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CheckStates">
+                                    <VisualState x:Name="Checked">
+                                        <VisualState.Setters>
+                                            <Setter Target="SelectionRing.Visibility" Value="Visible" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Unchecked" />
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <StackPanel Spacing="20" Margin="0,14,0,18">
+
+        <!-- Cursor type: Mouse / Touch / Hidden -->
+        <StackPanel Spacing="6">
+            <TextBlock Text="Type" Style="{StaticResource PropertyLabelStyle}" />
+            <StackPanel Spacing="2">
+                <RadioButton
+                    x:Name="CursorTypeMouse"
+                    x:FieldModifier="public"
+                    Content="Mouse"
+                    GroupName="CursorType" />
+                <RadioButton
+                    x:Name="CursorTypeTouch"
+                    x:FieldModifier="public"
+                    Content="Touch"
+                    GroupName="CursorType" />
+                <RadioButton
+                    x:Name="CursorTypeHidden"
+                    x:FieldModifier="public"
+                    Content="Hidden"
+                    GroupName="CursorType" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Size slider -->
+        <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="CursorSizeSlider"
+            x:FieldModifier="public"
+            Header="Size"
+            Minimum="1"
+            Maximum="6"
+            StepFrequency="0.25" />
+
+        <!-- Tilt toggle (mouse cursor only) -->
+        <ToggleSwitch HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+            x:Name="CursorTiltToggle"
+            x:FieldModifier="public"
+            Header="Tilt" />
+
+        <!-- Reposition the cursor at the playhead. Authors a cursor anchor: the recorded
+             path is offset around that moment and eases back into the recording, so the
+             rest of the movement is preserved. -->
+        <StackPanel x:Name="CursorAnchorSection" x:FieldModifier="public" Spacing="6">
+            <TextBlock Text="Position" Style="{StaticResource PropertyLabelStyle}" />
+            <Button
+                x:Name="CursorAnchorEditButton"
+                x:FieldModifier="public"
+                Content="Reposition cursor"
+                HorizontalAlignment="Stretch"
+                ToolTipService.ToolTip="Move the playhead to the moment you want to change, then drag the cursor in the preview. The rest of the recorded movement is kept." />
+            <TextBlock
+                x:Name="CursorAnchorUnavailableText"
+                x:FieldModifier="public"
+                Visibility="Collapsed"
+                TextWrapping="Wrap"
+                FontSize="12"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
+        <!-- Color presets -->
+        <StackPanel x:Name="CursorColorSection" x:FieldModifier="public" Spacing="6">
+            <TextBlock Text="Color" Style="{StaticResource PropertyLabelStyle}" />
+            <StackPanel x:Name="CursorColorPanel" x:FieldModifier="public" Orientation="Horizontal" Spacing="8">
+                <RadioButton GroupName="CursorColor" Tag="#FFFFFF" Background="White"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="White" />
+                <RadioButton GroupName="CursorColor" Tag="#000000" Background="Black"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="Black" />
+                <RadioButton GroupName="CursorColor" Tag="#FFD600" Background="#FFD600"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="Yellow" />
+                <RadioButton GroupName="CursorColor" Tag="#FF3B30" Background="#FF3B30"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="Red" />
+                <RadioButton GroupName="CursorColor" Tag="#007AFF" Background="#007AFF"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="Blue" />
+                <RadioButton GroupName="CursorColor" Tag="#34C759" Background="#34C759"
+                             Style="{StaticResource CursorColorSwatchStyle}"
+                             AutomationProperties.Name="Green" />
+            </StackPanel>
+        </StackPanel>
+    </StackPanel>
+</UserControl>
