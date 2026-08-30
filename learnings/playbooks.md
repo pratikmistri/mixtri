@@ -178,6 +178,15 @@ reveals:
 
 ## Playbook: Crash / freeze hardening invariants
 
+- **Do NOT add a `CanvasControl` for anything XAML can draw.** Every canvas is one more
+  surface that must survive a GPU device removal, and the app-wide blank-editor failure is
+  exactly what happens when one does not come back — while plain XAML keeps rendering right
+  through the loss. This has been decided twice: the per-track zoom/cursor bands were folded
+  into `VideoTrackCanvas` specifically to add ZERO canvases, and the video/zoom/mouse band
+  captions were re-done as positioned `FontIcon`/`TextBlock` rows after shipping as a tenth
+  canvas. Text, icons and chrome go in XAML positioned from the canvas's own geometry
+  helpers (`TrackBandBounds`); only pixels that must interleave with drawn content earn a
+  canvas.
 - **Every `CanvasControl` MUST subscribe `CreateResources` and rebuild on
   `CanvasCreateResourcesReason.NewDevice`.** A `CanvasControl` recovers from GPU device loss
   *internally and silently* — it builds a replacement device and raises `CreateResources`;

@@ -40,16 +40,13 @@
         <!-- Track labels -->
         <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
         <!-- The video row is a STACK of bands (video / zoom / cursor per track), so its label
-             cannot be a single static TextBlock: it is drawn with the same band geometry the
-             canvas next to it uses, otherwise the captions drift out of their lanes the moment
-             a track is added or the drop-hint lane opens. -->
+             cannot be a single static TextBlock. The captions are plain XAML positioned from
+             the same band geometry the canvas next to it draws with — deliberately NOT a
+             CanvasControl: every extra CanvasControl multiplies the silent device-loss hazard
+             the crash playbook exists for, and XAML keeps rendering when a GPU loss has
+             blanked every canvas in the window. -->
         <Border Grid.Row="1" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="0">
-            <canvas:CanvasControl
-                x:Name="VideoTrackLabelCanvas"
-                ClearColor="Transparent"
-                Draw="VideoTrackLabelCanvas_Draw"
-                IsHitTestVisible="False"
-                AutomationProperties.AccessibilityView="Raw" />
+            <Canvas x:Name="VideoTrackLabels" IsHitTestVisible="False" />
         </Border>
         <Border x:Name="CameraTrackLabel" Grid.Row="2" Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorSecondaryBrush}" Padding="4,0">
             <TextBlock Text="Camera" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="11" VerticalAlignment="Center" />
