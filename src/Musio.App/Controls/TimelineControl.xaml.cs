@@ -1572,10 +1572,16 @@ public sealed partial class TimelineControl : UserControl
     private const double TrackLabelInsetX = 5;
 
     /// <summary>
-    /// A band shorter than this cannot show a caption legibly, so it is skipped — this is what
-    /// keeps the drop-hint lane (which eases up from zero height and stands for a track that
-    /// does not exist yet) from flashing a half-clipped label while it opens.
+    /// Legibility floor: a band shorter than this cannot fit the 12px icon without clipping
+    /// it, so it is left uncaptioned rather than half-drawn.
     /// </summary>
+    /// <remarks>
+    /// A guard, not a routine path. The drop-hint lane — the one band that really does ease
+    /// up from zero height — is never captioned at all, since the loop covers only the real
+    /// tracks. What this floor protects against is that band heights are derived and animated
+    /// (<see cref="VideoBandHeightFor"/> eases the base band while the hint lane opens), so a
+    /// pass landing mid-animation must not leave a clipped caption behind.
+    /// </remarks>
     private const float TrackLabelMinBandHeight = 14f;
 
     /// <summary>
