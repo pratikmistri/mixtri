@@ -82,6 +82,8 @@ public sealed class WsolaTimeStretcher
 
     /// <summary>Frames currently held in <see cref="_buffer"/>.</summary>
     private int _frames;
+    private int _head;
+    internal int CompactionCount { get; private set; }
 
     /// <summary>Tail of the previously emitted grain: the template the next grain matches.</summary>
     private readonly float[] _template;
@@ -261,7 +263,7 @@ public sealed class WsolaTimeStretcher
         int available = Math.Max(0, _frames - _skipDebt);
         int tail = Math.Min(available, (int)Math.Round(available / _speed));
         if (tail > 0)
-            writer(_buffer.AsSpan(_skipDebt * _channels, tail * _channels));
+            writer(_buffer.AsSpan((_head + _skipDebt) * _channels, tail * _channels));
 
         Reset();
     }
@@ -270,6 +272,7 @@ public sealed class WsolaTimeStretcher
     public void Reset()
     {
         _frames = 0;
+        _head = 0;
         _hopRemainder = 0;
         _skipDebt = 0;
         _partialFrameLength = 0;
@@ -295,8 +298,8 @@ public sealed class WsolaTimeStretcher
         // real waveform instead of fading up out of silence.
         if (!_primed)
         {
-            _buffer.AsSpan(offset * _channels, _overlap * _channels).CopyTo(_template);
-            _mono.AsSpan(offset, _overlap).CopyTo(_templateMono);
+            _buffer.AsSpan((_head + offset) * _channels, _overlap * _channels).CopyTo(_template);
+            _mono.AsSpan(_head + offset, _overlap).CopyTo(_templateMono);
             _primed = true;
         }
 
@@ -305,7 +308,7 @@ public sealed class WsolaTimeStretcher
         for (int frame = 0; frame < _overlap; frame++)
         {
             float w = _fadeIn[frame];
-            int src = (offset + frame) * _channels;
+            int src = (_head + offset + frame) * _channels;
             int dst = frame * _channels;
             for (int c = 0; c < _channels; c++)
                 _blend[dst + c] = (_template[dst + c] * (1f - w)) + (_buffer[src + c] * w);
@@ -315,9 +318,9 @@ public sealed class WsolaTimeStretcher
         // Flat region: the middle of the grain, untouched.
         int flatFrames = _sequence - (2 * _overlap);
         if (flatFrames > 0)
-            writer(_buffer.AsSpan((offset + _overlap) * _channels, flatFrames * _channels));
+            writer(_buffer.AsSpan((_head + offset + _overlap) * _channels, flatFrames * _channels));
 
-        int templateStart = offset + _sequence - _overlap;
+        int templateStart = _head + offset + _sequence - _overlap;
         _buffer.AsSpan(templateStart * _channels, _overlap * _channels).CopyTo(_template);
         _mono.AsSpan(templateStart, _overlap).CopyTo(_templateMono);
 
@@ -388,7 +391,7 @@ public sealed class WsolaTimeStretcher
 
         for (int i = 0; i < _overlap; i++)
         {
-            float value = mono[offset + i];
+            float value = mono[_head + offset + i];
             dot += template[i] * value;
             energy += (double)value * value;
         }
@@ -419,7 +422,14 @@ public sealed class WsolaTimeStretcher
             return;
         }
 
-        int needed = (_frames + newFrames) * _channels;
+        if ((_head + _frames + newFrames) * _channels > _buffer.Length && _head > 0)
+        {
+            Array.Copy(_buffer, _head * _channels, _buffer, 0, _frames * _channels);
+            Array.Copy(_mono, _head, _mono, 0, _frames);
+            _head = 0;
+            CompactionCount++;
+        }
+        int needed = (_head + _frames + newFrames) * _channels;
         if (_buffer.Length < needed)
         {
             int capacity = Math.Max(needed, _buffer.Length * 2);
@@ -427,7 +437,7 @@ public sealed class WsolaTimeStretcher
             Array.Resize(ref _mono, capacity / _channels);
         }
 
-        int written = _frames * _channels;
+        int written = (_head + _frames) * _channels;
         if (carried > 0)
         {
             _partialFrame.AsSpan(0, carried).CopyTo(_buffer.AsSpan(written));
@@ -443,10 +453,10 @@ public sealed class WsolaTimeStretcher
 
         for (int frame = 0; frame < newFrames; frame++)
         {
-            int baseIndex = (_frames + frame) * _channels;
+            int baseIndex = (_head + _frames + frame) * _channels;
             float sum = 0;
             for (int c = 0; c < _channels; c++) sum += _buffer[baseIndex + c];
-            _mono[_frames + frame] = sum;
+            _mono[_head + _frames + frame] = sum;
         }
 
         _frames += newFrames;
@@ -459,13 +469,12 @@ public sealed class WsolaTimeStretcher
         if (frames >= _frames)
         {
             _frames = 0;
+            _head = 0;
             return;
         }
 
-        int remaining = _frames - frames;
-        Array.Copy(_buffer, frames * _channels, _buffer, 0, remaining * _channels);
-        Array.Copy(_mono, frames, _mono, 0, remaining);
-        _frames = remaining;
+        _head += frames;
+        _frames -= frames;
     }
 
     private static int FramesFor(int sampleRate, double milliseconds) =>

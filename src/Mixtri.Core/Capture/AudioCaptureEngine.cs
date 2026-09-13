@@ -274,17 +274,27 @@ public sealed class AudioCaptureEngine : IDisposable
 
     private static void StopAndDisposeCapture(IDisposable? capture, Pcm16CaptureWriter? writer)
     {
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnStopped(object? sender, StoppedEventArgs args) => stopped.TrySetResult();
+        var wasapi = capture as WasapiCapture;
+        if (wasapi is not null) wasapi.RecordingStopped += OnStopped;
         try
         {
-            if (capture is WasapiLoopbackCapture loopback)
-                loopback.StopRecording();
-            else if (capture is WasapiCapture wasapi)
+            if (wasapi is not null)
+            {
                 wasapi.StopRecording();
+                if (!stopped.Task.Wait(TimeSpan.FromSeconds(2)))
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Audio", "Capture stop timed out; disposing endpoint.");
+            }
         }
-        catch { /* best-effort stop */ }
-
-        // Brief wait for final data callbacks to drain
-        Thread.Sleep(200);
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Audio", $"Capture stop failed: {ex.Message}");
+        }
+        finally
+        {
+            if (wasapi is not null) wasapi.RecordingStopped -= OnStopped;
+        }
 
         SafeDisposeWriter(writer);
         try { capture?.Dispose(); } catch { /* best-effort */ }
