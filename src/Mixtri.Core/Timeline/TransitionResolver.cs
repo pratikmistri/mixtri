@@ -134,26 +134,26 @@ public static class TransitionResolver
         bool ignoreExplicitConfig,
         TimeSpan? legacyDuration)
     {
-        var segments = timeline.BaseSegments.ToList();
-
-        int index = -1;
-        for (int i = 0; i < segments.Count; i++)
+        TimelineSegment? outgoing = null;
+        TimelineSegment? incoming = null;
+        foreach (var segment in timeline.Segments)
         {
-            if (outputTime >= segments[i].Start && outputTime < segments[i].End)
+            if (segment.TrackIndex != TimelineModel.BaseTrackIndex) continue;
+            if (outputTime >= segment.Start && outputTime < segment.End)
             {
-                index = i;
+                incoming = segment;
                 break;
             }
+            outgoing = segment;
         }
 
         // No current segment, or it's the very first one (nothing to dissolve from).
-        if (index <= 0)
+        if (incoming is null || outgoing is null)
             return TransitionResolution.None;
 
-        var incoming = segments[index];
-        var outgoing = segments[index - 1];
-
-        TransitionConfig config;
+        TransitionType type;
+        TimeSpan configuredDuration;
+        TransitionEasing easing;
         bool isLegacyFallback;
         if (!ignoreExplicitConfig && incoming.InTransition is { } explicitConfig)
         {
@@ -162,7 +162,9 @@ public static class TransitionResolver
             if (explicitConfig.Type == TransitionType.None)
                 return TransitionResolution.None;
 
-            config = explicitConfig;
+            type = explicitConfig.Type;
+            configuredDuration = explicitConfig.Duration;
+            easing = explicitConfig.Easing;
             isLegacyFallback = false;
         }
         else
@@ -174,24 +176,21 @@ public static class TransitionResolver
             if (incoming is not TextSlideSegment && outgoing is not TextSlideSegment)
                 return TransitionResolution.None;
 
-            config = new TransitionConfig
-            {
-                Type = TransitionType.CrossFade,
+            type = TransitionType.CrossFade;
 #pragma warning disable CS0618 // Intentional: the fallback duration must stay pinned to
                                 // SlideTransitions.DefaultDuration exactly, even though that type
                                 // is otherwise obsolete — this is the one place the dependency is
                                 // permanent, not a leftover from an unfinished migration.
-                Duration = legacyDuration ?? SlideTransitions.DefaultDuration,
+            configuredDuration = legacyDuration ?? SlideTransitions.DefaultDuration;
 #pragma warning restore CS0618
-                Easing = TransitionEasing.Linear,
-            };
+            easing = TransitionEasing.Linear;
             isLegacyFallback = true;
         }
 
         var duration = Half(incoming.Duration) < Half(outgoing.Duration)
             ? Half(incoming.Duration)
             : Half(outgoing.Duration);
-        duration = duration < config.Duration ? duration : config.Duration;
+        duration = duration < configuredDuration ? duration : configuredDuration;
         if (maxDurationOverride is { } max && max < duration)
             duration = max;
         if (duration <= TimeSpan.Zero)
@@ -205,7 +204,7 @@ public static class TransitionResolver
         // integer tick counts, so this avoids the double-rounding of converting each to seconds
         // first, and keeps the window's exclusive upper bound exact at its final tick.
         double rawProgress = Math.Clamp((double)local.Ticks / duration.Ticks, 0, 1);
-        double easedProgress = Ease(config.Easing, rawProgress);
+        double easedProgress = Ease(easing, rawProgress);
 
         // An EXPLICITLY configured transition rolls the outgoing segment past its own cut point
         // for the length of the dissolve — see the OutgoingLocalOffset doc comment.
@@ -223,7 +222,7 @@ public static class TransitionResolver
 
         return new TransitionResolution(
             Active: true,
-            Type: config.Type,
+            Type: type,
             Duration: duration,
             RawProgress: rawProgress,
             EasedProgress: easedProgress,
