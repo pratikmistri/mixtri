@@ -32,14 +32,22 @@ public record SubtitleStyle
 
 /// <summary>
 /// Renders subtitle text onto Win2D <see cref="CanvasDrawingSession"/> frames
-/// during video composition.
+/// during video composition. Dispose after composition to release cached text resources.
 /// </summary>
-public class SubtitleBurner
+public class SubtitleBurner : IDisposable
 {
     private readonly List<SubtitleSegment> _segments;
     private readonly SubtitleStyle _style;
     private readonly Color _textColor;
     private readonly Color _bgColor;
+    private CanvasTextFormat? _textFormat;
+    private CanvasTextLayout? _textLayout;
+    private CanvasDevice? _layoutDevice;
+    private (string Text, int Width, int Height) _layoutKey;
+    private bool _disposed;
+
+    internal int TextFormatCreationCount { get; private set; }
+    internal int TextLayoutCreationCount { get; private set; }
 
     public SubtitleBurner(List<SubtitleSegment> segments, SubtitleStyle style)
     {
@@ -62,24 +70,18 @@ public class SubtitleBurner
         int canvasWidth,
         int canvasHeight)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(session);
 
         var current = FindActiveSegment(timeSeconds);
         if (current is null)
-            return;
-
-        using var textFormat = new CanvasTextFormat
         {
-            FontFamily = _style.FontFamily,
-            FontSize = _style.FontSize,
-            HorizontalAlignment = CanvasHorizontalAlignment.Center,
-            WordWrapping = CanvasWordWrapping.Wrap
-        };
+            ReleaseLayout();
+            return;
+        }
 
         // Measure the text to size the background rectangle
-        var maxTextWidth = canvasWidth - (_style.PaddingHorizontal * 4);
-        using var textLayout = new CanvasTextLayout(
-            session, current.Text, textFormat, maxTextWidth, canvasHeight);
+        var textLayout = GetTextLayout(session, current.Text, canvasWidth, canvasHeight);
 
         var textWidth = (float)textLayout.LayoutBounds.Width;
         var textHeight = (float)textLayout.LayoutBounds.Height;
@@ -101,7 +103,48 @@ public class SubtitleBurner
     private SubtitleSegment? FindActiveSegment(double timeSeconds)
     {
         var ts = TimeSpan.FromSeconds(timeSeconds);
-        return _segments.FirstOrDefault(s => ts >= s.Start && ts < s.End);
+        foreach (var segment in _segments)
+        {
+            if (ts >= segment.Start && ts < segment.End) return segment;
+        }
+        return null;
+    }
+
+    private CanvasTextLayout GetTextLayout(CanvasDrawingSession session, string text, int width, int height)
+    {
+        var key = (text, width, height);
+        var device = session.Device;
+        if (_textLayout is not null && _layoutKey == key && _layoutDevice == device)
+            return _textLayout;
+
+        if (_textFormat is null)
+        {
+            var format = new CanvasTextFormat();
+            try
+            {
+                format.FontFamily = _style.FontFamily;
+                format.FontSize = _style.FontSize;
+                format.HorizontalAlignment = CanvasHorizontalAlignment.Center;
+                format.WordWrapping = CanvasWordWrapping.Wrap;
+            }
+            catch
+            {
+                format.Dispose();
+                throw;
+            }
+            _textFormat = format;
+            TextFormatCreationCount++;
+        }
+
+        var replacement = new CanvasTextLayout(
+            session, text, _textFormat, width - (_style.PaddingHorizontal * 4), height);
+        var previous = _textLayout;
+        _textLayout = replacement;
+        _layoutKey = key;
+        _layoutDevice = device;
+        TextLayoutCreationCount++;
+        previous?.Dispose();
+        return replacement;
     }
 
     private float CalculateY(int canvasHeight, float bgHeight) => _style.Position switch
@@ -140,5 +183,24 @@ public class SubtitleBurner
         {
             return Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
         }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        ReleaseLayout();
+        _textFormat?.Dispose();
+        _textFormat = null;
+        GC.SuppressFinalize(this);
+    }
+
+    private void ReleaseLayout()
+    {
+        var layout = _textLayout;
+        _textLayout = null;
+        _layoutDevice = null;
+        _layoutKey = default;
+        layout?.Dispose();
     }
 }

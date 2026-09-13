@@ -22,6 +22,9 @@ public class TextSlideRenderer : IDisposable
     private readonly CanvasDevice _device;
     private readonly AnimatedTextEngine _textEngine;
     private bool _disposed;
+    private CanvasTextFormat? _textFormat;
+    private (string Text, string Font, double Size, bool Bold, bool Italic, SlideTextAlignment Alignment, int W, int H) _textKey;
+    private double _textHeight;
 
     // Image background cache
     private CanvasBitmap? _bgImage;
@@ -55,13 +58,23 @@ public class TextSlideRenderer : IDisposable
         if (!drawText)
             return target;
 
-        using var format = AnimatedTextEngine.CreateFormat(
-            slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
-            ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
+        var key = (slide.Text, slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+            slide.TextAlignment, width, height);
+        if (_textFormat is null || _textKey != key)
+        {
+            _textFormat?.Dispose();
+            _textFormat = null;
+            _textHeight = MeasureTextHeight(slide, width * 0.84, height * 0.8);
+            _textFormat = AnimatedTextEngine.CreateFormat(
+                slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+                ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
+            _textKey = key;
+        }
+        double boxW = width * 0.84;
+        var rect = new Rect(slide.TextX * width - boxW / 2,
+            slide.TextY * height - _textHeight / 2, boxW, _textHeight);
 
-        var rect = ComputeTextRect(slide, width, height);
-
-        _textEngine.DrawAnimatedText(ds, slide.Text, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
+        _textEngine.DrawAnimatedText(ds, slide.Text, _textFormat, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
             slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
             TextAnimationWindow.FromSlide(slide));
 
@@ -367,6 +380,7 @@ public class TextSlideRenderer : IDisposable
         _disposed = true;
         _bgImage?.Dispose();
         _gradientCache?.Dispose();
+        _textFormat?.Dispose();
         // The engine owns a cached scratch render target for its blurred-text passes,
         // so it has to be released with the renderer that created it.
         _textEngine.Dispose();

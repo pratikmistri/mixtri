@@ -55,7 +55,14 @@ public class WebcamCompositor : IDisposable
     // Cached GPU resources — invalidated when style or canvas size changes
     private CanvasGeometry? _cachedClipGeometry;
     private CanvasRenderTarget? _cachedShadow;
+    private Vector2 _shadowOrigin;
+    private CanvasDevice? _cacheDevice;
+    private bool _cacheValid;
     private (Rect dest, float radius, int canvasW, int canvasH, bool shadow) _cacheKey;
+    internal int CacheBuildCount { get; private set; }
+    internal Windows.Graphics.SizeInt32 ShadowSize => _cachedShadow is { } shadow
+        ? new() { Width = (int)shadow.SizeInPixels.Width, Height = (int)shadow.SizeInPixels.Height }
+        : default;
 
     public WebcamCompositor(WebcamOverlayStyle style)
     {
@@ -67,7 +74,9 @@ public class WebcamCompositor : IDisposable
     /// </summary>
     public void UpdateStyle(WebcamOverlayStyle style)
     {
-        _style = style ?? throw new ArgumentNullException(nameof(style));
+        ArgumentNullException.ThrowIfNull(style);
+        if (_style == style) return;
+        _style = style;
         InvalidateCache();
     }
 
@@ -116,7 +125,7 @@ public class WebcamCompositor : IDisposable
 
         // Ensure cached resources are valid for current layout
         var key = (destRect, layout.CornerRadius, canvasWidth, canvasHeight, layout.ShadowAlpha > 0f);
-        if (_cachedClipGeometry is null || _cacheKey != key)
+        if (!_cacheValid || _cachedClipGeometry is null || _cacheKey != key || _cacheDevice != session.Device)
         {
             RebuildCache(session.Device, destRect, layout.CornerRadius, layout.ShadowAlpha > 0f);
             _cacheKey = key;
@@ -129,7 +138,7 @@ public class WebcamCompositor : IDisposable
         // Optional shadow behind the overlay (drawn from cache, faded out as it grows)
         if (layout.ShadowAlpha > 0f && _cachedShadow is not null)
         {
-            session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY),
+            session.DrawImage(_cachedShadow, _shadowOrigin + new Vector2(0, ShadowOffsetY),
                 _cachedShadow.Bounds, layout.ShadowAlpha * _overlayOpacity);
         }
 
@@ -166,16 +175,18 @@ public class WebcamCompositor : IDisposable
     private void RebuildCache(CanvasDevice device, Rect dest, float radius, bool shadowEnabled)
     {
         InvalidateCache();
+        _cacheDevice = device;
+        CacheBuildCount++;
         _cachedClipGeometry = CreateClipGeometry(device, dest, radius);
 
         if (shadowEnabled)
         {
             // Pad all edges so the shadow blur is never clipped near a canvas edge.
-            float pad = ShadowBlurAmount + 1;
-            float rtW = (float)dest.X + (float)dest.Width + pad + Math.Max(pad, ShadowBlurAmount * 2);
-            float rtH = (float)dest.Y + (float)dest.Height + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
-            rtW = Math.Max(rtW, (float)dest.Width + pad * 2);
-            rtH = Math.Max(rtH, (float)dest.Height + pad * 2 + ShadowOffsetY);
+            float pad = ShadowBlurAmount * 3 + 2;
+            _shadowOrigin = new Vector2(
+                MathF.Floor((float)dest.X - pad), MathF.Floor((float)dest.Y - pad));
+            float rtW = MathF.Ceiling((float)dest.Right + pad) - _shadowOrigin.X;
+            float rtH = MathF.Ceiling((float)dest.Bottom + pad) - _shadowOrigin.Y;
             _cachedShadow = Win2DUtils.CreateRenderTarget(device, rtW, rtH, 96, "webcam shadow");
 
             using var clipGeometry = CreateClipGeometry(device, dest, radius);
@@ -197,13 +208,16 @@ public class WebcamCompositor : IDisposable
             using (var ds = _cachedShadow.CreateDrawingSession())
             {
                 ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
+                ds.Transform = Matrix3x2.CreateTranslation(-_shadowOrigin);
                 ds.DrawImage(shadowEffect);
             }
         }
+        _cacheValid = true;
     }
 
     private void InvalidateCache()
     {
+        _cacheValid = false;
         _cachedClipGeometry?.Dispose();
         _cachedClipGeometry = null;
         _cachedShadow?.Dispose();
