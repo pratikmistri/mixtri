@@ -1,3 +1,4 @@
+using System.Numerics;
 using NAudio.Wave;
 
 namespace Mixtri.Core.Audio;
@@ -95,6 +96,8 @@ public readonly record struct WaveformWindow(
 /// </summary>
 public static class AudioWaveformGenerator
 {
+    internal const int MaximumReadSampleValues = 64 * 1024;
+
     /// <summary>
     /// Generate waveform peak samples from a WAV file.
     /// Returns normalized peak values (0..1) suitable for rendering.
@@ -103,10 +106,17 @@ public static class AudioWaveformGenerator
     /// <param name="maxDurationSeconds">Max seconds of audio to process (0 = read to end).</param>
     public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount,
         double startSeconds = 0, double maxDurationSeconds = 0)
+        => GenerateWaveform(wavFilePath, targetSampleCount, startSeconds, maxDurationSeconds, CancellationToken.None);
+
+    /// <summary>Generates WAV peaks while observing cancellation between bounded reads.</summary>
+    public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount,
+        double startSeconds, double maxDurationSeconds, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (targetSampleCount <= 0) return [];
 
         using var reader = new AudioFileReader(wavFilePath);
+        ct.ThrowIfCancellationRequested();
 
         if (startSeconds > 0)
         {
@@ -129,35 +139,86 @@ public static class AudioWaveformGenerator
                 remainingBytes = maxBytes;
         }
 
-        int bytesPerSample = reader.WaveFormat.BitsPerSample / 8;
-        long totalSamples = remainingBytes / bytesPerSample;
-        int channels = reader.WaveFormat.Channels;
-        long monoSamples = totalSamples / channels;
+        return GenerateWaveform(reader, remainingBytes, targetSampleCount, ct);
+    }
 
+    internal static float[] GenerateWaveform(ISampleProvider reader, long remainingBytes, int targetSampleCount,
+        CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentOutOfRangeException.ThrowIfNegative(remainingBytes);
+        if (targetSampleCount <= 0) return [];
+        int channels = reader.WaveFormat.Channels;
+        if (channels <= 0) throw new ArgumentException("Audio must have at least one channel.", nameof(reader));
+        long monoSamples = remainingBytes / sizeof(float) / channels;
         if (monoSamples == 0) return [];
 
-        int samplesPerBucket = Math.Max(1, (int)(monoSamples / targetSampleCount));
-        var result = new List<float>(targetSampleCount);
-        var buffer = new float[samplesPerBucket * channels];
+        long valuesPerBucket = Math.Max(1, monoSamples / targetSampleCount) * channels;
+        int readCapacity = Math.Max(1, MaximumReadSampleValues / channels) * channels;
+        var buffer = new float[(int)Math.Min(valuesPerBucket, readCapacity)];
+        var result = new float[targetSampleCount];
+        int bucketCount = 0;
         long bytesRead = 0;
+        bool endOfStream = false;
 
-        int read;
-        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+        while (bucketCount < targetSampleCount && bytesRead < remainingBytes && !endOfStream)
         {
-            bytesRead += read * sizeof(float);
-            if (bytesRead > remainingBytes) break;
-
             float peak = 0f;
-            for (int i = 0; i < read; i++)
-                peak = Math.Max(peak, Math.Abs(buffer[i]));
-            result.Add(peak);
+            long valuesRead = 0;
+            bool exceededWindow = false;
+            while (valuesRead < valuesPerBucket)
+            {
+                ct.ThrowIfCancellationRequested();
+                int requested = (int)Math.Min(buffer.Length, valuesPerBucket - valuesRead);
+                int read = reader.Read(buffer, 0, requested);
+                ct.ThrowIfCancellationRequested();
+                if (read == 0)
+                {
+                    endOfStream = true;
+                    break;
+                }
+                bytesRead += (long)read * sizeof(float);
+                if (bytesRead > remainingBytes)
+                {
+                    exceededWindow = true;
+                    break;
+                }
+                valuesRead += read;
+                peak = FindPeak(buffer, read, peak);
+                if (read < requested) break;
+            }
+            if (exceededWindow || valuesRead == 0) break;
+            result[bucketCount++] = peak;
         }
 
-        // Trim or pad to targetSampleCount
-        if (result.Count > targetSampleCount)
-            return result.Take(targetSampleCount).ToArray();
+        ct.ThrowIfCancellationRequested();
+        if (bucketCount < result.Length) Array.Resize(ref result, bucketCount);
+        return result;
+    }
 
-        return [.. result];
+    internal static float FindPeak(float[] samples, int count, float peak = 0f)
+    {
+        if (float.IsNaN(peak)) return peak;
+        int index = 0;
+        if (Vector.IsHardwareAccelerated && count >= Vector<float>.Count)
+        {
+            int lanes = Vector<float>.Count;
+            var maximum = new Vector<float>(peak);
+            var infinity = new Vector<float>(float.PositiveInfinity);
+            for (; index <= count - lanes; index += lanes)
+            {
+                var values = Vector.Abs(new Vector<float>(samples, index));
+                // Scalar handling preserves Math.Max's first-NaN propagation and payload.
+                if (!Vector.LessThanAll(values, infinity)) break;
+                maximum = Vector.Max(maximum, values);
+            }
+            for (int lane = 0; lane < lanes; lane++)
+                peak = Math.Max(peak, maximum[lane]);
+        }
+        for (; index < count; index++)
+            peak = Math.Max(peak, Math.Abs(samples[index]));
+        return peak;
     }
 
     /// <summary>
