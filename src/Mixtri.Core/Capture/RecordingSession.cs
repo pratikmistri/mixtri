@@ -100,6 +100,8 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
     // Timing
     private readonly Stopwatch _elapsedWatch = new();
+    private TimeSpan? _firstVideoFrameElapsed;
+    private long _stopRequestedElapsedTicks = -1;
     private Timer? _statsTimer;
 
     // FPS tracking
@@ -186,14 +188,26 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     /// </summary>
     public void OpenCaptureGate()
     {
+        if (_captureGateOpen) return;
         _audioEngine?.OpenGate();
-        _captureGateOpen = true;
 
         // Reset timing origins so offsets are measured from when
         // actual recording content begins, not from engine start.
         _videoStartTicks = Stopwatch.GetTimestamp();
         _audioStartTicks = Stopwatch.GetTimestamp();
         _elapsedWatch.Restart();
+        _captureGateOpen = true;
+        try
+        {
+            _screenEngine?.StartCapture();
+        }
+        catch
+        {
+            _captureGateOpen = false;
+            _acceptFrames = false;
+            State = RecordingState.Error;
+            throw;
+        }
     }
 
     public RecordingState State
@@ -224,6 +238,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     /// </summary>
     public void NotifyStopRequested()
     {
+        Interlocked.CompareExchange(ref _stopRequestedElapsedTicks, _elapsedWatch.Elapsed.Ticks, -1);
         _mouseRecorder?.NotifyStopRequested();
     }
 
@@ -336,13 +351,11 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             _keyboardRecorder.StartRecording();
 
             // Start screen capture (its internal stopwatch starts here)
-            _screenEngine.StartCapture();
+            _screenEngine.PrepareCapture();
 
-            // Store the offset between mouse start and screen capture start
-            // so we can align them during composition.
-            // Mouse started at _mouseRecorder's _startTicks (≈ sharedStartTicks).
-            // Video frame 0 corresponds to ScreenCaptureEngine._stopwatch.Elapsed = 0
-            // which is when StartCapture() was called (a few ms after mouse start).
+            // Capture resources are prepared now; frame delivery starts in OpenCaptureGate
+            // after the overlay is ready. Actual first-frame ticks remain the timing origin
+            // used to align mouse and audio data during composition.
             _videoStartTicks = Stopwatch.GetTimestamp();
 
             _audioStartTicks = Stopwatch.GetTimestamp();
@@ -389,9 +402,11 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         // One consistent writer instance for the whole stop flow — the lazy creation in
         // OnFrameCaptured runs on capture threads.
         VideoWriter? writer;
+        TimeSpan? firstFrameElapsed;
         lock (_lock)
         {
             writer = _videoWriter;
+            firstFrameElapsed = _firstVideoFrameElapsed;
         }
 
         try
@@ -408,6 +423,10 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
             if (writer is not null)
             {
+                long requestedStop = Interlocked.Read(ref _stopRequestedElapsedTicks);
+                writer.StopAcceptingFrames(GetVideoContentDuration(
+                    _elapsedWatch.Elapsed, firstFrameElapsed,
+                    requestedStop >= 0 ? TimeSpan.FromTicks(requestedStop) : null));
                 await DrainFrameWritesAsync(writer, ct).ConfigureAwait(false);
 
                 // A lost frame must reach the user even if the writer's event was missed.
@@ -572,6 +591,14 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     /// Returns null if recording has not been stopped yet.
     /// </summary>
     public Project? GetProject() => _project;
+
+    internal static TimeSpan GetVideoContentDuration(
+        TimeSpan elapsed, TimeSpan? firstFrameElapsed, TimeSpan? requestedStop)
+    {
+        if (firstFrameElapsed is null) return TimeSpan.Zero;
+        var end = requestedStop.HasValue && requestedStop.Value < elapsed ? requestedStop.Value : elapsed;
+        return end > firstFrameElapsed.Value ? end - firstFrameElapsed.Value : TimeSpan.Zero;
+    }
 
     // ── Fault reporting ─────────────────────────────────────────────
 
@@ -802,6 +829,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             // the VideoWriter constructor (which does disk I/O + device
             // creation) so the mouse→video offset is as accurate as possible.
             _firstVideoFrameTicks = Stopwatch.GetTimestamp();
+            _firstVideoFrameElapsed = _elapsedWatch.Elapsed;
 
             // For region mode, compute the DPI-adjusted crop rect in physical pixels
             if (_config.Target.Type == CaptureTargetType.Region

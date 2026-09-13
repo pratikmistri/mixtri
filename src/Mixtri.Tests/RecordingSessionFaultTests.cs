@@ -55,6 +55,21 @@ public class RecordingSessionFaultTests
         return session;
     }
 
+    [TestMethod]
+    public void VideoContentDuration_ExcludesStartupAndHonoursTheStopRequest()
+    {
+        Assert.AreEqual(TimeSpan.FromSeconds(1.3), RecordingSession.GetVideoContentDuration(
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(.2), TimeSpan.FromSeconds(1.5)));
+        Assert.AreEqual(TimeSpan.FromSeconds(1.3), RecordingSession.GetVideoContentDuration(
+            TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(.2), null));
+        Assert.AreEqual(TimeSpan.Zero, RecordingSession.GetVideoContentDuration(
+            TimeSpan.FromSeconds(1.5), null, null));
+        Assert.AreEqual(TimeSpan.Zero, RecordingSession.GetVideoContentDuration(
+            TimeSpan.FromSeconds(.3), TimeSpan.FromSeconds(.2), TimeSpan.FromSeconds(.1)));
+        Assert.AreEqual(TimeSpan.FromSeconds(1.3), RecordingSession.GetVideoContentDuration(
+            TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(.2), TimeSpan.FromSeconds(2)));
+    }
+
     private VideoWriter CreateWriter(string folder, int width = Width, int height = Height)
     {
         var dir = Path.Combine(_root, folder);

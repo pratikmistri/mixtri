@@ -106,6 +106,7 @@ public class VideoWriterQueueTests
         Assert.AreEqual(Frames, writer.FrameCount, "blocking writes must never be dropped");
         Assert.AreEqual(0, writer.DroppedFrames);
         Assert.AreEqual(Frames, CountFrameFiles(writer));
+        Assert.AreEqual(0, writer.PooledTargets, "Stopped capture must not retain idle GPU surfaces during finalization.");
 
         for (int i = 0; i < Frames; i++)
         {
@@ -148,6 +149,90 @@ public class VideoWriterQueueTests
         Assert.AreEqual(4, writer.FrameCount, "slots owed at stop must still be written");
         Assert.AreEqual(4, CountFrameFiles(writer));
         Assert.AreEqual(TimeSpan.FromSeconds(4 / (double)Fps), writer.CfrDuration);
+    }
+
+    [TestMethod]
+    public async Task StaticTail_HoldsLastFrameThroughStopWithoutNewCaptures()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(1.6));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+
+        Assert.AreEqual(16L, writer.FrameCount);
+        Assert.AreEqual(TimeSpan.FromSeconds(1.6), writer.CfrDuration);
+        var first = File.ReadAllBytes(Path.Combine(writer.FramesDirectory, "frame_00000000.jpg"));
+        var last = File.ReadAllBytes(Path.Combine(writer.FramesDirectory, "frame_00000015.jpg"));
+        CollectionAssert.AreEqual(first, last, "Holding a static frame must not re-encode or alter its pixels.");
+        if (new DriveInfo(Path.GetPathRoot(writer.FramesDirectory)!).DriveFormat == "NTFS")
+        {
+            Assert.AreEqual(15L, writer.LinkedGapFrames);
+            Assert.AreEqual(0L, writer.CopiedGapBytes);
+        }
+        Assert.IsFalse(Directory.EnumerateFiles(writer.FramesDirectory, "*.tmp").Any());
+        await writer.FinalizeAsync();
+        Assert.IsTrue(writer.FinalizeSucceeded);
+        if (writer.LinkedGapFrames > 0)
+        {
+            Assert.AreEqual(1L, writer.FinalizationDecodeCount, "A static held run should decode its JPEG only once.");
+            Assert.AreEqual(Width * Height * 4L, writer.MaximumDecodedCacheBytes);
+        }
+        var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(writer.OutputPath);
+        var properties = await file.Properties.GetVideoPropertiesAsync();
+        Assert.AreEqual(TimeSpan.FromSeconds(1.6), properties.Duration, "The MP4 must retain the same CFR duration.");
+    }
+
+    [TestMethod]
+    public async Task MinimumDuration_IsAppliedAfterQueuedFramesAndOwedSlots()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.WriteFrame(frame, TimeSpan.FromSeconds(.1));
+        writer.FillGapFrames(2);
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(.6));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        Assert.AreEqual(6L, writer.FrameCount, "Queued work and owed gaps must not be counted twice.");
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(6L, writer.FrameCount, "The first stop fixes the duration.");
+    }
+
+    [TestMethod]
+    public async Task MinimumDuration_DoesNotInventPixelsWhenNoFrameWasCaptured()
+    {
+        using var writer = CreateWriter();
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(2));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        Assert.AreEqual(0L, writer.FrameCount);
+        Assert.AreEqual(0, CountFrameFiles(writer));
+    }
+
+    [TestMethod]
+    [DataRow(0L, 10, 0L)]
+    [DataRow(1L, 10, 1L)]
+    [DataRow(3000000L, 10, 3L)]
+    [DataRow(3000001L, 10, 4L)]
+    [DataRow(10000000L, 30, 30L)]
+    public void MinimumFrameCount_RoundsUpAtExactTickBoundaries(long ticks, int fps, long expected)
+    {
+        Assert.AreEqual(expected, VideoWriter.GetMinimumFrameCount(TimeSpan.FromTicks(ticks), fps));
+    }
+
+    [TestMethod]
+    public async Task StaticTail_CancellationStopsGapWritingBeforeReturning()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.StopAcceptingFrames(TimeSpan.FromHours(1));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsExceptionAsync<TaskCanceledException>(() =>
+            writer.WaitForQuiescenceAsync(Quiescence, cancellation.Token));
+        long settled = writer.FrameCount;
+        await Task.Delay(50);
+        Assert.AreEqual(settled, writer.FrameCount, "Cancellation must leave no background writes racing finalization.");
     }
 
     [TestMethod]
