@@ -34,16 +34,24 @@ public sealed class ShellCoordinator : IDisposable
     private readonly RecordingViewModel _viewModel = RecordingViewModel.Shared;
 
     private MainWindow? _mainWindow;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
+    private string? _navigationState;
+    private Type? _lastPageType;
+    private Windows.Graphics.RectInt32? _windowBounds;
+    private bool _wasMaximized;
+    private int _windowGeneration;
     private MiniWindow? _miniWindow;
     private RecordingOverlayWindow? _overlay;
     private SelectionHighlight? _highlight;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _windowTracker;
 
     private bool _isDisposed;
+    public Task FullWindowPresentation { get; private set; } = Task.CompletedTask;
 
     public ShellCoordinator(MainWindow mainWindow, StartupMode startupMode)
     {
         _mainWindow = mainWindow;
+        _dispatcher = mainWindow.DispatcherQueue;
         _stateMachine = new AppShellStateMachine(
             startupMode == StartupMode.Mini ? AppShellState.Mini : AppShellState.Full);
 
@@ -58,6 +66,7 @@ public sealed class ShellCoordinator : IDisposable
 
     /// <summary>The surface that should currently be visible.</summary>
     public AppShellState CurrentState => _stateMachine.CurrentState;
+    public bool CanReleaseCaptureDevice => !_isPickerHiding && CurrentState != AppShellState.Recording && !_viewModel.IsRecording;
 
     /// <summary>Shows whichever surface the configured startup mode calls for.</summary>
     public void Start()
@@ -76,14 +85,22 @@ public sealed class ShellCoordinator : IDisposable
     #region Transitions
 
     /// <summary>Mini → Full, triggered by the Expand button on the pill.</summary>
-    public void ExpandToFull() => Apply(AppShellTrigger.Expand);
+    public void ExpandToFull() => ShowFullWindow();
 
     /// <summary>Full → Mini, triggered by the Collapse button in the app title bar.</summary>
-    public void CollapseToMini() => Apply(AppShellTrigger.Collapse);
+    public void CollapseToMini()
+    {
+        if (App.Current.EditorProcesses is { IsRecorder: false } processes)
+            _ = processes.ShowMiniAsync();
+        else Apply(AppShellTrigger.Collapse);
+    }
 
     /// <summary>Tray icon click: bring back the Mini pill (ignored mid-recording).</summary>
-    public void ActivateFromTray()
+    public void ActivateFromTray(bool parkWorkspace = true)
     {
+        if (parkWorkspace && _stateMachine.CurrentState != AppShellState.Recording
+            && App.Current.EditorProcesses is { IsRecorder: true } processes)
+            _ = processes.ParkWorkspaceAsync();
         if (!Apply(AppShellTrigger.TrayActivated))
         {
             // Already in the target state — re-show it anyway, since the user may
@@ -170,7 +187,8 @@ public sealed class ShellCoordinator : IDisposable
     /// </summary>
     public void ShowFullWindow()
     {
-        if (_stateMachine.CurrentState == AppShellState.Recording) return;
+        if (_stateMachine.CurrentState == AppShellState.Recording
+            || App.Current.EditorProcesses is { IsRemoteRecording: true }) return;
 
         if (!Apply(AppShellTrigger.Expand))
         {
@@ -199,7 +217,8 @@ public sealed class ShellCoordinator : IDisposable
                 break;
 
             case AppShellState.Full:
-                _miniWindow?.HideMini();
+                if (App.Current.EditorProcesses is not { IsRecorder: true })
+                    _miniWindow?.HideMini();
                 ShowFullSurface();
                 // The preview belongs to the Mini surface, so take it away here.
                 UpdateSelectionPreview();
@@ -239,12 +258,104 @@ public sealed class ShellCoordinator : IDisposable
 
     private void ShowFullSurface()
     {
-        if (_mainWindow is null) return;
+        FullWindowPresentation = ShowFullSurfaceAsync();
+        _ = ObservePresentationAsync(FullWindowPresentation);
+    }
 
+    private async Task ObservePresentationAsync(Task presentation)
+    {
+        try { await presentation; }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Shell", $"Full window presentation failed: {ex}");
+            SurfaceError($"Could not show the full window: {ex.Message}");
+        }
+    }
+
+    private async Task ShowFullSurfaceAsync()
+    {
+        if (App.Current.EditorProcesses is { IsRecorder: true } processes)
+        {
+            await processes.OpenWorkspaceAsync();
+            return;
+        }
+        bool recreated = false;
+        if (_mainWindow is null)
+        {
+            recreated = true;
+            _windowGeneration++;
+            _mainWindow = App.Current.RecreateMainWindow();
+            if (_windowBounds is { } bounds) _mainWindow.AppWindow.MoveAndResize(bounds);
+            _mainWindow.RestoreNavigation(_navigationState, _lastPageType);
+        }
+
+        if (App.Current.EditorProcesses is { IsRecorder: false })
+        {
+            await _mainWindow.ShowPreparedAsync();
+            return;
+        }
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
         NativeMethods.ShowWindow(hwnd, SW_SHOW);
         NativeMethods.ShowWindow(hwnd, SW_RESTORE);
         _mainWindow.Activate();
+        if (recreated && _wasMaximized
+            && _mainWindow.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+            presenter.Maximize();
+        _ = _mainWindow.UpdateResourceVisibilityAsync(true);
+    }
+
+    internal bool ReleaseIdleMainWindow(MainWindow window, Microsoft.Graphics.Canvas.CanvasDevice device)
+    {
+        if (_isDisposed || !IsTrayAvailable || !ReferenceEquals(_mainWindow, window)
+            || window.IsForegroundVisible || _stateMachine.CurrentState == AppShellState.Recording
+            || ProjectService.Instance.CurrentProject is not null
+            || ProjectService.Instance.IsSaveInFlight || ProjectService.Instance.OpenInFlightPath is not null
+            || _isPickerHiding || ProjectSaveCoordinator.IsPromptActive
+            || NativeMethods.IsWindowVisible(WinRT.Interop.WindowNative.GetWindowHandle(window)))
+            return false;
+
+        _miniWindow ??= CreateMiniWindow();
+        if (!_miniWindow.HasQuiesceHandler) return false;
+        _navigationState = window.ParkedNavigationState;
+        _lastPageType = window.ParkedPageType;
+        var position = window.AppWindow.Position;
+        var size = window.AppWindow.Size;
+        _windowBounds = new Windows.Graphics.RectInt32(position.X, position.Y, size.Width, size.Height);
+        _wasMaximized = window.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter
+            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Maximized };
+        _mainWindow = null;
+        App.Current.ReleaseMainWindow(window, _miniWindow);
+        QueueIdleCollection(++_windowGeneration, device);
+        return true;
+    }
+
+    private async void QueueIdleCollection(int generation, Microsoft.Graphics.Canvas.CanvasDevice device)
+    {
+        try
+        {
+            await Task.Delay(350);
+            if (_isDisposed || _mainWindow is not null || generation != _windowGeneration
+                || _stateMachine.CurrentState == AppShellState.Recording) return;
+            await Task.Run(() =>
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            });
+            if (_isDisposed || _mainWindow is not null || generation != _windowGeneration
+                || _stateMachine.CurrentState == AppShellState.Recording) return;
+
+            // Keep the original device alive until the window's native surfaces are gone.
+            // Trimming a replacement device, or trimming before window teardown, misses those pools.
+            device.Trim();
+            device.Dispose();
+            await Task.Run(() => Mixtri.Core.Diagnostics.NativeHeapReclaimer.OptimizeUnusedHeaps());
+            Mixtri.Core.Diagnostics.DiagLog.Write("Shell", "inactive full window destroyed; tray shell remains");
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Shell", $"idle window cleanup failed: {ex}");
+        }
     }
 
     private void HideMainWindow()
@@ -252,6 +363,7 @@ public sealed class ShellCoordinator : IDisposable
         if (_mainWindow is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
         NativeMethods.ShowWindow(hwnd, SW_HIDE);
+        _ = _mainWindow.UpdateResourceVisibilityAsync(false);
     }
 
     private void MinimizeMainWindow()
@@ -259,11 +371,27 @@ public sealed class ShellCoordinator : IDisposable
         if (_mainWindow is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
         NativeMethods.ShowWindow(hwnd, SW_MINIMIZE);
+        _ = _mainWindow.UpdateResourceVisibilityAsync(false);
     }
 
     #endregion
 
     #region Recording
+
+    public async Task SuspendForExternalRecordingAsync()
+    {
+        if (_mainWindow is null) return;
+        MinimizeMainWindow();
+        await _mainWindow.UpdateResourceVisibilityAsync(false);
+    }
+
+    public async Task ParkFullWindowAsync()
+    {
+        if (_mainWindow is null) return;
+        _mainWindow.SavePlacement();
+        HideMainWindow();
+        await _mainWindow.UpdateResourceVisibilityAsync(false);
+    }
 
     /// <summary>
     /// Clears the shell off screen, waits for the hide/minimize animation to
@@ -271,7 +399,13 @@ public sealed class ShellCoordinator : IDisposable
     /// </summary>
     public async Task StartRecordingAsync()
     {
-        if (_viewModel.IsRecording) return;
+        if (App.Current.EditorProcesses is { IsRecorder: false } editorProcesses)
+        {
+            await editorProcesses.StartRemoteRecordingAsync();
+            return;
+        }
+        if (_viewModel.IsRecording || _stateMachine.CurrentState == AppShellState.Recording
+            || App.Current.EditorProcesses is { IsBusy: true }) return;
 
         try
         {
@@ -279,25 +413,30 @@ public sealed class ShellCoordinator : IDisposable
             // capture starts, and a failed start rewinds via RecordingFailed.
             Apply(AppShellTrigger.RecordingStarted);
 
+            if (App.Current.EditorProcesses is { } processes)
+                await processes.PrepareLocalRecordingAsync();
             await Task.Delay(WindowHideSettleMs);
 
-            _viewModel.StartRecordingCommand.Execute(null);
+            await _viewModel.StartRecordingCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[ShellCoordinator] Start failed: {ex.Message}");
             Apply(AppShellTrigger.RecordingFailed);
+            SurfaceError($"Could not start recording: {ex.Message}");
+            if (App.Current.EditorProcesses is { } processes)
+                await processes.NotifyRecordingFailedAsync(ex.Message);
         }
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (_mainWindow is null) return;
+        if (_isDisposed) return;
 
         switch (e.PropertyName)
         {
             case nameof(RecordingViewModel.IsRecording):
-                _mainWindow.DispatcherQueue.TryEnqueue(() =>
+                _dispatcher.TryEnqueue(() =>
                 {
                     if (_viewModel.IsRecording)
                         OnRecordingBegan();
@@ -312,7 +451,7 @@ public sealed class ShellCoordinator : IDisposable
             case nameof(RecordingViewModel.SelectedRegion):
             case nameof(RecordingViewModel.SelectedWindow):
             case nameof(RecordingViewModel.HasSelectedRegion):
-                _mainWindow.DispatcherQueue.TryEnqueue(UpdateSelectionPreview);
+                _dispatcher.TryEnqueue(UpdateSelectionPreview);
                 break;
         }
     }
@@ -336,11 +475,19 @@ public sealed class ShellCoordinator : IDisposable
         _viewModel.OpenCaptureGate();
     }
 
-    private void OnRecordingEnded()
+    private async void OnRecordingEnded()
     {
         TearDownRecordingChrome();
 
         var project = _viewModel.LastProject;
+        if (App.Current.EditorProcesses is { IsRecorder: true } processes)
+        {
+            _viewModel.IsAppendMode = false;
+            _stateMachine.TryApply(project is null ? AppShellTrigger.RecordingFailed : AppShellTrigger.RecordingStopped, out _);
+            await processes.CompleteRecordingAsync(project);
+            if (project is null) ApplyState(_stateMachine.CurrentState);
+            return;
+        }
         if (project is null)
         {
             // Stop failed or produced nothing — put the user back where they were.
@@ -384,9 +531,9 @@ public sealed class ShellCoordinator : IDisposable
 
     private void OnViewModelErrorRaised(object? sender, string message)
     {
-        if (_mainWindow is null) return;
+        if (_isDisposed) return;
 
-        _mainWindow.DispatcherQueue.TryEnqueue(() =>
+        _dispatcher.TryEnqueue(() =>
         {
             // Leave an in-flight recording alone; its own stop path rewinds the
             // shell. This branch is for a start that bailed out before capture
@@ -408,6 +555,8 @@ public sealed class ShellCoordinator : IDisposable
         else
             _mainWindow?.ShowRecordingError(message);
     }
+
+    public void ShowErrorMessage(string message) => SurfaceError(message);
 
     /// <summary>
     /// Draws a border around whatever is about to be captured, so the user can see
@@ -506,9 +655,7 @@ public sealed class ShellCoordinator : IDisposable
 
     private void StartWindowTracking()
     {
-        if (_mainWindow is null) return;
-
-        _windowTracker ??= _mainWindow.DispatcherQueue.CreateTimer();
+        _windowTracker ??= _dispatcher.CreateTimer();
         if (_windowTracker.IsRunning) return;
 
         _windowTracker.Interval = TimeSpan.FromMilliseconds(WindowTrackIntervalMs);

@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.Input;
 using Mixtri.Core.Capture;
 using Mixtri.Core.Models;
 using Mixtri.Core.Settings;
+using Mixtri.Core.Shell;
 using Mixtri_App.Services;
 
 namespace Mixtri_App.ViewModels;
@@ -42,7 +43,17 @@ public partial class RecordingViewModel : ObservableObject
     /// Opens the capture gate so frames and audio begin recording.
     /// Call after the recording overlay is visible.
     /// </summary>
-    public void OpenCaptureGate() => _session?.OpenCaptureGate();
+    public void OpenCaptureGate()
+    {
+        try { _session?.OpenCaptureGate(); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingViewModel] Capture gate start failed: {ex}");
+            SetError($"Failed to start capture: {ex.Message}");
+            CleanupSession();
+            IsRecording = false;
+        }
+    }
 
     /// <summary>
     /// Must be called from the UI thread (e.g. in page constructor) to enable
@@ -196,6 +207,37 @@ public partial class RecordingViewModel : ObservableObject
     /// The project produced after recording stops, for navigation to the editor.
     /// </summary>
     public Project? LastProject { get; private set; }
+    public void ReleaseLastProject() => LastProject = null;
+
+    public RemoteRecordingOptions GetRemoteOptions() => new(
+        CaptureMode.ToString(), SelectedWindow?.Handle.ToInt64() ?? 0, SelectedWindow?.Title ?? "",
+        SelectedRegion, Fps, IsSystemAudioEnabled, IsMicEnabled, IsWebcamEnabled,
+        AppSettings.Instance.WebcamDeviceId, AppSettings.Instance.CaptureQuality)
+    {
+        WindowProcessName = SelectedWindow?.ProcessName ?? "",
+        WindowExecutablePath = SelectedWindow?.ExecutablePath,
+        WindowX = SelectedWindow?.X ?? 0, WindowY = SelectedWindow?.Y ?? 0,
+        WindowWidth = SelectedWindow?.Width ?? 0, WindowHeight = SelectedWindow?.Height ?? 0,
+    };
+
+    public void ApplyRemoteOptions(RemoteRecordingOptions options)
+    {
+        if (!Enum.TryParse<CaptureMode>(options.CaptureMode, out var mode) || !Enum.IsDefined(mode)
+            || options.Fps < 1 || !Enum.IsDefined(options.Quality))
+            throw new ArgumentException("Invalid recording settings.");
+        CaptureMode = mode;
+        SelectedWindow = options.WindowHandle == 0 ? null
+            : new WindowInfo(new IntPtr(options.WindowHandle), options.WindowTitle, options.WindowProcessName,
+                options.WindowX, options.WindowY, options.WindowWidth, options.WindowHeight, options.WindowExecutablePath);
+        SelectedRegion = options.Region;
+        HasSelectedRegion = options.Region is not null;
+        Fps = options.Fps;
+        IsSystemAudioEnabled = options.SystemAudio;
+        IsMicEnabled = options.Microphone;
+        IsWebcamEnabled = options.Webcam;
+        AppSettings.Instance.WebcamDeviceId = options.WebcamDeviceId;
+        AppSettings.Instance.CaptureQuality = options.Quality;
+    }
 
     public bool IsCustomRegionMode => CaptureMode == CaptureMode.CustomRegion;
 
@@ -222,6 +264,7 @@ public partial class RecordingViewModel : ObservableObject
 
         try
         {
+            LastProject = null;
             var target = BuildCaptureTarget();
             if (target is null)
             {
@@ -301,7 +344,8 @@ public partial class RecordingViewModel : ObservableObject
             await Task.Run(async () => await session.StopAsync());
 
             LastProject = _session.GetProject();
-            if (LastProject is not null && !IsAppendMode)
+            if (LastProject is not null && !IsAppendMode
+                && App.Current.EditorProcesses is not { IsRecorder: true })
             {
                 // Normal recording: replace the project/timeline. In append mode the
                 // page calls ProjectService.AppendRecording instead, so skip this to

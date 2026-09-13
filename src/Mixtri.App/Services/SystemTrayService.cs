@@ -1,6 +1,5 @@
 using System;
 using System.Runtime.InteropServices;
-using Microsoft.UI.Xaml;
 using Mixtri.Core.Interop;
 using Mixtri_App.Helpers;
 
@@ -17,8 +16,8 @@ public sealed class SystemTrayService : IDisposable
     public event EventHandler? ShowMiniRequested;
     public event EventHandler? ExitRequested;
 
-    private Window? _mainWindow;
     private IntPtr _messageWindowHwnd;
+    public IntPtr MessageWindowHandle => _messageWindowHwnd;
     private NOTIFYICONDATA _notifyIconData;
     private bool _isVisible;
     private bool _disposed;
@@ -31,9 +30,8 @@ public sealed class SystemTrayService : IDisposable
     private const uint IDM_EXIT = 1003;
     private const uint IDM_OPEN_MINI = 1004;
 
-    public void Initialize(Window mainWindow)
+    public void Initialize()
     {
-        _mainWindow = mainWindow;
         CreateMessageWindow();
         LoadIcon();
         SetupNotifyIconData();
@@ -45,11 +43,13 @@ public sealed class SystemTrayService : IDisposable
 
         if (_isVisible)
         {
-            Shell_NotifyIcon(NIM_MODIFY, ref _notifyIconData);
+            if (!Shell_NotifyIcon(NIM_MODIFY, ref _notifyIconData))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Could not update tray icon.");
         }
         else
         {
-            Shell_NotifyIcon(NIM_ADD, ref _notifyIconData);
+            if (!Shell_NotifyIcon(NIM_ADD, ref _notifyIconData))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Could not create tray icon.");
             _isVisible = true;
         }
     }
@@ -64,9 +64,8 @@ public sealed class SystemTrayService : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
-
         Hide();
+        _disposed = true;
 
         if (_iconHandle != IntPtr.Zero)
         {
@@ -99,6 +98,8 @@ public sealed class SystemTrayService : IDisposable
             0, "MixtriTrayMsgWindow", "Mixtri Tray", 0,
             0, 0, 0, 0,
             HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
+        if (_messageWindowHwnd == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Could not create tray message window.");
     }
 
     private void LoadIcon()

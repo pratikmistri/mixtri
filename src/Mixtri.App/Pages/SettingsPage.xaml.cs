@@ -30,6 +30,7 @@ public sealed partial class SettingsPage : Page
         using (SuppressScope.Enter(ref _suppressStartupModeEvents))
         {
             SelectComboBoxByTag(StartupModeCombo, ShellSettings.Instance.StartupMode.ToString());
+            SeparateEditorToggle.IsOn = ShellSettings.Instance.SeparateEditorProcess;
         }
 
         using (SuppressScope.Enter(ref _suppressExportDefaultEvents))
@@ -72,9 +73,12 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private void UpdateMiniHotkeyStatus()
+    private async void UpdateMiniHotkeyStatus()
     {
-        if (App.Current.IsMiniHotkeyRegistered)
+        bool available = App.Current.IsMiniHotkeyRegistered;
+        if (App.Current.EditorProcesses is { IsRecorder: false } processes)
+            available = await processes.IsRecorderHotkeyAvailableAsync();
+        if (available)
         {
             MiniHotkeyInfoBar.Severity = InfoBarSeverity.Informational;
             MiniHotkeyInfoBar.Message =
@@ -162,6 +166,12 @@ public sealed partial class SettingsPage : Page
         {
             ShellSettings.Instance.StartupMode = mode;
         }
+    }
+
+    private void SeparateEditorToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (!_suppressStartupModeEvents)
+            ShellSettings.Instance.SeparateEditorProcess = SeparateEditorToggle.IsOn;
     }
 
     private void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)

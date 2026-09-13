@@ -15,6 +15,7 @@ namespace Mixtri_App.Controls;
 public sealed partial class PreviewCanvas : UserControl
 {
     private CanvasRenderTarget? _previewFrame;
+    private bool _renderResourcesReleased;
     private DispatcherTimer? _playbackTimer;
     private System.Diagnostics.Stopwatch? _playbackClock;
     private TimeSpan _playbackStartPosition;
@@ -121,13 +122,13 @@ public sealed partial class PreviewCanvas : UserControl
     {
         InitializeComponent();
         ResolveThemeColors();
-        ActualThemeChanged += (_, _) => { ResolveThemeColors(); PreviewSurface.Invalidate(); };
-        PreviewSurface.CreateResources += PreviewSurface_CreateResources;
+        ActualThemeChanged += (_, _) => { ResolveThemeColors(); PreviewSurface?.Invalidate(); };
         UpdateTimeDisplay();
     }
 
     private void PreviewSurface_CreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         if (args.Reason != CanvasCreateResourcesReason.NewDevice) return;
 
         // The held frame was allocated on the device that just died. Dropping it here is what
@@ -192,9 +193,27 @@ public sealed partial class PreviewCanvas : UserControl
         SetFrame(null);
     }
 
+    public void ReleaseRenderResources(bool removeFromTree = false)
+    {
+        if (_renderResourcesReleased) return;
+        Pause();
+        ClearFrame();
+        if (removeFromTree)
+        {
+            _renderResourcesReleased = true;
+            if (PreviewSurface is not null)
+            {
+                PreviewSurface.Draw -= PreviewSurface_Draw;
+                PreviewSurface.CreateResources -= PreviewSurface_CreateResources;
+                PreviewSurface.RemoveFromVisualTree();
+                PreviewSurface = null;
+            }
+        }
+    }
+
     public void InvalidateSurface()
     {
-        PreviewSurface.Invalidate();
+        PreviewSurface?.Invalidate();
     }
 
     private void PreviewRoot_PointerEntered(object sender, PointerRoutedEventArgs e)
@@ -268,6 +287,11 @@ public sealed partial class PreviewCanvas : UserControl
     /// </summary>
     public void SetFrame(CanvasRenderTarget? frame)
     {
+        if (_renderResourcesReleased)
+        {
+            frame?.Dispose();
+            return;
+        }
         var old = _previewFrame;
         _previewFrame = frame;
         if (old is not null)
@@ -275,12 +299,16 @@ public sealed partial class PreviewCanvas : UserControl
             try { old.Dispose(); }
             catch { /* the frame may belong to a lost graphics device */ }
         }
-        PreviewSurface.Invalidate();
+        if (frame is not null && PreviewSurface is null
+            && FindName(nameof(PreviewSurface)) is not CanvasControl)
+            throw new InvalidOperationException("The preview drawing surface could not be created.");
+        PreviewSurface?.Invalidate();
     }
 
     /// <summary>Starts or resumes playback.</summary>
     public void Play()
     {
+        if (_renderResourcesReleased) return;
         if (IsPlaying) return;
         EnsureTimer();
         _playbackStartPosition = PlayheadPosition;
@@ -346,6 +374,7 @@ public sealed partial class PreviewCanvas : UserControl
 
     private void PreviewSurface_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         ds.Clear(_previewClearColor);
 

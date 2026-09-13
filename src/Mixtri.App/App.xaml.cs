@@ -31,11 +31,17 @@ public partial class App : Application
     private bool _isExiting;
     private bool _promptingUnsavedChanges;
     private bool _dismissalConfirmed;
+    private bool _closingWorker;
     private System.Threading.Timer? _quiesceTimer;
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
     public Window? MainAppWindow => _window;
     public bool IsMiniHotkeyRegistered { get; private set; }
+    public EditorProcessCoordinator? EditorProcesses { get; private set; }
+    public bool IsEditorProcess { get; private set; }
+    public bool IsProjectOperationInFlight =>
+        ProjectService.Instance.IsOperationInFlight
+        || _window is MainWindow { ContentFrame.Content: EditorPage { ExportVM.IsExporting: true } };
 
     public static new App Current => (App)Application.Current;
 
@@ -140,6 +146,10 @@ public partial class App : Application
     private static string? ExtractProjectPath(
         Microsoft.Windows.AppLifecycle.AppActivationArguments? activation)
     {
+        if (activation?.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.Launch
+            && activation.Data is Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs launch)
+            return EditorProcessLaunch.Parse(launch.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ProjectPath;
+
         if (activation?.Kind != Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File)
             return null;
 
@@ -268,11 +278,11 @@ public partial class App : Application
     /// unkeyed project from opening a second window.
     /// </para>
     /// </remarks>
-    private bool TryRedirectToExistingProjectInstance(string packagePath)
+    private bool TryRedirectToExistingProjectInstance(string packagePath, string? instanceKey = null)
     {
         try
         {
-            var key = BuildProjectInstanceKey(packagePath);
+            var key = instanceKey ?? BuildProjectInstanceKey(packagePath);
             var keyInstance = Microsoft.Windows.AppLifecycle.AppInstance
                 .FindOrRegisterForKey(key);
 
@@ -412,8 +422,17 @@ public partial class App : Application
         // not just the window manipulation.
         if (_shell?.CurrentState == Mixtri.Core.Shell.AppShellState.Recording) return;
 
-        if (requestedPath is not null && _window is MainWindow mainWindow)
-            ServeRedirectedOpen(mainWindow, requestedPath);
+        if (EditorProcesses is { IsRecorder: true } && requestedPath is null)
+        {
+            _shell?.ActivateFromTray();
+            return;
+        }
+
+        if (requestedPath is not null)
+        {
+            _shell?.ShowFullWindow();
+            if (_window is MainWindow mainWindow) ServeRedirectedOpen(mainWindow, requestedPath);
+        }
 
         BringToForeground();
     }
@@ -505,9 +524,13 @@ public partial class App : Application
         // Resolved before anything is constructed: launching by double-clicking a
         // .mixtri forces the full window, and may hand the whole activation to an
         // instance that already has that file open.
-        var activationPath = TryGetActivationProjectPath();
+        var launch = EditorProcessLaunch.Parse(Environment.GetCommandLineArgs());
+        var activationPath = launch.ProjectPath ?? TryGetActivationProjectPath();
+        IsEditorProcess = launch.IsEditor || activationPath is not null;
+        bool splitEditor = ShellSettings.Instance.SeparateEditorProcess || launch.EditorId.HasValue || launch.Background;
 
-        if (activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
+        if ((activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
+            || (splitEditor && !IsEditorProcess && TryRedirectToExistingProjectInstance("", "mixtri-resident-recorder")))
         {
             // The owning instance is taking over. Exit before creating a window, so
             // no second surface for this project ever appears. Process.Kill rather
@@ -520,8 +543,9 @@ public partial class App : Application
             return;
         }
 
-        // The full window is always constructed (it anchors app lifetime, hotkeys
-        // and the quiesce path), but only shown when the startup mode asks for it.
+        // Construct the initial navigation window, but show it only when requested.
+        // The resident tray owns hotkeys independently; an idle full window can be
+        // retired later while Mini keeps the application alive.
         var mainWindow = new MainWindow();
 
         // Published under the gate so a redirect racing startup either sees the window
@@ -540,16 +564,14 @@ public partial class App : Application
         _window.Closed += OnWindowClosed;
         _window.VisibilityChanged += OnWindowVisibilityChanged;
 
+        if (splitEditor)
+            EditorProcesses = new EditorProcessCoordinator(mainWindow.DispatcherQueue, IsEditorProcess, launch.EditorId);
+
         _shell = new ShellCoordinator(
             mainWindow,
             ShellSettings.ResolveLaunchMode(
                 ShellSettings.Instance.StartupMode,
-                hasFileActivation: activationPath is not null));
-        _shell.Start();
-
-        // Shown AFTER the shell, so the configured startup surface (Mini by default) is
-        // already up and the notice sits centred over it rather than replacing it.
-        TryShowRebrandNotice(mainWindow, isDocumentInstance: activationPath is not null);
+                hasFileActivation: IsEditorProcess));
 
         // Release captured JPEGs from finalized sessions in the background. Every root is
         // swept: the LocalAppData sessions folders (current AND pre-rename, since sessions
@@ -570,6 +592,10 @@ public partial class App : Application
                 SessionCleanupService.CleanupOrphanedImports(root);
         });
 
+        if (IsEditorProcess && (launch.StartInEditor || activationPath is not null))
+            mainWindow.ShowEditor();
+        else if (IsEditorProcess)
+            mainWindow.ShowRecord();
         if (activationPath is not null)
             _ = OpenActivationProjectAsync(mainWindow, activationPath);
 
@@ -582,10 +608,18 @@ public partial class App : Application
         // allowed to proceed when _trayService is null (OnWindowClosing), and
         // ShellCoordinator.IsTrayAvailable stays false so hide-to-tray falls back to
         // showing the full window rather than stranding an unreachable process.
-        if (activationPath is null)
+        if (!IsEditorProcess)
         {
             InitializeTray();
+            if (!_shell.IsTrayAvailable && EditorProcesses is not null)
+            {
+                DiagLog.Write("ShellProcess", "Tray unavailable; retaining the single-process shell.");
+                EditorProcesses.Dispose();
+                EditorProcesses = null;
+            }
         }
+        EditorProcesses?.Start();
+        if (launch.Background) _shell.HideToTray();
 
         // Subscribed unconditionally, and deliberately NOT inside InitializeTray: a document
         // instance has no tray, so if this rode along with it, opening a .mixtri from Explorer,
@@ -593,6 +627,9 @@ public partial class App : Application
         // most common edit flow. The handler already copes with there being no tray (it lets
         // the close proceed rather than stranding an unreachable process).
         mainWindow.AppWindow.Closing += OnWindowClosing;
+        if (!launch.Background && !(launch.EditorId.HasValue && activationPath is null))
+            _shell.Start();
+        TryShowRebrandNotice(mainWindow, isDocumentInstance: IsEditorProcess || launch.Background);
 
         // A redirect that landed while the window was still being built. Queued rather
         // than called directly so it runs after OnLaunched has finished wiring up.
@@ -657,7 +694,7 @@ public partial class App : Application
         try
         {
             _trayService = new SystemTrayService();
-            _trayService.Initialize(_window);
+            _trayService.Initialize();
             _trayService.Show();
             _trayService.ShowMiniRequested += OnShowMiniRequested;
             _trayService.ShowWindowRequested += OnShowWindowRequested;
@@ -667,16 +704,19 @@ public partial class App : Application
             // Tell the shell a tray affordance exists, so hide-to-tray is safe.
             if (_shell is not null) _shell.IsTrayAvailable = true;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // System tray not available — continue without it
+            DiagLog.Write("Shell", $"Tray unavailable: {ex.Message}");
+            _trayService?.Dispose();
             _trayService = null;
         }
 
         try
         {
             _hotkeyService = new GlobalHotkeyService();
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+            var hwnd = _trayService?.MessageWindowHandle
+                ?? WinRT.Interop.WindowNative.GetWindowHandle(_window);
             _hotkeyService.Initialize(hwnd);
 
             bool registered = _hotkeyService.RegisterHotkey(
@@ -690,6 +730,7 @@ public partial class App : Application
                 _hotkeyService.Dispose();
                 _hotkeyService = null;
             }
+
             else
             {
                 IsMiniHotkeyRegistered = true;
@@ -703,6 +744,26 @@ public partial class App : Application
             _hotkeyService?.Dispose();
             _hotkeyService = null;
         }
+    }
+
+    internal MainWindow RecreateMainWindow()
+    {
+        var main = new MainWindow();
+        lock (_foregroundGate) _window = main;
+        main.Closed += OnWindowClosed;
+        main.VisibilityChanged += OnWindowVisibilityChanged;
+        main.AppWindow.Closing += OnWindowClosing;
+        return main;
+    }
+
+    internal void ReleaseMainWindow(MainWindow main, MiniWindow anchor)
+    {
+        if (!ReferenceEquals(_window, main)) return;
+        main.Closed -= OnWindowClosed;
+        main.VisibilityChanged -= OnWindowVisibilityChanged;
+        main.AppWindow.Closing -= OnWindowClosing;
+        lock (_foregroundGate) _window = anchor;
+        main.Close();
     }
 
     private void OnShowWindowRequested(object? sender, EventArgs e)
@@ -754,6 +815,7 @@ public partial class App : Application
         try { _hotkeyService?.Dispose(); } catch { }
         IsMiniHotkeyRegistered = false;
         try { _trayService?.Dispose(); } catch { }
+        EditorProcesses?.Dispose();
         try { _shell?.Dispose(); } catch { }
 
         _quiesceTimer = new System.Threading.Timer(
@@ -778,16 +840,27 @@ public partial class App : Application
     /// </summary>
     public void HandleSystemShutdown() => BeginQuiesce();
 
-    private void OnWindowVisibilityChanged(object sender, WindowVisibilityChangedEventArgs args)
+    private async void OnWindowVisibilityChanged(object sender, WindowVisibilityChangedEventArgs args)
     {
-        if (!args.Visible)
+        try
         {
-            PauseEditorPlayback();
-            _ = RequestExtendedExecutionAsync();
+            if (!args.Visible)
+            {
+                PauseEditorPlayback();
+                _ = RequestExtendedExecutionAsync();
+                if (_window is MainWindow main)
+                    await main.UpdateResourceVisibilityAsync(main.IsForegroundVisible);
+            }
+            else
+            {
+                ReleaseExtendedExecution();
+                if (_window is MainWindow main)
+                    await main.UpdateResourceVisibilityAsync(main.IsForegroundVisible);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            ReleaseExtendedExecution();
+            Mixtri.Core.Diagnostics.DiagLog.Write("App", $"window visibility transition failed: {ex}");
         }
     }
 
@@ -848,8 +921,19 @@ public partial class App : Application
         });
     }
 
-    private void OnExitRequested(object? sender, EventArgs e)
+    private async void OnExitRequested(object? sender, EventArgs e)
     {
+        if (_shell?.CurrentState == AppShellState.Recording || EditorProcesses is { IsBusy: true })
+        {
+            DiagLog.Write("Shell", "Exit deferred while recording or handing off a completed take.");
+            _shell?.ActivateFromTray();
+            _shell?.ShowErrorMessage("Finish the recording or expand Mini to finish its handoff before exiting.");
+            return;
+        }
+        if (EditorProcesses is { IsRecorder: true } processes && await processes.RequestWorkspaceCloseAsync())
+            return;
+        if (_shell?.CurrentState == AppShellState.Recording || EditorProcesses is { IsBusy: true })
+            return;
         // Exiting from the tray skips the window entirely, so it is the one shutdown route
         // that can discard edits without the user ever seeing the window again.
         if (TryPromptUnsavedChanges(afterSaveDecision: () => BeginQuiesce(timeoutMs: 2000)))
@@ -866,7 +950,21 @@ public partial class App : Application
     {
         // Never block an OS- or user-initiated exit.
         if (_isExiting || _window is null) return;
+        if (_closingWorker)
+        {
+            args.Cancel = true;
+            return;
+        }
 
+        (_window as MainWindow)?.SavePlacement();
+        if (IsEditorProcess && IsProjectOperationInFlight)
+        {
+            args.Cancel = true;
+            (_window as MainWindow)?.ShowShellMessage(
+                "Wait for the current save, open, or export to finish before closing the editor.",
+                InfoBarSeverity.Informational);
+            return;
+        }
         // A save prompt is on screen and still owns the decision. The X stays clickable
         // behind a ContentDialog, so dismissing here would park the window WITH the dialog
         // on it — invisible, unanswerable, and blocking every later exit on the guard below.
@@ -890,6 +988,12 @@ public partial class App : Application
 
         // Nothing to save. With a tray the window is parked rather than closed, so cancel the
         // close and dismiss by hand; without one, close the project and let the close through.
+        if (EditorProcesses is { IsRecorder: false })
+        {
+            args.Cancel = true;
+            DismissMainWindow();
+            return;
+        }
         if (_trayService is null)
         {
             CloseProjectForDismissal();
@@ -948,7 +1052,11 @@ public partial class App : Application
         // nothing to reopen. See ProjectService.HasUnrecoverableWork — the same predicate
         // ServeRedirectedOpen uses to refuse an open, which is the identical question.
         if (!ProjectService.Instance.HasUnrecoverableWork) return false;
-        if (_window?.Content?.XamlRoot is null) return false;
+        if (_window?.Content?.XamlRoot is null)
+        {
+            DiagLog.Write("Shell", "Close abandoned: unsaved work has no available prompt surface.");
+            return true;
+        }
 
         // A ContentDialog on a hidden window renders nowhere. The tray's Exit item runs with
         // the window parked in the tray, so without this the app would appear to ignore Exit
@@ -1066,10 +1174,34 @@ public partial class App : Application
     /// re-ask on a window nobody could see, and left the user with no way back to an empty
     /// editor short of deleting every clip.
     /// </remarks>
-    private void DismissMainWindow()
+    public bool RequestWorkspaceExit()
     {
+        if (_closingWorker || IsProjectOperationInFlight || _promptingUnsavedChanges || ProjectSaveCoordinator.IsPromptActive)
+            return false;
+        if (!TryPromptUnsavedChanges(() => DismissMainWindowCore(exitRecorder: true)))
+            DismissMainWindowCore(exitRecorder: true);
+        return true;
+    }
+
+    private void DismissMainWindow() => DismissMainWindowCore(exitRecorder: false);
+
+    private async void DismissMainWindowCore(bool exitRecorder)
+    {
+        if (_closingWorker || IsEditorProcess && IsProjectOperationInFlight) return;
+        (_window as MainWindow)?.SavePlacement();
         CloseProjectForDismissal();
 
+        if (EditorProcesses is { IsRecorder: false } processes)
+        {
+            _closingWorker = true;
+            HideMainWindowToTray();
+            processes.Dispose();
+            try { await processes.FlushRecordingOptionsAsync(); }
+            catch (Exception ex) { DiagLog.Write("ShellProcess", $"Could not return recording settings on close: {ex}"); }
+            if (exitRecorder) await processes.RequestRecorderExitAsync();
+            BeginQuiesce();
+            return;
+        }
         if (_trayService is not null)
         {
             HideMainWindowToTray();
@@ -1084,6 +1216,7 @@ public partial class App : Application
         if (_window is null) return;
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
         NativeMethods.ShowWindow(hwnd, SW_HIDE);
+        if (_window is MainWindow main) _ = main.UpdateResourceVisibilityAsync(false);
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)

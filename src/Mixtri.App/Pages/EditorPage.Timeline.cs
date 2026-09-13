@@ -36,6 +36,9 @@ public sealed partial class EditorPage
     /// </summary>
     private async Task LoadAppendedTrackVisualsAsync()
     {
+        if (_previewSuspended || _pageUnloaded) return;
+        var ct = WaveformWorkToken;
+        int generation = _previewInitGeneration;
         var model = ViewModel.Model;
         var primary = PrimaryVideoPath;
 
@@ -48,6 +51,7 @@ public sealed partial class EditorPage
 
         foreach (var seg in segs)
         {
+            if (!IsWaveformWorkCurrent(generation, ct)) return;
             // Per-segment isolation: this runs fire-and-forget, so letting one unreadable
             // recording throw used to abandon every remaining segment AND skip the Refresh
             // below, leaving those tracks blank for the rest of the session with nothing
@@ -72,7 +76,8 @@ public sealed partial class EditorPage
                 GenerateAppendedZoomKeyframes(seg, visual.Cursor);
 
                 // Audio waveforms (system + mic), spanning the file's audio duration
-                var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+                var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths, ct);
+                if (!IsWaveformWorkCurrent(generation, ct)) return;
                 visual.SystemWaveform = sys;
                 visual.MicWaveform = mic;
                 visual.WaveformDurationSeconds = durSec > 0
@@ -81,6 +86,7 @@ public sealed partial class EditorPage
 
                 Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex)
             {
                 Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
@@ -169,12 +175,13 @@ public sealed partial class EditorPage
     /// Generates system + mic waveform peak arrays for a recording's audio files,
     /// each spanning the full audio file, plus the (max) audio duration in seconds.
     /// </summary>
-    private static async Task<(float[]? Sys, float[]? Mic, double DurationSec)> GenerateFileWaveformsAsync(
-        IReadOnlyList<string> audioFilePaths)
+    private async Task<(float[]? Sys, float[]? Mic, double DurationSec)> GenerateFileWaveformsAsync(
+        IReadOnlyList<string> audioFilePaths, CancellationToken ct)
     {
         const int peaks = 1000;
-        return await Task.Run(() =>
+        return await RunWaveformWorkAsync(token =>
         {
+            token.ThrowIfCancellationRequested();
             float[]? sys = null, mic = null;
             double dur = 0;
 
@@ -188,17 +195,33 @@ public sealed partial class EditorPage
 
             if (systemPath is not null)
             {
-                try { using var r = new NAudio.Wave.AudioFileReader(systemPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
-                try { sys = AudioWaveformGenerator.GenerateWaveform(systemPath, peaks); } catch { }
+                token.ThrowIfCancellationRequested();
+                dur = Math.Max(dur, AudioFileDuration.TryGet(systemPath)?.TotalSeconds ?? 0);
+                sys = GenerateWaveformOrNull(systemPath, peaks, token);
             }
             if (micPath is not null)
             {
-                try { using var r = new NAudio.Wave.AudioFileReader(micPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
-                try { mic = AudioWaveformGenerator.GenerateWaveform(micPath, peaks); } catch { }
+                token.ThrowIfCancellationRequested();
+                dur = Math.Max(dur, AudioFileDuration.TryGet(micPath)?.TotalSeconds ?? 0);
+                mic = GenerateWaveformOrNull(micPath, peaks, token);
             }
 
             return (sys, mic, dur);
-        });
+        }, ct);
+    }
+
+    private static float[]? GenerateWaveformOrNull(string path, int peaks, CancellationToken ct, double startSeconds = 0)
+    {
+        try
+        {
+            return AudioWaveformGenerator.GenerateWaveform(path, peaks, startSeconds, 0, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"waveform decode failed '{path}': {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -242,6 +265,7 @@ public sealed partial class EditorPage
 
             await GenerateAppendedThumbnailsAsync(primaryPath);
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
@@ -257,6 +281,8 @@ public sealed partial class EditorPage
     /// </summary>
     private async Task GenerateAppendedThumbnailsAsync(string? primaryPath)
     {
+        if (_previewSuspended || _pageUnloaded) return;
+        var ct = _thumbnailCts.Token;
         var model = ViewModel.Model;
         var files = model.Segments.OfType<VideoSegment>()
             .Where(v => !string.IsNullOrEmpty(v.VideoFilePath) &&
@@ -267,6 +293,7 @@ public sealed partial class EditorPage
 
         foreach (var (file, segmentFps) in files)
         {
+            if (ct.IsCancellationRequested || _previewSuspended || _pageUnloaded) return;
             if (!File.Exists(file)) continue;
 
             // Claim the file before awaiting: two overlapping initialisations would
@@ -282,6 +309,11 @@ public sealed partial class EditorPage
                 // A pass cancelled by a newer generation applied nothing, so the claim must
                 // be released or this source would never get a strip again.
                 if (!applied) _thumbnailsDoneForFiles.Remove(file);
+            }
+            catch (OperationCanceledException)
+            {
+                _thumbnailsDoneForFiles.Remove(file);
+                return;
             }
             catch (Exception ex)
             {
@@ -311,77 +343,63 @@ public sealed partial class EditorPage
     /// </returns>
     private async Task<bool> GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
     {
-        var generationId = ++_thumbnailGenerationId;
-
-        // Thumbnail size: match video track height (60px row minus padding)
+        if (_previewSuspended || _pageUnloaded) return false;
+        var generationId = _thumbnailGenerationId;
+        var ct = _thumbnailCts.Token;
         const int thumbH = 52;
-
         var device = CanvasDevice.GetSharedDevice();
-        var strip = await VideoThumbnailExtractor.ExtractAsync(filePath, thumbH, device);
-
-        // The MP4 is unreadable — unfinalized, or finalization failed. The captured JPEGs
-        // are still there in exactly that case and the preview is already using them, so
-        // the filmstrip must not be the one surface that gives up.
-        strip ??= await VideoThumbnailExtractor.ExtractFromCapturedFramesAsync(
-            filePath, fps, thumbH, device);
-
-        if (strip is null || generationId != _thumbnailGenerationId)
+        var priorityTimes = Timeline.VisibleFilmstripSourceTimes(filePath);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        int published = 0;
+        bool started = false;
+        _activeThumbnailGenerations++;
+        void Publish(ThumbnailBatch batch)
         {
-            // Both outcomes leave the filmstrip empty, but for very different reasons:
-            // a null strip means extraction failed, whereas a generation mismatch means a
-            // newer pass superseded this one. Distinguishing them matters, because a
-            // repeating mismatch indicates a rebuild storm rather than a decode problem.
+            ct.ThrowIfCancellationRequested();
+            if (generationId != _thumbnailGenerationId || _previewSuspended || _pageUnloaded) return;
+            Timeline.AppendThumbnailBatch(filePath, batch, isPrimary, reset: !started);
+            if (!started)
+                Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                    $"first {(batch.IsOverview ? "overview" : "batch")} ({batch.Count} tiles) in {stopwatch.ElapsedMilliseconds}ms for '{filePath}'");
+            started = true;
+            if (!batch.IsOverview) published = batch.StartIndex + batch.Count;
+        }
+        Task PublishAsync(ThumbnailBatch batch)
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                try { Publish(batch); completion.TrySetResult(); }
+                catch (OperationCanceledException) { completion.TrySetCanceled(ct); }
+                catch (Exception ex) { completion.TrySetException(ex); }
+            }))
+                completion.TrySetException(new InvalidOperationException("Filmstrip dispatcher is unavailable."));
+            return completion.Task;
+        }
+        try
+        {
+            bool success = await Task.Run(() => VideoThumbnailExtractor.ExtractProgressivelyAsync(
+                filePath, thumbH, device, PublishAsync, ct: ct, priorityTimes: priorityTimes), ct);
+            if (!success)
+            {
+                started = false;
+                success = await Task.Run(() => VideoThumbnailExtractor.ExtractCapturedFramesProgressivelyAsync(
+                    filePath, fps, thumbH, device, PublishAsync, ct: ct), ct);
+            }
+            if (generationId != _thumbnailGenerationId || _previewSuspended || _pageUnloaded) return false;
+            if (success && isPrimary) _thumbnailsCompletedForPath = filePath;
             Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
-                strip is null
-                    ? $"extraction returned nothing for '{filePath}' (isPrimary={isPrimary})"
-                    : $"discarded {strip.Thumbnails.Length} tiles for '{filePath}': generation " +
-                      $"{generationId} superseded by {_thumbnailGenerationId}");
-
-            if (strip is not null)
-                foreach (var t in strip.Thumbnails) t?.Dispose();
-            return false;
+                success
+                    ? $"completed {published} tiles in {stopwatch.ElapsedMilliseconds}ms for '{filePath}'"
+                    : $"preview unavailable or incomplete for '{filePath}'");
+            return success;
         }
-
-        // A tile that could not be decoded would leave a hole in the strip. Repeat the
-        // nearest earlier tile instead — slightly stale footage reads as continuous, an
-        // empty slot reads as a broken timeline.
-        var thumbnails = strip.Thumbnails;
-        int thumbW = Math.Max(1, (int)(thumbH * strip.AspectRatio));
-        for (int i = 0; i < thumbnails.Length; i++)
+        finally
         {
-            if (thumbnails[i] is not null || i == 0) continue;
-            if (thumbnails[i - 1] is not { } previous) continue;
-
-            var repeat = Win2DUtils.CreateRenderTarget(device, thumbW, thumbH, 96, "timeline thumbnail repeat");
-            using (var session = repeat.CreateDrawingSession())
-                session.DrawImage(previous, new Rect(0, 0, thumbW, thumbH));
-            thumbnails[i] = repeat;
+            _activeThumbnailGenerations--;
+            if (generationId == _thumbnailGenerationId && !_pageUnloaded)
+                Timeline.FinishThumbnailLoading(filePath);
         }
-
-        var owned = new CanvasBitmap[thumbnails.Length];
-        for (int i = 0; i < thumbnails.Length; i++) owned[i] = thumbnails[i]!;
-
-        // TimelineControl takes ownership of the bitmaps.
-        if (isPrimary)
-        {
-            Timeline.SetThumbnails(owned, strip.IntervalSeconds, strip.AspectRatio, filePath);
-            // Only a pass that ran to completion may mark the strip done; a cancelled one
-            // would otherwise pin a half-filled filmstrip permanently.
-            _thumbnailsCompletedForPath = filePath;
-
-            // Logged so a "no thumbnails ... (primary '')" line can be told apart from a real
-            // failure: that miss is also emitted by the first draw, which legitimately happens
-            // before this asynchronous pass finishes. A miss followed by this line is benign;
-            // a miss with no matching install is the bug.
-            Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
-                $"primary strip installed for '{filePath}' ({owned.Length} tiles)");
-        }
-        else
-        {
-            Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
-        }
-
-        return true;
     }
 
     private TimelineMapper? EnsureTimelineMapper()
@@ -412,6 +430,7 @@ public sealed partial class EditorPage
     {
         _timelineMapper = null;
         _lastRenderedFrameIndex = -1;
+        if (_previewSuspended || _pageUnloaded) return;
 
         Preview.Duration = GetMappedDuration();
 
@@ -592,7 +611,6 @@ public sealed partial class EditorPage
             // asked for. Guarded by its own signature, since re-rendering is expensive.
             RefreshStretchedAudioIfChanged();
 
-            Timeline.Refresh();
             InvalidatePreview();
 
             // AFTER InvalidatePreview, deliberately: that is what pushes the post-undo anchor
@@ -961,15 +979,14 @@ public sealed partial class EditorPage
 
     private void SyncCameraSegmentUI(string? segmentId)
     {
-        if (CameraFullscreenPanel is null) return;
-
         var seg = segmentId is null
             ? null
             : ViewModel.Model.CameraSegments.FirstOrDefault(s => s.Id == segmentId);
 
         if (seg is null)
         {
-            CameraFullscreenPanel.Visibility = Visibility.Collapsed;
+            if (PropertiesPanel.IsPaneCreated(PropertyPaneKind.Video))
+                CameraFullscreenPanel.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -1490,9 +1507,11 @@ public sealed partial class EditorPage
 
     private async Task LoadAudioWaveformAsync(Project project, int initGeneration)
     {
-        if (project.AudioFilePaths is not { Count: > 0 })
+        if (!IsWaveformWorkCurrent(initGeneration, CancellationToken.None)
+            || project.AudioFilePaths is not { Count: > 0 })
             return;
 
+        var ct = WaveformWorkToken;
         const int targetSamples = 2000;
 
         try
@@ -1518,21 +1537,21 @@ public sealed partial class EditorPage
             // Negative: audio started late (e.g. mic permission dialog delay).
             double audioOffset = project.AudioToVideoOffsetSeconds;
 
-            var (systemWaveform, micWaveform) = await Task.Run(() =>
+            var (systemWaveform, micWaveform) = await RunWaveformWorkAsync(token =>
             {
+                token.ThrowIfCancellationRequested();
                 float[]? sysWf = null;
                 float[]? micWf = null;
 
                 double sysDuration = 0, micDuration = 0;
                 if (systemPath is not null)
                 {
-                    try { using var p = new NAudio.Wave.AudioFileReader(systemPath); sysDuration = p.TotalTime.TotalSeconds; }
-                    catch { }
+                    sysDuration = AudioFileDuration.TryGet(systemPath)?.TotalSeconds ?? 0;
                 }
                 if (micPath is not null)
                 {
-                    try { using var p = new NAudio.Wave.AudioFileReader(micPath); micDuration = p.TotalTime.TotalSeconds; }
-                    catch { }
+                    token.ThrowIfCancellationRequested();
+                    micDuration = AudioFileDuration.TryGet(micPath)?.TotalSeconds ?? 0;
                 }
 
                 // Waveform alignment:
@@ -1542,12 +1561,14 @@ public sealed partial class EditorPage
                 double skipSeconds = Math.Max(0, audioOffset);
                 double leadTime = Math.Max(0, -audioOffset);
 
-                sysWf = BuildAlignedWaveform(systemPath, sysDuration, skipSeconds, leadTime, videoDuration, targetSamples);
-                micWf = BuildAlignedWaveform(micPath, micDuration, skipSeconds, leadTime, videoDuration, targetSamples);
+                sysWf = BuildAlignedWaveform(systemPath, sysDuration, skipSeconds, leadTime, videoDuration, targetSamples, token);
+                micWf = BuildAlignedWaveform(micPath, micDuration, skipSeconds, leadTime, videoDuration, targetSamples, token);
 
                 return (sysWf, micWf);
-            });
+            }, ct);
 
+            // Reject stale work before publishing either samples or an audio player.
+            if (!IsWaveformWorkCurrent(initGeneration, ct)) return;
             if (systemWaveform is { Length: > 0 })
                 ViewModel.Model.SystemAudioWaveformSamples = systemWaveform;
             if (micWaveform is { Length: > 0 })
@@ -1557,12 +1578,10 @@ public sealed partial class EditorPage
             // build runs in the background well after the timeline first drew — so the
             // tracks have to be told the samples arrived or they would stay collapsed.
             if (systemWaveform is { Length: > 0 } || micWaveform is { Length: > 0 })
-                DispatcherQueue.TryEnqueue(() => Timeline?.Refresh());
-
-            // The waveform build above is a multi-second background pass; if the page
-            // unloaded or a newer preview init took over meanwhile, publishing a player
-            // here would strand it (nothing disposes it again) or clobber the new run's.
-            if (initGeneration != _previewInitGeneration) return;
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (IsWaveformWorkCurrent(initGeneration, ct)) Timeline?.Refresh();
+                });
 
             // At video time T, the audio file position is T + audioOffset
             _audioOffsetSeconds = audioOffset;
@@ -1602,6 +1621,7 @@ public sealed partial class EditorPage
                 $"mic={(micWaveform is { Length: > 0 } ? "yes" : "no")}, " +
                 $"videoDuration={videoDuration:F2}s");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
             // Audio waveform generation failed — editor still works without it, but a
@@ -1777,6 +1797,7 @@ public sealed partial class EditorPage
     /// </remarks>
     private void ReloadInsertedAudioPlayer()
     {
+        if (_previewSuspended || _pageUnloaded) return;
         _insertedAudioPlayer?.Dispose();
         _insertedAudioPlayer = null;
         _insertedAudioSignature = BuildInsertedAudioSignature();
@@ -1834,7 +1855,7 @@ public sealed partial class EditorPage
             var built = player;
             DispatcherQueue.TryEnqueue(() =>
             {
-                if (generation != _insertedAudioGeneration || _pageUnloaded)
+                if (generation != _insertedAudioGeneration || _pageUnloaded || _previewSuspended)
                 {
                     built.Dispose();
                     return;
@@ -1915,6 +1936,8 @@ public sealed partial class EditorPage
     /// </remarks>
     private void ReloadStretchedAudioPlayer()
     {
+        if (_previewSuspended || _pageUnloaded) return;
+        var ct = _previewWorkCts.Token;
         _stretchedAudioPlayer?.Dispose();
         _stretchedAudioPlayer = null;
 
@@ -1935,57 +1958,69 @@ public sealed partial class EditorPage
 
         _ = Task.Run(async () =>
         {
-            var renderer = new SegmentAudioRenderer();
-            var placements = new List<AudioTimelinePlacement>();
-
-            foreach (var request in requests)
-            {
-                if (generation != _stretchedAudioGeneration) return;
-
-                var stretch = request.Stretch!.Value;
-                string? rendered = await renderer.RenderAsync(
-                    request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
-                    stretch.Speed, stretch.OutputDuration);
-
-                // A source that cannot be stretched stays silent in preview rather than
-                // reverting to a drifting native-rate pass: export falls back to native for
-                // it, and a preview that thrashed the playhead would be the worse of the two
-                // disagreements.
-                if (rendered is null) continue;
-
-                placements.Add(new AudioTimelinePlacement(
-                    rendered, request.Delay, TimeSpan.Zero, stretch.OutputDuration,
-                    (float)Math.Clamp(request.Volume, 0.0, 1.0)));
-            }
-
-            if (placements.Count == 0) return;
-
-            AudioPlaybackEngine? player = null;
             try
             {
-                player = new AudioPlaybackEngine();
-                player.LoadPlacements(placements);
-            }
-            catch (Exception ex)
-            {
-                Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
-                    $"stretched audio engine failed to load: {ex.Message}");
-                player?.Dispose();
-                return;
-            }
+                var renderer = new SegmentAudioRenderer();
+                var placements = new List<AudioTimelinePlacement>();
 
-            var built = player;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                if (generation != _stretchedAudioGeneration || _pageUnloaded)
+                foreach (var request in requests)
                 {
-                    built.Dispose();
+                    if (generation != _stretchedAudioGeneration) return;
+
+                    var stretch = request.Stretch!.Value;
+                    string? rendered = await renderer.RenderAsync(
+                        request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
+                        stretch.Speed, stretch.OutputDuration, ct);
+
+                    // A source that cannot be stretched stays silent in preview rather than
+                    // reverting to a drifting native-rate pass: export falls back to native for
+                    // it, and a preview that thrashed the playhead would be the worse of the two
+                    // disagreements.
+                    if (rendered is null) continue;
+
+                    placements.Add(new AudioTimelinePlacement(
+                        rendered, request.Delay, TimeSpan.Zero, stretch.OutputDuration,
+                        (float)Math.Clamp(request.Volume, 0.0, 1.0)));
+                }
+
+                if (placements.Count == 0) return;
+
+                AudioPlaybackEngine? player = null;
+                try
+                {
+                    player = new AudioPlaybackEngine();
+                    player.LoadPlacements(placements);
+                }
+                catch (Exception ex)
+                {
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+                        $"stretched audio engine failed to load: {ex.Message}");
+                    player?.Dispose();
                     return;
                 }
 
-                _stretchedAudioPlayer?.Dispose();
-                _stretchedAudioPlayer = built;
-            });
+                var built = player;
+                if (!DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (generation != _stretchedAudioGeneration || _pageUnloaded || _previewSuspended)
+                    {
+                        built.Dispose();
+                        return;
+                    }
+
+                    _stretchedAudioPlayer?.Dispose();
+                    _stretchedAudioPlayer = built;
+                }))
+                {
+                    built.Dispose();
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Editor", "stretched audio discarded: dispatcher shut down");
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"stretched audio preparation failed: {ex}");
+            }
         });
     }
 
@@ -2384,7 +2419,7 @@ public sealed partial class EditorPage
     /// </summary>
     private void PublishInsertedAudioLane()
     {
-        if (Timeline is null) return;
+        if (Timeline is null || _previewSuspended || _pageUnloaded) return;
 
         var tracks = ViewModel.Model.AudioTracks;
         if (tracks is not { Count: > 0 })
@@ -2405,6 +2440,7 @@ public sealed partial class EditorPage
             _insertedAudioWaveforms.TryGetValue(track.FilePath, out var cached);
             if (cached.Peaks is null
                 && !missing.Contains(track.FilePath, StringComparer.OrdinalIgnoreCase)
+                && !_pendingInsertedWaveforms.ContainsKey(track.FilePath)
                 && File.Exists(track.FilePath))
             {
                 // One entry per FILE, not per track: after a split, both halves read the
@@ -2429,28 +2465,26 @@ public sealed partial class EditorPage
 
         if (missing.Count == 0) return;
 
-        // Decoding a WAV is far too slow for a draw pass, so the lane draws as a plain block
-        // first and gains its waveform on the republish below.
-        _ = Task.Run(async () =>
-        {
-            // Deliberately yields first. This runs during project load, where the preview
-            // decoder, the filmstrip pass and the audio engine are all starting at once;
-            // decoding several minutes of WAV in that window competes with them for I/O and
-            // CPU and shows up as the editor stuttering while it opens. The waveform is
-            // decoration — it can afford to arrive a moment later than the blocks.
-            await Task.Delay(WaveformDecodeDelay);
+        var ct = WaveformWorkToken;
+        int epoch = _waveformEpoch;
+        foreach (var path in missing) _pendingInsertedWaveforms[path] = epoch;
+        _ = LoadInsertedWaveformsAsync(missing, _previewInitGeneration, epoch, ct);
+    }
 
-            var built = new List<(string Path, float[] Peaks, double DurationSeconds)>();
-            foreach (var path in missing)
+    private async Task LoadInsertedWaveformsAsync(
+        List<string> missing, int generation, int epoch, CancellationToken ct)
+    {
+        try
+        {
+            // Keep waveform I/O behind preview/filmstrip startup, but cancel the delay when hidden.
+            var built = await RunWaveformWorkAsync(token =>
             {
-                try
+                var results = new List<(string Path, float[] Peaks, double DurationSeconds)>();
+                foreach (var path in missing)
                 {
-                    // Measured from the file itself rather than taken from AudioTrack
-                    // .SourceDuration: the peaks are keyed by path and shared by every track
-                    // cut from it, so their span must describe the FILE, not any one track.
-                    double fileSeconds;
-                    using (var probe = new NAudio.Wave.AudioFileReader(path))
-                        fileSeconds = probe.TotalTime.TotalSeconds;
+                    token.ThrowIfCancellationRequested();
+                    double fileSeconds = AudioFileDuration.TryGet(path)?.TotalSeconds ?? 0;
+                    token.ThrowIfCancellationRequested();
                     if (fileSeconds <= 0) continue;
 
                     int peakCount = (int)Math.Clamp(
@@ -2458,30 +2492,31 @@ public sealed partial class EditorPage
                         InsertedAudioMinPeaks,
                         InsertedAudioMaxPeaks);
 
-                    var peaks = AudioWaveformGenerator.GenerateWaveform(path, peakCount);
+                    var peaks = GenerateWaveformOrNull(path, peakCount, token);
                     if (peaks is { Length: > 0 })
-                        built.Add((path, peaks, fileSeconds));
+                        results.Add((path, peaks, fileSeconds));
                 }
-                catch
-                {
-                    // An unreadable file still draws as a block; it just never gets a waveform.
-                }
-            }
+                return results;
+            }, ct, WaveformDecodeDelay);
+            if (!IsWaveformWorkCurrent(generation, ct) || built.Count == 0) return;
 
-            if (built.Count == 0) return;
-
-            DispatcherQueue.TryEnqueue(() =>
+            foreach (var (path, peaks, seconds) in built)
+                _insertedAudioWaveforms[path] = (peaks, seconds);
+            PublishInsertedAudioLane();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"inserted waveform load failed: {ex}");
+        }
+        finally
+        {
+            foreach (var path in missing)
             {
-                if (_pageUnloaded || Timeline is null) return;
-
-                foreach (var (path, peaks, seconds) in built)
-                    _insertedAudioWaveforms[path] = (peaks, seconds);
-
-                // Re-projects with the waveforms now cached. Guarded because this lands
-                // after an await boundary, by which time the page may have unloaded.
-                PublishInsertedAudioLane();
-            });
-        });
+                if (_pendingInsertedWaveforms.TryGetValue(path, out int pendingEpoch) && pendingEpoch == epoch)
+                    _pendingInsertedWaveforms.Remove(path);
+            }
+        }
     }
 
     /// <summary>
@@ -2492,8 +2527,9 @@ public sealed partial class EditorPage
     private static float[]? BuildAlignedWaveform(
         string? path, double fileDuration,
         double skipSeconds, double leadTime,
-        double videoDuration, int targetSamples)
+        double videoDuration, int targetSamples, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (path is null || fileDuration <= 0) return null;
 
         try
@@ -2510,13 +2546,18 @@ public sealed partial class EditorPage
                 Math.Ceiling(targetSamples * coverageDuration / videoDuration));
             if (audioPeaks < 1) audioPeaks = 1;
 
-            var raw = AudioWaveformGenerator.GenerateWaveform(
-                path, audioPeaks, startSeconds: skipSeconds);
+            var raw = GenerateWaveformOrNull(path, audioPeaks, ct, skipSeconds);
+            if (raw is null) return null;
             var wf = new float[targetSamples];
             Array.Copy(raw, 0, wf, leadPeaks, Math.Min(raw.Length, audioPeaks));
             return wf;
         }
-        catch { return null; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"waveform alignment failed '{path}': {ex.Message}");
+            return null;
+        }
     }
 
     // --- Audio mute support ---

@@ -39,9 +39,14 @@ public sealed partial class EditorPage
         public void Dispose()
         {
             TryDispose(Reader);
+            Reader = null;
             TryDispose(Renderer);
+            Renderer = null;
+            Ready = false;
             try { Webcam?.Clips.Clear(); } catch { }
+            Webcam = null;
             TryDispose(LastWebcamFrame);
+            LastWebcamFrame = null;
         }
     }
     private long _segmentPreviewUseCounter;
@@ -263,17 +268,20 @@ public sealed partial class EditorPage
     /// hold for seconds. Doing that on the UI thread freezes the app while switching
     /// projects or navigating away mid-playback.
     /// </summary>
-    private static void DisposeOffUiThread(IDisposable? resource)
+    private readonly List<Task> _resourceDisposals = [];
+
+    private void DisposeOffUiThread(IDisposable? resource)
     {
         if (resource is null) return;
-        _ = Task.Run(() =>
+        _resourceDisposals.RemoveAll(task => task.IsCompleted);
+        _resourceDisposals.Add(Task.Run(() =>
         {
             try { resource.Dispose(); }
             catch (Exception ex)
             {
                 Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"deferred dispose failed: {ex.Message}");
             }
-        });
+        }));
     }
 
     private static void TryDispose(IDisposable? resource)
@@ -304,14 +312,15 @@ public sealed partial class EditorPage
     /// editor that is supposed to be empty.
     /// </para>
     /// </remarks>
-    private void ResetPreviewToEmptyState()
+    private void ResetPreviewToEmptyState(bool preservePresentedFrame = false)
     {
         _previewInitGeneration++;
-        _thumbnailGenerationId++;
+        CancelWaveformWork();
+        CancelThumbnailGeneration();
         _segmentPreviewGeneration++;
 
         Preview.Pause();
-        Preview.ClearFrame();
+        if (!preservePresentedFrame) Preview.ClearFrame();
         Preview.HideQualityIndicator();
 
         _styleDebouncer?.Stop();
@@ -355,10 +364,19 @@ public sealed partial class EditorPage
         _trimEdgePreview = null;
         Preview.HideTrimIndicator();
 
-        Mixtri.Core.Diagnostics.DiagLog.Write("Editor", "timeline emptied; editor reset to zero state");
+        Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+            _previewSuspended ? "hidden editor media state released" : "timeline emptied; editor reset to zero state");
     }
 
     private async Task InitializePreviewCoreAsync()
+    {
+        if (_previewSuspended || _pageUnloaded) return;
+        _activePreviewInitializations++;
+        try { await InitializePreviewResourcesAsync(); }
+        finally { _activePreviewInitializations--; }
+    }
+
+    private async Task InitializePreviewResourcesAsync()
     {
         // Resolved BEFORE any teardown. The teardown below is unconditional, so discovering
         // only afterwards that there is nothing to rebuild the pipeline with used to leave
@@ -380,7 +398,9 @@ public sealed partial class EditorPage
 
         // Every await below is a point where this page can be unloaded or a newer init can
         // start. Anything built after the generation moves on is disposed, never published.
+        _graphicsDeviceManager.Attach();
         int initGeneration = ++_previewInitGeneration;
+        CancelWaveformWork();
 
         DisposeOffUiThread(_frameReader);
         _previewRenderer?.Dispose();
@@ -451,7 +471,7 @@ public sealed partial class EditorPage
 
         if (!haveStrip && !alreadyGenerating)
         {
-            _thumbnailGenerationId++; // cancel any pass for a different source
+            CancelThumbnailGeneration();
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
             _thumbnailsDoneForFiles.Clear();
@@ -593,7 +613,8 @@ public sealed partial class EditorPage
         // CompositionConfig so the preview renderer matches both the editor UI and
         // the export pipeline (which sources these from Project).
         var config = ProjectService.Instance.CurrentComposition ?? new CompositionConfig();
-        bool restored = ProjectService.Instance.IsRestoredFromPackage;
+        bool restored = ProjectService.Instance.IsRestoredFromPackage
+            || ReferenceEquals(_defaultsAppliedProject, project);
 
         config = config with
         {
@@ -644,6 +665,7 @@ public sealed partial class EditorPage
         // path: everything above is derived from the project or from first-open defaults, not
         // from anything the user did, so it must not mark the project as having unsaved edits.
         ProjectService.Instance.ApplyLoadTimeComposition(config);
+        _defaultsAppliedProject = project;
 
         // Applied to the renderer's copy only, never to the config persisted above: a source
         // with no cursor samples must not draw the invented centre cursor, but that is a fact
@@ -714,11 +736,12 @@ public sealed partial class EditorPage
         // Aspect ratio + fit + crop anchor controls (always visible)
         InitializeAspectRatioControls();
 
-        _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition);
     }
 
     private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
     {
+        if (_previewSuspended || _pageUnloaded) return;
         if (_frameReader is null) return;
         if (_graphicsDeviceManager.IsRecoveryInProgress)
         {
@@ -789,7 +812,7 @@ public sealed partial class EditorPage
                 {
                     break;
                 }
-            } while (true);
+            } while (!_previewSuspended && !_pageUnloaded);
         }
         finally
         {
@@ -855,7 +878,7 @@ public sealed partial class EditorPage
             return false;
         }
 
-        using var probe = await reader.LoadFrameAtTimeAsync(TimeSpan.Zero);
+        using var probe = await reader.AcquireFrameAtTimeAsync(TimeSpan.Zero);
         if (probe is null
             || !ReferenceEquals(project, ProjectService.Instance.CurrentProject)
             || initGeneration != _previewInitGeneration)
@@ -1215,8 +1238,9 @@ public sealed partial class EditorPage
             if (!ReferenceEquals(reader, _frameReader)) return null;
             int stateGen = _primaryPreviewStateGeneration;
 
-            var bitmap = await reader.LoadFrameAtTimeAsync(sourceTime);
-            if (bitmap is null) return null;
+            var frame = await reader.AcquireFrameAtTimeAsync(sourceTime);
+            if (frame is null) return null;
+            var bitmap = frame.Bitmap;
 
             try
             {
@@ -1256,11 +1280,7 @@ public sealed partial class EditorPage
             }
             finally
             {
-                // Every path above either already returned a NEW render target (never the
-                // decoded bitmap itself) or fell through to null — the decoded bitmap is
-                // always this method's to release, on every path including an exception
-                // thrown while composing it.
-                bitmap.Dispose();
+                frame.Dispose();
             }
         }
 
@@ -1275,12 +1295,13 @@ public sealed partial class EditorPage
         int ctxGeneration = _segmentPreviewGeneration;
         var segReader = ctx.Reader;
 
-        var segBitmap = await segReader.LoadFrameAtTimeAsync(sourceTime);
-        if (segBitmap is null) return null;
+        var segmentFrame = await segReader.AcquireFrameAtTimeAsync(sourceTime);
+        if (segmentFrame is null) return null;
+        var segBitmap = segmentFrame.Bitmap;
 
         try
         {
-            if (ctxGeneration != _segmentPreviewGeneration) return null;
+            if (!IsCurrentSegmentPreview(seg.Id, ctx, ctxGeneration)) return null;
 
             if (ctx.Ready && ctx.Renderer is not null)
             {
@@ -1291,7 +1312,11 @@ public sealed partial class EditorPage
                     try
                     {
                         var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
-                        if (ctxGeneration != _segmentPreviewGeneration) return null;
+                        if (!IsCurrentSegmentPreview(seg.Id, ctx, ctxGeneration))
+                        {
+                            wf?.Dispose();
+                            return null;
+                        }
                         if (wf is not null)
                         {
                             ctx.LastWebcamFrame?.Dispose();
@@ -1301,6 +1326,7 @@ public sealed partial class EditorPage
                     }
                     catch { }
                 }
+                if (!IsCurrentSegmentPreview(seg.Id, ctx, ctxGeneration)) return null;
                 var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
                 if (composed is not null) return composed;
                 return null;
@@ -1314,7 +1340,7 @@ public sealed partial class EditorPage
         }
         finally
         {
-            segBitmap.Dispose();
+            segmentFrame.Dispose();
         }
     }
 
@@ -1604,13 +1630,17 @@ public sealed partial class EditorPage
 
     private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
     {
-        if (_frameReader is null) return;
+        var reader = _frameReader;
+        if (reader is null) return;
+        int stateGeneration = _primaryPreviewStateGeneration;
 
-        int frameIndex = _frameReader.GetFrameIndex(sourcePosition);
+        int frameIndex = reader.GetFrameIndex(sourcePosition);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
-        var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourcePosition);
-        if (bitmap is null)
+        using var frame = await reader.AcquireFrameAtTimeAsync(sourcePosition);
+        if (_pageUnloaded || _previewSuspended || stateGeneration != _primaryPreviewStateGeneration
+            || !ReferenceEquals(reader, _frameReader)) return;
+        if (frame is null)
         {
             // The decoder produced nothing. Whatever was presented last — often a text
             // slide the playhead has already left — stays on screen, so make sure the
@@ -1621,22 +1651,24 @@ public sealed partial class EditorPage
                 $"no decoded frame at {sourcePosition} (index {frameIndex}); preview is stale");
             return;
         }
+        var bitmap = frame.Bitmap;
 
         try
         {
-            if (_compositorReady && _previewRenderer is not null)
+            if (_compositorReady && _previewRenderer is { } renderer)
             {
                 // Region-edit mode composes at rest so the picker frames the SAME image the
                 // export produces (background, padding, cursor) minus the zoom being edited.
-                _previewRenderer.SuppressZoom = _zoomRegionEditMode;
+                renderer.SuppressZoom = _zoomRegionEditMode;
 
                 // Extract webcam frame for overlay
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
+                if (_pageUnloaded || _previewSuspended || stateGeneration != _primaryPreviewStateGeneration
+                    || !ReferenceEquals(renderer, _previewRenderer)) return;
 
-                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
+                var composed = renderer.RenderPreviewFrame(bitmap, sourcePosition);
                 if (composed is not null)
                 {
-                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
@@ -1653,7 +1685,6 @@ public sealed partial class EditorPage
             {
                 ds.DrawImage(bitmap);
             }
-            bitmap.Dispose();
             _lastRenderedFrameIndex = frameIndex;
             Preview.SetFrame(renderTarget);
         }
@@ -1663,7 +1694,6 @@ public sealed partial class EditorPage
                 $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"frame render failed at {sourcePosition}: {ex.GetType().Name}: {ex.Message}");
-            bitmap.Dispose();
         }
     }
 
@@ -1682,12 +1712,15 @@ public sealed partial class EditorPage
 
         var ctx = await GetOrBuildSegmentPreviewAsync(seg);
         if (ctx?.Reader is null) return;
+        int generation = _segmentPreviewGeneration;
+        var reader = ctx.Reader;
 
-        int frameIndex = ctx.Reader.GetFrameIndex(sourceTime);
+        int frameIndex = reader.GetFrameIndex(sourceTime);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
-        var bitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
-        if (bitmap is null)
+        using var frame = await reader.AcquireFrameAtTimeAsync(sourceTime);
+        if (!IsCurrentSegmentPreview(seg.Id, ctx, generation)) return;
+        if (frame is null)
         {
             _lastRenderedFrameIndex = -1;
             _decodeMissed = true;
@@ -1695,32 +1728,39 @@ public sealed partial class EditorPage
                 $"no decoded frame for appended segment at {sourceTime} (index {frameIndex}); preview is stale");
             return;
         }
+        var bitmap = frame.Bitmap;
 
         try
         {
-            if (ctx.Ready && ctx.Renderer is not null)
+            if (ctx.Ready && ctx.Renderer is { } renderer)
             {
-                ctx.Renderer.SuppressZoom = _zoomRegionEditMode;
+                renderer.SuppressZoom = _zoomRegionEditMode;
 
                 if (ctx.Webcam is not null)
                 {
                     try
                     {
                         var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                        if (!IsCurrentSegmentPreview(seg.Id, ctx, generation))
+                        {
+                            wf?.Dispose();
+                            return;
+                        }
                         if (wf is not null)
                         {
                             ctx.LastWebcamFrame?.Dispose();
                             ctx.LastWebcamFrame = wf;
-                            ctx.Renderer.SetWebcamFrame(wf);
+                            renderer.SetWebcamFrame(wf);
                         }
                     }
                     catch { }
                 }
+                if (!IsCurrentSegmentPreview(seg.Id, ctx, generation)
+                    || !ReferenceEquals(renderer, ctx.Renderer)) return;
 
-                var composed = ctx.Renderer.RenderPreviewFrame(bitmap, sourceTime);
+                var composed = renderer.RenderPreviewFrame(bitmap, sourceTime);
                 if (composed is not null)
                 {
-                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
@@ -1732,7 +1772,6 @@ public sealed partial class EditorPage
             var device = CanvasDevice.GetSharedDevice();
             var rt = Win2DUtils.CreateRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
             using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
-            bitmap.Dispose();
             _lastRenderedFrameIndex = frameIndex;
             Preview.SetFrame(rt);
         }
@@ -1741,7 +1780,6 @@ public sealed partial class EditorPage
             System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"appended segment render failed: {ex.GetType().Name}: {ex.Message}");
-            bitmap.Dispose();
         }
     }
 
@@ -1770,6 +1808,10 @@ public sealed partial class EditorPage
         return longest;
     }
 
+    private bool IsCurrentSegmentPreview(string segmentId, SegmentPreview context, int generation) =>
+        !_pageUnloaded && !_previewSuspended && generation == _segmentPreviewGeneration
+        && _segmentPreviews.TryGetValue(segmentId, out var current) && ReferenceEquals(current, context);
+
     private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
     {
         if (_segmentPreviews.TryGetValue(seg.Id, out var existing))
@@ -1786,14 +1828,10 @@ public sealed partial class EditorPage
         // True once this build's entry has been dropped or replaced — by a cache clear, a
         // per-segment style rebuild, or page teardown — while it was awaiting. Publishing
         // onto it after that would leak a decoder nothing owns.
-        bool Abandoned() =>
-            generation != _segmentPreviewGeneration
-            || !_segmentPreviews.TryGetValue(seg.Id, out var current)
-            || !ReferenceEquals(current, ctx);
+        bool Abandoned() => !IsCurrentSegmentPreview(seg.Id, ctx, generation);
 
-        // Tears down whatever this build managed to create. The clear that abandoned it
-        // disposed an empty context, so everything built after that point is this build's
-        // to release.
+        // Clear/eviction released the context's published resources; anything completed
+        // after its await is still this build's responsibility.
         SegmentPreview? Abandon()
         {
             DisposeOffUiThread(ctx.Reader);
@@ -1804,6 +1842,7 @@ public sealed partial class EditorPage
 
         try
         {
+            if (Abandoned()) return Abandon();
             int fps = seg.Fps > 0 ? seg.Fps : 30;
             var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
                 seg.VideoFilePath,
@@ -1816,7 +1855,6 @@ public sealed partial class EditorPage
                 DisposeOffUiThread(reader);
                 return Abandon();
             }
-
             ctx.Reader = reader;
             if (ctx.Reader is null) return ctx;
 
@@ -1859,9 +1897,10 @@ public sealed partial class EditorPage
 
             config = HideCursorWhenNoSamples(config, mouseData);
 
+            PreviewRenderer? renderer = null;
             try
             {
-                var renderer = new PreviewRenderer();
+                renderer = new PreviewRenderer();
                 // The compositor is driven with ABSOLUTE source times
                 // (SourceStart + localOffset), so its timelines must span the end of
                 // the clip's source extent, not just the clip's length. Passing the
@@ -1893,12 +1932,12 @@ public sealed partial class EditorPage
 
                 if (Abandoned())
                 {
-                    renderer.Dispose();
                     return Abandon();
                 }
 
                 ctx.Renderer = renderer;
                 ctx.Ready = true;
+                renderer = null;
             }
             catch (Exception ex)
             {
@@ -1909,6 +1948,7 @@ public sealed partial class EditorPage
                 ctx.Renderer = null;
                 ctx.Ready = false;
             }
+            finally { TryDispose(renderer); }
 
             if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
             {
