@@ -43,6 +43,8 @@ public sealed class SegmentFrameComposer : IDisposable
     private readonly CanvasDevice _device;
     private readonly Dictionary<SourceKey, SourceContext> _contexts = [];
     private readonly SourceContext _primaryContext;
+    private readonly Dictionary<SourceKey, TimeSpan> _lastContextUse = [];
+    private readonly List<SourceKey> _retiredKeys = [];
 
     private TextSlideRenderer? _textSlideRenderer;
     private TransitionRenderer? _transitionRenderer;
@@ -59,6 +61,7 @@ public sealed class SegmentFrameComposer : IDisposable
     /// when a timeline is present, otherwise the primary recording's frame count.
     /// </summary>
     public int TotalFrames { get; }
+    internal int ActiveContextCount => _contexts.Count;
 
     private SegmentFrameComposer(
         Project project,
@@ -84,6 +87,21 @@ public sealed class SegmentFrameComposer : IDisposable
         OutputWidth = primaryContext.Compositor.OutputWidth;
         OutputHeight = primaryContext.Compositor.OutputHeight;
         TotalFrames = mapper?.TotalOutputFrames ?? primaryContext.Compositor.TotalFrames;
+        if (timeline is not null)
+        {
+            var transitionTail = timeline.Segments
+                .Select(s => s.InTransition?.Duration ?? TimeSpan.FromMilliseconds(500))
+                .DefaultIfEmpty(TimeSpan.Zero).Max();
+            foreach (var video in timeline.Segments.OfType<VideoSegment>())
+            {
+                var key = new SourceKey(NormalizePath(video.VideoFilePath),
+                    video.FrameStyleOverride ?? composition.Background,
+                    video.CursorStyleOverride ?? composition.Cursor);
+                var end = video.End + transitionTail;
+                if (!_lastContextUse.TryGetValue(key, out var previous) || end > previous)
+                    _lastContextUse[key] = end;
+            }
+        }
     }
 
     /// <summary>
@@ -156,6 +174,7 @@ public sealed class SegmentFrameComposer : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfNegative(frameIndex);
 
+        RetireUnusedContexts(TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _fps)));
         var frame = await ComposeSegmentFrameAsync(frameIndex, ct);
 
         if (_timeline is null || _timeline.Segments.Count == 0)
@@ -725,7 +744,7 @@ public sealed class SegmentFrameComposer : IDisposable
             }
 
             using var sourceFrame = await LoadSourceFrameAsync(context, position);
-            return EnsureCanonicalSize(compositor.ComposeFrame(sourceFrame, clampedTime));
+            return EnsureCanonicalSize(compositor.ComposeFrame(sourceFrame.Bitmap, clampedTime));
         }
         finally
         {
@@ -735,26 +754,28 @@ public sealed class SegmentFrameComposer : IDisposable
         }
     }
 
-    private async Task<CanvasBitmap> LoadSourceFrameAsync(SourceContext context, TimeSpan position)
+    private async Task<FrameLease> LoadSourceFrameAsync(SourceContext context, TimeSpan position)
     {
         if (context.Reader is not null)
         {
-            var frame = await context.Reader.LoadFrameAtTimeAsync(position);
+            var frame = await context.Reader.AcquireFrameAtTimeAsync(position);
             if (frame is not null)
                 return frame;
         }
 
         if (context.SourceComposition is not null)
         {
-            return await ExtractFrameFromCompositionAsync(
+            var extracted = await ExtractFrameFromCompositionAsync(
                 _device, context.SourceComposition, position,
                 context.SourceWidth, context.SourceHeight);
+            return new FrameLease(extracted, extracted.Dispose);
         }
 
         // The JPEG frame could not be loaded and there is no open composition —
         // decode the frame straight from the video file.
-        return await FallbackExtractFrameAsync(
+        var fallback = await FallbackExtractFrameAsync(
             _device, context.VideoFilePath, position, context.SourceWidth, context.SourceHeight);
+        return new FrameLease(fallback, fallback.Dispose);
     }
 
     /// <summary>
@@ -809,6 +830,19 @@ public sealed class SegmentFrameComposer : IDisposable
     #endregion
 
     #region Source contexts
+
+    private void RetireUnusedContexts(TimeSpan outputTime)
+    {
+        if (_timeline is null || _timeline.Segments.Count == 0) return;
+        _retiredKeys.Clear();
+        foreach (var key in _contexts.Keys)
+        {
+            if (_lastContextUse.TryGetValue(key, out var last) && outputTime <= last) continue;
+            _retiredKeys.Add(key);
+        }
+        foreach (var key in _retiredKeys)
+            if (_contexts.Remove(key, out var context)) context.Dispose();
+    }
 
     private async Task<SourceContext> GetOrCreateContextAsync(VideoSegment segment, CancellationToken ct)
     {
@@ -908,7 +942,7 @@ public sealed class SegmentFrameComposer : IDisposable
         // Captured JPEG frames are preferred when they still exist, otherwise frames are
         // decoded from the finalized MP4. Either way they are indexed with the RECORDING fps.
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(
-            videoFilePath, recordingFps > 0 ? recordingFps : 30);
+            videoFilePath, recordingFps > 0 ? recordingFps : 30, forExport: true);
 
         // Only open the video file when it is actually needed: as the frame source when
         // no captured frames exist, or to recover dimensions the recording metadata does

@@ -32,16 +32,19 @@ public sealed class VideoFrameReader : IDisposable
     private readonly IFrameSource _source;
     private readonly int _fps;
     private readonly long _cacheBudgetBytes;
+    private readonly int _cacheCapacity;
 
-    private readonly Dictionary<int, CanvasBitmap> _cache = [];
+    private readonly Dictionary<int, CachedFrame> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     private long _cachedBytes;
+    private long _clonedPixelBytes;
 
     private bool _disposed;
 
     public int FrameCount => _source.FrameCount;
     public int Fps => _fps;
+    internal long ClonedPixelBytes => Interlocked.Read(ref _clonedPixelBytes);
 
     /// <summary>Which backing store frames are being read from.</summary>
     public FrameSourceKind SourceKind => _source.Kind;
@@ -50,11 +53,13 @@ public sealed class VideoFrameReader : IDisposable
         ? TimeSpan.FromSeconds((double)_source.FrameCount / _fps)
         : TimeSpan.Zero;
 
-    private VideoFrameReader(IFrameSource source, int fps, long cacheBudgetBytes = 0)
+    internal VideoFrameReader(IFrameSource source, int fps, long cacheBudgetBytes = 0, int cacheCapacity = 0)
     {
         _source = source;
         _fps = fps;
         _cacheBudgetBytes = cacheBudgetBytes;
+        _cacheCapacity = cacheCapacity > 0 ? cacheCapacity
+            : cacheBudgetBytes > 0 ? int.MaxValue : DefaultCacheCapacity;
     }
 
     /// <summary>
@@ -83,7 +88,8 @@ public sealed class VideoFrameReader : IDisposable
     /// Opens the recording that <paramref name="videoFilePath"/> belongs to, preferring the
     /// captured JPEGs alongside it and falling back to decoding the file itself.
     /// </summary>
-    public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(string videoFilePath, int fps)
+    public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(
+        string videoFilePath, int fps, bool forExport = false)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
@@ -101,7 +107,9 @@ public sealed class VideoFrameReader : IDisposable
         var mp4 = await Mp4FrameSource.OpenAsync(
             videoFilePath, fps, device, RecordingMarker.NeedsVerticalFlip(videoFilePath))
             .ConfigureAwait(false);
-        return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
+        return mp4 is not null
+            ? new VideoFrameReader(mp4, fps, forExport ? 64L * 1024 * 1024 : 0, forExport ? 2 : 0)
+            : null;
     }
 
     /// <summary>
@@ -152,13 +160,26 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
     {
+        if (_disposed || frameIndex < 0 || frameIndex >= _source.FrameCount) return null;
+        if (_source.Kind == FrameSourceKind.CapturedJpeg)
+            return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        using var lease = await AcquireFrameAsync(frameIndex).ConfigureAwait(false);
+        return lease is null ? null : Clone(lease.Bitmap);
+    }
+
+    /// <summary>Acquires immutable source pixels without making a second GPU copy.</summary>
+    public async Task<FrameLease?> AcquireFrameAsync(int frameIndex)
+    {
         if (_disposed || frameIndex < 0 || frameIndex >= _source.FrameCount)
             return null;
 
         // JPEG loads are cheap and already backed by the OS file cache; adding a GPU-side
         // cache on top would cost memory for no gain.
         if (_source.Kind == FrameSourceKind.CapturedJpeg)
-            return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        {
+            var jpeg = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+            return jpeg is null ? null : new FrameLease(jpeg, jpeg.Dispose);
+        }
 
         if (!await TryEnterCacheAsync().ConfigureAwait(false))
             return null;
@@ -167,7 +188,7 @@ public sealed class VideoFrameReader : IDisposable
             if (_cache.TryGetValue(frameIndex, out var cached))
             {
                 Touch(frameIndex);
-                return Clone(cached);
+                return cached.Acquire();
             }
         }
         finally
@@ -182,7 +203,7 @@ public sealed class VideoFrameReader : IDisposable
         if (!await TryEnterCacheAsync().ConfigureAwait(false))
         {
             // Disposed while decoding — the caller still owns this bitmap.
-            return decoded;
+            return new FrameLease(decoded, decoded.Dispose);
         }
         try
         {
@@ -191,15 +212,17 @@ public sealed class VideoFrameReader : IDisposable
                 // Another caller cached this frame while we were decoding.
                 Touch(frameIndex);
                 decoded.Dispose();
-                return Clone(raced);
+                return raced.Acquire();
             }
 
-            _cache[frameIndex] = decoded;
+            var entry = new CachedFrame(decoded);
+            _cache[frameIndex] = entry;
             _cachedBytes += EstimateBytes(decoded);
             _cacheOrder.AddFirst(frameIndex);
+            var lease = entry.Acquire();
             Evict();
 
-            return Clone(decoded);
+            return lease;
         }
         finally
         {
@@ -252,6 +275,9 @@ public sealed class VideoFrameReader : IDisposable
     public Task<CanvasBitmap?> LoadFrameAtTimeAsync(TimeSpan time)
         => LoadFrameAsync(GetFrameIndex(time));
 
+    public Task<FrameLease?> AcquireFrameAtTimeAsync(TimeSpan time)
+        => AcquireFrameAsync(GetFrameIndex(time));
+
     private void Touch(int frameIndex)
     {
         _cacheOrder.Remove(frameIndex);
@@ -260,16 +286,15 @@ public sealed class VideoFrameReader : IDisposable
 
     private void Evict()
     {
-        while (_cacheBudgetBytes > 0
-            ? _cachedBytes > _cacheBudgetBytes
-            : _cacheOrder.Count > DefaultCacheCapacity)
+        while (_cacheOrder.Count > 1 &&
+            (_cacheOrder.Count > _cacheCapacity || (_cacheBudgetBytes > 0 && _cachedBytes > _cacheBudgetBytes)))
         {
             var oldest = _cacheOrder.Last!.Value;
             _cacheOrder.RemoveLast();
             if (_cache.Remove(oldest, out var bitmap))
             {
-                _cachedBytes -= EstimateBytes(bitmap);
-                bitmap.Dispose();
+                _cachedBytes -= EstimateBytes(bitmap.Bitmap);
+                bitmap.Release();
             }
         }
     }
@@ -281,7 +306,7 @@ public sealed class VideoFrameReader : IDisposable
     /// Returns an independent copy so cache eviction can never dispose a bitmap a caller
     /// is still drawing with.
     /// </summary>
-    private static CanvasBitmap Clone(CanvasBitmap source)
+    private CanvasBitmap Clone(CanvasBitmap source)
     {
         var copy = Win2DUtils.CreateRenderTarget(
             GpuContext.GetSharedDevice(),
@@ -293,6 +318,7 @@ public sealed class VideoFrameReader : IDisposable
         using (var ds = copy.CreateDrawingSession())
             ds.DrawImage(source);
 
+        Interlocked.Add(ref _clonedPixelBytes, EstimateBytes(copy));
         return copy;
     }
 
@@ -315,7 +341,7 @@ public sealed class VideoFrameReader : IDisposable
         try
         {
             foreach (var bitmap in _cache.Values)
-                bitmap.Dispose();
+                bitmap.Release();
             _cache.Clear();
             _cacheOrder.Clear();
             _cachedBytes = 0;
@@ -329,5 +355,22 @@ public sealed class VideoFrameReader : IDisposable
 
         // _cacheGate is deliberately NOT disposed: SemaphoreSlim.Dispose does not release
         // callers already parked in WaitAsync, so disposing it would strand them forever.
+    }
+
+    private sealed class CachedFrame(CanvasBitmap bitmap)
+    {
+        private int _references = 1;
+        public CanvasBitmap Bitmap { get; } = bitmap;
+
+        public FrameLease Acquire()
+        {
+            Interlocked.Increment(ref _references);
+            return new FrameLease(Bitmap, Release);
+        }
+
+        public void Release()
+        {
+            if (Interlocked.Decrement(ref _references) == 0) Bitmap.Dispose();
+        }
     }
 }
