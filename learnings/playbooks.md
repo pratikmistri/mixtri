@@ -1,11 +1,11 @@
-> **This is the always-read file.** Every agent reads this at the start of every task -
-> it is kept deliberately small. A rule is promoted here only after its area has caused
+> **This is the settled-rules file.** Agents read the section relevant to their task - it is
+> kept deliberately small. A rule is promoted here only after its area has caused
 > repeated churn (multiple rounds of rework, reversals, or regressions); do not add
 > speculative rules. For the full historical record of why each rule exists, and for
 > entries that never rose to playbook status, see the archive files listed in
 > ../learnings.md.
 
-# Settled Playbooks (definitive — read before starting)
+# Settled Playbooks (definitive)
 
 These rules supersede any conflicting advice in the historical sections below. Each one
 caused repeated churn before it was settled; treat them as fixed conventions.
