@@ -93,4 +93,18 @@ public class ShellSettingsTests
         ShellSettings.Instance.LastCaptureMode = null;
         Assert.IsNull(ShellSettings.Instance.LastCaptureMode);
     }
+
+    [TestMethod]
+    public void SeparateProcessPreference_CanBeDisabledForComparison()
+    {
+        bool original = ShellSettings.Instance.SeparateEditorProcess;
+        try
+        {
+            ShellSettings.Instance.SeparateEditorProcess = false;
+            Assert.IsFalse(ShellSettings.Instance.SeparateEditorProcess);
+            ShellSettings.Instance.SeparateEditorProcess = true;
+            Assert.IsTrue(ShellSettings.Instance.SeparateEditorProcess);
+        }
+        finally { ShellSettings.Instance.SeparateEditorProcess = original; }
+    }
 }
