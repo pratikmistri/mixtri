@@ -151,9 +151,26 @@ public class VideoWriterQueueTests
         Assert.AreEqual(TimeSpan.FromSeconds(4 / (double)Fps), writer.CfrDuration);
     }
 
+    /// <summary>
+    /// The stop-time owed-slot flush uses a non-blocking TryWrite, so it would silently drop
+    /// the CFR tail if producers could occupy the whole channel. They cannot: the channel is
+    /// sized one larger than the admission limit precisely to reserve that slot. This pins
+    /// the relationship so it cannot be tuned apart later.
+    /// </summary>
     [TestMethod]
-    public async Task StaticTail_HoldsLastFrameThroughStopWithoutNewCaptures()
+    [DataRow(1920, 1080)]
+    [DataRow(3840, 2160)]
+    [DataRow(320, 240)]
+    public void QueueReservesASlotForTheStopTimeGapMarker(int width, int height)
     {
+        int capacity = VideoWriter.ComputeQueueCapacity(width, height);
+        var options = VideoWriter.CreateQueueOptions(capacity);
+        Assert.AreEqual(capacity + 1, options.Capacity,
+            "producers are admitted up to capacity, so the channel needs one more for the gap marker");
+    }
+
+    [TestMethod]
+    public async Task StaticTail_HoldsLastFrameThroughStopWithoutNewCaptures()    {
         using var writer = CreateWriter();
         using var frame = CreateFrame();
         writer.WriteFrame(frame, TimeSpan.Zero);

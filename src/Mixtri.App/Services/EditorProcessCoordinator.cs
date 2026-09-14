@@ -23,6 +23,9 @@ public sealed class EditorProcessCoordinator : IDisposable
     /// <summary>How long capture waits for the editor to confirm its window is hidden.</summary>
     private static readonly TimeSpan SuspendTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long a StartRecording request waits for the recorder to accept it.</summary>
+    private static readonly TimeSpan StartRecordingTimeout = TimeSpan.FromSeconds(10);
+
     /// <summary>Cadence and tolerance for the editor's watch on the recorder during remote capture.</summary>
     private static readonly TimeSpan RecorderHeartbeatInterval = TimeSpan.FromSeconds(2);
     private const int RecorderHeartbeatFailuresBeforeRecovery = 3;
@@ -85,7 +88,12 @@ public sealed class EditorProcessCoordinator : IDisposable
     {
         if (request.Command == ShellProcessCommand.Ping)
             return Task.FromResult(new ShellProcessResponse(
-                true, HotkeyRegistered: App.Current.IsMiniHotkeyRegistered, ProcessId: Environment.ProcessId));
+                true, HotkeyRegistered: App.Current.IsMiniHotkeyRegistered, ProcessId: Environment.ProcessId)
+            {
+                // Let a caller whose StartRecording response was lost reconcile the real state.
+                IsRecording = IsRecorder && RecordingViewModel.Shared.IsRecording,
+                IsDelivering = IsRecorder && IsBusy,
+            });
         var completion = new TaskCompletionSource<ShellProcessResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_dispatcher.TryEnqueue(async () =>
         {
@@ -398,7 +406,28 @@ public sealed class EditorProcessCoordinator : IDisposable
             };
             IsRemoteRecording = true;
             await ShellCoordinator.Instance!.SuspendForExternalRecordingAsync();
-            RequireSuccess(await ShellProcessPipe.SendAsync(RecorderPipe, request));
+
+            // A lost response is NOT a refusal: the recorder may already be capturing, and
+            // restoring the window would put the editor on screen inside the take (and let a
+            // second start begin). Retry the same id so the recorder replays its outcome,
+            // then reconcile against its actual state before rolling anything back.
+            var response = await TrySendAsync(RecorderPipe, request, StartRecordingTimeout);
+            for (int attempt = 0; response is null && attempt < DeliverRetries; attempt++)
+            {
+                await Task.Delay(DeliverRetryDelay);
+                response = await TrySendAsync(RecorderPipe, request, StartRecordingTimeout);
+            }
+
+            if (response is null && await RecorderIsCapturingAsync())
+            {
+                DiagLog.Write("ShellProcess",
+                    "The start response was lost but the recorder is capturing; staying parked.");
+                StartRecorderWatch();
+                return;
+            }
+
+            RequireSuccess(response ?? new(false,
+                "The recorder did not respond to the recording request."));
             StartRecorderWatch();
         }
         catch (Exception ex)
@@ -416,10 +445,23 @@ public sealed class EditorProcessCoordinator : IDisposable
     }
 
     /// <summary>
+    /// Asks the recorder whether it is actually capturing. Used to reconcile after a start
+    /// request whose response was lost, so an unknown transport outcome is never mistaken for
+    /// a refusal.
+    /// </summary>
+    private async Task<bool> RecorderIsCapturingAsync()
+    {
+        var ping = await TrySendAsync(RecorderPipe, new() { Command = ShellProcessCommand.Ping });
+        return ping is { Success: true, IsRecording: true };
+    }
+
+    /// <summary>
     /// Watches the recorder for the life of a remote recording. Without this, a recorder that
     /// crashes or hangs after accepting the start command leaves the editor parked forever:
     /// <see cref="IsRemoteRecording"/> is otherwise cleared only by a completion, failure or
     /// redirect message, and <c>ShowFullWindow</c> refuses to restore while it is set.
+    /// A recorder that is alive but has silently stopped capturing counts as failure too,
+    /// once it has been seen capturing and is not mid-handoff.
     /// </summary>
     private void StartRecorderWatch()
     {
@@ -429,25 +471,31 @@ public sealed class EditorProcessCoordinator : IDisposable
         _ = Task.Run(async () =>
         {
             int failures = 0;
+            bool sawCapturing = false;
             try
             {
                 while (!cancellation.IsCancellationRequested)
                 {
                     await Task.Delay(RecorderHeartbeatInterval, cancellation.Token);
-                    if (await TrySendAsync(RecorderPipe, new() { Command = ShellProcessCommand.Ping }) is { Success: true })
+                    var ping = await TrySendAsync(RecorderPipe, new() { Command = ShellProcessCommand.Ping });
+
+                    if (ping is { Success: true })
                     {
-                        failures = 0;
-                        continue;
+                        if (ping.IsRecording) { sawCapturing = true; failures = 0; continue; }
+                        // Mid-handoff: the take ended normally and RecordingCompleted is coming.
+                        if (ping.IsDelivering || !sawCapturing) { failures = 0; continue; }
                     }
+
                     if (++failures < RecorderHeartbeatFailuresBeforeRecovery) continue;
 
-                    DiagLog.Write("ShellProcess", "The recorder stopped responding during a remote recording.");
+                    DiagLog.Write("ShellProcess",
+                        $"The recorder stopped responding or capturing during a remote recording (sawCapturing={sawCapturing}).");
                     _dispatcher.TryEnqueue(() =>
                     {
                         if (!IsRemoteRecording || cancellation.IsCancellationRequested) return;
                         IsRemoteRecording = false;
                         ShellCoordinator.Instance?.ShowFullWindow();
-                        ShowError("The recording process stopped responding, so recording was cancelled. "
+                        ShowError("The recording process stopped unexpectedly, so recording was cancelled. "
                             + "Your project is unchanged.");
                     });
                     return;

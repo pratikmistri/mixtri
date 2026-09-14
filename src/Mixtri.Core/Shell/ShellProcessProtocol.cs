@@ -46,7 +46,17 @@ public sealed record ShellProcessRequest
 }
 
 public sealed record ShellProcessResponse(
-    bool Success, string? Error = null, bool HotkeyRegistered = false, int ProcessId = 0);
+    bool Success, string? Error = null, bool HotkeyRegistered = false, int ProcessId = 0)
+{
+    /// <summary>
+    /// Recorder-only, reported on Ping: whether capture is currently running. Lets an editor
+    /// reconcile after a start request whose response was lost, instead of guessing.
+    /// </summary>
+    public bool IsRecording { get; init; }
+
+    /// <summary>Recorder-only, reported on Ping: a recording handoff is in flight.</summary>
+    public bool IsDelivering { get; init; }
+}
 
 public static class RecordingDeliveryPolicy
 {

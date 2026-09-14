@@ -548,6 +548,16 @@ public sealed class VideoWriter : IDisposable
                         return;
                 }
             }
+            // Slots owed by dropped frames that never reached the queue. The stop-time flush
+            // itself is safe — the channel reserves a slot for it (see CreateQueueOptions) —
+            // but a producer already past the `_stopAccepting` check can accrue more after
+            // that exchange has run. Draining them here, on the writer thread once the channel
+            // has completed, keeps the tail at wall-clock length. The minimum-frame backstop
+            // below covers the duration-critical path; this covers the rest.
+            int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+            if (owed > 0)
+                FillGapFramesCore(owed, ct);
+
             long remaining = Interlocked.Read(ref _minimumFrameCount) - FrameCount;
             if (remaining > 0)
                 FillGapFramesCore(remaining, ct);
@@ -1252,6 +1262,17 @@ public sealed class VideoWriter : IDisposable
     /// Stops the frame gate and waits for the writer loop to finish, so finalization never
     /// races a pending JPEG write. Falls back to cancelling the loop if it will not drain.
     /// </summary>
+    /// <summary>
+    /// Ensures the writer loop has stopped touching the frames directory before finalization
+    /// reads it.
+    /// </summary>
+    /// <remarks>
+    /// Aborting is bounded, so it can return with the loop still alive. Finalization must not
+    /// proceed in that state: it snapshots <c>_frameCount</c> and then enumerates and reads the
+    /// directory, so a still-running writer can publish further JPEGs and leave the MP4 a
+    /// truncated, inconsistent view of the capture. Failing here instead keeps the captured
+    /// frames, which remain the durable master for the take.
+    /// </remarks>
     private async Task DrainWriterForFinalizeAsync(CancellationToken ct)
     {
         StopAcceptingFrames();
@@ -1268,6 +1289,11 @@ public sealed class VideoWriter : IDisposable
             Debug.WriteLine($"[VideoWriter] Writer did not drain before finalize: {ex.Message}");
             await AbortWriterAsync().ConfigureAwait(false);
         }
+
+        if (!_writerLoop.IsCompleted)
+            throw new InvalidOperationException(
+                "The frame writer did not stop before finalization, so the MP4 would not match the "
+                + "captured frames. The recording's frames have been preserved.");
     }
 
     public void Dispose()

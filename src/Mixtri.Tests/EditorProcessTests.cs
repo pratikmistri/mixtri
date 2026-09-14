@@ -310,4 +310,62 @@ public sealed class EditorProcessTests
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
+
+    /// <summary>
+    /// Acknowledgement must be durable even if the handoff file cannot be deleted. The
+    /// in-memory request dedup does not survive a restart, so a replayed RecordingCompleted
+    /// would run AppendRecording again and add the same take twice.
+    /// </summary>
+    [TestMethod]
+    public async Task AcknowledgedRecording_IsNotReplayed_EvenIfItsFileSurvives()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-ack-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new RecordingHandoffStore(root);
+            var request = new ShellProcessRequest
+            {
+                Command = ShellProcessCommand.RecordingCompleted,
+                Project = new Project { VideoFilePath = @"C:\recording\video.mp4" },
+                AppendToProjectId = Guid.NewGuid(),
+            };
+            await store.SaveAsync(request);
+
+            string handoff = Directory.EnumerateFiles(root, "*.json").Single();
+
+            // Hold the handoff open so the delete inside Acknowledge cannot succeed,
+            // reproducing the case where acknowledgement is only partially applied.
+            using (var pin = new FileStream(handoff, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                store.Acknowledge(request.Id);
+            }
+
+            Assert.IsTrue(File.Exists(handoff), "precondition: the delete was expected to fail");
+            Assert.IsFalse(new RecordingHandoffStore(root).ReadPending().Any(),
+                "an acknowledged recording must never be replayed after a restart");
+
+            // The sweep should also have cleared the now-deletable leftovers.
+            Assert.IsFalse(Directory.EnumerateFiles(root).Any(),
+                "the acknowledged handoff and its tombstone should be cleaned up once possible");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>
+    /// An acknowledgement that cannot be recorded at all must be reported, not swallowed:
+    /// the caller has to keep treating the recording as pending.
+    /// </summary>
+    [TestMethod]
+    public void Acknowledge_ThatCannotBeRecorded_Throws()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-ackfail-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // A file where the directory must go: the tombstone write cannot succeed.
+            File.WriteAllText(root, "not a directory");
+            var store = new RecordingHandoffStore(root);
+            Assert.ThrowsException<IOException>(() => store.Acknowledge(Guid.NewGuid()));
+        }
+        finally { if (File.Exists(root)) File.Delete(root); }
+    }
 }

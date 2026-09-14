@@ -47,6 +47,14 @@ public sealed class RecordingHandoffStore(string root)
         if (!Directory.Exists(root)) yield break;
         foreach (var path in Directory.EnumerateFiles(root, "*.json").Order(StringComparer.Ordinal))
         {
+            // An acknowledged handoff whose delete failed still carries its tombstone.
+            // Replaying it would re-apply the take — for Record More, appending it twice.
+            if (File.Exists(TombstonePath(path)))
+            {
+                ClearAcknowledged(path);
+                continue;
+            }
+
             ShellProcessRequest? request = null;
             string? invalid = null;
             try
@@ -73,6 +81,14 @@ public sealed class RecordingHandoffStore(string root)
 
             yield return request!;
         }
+
+        // Drop tombstones whose handoff is already gone, so the folder cannot grow forever.
+        foreach (var marker in Directory.EnumerateFiles(root, "*.done"))
+        {
+            string handoff = marker[..^TombstoneSuffix.Length];
+            if (!File.Exists(handoff))
+                try { File.Delete(marker); } catch { /* retried on the next open */ }
+        }
     }
 
     private static void Quarantine(string path, string reason)
@@ -86,11 +102,49 @@ public sealed class RecordingHandoffStore(string root)
         }
     }
 
+    /// <summary>
+    /// Marks a delivered recording as consumed.
+    /// </summary>
+    /// <remarks>
+    /// Writes a tombstone BEFORE removing the handoff. Deleting alone is not enough: the
+    /// in-memory request dedup does not survive a process restart, so if the delete failed
+    /// and the handoff stayed on disk, the next start would replay it and
+    /// <c>AppendRecording</c> would add the same take a second time. The tombstone is what
+    /// makes acknowledgement durable; failing to write one is reported rather than swallowed,
+    /// because the caller must not treat the handoff as consumed.
+    /// </remarks>
     public void Acknowledge(Guid id)
     {
-        try { File.Delete(GetPath(id)); }
-        catch (Exception ex) { DiagLog.Write("Shell", $"Could not clear handoff {id:N}: {ex.Message}"); }
+        string path = GetPath(id);
+        string tombstone = TombstonePath(path);
+        try
+        {
+            Directory.CreateDirectory(root);
+            File.WriteAllBytes(tombstone, []);
+        }
+        catch (Exception ex)
+        {
+            throw new IOException(
+                $"Could not record acknowledgement for recording {id:N}; it was left pending to avoid replaying it.", ex);
+        }
+
+        ClearAcknowledged(path);
     }
 
+    /// <summary>Removes an acknowledged handoff and its tombstone, in that order.</summary>
+    private static void ClearAcknowledged(string path)
+    {
+        try { File.Delete(path); }
+        catch (Exception ex)
+        {
+            // The tombstone stays behind and suppresses the replay until this succeeds.
+            DiagLog.Write("Shell", $"Could not clear acknowledged handoff '{path}': {ex.Message}");
+            return;
+        }
+        try { File.Delete(TombstonePath(path)); } catch { /* swept on the next read */ }
+    }
+
+    private const string TombstoneSuffix = ".done";
+    private static string TombstonePath(string handoffPath) => handoffPath + TombstoneSuffix;
     private string GetPath(Guid id) => Path.Combine(root, $"{id:N}.json");
 }
