@@ -182,6 +182,8 @@ public class WebcamCompositor : IDisposable
         if (shadowEnabled)
         {
             // Pad all edges so the shadow blur is never clipped near a canvas edge.
+            // Pad every edge past the blur's own reach so the local surface cannot clip it:
+            // a Direct2D Gaussian at BlurAmount s extends ~3s, so 3s + 2 leaves a margin.
             float pad = ShadowBlurAmount * 3 + 2;
             _shadowOrigin = new Vector2(
                 MathF.Floor((float)dest.X - pad), MathF.Floor((float)dest.Y - pad));

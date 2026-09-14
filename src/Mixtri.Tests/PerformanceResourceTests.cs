@@ -150,7 +150,51 @@ public sealed class PerformanceResourceTests
         using (var ds = expected.CreateDrawingSession())
         using (ds.CreateLayer(1f, geometry))
             ds.DrawImage(source, dest, layout.SourceCrop);
-        CollectionAssert.AreEqual(expected.GetPixelBytes(), actual.GetPixelBytes());
+        AssertVisuallyIdentical(expected, actual, 640);
+    }
+
+    /// <summary>
+    /// Compares two renderings that were composed through DIFFERENT intermediate surfaces.
+    /// </summary>
+    /// <remarks>
+    /// Bit-exact equality is the wrong assertion here. The optimized path blurs the shadow in a
+    /// small surface local to the overlay, the reference blurs it in a canvas-origin surface of
+    /// a different size, and Direct2D does not promise identical rounding for the same blur
+    /// evaluated over different extents. A hardware GPU happens to agree; the WARP software
+    /// rasterizer used on CI rounds a handful of alpha-blended pixels differently by exactly 1.
+    ///
+    /// The invariant that actually matters is that the optimization is VISUALLY identical and,
+    /// above all, that the shadow is never clipped by the smaller surface. Both are still
+    /// enforced: a clipped shadow removes up to the full shadow alpha over a contiguous band,
+    /// which blows past both bounds below by orders of magnitude.
+    /// </remarks>
+    private static void AssertVisuallyIdentical(
+        CanvasRenderTarget expected, CanvasRenderTarget actual, int width)
+    {
+        var e = expected.GetPixelBytes();
+        var a = actual.GetPixelBytes();
+        Assert.AreEqual(e.Length, a.Length, "renderings differ in size");
+
+        int differing = 0, maxDelta = 0, worstIndex = -1;
+        for (int i = 0; i < e.Length; i++)
+        {
+            int delta = Math.Abs(e[i] - a[i]);
+            if (delta == 0) continue;
+            differing++;
+            if (delta > maxDelta) { maxDelta = delta; worstIndex = i; }
+        }
+
+        if (maxDelta > 1)
+        {
+            int pixel = worstIndex / 4;
+            Assert.Fail($"channel delta {maxDelta} at ({pixel % width},{pixel / width}) exceeds rounding "
+                + "tolerance — the local shadow surface is clipping or displacing the blur, not just rounding it");
+        }
+
+        // Rounding touches a few edge pixels; a geometry or origin error touches a whole region.
+        double fraction = differing / (double)e.Length;
+        Assert.IsTrue(fraction < 0.005,
+            $"{differing} of {e.Length} channels differ ({fraction:P3}); rounding alone cannot explain that");
     }
 
     [TestMethod]
