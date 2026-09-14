@@ -87,11 +87,17 @@ process still costs roughly launch-time RAM while the full app is open, and a ne
 window incurs process-startup latency. Turning the setting off restores single-process behavior
 after restarting Mixtri.
 
-Single-process tray RAM does not yet return to launch levels on the tested ARM64 host:
-a diagnostic empty-editor close measured about 122 MiB private working set versus
-48 MiB at launch, despite collection of the editor and Win2D device wrappers. Native
-rendering retention remains under investigation; these measurements are not a universal
-memory ceiling or proof of a specific driver leak.
+Single-process tray RAM does not return to launch levels on the tested ARM64 host: a
+diagnostic empty-editor close settles at about 120 MiB private working set and 143 MiB
+private commit, against 48 MiB and 70 MiB at launch. Four repeated open/close cycles show
+no per-cycle growth, and managed memory returns to under 1 MiB. About 64 MiB of the excess
+is in eight fixed-size private allocations outside the enumerated process heaps. Their
+count is unchanged at the two tested window sizes, and they survive window destruction
+and the tested device-trimming and heap-optimization paths. A headless Win2D harness can
+release similar allocations when its devices are destroyed, supporting further graphics-
+lifetime investigation, but the exact native allocator and retaining owner are not proven.
+No supported reclamation fix has been demonstrated. A plateau does not rule out a one-time
+leak; these measurements are neither a universal memory ceiling nor proof of a driver defect.
 
 Minimizing or collapsing an editor does not end its session. Hidden editors pause playback
 and release derived preview/audio/thumbnail resources; restoring rebuilds them at the same
