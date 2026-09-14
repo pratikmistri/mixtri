@@ -66,33 +66,63 @@ public class TransitionAllocationTests
         Console.WriteLine($"100,000 transition resolutions: {previousBytes:N0} previous bytes, {currentBytes:N0} current bytes.");
     }
 
+    /// <summary>
+    /// Three base-track segments interleaved with overlay-track segments, so predecessor
+    /// selection has to skip overlays and pick the immediately preceding BASE segment rather
+    /// than simply the previous entry in <see cref="TimelineModel.Segments"/>.
+    /// The incoming segment under test is always the last entry.
+    /// </summary>
     private static TimelineModel Model(TransitionConfig? configuration)
     {
         var model = new TimelineModel();
-        model.Segments.Add(new TextSlideSegment { Duration = TimeSpan.FromTicks(6_000_001) });
+        model.Segments.Add(new VideoSegment
+        {
+            Start = TimeSpan.Zero, Duration = TimeSpan.FromTicks(4_000_003),
+        });
         model.Segments.Add(new VideoSegment
         {
             TrackIndex = 2, Start = TimeSpan.Zero, Duration = TimeSpan.FromSeconds(10),
         });
+        model.Segments.Add(new TextSlideSegment
+        {
+            Start = TimeSpan.FromTicks(4_000_003), Duration = TimeSpan.FromTicks(6_000_001),
+        });
         model.Segments.Add(new VideoSegment
         {
-            Start = TimeSpan.FromTicks(6_000_001), Duration = TimeSpan.FromTicks(9_000_001),
+            TrackIndex = 1, Start = TimeSpan.FromTicks(2_000_000), Duration = TimeSpan.FromTicks(3_000_000),
+        });
+        model.Segments.Add(new VideoSegment
+        {
+            Start = TimeSpan.FromTicks(10_000_004), Duration = TimeSpan.FromTicks(9_000_001),
             InTransition = configuration,
         });
         return model;
     }
 
+    /// <summary>
+    /// The pre-optimization algorithm, reproduced verbatim: materialize
+    /// <see cref="TimelineModel.BaseSegments"/>, locate the covering segment by index, and take
+    /// its immediate predecessor. Deliberately NOT the single-pass scan the optimized resolver
+    /// now uses — a reference implementation that shares the new algorithm would agree with a
+    /// regression in base-track filtering, ordering or predecessor selection and prove nothing.
+    /// </summary>
     private static TransitionResolution Previous(TimelineModel model, TimeSpan time, TimeSpan? cap,
         bool ignoreExplicit = false, TimeSpan? legacyDuration = null)
     {
-        TimelineSegment? incoming = null, outgoing = null;
-        foreach (var segment in model.Segments)
+        var segments = model.BaseSegments.ToList();
+
+        int index = -1;
+        for (int i = 0; i < segments.Count; i++)
         {
-            if (segment.TrackIndex != TimelineModel.BaseTrackIndex) continue;
-            if (time >= segment.Start && time < segment.End) { incoming = segment; break; }
-            outgoing = segment;
+            if (time >= segments[i].Start && time < segments[i].End) { index = i; break; }
         }
-        if (incoming is null || outgoing is null) return TransitionResolution.None;
+
+        // No current segment, or it's the very first one (nothing to dissolve from).
+        if (index <= 0) return TransitionResolution.None;
+
+        TimelineSegment incoming = segments[index];
+        TimelineSegment outgoing = segments[index - 1];
+
         TransitionConfig config;
         bool legacy;
         if (!ignoreExplicit && incoming.InTransition is { } explicitConfig)

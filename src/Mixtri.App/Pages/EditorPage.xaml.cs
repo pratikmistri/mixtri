@@ -503,6 +503,7 @@ public sealed partial class EditorPage : Page
             // Abandon any preview init still awaiting the decoder open, so it disposes
             // rather than publishes whatever it built onto this dead page.
             _previewInitGeneration++;
+            AbandonRendererRebuilds();
             CancelWaveformWork();
 
             // Dispose owned resources

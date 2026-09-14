@@ -1,5 +1,6 @@
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Diagnostics;
+using System.Runtime.ExceptionServices;
 using Windows.Media.Editing;
 using Windows.Storage;
 
@@ -18,6 +19,10 @@ public sealed record ThumbnailStrip(
 /// </summary>
 public static class VideoThumbnailExtractor
 {
+    /// <summary>Marks a consumer-callback fault so it is never reported as a decode failure.</summary>
+    private sealed class PublishFailedException(Exception inner)
+        : Exception("The thumbnail consumer rejected a batch.", inner);
+
     public static Task<ThumbnailStrip?> ExtractAsync(
         string videoFilePath, int targetHeight, CanvasDevice device, int maxCount = 300,
         double minIntervalSeconds = 0.5, CancellationToken ct = default)
@@ -153,7 +158,12 @@ public static class VideoThumbnailExtractor
                     foreach (var stream in streams) stream.Dispose();
                 }
                 ct.ThrowIfCancellationRequested();
-                await publish(batch).ConfigureAwait(false);
+                // A consumer fault is not a decode fault: letting it fall into the catch below
+                // would report "extraction failed", silently start the JPEG fallback after MP4
+                // batches were already accepted, and discard the real stack.
+                try { await publish(batch).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { throw new PublishFailedException(ex); }
                 if (overviewPending) overviewPending = false;
                 else start += count;
                 if (progressive) await Task.Yield();
@@ -161,6 +171,11 @@ public static class VideoThumbnailExtractor
             return anyFrame;
         }
         catch (OperationCanceledException) { throw; }
+        catch (PublishFailedException ex)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException!).Throw();
+            throw;
+        }
         catch (Exception ex)
         {
             DiagLog.Write("Filmstrip", $"video extraction failed for '{videoFilePath}': {ex.Message}");

@@ -1052,10 +1052,13 @@ public sealed partial class EditorPage
 
             // Drain coalesced requests. Bounded purely as a backstop — the segment-scoped
             // rebuild above converges — so a future regression degrades to a stale frame
-            // rather than to a frozen app.
+            // rather than to a frozen app. Re-tests page state every iteration: an unload
+            // during the previous await must stop the loop, or it would build a renderer
+            // onto a page that has already torn down and will never dispose it.
             for (int i = 0; i < MaxCoalescedRendererRebuilds && _pendingRendererRebuild is { } pending; i++)
             {
                 _pendingRendererRebuild = null;
+                if (_previewSuspended || _pageUnloaded) break;
                 if (ProjectService.Instance.CurrentProject is not { } current) break;
                 await RebuildPreviewRendererCoreAsync(current, pending.Config, pending.Segment);
             }
@@ -1071,6 +1074,18 @@ public sealed partial class EditorPage
     private const int MaxCoalescedRendererRebuilds = 4;
     private bool _rebuildingPreviewRenderer;
     private (CompositionConfig Config, VideoSegment? Segment)? _pendingRendererRebuild;
+
+    /// <summary>
+    /// Bumped whenever the page tears down or suspends, so a rebuild that is mid-await can
+    /// tell that the renderer it is building is no longer wanted.
+    /// </summary>
+    private int _rendererRebuildGeneration;
+
+    internal void AbandonRendererRebuilds()
+    {
+        _rendererRebuildGeneration++;
+        _pendingRendererRebuild = null;
+    }
 
     private async Task RebuildPreviewRendererCoreAsync(
         Project project, CompositionConfig config, VideoSegment? forSegment)
@@ -1109,11 +1124,18 @@ public sealed partial class EditorPage
 
         _compositorReady = false;
         _previewRenderer?.Dispose();
+        _previewRenderer = null;
 
+        // Build into a local and publish only if this page still wants it. Assigning the
+        // field before the await would let a permanent unload dispose and null it mid-init,
+        // after which this continuation would mark a disposed renderer ready — or, worse,
+        // install a freshly built one onto a dead page with no teardown left to release it.
+        int generation = _rendererRebuildGeneration;
+        PreviewRenderer? built = null;
         try
         {
-            _previewRenderer = new PreviewRenderer();
-            await _previewRenderer.InitializeAsync(
+            built = new PreviewRenderer();
+            await built.InitializeAsync(
                 mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
@@ -1122,6 +1144,15 @@ public sealed partial class EditorPage
                 project.CropOffsetX,
                 project.CropOffsetY,
                 project.DpiScale);
+
+            if (generation != _rendererRebuildGeneration || _pageUnloaded)
+            {
+                built.Dispose();
+                return;
+            }
+
+            _previewRenderer = built;
+            built = null;
 
             // Re-sync zoom state from the model. The new compositor has just regenerated
             // auto-zoom from the raw mouse data, so this has to run unconditionally —
@@ -1132,9 +1163,12 @@ public sealed partial class EditorPage
         }
         catch
         {
+            built?.Dispose();
             _previewRenderer?.Dispose();
             _previewRenderer = null;
         }
+
+        if (generation != _rendererRebuildGeneration || _pageUnloaded) return;
 
         // Re-render at current playhead position
         _lastRenderedFrameIndex = -1;

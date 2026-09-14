@@ -1189,13 +1189,16 @@ public sealed partial class EditorPage
     {
         if (segment is TextSlideSegment slide)
         {
-            _textSlideRenderer ??= new TextSlideRenderer();
-            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+            var slideRenderer = _textSlideRenderer ??= new TextSlideRenderer();
+            await slideRenderer.EnsureBackgroundLoadedAsync(slide);
+            // Permanent unload disposes and nulls _textSlideRenderer without draining this
+            // await, so reuse the captured instance only while it is still the page's.
+            if (_pageUnloaded || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return null;
             var (w, h) = GetPreviewCanvasSize();
             double progress = slide.Duration.TotalSeconds > 0
                 ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
                 : 0;
-            return _textSlideRenderer.RenderSlide(slide, progress, w, h);
+            return slideRenderer.RenderSlide(slide, progress, w, h);
         }
 
         if (segment is not VideoSegment seg)
@@ -1517,11 +1520,15 @@ public sealed partial class EditorPage
 
     private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
     {
-        _textSlideRenderer ??= new TextSlideRenderer();
+        var slideRenderer = _textSlideRenderer ??= new TextSlideRenderer();
 
         // Pre-load the (image) background off the UI thread so the synchronous
         // RenderSlide call below never blocks on file I/O + GPU decode.
-        await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+        await slideRenderer.EnsureBackgroundLoadedAsync(slide);
+
+        // Teardown disposes and nulls the field without draining this await. Bail rather
+        // than render through a disposed renderer and then touch unloaded XAML below.
+        if (_pageUnloaded || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return;
 
         var (width, height) = GetPreviewCanvasSize();
 
@@ -1538,7 +1545,7 @@ public sealed partial class EditorPage
         {
             // While editing, render background only — the editable TextBox shows the text.
             bool drawText = _editingTextId != slide.Id;
-            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height, drawText);
+            var frame = slideRenderer.RenderSlide(slide, progress, width, height, drawText);
             _lastRenderedFrameIndex = -1; // force redraw next time
             Preview.SetFrame(frame);
         }

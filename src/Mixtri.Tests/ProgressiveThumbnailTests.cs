@@ -200,4 +200,37 @@ public sealed class ProgressiveThumbnailTests
             foreach (var frame in actual) frame?.Dispose();
         }
     }
+
+    /// <summary>
+    /// A consumer fault must not be reported as a decode failure. It previously fell into the
+    /// method-wide catch, which logged "video extraction failed", returned false, and let the
+    /// caller start the JPEG fallback after MP4 batches had already been accepted — losing the
+    /// real exception and its stack.
+    /// </summary>
+    [TestMethod]
+    public async Task Mp4_PublishFailure_PropagatesInsteadOfReportingADecodeFailure()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_progressive_publish_");
+        string video = Path.Combine(directory.Path, "video.mp4");
+        var device = CanvasDevice.GetSharedDevice();
+        using (var writer = new VideoWriter(video, 96, 64, 10))
+        using (var frame = new CanvasRenderTarget(device, 96, 64, 96))
+        {
+            for (int i = 0; i < 24; i++)
+            {
+                using (var ds = frame.CreateDrawingSession())
+                    ds.Clear(Color.FromArgb(255, (byte)(i * 10), 80, 120));
+                writer.WriteFrame(frame, TimeSpan.FromSeconds(i / 10.0));
+            }
+            await writer.WaitForQuiescenceAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+            await writer.FinalizeAsync();
+        }
+
+        var thrown = new InvalidOperationException("the consumer rejected this batch");
+        Action<ThumbnailBatch> publish = _ => throw thrown;
+        var actual = await Assert.ThrowsExceptionAsync<InvalidOperationException>(
+            () => VideoThumbnailExtractor.ExtractProgressivelyAsync(video, 32, device, publish));
+
+        Assert.AreSame(thrown, actual, "the consumer's own exception must reach the caller intact");
+    }
 }

@@ -54,6 +54,14 @@ public sealed class VideoWriter : IDisposable
     /// <summary>Grace period given to the writer loop to observe cancellation before it is abandoned.</summary>
     private static readonly TimeSpan WriterShutdownGrace = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Grace period given to outstanding sample decodes after finalization cancels them.
+    /// A WinRT JPEG decode that never observes cancellation must not be able to hang
+    /// <c>StopAsync</c> forever: the session's finalize watchdog is token-based, so an
+    /// unbounded wait here would sit outside it entirely.
+    /// </summary>
+    private static readonly TimeSpan SampleCleanupGrace = TimeSpan.FromSeconds(10);
+
     private const float JpegQuality = 0.85f;
 
     /// <summary>
@@ -906,8 +914,11 @@ public sealed class VideoWriter : IDisposable
         long firstFrameErrorIndex = -1;
         var frameErrorLock = new object();
 
-        using var finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        using var frameDecoder = new CaptureFrameDecoder(
+        var finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // Not a `using`: if cleanup below has to abandon a stuck decode, ownership of the
+        // decoder moves to a continuation so it is never disposed out from under a task
+        // that is still reading it.
+        var frameDecoder = new CaptureFrameDecoder(
             (int)profileWidth, (int)profileHeight, cacheLinkedFrames: _frameFiles.LinkedFrames > 0);
         bool acceptingSamples = true;
 
@@ -1053,10 +1064,47 @@ public sealed class VideoWriter : IDisposable
             }
             streamSource.SampleRequested -= OnSampleRequested;
             finalizeCts.Cancel();
-            try { await Task.WhenAll(remaining).ConfigureAwait(false); }
-            catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Final sample cleanup failed: {ex}"); }
+
+            // Counters are plain reads, so capture them before ownership can move away.
             Interlocked.Exchange(ref _finalizationDecodeCount, frameDecoder.DecodeCount);
             Interlocked.Exchange(ref _maximumDecodedCacheBytes, frameDecoder.MaximumCachedBytes);
+
+            var cleanup = Task.WhenAll(remaining);
+            bool drained;
+            try
+            {
+                await cleanup.WaitAsync(SampleCleanupGrace).ConfigureAwait(false);
+                drained = true;
+            }
+            catch (TimeoutException)
+            {
+                drained = false;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[VideoWriter] Final sample cleanup failed: {ex}");
+                drained = true;
+            }
+
+            if (drained)
+            {
+                frameDecoder.Dispose();
+                finalizeCts.Dispose();
+            }
+            else
+            {
+                // A decode ignored cancellation. Return control to the caller so the stop
+                // watchdog stays meaningful, and let the stragglers release the decoder and
+                // the token source they are still holding.
+                Debug.WriteLine(
+                    $"[VideoWriter] {remaining.Length} sample task(s) did not observe cancellation; " +
+                    "deferring decoder disposal.");
+                _ = cleanup.ContinueWith(
+                    _ => { frameDecoder.Dispose(); finalizeCts.Dispose(); },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
         }
 
         // The MP4 is now the durable master for this recording, so the captured JPEGs

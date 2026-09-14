@@ -15,11 +15,33 @@ namespace Mixtri_App.Services;
 /// <summary>Owns the process boundary; the recorder never constructs an editor or loads its media.</summary>
 public sealed class EditorProcessCoordinator : IDisposable
 {
+    /// <summary>How long a delivery attempt waits for the editor to apply the recording.</summary>
+    private static readonly TimeSpan DeliverTimeout = TimeSpan.FromSeconds(15);
+    private const int DeliverRetries = 2;
+    private static readonly TimeSpan DeliverRetryDelay = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long capture waits for the editor to confirm its window is hidden.</summary>
+    private static readonly TimeSpan SuspendTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>Cadence and tolerance for the editor's watch on the recorder during remote capture.</summary>
+    private static readonly TimeSpan RecorderHeartbeatInterval = TimeSpan.FromSeconds(2);
+    private const int RecorderHeartbeatFailuresBeforeRecovery = 3;
+
+    /// <summary>How long an owned editor is given to exit gracefully before it is killed.</summary>
+    private static readonly TimeSpan EditorKillGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Upper bound on remembered request results. Entries exist only so a retried request id
+    /// replays its outcome instead of re-applying it, so a small recent window is enough.
+    /// </summary>
+    private const int MaxRememberedRequests = 64;
+
     private readonly DispatcherQueue _dispatcher;
     private readonly string _scope;
     private readonly RecordingHandoffStore _handoffs;
     private readonly SemaphoreSlim _openGate = new(1, 1);
     private readonly Dictionary<Guid, Task<ShellProcessResponse>> _requests = new();
+    private readonly Queue<Guid> _requestOrder = new();
     private ShellProcessPipe? _pipe;
     private Guid? _primaryEditor;
     private Process? _primaryProcess;
@@ -27,6 +49,8 @@ public sealed class EditorProcessCoordinator : IDisposable
     private Guid? _appendToProject;
     private bool _delivering;
     private ShellProcessRequest? _pendingRecording;
+    private CancellationTokenSource? _recorderWatch;
+    private int _remoteRecordingStarting;
     private bool _disposed;
 
     public bool IsRecorder { get; }
@@ -72,14 +96,14 @@ public sealed class EditorProcessCoordinator : IDisposable
                 {
                     var owner = new TaskCompletionSource<ShellProcessResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
                     operation = owner.Task;
-                    _requests.Add(request.Id, operation);
+                    Remember(request.Id, operation);
                     try { owner.SetResult(await HandleAsync(request)); }
                     catch (Exception ex)
                     {
                         DiagLog.Write("ShellProcess", $"{request.Command} failed: {ex}");
                         owner.SetResult(new(false, ex.Message));
                     }
-                    if (!(await operation).Success) _requests.Remove(request.Id);
+                    if (!(await operation).Success) Forget(request.Id);
                 }
                 completion.SetResult(await operation);
             }
@@ -88,6 +112,22 @@ public sealed class EditorProcessCoordinator : IDisposable
             completion.SetResult(new(false, "The application dispatcher is shutting down."));
         return completion.Task;
     }
+
+    /// <summary>
+    /// Records a request outcome so a retry of the same id replays it rather than re-applying
+    /// the side effect. Bounded: a resident process would otherwise accumulate an entry for
+    /// every activation, park, option change and recording for its whole lifetime.
+    /// Runs on the dispatcher, so no additional locking is needed.
+    /// </summary>
+    private void Remember(Guid id, Task<ShellProcessResponse> operation)
+    {
+        _requests[id] = operation;
+        _requestOrder.Enqueue(id);
+        while (_requestOrder.Count > MaxRememberedRequests)
+            _requests.Remove(_requestOrder.Dequeue());
+    }
+
+    private void Forget(Guid id) => _requests.Remove(id);
 
     private async Task<ShellProcessResponse> HandleAsync(ShellProcessRequest request)
     {
@@ -157,6 +197,7 @@ public sealed class EditorProcessCoordinator : IDisposable
                     return new(false, "Finish the editor's save prompt before recording.");
                 IsRemoteRecording = true;
                 await shell.SuspendForExternalRecordingAsync();
+                StartRecorderWatch();
                 return new(true);
             case ShellProcessCommand.ParkEditor:
                 if (ProjectSaveCoordinator.IsPromptActive) return new(false, "A save prompt is open.");
@@ -165,11 +206,13 @@ public sealed class EditorProcessCoordinator : IDisposable
                 return new(true);
             case ShellProcessCommand.RecordingFailed:
                 IsRemoteRecording = false;
+                StopRecorderWatch();
                 shell.ShowFullWindow();
                 ShowError(request.Message ?? "The recording could not be completed.");
                 return new(true);
             case ShellProcessCommand.RecordingRedirected:
                 IsRemoteRecording = false;
+                StopRecorderWatch();
                 (App.Current.MainAppWindow as MainWindow)?.ShowShellMessage(
                     request.Message ?? "The new recording was opened separately.", InfoBarSeverity.Informational);
                 return new(true);
@@ -184,6 +227,7 @@ public sealed class EditorProcessCoordinator : IDisposable
                 if (!File.Exists(recording.VideoFilePath))
                     return new(false, "The completed recording's video file is missing.");
                 IsRemoteRecording = false;
+                StopRecorderWatch();
                 if (request.AppendToProjectId.HasValue) projects.AppendRecording(recording);
                 else projects.SetProject(recording);
                 RecordingViewModel.Shared.IsAppendMode = false;
@@ -252,12 +296,40 @@ public sealed class EditorProcessCoordinator : IDisposable
             return existing;
         }
 
+        // The previous child failed its readiness check but may still be running. Disposing
+        // the Process only releases the handle, so an unresponsive editor would linger with
+        // no way left to reach it. Adopted editors (no handle of our own) are left alone.
+        await RetirePrimaryProcessAsync();
+
         var id = Guid.NewGuid();
-        _primaryProcess?.Dispose();
         _primaryProcess = Launch(EditorProcessLaunch.Arguments(id, startInEditor: startInEditor));
         _primaryEditor = id;
         RequireSuccess(await ShellProcessPipe.SendAsync(EditorPipe(id), new() { Command = ShellProcessCommand.Ping }));
         return id;
+    }
+
+    private async Task RetirePrimaryProcessAsync()
+    {
+        var process = _primaryProcess;
+        _primaryProcess = null;
+        if (process is null) return;
+        try
+        {
+            if (!process.HasExited)
+            {
+                DiagLog.Write("ShellProcess", $"Closing unresponsive editor PID {process.Id}.");
+                try { process.CloseMainWindow(); } catch (InvalidOperationException) { }
+                using var exit = new CancellationTokenSource(EditorKillGrace);
+                try { await process.WaitForExitAsync(exit.Token); }
+                catch (OperationCanceledException)
+                {
+                    try { process.Kill(entireProcessTree: true); } catch (Exception ex)
+                    { DiagLog.Write("ShellProcess", $"Could not stop editor PID {process.Id}: {ex.Message}"); }
+                }
+            }
+        }
+        catch (Exception ex) { DiagLog.Write("ShellProcess", $"Editor retirement failed: {ex.Message}"); }
+        finally { process.Dispose(); }
     }
 
     private static Process Launch(IEnumerable<string> arguments)
@@ -298,9 +370,21 @@ public sealed class EditorProcessCoordinator : IDisposable
         catch (Exception ex) { ReportError("Could not show Mini mode", ex); }
     }
 
+    /// <summary>
+    /// Asks the resident recorder to start capturing on this editor's behalf.
+    /// </summary>
+    /// <remarks>
+    /// The transition is claimed with an interlocked flag BEFORE the first await. Checking
+    /// <see cref="IsRemoteRecording"/> alone is not a gate: it is only set after the recorder
+    /// ping completes, and the editor's own <c>RecordingViewModel.IsRecording</c> never turns
+    /// true for remote capture, so the Record button stays live. Two quick clicks could
+    /// otherwise both enter, and the loser's rollback would restore the full window into a
+    /// recording that the winner had already started.
+    /// </remarks>
     public async Task StartRemoteRecordingAsync()
     {
         if (IsRemoteRecording) return;
+        if (Interlocked.Exchange(ref _remoteRecordingStarting, 1) == 1) return;
         try
         {
             await EnsureRecorderAsync();
@@ -315,21 +399,88 @@ public sealed class EditorProcessCoordinator : IDisposable
             IsRemoteRecording = true;
             await ShellCoordinator.Instance!.SuspendForExternalRecordingAsync();
             RequireSuccess(await ShellProcessPipe.SendAsync(RecorderPipe, request));
+            StartRecorderWatch();
         }
         catch (Exception ex)
         {
             IsRemoteRecording = false;
+            StopRecorderWatch();
             ShellCoordinator.Instance?.ShowFullWindow();
             ReportError("Could not start recording", ex);
         }
+        finally
+        {
+            // Past this point IsRemoteRecording is the gate for a started recording.
+            Interlocked.Exchange(ref _remoteRecordingStarting, 0);
+        }
     }
 
+    /// <summary>
+    /// Watches the recorder for the life of a remote recording. Without this, a recorder that
+    /// crashes or hangs after accepting the start command leaves the editor parked forever:
+    /// <see cref="IsRemoteRecording"/> is otherwise cleared only by a completion, failure or
+    /// redirect message, and <c>ShowFullWindow</c> refuses to restore while it is set.
+    /// </summary>
+    private void StartRecorderWatch()
+    {
+        StopRecorderWatch();
+        var cancellation = new CancellationTokenSource();
+        _recorderWatch = cancellation;
+        _ = Task.Run(async () =>
+        {
+            int failures = 0;
+            try
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    await Task.Delay(RecorderHeartbeatInterval, cancellation.Token);
+                    if (await TrySendAsync(RecorderPipe, new() { Command = ShellProcessCommand.Ping }) is { Success: true })
+                    {
+                        failures = 0;
+                        continue;
+                    }
+                    if (++failures < RecorderHeartbeatFailuresBeforeRecovery) continue;
+
+                    DiagLog.Write("ShellProcess", "The recorder stopped responding during a remote recording.");
+                    _dispatcher.TryEnqueue(() =>
+                    {
+                        if (!IsRemoteRecording || cancellation.IsCancellationRequested) return;
+                        IsRemoteRecording = false;
+                        ShellCoordinator.Instance?.ShowFullWindow();
+                        ShowError("The recording process stopped responding, so recording was cancelled. "
+                            + "Your project is unchanged.");
+                    });
+                    return;
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { DiagLog.Write("ShellProcess", $"Recorder watch ended: {ex.Message}"); }
+        }, CancellationToken.None);
+    }
+
+    private void StopRecorderWatch()
+    {
+        var watch = _recorderWatch;
+        _recorderWatch = null;
+        if (watch is null) return;
+        try { watch.Cancel(); } catch (ObjectDisposedException) { }
+        watch.Dispose();
+    }
+
+    /// <summary>
+    /// Hides the resident editor before local capture begins. A null response means the
+    /// editor is alive but did not confirm (timeout or broken pipe) — its window may still
+    /// be on screen, so capture must not start. Only an explicit success proceeds.
+    /// </summary>
     public async Task PrepareLocalRecordingAsync()
     {
         if (_recordingEditor.HasValue || !_primaryEditor.HasValue) return;
         var response = await TrySendAsync(EditorPipe(_primaryEditor.Value),
-            new() { Command = ShellProcessCommand.SuspendEditor });
-        if (response is { Success: false }) RequireSuccess(response);
+            new() { Command = ShellProcessCommand.SuspendEditor }, SuspendTimeout);
+        if (response is null)
+            throw new InvalidOperationException(
+                "The full window did not confirm that it was hidden, so recording was cancelled to avoid capturing it.");
+        RequireSuccess(response);
     }
 
     public async Task ParkWorkspaceAsync()
@@ -373,29 +524,62 @@ public sealed class EditorProcessCoordinator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Hands a completed recording to its originating editor, falling back to a fresh editor
+    /// only when the original genuinely refused it.
+    /// </summary>
+    /// <remarks>
+    /// A lost response is NOT a rejection. The editor may have already run SetProject or
+    /// AppendRecording before its reply went missing, so redirecting on a timeout can show
+    /// the same take in two editors and contradict the "original project was not changed"
+    /// message. Retrying the same request id lets the peer's dedup cache replay the original
+    /// outcome; only an explicit failure or a dead process redirects.
+    /// </remarks>
     private async Task DeliverAsync(ShellProcessRequest request)
     {
         ShellProcessResponse? response = null;
         if (request.EditorId != Guid.Empty)
-            response = await TrySendAsync(EditorPipe(request.EditorId), request, TimeSpan.FromSeconds(15));
-        if (response is not { Success: true })
         {
-            var editor = await EnsureEditorAsync(newSession: true, startInEditor: true);
-            var separate = request with
+            response = await TrySendAsync(EditorPipe(request.EditorId), request, DeliverTimeout);
+            for (int attempt = 0; response is null && attempt < DeliverRetries; attempt++)
             {
-                AppendToProjectId = null,
-                Message = request.AppendToProjectId.HasValue
-                    ? "The original editor could not accept Record More. Your new recording was opened separately; the original project was not changed."
-                    : "The previous editor could not accept this recording, so it was opened separately without replacing existing edits.",
-            };
-            RequireSuccess(await ShellProcessPipe.SendAsync(EditorPipe(editor), separate));
-            if (request.EditorId != Guid.Empty)
-                await TrySendAsync(EditorPipe(request.EditorId), new()
-                {
-                    Command = ShellProcessCommand.RecordingRedirected,
-                    Message = "The new recording was opened in a separate editor to preserve this project.",
-                });
+                await Task.Delay(DeliverRetryDelay);
+                // Same id on purpose: the peer replays its recorded result instead of re-applying.
+                response = await TrySendAsync(EditorPipe(request.EditorId), request, DeliverTimeout);
+            }
         }
+
+        if (response is { Success: true })
+        {
+            _handoffs.Acknowledge(request.Id);
+            return;
+        }
+
+        if (response is null && request.EditorId != Guid.Empty)
+        {
+            // Never confirmed either way. Keep the handoff on disk so the next open recovers
+            // it once the editor is reachable, rather than risking a duplicate delivery now.
+            DiagLog.Write("ShellProcess",
+                $"Editor {request.EditorId:N} never acknowledged recording {request.Id:N}; keeping it for recovery.");
+            throw new InvalidOperationException(
+                "The editor did not confirm the recording. It has been kept and will be offered again.");
+        }
+
+        var editor = await EnsureEditorAsync(newSession: true, startInEditor: true);
+        var separate = request with
+        {
+            AppendToProjectId = null,
+            Message = request.AppendToProjectId.HasValue
+                ? "The original editor could not accept Record More. Your new recording was opened separately; the original project was not changed."
+                : "The previous editor could not accept this recording, so it was opened separately without replacing existing edits.",
+        };
+        RequireSuccess(await ShellProcessPipe.SendAsync(EditorPipe(editor), separate));
+        if (request.EditorId != Guid.Empty)
+            await TrySendAsync(EditorPipe(request.EditorId), new()
+            {
+                Command = ShellProcessCommand.RecordingRedirected,
+                Message = "The new recording was opened in a separate editor to preserve this project.",
+            });
         _handoffs.Acknowledge(request.Id);
     }
 
@@ -502,7 +686,11 @@ public sealed class EditorProcessCoordinator : IDisposable
     public void Dispose()
     {
         _disposed = true;
+        StopRecorderWatch();
         _pipe?.Dispose();
         _primaryProcess?.Dispose();
+        _requests.Clear();
+        _requestOrder.Clear();
+        _openGate.Dispose();
     }
 }

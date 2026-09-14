@@ -320,6 +320,16 @@ public class TextSlideRenderer : IDisposable
         try
         {
             var loaded = await CanvasBitmap.LoadAsync(_device, path).AsTask().ConfigureAwait(false);
+
+            // The decode resumed off the calling context, so disposal (or a newer slide
+            // background) may have won in the meantime. Publishing here would resurrect a
+            // GPU bitmap on a disposed renderer and leak it past teardown.
+            if (_disposed || _bgImagePath == path && _bgImage is not null && _bgImage.Device == _device)
+            {
+                loaded.Dispose();
+                return;
+            }
+
             _bgImage?.Dispose();
             _bgImage = loaded;
             _bgImagePath = path;

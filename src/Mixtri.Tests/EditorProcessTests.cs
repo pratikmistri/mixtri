@@ -245,4 +245,69 @@ public sealed class EditorProcessTests
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
+
+    /// <summary>
+    /// A malformed handoff must not strand the valid ones behind it. ReadPending is a lazy
+    /// iterator, so throwing on the first bad file abandoned every later recording and left
+    /// the bad file in place to fail identically on every subsequent open.
+    /// </summary>
+    [TestMethod]
+    public async Task CorruptHandoff_IsQuarantinedAndLaterRecordingsStillRecover()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-bad-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new RecordingHandoffStore(root);
+            Directory.CreateDirectory(root);
+
+            // Ordinal ordering puts the corrupt file first.
+            string corrupt = Path.Combine(root, $"{new Guid("00000000-0000-0000-0000-0000000000ff"):N}.json");
+            await File.WriteAllTextAsync(corrupt, "{ this is not valid json");
+
+            var good = new ShellProcessRequest
+            {
+                Id = new Guid("ffffffff-0000-0000-0000-000000000001"),
+                Command = ShellProcessCommand.RecordingCompleted,
+                Project = new Project { VideoFilePath = @"C:\recording\good.mp4" },
+            };
+            await store.SaveAsync(good);
+
+            var recovered = store.ReadPending().ToList();
+            Assert.AreEqual(1, recovered.Count, "the valid handoff behind the corrupt one must still be recovered");
+            Assert.AreEqual(good.Id, recovered[0].Id);
+
+            Assert.IsFalse(File.Exists(corrupt), "the corrupt file must not be left to fail again");
+            Assert.IsTrue(File.Exists(corrupt + ".bad"), "the corrupt file should be quarantined for diagnosis");
+
+            // A second pass is clean, proving the bad file is no longer in the rotation.
+            Assert.AreEqual(1, store.ReadPending().Count());
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>
+    /// Re-entrant saves for one id must not share a scratch file: CompleteRecordingAsync is
+    /// not covered by the open gate, so a recovery save can overlap an in-flight one and each
+    /// one's cleanup could delete the other's temporary.
+    /// </summary>
+    [TestMethod]
+    public async Task ConcurrentSavesOfTheSameRecording_DoNotCollideOnATemporaryFile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-race-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new RecordingHandoffStore(root);
+            var request = new ShellProcessRequest
+            {
+                Command = ShellProcessCommand.RecordingCompleted,
+                Project = new Project { VideoFilePath = @"C:\recording\video.mp4" },
+            };
+
+            await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => store.SaveAsync(request)));
+
+            Assert.AreEqual(request.Id, store.ReadPending().Single().Id);
+            Assert.IsFalse(Directory.EnumerateFiles(root, "*.tmp").Any(), "no scratch file may survive");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
 }
