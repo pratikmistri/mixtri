@@ -29,7 +29,7 @@ public sealed class RecordingApplicationTests
 
         string marker = Path.Combine(directory.Path, "handoffs", $"{request.Id:N}.json.done");
         Directory.CreateDirectory(marker);
-        await Assert.ThrowsExceptionAsync<IOException>(() => store.AcknowledgeAsync(request.Id));
+        await Assert.ThrowsExceptionAsync<IOException>(() => store.AcknowledgeAsync(request));
         var replay = (await store.ReadPendingAsync()).Single();
         var restarted = new RecordingApplication();
         var result = restarted.Apply(replay, receipts,
@@ -38,7 +38,7 @@ public sealed class RecordingApplicationTests
         Assert.IsTrue(result.Success);
         Assert.AreEqual(1, applications);
         Directory.Delete(marker);
-        await store.AcknowledgeAsync(request.Id);
+        await store.AcknowledgeAsync(request);
         Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
     }
 

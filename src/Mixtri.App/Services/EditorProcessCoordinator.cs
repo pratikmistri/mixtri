@@ -670,7 +670,13 @@ public sealed class EditorProcessCoordinator : IDisposable
             PersistPendingRecordingAsync,
             DeliverRetries,
             DeliverRetryDelay);
-        await _handoffs.AcknowledgeAsync(delivered.Id);
+        try { await _handoffs.AcknowledgeAsync(delivered); }
+        catch (RecordingHandoffChangedException)
+        {
+            // Recover from the durable store next time, not by resaving this stale mirror.
+            _pendingRecording = null;
+            throw;
+        }
         if (_pendingRecording?.Id == delivered.Id)
             _pendingRecording = null;
         if (delivered.RedirectedFromEditorId is { } original)

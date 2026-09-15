@@ -122,7 +122,7 @@ public sealed class RecordingDeliveryTests
         Assert.AreEqual(lostReplies + 1, fallbackAttempts);
         Assert.AreEqual(request.Id, delivered.Id);
         Assert.AreEqual(request.EditorId, delivered.RedirectedFromEditorId);
-        await store.AcknowledgeAsync(delivered.Id);
+        await store.AcknowledgeAsync(delivered);
         Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
     }
 

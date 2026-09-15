@@ -240,7 +240,7 @@ public sealed class EditorProcessTests
             Assert.AreEqual(request.Project.Id, restored.Project!.Id);
             Assert.AreEqual(request.AppendToProjectId, restored.AppendToProjectId);
             Assert.IsFalse(Directory.EnumerateFiles(root, "*.tmp").Any());
-            await store.AcknowledgeAsync(request.Id);
+            await store.AcknowledgeAsync(request);
             Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
@@ -333,7 +333,7 @@ public sealed class EditorProcessTests
             // reproducing the case where acknowledgement is only partially applied.
             using (var pin = new FileStream(handoff, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                await store.AcknowledgeAsync(request.Id);
+                await store.AcknowledgeAsync(request);
             }
 
             Assert.IsTrue(File.Exists(handoff), "precondition: the delete was expected to fail");
@@ -360,7 +360,11 @@ public sealed class EditorProcessTests
             // A file where the directory must go: the tombstone write cannot succeed.
             File.WriteAllText(root, "not a directory");
             var store = new RecordingHandoffStore(root);
-            await Assert.ThrowsExceptionAsync<IOException>(() => store.AcknowledgeAsync(Guid.NewGuid()));
+            await Assert.ThrowsExceptionAsync<IOException>(() => store.AcknowledgeAsync(new ShellProcessRequest
+            {
+                Command = ShellProcessCommand.RecordingCompleted,
+                Project = new Project(),
+            }));
         }
         finally { if (File.Exists(root)) File.Delete(root); }
     }

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Diagnostics;
 using Mixtri.Core.Models;
 using Mixtri.Core.Shell;
 using Mixtri.Tests.TestSupport;
@@ -27,7 +28,7 @@ public sealed class RecordingHandoffStoreTests
         string path = Path.Combine(directory.Path, $"{request.Id:N}.json");
 
         using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            await store.AcknowledgeAsync(request.Id);
+            await store.AcknowledgeAsync(request);
         Assert.IsTrue(File.Exists(path + ".done"));
         if (!handoffSurvives) File.Delete(path);
 
@@ -53,7 +54,7 @@ public sealed class RecordingHandoffStoreTests
         if (acknowledged)
         {
             using var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            await store.AcknowledgeAsync(request.Id);
+            await store.AcknowledgeAsync(request);
         }
         else
         {
@@ -113,7 +114,7 @@ public sealed class RecordingHandoffStoreTests
         byte[] original = await File.ReadAllBytesAsync(path);
         using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            await store.AcknowledgeAsync(request.Id);
+            await store.AcknowledgeAsync(request);
             await Assert.ThrowsExceptionAsync<IOException>(() =>
                 store.SaveAsync(request with { EditorId = Guid.NewGuid() }));
             CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(path));
@@ -141,5 +142,118 @@ public sealed class RecordingHandoffStoreTests
             Assert.IsFalse(File.Exists(path + ".bad"));
         }
         Assert.AreEqual(request.Id, (await store.ReadPendingAsync()).Single().Id);
+    }
+
+    [TestMethod]
+    public async Task AcknowledgementOfOlderSnapshotPreservesTheNewDestination()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_stale_ack_");
+        var firstStore = new RecordingHandoffStore(directory.Path);
+        var otherStore = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await firstStore.SaveAsync(request);
+        var delivered = (await firstStore.ReadPendingAsync()).Single();
+        var newer = request with { EditorId = Guid.NewGuid(), Message = "New destination" };
+        await otherStore.SaveAsync(newer);
+
+        await Assert.ThrowsExceptionAsync<RecordingHandoffChangedException>(() =>
+            firstStore.AcknowledgeAsync(delivered));
+        var pending = (await otherStore.ReadPendingAsync()).Single();
+        Assert.AreEqual(newer.EditorId, pending.EditorId);
+        Assert.AreEqual(newer.Message, pending.Message);
+        Assert.IsFalse(File.Exists(Path.Combine(directory.Path, $"{request.Id:N}.json.done")));
+
+        await otherStore.AcknowledgeAsync(pending);
+        await firstStore.AcknowledgeAsync(pending);
+        Assert.AreEqual(0, (await firstStore.ReadPendingAsync()).Count);
+    }
+
+    [TestMethod]
+    public async Task AcknowledgementComparesTheWholeDeliveredPayload()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_payload_ack_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        var delivered = (await store.ReadPendingAsync()).Single();
+        var newer = request with { AppendToProjectId = Guid.NewGuid() };
+        await store.SaveAsync(newer);
+
+        await Assert.ThrowsExceptionAsync<RecordingHandoffChangedException>(() =>
+            store.AcknowledgeAsync(delivered));
+        Assert.AreEqual(newer.AppendToProjectId, (await store.ReadPendingAsync()).Single().AppendToProjectId);
+    }
+
+    [TestMethod]
+    [DataRow("save")]
+    [DataRow("read")]
+    [DataRow("acknowledge")]
+    public async Task StoreOperationsWaitForTheOtherProcess(string operation)
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_process_lock_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        var mutexName = (string)typeof(RecordingHandoffStore)
+            .GetField("_processLockName", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
+        var start = new ProcessStartInfo(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            @"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add(
+            $"$m = [System.Threading.Mutex]::new($false, '{mutexName}'); " +
+            "try { $null = $m.WaitOne(); [Console]::WriteLine('locked'); " +
+            "[Console]::Out.Flush(); $null = [Console]::ReadLine(); $m.ReleaseMutex() } " +
+            "finally { $m.Dispose() }");
+        using var owner = Process.Start(start) ?? throw new AssertFailedException("Could not start mutex owner.");
+        Task? pending = null;
+        try
+        {
+            Assert.AreEqual("locked", await owner.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)));
+            pending = operation switch
+            {
+                "save" => store.SaveAsync(request),
+                "read" => store.ReadPendingAsync(),
+                _ => store.AcknowledgeAsync(request),
+            };
+            await Task.WhenAny(pending, Task.Delay(100));
+            Assert.IsFalse(pending.IsCompleted, "A process-local semaphore cannot protect this operation.");
+        }
+        finally
+        {
+            if (!owner.HasExited)
+            {
+                await owner.StandardInput.WriteLineAsync("release");
+                try { await owner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15)); }
+                catch (TimeoutException)
+                {
+                    owner.Kill(entireProcessTree: true);
+                    await owner.WaitForExitAsync();
+                    throw;
+                }
+            }
+            if (pending is not null) await pending.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        Assert.AreEqual(0, owner.ExitCode, await owner.StandardError.ReadToEndAsync());
+    }
+
+    [TestMethod]
+    public void EquivalentDirectorySpellingsUseTheSameProcessLock()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_lock_name_");
+        var field = typeof(RecordingHandoffStore)
+            .GetField("_processLockName", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var first = new RecordingHandoffStore(directory.Path);
+        var equivalent = new RecordingHandoffStore(directory.Path.ToUpperInvariant() + Path.DirectorySeparatorChar);
+        Assert.AreEqual(field.GetValue(first), field.GetValue(equivalent));
     }
 }
