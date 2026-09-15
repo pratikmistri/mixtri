@@ -38,14 +38,14 @@ public class AudioWaveformStreamingTests
         foreach (int target in new[] { 1, 31, 1500, 4096 })
         foreach (var (start, duration) in new[] { (0d, 0d), (.00137, .05519), (.09, 0), (5d, 0d) })
         {
-            AssertBitsEqual(
+            AssertPeaksEqual(
                 PreviousFile(path, target, start, duration),
                 AudioWaveformGenerator.GenerateWaveform(path, target, start, duration));
         }
     }
 
     [TestMethod]
-    public void VectorPeakPreservesFiniteSpecialAndNanBits()
+    public void VectorPeakPreservesFiniteAndSpecialValues()
     {
         var random = new Random(90210);
         foreach (int count in new[] { 0, 1, 3, Vector<float>.Count, Vector<float>.Count + 1, 37, 65539 })
@@ -80,7 +80,7 @@ public class AudioWaveformStreamingTests
             {
                 var previous = new ArraySamples(values, channels);
                 var current = new ArraySamples(values, channels);
-                AssertBitsEqual(PreviousSamples(previous, available, target),
+                AssertPeaksEqual(PreviousSamples(previous, available, target),
                     AudioWaveformGenerator.GenerateWaveform(current, available, target));
             }
         }
@@ -126,9 +126,32 @@ public class AudioWaveformStreamingTests
         var values = new float[AudioWaveformGenerator.MaximumReadSampleValues + 10];
         values[9] = BitConverter.Int32BitsToSingle(unchecked((int)0xffc12345));
         values[^2] = BitConverter.Int32BitsToSingle(0x7fc54321);
-        AssertBitsEqual(
+        AssertPeaksEqual(
             PreviousSamples(new ArraySamples(values, 2), values.LongLength * 4, 1),
             AudioWaveformGenerator.GenerateWaveform(new ArraySamples(values, 2), values.LongLength * 4, 1));
+    }
+
+    [TestMethod]
+    [DataRow(0x7fc00000)]
+    [DataRow(unchecked((int)0xffc12345))]
+    [DataRow(0x7fc54321)]
+    public void NanPropagationDoesNotContaminateOtherBuckets(int nanBits)
+    {
+        float[] values = [BitConverter.Int32BitsToSingle(nanBits), .1f, .2f, .3f, .5f, -.75f, .25f, 0f];
+        var peaks = AudioWaveformGenerator.GenerateWaveform(new ArraySamples(values, 1), values.Length * 4L, 2);
+        Assert.AreEqual(2, peaks.Length);
+        Assert.IsTrue(float.IsNaN(peaks[0]));
+        AssertPeakValue(.75f, peaks[1]);
+    }
+
+    [TestMethod]
+    public void PeakComparisonRejectsDroppedNansAndNonNanBitChanges()
+    {
+        Assert.ThrowsException<AssertFailedException>(() => AssertPeakValue(float.NaN, 0f));
+        Assert.ThrowsException<AssertFailedException>(() => AssertPeakValue(.75f, .5f));
+        Assert.ThrowsException<AssertFailedException>(() => AssertPeakValue(float.PositiveInfinity, float.NegativeInfinity));
+        Assert.ThrowsException<AssertFailedException>(() => AssertPeakValue(0f, BitConverter.Int32BitsToSingle(int.MinValue)));
+        AssertPeakValue(float.NaN, BitConverter.Int32BitsToSingle(unchecked((int)0xffc12345)));
     }
 
     [TestMethod]
@@ -157,7 +180,7 @@ public class AudioWaveformStreamingTests
         var previous = PreviousFile(path, 1);
         timer.Stop();
         long previousBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-        AssertBitsEqual(previous, current);
+        AssertPeaksEqual(previous, current);
         Assert.IsTrue(currentBytes < 2_000_000, $"Scratch allocations grew to {currentBytes:N0} bytes.");
         Assert.IsTrue(previousBytes > 30_000_000, $"Reference fixture allocated only {previousBytes:N0} bytes.");
         Console.WriteLine($"90-second stereo waveform: {previousBytes:N0} -> {currentBytes:N0} allocated bytes; " +
@@ -208,13 +231,23 @@ public class AudioWaveformStreamingTests
     {
         float previous = initial;
         for (int i = 0; i < count; i++) previous = Math.Max(previous, Math.Abs(samples[i]));
-        Assert.AreEqual(BitConverter.SingleToInt32Bits(previous),
-            BitConverter.SingleToInt32Bits(AudioWaveformGenerator.FindPeak(samples, count, initial)));
+        AssertPeakValue(previous, AudioWaveformGenerator.FindPeak(samples, count, initial));
     }
 
-    private static void AssertBitsEqual(float[] previous, float[] current) =>
-        CollectionAssert.AreEqual(previous.Select(BitConverter.SingleToInt32Bits).ToArray(),
-            current.Select(BitConverter.SingleToInt32Bits).ToArray());
+    private static void AssertPeakValue(float expected, float actual)
+    {
+        // Math.Max can select different NaN payloads across JIT targets. All other bits remain exact.
+        if (float.IsNaN(expected))
+            Assert.IsTrue(float.IsNaN(actual), $"NaN did not propagate: actual bits 0x{BitConverter.SingleToInt32Bits(actual):X8}.");
+        else
+            Assert.AreEqual(BitConverter.SingleToInt32Bits(expected), BitConverter.SingleToInt32Bits(actual));
+    }
+
+    private static void AssertPeaksEqual(float[] previous, float[] current)
+    {
+        Assert.AreEqual(previous.Length, current.Length);
+        for (int i = 0; i < previous.Length; i++) AssertPeakValue(previous[i], current[i]);
+    }
 
     private static float[] PreviousFile(string path, int target, double start = 0, double duration = 0)
     {

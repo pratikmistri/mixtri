@@ -209,7 +209,7 @@ public static class AudioWaveformGenerator
             for (; index <= count - lanes; index += lanes)
             {
                 var values = Vector.Abs(new Vector<float>(samples, index));
-                // Scalar handling preserves Math.Max's first-NaN propagation and payload.
+                // Preserve non-finite propagation; NaN sign/payload is not a portable Math.Max contract.
                 if (!Vector.LessThanAll(values, infinity)) break;
                 maximum = Vector.Max(maximum, values);
             }
