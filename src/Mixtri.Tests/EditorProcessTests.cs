@@ -235,21 +235,19 @@ public sealed class EditorProcessTests
             };
             await store.SaveAsync(request);
             await store.SaveAsync(request);
-            var restored = new RecordingHandoffStore(root).ReadPending().Single();
+            var restored = (await new RecordingHandoffStore(root).ReadPendingAsync()).Single();
             Assert.AreEqual(request.Id, restored.Id);
             Assert.AreEqual(request.Project.Id, restored.Project!.Id);
             Assert.AreEqual(request.AppendToProjectId, restored.AppendToProjectId);
             Assert.IsFalse(Directory.EnumerateFiles(root, "*.tmp").Any());
             await store.AcknowledgeAsync(request.Id);
-            Assert.IsFalse(store.ReadPending().Any());
+            Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
 
     /// <summary>
-    /// A malformed handoff must not strand the valid ones behind it. ReadPending is a lazy
-    /// iterator, so throwing on the first bad file abandoned every later recording and left
-    /// the bad file in place to fail identically on every subsequent open.
+    /// A malformed handoff must not strand the valid ones behind it.
     /// </summary>
     [TestMethod]
     public async Task CorruptHandoff_IsQuarantinedAndLaterRecordingsStillRecover()
@@ -272,7 +270,7 @@ public sealed class EditorProcessTests
             };
             await store.SaveAsync(good);
 
-            var recovered = store.ReadPending().ToList();
+            var recovered = await store.ReadPendingAsync();
             Assert.AreEqual(1, recovered.Count, "the valid handoff behind the corrupt one must still be recovered");
             Assert.AreEqual(good.Id, recovered[0].Id);
 
@@ -280,15 +278,13 @@ public sealed class EditorProcessTests
             Assert.IsTrue(File.Exists(corrupt + ".bad"), "the corrupt file should be quarantined for diagnosis");
 
             // A second pass is clean, proving the bad file is no longer in the rotation.
-            Assert.AreEqual(1, store.ReadPending().Count());
+            Assert.AreEqual(1, (await store.ReadPendingAsync()).Count);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
 
     /// <summary>
-    /// Re-entrant saves for one id must not share a scratch file: CompleteRecordingAsync is
-    /// not covered by the open gate, so a recovery save can overlap an in-flight one and each
-    /// one's cleanup could delete the other's temporary.
+    /// Concurrent saves must neither share scratch files nor collide during replacement.
     /// </summary>
     [TestMethod]
     public async Task ConcurrentSavesOfTheSameRecording_DoNotCollideOnATemporaryFile()
@@ -305,7 +301,7 @@ public sealed class EditorProcessTests
 
             await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => store.SaveAsync(request)));
 
-            Assert.AreEqual(request.Id, store.ReadPending().Single().Id);
+            Assert.AreEqual(request.Id, (await store.ReadPendingAsync()).Single().Id);
             Assert.IsFalse(Directory.EnumerateFiles(root, "*.tmp").Any(), "no scratch file may survive");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
@@ -341,7 +337,7 @@ public sealed class EditorProcessTests
             }
 
             Assert.IsTrue(File.Exists(handoff), "precondition: the delete was expected to fail");
-            Assert.IsFalse(new RecordingHandoffStore(root).ReadPending().Any(),
+            Assert.AreEqual(0, (await new RecordingHandoffStore(root).ReadPendingAsync()).Count,
                 "an acknowledged recording must never be replayed after a restart");
 
             // The sweep should also have cleared the now-deletable leftovers.
@@ -369,38 +365,4 @@ public sealed class EditorProcessTests
         finally { if (File.Exists(root)) File.Delete(root); }
     }
 
-    /// <summary>
-    /// A save that repairs a handoff must not be quarantined by a read that already decided
-    /// the old bytes were unreadable. Reads are not serialized with saves, so quarantine
-    /// re-checks the content and skips anything that changed underneath it.
-    /// </summary>
-    [TestMethod]
-    public async Task HandoffRepairedAfterAFailedParse_IsNotQuarantined()
-    {
-        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-repair-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            var store = new RecordingHandoffStore(root);
-            var request = new ShellProcessRequest
-            {
-                Command = ShellProcessCommand.RecordingCompleted,
-                Project = new Project { VideoFilePath = @"C:\recording\video.mp4" },
-            };
-
-            Directory.CreateDirectory(root);
-            string path = Path.Combine(root, $"{request.Id:N}.json");
-            await File.WriteAllTextAsync(path, "{ truncated");
-
-            // Enumerate lazily so the malformed bytes are read, then repair the file before
-            // the iterator resumes and reaches its quarantine decision.
-            using var pending = store.ReadPending().GetEnumerator();
-            await store.SaveAsync(request);
-            pending.MoveNext();
-
-            Assert.IsTrue(File.Exists(path), "the repaired handoff must survive");
-            Assert.IsFalse(File.Exists(path + ".bad"), "a repaired handoff must not be quarantined");
-            Assert.AreEqual(request.Id, new RecordingHandoffStore(root).ReadPending().Single().Id);
-        }
-        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
-    }
 }

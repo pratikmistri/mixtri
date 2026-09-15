@@ -8,122 +8,96 @@ public sealed class RecordingHandoffStore(string root)
 {
     private readonly SemaphoreSlim _writeGate = new(1, 1);
 
-    /// <summary>
-    /// Persists a completed take. Re-entrant saves of the same id are serialized and each uses
-    /// its own scratch file: CompleteRecordingAsync is not covered by the coordinator's open
-    /// gate, so a recovery save can overlap an in-flight one. Without both, the two writes
-    /// collide on the scratch name and their concurrent replaces of the same destination fail
-    /// with a sharing violation — reporting an error for a recording that is perfectly valid.
-    /// </summary>
-    public async Task SaveAsync(ShellProcessRequest request)
+    /// <summary>Atomically publishes a completed take or its updated delivery destination.</summary>
+    public async Task SaveAsync(ShellProcessRequest request, CancellationToken ct = default)
     {
         if (request.Command != ShellProcessCommand.RecordingCompleted || request.Project is null || request.Id == Guid.Empty)
             throw new ArgumentException("A completed recording is required.", nameof(request));
-        Directory.CreateDirectory(root);
         string path = GetPath(request.Id);
         string temporary = $"{path}.{Guid.NewGuid():N}.tmp";
 
-        await _writeGate.WaitAsync().ConfigureAwait(false);
+        await _writeGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await File.WriteAllBytesAsync(temporary, JsonSerializer.SerializeToUtf8Bytes(request)).ConfigureAwait(false);
+            Directory.CreateDirectory(root);
+            await File.WriteAllBytesAsync(temporary, JsonSerializer.SerializeToUtf8Bytes(request), ct).ConfigureAwait(false);
+            // Remove the old acknowledged pair before publishing, never leave its marker
+            // attached to a new pending request. A failed cleanup must leave the new save unpublished.
+            if (File.Exists(TombstonePath(path)))
+                ClearAcknowledged(path);
             File.Move(temporary, path, overwrite: true);
         }
         finally
         {
-            try { if (File.Exists(temporary)) File.Delete(temporary); }
-            catch { /* the move already consumed it */ }
+            try { File.Delete(temporary); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                DiagLog.Write("Shell", $"Could not remove handoff temporary '{temporary}': {ex}");
+            }
             _writeGate.Release();
         }
     }
 
     /// <summary>
-    /// Yields every recoverable handoff. A malformed file is quarantined rather than thrown
-    /// from, because this is a lazy iterator: throwing would abandon every later handoff and
-    /// leave the bad file in place to fail the same way on every subsequent open.
+    /// Reads a recovery snapshot and cleans stale files under the same gate as saves.
+    /// The gate is released before callers enumerate the result or attempt delivery.
     /// </summary>
-    public IEnumerable<ShellProcessRequest> ReadPending()
+    public async Task<IReadOnlyList<ShellProcessRequest>> ReadPendingAsync(CancellationToken ct = default)
     {
-        if (!Directory.Exists(root)) yield break;
-        foreach (var path in Directory.EnumerateFiles(root, "*.json").Order(StringComparer.Ordinal))
-        {
-            // An acknowledged handoff whose delete failed still carries its tombstone.
-            // Replaying it would re-apply the take — for Record More, appending it twice.
-            if (File.Exists(TombstonePath(path)))
-            {
-                ClearAcknowledged(path);
-                continue;
-            }
-
-            ShellProcessRequest? request = null;
-            string? invalid = null;
-            byte[]? raw = null;
-            try
-            {
-                raw = File.ReadAllBytes(path);
-                request = JsonSerializer.Deserialize<ShellProcessRequest>(raw);
-                if (request?.Command != ShellProcessCommand.RecordingCompleted || request.Project is null
-                    || request.Id == Guid.Empty || !string.Equals(path, GetPath(request.Id), StringComparison.OrdinalIgnoreCase))
-                {
-                    request = null;
-                    invalid = "the file does not describe a completed recording";
-                }
-            }
-            catch (Exception ex)
-            {
-                request = null;
-                invalid = ex.Message;
-            }
-
-            if (invalid is not null)
-            {
-                Quarantine(path, invalid, raw);
-                continue;
-            }
-
-            yield return request!;
-        }
-
-        // Drop tombstones whose handoff is already gone, so the folder cannot grow forever.
-        foreach (var marker in Directory.EnumerateFiles(root, "*.done"))
-        {
-            string handoff = marker[..^TombstoneSuffix.Length];
-            if (!File.Exists(handoff))
-                try { File.Delete(marker); } catch { /* retried on the next open */ }
-        }
-    }
-
-    /// <summary>
-    /// Moves an unreadable handoff aside.
-    /// </summary>
-    /// <remarks>
-    /// Reads are not serialized with <see cref="SaveAsync"/>, so between validation failing
-    /// and this call a save can legitimately replace the file with a valid handoff. Moving it
-    /// then would discard the only durable copy of a good recording. The bytes that failed
-    /// validation are therefore re-checked first, and anything that changed is left alone for
-    /// the next read to pick up.
-    /// </remarks>
-    private static void Quarantine(string path, string reason, byte[]? failedContent)
-    {
+        await _writeGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (failedContent is null || !File.ReadAllBytes(path).AsSpan().SequenceEqual(failedContent))
+            if (!Directory.Exists(root)) return [];
+            var pending = new List<ShellProcessRequest>();
+            foreach (var path in Directory.EnumerateFiles(root, "*.json").Order(StringComparer.Ordinal))
             {
-                DiagLog.Write("Shell", $"Skipping quarantine of '{path}': it changed since it failed to parse.");
-                return;
-            }
-        }
-        catch (Exception ex)
-        {
-            DiagLog.Write("Shell", $"Skipping quarantine of '{path}': {ex.Message}");
-            return;
-        }
+                ct.ThrowIfCancellationRequested();
+                if (File.Exists(TombstonePath(path)))
+                {
+                    TryClearAcknowledged(path);
+                    continue;
+                }
 
-        DiagLog.Write("Shell", $"Discarding unreadable recording handoff '{path}': {reason}");
+                try
+                {
+                    var raw = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+                    var request = JsonSerializer.Deserialize<ShellProcessRequest>(raw);
+                    if (request?.Command != ShellProcessCommand.RecordingCompleted || request.Project is null
+                        || request.Id == Guid.Empty || !string.Equals(path, GetPath(request.Id), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("The file does not describe a completed recording.");
+                    pending.Add(request);
+                }
+                catch (Exception ex) when (ex is JsonException or InvalidDataException)
+                {
+                    Quarantine(path, ex);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    DiagLog.Write("Shell", $"Could not read recording handoff '{path}'; kept for retry: {ex}");
+                }
+            }
+
+            foreach (var marker in Directory.EnumerateFiles(root, "*.done"))
+            {
+                ct.ThrowIfCancellationRequested();
+                string handoff = marker[..^TombstoneSuffix.Length];
+                if (!File.Exists(handoff))
+                    TryClearAcknowledged(handoff);
+            }
+
+            return pending;
+        }
+        finally { _writeGate.Release(); }
+    }
+
+    // Validation, quarantine, and marker cleanup all run while _writeGate is held.
+    private static void Quarantine(string path, Exception reason)
+    {
+        DiagLog.Write("Shell", $"Quarantining invalid recording handoff '{path}': {reason}");
         try { File.Move(path, $"{path}.bad", overwrite: true); }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            DiagLog.Write("Shell", $"Could not quarantine '{path}': {ex.Message}");
+            DiagLog.Write("Shell", $"Could not quarantine '{path}'; kept for retry: {ex}");
         }
     }
 
@@ -142,26 +116,28 @@ public sealed class RecordingHandoffStore(string root)
     /// valid handoff into this path between the tombstone write and the delete, and the
     /// delete would destroy the only durable copy of that recording.
     /// </remarks>
-    public async Task AcknowledgeAsync(Guid id)
+    public async Task AcknowledgeAsync(Guid id, CancellationToken ct = default)
     {
+        if (id == Guid.Empty) throw new ArgumentException("A recording request ID is required.", nameof(id));
         string path = GetPath(id);
         string tombstone = TombstonePath(path);
 
-        await _writeGate.WaitAsync().ConfigureAwait(false);
+        await _writeGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             try
             {
                 Directory.CreateDirectory(root);
-                File.WriteAllBytes(tombstone, []);
+                using var marker = new FileStream(tombstone, FileMode.Create, FileAccess.Write, FileShare.None);
+                marker.Flush(flushToDisk: true);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 throw new IOException(
-                    $"Could not record acknowledgement for recording {id:N}; it was left pending to avoid replaying it.", ex);
+                    $"Could not record acknowledgement for recording {id:N}; it remains pending.", ex);
             }
 
-            ClearAcknowledged(path);
+            TryClearAcknowledged(path);
         }
         finally { _writeGate.Release(); }
     }
@@ -169,14 +145,17 @@ public sealed class RecordingHandoffStore(string root)
     /// <summary>Removes an acknowledged handoff and its tombstone, in that order.</summary>
     private static void ClearAcknowledged(string path)
     {
-        try { File.Delete(path); }
-        catch (Exception ex)
+        File.Delete(path);
+        File.Delete(TombstonePath(path));
+    }
+
+    private static void TryClearAcknowledged(string path)
+    {
+        try { ClearAcknowledged(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // The tombstone stays behind and suppresses the replay until this succeeds.
-            DiagLog.Write("Shell", $"Could not clear acknowledged handoff '{path}': {ex.Message}");
-            return;
+            DiagLog.Write("Shell", $"Could not clear acknowledged handoff '{path}'; marker retained: {ex}");
         }
-        try { File.Delete(TombstonePath(path)); } catch { /* swept on the next read */ }
     }
 
     private const string TombstoneSuffix = ".done";

@@ -38,6 +38,7 @@ public sealed record ShellProcessRequest
     public Guid Id { get; init; } = Guid.NewGuid();
     public ShellProcessCommand Command { get; init; }
     public Guid EditorId { get; init; }
+    public Guid? RedirectedFromEditorId { get; init; }
     public RemoteRecordingOptions? Recording { get; init; }
     public Project? Project { get; init; }
     public Guid? AppendToProjectId { get; init; }

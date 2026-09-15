@@ -79,8 +79,9 @@ its native rendering caches. Save, open, import, and export work block closing u
 Recording remains in the resident process; completed takes are handed over as metadata and
 file paths, not raw frames. Record More targets the original project explicitly. A completed
 take stays in a durable pending handoff until an editor accepts it; opening the full app
-retries pending handoffs. If the original editor cannot accept a take, it opens separately
-without overwriting existing edits.
+retries pending handoffs. If the original editor explicitly rejects a take, it opens separately
+without overwriting existing edits. The new destination is saved before delivery; a lost reply
+is retried with the same request ID in that editor, not by opening another copy.
 
 This is an **idle-memory tradeoff**, not an overall memory reduction: the resident WinUI
 process still costs roughly launch-time RAM while the full app is open, and a new full

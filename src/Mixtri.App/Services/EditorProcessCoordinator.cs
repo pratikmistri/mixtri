@@ -275,13 +275,13 @@ public sealed class EditorProcessCoordinator : IDisposable
             bool recovered = false;
             if (_pendingRecording is { } pendingRecording)
             {
-                await _handoffs.SaveAsync(pendingRecording);
+                await PersistPendingRecordingAsync(pendingRecording);
                 await DeliverAsync(pendingRecording);
                 _pendingRecording = null;
                 RecordingViewModel.Shared.ReleaseLastProject();
                 recovered = true;
             }
-            foreach (var pending in _handoffs.ReadPending())
+            foreach (var pending in await _handoffs.ReadPendingAsync())
             {
                 await DeliverAsync(pending);
                 recovered = true;
@@ -571,6 +571,7 @@ public sealed class EditorProcessCoordinator : IDisposable
     public async Task CompleteRecordingAsync(Project? project)
     {
         _delivering = true;
+        await _openGate.WaitAsync();
         try
         {
             if (project is null)
@@ -585,8 +586,7 @@ public sealed class EditorProcessCoordinator : IDisposable
                 AppendToProjectId = _appendToProject,
                 Project = project,
             };
-            _pendingRecording = request;
-            await _handoffs.SaveAsync(request);
+            await PersistPendingRecordingAsync(request);
             await DeliverAsync(request);
             _pendingRecording = null;
             RecordingViewModel.Shared.ReleaseLastProject();
@@ -600,66 +600,34 @@ public sealed class EditorProcessCoordinator : IDisposable
             _recordingEditor = null;
             _appendToProject = null;
             _delivering = false;
+            _openGate.Release();
         }
     }
 
-    /// <summary>
-    /// Hands a completed recording to its originating editor, falling back to a fresh editor
-    /// only when the original genuinely refused it.
-    /// </summary>
-    /// <remarks>
-    /// A lost response is NOT a rejection. The editor may have already run SetProject or
-    /// AppendRecording before its reply went missing, so redirecting on a timeout can show
-    /// the same take in two editors and contradict the "original project was not changed"
-    /// message. Retrying the same request id lets the peer's dedup cache replay the original
-    /// outcome; only an explicit failure or a dead process redirects.
-    /// </remarks>
+    private async Task PersistPendingRecordingAsync(ShellProcessRequest request)
+    {
+        _pendingRecording = request;
+        await _handoffs.SaveAsync(request);
+    }
+
     private async Task DeliverAsync(ShellProcessRequest request)
     {
-        ShellProcessResponse? response = null;
-        if (request.EditorId != Guid.Empty)
-        {
-            response = await TrySendAsync(EditorPipe(request.EditorId), request, DeliverTimeout);
-            for (int attempt = 0; response is null && attempt < DeliverRetries; attempt++)
-            {
-                await Task.Delay(DeliverRetryDelay);
-                // Same id on purpose: the peer replays its recorded result instead of re-applying.
-                response = await TrySendAsync(EditorPipe(request.EditorId), request, DeliverTimeout);
-            }
-        }
-
-        if (response is { Success: true })
-        {
-            await _handoffs.AcknowledgeAsync(request.Id);
-            return;
-        }
-
-        if (response is null && request.EditorId != Guid.Empty)
-        {
-            // Never confirmed either way. Keep the handoff on disk so the next open recovers
-            // it once the editor is reachable, rather than risking a duplicate delivery now.
-            DiagLog.Write("ShellProcess",
-                $"Editor {request.EditorId:N} never acknowledged recording {request.Id:N}; keeping it for recovery.");
-            throw new InvalidOperationException(
-                "The editor did not confirm the recording. It has been kept and will be offered again.");
-        }
-
-        var editor = await EnsureEditorAsync(newSession: true, startInEditor: true);
-        var separate = request with
-        {
-            AppendToProjectId = null,
-            Message = request.AppendToProjectId.HasValue
-                ? "The original editor could not accept Record More. Your new recording was opened separately; the original project was not changed."
-                : "The previous editor could not accept this recording, so it was opened separately without replacing existing edits.",
-        };
-        RequireSuccess(await ShellProcessPipe.SendAsync(EditorPipe(editor), separate));
-        if (request.EditorId != Guid.Empty)
-            await TrySendAsync(EditorPipe(request.EditorId), new()
+        var delivered = await RecordingDelivery.DeliverAsync(
+            request,
+            pending => TrySendAsync(EditorPipe(pending.EditorId), pending, DeliverTimeout),
+            () => EnsureEditorAsync(newSession: true, startInEditor: true),
+            PersistPendingRecordingAsync,
+            DeliverRetries,
+            DeliverRetryDelay);
+        await _handoffs.AcknowledgeAsync(delivered.Id);
+        if (_pendingRecording?.Id == delivered.Id)
+            _pendingRecording = null;
+        if (delivered.RedirectedFromEditorId is { } original)
+            await TrySendAsync(EditorPipe(original), new()
             {
                 Command = ShellProcessCommand.RecordingRedirected,
                 Message = "The new recording was opened in a separate editor to preserve this project.",
             });
-        await _handoffs.AcknowledgeAsync(request.Id);
     }
 
     public async Task NotifyRecordingFailedAsync(string? message = null)
