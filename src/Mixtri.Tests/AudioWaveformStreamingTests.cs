@@ -164,6 +164,46 @@ public class AudioWaveformStreamingTests
             $"reference {timer.Elapsed.TotalMilliseconds:F1} ms, current {currentMs:F1} ms (timing informational).");
     }
 
+    /// <summary>
+    /// Pins the NAudio contract the file-based overload depends on: <c>AudioFileReader</c>
+    /// normalises Length, Position and WaveFormat to decoded 32-bit float, whatever the
+    /// source bit depth. <c>remainingBytes</c> is therefore already decoded float bytes, so
+    /// dividing by <c>sizeof(float)</c> is correct and no encoded-to-decoded conversion is
+    /// wanted. Asserted directly because the parity fixture divides by
+    /// <c>BitsPerSample / 8</c>, which is also 4 here and so cannot detect a unit mismatch.
+    /// </summary>
+    [TestMethod]
+    [DataRow(8, 1)]
+    [DataRow(16, 1)]
+    [DataRow(16, 2)]
+    [DataRow(24, 2)]
+    [DataRow(32, 2)]
+    public void AudioFileReaderReportsDecodedFloatBytes(int bits, int channels)
+    {
+        using var directory = new TempDirectoryFixture("mixtri_waveform_units_");
+        string path = Path.Combine(directory.Path, "units.wav");
+        const int frames = 2003;
+        using (var writer = new WaveFileWriter(path, new WaveFormat(16000, bits, channels)))
+        {
+            var bytes = new byte[frames * channels * bits / 8];
+            new Random(7).NextBytes(bytes);
+            writer.Write(bytes, 0, bytes.Length);
+        }
+
+        using var reader = new AudioFileReader(path);
+        Assert.AreEqual(32, reader.WaveFormat.BitsPerSample);
+        Assert.AreEqual(frames * (long)channels * sizeof(float), reader.Length,
+            "Length must be decoded float bytes, not encoded source bytes");
+
+        var buffer = new float[4096];
+        long values = 0;
+        int read;
+        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0) values += read;
+        Assert.AreEqual(frames * (long)channels, values,
+            "every decoded sample value must be accounted for by Length / sizeof(float)");
+        Assert.AreEqual(reader.Length / sizeof(float), values);
+    }
+
     private static void AssertPeak(float[] samples, int count, float initial = 0)
     {
         float previous = initial;

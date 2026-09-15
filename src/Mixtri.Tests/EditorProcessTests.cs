@@ -240,7 +240,7 @@ public sealed class EditorProcessTests
             Assert.AreEqual(request.Project.Id, restored.Project!.Id);
             Assert.AreEqual(request.AppendToProjectId, restored.AppendToProjectId);
             Assert.IsFalse(Directory.EnumerateFiles(root, "*.tmp").Any());
-            store.Acknowledge(request.Id);
+            await store.AcknowledgeAsync(request.Id);
             Assert.IsFalse(store.ReadPending().Any());
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
@@ -337,7 +337,7 @@ public sealed class EditorProcessTests
             // reproducing the case where acknowledgement is only partially applied.
             using (var pin = new FileStream(handoff, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                store.Acknowledge(request.Id);
+                await store.AcknowledgeAsync(request.Id);
             }
 
             Assert.IsTrue(File.Exists(handoff), "precondition: the delete was expected to fail");
@@ -356,7 +356,7 @@ public sealed class EditorProcessTests
     /// the caller has to keep treating the recording as pending.
     /// </summary>
     [TestMethod]
-    public void Acknowledge_ThatCannotBeRecorded_Throws()
+    public async Task Acknowledge_ThatCannotBeRecorded_Throws()
     {
         string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-ackfail-" + Guid.NewGuid().ToString("N"));
         try
@@ -364,8 +364,43 @@ public sealed class EditorProcessTests
             // A file where the directory must go: the tombstone write cannot succeed.
             File.WriteAllText(root, "not a directory");
             var store = new RecordingHandoffStore(root);
-            Assert.ThrowsException<IOException>(() => store.Acknowledge(Guid.NewGuid()));
+            await Assert.ThrowsExceptionAsync<IOException>(() => store.AcknowledgeAsync(Guid.NewGuid()));
         }
         finally { if (File.Exists(root)) File.Delete(root); }
+    }
+
+    /// <summary>
+    /// A save that repairs a handoff must not be quarantined by a read that already decided
+    /// the old bytes were unreadable. Reads are not serialized with saves, so quarantine
+    /// re-checks the content and skips anything that changed underneath it.
+    /// </summary>
+    [TestMethod]
+    public async Task HandoffRepairedAfterAFailedParse_IsNotQuarantined()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "Mixtri-handoff-repair-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new RecordingHandoffStore(root);
+            var request = new ShellProcessRequest
+            {
+                Command = ShellProcessCommand.RecordingCompleted,
+                Project = new Project { VideoFilePath = @"C:\recording\video.mp4" },
+            };
+
+            Directory.CreateDirectory(root);
+            string path = Path.Combine(root, $"{request.Id:N}.json");
+            await File.WriteAllTextAsync(path, "{ truncated");
+
+            // Enumerate lazily so the malformed bytes are read, then repair the file before
+            // the iterator resumes and reaches its quarantine decision.
+            using var pending = store.ReadPending().GetEnumerator();
+            await store.SaveAsync(request);
+            pending.MoveNext();
+
+            Assert.IsTrue(File.Exists(path), "the repaired handoff must survive");
+            Assert.IsFalse(File.Exists(path + ".bad"), "a repaired handoff must not be quarantined");
+            Assert.AreEqual(request.Id, new RecordingHandoffStore(root).ReadPending().Single().Id);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
 }

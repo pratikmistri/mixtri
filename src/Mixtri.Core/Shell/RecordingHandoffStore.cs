@@ -57,9 +57,11 @@ public sealed class RecordingHandoffStore(string root)
 
             ShellProcessRequest? request = null;
             string? invalid = null;
+            byte[]? raw = null;
             try
             {
-                request = JsonSerializer.Deserialize<ShellProcessRequest>(File.ReadAllBytes(path));
+                raw = File.ReadAllBytes(path);
+                request = JsonSerializer.Deserialize<ShellProcessRequest>(raw);
                 if (request?.Command != ShellProcessCommand.RecordingCompleted || request.Project is null
                     || request.Id == Guid.Empty || !string.Equals(path, GetPath(request.Id), StringComparison.OrdinalIgnoreCase))
                 {
@@ -75,7 +77,7 @@ public sealed class RecordingHandoffStore(string root)
 
             if (invalid is not null)
             {
-                Quarantine(path, invalid);
+                Quarantine(path, invalid, raw);
                 continue;
             }
 
@@ -91,14 +93,37 @@ public sealed class RecordingHandoffStore(string root)
         }
     }
 
-    private static void Quarantine(string path, string reason)
+    /// <summary>
+    /// Moves an unreadable handoff aside.
+    /// </summary>
+    /// <remarks>
+    /// Reads are not serialized with <see cref="SaveAsync"/>, so between validation failing
+    /// and this call a save can legitimately replace the file with a valid handoff. Moving it
+    /// then would discard the only durable copy of a good recording. The bytes that failed
+    /// validation are therefore re-checked first, and anything that changed is left alone for
+    /// the next read to pick up.
+    /// </remarks>
+    private static void Quarantine(string path, string reason, byte[]? failedContent)
     {
+        try
+        {
+            if (failedContent is null || !File.ReadAllBytes(path).AsSpan().SequenceEqual(failedContent))
+            {
+                DiagLog.Write("Shell", $"Skipping quarantine of '{path}': it changed since it failed to parse.");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Skipping quarantine of '{path}': {ex.Message}");
+            return;
+        }
+
         DiagLog.Write("Shell", $"Discarding unreadable recording handoff '{path}': {reason}");
         try { File.Move(path, $"{path}.bad", overwrite: true); }
         catch (Exception ex)
         {
             DiagLog.Write("Shell", $"Could not quarantine '{path}': {ex.Message}");
-            try { File.Delete(path); } catch { /* it will be retried on the next open */ }
         }
     }
 
@@ -112,23 +137,33 @@ public sealed class RecordingHandoffStore(string root)
     /// <c>AppendRecording</c> would add the same take a second time. The tombstone is what
     /// makes acknowledgement durable; failing to write one is reported rather than swallowed,
     /// because the caller must not treat the handoff as consumed.
+    ///
+    /// Runs under the same gate as <see cref="SaveAsync"/>: otherwise a save could move a new
+    /// valid handoff into this path between the tombstone write and the delete, and the
+    /// delete would destroy the only durable copy of that recording.
     /// </remarks>
-    public void Acknowledge(Guid id)
+    public async Task AcknowledgeAsync(Guid id)
     {
         string path = GetPath(id);
         string tombstone = TombstonePath(path);
+
+        await _writeGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(root);
-            File.WriteAllBytes(tombstone, []);
-        }
-        catch (Exception ex)
-        {
-            throw new IOException(
-                $"Could not record acknowledgement for recording {id:N}; it was left pending to avoid replaying it.", ex);
-        }
+            try
+            {
+                Directory.CreateDirectory(root);
+                File.WriteAllBytes(tombstone, []);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException(
+                    $"Could not record acknowledgement for recording {id:N}; it was left pending to avoid replaying it.", ex);
+            }
 
-        ClearAcknowledged(path);
+            ClearAcknowledged(path);
+        }
+        finally { _writeGate.Release(); }
     }
 
     /// <summary>Removes an acknowledged handoff and its tombstone, in that order.</summary>

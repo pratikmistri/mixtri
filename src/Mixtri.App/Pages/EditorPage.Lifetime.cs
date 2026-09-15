@@ -67,6 +67,10 @@ public sealed partial class EditorPage
         await _previewVisibilityGate.WaitAsync();
         try
         {
+            // NOT a tautology despite `_previewSuspended = !visible` above: the gate is
+            // awaited in between, and a newer SetPreviewVisibilityAsync call reassigns
+            // `_previewSuspended` to ITS `!visible`. So this reads as "a later call has since
+            // asked for the opposite state" — this pass is superseded and must not run.
             if (_pageUnloaded || visible == _previewSuspended) return;
             if (!visible)
             {

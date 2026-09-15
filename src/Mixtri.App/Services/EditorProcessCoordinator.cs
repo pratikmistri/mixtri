@@ -127,12 +127,28 @@ public sealed class EditorProcessCoordinator : IDisposable
     /// every activation, park, option change and recording for its whole lifetime.
     /// Runs on the dispatcher, so no additional locking is needed.
     /// </summary>
+    /// <remarks>
+    /// Only SETTLED results are evictable. An entry whose handler is still running is the
+    /// very thing that makes a retried id wait for the original outcome instead of starting
+    /// <see cref="HandleAsync"/> a second time; dropping it mid-flight would let a delivery
+    /// retry apply the recording twice. The cache can therefore exceed its bound while many
+    /// requests are genuinely in flight, which is inherently self-limiting.
+    /// </remarks>
     private void Remember(Guid id, Task<ShellProcessResponse> operation)
     {
         _requests[id] = operation;
         _requestOrder.Enqueue(id);
-        while (_requestOrder.Count > MaxRememberedRequests)
-            _requests.Remove(_requestOrder.Dequeue());
+        if (_requestOrder.Count <= MaxRememberedRequests) return;
+
+        for (int scanned = 0, scan = _requestOrder.Count;
+             scanned < scan && _requestOrder.Count > MaxRememberedRequests;
+             scanned++)
+        {
+            var oldest = _requestOrder.Dequeue();
+            if (!_requests.TryGetValue(oldest, out var settled)) continue;
+            if (settled.IsCompleted) _requests.Remove(oldest);
+            else _requestOrder.Enqueue(oldest);
+        }
     }
 
     private void Forget(Guid id) => _requests.Remove(id);
@@ -304,10 +320,13 @@ public sealed class EditorProcessCoordinator : IDisposable
             return existing;
         }
 
-        // The previous child failed its readiness check but may still be running. Disposing
-        // the Process only releases the handle, so an unresponsive editor would linger with
-        // no way left to reach it. Adopted editors (no handle of our own) are left alone.
-        await RetirePrimaryProcessAsync();
+        // A deliberate NEW session runs alongside the current editor and must never close it:
+        // the separate-recording fallback is reached precisely when a responsive editor
+        // REFUSED to mutate its project, and killing it would discard the unsaved work the
+        // fallback message promises was preserved. Only a child that failed its readiness
+        // check is retired; here the handle is simply released.
+        if (newSession) ReleasePrimaryProcessHandle();
+        else await RetirePrimaryProcessAsync();
 
         var id = Guid.NewGuid();
         _primaryProcess = Launch(EditorProcessLaunch.Arguments(id, startInEditor: startInEditor));
@@ -316,6 +335,18 @@ public sealed class EditorProcessCoordinator : IDisposable
         return id;
     }
 
+    /// <summary>Drops our handle to the current editor without affecting the process itself.</summary>
+    private void ReleasePrimaryProcessHandle()
+    {
+        _primaryProcess?.Dispose();
+        _primaryProcess = null;
+    }
+
+    /// <summary>
+    /// Closes an owned editor that failed its readiness check. <see cref="Process.Dispose"/>
+    /// only releases the handle, so without this an unresponsive child would linger with no
+    /// remaining way to reach it. Adopted editors (no handle of our own) are left alone.
+    /// </summary>
     private async Task RetirePrimaryProcessAsync()
     {
         var process = _primaryProcess;
@@ -599,7 +630,7 @@ public sealed class EditorProcessCoordinator : IDisposable
 
         if (response is { Success: true })
         {
-            _handoffs.Acknowledge(request.Id);
+            await _handoffs.AcknowledgeAsync(request.Id);
             return;
         }
 
@@ -628,7 +659,7 @@ public sealed class EditorProcessCoordinator : IDisposable
                 Command = ShellProcessCommand.RecordingRedirected,
                 Message = "The new recording was opened in a separate editor to preserve this project.",
             });
-        _handoffs.Acknowledge(request.Id);
+        await _handoffs.AcknowledgeAsync(request.Id);
     }
 
     public async Task NotifyRecordingFailedAsync(string? message = null)
