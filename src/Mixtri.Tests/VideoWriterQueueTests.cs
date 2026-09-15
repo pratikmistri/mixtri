@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
 using Mixtri.Tests.TestSupport;
@@ -84,8 +85,8 @@ public class VideoWriterQueueTests
             "abort and dispose may drain pending frames while the writer loop is still stopping");
         Assert.IsFalse(options.SingleWriter,
             "capture callbacks may enqueue frames concurrently");
-        Assert.AreEqual(5, options.Capacity,
-            "the extra slot is reserved for the final gap-only marker");
+        Assert.AreEqual(4, options.Capacity,
+            "tail debt is drained after admitted producers exit; no marker slot is needed");
     }
 
     [TestMethod]
@@ -151,22 +152,73 @@ public class VideoWriterQueueTests
         Assert.AreEqual(TimeSpan.FromSeconds(4 / (double)Fps), writer.CfrDuration);
     }
 
-    /// <summary>
-    /// The stop-time owed-slot flush uses a non-blocking TryWrite, so it would silently drop
-    /// the CFR tail if producers could occupy the whole channel. They cannot: the channel is
-    /// sized one larger than the admission limit precisely to reserve that slot. This pins
-    /// the relationship so it cannot be tuned apart later.
-    /// </summary>
     [TestMethod]
     [DataRow(1920, 1080)]
     [DataRow(3840, 2160)]
     [DataRow(320, 240)]
-    public void QueueReservesASlotForTheStopTimeGapMarker(int width, int height)
+    public void QueueCapacityMatchesProducerAdmission(int width, int height)
     {
         int capacity = VideoWriter.ComputeQueueCapacity(width, height);
         var options = VideoWriter.CreateQueueOptions(capacity);
-        Assert.AreEqual(capacity + 1, options.Capacity,
-            "producers are admitted up to capacity, so the channel needs one more for the gap marker");
+        Assert.AreEqual(capacity, options.Capacity);
+    }
+
+    [TestMethod]
+    public async Task StopWaitsForAdmittedProducer_BeforeDrainingItsLateGapSlots()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        var gate = (FrameSubmissionGate)typeof(VideoWriter)
+            .GetField("_frameAdmission", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writer)!;
+        Assert.IsTrue(gate.TryEnter());
+        writer.StopAcceptingFrames();
+        var drain = writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        try
+        {
+            Assert.IsFalse(drain.IsCompleted);
+            Assert.IsFalse(gate.TryEnter(), "Stopping must reject any new producer.");
+            typeof(VideoWriter).GetField("_pendingSkippedSlots",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(writer, 3);
+        }
+        finally { gate.Exit(); }
+        await drain;
+        Assert.AreEqual(4L, writer.FrameCount);
+        Assert.AreEqual(4, CountFrameFiles(writer));
+        Assert.AreEqual(0, writer.QueuedFrames);
+    }
+
+    [TestMethod]
+    public async Task FinalizeRefusesDirectoryRead_WhenWriterIgnoresCancellation()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+
+        // Model an uncooperative external operation without stalling WinRT or adding a production hook.
+        var field = typeof(VideoWriter).GetField("_writerLoop",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var completedWriter = (Task)field.GetValue(writer)!;
+        var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        field.SetValue(writer, stalled.Task);
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            var failure = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+                writer.FinalizeAsync(cancellation.Token).WaitAsync(TimeSpan.FromSeconds(15)));
+            StringAssert.Contains(failure.Message, "frame writer did not stop");
+            Assert.IsFalse(writer.FinalizeSucceeded);
+            Assert.IsFalse(File.Exists(writer.OutputPath));
+            Assert.AreEqual(1, CountFrameFiles(writer));
+            Assert.AreEqual(0L, writer.DeleteCapturedFrames());
+        }
+        finally
+        {
+            stalled.TrySetResult();
+            field.SetValue(writer, completedWriter);
+        }
     }
 
     [TestMethod]

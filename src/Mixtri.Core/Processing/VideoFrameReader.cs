@@ -33,6 +33,7 @@ public sealed class VideoFrameReader : IDisposable
     private readonly int _fps;
     private readonly long _cacheBudgetBytes;
     private readonly int _cacheCapacity;
+    private readonly FrameSubmissionGate _readAdmission;
 
     private readonly Dictionary<int, CachedFrame> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
@@ -40,7 +41,7 @@ public sealed class VideoFrameReader : IDisposable
     private long _cachedBytes;
     private long _clonedPixelBytes;
 
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public int FrameCount => _source.FrameCount;
     public int Fps => _fps;
@@ -60,6 +61,7 @@ public sealed class VideoFrameReader : IDisposable
         _cacheBudgetBytes = cacheBudgetBytes;
         _cacheCapacity = cacheCapacity > 0 ? cacheCapacity
             : cacheBudgetBytes > 0 ? int.MaxValue : DefaultCacheCapacity;
+        _readAdmission = new FrameSubmissionGate(ReleaseResources);
     }
 
     /// <summary>
@@ -160,84 +162,78 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
     {
-        if (_disposed || frameIndex < 0 || frameIndex >= _source.FrameCount) return null;
-        if (_source.Kind == FrameSourceKind.CapturedJpeg)
-            return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
-        using var lease = await AcquireFrameAsync(frameIndex).ConfigureAwait(false);
-        return lease is null ? null : Clone(lease.Bitmap);
+        if (_disposed || !_readAdmission.TryEnter()) return null;
+        try
+        {
+            if (frameIndex < 0 || frameIndex >= _source.FrameCount) return null;
+            if (_source.Kind == FrameSourceKind.CapturedJpeg)
+                return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+            using var lease = await AcquireFrameAsync(frameIndex).ConfigureAwait(false);
+            return lease is null ? null : Clone(lease.Bitmap);
+        }
+        finally { _readAdmission.Exit(); }
     }
 
     /// <summary>Acquires immutable source pixels without making a second GPU copy.</summary>
     public async Task<FrameLease?> AcquireFrameAsync(int frameIndex)
     {
-        if (_disposed || frameIndex < 0 || frameIndex >= _source.FrameCount)
-            return null;
-
-        // JPEG loads are cheap and already backed by the OS file cache; adding a GPU-side
-        // cache on top would cost memory for no gain.
-        if (_source.Kind == FrameSourceKind.CapturedJpeg)
-        {
-            var jpeg = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
-            return jpeg is null ? null : new FrameLease(jpeg, jpeg.Dispose);
-        }
-
-        if (!await TryEnterCacheAsync().ConfigureAwait(false))
-            return null;
+        if (_disposed || !_readAdmission.TryEnter()) return null;
         try
         {
-            if (_cache.TryGetValue(frameIndex, out var cached))
-            {
-                Touch(frameIndex);
-                return cached.Acquire();
-            }
-        }
-        finally
-        {
-            ReleaseCache();
-        }
+            if (frameIndex < 0 || frameIndex >= _source.FrameCount) return null;
 
-        var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
-        if (decoded is null)
-            return null;
-
-        if (!await TryEnterCacheAsync().ConfigureAwait(false))
-        {
-            // Disposed while decoding — the caller still owns this bitmap.
-            return new FrameLease(decoded, decoded.Dispose);
-        }
-        try
-        {
-            if (_cache.TryGetValue(frameIndex, out var raced))
+            // JPEG loads remain uncached, but must still retain the source through the await.
+            if (_source.Kind == FrameSourceKind.CapturedJpeg)
             {
-                // Another caller cached this frame while we were decoding.
-                Touch(frameIndex);
-                decoded.Dispose();
-                return raced.Acquire();
+                var jpeg = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+                return jpeg is null ? null : new FrameLease(jpeg, jpeg.Dispose);
             }
 
-            var entry = new CachedFrame(decoded);
-            _cache[frameIndex] = entry;
-            _cachedBytes += EstimateBytes(decoded);
-            _cacheOrder.AddFirst(frameIndex);
-            var lease = entry.Acquire();
-            Evict();
+            if (!await TryEnterCacheAsync().ConfigureAwait(false))
+                return null;
+            try
+            {
+                if (_cache.TryGetValue(frameIndex, out var cached))
+                {
+                    Touch(frameIndex);
+                    return cached.Acquire();
+                }
+            }
+            finally { ReleaseCache(); }
 
-            return lease;
+            var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+            if (decoded is null) return null;
+            if (!await TryEnterCacheAsync().ConfigureAwait(false))
+                return new FrameLease(decoded, decoded.Dispose);
+            try
+            {
+                if (_cache.TryGetValue(frameIndex, out var raced))
+                {
+                    Touch(frameIndex);
+                    decoded.Dispose();
+                    return raced.Acquire();
+                }
+
+                var entry = new CachedFrame(decoded);
+                _cache[frameIndex] = entry;
+                _cachedBytes += EstimateBytes(decoded);
+                _cacheOrder.AddFirst(frameIndex);
+                var lease = entry.Acquire();
+                Evict();
+
+                return lease;
+            }
+            finally { ReleaseCache(); }
         }
-        finally
-        {
-            ReleaseCache();
-        }
+        finally { _readAdmission.Exit(); }
     }
 
     /// <summary>
     /// Acquires the cache lock, returning false when the reader has been disposed.
     /// </summary>
     /// <remarks>
-    /// <see cref="Dispose"/> takes the same lock before tearing the cache down, so holding
-    /// it guarantees no cached bitmap is disposed while it is being cloned. Callers treat
-    /// a disposed reader as "no frame" rather than an error, matching the pre-existing
-    /// non-throwing contract of this method.
+    /// Read admission spans source loads, cache operations, and legacy clones. Disposal
+    /// closes admission and releases resources only after every admitted read returns.
     /// </remarks>
     private async Task<bool> TryEnterCacheAsync()
     {
@@ -328,16 +324,11 @@ public sealed class VideoFrameReader : IDisposable
             return;
 
         _disposed = true;
+        _readAdmission.Close();
+    }
 
-        // Wait for any in-flight clone to finish before disposing the bitmaps it is
-        // reading from. The gate is only ever held for GPU blits, so this is brief.
-        bool held = false;
-        try
-        {
-            held = _cacheGate.Wait(TimeSpan.FromSeconds(5));
-        }
-        catch (ObjectDisposedException) { }
-
+    private void ReleaseResources()
+    {
         try
         {
             foreach (var bitmap in _cache.Values)
@@ -348,13 +339,8 @@ public sealed class VideoFrameReader : IDisposable
         }
         finally
         {
-            if (held) ReleaseCache();
+            _source.Dispose();
         }
-
-        _source.Dispose();
-
-        // _cacheGate is deliberately NOT disposed: SemaphoreSlim.Dispose does not release
-        // callers already parked in WaitAsync, so disposing it would strand them forever.
     }
 
     private sealed class CachedFrame(CanvasBitmap bitmap)

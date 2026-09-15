@@ -134,11 +134,13 @@ public sealed class VideoWriter : IDisposable
     // encoding, gap filling and disk writes, so ordering needs no lock.
 
     private readonly Channel<PendingFrame> _frameQueue;
+    private readonly FrameSubmissionGate _frameAdmission;
     private readonly CancellationTokenSource _writerCts = new();
     private readonly Task _writerLoop;
     private readonly int _queueCapacity;
     private int _queueDepth;
     private int _writerCompleted;
+    private volatile bool _writerStopped;
     private long _minimumFrameCount;
     private readonly CaptureFrameFiles _frameFiles = new();
     private long _finalizationDecodeCount;
@@ -287,13 +289,13 @@ public sealed class VideoWriter : IDisposable
 
         _queueCapacity = ComputeQueueCapacity(width, height);
         _frameQueue = Channel.CreateBounded<PendingFrame>(CreateQueueOptions(_queueCapacity));
+        _frameAdmission = new FrameSubmissionGate(CompleteFrameQueue);
 
         _writerLoop = Task.Run(ProcessQueuedFramesAsync);
     }
 
     internal static BoundedChannelOptions CreateQueueOptions(int queueCapacity)
-        // +1 reserves a slot for the final gap-only marker enqueued by StopAcceptingFrames().
-        => new(queueCapacity + 1)
+        => new(queueCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
 
@@ -340,13 +342,16 @@ public sealed class VideoWriter : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Frames still in flight when the capture stops are expected, not an error.
-        if (_stopAccepting)
+        if (_stopAccepting || !_frameAdmission.TryEnter())
             return false;
 
-        if (_finalized)
-            throw new InvalidOperationException("Writer has been finalized.");
+        try { return WriteAcceptedFrame(surface, timestamp, skippedSlots, block); }
+        finally { _frameAdmission.Exit(); }
+    }
 
+    private bool WriteAcceptedFrame(
+        IDirect3DSurface surface, TimeSpan timestamp, int skippedSlots, bool block)
+    {
         if (skippedSlots < 0)
             skippedSlots = 0;
 
@@ -364,8 +369,7 @@ public sealed class VideoWriter : IDisposable
             int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
             if (!_frameQueue.Writer.TryWrite(new PendingFrame(copy, timestamp, skippedSlots + owed)))
             {
-                // The queue closed underneath us (stop/dispose raced this callback).
-                Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + owed);
+                Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + owed + 1);
                 ReleaseFrame(new PendingFrame(copy, timestamp, 0));
                 return false;
             }
@@ -548,12 +552,8 @@ public sealed class VideoWriter : IDisposable
                         return;
                 }
             }
-            // Slots owed by dropped frames that never reached the queue. The stop-time flush
-            // itself is safe — the channel reserves a slot for it (see CreateQueueOptions) —
-            // but a producer already past the `_stopAccepting` check can accrue more after
-            // that exchange has run. Draining them here, on the writer thread once the channel
-            // has completed, keeps the tail at wall-clock length. The minimum-frame backstop
-            // below covers the duration-critical path; this covers the rest.
+            // Queue completion follows the last admitted producer, so no later submission
+            // can accrue more debt after this final drain.
             int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
             if (owed > 0)
                 FillGapFramesCore(owed, ct);
@@ -574,6 +574,7 @@ public sealed class VideoWriter : IDisposable
         }
         finally
         {
+            _writerStopped = true;
             DrainQueue();
         }
     }
@@ -773,17 +774,14 @@ public sealed class VideoWriter : IDisposable
         Interlocked.Exchange(ref _minimumFrameCount, minimumFrameCount);
         ClearTargetPool();
 
-        // Flush the CFR slots owed by dropped frames so a recording whose tail was dropped
-        // still ends at the right wall-clock time.
-        int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
-        if (owed > 0)
-        {
-            Interlocked.Increment(ref _queueDepth);
-            if (!_frameQueue.Writer.TryWrite(new PendingFrame(null, TimeSpan.Zero, owed)))
-                Interlocked.Decrement(ref _queueDepth);
-        }
+        _frameAdmission.Close();
+    }
 
+    private void CompleteFrameQueue()
+    {
         _frameQueue.Writer.TryComplete();
+        if (_writerStopped || _writerCts.IsCancellationRequested)
+            DrainQueue();
     }
 
     /// <summary>
@@ -840,10 +838,11 @@ public sealed class VideoWriter : IDisposable
         if (count <= 0) return;
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_stopAccepting)
+        if (_stopAccepting || !_frameAdmission.TryEnter())
             return;
 
-        Interlocked.Add(ref _pendingSkippedSlots, count);
+        try { Interlocked.Add(ref _pendingSkippedSlots, count); }
+        finally { _frameAdmission.Exit(); }
     }
 
     /// <summary>
@@ -1258,10 +1257,6 @@ public sealed class VideoWriter : IDisposable
         }
     }
 
-    /// <summary>
-    /// Stops the frame gate and waits for the writer loop to finish, so finalization never
-    /// races a pending JPEG write. Falls back to cancelling the loop if it will not drain.
-    /// </summary>
     /// <summary>
     /// Ensures the writer loop has stopped touching the frames directory before finalization
     /// reads it.

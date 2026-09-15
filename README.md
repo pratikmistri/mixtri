@@ -82,6 +82,11 @@ take stays in a durable pending handoff until an editor accepts it; opening the 
 retries pending handoffs. If the original editor explicitly rejects a take, it opens separately
 without overwriting existing edits. The new destination is saved before delivery; a lost reply
 is retried with the same request ID in that editor, not by opening another copy.
+Application receipts are stored with the recording, so a failed final acknowledgement does
+not apply the same request again. An interrupted application is reported as uncertain rather
+than blindly repeated or redirected. An unreachable recorder keeps the editor hidden until
+its exit or an acknowledged recording's end is confirmed; an editor that fails a readiness
+check is left running, never automatically killed.
 
 This is an **idle-memory tradeoff**, not an overall memory reduction: the resident WinUI
 process still costs roughly launch-time RAM while the full app is open, and a new full

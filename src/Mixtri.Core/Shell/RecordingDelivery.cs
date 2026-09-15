@@ -57,10 +57,10 @@ public static class RecordingDelivery
         for (int attempt = 0; ; attempt++)
         {
             var response = await trySend(request);
-            if (response is not null) return response;
+            if (response is { OutcomeUnknown: false }) return response;
             if (attempt == retries)
                 throw new InvalidOperationException(
-                    "The editor did not confirm the recording. It has been kept for retry in the same editor.");
+                    response?.Error ?? "The editor did not confirm the recording. It has been kept for retry in the same editor.");
             await Task.Delay(retryDelay);
         }
     }

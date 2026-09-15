@@ -39,6 +39,7 @@ public sealed record ShellProcessRequest
     public ShellProcessCommand Command { get; init; }
     public Guid EditorId { get; init; }
     public Guid? RedirectedFromEditorId { get; init; }
+    public int? ExpectedProcessId { get; init; }
     public RemoteRecordingOptions? Recording { get; init; }
     public Project? Project { get; init; }
     public Guid? AppendToProjectId { get; init; }
@@ -49,6 +50,8 @@ public sealed record ShellProcessRequest
 public sealed record ShellProcessResponse(
     bool Success, string? Error = null, bool HotkeyRegistered = false, int ProcessId = 0)
 {
+    public bool OutcomeUnknown { get; init; }
+
     /// <summary>
     /// Recorder-only, reported on Ping: whether capture is currently running. Lets an editor
     /// reconcile after a start request whose response was lost, instead of guessing.

@@ -1,6 +1,9 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using Mixtri.Core.Diagnostics;
 
 namespace Mixtri.Core.Shell;
@@ -84,6 +87,13 @@ public sealed class ShellProcessPipe : IDisposable
         using var pipe = new NamedPipeClientStream(
             ".", name, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         await pipe.ConnectAsync(timeout.Token).ConfigureAwait(false);
+        if (request.ExpectedProcessId is { } expected)
+        {
+            if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint actual))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not identify the connected shell process.");
+            if (actual != expected)
+                throw new IOException("The connected recorder is a different process; the request was not sent.");
+        }
         await WriteAsync(pipe, request, timeout.Token).ConfigureAwait(false);
         return await ReadAsync<ShellProcessResponse>(pipe, timeout.Token).ConfigureAwait(false);
     }
@@ -111,4 +121,8 @@ public sealed class ShellProcessPipe : IDisposable
     }
 
     public void Dispose() => _shutdown.Cancel();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
 }
