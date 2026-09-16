@@ -24,6 +24,8 @@ public static class RecordingDelivery
         {
             var response = await SendWithRetryAsync(request, trySend, retries, retryDelay);
             if (response.Success) return request;
+            if (request.RedirectedFromEditorId.HasValue)
+                throw new InvalidOperationException(response.Error ?? "The separate editor rejected the recording.");
         }
 
         var editor = await createEditor();
@@ -32,8 +34,7 @@ public static class RecordingDelivery
         var separate = request with
         {
             EditorId = editor,
-            RedirectedFromEditorId = request.RedirectedFromEditorId
-                ?? (request.EditorId == Guid.Empty ? null : request.EditorId),
+            RedirectedFromEditorId = request.EditorId,
             AppendToProjectId = null,
             Message = request.Message ?? (request.AppendToProjectId.HasValue
                 ? "The original editor could not accept Record More. Your new recording was opened separately; the original project was not changed."

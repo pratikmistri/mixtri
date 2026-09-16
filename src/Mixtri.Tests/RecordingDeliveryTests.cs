@@ -146,7 +146,7 @@ public sealed class RecordingDeliveryTests
             () => Task.FromResult(fallback),
             pending => { persisted = pending; return Task.CompletedTask; },
             2, TimeSpan.Zero);
-        Assert.IsNull(delivered.RedirectedFromEditorId);
+        Assert.AreEqual(Guid.Empty, delivered.RedirectedFromEditorId);
         Assert.AreEqual(1, attempts);
     }
 
@@ -177,22 +177,43 @@ public sealed class RecordingDeliveryTests
     }
 
     [TestMethod]
-    public async Task FallbackRejection_KeepsItsRoutePendingWithoutLaunchingInALoop()
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task FallbackRejection_KeepsItsRoutePendingWithoutLaunchingInALoop(bool withoutOriginalEditor)
     {
         var request = Request();
+        if (withoutOriginalEditor) request = request with { EditorId = Guid.Empty, AppendToProjectId = null };
+        using var directory = new TempDirectoryFixture("mixtri_delivery_rejected_");
+        var store = new RecordingHandoffStore(directory.Path);
+        await store.SaveAsync(request);
         var fallback = Guid.NewGuid();
-        ShellProcessRequest? persisted = null;
         int editors = 0, attempts = 0;
+        Task<ShellProcessResponse?> Send(ShellProcessRequest pending)
+        {
+            attempts++;
+            return Task.FromResult<ShellProcessResponse?>(new(false, "The recording file is missing."));
+        }
+        Task<Guid> CreateEditor()
+        {
+            editors++;
+            return Task.FromResult(editors == 1 ? fallback : Guid.NewGuid());
+        }
         await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
-            RecordingDelivery.DeliverAsync(
-                request,
-                _ => { attempts++; return Task.FromResult<ShellProcessResponse?>(new(false, "Busy.")); },
-                () => { editors++; return Task.FromResult(fallback); },
-                pending => { persisted = pending; return Task.CompletedTask; },
-                2, TimeSpan.Zero));
+            RecordingDelivery.DeliverAsync(request, Send, CreateEditor, pending => store.SaveAsync(pending), 2, TimeSpan.Zero));
         Assert.AreEqual(1, editors);
-        Assert.AreEqual(2, attempts);
-        Assert.IsNotNull(persisted);
-        Assert.AreEqual(fallback, persisted.EditorId);
+        Assert.AreEqual(withoutOriginalEditor ? 1 : 2, attempts);
+
+        for (int recovery = 0; recovery < 3; recovery++)
+        {
+            var pending = (await new RecordingHandoffStore(directory.Path).ReadPendingAsync()).Single();
+            Assert.AreEqual(fallback, pending.EditorId);
+            var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+                RecordingDelivery.DeliverAsync(pending, Send, CreateEditor, next => store.SaveAsync(next), 2, TimeSpan.Zero));
+            StringAssert.Contains(error.Message, "The recording file is missing.");
+            Assert.AreEqual(1, editors, "A rejected persisted fallback must not launch another editor on recovery.");
+            var retained = (await store.ReadPendingAsync()).Single();
+            Assert.AreEqual(request.Id, retained.Id);
+            Assert.AreEqual(fallback, retained.EditorId);
+        }
     }
 }

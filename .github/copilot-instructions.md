@@ -13,8 +13,8 @@ msbuild src\Mixtri.Tests\Mixtri.Tests.csproj /restore /t:Build /p:Configuration=
 dotnet test src\Mixtri.Tests\Mixtri.Tests.csproj --no-build -c Debug -p:Platform=x64
 ```
 
-Set `DOTNET_ROLL_FORWARD=Major` if the .NET 9 runtime is missing. The suite (~1280 tests, 3
-skipped) must stay green. It uses disposable fixtures and has no production access: run it, fix
+Set `DOTNET_ROLL_FORWARD=Major` if the .NET 9 runtime is missing. The full suite must stay
+green. It uses disposable fixtures and has no production access: run it, fix
 failures your change caused, and rerun without asking for approval at each step.
 
 App build, MSIX packaging, Store version bumps, and local deploy/launch are in

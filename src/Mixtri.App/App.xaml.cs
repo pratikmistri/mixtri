@@ -263,8 +263,9 @@ public partial class App : Application
     /// holds handles to, and both windows then save over the same <c>.mixtri</c>,
     /// silently discarding one set of edits.
     /// <para>
-    /// Only file activations register a key. A plain launch stays un-keyed, so the
-    /// recorder can still be started as many times as the user likes.
+    /// File activations register a project key. Plain launches share the resident
+    /// recorder key in either process mode, so changing the preference cannot create
+    /// competing tray/hotkey owners while the previous recorder is still running.
     /// </para>
     /// <para>
     /// <b>Known limits.</b> The key is fixed for the process lifetime — it cannot be
@@ -272,7 +273,7 @@ public partial class App : Application
     /// invalid key after re-registration, and a failfast when called off the
     /// registering thread). So a window repointed at another project through the
     /// in-app Open dialog still holds the key for the file it launched with, and
-    /// projects opened that way — including anything opened in the un-keyed recorder
+    /// projects opened that way — including anything opened in the resident recorder
     /// instance — are not covered. <see cref="ServeRedirectedOpen"/> reconciles the
     /// request when a redirect does arrive, but it cannot stop a double-click on an
     /// unkeyed project from opening a second window.
@@ -530,7 +531,7 @@ public partial class App : Application
         bool splitEditor = ShellSettings.Instance.SeparateEditorProcess || launch.EditorId.HasValue || launch.Background;
 
         if ((activationPath is not null && TryRedirectToExistingProjectInstance(activationPath))
-            || (splitEditor && !IsEditorProcess && TryRedirectToExistingProjectInstance("", "mixtri-resident-recorder")))
+            || (!IsEditorProcess && TryRedirectToExistingProjectInstance("", "mixtri-resident-recorder")))
         {
             // The owning instance is taking over. Exit before creating a window, so
             // no second surface for this project ever appears. Process.Kill rather

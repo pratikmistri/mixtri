@@ -38,6 +38,7 @@ public sealed record ShellProcessRequest
     public Guid Id { get; init; } = Guid.NewGuid();
     public ShellProcessCommand Command { get; init; }
     public Guid EditorId { get; init; }
+    /// <summary>A published fallback route's origin; Guid.Empty means there was no original editor.</summary>
     public Guid? RedirectedFromEditorId { get; init; }
     public int? ExpectedProcessId { get; init; }
     public RemoteRecordingOptions? Recording { get; init; }

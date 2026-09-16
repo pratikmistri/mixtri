@@ -83,7 +83,7 @@ public class AutoZoomEngine
 {
     private AutoZoomConfig _config;
     private readonly List<ZoomKeyframe> _manualKeyframes = [];
-    private ZoomKeyframe[] _lastManualKeyframes = [];
+    private ZoomKeyframe[]? _lastManualKeyframes = [];
     internal int PathBuildCount { get; private set; }
     private List<ZoomSegment> _autoSegments = [];
     private ZoomCameraPath _path = ZoomCameraPath.Empty;
@@ -236,12 +236,14 @@ public class AutoZoomEngine
     {
         _manualKeyframes.Add(keyframe);
         _manualKeyframes.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
+        _lastManualKeyframes = null;
         RebuildPath();
     }
 
     public void RemoveManualKeyframe(TimeSpan timestamp)
     {
         _manualKeyframes.RemoveAll(k => k.Timestamp == timestamp);
+        _lastManualKeyframes = null;
         RebuildPath();
     }
 
@@ -251,7 +253,7 @@ public class AutoZoomEngine
     /// </summary>
     public void SetManualKeyframes(IReadOnlyList<ZoomKeyframe> keyframes)
     {
-        if (_lastManualKeyframes.SequenceEqual(keyframes ?? [])) return;
+        if (_lastManualKeyframes is not null && _lastManualKeyframes.SequenceEqual(keyframes ?? [])) return;
         _lastManualKeyframes = keyframes?.ToArray() ?? [];
         _manualKeyframes.Clear();
         if (keyframes is { Count: > 0 })

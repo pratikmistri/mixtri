@@ -186,7 +186,6 @@ public static class AudioWaveformGenerator
                 }
                 valuesRead += read;
                 peak = FindPeak(buffer, read, peak);
-                if (read < requested) break;
             }
             if (exceededWindow || valuesRead == 0) break;
             result[bucketCount++] = peak;

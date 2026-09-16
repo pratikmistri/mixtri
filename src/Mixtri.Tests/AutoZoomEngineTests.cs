@@ -770,6 +770,54 @@ public sealed class AutoZoomEngineTests
     }
 
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void SetManualKeyframes_AfterDirectAdd_RestoresTheRequestedSnapshot(bool includeExisting)
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(10.0, []), 1920, 1080, TickFrequency);
+        ZoomKeyframe[] keys = includeExisting
+            ? [new() { Timestamp = TimeSpan.FromSeconds(2), ZoomLevel = 2, IsManual = true }]
+            : [];
+        engine.SetManualKeyframes(keys);
+        engine.AddManualKeyframe(new() { Timestamp = TimeSpan.FromSeconds(7), ZoomLevel = 3, IsManual = true });
+        Assert.AreEqual(3f, engine.GetZoomState(7).ZoomLevel, .01f);
+        int builds = engine.PathBuildCount;
+
+        engine.SetManualKeyframes(keys);
+
+        Assert.AreEqual(1f, engine.GetZoomState(7).ZoomLevel, .01f);
+        Assert.AreEqual(includeExisting ? 2f : 1f, engine.GetZoomState(2).ZoomLevel, .01f);
+        Assert.AreEqual(builds + 1, engine.PathBuildCount);
+        engine.SetManualKeyframes(keys);
+        Assert.AreEqual(builds + 1, engine.PathBuildCount, "Unchanged snapshots should still skip rebuilding.");
+    }
+
+    [TestMethod]
+    public void SetManualKeyframes_AfterDirectRemoval_RestoresTheRequestedSnapshot()
+    {
+        var engine = new AutoZoomEngine(new AutoZoomConfig());
+        engine.BuildZoomTimeline(BuildRecordingWithClicks(10.0, []), 1920, 1080, TickFrequency);
+        ZoomKeyframe[] keys =
+        [
+            new() { Timestamp = TimeSpan.FromSeconds(7), ZoomLevel = 2, IsManual = true },
+            new() { Timestamp = TimeSpan.FromSeconds(2), ZoomLevel = 3, IsManual = true },
+        ];
+        engine.SetManualKeyframes(keys);
+        engine.RemoveManualKeyframe(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(1f, engine.GetZoomState(2).ZoomLevel, .01f);
+        int builds = engine.PathBuildCount;
+
+        engine.SetManualKeyframes(keys);
+
+        Assert.AreEqual(3f, engine.GetZoomState(2).ZoomLevel, .01f);
+        Assert.AreEqual(2f, engine.GetZoomState(7).ZoomLevel, .01f);
+        Assert.AreEqual(builds + 1, engine.PathBuildCount);
+        engine.SetManualKeyframes(keys);
+        Assert.AreEqual(builds + 1, engine.PathBuildCount);
+    }
+
+    [TestMethod]
     public void RemoveManualKeyframe_RemovesCorrectKeyframe()
     {
         var config = new AutoZoomConfig();

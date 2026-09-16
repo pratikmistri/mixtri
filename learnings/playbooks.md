@@ -29,7 +29,7 @@ caused repeated churn before it was settled; treat them as fixed conventions.
   hits the same PriGen MSB4062 failure when it tries to BUILD, so build the test project
   with MSBuild first and then run
   `dotnet test src\Mixtri.Tests\Mixtri.Tests.csproj --no-build -p:Platform=x64 -c Debug`.
-  The suite must stay green (currently ~1280 tests, 3 skipped).
+  The full suite must stay green.
 - **MSIX (unsigned, for Store):** `msbuild Mixtri.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=<x64|ARM64> /p:GenerateAppxPackageOnBuild=true /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never`.
 - **ALWAYS check the LIVE Store version before packaging, and bump past it.** The Store rejects a
   submission whose version equals one already published, and the in-repo manifest normally still

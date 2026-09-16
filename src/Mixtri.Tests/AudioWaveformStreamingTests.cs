@@ -87,6 +87,38 @@ public class AudioWaveformStreamingTests
     }
 
     [TestMethod]
+    [DataRow(1, 1)]
+    [DataRow(2, 3)]
+    [DataRow(6, 6)]
+    public void ShortReadsDoNotMoveBucketBoundaries(int channels, int maximumRead)
+    {
+        var values = Enumerable.Range(0, 20 * channels)
+            .Select(i => -(i / (5 * channels) + 1) / 4f).ToArray();
+        var peaks = AudioWaveformGenerator.GenerateWaveform(
+            new ArraySamples(values, channels, maximumRead), values.Length * 4L, 4);
+
+        AssertPeaksEqual([.25f, .5f, .75f, 1f], peaks);
+    }
+
+    [TestMethod]
+    public void ShortReadsAccumulateTheFinalPartialBucketUntilEof()
+    {
+        float[] values = [.1f, .2f, .25f, .1f, .4f, .5f, .3f];
+        var peaks = AudioWaveformGenerator.GenerateWaveform(new ArraySamples(values, 1, 2), 12 * 4L, 3);
+
+        AssertPeaksEqual([.25f, .5f], peaks);
+    }
+
+    [TestMethod]
+    public void ShortReadNanDoesNotContaminateTheNextBucket()
+    {
+        float[] values = [.1f, float.NaN, .2f, .3f, .5f, -.75f, .25f, 0f];
+        var peaks = AudioWaveformGenerator.GenerateWaveform(new ArraySamples(values, 1, 2), values.Length * 4L, 2);
+
+        AssertPeaksEqual([float.NaN, .75f], peaks);
+    }
+
+    [TestMethod]
     public void LargeBucketsKeepChannelAlignedReadsBounded()
     {
         const long frames = 48000L * 90;
@@ -289,13 +321,13 @@ public class AudioWaveformStreamingTests
         return result.Count > target ? result.Take(target).ToArray() : [.. result];
     }
 
-    private sealed class ArraySamples(float[] samples, int channels) : ISampleProvider
+    private sealed class ArraySamples(float[] samples, int channels, int maximumRead = int.MaxValue) : ISampleProvider
     {
         private int _position;
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(48000, channels);
         public int Read(float[] buffer, int offset, int count)
         {
-            int read = Math.Min(count, samples.Length - _position);
+            int read = Math.Min(Math.Min(count, maximumRead), samples.Length - _position);
             Array.Copy(samples, _position, buffer, offset, read);
             _position += read;
             return read;

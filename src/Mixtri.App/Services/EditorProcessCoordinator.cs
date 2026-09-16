@@ -248,6 +248,7 @@ public sealed class EditorProcessCoordinator : IDisposable
             case ShellProcessCommand.RecordingRedirected:
                 IsRemoteRecording = false;
                 StopRecorderWatch();
+                shell.ShowFullWindow();
                 (App.Current.MainAppWindow as MainWindow)?.ShowShellMessage(
                     request.Message ?? "The new recording was opened separately.", InfoBarSeverity.Informational);
                 return new(true);
@@ -679,7 +680,7 @@ public sealed class EditorProcessCoordinator : IDisposable
         }
         if (_pendingRecording?.Id == delivered.Id)
             _pendingRecording = null;
-        if (delivered.RedirectedFromEditorId is { } original)
+        if (delivered.RedirectedFromEditorId is { } original && original != Guid.Empty)
             await TrySendAsync(EditorPipe(original), new()
             {
                 Command = ShellProcessCommand.RecordingRedirected,
