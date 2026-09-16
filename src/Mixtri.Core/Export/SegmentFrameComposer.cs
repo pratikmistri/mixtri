@@ -123,7 +123,8 @@ public sealed class SegmentFrameComposer : IDisposable
         TimelineModel? timeline,
         TimelineMapper? mapper,
         int fps,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        CanvasDevice? graphicsDevice = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(primaryMouseData);
@@ -133,7 +134,7 @@ public sealed class SegmentFrameComposer : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        var device = GpuContext.GetSharedDevice();
+        var device = graphicsDevice ?? GpuContext.GetSharedDevice();
 
         // The key is built from the *unmodified* composition styles so that primary
         // segments without an override resolve back to this same context.
@@ -934,7 +935,7 @@ public sealed class SegmentFrameComposer : IDisposable
         // Captured JPEG frames are preferred when they still exist, otherwise frames are
         // decoded from the finalized MP4. Either way they are indexed with the RECORDING fps.
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(
-            videoFilePath, recordingFps > 0 ? recordingFps : 30, forExport: true);
+            videoFilePath, recordingFps > 0 ? recordingFps : 30, forExport: true, device: device);
 
         // Only open the video file when it is actually needed: as the frame source when
         // no captured frames exist, or to recover dimensions the recording metadata does
@@ -991,7 +992,7 @@ public sealed class SegmentFrameComposer : IDisposable
                 context.SourceComposition = composition;
             }
 
-            var compositor = new FrameCompositor(config);
+            var compositor = new FrameCompositor(config, device);
             context.Compositor = compositor;
             await compositor.InitializeAsync(
                 mouseData, sourceWidth, sourceHeight, EnsureRenderableDuration(duration),

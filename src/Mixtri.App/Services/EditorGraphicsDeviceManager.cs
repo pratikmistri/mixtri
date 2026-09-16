@@ -73,7 +73,7 @@ public sealed class EditorGraphicsDeviceManager
         try
         {
             var device = GpuContext.GetSharedDevice();
-            if (ReferenceEquals(_graphicsDevice, device))
+            if (_graphicsDevice == device)
                 return;
 
             Detach();

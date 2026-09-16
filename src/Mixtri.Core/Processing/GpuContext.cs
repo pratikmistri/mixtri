@@ -11,6 +11,9 @@ namespace Mixtri.Core.Processing;
 public static class GpuContext
 {
     public static CanvasDevice GetSharedDevice() => CanvasDevice.GetSharedDevice();
+
+    /// <summary>Keeps background export rendering off the editor's shared hardware device.</summary>
+    public static CanvasDevice GetExportDevice() => CanvasDevice.GetSharedDevice(forceSoftwareRenderer: true);
 }
 
 /// <summary>

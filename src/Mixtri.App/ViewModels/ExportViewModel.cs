@@ -37,6 +37,12 @@ public partial class ExportViewModel : ObservableObject
 
     private void OnProjectChanged(object? sender, EventArgs e)
     {
+        if (IsExporting)
+        {
+            CurrentProject = ProjectService.Instance.CurrentProject;
+            CompositionConfig = ProjectService.Instance.CurrentComposition;
+            return;
+        }
         PrepareForExport();
     }
 
@@ -55,6 +61,7 @@ public partial class ExportViewModel : ObservableObject
     /// </summary>
     public void PrepareForExport()
     {
+        if (IsExporting) return;
         ExportSucceeded = false;
         ExportFailed = false;
         ErrorMessage = string.Empty;
@@ -459,6 +466,10 @@ public partial class ExportViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(OutputPath) || CurrentProject is null) return;
 
+        var project = CurrentProject;
+        var composition = CompositionConfig;
+        string sourceVideoPath = project.VideoFilePath;
+        string outputPath = OutputPath;
         using var activity = ProjectService.Instance.Activity.Begin();
         IsExporting = true;
         ExportSucceeded = false;
@@ -469,10 +480,12 @@ public partial class ExportViewModel : ObservableObject
         ProgressStatus = "Starting export…";
         EstimatedTimeRemaining = string.Empty;
 
-        _exportCts = new CancellationTokenSource();
+        using var exportCts = new CancellationTokenSource();
+        _exportCts = exportCts;
 
         var exportProgress = new Progress<ExportProgress>(p =>
         {
+            if (!ReferenceEquals(_exportCts, exportCts) || exportCts.IsCancellationRequested) return;
             ProgressPercent = p.PercentComplete;
             EstimatedTimeRemaining = FormatTimeSpan(p.EstimatedRemaining);
             ProgressStatus = $"{EstimatedTimeRemaining} remaining";
@@ -495,16 +508,16 @@ public partial class ExportViewModel : ObservableObject
                 Fps = SelectedFps,
             };
 
-            string outputFolder = Path.GetDirectoryName(OutputPath) ?? OutputPath;
+            string outputFolder = Path.GetDirectoryName(outputPath) ?? outputPath;
 
             string exportedPath = await _exportEngine.ExportProjectAsync(
-                CurrentProject,
+                project,
                 settings,
-                CompositionConfig,
+                composition,
                 outputFolder,
                 timeline: timeline,
                 progress: exportProgress,
-                ct: _exportCts.Token);
+                ct: exportCts.Token);
 
             ExportedFilePath = exportedPath;
             ExportSucceeded = true;
@@ -513,31 +526,29 @@ public partial class ExportViewModel : ObservableObject
 
             // Clean up raw frames to reclaim disk space.
             // The exported file is self-contained; .frames/ is no longer needed.
-            if (CurrentProject is not null)
+            var sessionDir = Path.GetDirectoryName(sourceVideoPath);
+            if (sessionDir is not null)
             {
-                var sessionDir = Path.GetDirectoryName(CurrentProject.VideoFilePath);
-                if (sessionDir is not null)
-                {
-                    SessionCleanupService.MarkSessionExported(sessionDir);
-                    _ = Task.Run(() => SessionCleanupService.CleanupSession(sessionDir));
-                }
+                SessionCleanupService.MarkSessionExported(sessionDir);
+                _ = Task.Run(() => SessionCleanupService.CleanupSession(sessionDir));
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (exportCts.IsCancellationRequested)
         {
             ProgressStatus = "Export cancelled.";
         }
         catch (Exception ex)
         {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export", $"Export failed: {ex}");
             ExportFailed = true;
             ErrorMessage = ex.Message;
             ProgressStatus = $"Export failed: {ex.Message}";
         }
         finally
         {
+            if (ReferenceEquals(_exportCts, exportCts))
+                _exportCts = null;
             IsExporting = false;
-            _exportCts?.Dispose();
-            _exportCts = null;
             ExportCommand.NotifyCanExecuteChanged();
         }
     }

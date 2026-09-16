@@ -96,13 +96,13 @@ The single most-churned area. The process is **PerMonitorV2**, which is the key 
   visibly on AMD AMF; NVIDIA may silently auto-promote and mask the bug).
 - **Scale bitrate by pixel count:** `VideoEncoder.ComputeBitrate(width, height)` scales the base by
   pixel ratio. A fixed bitrate starves ~3K+ output.
-- **Per-frame GPU surface allocation in `VideoEncoder` is INTENTIONAL, not a leak to "fix".** When
-  scaling, each frame gets its own `outputSurface` (`CreateRenderTarget`) so the encoder can read it
-  asynchronously after the producer releases the `SampleRequested` semaphore — a reused buffer would
-  be overwritten mid-read. (The old `_flipBuffer`/`_scaleTarget` reuse fields no longer exist.)
-  Memory safety comes from `PreflightRenderTargetMemory` (rejects > ~1.5 GB BGRA targets) and
-  disposing each surface after the encoder consumes it, NOT from buffer reuse. Long-lived helpers
-  that ARE cached: `_textSlideRenderer` and the webcam source (opened once, extracted per frame).
+- **Every encoded sample owns its pixels.** Export renders on a separate shared WARP device,
+  reads BGRA pixels into a fresh array, then uses `MediaStreamSample.CreateFromBuffer` (like
+  recording finalization). Release the render target after readback, but never refill an array
+  the encoder may still be reading. Direct D3D-surface handoff from software export rendering
+  stalled in the live-edit probe; sharing the editor's device also exposed its canvases to export
+  failures. `PreflightRenderTargetMemory` covers the sample buffer and optional scaling surface.
+  Text/webcam helpers remain cached per export; they must use that export's rendering device.
 - **For per-frame encoding prefer a streaming `MediaStreamSource` + `MediaTranscoder`**
   (BGRA8 → H.264, CFR) — both pipelines do this; NOT `MediaClip` + `MediaComposition.RenderToFileAsync`
   per frame (spawns 100k+ COM objects on long recordings). Set

@@ -385,10 +385,8 @@ public sealed partial class EditorPage
     {
         if (ExportVM.IsExporting) return;
 
-        // Pause preview playback before export. The export pipeline composites
-        // frames on the shared Win2D device; running it concurrently with the
-        // preview's per-frame composition can corrupt output frames and crash
-        // the encoder when both pull from the same source files at once.
+        // Start quietly; edits remain available while export renders its snapshot
+        // on an isolated software device rather than the preview's hardware device.
         Preview.Pause();
         try { _audioPlayer?.Pause(); } catch { /* best-effort */ }
         try { _insertedAudioPlayer?.Pause(); } catch { /* best-effort */ }

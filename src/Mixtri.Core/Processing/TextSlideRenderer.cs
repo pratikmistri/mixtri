@@ -86,7 +86,7 @@ public class TextSlideRenderer : IDisposable
         {
             _textFormat?.Dispose();
             _textFormat = null;
-            _textHeight = MeasureTextHeight(slide, width * 0.84, height * 0.8);
+            _textHeight = MeasureTextHeight(slide, width * 0.84, height * 0.8, _device);
             _textFormat = AnimatedTextEngine.CreateFormat(
                 slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
                 ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
@@ -122,7 +122,8 @@ public class TextSlideRenderer : IDisposable
     /// Measures the wrapped text height (in output pixels) for the slide, clamped
     /// between roughly one line and <paramref name="maxHeight"/>.
     /// </summary>
-    private static double MeasureTextHeight(TextSlideSegment slide, double maxWidth, double maxHeight)
+    private static double MeasureTextHeight(
+        TextSlideSegment slide, double maxWidth, double maxHeight, CanvasDevice? device = null)
     {
         double minH = Math.Min(slide.FontSize * 1.3, maxHeight);
         if (string.IsNullOrEmpty(slide.Text) || maxWidth <= 0)
@@ -132,7 +133,7 @@ public class TextSlideRenderer : IDisposable
             slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
             ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Top, wrap: true);
         using var layout = new CanvasTextLayout(
-            CanvasDevice.GetSharedDevice(), slide.Text, format, (float)maxWidth, (float)maxHeight);
+            device ?? GpuContext.GetSharedDevice(), slide.Text, format, (float)maxWidth, (float)maxHeight);
 
         return Math.Clamp(layout.LayoutBounds.Height, minH, maxHeight);
     }

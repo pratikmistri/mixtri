@@ -113,14 +113,15 @@ public static class MixtriPackageService
         for (int i = 0; i < mediaFiles.Count; i++)
             entryByPath[mediaFiles[i]] = MixtriPackage.BuildMediaEntryName(i, mediaFiles[i]);
 
+        var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
         var manifest = new MixtriManifest
         {
             SchemaVersion = MixtriPackage.CurrentSchemaVersion,
             WrittenBy = typeof(MixtriPackageService).Assembly.GetName().Version?.ToString(),
             SavedAt = DateTimeOffset.UtcNow,
-            Project = Clone(project),
-            Composition = Clone(composition),
-            Timeline = timeline is null ? new TimelineModel() : Clone(timeline),
+            Project = snapshot.Project,
+            Composition = snapshot.Composition,
+            Timeline = snapshot.Timeline ?? new TimelineModel(),
             MediaEntries = [.. entryByPath.Values],
         };
 
@@ -598,16 +599,6 @@ public static class MixtriPackageService
             ? candidate
             : rawCandidate;
     }
-
-    /// <summary>
-    /// Deep-clones through JSON so the manifest can have its paths rewritten without
-    /// disturbing the live objects the editor is still using.
-    /// </summary>
-    private static T Clone<T>(T value) where T : notnull
-        => JsonSerializer.Deserialize<T>(
-               JsonSerializer.Serialize(value, MixtriPackage.JsonOptions),
-               MixtriPackage.JsonOptions)
-           ?? throw new InvalidOperationException($"Failed to clone {typeof(T).Name}.");
 
     private static void TryDelete(string path)
     {

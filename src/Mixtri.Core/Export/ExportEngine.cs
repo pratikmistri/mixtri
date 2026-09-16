@@ -3,6 +3,7 @@ using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
+using Mixtri.Core.Projects;
 using Mixtri.Core.Settings;
 using Mixtri.Core.Timeline;
 using Windows.ApplicationModel.DataTransfer;
@@ -18,8 +19,9 @@ namespace Mixtri.Core.Export;
 public class ExportEngine
 {
     /// <summary>
-    /// Runs the full export pipeline: detects hardware encoders, composites frames,
+    /// Runs the full export pipeline: snapshots the project, composites frames,
     /// and writes the final video to <paramref name="outputFolder"/>.
+    /// Captures the starting project state synchronously; later edits belong to the next export.
     /// </summary>
     /// <returns>The full path to the exported file.</returns>
     public async Task<string> ExportProjectAsync(
@@ -35,13 +37,27 @@ public class ExportEngine
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(composition);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
+        ct.ThrowIfCancellationRequested();
 
+        // Capture before the first await, while the caller still owns the live editor state.
+        var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
+        return await Task.Run(() => ExportSnapshotAsync(
+            snapshot.Project, settings, snapshot.Composition, outputFolder,
+            snapshot.Timeline, progress, ct), ct).ConfigureAwait(false);
+    }
+
+    private async Task<string> ExportSnapshotAsync(
+        Project project,
+        ExportSettings settings,
+        CompositionConfig composition,
+        string outputFolder,
+        TimelineModel? timeline,
+        IProgress<ExportProgress>? progress,
+        CancellationToken ct)
+    {
         Directory.CreateDirectory(outputFolder);
 
-        // Detect best encoder (informational for now; MediaComposition uses system defaults)
-        var encoder = HardwareEncoderDetector.DetectBestEncoder();
-        Debug.WriteLine(
-            $"[ExportEngine] Using encoder: {encoder.Name} (HW={encoder.IsHardware}, Vendor={encoder.Vendor})");
+        Debug.WriteLine("[ExportEngine] Using isolated software composition and software encoding.");
 
         // Load cursor data using the canonical binary format from MouseHookRecorder
         var mouseData = LoadMouseData(project.CursorDataFilePath);
@@ -148,7 +164,8 @@ public class ExportEngine
         CancellationToken ct)
     {
         using var composer = await SegmentFrameComposer.CreateAsync(
-            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct);
+            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct,
+            GpuContext.GetExportDevice());
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? composer.TotalFrames;
 

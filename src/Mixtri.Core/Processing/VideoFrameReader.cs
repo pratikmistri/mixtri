@@ -91,12 +91,12 @@ public sealed class VideoFrameReader : IDisposable
     /// captured JPEGs alongside it and falling back to decoding the file itself.
     /// </summary>
     public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(
-        string videoFilePath, int fps, bool forExport = false)
+        string videoFilePath, int fps, bool forExport = false, CanvasDevice? device = null)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
 
-        var device = CanvasDevice.GetSharedDevice();
+        device ??= GpuContext.GetSharedDevice();
 
         var dir = Path.GetDirectoryName(videoFilePath);
         if (dir is not null)
@@ -305,7 +305,7 @@ public sealed class VideoFrameReader : IDisposable
     private CanvasBitmap Clone(CanvasBitmap source)
     {
         var copy = Win2DUtils.CreateRenderTarget(
-            GpuContext.GetSharedDevice(),
+            source.Device,
             source.SizeInPixels.Width,
             source.SizeInPixels.Height,
             96,

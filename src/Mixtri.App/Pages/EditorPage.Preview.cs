@@ -262,11 +262,8 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// Disposes a decoder-backed resource off the dispatcher thread.
-    /// <see cref="VideoFrameReader.Dispose"/> blocks on the decode gate (up to 5s, and
-    /// <see cref="Mp4FrameSource"/> adds another 5s), which a single in-flight seek can
-    /// hold for seconds. Doing that on the UI thread freezes the app while switching
-    /// projects or navigating away mid-playback.
+    /// Releases decoder-backed resources away from the dispatcher. Native teardown may
+    /// still be expensive even after read/callback admission has drained.
     /// </summary>
     private readonly List<Task> _resourceDisposals = [];
 
@@ -739,14 +736,19 @@ public sealed partial class EditorPage
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition);
     }
 
-    private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
+    private async Task UpdatePreviewFrameAsync(
+        TimeSpan position, bool force = false, int? decodeRetryGeneration = null)
     {
         if (_previewSuspended || _pageUnloaded) return;
         if (_frameReader is null) return;
+        if (decodeRetryGeneration.HasValue && decodeRetryGeneration.Value != _previewRequestGeneration) return;
+        int requestGeneration = decodeRetryGeneration ?? ++_previewRequestGeneration;
+        if (!decodeRetryGeneration.HasValue) _decodeMissRetries = 0;
         if (_graphicsDeviceManager.IsRecoveryInProgress)
         {
             _pendingRenderPosition = position;
             _pendingRenderForce |= force;
+            _pendingRenderRequestGeneration = requestGeneration;
             return;
         }
 
@@ -757,6 +759,7 @@ public sealed partial class EditorPage
         {
             _pendingRenderPosition = position;
             _pendingRenderForce |= force;
+            _pendingRenderRequestGeneration = requestGeneration;
             return;
         }
 
@@ -769,6 +772,7 @@ public sealed partial class EditorPage
             bool currentForce = force;
             do
             {
+                _activeRenderRequestGeneration = requestGeneration;
                 // Wall-clock time is intentionally used as the user-visible load signal:
                 // decode, composition and UI contention all reduce preview headroom.
                 long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -780,8 +784,8 @@ public sealed partial class EditorPage
                 // playhead stationary NOTHING would ever ask for this frame again and the
                 // preview would stay broken until the user happened to scrub. Retry it.
                 if (_decodeMissed)
-                    ScheduleDecodeMissRetry(currentPos);
-                else
+                    ScheduleDecodeMissRetry(currentPos, requestGeneration);
+                else if (requestGeneration == _previewRequestGeneration)
                     _decodeMissRetries = 0;
 
                 if (Preview.IsPlaying
@@ -805,6 +809,7 @@ public sealed partial class EditorPage
                 {
                     currentPos = _pendingRenderPosition.Value;
                     currentForce = _pendingRenderForce;
+                    requestGeneration = _pendingRenderRequestGeneration;
                     _pendingRenderPosition = null;
                     _pendingRenderForce = false;
                 }
@@ -1023,7 +1028,7 @@ public sealed partial class EditorPage
                             _transitionRenderer ??= new TransitionRenderer();
                             var blended = _transitionRenderer.Render(
                                 outgoing, incoming, resolution.Type, resolution.EasedProgress, w, h);
-                            Preview.SetFrame(blended);
+                            PresentPreviewFrame(blended);
                         }
                         else
                         {
@@ -1032,7 +1037,7 @@ public sealed partial class EditorPage
                             // text slide — on screen while the playhead is over capture.
                             var present = incoming;
                             incoming = null; // ownership moves to the preview
-                            Preview.SetFrame(present);
+                            PresentPreviewFrame(present);
                         }
                         return;
                     }
@@ -1533,7 +1538,7 @@ public sealed partial class EditorPage
 
         // Teardown disposes and nulls the field without draining this await. Bail rather
         // than render through a disposed renderer and then touch unloaded XAML below.
-        if (!CanRenderPreview || !IsPreviewWorkCurrent(project, generation)
+        if (!CanPublishPreview || !IsPreviewWorkCurrent(project, generation)
             || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return;
 
         var (width, height) = GetPreviewCanvasSize();
@@ -1553,7 +1558,7 @@ public sealed partial class EditorPage
             bool drawText = _editingTextId != slide.Id;
             var frame = slideRenderer.RenderSlide(slide, progress, width, height, drawText);
             _lastRenderedFrameIndex = -1; // force redraw next time
-            Preview.SetFrame(frame);
+            if (!PresentPreviewFrame(frame)) return;
         }
         catch (Exception ex)
         {
@@ -1574,6 +1579,7 @@ public sealed partial class EditorPage
     /// </summary>
     private void RenderEmptyPreviewFrame()
     {
+        if (!CanPublishPreview) return;
         var (width, height) = GetPreviewCanvasSize();
         if (width <= 0 || height <= 0) return;
 
@@ -1587,7 +1593,7 @@ public sealed partial class EditorPage
             var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
             var frame = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, width, height, 96);
             _lastRenderedFrameIndex = -1; // force redraw next time
-            Preview.SetFrame(frame);
+            if (!PresentPreviewFrame(frame)) return;
         }
         catch (Exception ex)
         {
@@ -1598,25 +1604,30 @@ public sealed partial class EditorPage
         HideTextEditOverlay();
     }
 
+    private bool CanPublishPreview =>
+        CanRenderPreview
+        && (!_rebuildingPreviewRenderer || _compositorReady)
+        && (!_isRendering || Preview.IsPlaying || _activeRenderRequestGeneration == _previewRequestGeneration);
+
+    private bool PresentPreviewFrame(CanvasRenderTarget frame)
+    {
+        if (!CanPublishPreview)
+        {
+            frame.Dispose();
+            return false;
+        }
+        Preview.SetFrame(frame);
+        return true;
+    }
+
     /// <summary>
-    /// Re-requests a frame that failed to decode, so a transient decoder miss cannot leave the
-    /// preview permanently blank.
-    /// <para>
-    /// Preview rendering is event-driven — it runs when the playhead moves or an edit lands. A
-    /// decode miss at a STATIONARY playhead therefore has nothing to retry it, which is how a
-    /// momentary decoder hiccup (reader being rebuilt, seek contention, UI-thread churn while
-    /// dragging segments) turned into a black preview that "won't recover" until the user
-    /// scrubbed. Retries back off and are bounded, so a position that genuinely cannot decode
-    /// costs a handful of attempts instead of spinning.
-    /// </para>
-    /// <para>
-    /// The init generation is captured and re-checked so a retry queued against a preview that
-    /// has since been torn down or rebuilt is dropped rather than fighting the newer one.
-    /// </para>
+    /// Retries a stationary decode miss without reviving an older seek or preview initialization.
+    /// New input invalidates the delayed retry; a successful frame or a new request resets its budget.
     /// </summary>
-    private void ScheduleDecodeMissRetry(TimeSpan position)
+    private void ScheduleDecodeMissRetry(TimeSpan position, int requestGeneration)
     {
         const int maxDecodeMissRetries = 5;
+        if (requestGeneration != _previewRequestGeneration) return;
 
         if (_decodeMissRetries >= maxDecodeMissRetries)
         {
@@ -1635,8 +1646,9 @@ public sealed partial class EditorPage
             {
                 if (_pageUnloaded || _frameReader is null) return;
                 if (generation != _previewInitGeneration) return;
+                if (requestGeneration != _previewRequestGeneration) return;
 
-                _ = UpdatePreviewFrameAsync(position, force: true);
+                _ = UpdatePreviewFrameAsync(position, force: true, decodeRetryGeneration: requestGeneration);
             }),
             TaskScheduler.Default);
     }
@@ -1651,7 +1663,7 @@ public sealed partial class EditorPage
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
         using var frame = await reader.AcquireFrameAtTimeAsync(sourcePosition);
-        if (!CanRenderPreview || stateGeneration != _primaryPreviewStateGeneration
+        if (!CanPublishPreview || stateGeneration != _primaryPreviewStateGeneration
             || !ReferenceEquals(reader, _frameReader)) return;
         if (frame is null)
         {
@@ -1676,14 +1688,13 @@ public sealed partial class EditorPage
 
                 // Extract webcam frame for overlay
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
-                if (!CanRenderPreview || stateGeneration != _primaryPreviewStateGeneration
+                if (!CanPublishPreview || stateGeneration != _primaryPreviewStateGeneration
                     || !ReferenceEquals(renderer, _previewRenderer)) return;
 
                 var composed = renderer.RenderPreviewFrame(bitmap, sourcePosition);
                 if (composed is not null)
                 {
-                    _lastRenderedFrameIndex = frameIndex;
-                    Preview.SetFrame(composed);
+                    if (PresentPreviewFrame(composed)) _lastRenderedFrameIndex = frameIndex;
                     return;
                 }
                 // Compositor declined this frame — fall through and show the raw bitmap,
@@ -1698,8 +1709,7 @@ public sealed partial class EditorPage
             {
                 ds.DrawImage(bitmap);
             }
-            _lastRenderedFrameIndex = frameIndex;
-            Preview.SetFrame(renderTarget);
+            if (PresentPreviewFrame(renderTarget)) _lastRenderedFrameIndex = frameIndex;
         }
         catch (Exception ex)
         {
@@ -1774,8 +1784,7 @@ public sealed partial class EditorPage
                 var composed = renderer.RenderPreviewFrame(bitmap, sourceTime);
                 if (composed is not null)
                 {
-                    _lastRenderedFrameIndex = frameIndex;
-                    Preview.SetFrame(composed);
+                    if (PresentPreviewFrame(composed)) _lastRenderedFrameIndex = frameIndex;
                     return;
                 }
                 // Fall through to the raw-frame path, which still needs the bitmap.
@@ -1785,8 +1794,7 @@ public sealed partial class EditorPage
             var device = CanvasDevice.GetSharedDevice();
             var rt = Win2DUtils.CreateRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
             using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
-            _lastRenderedFrameIndex = frameIndex;
-            Preview.SetFrame(rt);
+            if (PresentPreviewFrame(rt)) _lastRenderedFrameIndex = frameIndex;
         }
         catch (Exception ex)
         {

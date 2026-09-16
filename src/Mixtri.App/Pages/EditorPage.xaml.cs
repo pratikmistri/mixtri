@@ -149,6 +149,9 @@ public sealed partial class EditorPage : Page
     private bool _isRendering;
     private TimeSpan? _pendingRenderPosition;
     private bool _pendingRenderForce;
+    private int _previewRequestGeneration;
+    private int _activeRenderRequestGeneration;
+    private int _pendingRenderRequestGeneration;
 
     /// <summary>
     /// Set by the frame-render path when the decoder returns no bitmap for the requested

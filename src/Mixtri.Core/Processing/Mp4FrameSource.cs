@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
+using Mixtri.Core.Capture;
 using Windows.Media.Core;
 using Windows.Media.Playback;
 using Windows.Storage;
@@ -31,6 +32,7 @@ namespace Mixtri.Core.Processing;
 public sealed class Mp4FrameSource : IFrameSource
 {
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
+    private static readonly double[] SeekFrameOffsets = [0.5, 0.35, 0.65, 0.2];
 
     /// <summary>
     /// How long to wait for one seek attempt before re-issuing it. Sequential decodes
@@ -60,13 +62,12 @@ public sealed class Mp4FrameSource : IFrameSource
     /// </summary>
     private static readonly TimeSpan DrainDelay = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>How long disposal waits for an in-flight request to finish.</summary>
-    private static readonly TimeSpan DisposeGateTimeout = TimeSpan.FromSeconds(5);
-
     private readonly MediaPlayer _player;
     private readonly CanvasDevice _device;
     private readonly CanvasRenderTarget _surface;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _surfaceLock = new();
+    private readonly FrameSubmissionGate _workAdmission;
     private readonly int _fps;
     private readonly bool _flipVertical;
     private readonly int _seekAttempts;
@@ -74,9 +75,11 @@ public sealed class Mp4FrameSource : IFrameSource
     private readonly bool _enableSeekRecovery;
 
     private TaskCompletionSource<bool>? _framePending;
+    private TaskCompletionSource<bool>? _activeFrameRequest;
     private int _lastDeliveredIndex = -1;
+    private int _seekRoundOffset;
     private bool _needsDrain;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public int FrameCount { get; }
     public int Width { get; }
@@ -101,6 +104,7 @@ public sealed class Mp4FrameSource : IFrameSource
         FrameCount = frameCount;
 
         _surface = Win2DUtils.CreateRenderTarget(device, width, height, 96, "MP4 frame-server surface");
+        _workAdmission = new FrameSubmissionGate(ReleaseNativeResources);
         _player.VideoFrameAvailable += OnVideoFrameAvailable;
     }
 
@@ -247,28 +251,20 @@ public sealed class Mp4FrameSource : IFrameSource
         // attempts pick a different instant in the same interval so that re-assigning
         // Position is a real seek and not an ignored no-op, while still decoding the
         // frame that was asked for.
-        double[] offsets = [0.5, 0.35, 0.65, 0.2];
-        double offset = offsets[attempt % offsets.Length];
+        double offset = SeekFrameOffsets[attempt % SeekFrameOffsets.Length];
         return TimeSpan.FromSeconds((frameIndex + offset) / _fps);
     }
 
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
     {
-        if (_disposed || frameIndex < 0 || frameIndex >= FrameCount)
+        if (_disposed || frameIndex < 0 || frameIndex >= FrameCount || !_workAdmission.TryEnter())
             return null;
 
+        bool held = false;
         try
         {
             await _gate.WaitAsync().ConfigureAwait(false);
-        }
-        catch (ObjectDisposedException)
-        {
-            // Disposed while this request was queued.
-            return null;
-        }
-
-        try
-        {
+            held = true;
             if (_disposed)
                 return null;
 
@@ -286,23 +282,27 @@ public sealed class Mp4FrameSource : IFrameSource
 
             // _surface is reused across calls, so hand back an independent copy the
             // caller can hold and dispose on its own schedule.
-            var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
-            using (var ds = copy.CreateDrawingSession())
+            lock (_surfaceLock)
             {
-                // Legacy recordings are stored upside down; correcting it here keeps the
-                // preview, the export compositor and the filmstrip consistent, because
-                // they all read frames through this one path.
-                if (_flipVertical)
+                var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
+                try
                 {
-                    ds.Transform =
-                        System.Numerics.Matrix3x2.CreateScale(1, -1) *
-                        System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                    using var ds = copy.CreateDrawingSession();
+                    if (_flipVertical)
+                    {
+                        ds.Transform =
+                            System.Numerics.Matrix3x2.CreateScale(1, -1) *
+                            System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                    }
+                    ds.DrawImage(_surface);
+                    return copy;
                 }
-
-                ds.DrawImage(_surface);
+                catch
+                {
+                    copy.Dispose();
+                    throw;
+                }
             }
-
-            return copy;
         }
         catch (Exception ex)
         {
@@ -314,7 +314,9 @@ public sealed class Mp4FrameSource : IFrameSource
         finally
         {
             Interlocked.Exchange(ref _framePending, null);
-            try { _gate.Release(); } catch (ObjectDisposedException) { }
+            Interlocked.Exchange(ref _activeFrameRequest, null);
+            if (held) _gate.Release();
+            _workAdmission.Exit();
         }
     }
 
@@ -335,6 +337,8 @@ public sealed class Mp4FrameSource : IFrameSource
     /// </remarks>
     private async Task<bool> PositionAtAsync(int frameIndex)
     {
+        // Priming already produced frame zero; seeking there again can be a paused-player no-op.
+        if (frameIndex == _lastDeliveredIndex) return true;
         int gap = frameIndex - _lastDeliveredIndex;
 
         if (_lastDeliveredIndex >= 0 && gap > 0 && gap <= MaxStepAhead)
@@ -445,6 +449,8 @@ public sealed class Mp4FrameSource : IFrameSource
     private async Task<bool> TrySeekRoundAsync(int frameIndex)
     {
         var session = _player.PlaybackSession;
+        int roundOffset = _seekRoundOffset;
+        _seekRoundOffset = (_seekRoundOffset + 1) % SeekFrameOffsets.Length;
 
         for (int attempt = 0; attempt < _seekAttempts; attempt++)
         {
@@ -455,13 +461,14 @@ public sealed class Mp4FrameSource : IFrameSource
             try
             {
                 var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref _activeFrameRequest, pending);
                 Interlocked.Exchange(ref _framePending, pending);
 
                 // Each attempt targets a different instant *within the same frame's display
                 // interval*: re-assigning an identical Position is a no-op that would never
                 // wake the decoder, while every one of these offsets still resolves to
                 // `frameIndex`.
-                session.Position = TimeForFrame(frameIndex, attempt);
+                session.Position = TimeForFrame(frameIndex, attempt + roundOffset);
 
                 // The frame usually arrives with, or shortly after, seek completion.
                 var settled = await Task.WhenAny(
@@ -482,6 +489,7 @@ public sealed class Mp4FrameSource : IFrameSource
                 }
 
                 Interlocked.Exchange(ref _framePending, null);
+                Interlocked.CompareExchange(ref _activeFrameRequest, null, pending);
                 _needsDrain = true;
 
                 if (_disposed)
@@ -503,6 +511,7 @@ public sealed class Mp4FrameSource : IFrameSource
     private async Task<bool> IssueAndWaitAsync(Action issue, TimeSpan timeout)
     {
         var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Volatile.Write(ref _activeFrameRequest, pending);
         Interlocked.Exchange(ref _framePending, pending);
 
         issue();
@@ -511,6 +520,7 @@ public sealed class Mp4FrameSource : IFrameSource
         {
             // Abandon this request so a late frame cannot satisfy the next one.
             Interlocked.Exchange(ref _framePending, null);
+            Interlocked.CompareExchange(ref _activeFrameRequest, null, pending);
             _needsDrain = true;
             return false;
         }
@@ -520,22 +530,33 @@ public sealed class Mp4FrameSource : IFrameSource
 
     private void OnVideoFrameAvailable(MediaPlayer sender, object args)
     {
-        // Consume the request atomically. A single seek or step is not guaranteed to raise
-        // this exactly once, and a second raise would overwrite _surface while the waiting
-        // thread is already drawing from it — a silently wrong frame in an export.
-        var pending = Interlocked.Exchange(ref _framePending, null);
-        if (pending is null)
-            return;
-
+        if (!_workAdmission.TryEnter()) return;
         try
         {
-            sender.CopyFrameToVideoSurface(_surface);
-            pending.TrySetResult(true);
+            var pending = Interlocked.Exchange(ref _framePending, null);
+            if (pending is null) return;
+            try
+            {
+                lock (_surfaceLock)
+                {
+                    if (_disposed || !ReferenceEquals(pending, Volatile.Read(ref _activeFrameRequest)))
+                    {
+                        pending.TrySetResult(false);
+                        return;
+                    }
+                    sender.CopyFrameToVideoSurface(_surface);
+                    pending.TrySetResult(ReferenceEquals(pending, Volatile.Read(ref _activeFrameRequest)));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Mp4FrameSource] CopyFrameToVideoSurface failed: {ex.Message}");
+                pending.TrySetResult(false);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            Debug.WriteLine($"[Mp4FrameSource] CopyFrameToVideoSurface failed: {ex.Message}");
-            pending.TrySetResult(false);
+            _workAdmission.Exit();
         }
     }
 
@@ -546,31 +567,25 @@ public sealed class Mp4FrameSource : IFrameSource
 
         _disposed = true;
         Interlocked.Exchange(ref _framePending, null)?.TrySetResult(false);
+        Interlocked.Exchange(ref _activeFrameRequest, null)?.TrySetResult(false);
+        _workAdmission.Close();
+    }
 
-        // Wait for any in-flight request to leave the critical section before tearing
-        // down the player and surface it is reading from.
-        bool held = false;
-        try
-        {
-            held = _gate.Wait(DisposeGateTimeout);
-        }
-        catch (ObjectDisposedException) { }
-
+    private void ReleaseNativeResources()
+    {
         try
         {
             _player.VideoFrameAvailable -= OnVideoFrameAvailable;
             _player.Source = null;
-            _player.Dispose();
-            _surface.Dispose();
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Mp4FrameSource] Dispose failed: {ex.Message}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"MP4 reader detachment failed: {ex}");
         }
-        finally
-        {
-            if (held) _gate.Release();
-        }
+        try { _player.Dispose(); }
+        catch (Exception ex) { Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"MP4 player disposal failed: {ex}"); }
+        try { _surface.Dispose(); }
+        catch (Exception ex) { Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"MP4 surface disposal failed: {ex}"); }
 
         // _gate is deliberately NOT disposed. SemaphoreSlim.Dispose does not release
         // callers already parked in WaitAsync, so disposing it would strand any queued
