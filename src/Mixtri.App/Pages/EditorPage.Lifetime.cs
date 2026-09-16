@@ -23,6 +23,13 @@ public sealed partial class EditorPage
     private bool IsWaveformWorkCurrent(int generation, CancellationToken ct) =>
         !ct.IsCancellationRequested && !_previewSuspended && !_pageUnloaded && generation == _previewInitGeneration;
 
+    private bool IsPreviewWorkCurrent(Project? project, int generation) =>
+        !_previewSuspended && !_pageUnloaded && generation == _previewInitGeneration
+        && ReferenceEquals(project, ProjectService.Instance.CurrentProject);
+
+    private bool CanRenderPreview =>
+        !_previewSuspended && !_pageUnloaded && _graphicsDeviceManager is { IsRecoveryInProgress: false };
+
     private void CancelWaveformWork()
     {
         _waveformEpoch++;
@@ -56,6 +63,7 @@ public sealed partial class EditorPage
             _pendingRenderPosition = null;
             _pendingRenderForce = false;
             _previewInitGeneration++;
+            AbandonRendererRebuilds();
             CancelWaveformWork();
             _insertedAudioGeneration++;
             _stretchedAudioGeneration++;

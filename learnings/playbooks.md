@@ -208,6 +208,11 @@ reveals:
   `CurrentProject` (and anything else the rebuild needs) FIRST; disposing `_frameReader` and
   clearing track visuals and only then discovering there is nothing to rebuild with leaves a
   permanently blank editor that no later render can repair. Log every such bail-out.
+- **Bind async preview work to its project and initialization/rebuild generations.** Invalidate
+  rebuilds on reset, hide, initialization, recovery, and unload; reject stale queued work as
+  well as late completions. A failed old initialization must dispose its local candidate, not
+  whatever renderer a newer initialization has published. Recheck webcam/slide publication
+  after awaits, and do not render while device recovery is active.
 - **On `CanvasDevice.DeviceLost`, surface a recoverable exception — NEVER recreate the device
   mid-frame.** Let outer code restart cleanly. Check `D3D11CreateDevice` HRESULT and fall back to
   WARP (`D3D_DRIVER_TYPE_WARP`).

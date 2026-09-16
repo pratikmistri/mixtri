@@ -1031,7 +1031,7 @@ public sealed partial class EditorPage
     private async Task RebuildPreviewRendererAsync(
         CompositionConfig config, VideoSegment? forSegment = null)
     {
-        if (_previewSuspended || _pageUnloaded) return;
+        if (!CanRenderPreview) return;
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
 
@@ -1039,17 +1039,12 @@ public sealed partial class EditorPage
         // this must not recurse. Requests that arrive mid-rebuild are coalesced rather
         // than dropped: the style handlers call this fire-and-forget, so dropping would
         // lose the last value of a slider drag.
-        if (_rebuildingPreviewRenderer)
-        {
-            _pendingRendererRebuild = (config, forSegment);
-            return;
-        }
+        _pendingRendererRebuild = (project, config, forSegment, _previewInitGeneration, _rendererRebuildGeneration);
+        if (_rebuildingPreviewRenderer) return;
 
         _rebuildingPreviewRenderer = true;
         try
         {
-            await RebuildPreviewRendererCoreAsync(project, config, forSegment);
-
             // Drain coalesced requests. Bounded purely as a backstop — the segment-scoped
             // rebuild above converges — so a future regression degrades to a stale frame
             // rather than to a frozen app. Re-tests page state every iteration: an unload
@@ -1058,9 +1053,12 @@ public sealed partial class EditorPage
             for (int i = 0; i < MaxCoalescedRendererRebuilds && _pendingRendererRebuild is { } pending; i++)
             {
                 _pendingRendererRebuild = null;
-                if (_previewSuspended || _pageUnloaded) break;
-                if (ProjectService.Instance.CurrentProject is not { } current) break;
-                await RebuildPreviewRendererCoreAsync(current, pending.Config, pending.Segment);
+                while (_activePreviewInitializations > 0 && CanRenderPreview)
+                    await Task.Delay(25);
+                if (!CanRenderPreview) break;
+                if (!IsPreviewWorkCurrent(pending.Project, pending.InitGeneration)
+                    || pending.RebuildGeneration != _rendererRebuildGeneration) continue;
+                await RebuildPreviewRendererCoreAsync(pending.Project, pending.Config, pending.Segment);
             }
 
             _pendingRendererRebuild = null;
@@ -1073,7 +1071,8 @@ public sealed partial class EditorPage
 
     private const int MaxCoalescedRendererRebuilds = 4;
     private bool _rebuildingPreviewRenderer;
-    private (CompositionConfig Config, VideoSegment? Segment)? _pendingRendererRebuild;
+    private (Project Project, CompositionConfig Config, VideoSegment? Segment,
+        int InitGeneration, int RebuildGeneration)? _pendingRendererRebuild;
 
     /// <summary>
     /// Bumped whenever the page tears down or suspends, so a rebuild that is mid-await can
@@ -1090,21 +1089,27 @@ public sealed partial class EditorPage
     private async Task RebuildPreviewRendererCoreAsync(
         Project project, CompositionConfig config, VideoSegment? forSegment)
     {
+        int initGeneration = _previewInitGeneration;
+        int generation = _rendererRebuildGeneration;
+        if (!CanRenderPreview || !IsPreviewWorkCurrent(project, initGeneration)) return;
+
         // Apply the active primary segment's per-segment frame style / cursor override
         // on top of the global config so the primary recording honors its own style.
         var activePrimary = forSegment ?? ActivePrimaryVideoSegment();
         var effective = config;
         if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
         if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
-        _primaryRenderBackground = effective.Background;
-        _primaryRenderCursor = effective.Cursor;
-        _primaryRendererSegmentId = activePrimary?.Id;
+        var renderBackground = effective.Background;
+        var renderCursor = effective.Cursor;
 
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
         {
             try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
-            catch { /* no cursor data */ }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Cursor data could not be loaded during renderer rebuild: {ex}");
+            }
         }
 
         mouseData ??= new MouseRecordingData();
@@ -1130,7 +1135,6 @@ public sealed partial class EditorPage
         // field before the await would let a permanent unload dispose and null it mid-init,
         // after which this continuation would mark a disposed renderer ready — or, worse,
         // install a freshly built one onto a dead page with no teardown left to release it.
-        int generation = _rendererRebuildGeneration;
         PreviewRenderer? built = null;
         try
         {
@@ -1145,14 +1149,13 @@ public sealed partial class EditorPage
                 project.CropOffsetY,
                 project.DpiScale);
 
-            if (generation != _rendererRebuildGeneration || _pageUnloaded)
-            {
-                built.Dispose();
+            if (!CanRenderPreview || generation != _rendererRebuildGeneration || !IsPreviewWorkCurrent(project, initGeneration))
                 return;
-            }
 
             _previewRenderer = built;
-            built = null;
+            _primaryRenderBackground = renderBackground;
+            _primaryRenderCursor = renderCursor;
+            _primaryRendererSegmentId = activePrimary?.Id;
 
             // Re-sync zoom state from the model. The new compositor has just regenerated
             // auto-zoom from the raw mouse data, so this has to run unconditionally —
@@ -1160,15 +1163,20 @@ public sealed partial class EditorPage
             SyncZoomStateToRenderer();
 
             _compositorReady = true;
+            built = null;
         }
-        catch
+        catch (Exception ex)
         {
-            built?.Dispose();
-            _previewRenderer?.Dispose();
-            _previewRenderer = null;
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Preview renderer rebuild failed: {ex}");
+            if (built is not null && ReferenceEquals(_previewRenderer, built))
+            {
+                _previewRenderer = null;
+                _compositorReady = false;
+            }
         }
+        finally { built?.Dispose(); }
 
-        if (generation != _rendererRebuildGeneration || _pageUnloaded) return;
+        if (!CanRenderPreview || generation != _rendererRebuildGeneration || !IsPreviewWorkCurrent(project, initGeneration)) return;
 
         // Re-render at current playhead position
         _lastRenderedFrameIndex = -1;

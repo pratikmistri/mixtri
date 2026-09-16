@@ -315,6 +315,7 @@ public sealed partial class EditorPage
     private void ResetPreviewToEmptyState(bool preservePresentedFrame = false)
     {
         _previewInitGeneration++;
+        AbandonRendererRebuilds();
         CancelWaveformWork();
         CancelThumbnailGeneration();
         _segmentPreviewGeneration++;
@@ -400,6 +401,7 @@ public sealed partial class EditorPage
         // start. Anything built after the generation moves on is disposed, never published.
         _graphicsDeviceManager.Attach();
         int initGeneration = ++_previewInitGeneration;
+        AbandonRendererRebuilds();
         CancelWaveformWork();
 
         DisposeOffUiThread(_frameReader);
@@ -496,7 +498,7 @@ public sealed partial class EditorPage
             _previewResolution.MaxWidth,
             _previewResolution.MaxHeight,
             PrimaryPreviewCacheBudgetBytes);
-        if (initGeneration != _previewInitGeneration)
+        if (!IsPreviewWorkCurrent(project, initGeneration))
         {
             // Page unloaded or a newer init took over while the decoder was opening.
             DisposeOffUiThread(reader);
@@ -517,7 +519,7 @@ public sealed partial class EditorPage
 
         // Load audio waveform data for timeline visualization
         await LoadAudioWaveformAsync(project, initGeneration);
-        if (initGeneration != _previewInitGeneration) return;
+        if (!IsPreviewWorkCurrent(project, initGeneration)) return;
 
         // Load mouse data for cursor smoothing + click animations
         MouseRecordingData? mouseData = null;
@@ -673,35 +675,26 @@ public sealed partial class EditorPage
         // separation RebuildPreviewRendererCoreAsync makes.
         var rendererConfig = HideCursorWhenNoSamples(config, mouseData);
 
+        PreviewRenderer? renderer = null;
         try
         {
-            var renderer = new PreviewRenderer();
-            try
-            {
-                await renderer.InitializeAsync(
-                    mouseData, rendererConfig,
-                    project.Width > 0 ? project.Width : 1920,
-                    project.Height > 0 ? project.Height : 1080,
-                    project.Duration,
-                    project.MouseToVideoOffsetSeconds,
-                    project.CropOffsetX,
-                    project.CropOffsetY,
-                    project.DpiScale);
-            }
-            catch
-            {
-                renderer.Dispose();
-                throw;
-            }
+            renderer = new PreviewRenderer();
+            await renderer.InitializeAsync(
+                mouseData, rendererConfig,
+                project.Width > 0 ? project.Width : 1920,
+                project.Height > 0 ? project.Height : 1080,
+                project.Duration,
+                project.MouseToVideoOffsetSeconds,
+                project.CropOffsetX,
+                project.CropOffsetY,
+                project.DpiScale);
 
-            if (initGeneration != _previewInitGeneration)
-            {
-                renderer.Dispose();
-                return;
-            }
+            if (!IsPreviewWorkCurrent(project, initGeneration)) return;
 
             _previewRenderer = renderer;
-            _compositorReady = true;
+            _primaryRenderBackground = config.Background;
+            _primaryRenderCursor = config.Cursor;
+            _primaryRendererSegmentId = null;
 
             // Push the model's zoom keyframes/suppressed-clicks AND text overlays onto the
             // freshly published renderer before the first frame draws — mirrors the same
@@ -711,18 +704,25 @@ public sealed partial class EditorPage
             // (though export still renders them, since export builds its own renderer
             // through SegmentFrameComposer) until some other edit happens to trigger a sync.
             SyncZoomStateToRenderer();
+            _compositorReady = true;
+            renderer = null;
         }
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"PreviewRenderer init failed: {ex}");
             // Compositor init failed — fall back to raw frames
-            _previewRenderer?.Dispose();
-            _previewRenderer = null;
+            if (renderer is not null && ReferenceEquals(_previewRenderer, renderer))
+            {
+                _previewRenderer = null;
+                _compositorReady = false;
+            }
         }
+        finally { renderer?.Dispose(); }
 
         // Load webcam composition for preview overlay
-        await LoadWebcamCompositionAsync(project);
-        if (initGeneration != _previewInitGeneration) return;
+        if (!IsPreviewWorkCurrent(project, initGeneration)) return;
+        await LoadWebcamCompositionAsync(project, initGeneration);
+        if (!IsPreviewWorkCurrent(project, initGeneration)) return;
 
         // Initialize webcam overlay editing
         InitializeWebcamOverlay(config);
@@ -1189,11 +1189,14 @@ public sealed partial class EditorPage
     {
         if (segment is TextSlideSegment slide)
         {
+            int generation = _previewInitGeneration;
+            var project = ProjectService.Instance.CurrentProject;
             var slideRenderer = _textSlideRenderer ??= new TextSlideRenderer();
             await slideRenderer.EnsureBackgroundLoadedAsync(slide);
             // Permanent unload disposes and nulls _textSlideRenderer without draining this
             // await, so reuse the captured instance only while it is still the page's.
-            if (_pageUnloaded || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return null;
+            if (!CanRenderPreview || !IsPreviewWorkCurrent(project, generation)
+                || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return null;
             var (w, h) = GetPreviewCanvasSize();
             double progress = slide.Duration.TotalSeconds > 0
                 ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
@@ -1238,7 +1241,7 @@ public sealed partial class EditorPage
             // right now, then re-validate after the frame decode await — see the remarks on
             // _primaryPreviewStateGeneration for why a rebuild/teardown that completes
             // during either await must not be silently composited past.
-            if (!ReferenceEquals(reader, _frameReader)) return null;
+            if (!CanRenderPreview || !ReferenceEquals(reader, _frameReader)) return null;
             int stateGen = _primaryPreviewStateGeneration;
 
             var frame = await reader.AcquireFrameAtTimeAsync(sourceTime);
@@ -1247,7 +1250,7 @@ public sealed partial class EditorPage
 
             try
             {
-                if (stateGen != _primaryPreviewStateGeneration || !ReferenceEquals(reader, _frameReader))
+                if (!CanRenderPreview || stateGen != _primaryPreviewStateGeneration || !ReferenceEquals(reader, _frameReader))
                     return null;
 
                 if (compositor is not null)
@@ -1265,7 +1268,7 @@ public sealed partial class EditorPage
                     if (ReferenceEquals(compositor, _previewRenderer))
                     {
                         await SetWebcamFrameForPreviewAsync(sourceTime);
-                        if (stateGen != _primaryPreviewStateGeneration) return null;
+                        if (!CanRenderPreview || stateGen != _primaryPreviewStateGeneration) return null;
                     }
 
                     var composed = compositor.RenderPreviewFrame(bitmap, sourceTime);
@@ -1520,6 +1523,8 @@ public sealed partial class EditorPage
 
     private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
     {
+        int generation = _previewInitGeneration;
+        var project = ProjectService.Instance.CurrentProject;
         var slideRenderer = _textSlideRenderer ??= new TextSlideRenderer();
 
         // Pre-load the (image) background off the UI thread so the synchronous
@@ -1528,7 +1533,8 @@ public sealed partial class EditorPage
 
         // Teardown disposes and nulls the field without draining this await. Bail rather
         // than render through a disposed renderer and then touch unloaded XAML below.
-        if (_pageUnloaded || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return;
+        if (!CanRenderPreview || !IsPreviewWorkCurrent(project, generation)
+            || !ReferenceEquals(_textSlideRenderer, slideRenderer)) return;
 
         var (width, height) = GetPreviewCanvasSize();
 
@@ -1645,7 +1651,7 @@ public sealed partial class EditorPage
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
         using var frame = await reader.AcquireFrameAtTimeAsync(sourcePosition);
-        if (_pageUnloaded || _previewSuspended || stateGeneration != _primaryPreviewStateGeneration
+        if (!CanRenderPreview || stateGeneration != _primaryPreviewStateGeneration
             || !ReferenceEquals(reader, _frameReader)) return;
         if (frame is null)
         {
@@ -1670,7 +1676,7 @@ public sealed partial class EditorPage
 
                 // Extract webcam frame for overlay
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
-                if (_pageUnloaded || _previewSuspended || stateGeneration != _primaryPreviewStateGeneration
+                if (!CanRenderPreview || stateGeneration != _primaryPreviewStateGeneration
                     || !ReferenceEquals(renderer, _previewRenderer)) return;
 
                 var composed = renderer.RenderPreviewFrame(bitmap, sourcePosition);
@@ -1816,7 +1822,7 @@ public sealed partial class EditorPage
     }
 
     private bool IsCurrentSegmentPreview(string segmentId, SegmentPreview context, int generation) =>
-        !_pageUnloaded && !_previewSuspended && generation == _segmentPreviewGeneration
+        CanRenderPreview && generation == _segmentPreviewGeneration
         && _segmentPreviews.TryGetValue(segmentId, out var current) && ReferenceEquals(current, context);
 
     private async Task<SegmentPreview?> GetOrBuildSegmentPreviewAsync(VideoSegment seg)
@@ -1999,8 +2005,9 @@ public sealed partial class EditorPage
         finally { try { ras.Dispose(); } catch { } }
     }
 
-    private async Task LoadWebcamCompositionAsync(Project project)
+    private async Task LoadWebcamCompositionAsync(Project project, int generation)
     {
+        if (!IsPreviewWorkCurrent(project, generation)) return;
         // Clear previous webcam state so stale resources don't persist
         // when loading a new project or one without a webcam file.
         _webcamComposition?.Clips.Clear();
@@ -2014,7 +2021,9 @@ public sealed partial class EditorPage
         try
         {
             var webcamFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
+            if (!IsPreviewWorkCurrent(project, generation)) return;
             var webcamClip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(webcamFile);
+            if (!IsPreviewWorkCurrent(project, generation)) return;
             var props = webcamClip.GetVideoEncodingProperties();
             _webcamWidth = (int)props.Width;
             _webcamHeight = (int)props.Height;
@@ -2032,7 +2041,11 @@ public sealed partial class EditorPage
 
     private async Task SetWebcamFrameForPreviewAsync(TimeSpan position)
     {
-        if (_webcamComposition is null || _previewRenderer is null) return;
+        var composition = _webcamComposition;
+        var renderer = _previewRenderer;
+        var project = ProjectService.Instance.CurrentProject;
+        int generation = _previewInitGeneration;
+        if (!CanRenderPreview || composition is null || renderer is null) return;
 
         // Independent camera track: when camera segments exist, the webcam overlay
         // is only shown while the (source) playhead is inside an enabled segment,
@@ -2046,23 +2059,23 @@ public sealed partial class EditorPage
             var active = model.GetCameraSegmentAtSourceTime(position);
             if (active is null)
             {
-                _previewRenderer.SetWebcamFrame(null);
+                renderer.SetWebcamFrame(null);
                 return;
             }
-            _previewRenderer.UpdateWebcamStyle(
+            renderer.UpdateWebcamStyle(
                 active.ResolveStyle(ProjectService.Instance.CurrentComposition?.WebcamStyle));
             fullscreenFactor = active.ComputeFullscreenFactor(position);
             overlayOpacity = model.GetCameraOverlayOpacity(active, position);
         }
-        _previewRenderer.SetWebcamFullscreenFactor(fullscreenFactor);
-        _previewRenderer.SetWebcamOverlayOpacity(overlayOpacity);
+        renderer.SetWebcamFullscreenFactor(fullscreenFactor);
+        renderer.SetWebcamOverlayOpacity(overlayOpacity);
 
         CanvasBitmap? webcamFrame = null;
         try
         {
             var clamped = position;
-            if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
-                clamped = _webcamComposition.Duration;
+            if (composition.Duration > TimeSpan.Zero && position > composition.Duration)
+                clamped = composition.Duration;
 
             // Cap extraction size for preview — full native resolution is
             // unnecessarily heavy for a ~300px overlay during editor scrubbing.
@@ -2071,7 +2084,7 @@ public sealed partial class EditorPage
             float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
             if (fullscreenFactor > 0f)
             {
-                float outMax = Math.Max(_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
+                float outMax = Math.Max(renderer.OutputWidth, renderer.OutputHeight);
                 previewCap = Math.Max(previewCap, fullscreenFactor * outMax);
             }
             int extractW = _webcamWidth;
@@ -2084,28 +2097,28 @@ public sealed partial class EditorPage
                 extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
             }
 
-            var thumbnail = await _webcamComposition.GetThumbnailAsync(
+            using var thumbnail = await composition.GetThumbnailAsync(
                 clamped, extractW, extractH,
                 Windows.Media.Editing.VideoFramePrecision.NearestFrame);
+            if (!CanRenderPreview || !IsPreviewWorkCurrent(project, generation)
+                || !ReferenceEquals(renderer, _previewRenderer) || !ReferenceEquals(composition, _webcamComposition)) return;
 
             var device = CanvasDevice.GetSharedDevice();
-            var stream = thumbnail.AsStream();
-            var ras = stream.AsRandomAccessStream();
-            webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
+            webcamFrame = await CanvasBitmap.LoadAsync(device, thumbnail);
+            if (!CanRenderPreview || !IsPreviewWorkCurrent(project, generation)
+                || !ReferenceEquals(renderer, _previewRenderer) || !ReferenceEquals(composition, _webcamComposition)) return;
 
-            // Dispose intermediate streams — ignore errors from WinRT stream flush
-            try { ras.Dispose(); } catch { }
-            try { stream.Dispose(); } catch { }
-            try { thumbnail.Dispose(); } catch { }
-        }
-        catch { /* frame extraction failed — keep previous frame */ }
-
-        if (webcamFrame is not null)
-        {
-            _lastWebcamFrame?.Dispose();
+            renderer.SetWebcamFrame(webcamFrame);
+            var previous = _lastWebcamFrame;
             _lastWebcamFrame = webcamFrame;
-            _previewRenderer.SetWebcamFrame(_lastWebcamFrame);
+            webcamFrame = null;
+            previous?.Dispose();
         }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"Webcam frame extraction failed; retaining the previous frame: {ex}");
+        }
+        finally { webcamFrame?.Dispose(); }
     }
 
     /// <summary>

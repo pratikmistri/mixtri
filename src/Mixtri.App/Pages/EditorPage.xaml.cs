@@ -374,6 +374,7 @@ public sealed partial class EditorPage : Page
         {
             DispatcherQueue.TryEnqueue(() =>
             {
+                if (_pageUnloaded) return;
                 // Every statement here mutates live UI state, and the preview re-init at the
                 // end is what rebuilds it. A throw partway through used to escape into the
                 // XAML dispatcher with the timeline already re-pointed and its selections
@@ -571,6 +572,7 @@ public sealed partial class EditorPage : Page
             return;
 
         _previewInitGeneration++;
+        AbandonRendererRebuilds();
         CancelWaveformWork();
         CancelThumbnailGeneration();
         _segmentPreviewGeneration++;
