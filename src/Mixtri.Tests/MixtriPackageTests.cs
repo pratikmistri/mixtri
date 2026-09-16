@@ -1,5 +1,7 @@
 using System.IO.Compression;
+using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Audio;
+using Mixtri.Core.Capture;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
 using Mixtri.Core.Projects;
@@ -12,6 +14,38 @@ namespace Mixtri.Tests;
 [TestClass]
 public class MixtriPackageTests
 {
+    [TestMethod]
+    public async Task SavePosterKeepsTheCapturedSourceWhenTheLiveProjectPathChanges()
+    {
+        var (project, timeline) = BuildProject();
+        string replacementPath = Path.Combine(_root, "replacement.mp4");
+        using (var writer = new VideoWriter(replacementPath, 96, 64, 10))
+        using (var image = new CanvasRenderTarget(CanvasDevice.GetSharedDevice(), 96, 64, 96))
+        {
+            using (var drawing = image.CreateDrawingSession())
+                for (int x = 0; x < 96; x++)
+                    drawing.FillRectangle(x, 0, 1, 64,
+                        Windows.UI.Color.FromArgb(255, (byte)(x * 2), (byte)(255 - x * 2), (byte)x));
+            for (int i = 0; i < 8; i++)
+                writer.WriteFrame(image, TimeSpan.FromSeconds(i / 10d));
+            writer.StopAcceptingFrames();
+            await writer.WaitForQuiescenceAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+            await writer.FinalizeAsync();
+            Assert.IsTrue(writer.FinalizeSucceeded);
+        }
+
+        string packagePath = Path.Combine(_root, "snapshot-poster.mixtri");
+        var save = MixtriPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        Assert.IsFalse(save.IsCompleted, "The live path must change while poster work is in flight.");
+        project.VideoFilePath = replacementPath;
+        await save;
+
+        Assert.IsNull(MixtriPackageService.ReadPoster(packagePath),
+            "The original undecodable source must not acquire a poster from the replacement video.");
+        var reopened = await MixtriPackageService.OpenAsync(packagePath, _workingRoot);
+        Assert.AreEqual("video.mp4", Path.GetFileName(reopened.Project.VideoFilePath));
+    }
+
     private TempDirectoryFixture? _tempDir;
     private string _root => _tempDir!.Path;
     private string _sourceFolder => Path.Combine(_root, "session");

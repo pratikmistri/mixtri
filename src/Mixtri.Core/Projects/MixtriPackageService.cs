@@ -114,6 +114,7 @@ public static class MixtriPackageService
             entryByPath[mediaFiles[i]] = MixtriPackage.BuildMediaEntryName(i, mediaFiles[i]);
 
         var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
+        string posterVideoPath = snapshot.Project.VideoFilePath;
         var manifest = new MixtriManifest
         {
             SchemaVersion = MixtriPackage.CurrentSchemaVersion,
@@ -136,7 +137,7 @@ public static class MixtriPackageService
         {
             // Rendered before the archive is opened so a poster failure cannot abort the
             // save; the poster is presentation only.
-            var poster = await TryRenderPosterAsync(project, ct).ConfigureAwait(false);
+            var poster = await TryRenderPosterAsync(posterVideoPath, ct).ConfigureAwait(false);
 
             await Task.Run(() =>
             {
@@ -226,11 +227,11 @@ public static class MixtriPackageService
     /// Taken a little way into the recording rather than at frame zero, which is often a
     /// blank desktop or a half-drawn window.
     /// </remarks>
-    private static async Task<byte[]?> TryRenderPosterAsync(Project project, CancellationToken ct)
+    private static async Task<byte[]?> TryRenderPosterAsync(string videoFilePath, CancellationToken ct)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(project.VideoFilePath) || !File.Exists(project.VideoFilePath))
+            if (string.IsNullOrWhiteSpace(videoFilePath) || !File.Exists(videoFilePath))
                 return null;
 
             var device = CanvasDevice.GetSharedDevice();
@@ -240,7 +241,7 @@ public static class MixtriPackageService
                 ct.ThrowIfCancellationRequested();
 
                 var strip = await VideoThumbnailExtractor.ExtractAsync(
-                    project.VideoFilePath,
+                    videoFilePath,
                     height,
                     device,
                     maxCount: PosterSampleCount,
@@ -266,7 +267,7 @@ public static class MixtriPackageService
                 }
             }
 
-            Debug.WriteLine($"[MixtriPackage] No usable poster frame for '{project.VideoFilePath}'.");
+            Debug.WriteLine($"[MixtriPackage] No usable poster frame for '{videoFilePath}'.");
             return null;
         }
         catch (OperationCanceledException)
