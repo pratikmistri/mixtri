@@ -460,6 +460,8 @@ public sealed class BackgroundCompositorPreloadTests
             int calls = 0;
             var failNext = true;
             using var compositor = CreateFastRetryCompositor(baseMs: 1000, maxMs: 1000);
+            long nowMs = 0;
+            compositor.TickCount64Provider = () => Volatile.Read(ref nowMs);
             compositor.ImageLoaderOverride = (dev, _, _) =>
             {
                 Interlocked.Increment(ref calls);
@@ -488,10 +490,14 @@ public sealed class BackgroundCompositorPreloadTests
             Assert.AreEqual(1, Volatile.Read(ref calls),
                 "The render path must not retry a failed load on every frame.");
 
+            Volatile.Write(ref nowMs, 999);
+            RenderCenterPixel(device, compositor, style, out _);
+            Assert.AreEqual(1, Volatile.Read(ref calls), "Retry must not start before the backoff deadline.");
+
             // Once the transient condition clears and the backoff elapses, a later frame
             // recovers on its own.
             Volatile.Write(ref failNext, false);
-            Thread.Sleep(1100);
+            Volatile.Write(ref nowMs, 1000);
 
             var recovered = RenderUntilReady(device, compositor, style, TimeSpan.FromSeconds(5));
 
@@ -500,6 +506,7 @@ public sealed class BackgroundCompositorPreloadTests
             Assert.IsNull(compositor.LastImageLoadFailure,
                 "A successful load clears the recorded failure.");
             Assert.IsTrue(compositor.IsBackgroundImageReady(device, style));
+            Assert.AreEqual(2, Volatile.Read(ref calls), "Retry must resume at the backoff deadline.");
         }
     }
 

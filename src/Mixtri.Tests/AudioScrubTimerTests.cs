@@ -251,6 +251,50 @@ public class AudioScrubTimerTests
     }
 
     [TestMethod]
+    public async Task DisposalReleasesTheScrubQueueBeforeWaitingForTransport()
+    {
+        var clock = new ManualClock();
+        var output = new FakeOutput();
+        using var engine = new AudioPlaybackEngine(output, clock);
+        engine.ScrubTo(TimeSpan.Zero);
+        await WaitIdle(engine);
+        var transport = Field<object>(engine, "_transportLock");
+        var queue = Field<object>(engine, "_scrubQueueLock");
+        Task? disposal = null;
+        try
+        {
+            await Task.Factory.StartNew(() =>
+            {
+                // Dedicated threads keep the controlled lock waits from starving other tests.
+                lock (transport)
+                {
+                    disposal = Task.Factory.StartNew(engine.Dispose, CancellationToken.None,
+                        TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    Assert.IsTrue(SpinWait.SpinUntil(() => clock.Timer!.IsDisposed, TimeSpan.FromSeconds(5)),
+                        "Timer disposal must not wait for the transport lock.");
+                    bool entered = Monitor.TryEnter(queue, TimeSpan.FromSeconds(5));
+                    try
+                    {
+                        Assert.IsTrue(entered, "Disposal held the queue lock while waiting for transport.");
+                        Assert.IsFalse(disposal.IsCompleted, "Disposal must still wait for in-flight transport work.");
+                    }
+                    finally
+                    {
+                        if (entered) Monitor.Exit(queue);
+                    }
+                }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+        finally
+        {
+            if (disposal is not null)
+                await disposal.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.AreEqual(1, output.Disposals);
+        Assert.IsFalse(engine.IsLoaded);
+    }
+
+    [TestMethod]
     public async Task DisposalPreventsLaterTimerOrScrubActivity()
     {
         var clock = new ManualClock();

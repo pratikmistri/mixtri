@@ -80,6 +80,7 @@ public sealed class BackgroundCompositor : IDisposable
     internal const int MaxLoadAttempts = 4;
     internal TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromMilliseconds(750);
     internal TimeSpan RetryMaxDelay { get; set; } = TimeSpan.FromSeconds(10);
+    internal Func<long> TickCount64Provider { get; set; } = static () => Environment.TickCount64;
 
     // Test seam for the actual decode. Returning null means "no bitmap for this key"
     // (treated exactly like a missing file); throwing OperationCanceledException means
@@ -485,7 +486,7 @@ public sealed class BackgroundCompositor : IDisposable
             return true;
         if (_failedAttempts >= MaxLoadAttempts)
             return false;
-        return Environment.TickCount64 >= _retryNotBeforeMs;
+        return TickCount64Provider() >= _retryNotBeforeMs;
     }
 
     /// <summary>Must be called under <see cref="_cacheLock"/>.</summary>
@@ -524,7 +525,7 @@ public sealed class BackgroundCompositor : IDisposable
         double baseMs = RetryBaseDelay.TotalMilliseconds;
         double maxMs = Math.Max(baseMs, RetryMaxDelay.TotalMilliseconds);
         double delayMs = Math.Min(maxMs, baseMs * Math.Pow(2, _failedAttempts - 1));
-        _retryNotBeforeMs = Environment.TickCount64 + (long)delayMs;
+        _retryNotBeforeMs = TickCount64Provider() + (long)delayMs;
 
         return _failedAttempts;
     }
