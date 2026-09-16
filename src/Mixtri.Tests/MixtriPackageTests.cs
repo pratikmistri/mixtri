@@ -1,7 +1,5 @@
 using System.IO.Compression;
-using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Audio;
-using Mixtri.Core.Capture;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
 using Mixtri.Core.Projects;
@@ -18,30 +16,28 @@ public class MixtriPackageTests
     public async Task SavePosterKeepsTheCapturedSourceWhenTheLiveProjectPathChanges()
     {
         var (project, timeline) = BuildProject();
-        string replacementPath = Path.Combine(_root, "replacement.mp4");
-        using (var writer = new VideoWriter(replacementPath, 96, 64, 10))
-        using (var image = new CanvasRenderTarget(CanvasDevice.GetSharedDevice(), 96, 64, 96))
-        {
-            using (var drawing = image.CreateDrawingSession())
-                for (int x = 0; x < 96; x++)
-                    drawing.FillRectangle(x, 0, 1, 64,
-                        Windows.UI.Color.FromArgb(255, (byte)(x * 2), (byte)(255 - x * 2), (byte)x));
-            for (int i = 0; i < 8; i++)
-                writer.WriteFrame(image, TimeSpan.FromSeconds(i / 10d));
-            writer.StopAcceptingFrames();
-            await writer.WaitForQuiescenceAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
-            await writer.FinalizeAsync();
-            Assert.IsTrue(writer.FinalizeSucceeded);
-        }
-
+        string originalPath = project.VideoFilePath;
+        byte[] poster = [10, 20, 30];
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         string packagePath = Path.Combine(_root, "snapshot-poster.mixtri");
-        var save = MixtriPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
-        Assert.IsFalse(save.IsCompleted, "The live path must change while poster work is in flight.");
-        project.VideoFilePath = replacementPath;
+        var save = MixtriPackageService.SaveWithPosterRendererAsync(
+            packagePath, project, new CompositionConfig(), timeline, async (path, ct) =>
+            {
+                entered.TrySetResult(path);
+                await release.Task.WaitAsync(ct);
+                return poster;
+            });
+        try
+        {
+            Assert.AreEqual(originalPath, await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.IsFalse(save.IsCompleted, "The explicit poster gate must hold the save.");
+            project.VideoFilePath = WriteFile("replacement.mp4", 1024);
+        }
+        finally { release.TrySetResult(); }
         await save;
 
-        Assert.IsNull(MixtriPackageService.ReadPoster(packagePath),
-            "The original undecodable source must not acquire a poster from the replacement video.");
+        CollectionAssert.AreEqual(poster, MixtriPackageService.ReadPoster(packagePath));
         var reopened = await MixtriPackageService.OpenAsync(packagePath, _workingRoot);
         Assert.AreEqual("video.mp4", Path.GetFileName(reopened.Project.VideoFilePath));
     }

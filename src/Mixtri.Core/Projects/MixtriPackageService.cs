@@ -67,16 +67,28 @@ public static class MixtriPackageService
     /// so an interrupted save cannot leave a half-written project behind.
     /// </remarks>
     /// <param name="progress">Reports 0..1 packing progress.</param>
-    public static async Task SaveAsync(
+    public static Task SaveAsync(
         string packagePath,
         Project project,
         CompositionConfig composition,
         TimelineModel? timeline,
         IProgress<double>? progress = null,
+        CancellationToken ct = default) =>
+        SaveWithPosterRendererAsync(packagePath, project, composition, timeline,
+            TryRenderPosterAsync, progress, ct);
+
+    internal static async Task SaveWithPosterRendererAsync(
+        string packagePath,
+        Project project,
+        CompositionConfig composition,
+        TimelineModel? timeline,
+        Func<string, CancellationToken, Task<byte[]?>> renderPoster,
+        IProgress<double>? progress = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packagePath);
         ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(renderPoster);
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(packagePath));
         if (!string.IsNullOrEmpty(directory))
@@ -137,7 +149,7 @@ public static class MixtriPackageService
         {
             // Rendered before the archive is opened so a poster failure cannot abort the
             // save; the poster is presentation only.
-            var poster = await TryRenderPosterAsync(posterVideoPath, ct).ConfigureAwait(false);
+            var poster = await renderPoster(posterVideoPath, ct).ConfigureAwait(false);
 
             await Task.Run(() =>
             {

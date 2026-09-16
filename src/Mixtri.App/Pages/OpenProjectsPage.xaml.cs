@@ -63,7 +63,7 @@ public sealed partial class OpenProjectsPage : Page
             var cancellation = Cancellation;
             Cancellation = null;
             cancellation?.Cancel();
-            cancellation?.Dispose();
+            // LoadPosterAsync disposes its captured source after all token consumers finish.
         }
     }
 
@@ -99,7 +99,6 @@ public sealed partial class OpenProjectsPage : Page
         {
             _refreshGeneration++;
             _refreshCts?.Cancel();
-            _refreshCts?.Dispose();
             _refreshCts = null;
             _refreshNeeded |= _isLoading;
             _isLoading = false;
@@ -117,7 +116,6 @@ public sealed partial class OpenProjectsPage : Page
         _refreshNeeded = true;
         if (!_pageLoaded || !_postersVisible) return;
         _refreshCts?.Cancel();
-        _refreshCts?.Dispose();
         using var cancellation = new CancellationTokenSource();
         _refreshCts = cancellation;
         var ct = cancellation.Token;
