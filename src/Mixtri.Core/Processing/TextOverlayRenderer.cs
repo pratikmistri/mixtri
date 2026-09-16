@@ -75,6 +75,7 @@ public class TextOverlayRenderer : IDisposable
         public required CanvasTextFormat DrawFormat;
         public double TextW;
         public double TextH;
+        public bool Present;
 
         public void Dispose() => DrawFormat.Dispose();
     }
@@ -129,15 +130,17 @@ public class TextOverlayRenderer : IDisposable
             return;
 
         bool anyActive = false;
-        foreach (var overlay in overlays)
+        for (int i = 0; i < overlays.Count; i++)
         {
+            var overlay = overlays[i];
             if (IsActive(overlay, sourceTime)) { anyActive = true; break; }
         }
         if (!anyActive)
             return;
 
-        foreach (var overlay in overlays)
+        for (int i = 0; i < overlays.Count; i++)
         {
+            var overlay = overlays[i];
             if (IsActive(overlay, sourceTime))
                 RenderOverlay(target, overlay, sourceTime, width, height);
         }
@@ -152,26 +155,38 @@ public class TextOverlayRenderer : IDisposable
     {
         if (_overlayCache.Count == 0)
             return;
-
-        List<string>? staleKeys = null;
-        foreach (var id in _overlayCache.Keys)
+        if (overlays.Count == 0)
         {
-            bool stillPresent = false;
-            for (int i = 0; i < overlays.Count; i++)
-            {
-                if (overlays[i].Id == id) { stillPresent = true; break; }
-            }
-            if (!stillPresent)
-                (staleKeys ??= new List<string>()).Add(id);
-        }
-        if (staleKeys is null)
+            ClearOverlayCache();
             return;
+        }
 
+        // Mark once per live id instead of searching the overlay list once per cached entry.
+        foreach (var entry in _overlayCache.Values) entry.Present = false;
+        int remaining = _overlayCache.Count;
+        for (int i = 0; i < overlays.Count; i++)
+        {
+            if (overlays[i].Id is { } id && _overlayCache.TryGetValue(id, out var entry) && !entry.Present)
+            {
+                entry.Present = true;
+                if (--remaining == 0) return;
+            }
+        }
+
+        var staleKeys = new List<string>(remaining);
+        foreach (var pair in _overlayCache)
+            if (!pair.Value.Present) staleKeys.Add(pair.Key);
         foreach (var id in staleKeys)
         {
             _overlayCache[id].Dispose();
             _overlayCache.Remove(id);
         }
+    }
+
+    private void ClearOverlayCache()
+    {
+        foreach (var entry in _overlayCache.Values) entry.Dispose();
+        _overlayCache.Clear();
     }
 
     /// <summary>
@@ -594,9 +609,7 @@ public class TextOverlayRenderer : IDisposable
         _blurScratchHolder.Dispose();
         _blurGaussianEffect?.Dispose();
         _blurBorderEffect?.Dispose();
-        foreach (var entry in _overlayCache.Values)
-            entry.Dispose();
-        _overlayCache.Clear();
+        ClearOverlayCache();
         _textEngine.Dispose();
         GC.SuppressFinalize(this);
     }

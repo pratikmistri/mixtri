@@ -182,6 +182,29 @@ public sealed partial class EditorPage
     /// </summary>
     private void WirePropertyPanels()
     {
+        PropertiesPanel.PaneCreated += (_, kind) => WirePropertyPanel(kind);
+        WirePropertyPanel(PropertyPaneKind.Scene);
+    }
+
+    private readonly HashSet<PropertyPaneKind> _wiredPropertyPanels = [];
+
+    private void WirePropertyPanel(PropertyPaneKind kind)
+    {
+        if (!_wiredPropertyPanels.Add(kind)) return;
+        switch (kind)
+        {
+            case PropertyPaneKind.Scene: WireScenePanel(); break;
+            case PropertyPaneKind.Zoom: WireZoomPanel(); break;
+            case PropertyPaneKind.TextSlide: WireTextSlidePanel(); break;
+            case PropertyPaneKind.Cursor: WireCursorPanel(); break;
+            case PropertyPaneKind.Video: WireVideoPanel(); break;
+            case PropertyPaneKind.TextOverlay: WireTextOverlayPanel(); break;
+            case PropertyPaneKind.Transition: WireTransitionPanel(); break;
+        }
+    }
+
+    private void WireScenePanel()
+    {
         // Scene — aspect ratio / fit / crop
         foreach (var ratio in new[]
                  {
@@ -215,21 +238,17 @@ public sealed partial class EditorPage
         BorderToggle.Toggled += StyleToggle_Toggled;
         MotionBlurToggle.Toggled += MotionToggle_Toggled;
         MotionBlurSlider.ValueChanged += MotionSlider_ValueChanged;
+    }
 
-        // Zoom segment panel
+    private void WireZoomPanel()
+    {
+        ZoomLevelSlider.Value = DefaultNewSegmentZoom;
+        UpdateZoomLevelReadout(DefaultNewSegmentZoom);
         ZoomLevelSlider.ValueChanged += ZoomLevelSlider_ValueChanged;
         PropertiesPanel.Zoom.EditZoomRegionButton.Click += EditZoomRegion_Click;
         PropertiesPanel.Zoom.RemoveZoomSegmentButton.Click += RemoveZoomSegment_Click;
         ZoomDriftToggle.Toggled += ZoomDriftToggle_Toggled;
         ZoomDriftSlider.ValueChanged += ZoomDriftSlider_ValueChanged;
-
-        // The zoom level a newly drawn segment is created at. Set here rather than as a
-        // XAML Value (playbook: a XAML default fires ValueChanged during
-        // InitializeComponent, before the suppress flags exist) — and it has to be set
-        // SOMEWHERE, because a slider left at its Minimum would create every new segment
-        // at 1x, i.e. no zoom at all.
-        ZoomLevelSlider.Value = DefaultNewSegmentZoom;
-        UpdateZoomLevelReadout(DefaultNewSegmentZoom);
 
         // Both sliders' drag-start/end are picked up here rather than via XAML
         // PointerPressed/PointerCaptureLost attributes: Slider/RangeBase marks those routed
@@ -246,8 +265,10 @@ public sealed partial class EditorPage
             new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomLevelSlider_PointerPressed), handledEventsToo: true);
         ZoomLevelSlider.AddHandler(Microsoft.UI.Xaml.UIElement.PointerCaptureLostEvent,
             new Microsoft.UI.Xaml.Input.PointerEventHandler(ZoomLevelSlider_PointerCaptureLost), handledEventsToo: true);
+    }
 
-        // Text slide
+    private void WireTextSlidePanel()
+    {
         SlideTextBox.TextChanged += SlideTextBox_TextChanged;
         SlideAnimationCombo.SelectionChanged += SlideAnimationCombo_SelectionChanged;
         SlideTextInAtSlider.ValueChanged += SlideTextWindowSlider_ValueChanged;
@@ -268,8 +289,10 @@ public sealed partial class EditorPage
         SlideGradAngleSlider.ValueChanged += SlideGradAngleSlider_ValueChanged;
         PropertiesPanel.TextSlide.ChooseSlideImageButton.Click += ChooseSlideImage_Click;
         PropertiesPanel.TextSlide.RemoveSlideButton.Click += RemoveTextSlide_Click;
+    }
 
-        // Mouse
+    private void WireCursorPanel()
+    {
         CursorTypeMouse.Checked += CursorType_Checked;
         CursorTypeTouch.Checked += CursorType_Checked;
         CursorTypeHidden.Checked += CursorType_Checked;
@@ -281,16 +304,22 @@ public sealed partial class EditorPage
             if (child is RadioButton swatch)
                 swatch.Checked += CursorColor_Checked;
         }
+        if (_pendingCursorStyle is { } cursor) SyncCursorControlsToConfig(cursor);
+    }
 
-        // Video
+    private void WireVideoPanel()
+    {
         WebcamShapeCombo.SelectionChanged += WebcamShapeCombo_SelectionChanged;
         WebcamBorderSlider.ValueChanged += WebcamBorderSlider_ValueChanged;
         WebcamMirrorToggle.Toggled += WebcamMirrorToggle_Toggled;
         CameraFullscreenToggle.Toggled += CameraFullscreenToggle_Toggled;
         CameraFullscreenModeCombo.SelectionChanged += CameraFullscreenModeCombo_SelectionChanged;
         CameraDeleteButton.Click += CameraDeleteButton_Click;
+        if (_pendingWebcamStyle is { } webcam) SyncWebcamOverlayUI(webcam);
+    }
 
-        // Text overlay
+    private void WireTextOverlayPanel()
+    {
         OverlayPresets.SelectionChanged += OverlayPreset_SelectionChanged;
         OverlayTextBox.TextChanged += OverlayTextBox_TextChanged;
         OverlayAnimationCombo.SelectionChanged += OverlayAnimationCombo_SelectionChanged;
@@ -309,6 +338,7 @@ public sealed partial class EditorPage
         }
 
         OverlayWidthSlider.ValueChanged += OverlayWidthSlider_ValueChanged;
+        PropertiesPanel.TextOverlay.OverlayHeightSlider.ValueChanged += OverlayHeightSlider_ValueChanged;
         OverlayMarginSlider.ValueChanged += OverlayMarginSlider_ValueChanged;
         OverlayBgTypeCombo.SelectionChanged += OverlayBgTypeCombo_SelectionChanged;
         OverlayBgColorPicker.ColorChanged += OverlayBgColorPicker_ColorChanged;
@@ -336,8 +366,10 @@ public sealed partial class EditorPage
         OverlayAccentSideCombo.SelectionChanged += OverlayAccentSideCombo_SelectionChanged;
         OverlayEnabledToggle.Toggled += OverlayEnabledToggle_Toggled;
         RemoveOverlayButton.Click += RemoveTextOverlay_Click;
+    }
 
-        // Transition
+    private void WireTransitionPanel()
+    {
         TransitionFamilyCombo.SelectionChanged += TransitionFamilyCombo_SelectionChanged;
         TransitionVariantCombo.SelectionChanged += TransitionVariantCombo_SelectionChanged;
         TransitionDurationSlider.ValueChanged += TransitionDurationSlider_ValueChanged;

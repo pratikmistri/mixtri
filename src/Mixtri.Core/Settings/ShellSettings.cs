@@ -17,6 +17,36 @@ public sealed class ShellSettings
 
     private ShellSettings() { }
 
+    /// <summary>Read once at process startup; changing this preference requires restarting Mixtri.</summary>
+    public bool SeparateEditorProcess
+    {
+        get => AppSettings.Instance.Get("Shell.SeparateEditorProcess", false);
+        set => AppSettings.Instance.Set("Shell.SeparateEditorProcess", value);
+    }
+
+    public FullWindowPlacement? FullWindowPlacement
+    {
+        get
+        {
+            var json = AppSettings.Instance.Get<string?>("Shell.FullWindowPlacement", null);
+            if (json is null) return null;
+            try
+            {
+                var placement = System.Text.Json.JsonSerializer.Deserialize<FullWindowPlacement>(json);
+                if (placement is not { IsValid: true })
+                    throw new System.Text.Json.JsonException("Invalid window size.");
+                return placement;
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                Diagnostics.DiagLog.Write("Shell", $"Saved window placement is invalid: {ex.Message}");
+                return null;
+            }
+        }
+        set => AppSettings.Instance.Set("Shell.FullWindowPlacement",
+            value is null ? null : System.Text.Json.JsonSerializer.Serialize(value));
+    }
+
     /// <summary>
     /// Which window the app opens on launch. Installs that have never chosen a
     /// value get <see cref="StartupMode.Mini"/>.

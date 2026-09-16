@@ -171,12 +171,12 @@
                               ViewChanged="PaneScroller_ViewChanged">
                     <Grid x:Name="PaneContent" SizeChanged="PaneContent_SizeChanged">
                         <panes:ScenePropertiesView x:Name="SceneView" x:FieldModifier="public" />
-                        <panes:TextSlidePropertiesView x:Name="TextSlideView" x:FieldModifier="public" Visibility="Collapsed" />
-                        <panes:CursorPropertiesView x:Name="CursorView" x:FieldModifier="public" Visibility="Collapsed" />
-                        <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" Visibility="Collapsed" />
-                        <panes:TextOverlayPropertiesView x:Name="TextOverlayView" x:FieldModifier="public" Visibility="Collapsed" />
-                        <panes:TransitionPropertiesView x:Name="TransitionView" x:FieldModifier="public" Visibility="Collapsed" />
-                        <panes:ZoomPropertiesView x:Name="ZoomView" x:FieldModifier="public" Visibility="Collapsed" />
+                        <panes:TextSlidePropertiesView x:Name="TextSlideView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
+                        <panes:CursorPropertiesView x:Name="CursorView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
+                        <panes:VideoPropertiesView x:Name="VideoView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
+                        <panes:TextOverlayPropertiesView x:Name="TextOverlayView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
+                        <panes:TransitionPropertiesView x:Name="TransitionView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
+                        <panes:ZoomPropertiesView x:Name="ZoomView" x:FieldModifier="public" x:Load="False" Visibility="Collapsed" />
                     </Grid>
                 </ScrollViewer>
 

@@ -629,7 +629,7 @@ public sealed partial class EditorPage
         _audioPlayer?.Stop();
         _insertedAudioPlayer?.Stop();
         _stretchedAudioPlayer?.Stop();
-        Frame.Navigate(typeof(RecordingPage), "append");
+        (App.Current.MainAppWindow as MainWindow)?.ShowRecord(append: true);
     }
 
     /// <summary>
@@ -670,6 +670,7 @@ public sealed partial class EditorPage
     /// </summary>
     private async Task<VideoSegment?> ImportVideoFileAsync(string path, TimeSpan insertAt)
     {
+        using var activity = ProjectService.Instance.Activity.Begin();
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();

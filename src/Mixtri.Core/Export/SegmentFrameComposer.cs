@@ -43,6 +43,9 @@ public sealed class SegmentFrameComposer : IDisposable
     private readonly CanvasDevice _device;
     private readonly Dictionary<SourceKey, SourceContext> _contexts = [];
     private readonly SourceContext _primaryContext;
+    private readonly Dictionary<SourceKey, TimeSpan> _lastContextUse = [];
+    private readonly Dictionary<string, TimeSpan> _sourceDurations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<SourceKey> _retiredKeys = [];
 
     private TextSlideRenderer? _textSlideRenderer;
     private TransitionRenderer? _transitionRenderer;
@@ -59,6 +62,7 @@ public sealed class SegmentFrameComposer : IDisposable
     /// when a timeline is present, otherwise the primary recording's frame count.
     /// </summary>
     public int TotalFrames { get; }
+    internal int ActiveContextCount => _contexts.Count;
 
     private SegmentFrameComposer(
         Project project,
@@ -84,6 +88,27 @@ public sealed class SegmentFrameComposer : IDisposable
         OutputWidth = primaryContext.Compositor.OutputWidth;
         OutputHeight = primaryContext.Compositor.OutputHeight;
         TotalFrames = mapper?.TotalOutputFrames ?? primaryContext.Compositor.TotalFrames;
+        _sourceDurations[project.VideoFilePath] = primaryKey.Duration;
+        if (timeline is not null)
+        {
+            foreach (var item in timeline.Segments)
+            {
+                if (item is not VideoSegment video) continue;
+                var extent = video.SourceStart + video.SourceDuration;
+                if (!_sourceDurations.TryGetValue(video.VideoFilePath, out var previous) || extent > previous)
+                    _sourceDurations[video.VideoFilePath] = extent;
+            }
+            var transitionTail = timeline.Segments
+                .Select(s => s.InTransition?.Duration ?? TimeSpan.FromMilliseconds(500))
+                .DefaultIfEmpty(TimeSpan.Zero).Max();
+            foreach (var video in timeline.Segments.OfType<VideoSegment>())
+            {
+                var key = CreateSourceKey(video);
+                var end = video.End + transitionTail;
+                if (!_lastContextUse.TryGetValue(key, out var previous) || end > previous)
+                    _lastContextUse[key] = end;
+            }
+        }
     }
 
     /// <summary>
@@ -112,8 +137,7 @@ public sealed class SegmentFrameComposer : IDisposable
 
         // The key is built from the *unmodified* composition styles so that primary
         // segments without an override resolve back to this same context.
-        var primaryKey = new SourceKey(
-            NormalizePath(project.VideoFilePath), composition.Background, composition.Cursor);
+        var primaryKey = CreateSourceKey(project, composition, timeline, fps);
 
         SourceContext? primary = null;
         try
@@ -123,15 +147,15 @@ public sealed class SegmentFrameComposer : IDisposable
                 project.VideoFilePath,
                 ApplyCursorAvailability(composition, primaryMouseData),
                 primaryMouseData,
-                sourceWidth: project.Width,
-                sourceHeight: project.Height,
-                duration: ResolveSourceDuration(timeline, project.VideoFilePath, project.Duration),
-                mouseToVideoOffsetSeconds: project.MouseToVideoOffsetSeconds,
-                cropOffsetX: project.CropOffsetX,
-                cropOffsetY: project.CropOffsetY,
-                dpiScale: project.DpiScale,
-                webcamFilePath: project.WebcamFilePath,
-                recordingFps: project.Fps > 0 ? project.Fps : fps,
+                sourceWidth: primaryKey.SourceWidth,
+                sourceHeight: primaryKey.SourceHeight,
+                duration: primaryKey.Duration,
+                mouseToVideoOffsetSeconds: primaryKey.MouseOffset,
+                cropOffsetX: primaryKey.CropOffsetX,
+                cropOffsetY: primaryKey.CropOffsetY,
+                dpiScale: primaryKey.DpiScale,
+                webcamFilePath: primaryKey.WebcamPath,
+                recordingFps: primaryKey.RecordingFps,
                 timeline: timeline,
                 ct);
 
@@ -156,6 +180,7 @@ public sealed class SegmentFrameComposer : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfNegative(frameIndex);
 
+        RetireUnusedContexts(TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _fps)));
         var frame = await ComposeSegmentFrameAsync(frameIndex, ct);
 
         if (_timeline is null || _timeline.Segments.Count == 0)
@@ -725,7 +750,7 @@ public sealed class SegmentFrameComposer : IDisposable
             }
 
             using var sourceFrame = await LoadSourceFrameAsync(context, position);
-            return EnsureCanonicalSize(compositor.ComposeFrame(sourceFrame, clampedTime));
+            return EnsureCanonicalSize(compositor.ComposeFrame(sourceFrame.Bitmap, clampedTime));
         }
         finally
         {
@@ -735,26 +760,28 @@ public sealed class SegmentFrameComposer : IDisposable
         }
     }
 
-    private async Task<CanvasBitmap> LoadSourceFrameAsync(SourceContext context, TimeSpan position)
+    private async Task<FrameLease> LoadSourceFrameAsync(SourceContext context, TimeSpan position)
     {
         if (context.Reader is not null)
         {
-            var frame = await context.Reader.LoadFrameAtTimeAsync(position);
+            var frame = await context.Reader.AcquireFrameAtTimeAsync(position);
             if (frame is not null)
                 return frame;
         }
 
         if (context.SourceComposition is not null)
         {
-            return await ExtractFrameFromCompositionAsync(
+            var extracted = await ExtractFrameFromCompositionAsync(
                 _device, context.SourceComposition, position,
                 context.SourceWidth, context.SourceHeight);
+            return new FrameLease(extracted, extracted.Dispose);
         }
 
         // The JPEG frame could not be loaded and there is no open composition —
         // decode the frame straight from the video file.
-        return await FallbackExtractFrameAsync(
+        var fallback = await FallbackExtractFrameAsync(
             _device, context.VideoFilePath, position, context.SourceWidth, context.SourceHeight);
+        return new FrameLease(fallback, fallback.Dispose);
     }
 
     /// <summary>
@@ -810,25 +837,35 @@ public sealed class SegmentFrameComposer : IDisposable
 
     #region Source contexts
 
+    private void RetireUnusedContexts(TimeSpan outputTime)
+    {
+        if (_timeline is null || _timeline.Segments.Count == 0) return;
+        _retiredKeys.Clear();
+        foreach (var key in _contexts.Keys)
+        {
+            if (_lastContextUse.TryGetValue(key, out var last) && outputTime <= last) continue;
+            _retiredKeys.Add(key);
+        }
+        foreach (var key in _retiredKeys)
+            if (_contexts.Remove(key, out var context)) context.Dispose();
+    }
+
     private async Task<SourceContext> GetOrCreateContextAsync(VideoSegment segment, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(segment.VideoFilePath))
             throw new InvalidOperationException("A video segment on the timeline has no source file.");
 
-        var background = segment.FrameStyleOverride ?? _composition.Background;
-        var cursor = segment.CursorStyleOverride ?? _composition.Cursor;
-        var key = new SourceKey(NormalizePath(segment.VideoFilePath), background, cursor);
+        var key = CreateSourceKey(segment);
 
         if (_contexts.TryGetValue(key, out var cached))
             return cached;
 
-        bool isPrimary = IsPrimarySource(segment.VideoFilePath);
-        var mouseData = isPrimary
+        var mouseData = key.UsePrimaryMouseData
             ? _primaryMouseData
-            : LoadMouseData(segment.CursorDataFilePath);
+            : LoadMouseData(key.CursorPath);
 
-        var config = _composition with { Background = background, Cursor = cursor };
-        if (!isPrimary)
+        var config = _composition with { Background = key.Background, Cursor = key.Cursor };
+        if (!key.IsPrimaryVideo)
         {
             // Keyboard events and subtitles are timestamped in the primary recording's
             // timebase, so they must not be replayed over an appended recording.
@@ -839,37 +876,26 @@ public sealed class SegmentFrameComposer : IDisposable
                 SubtitleStyle = null,
                 Subtitles = null,
             };
-
-            // An appended recording can carry its own camera even when the primary
-            // recording has none; the compositor only builds its webcam layer when a
-            // style is present.
-            if (!string.IsNullOrWhiteSpace(segment.WebcamFilePath) && File.Exists(segment.WebcamFilePath))
-                config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
         }
+        if ((!key.IsPrimaryVideo || key.WebcamPath != NormalizeOptionalPath(_project.WebcamFilePath))
+            && !string.IsNullOrWhiteSpace(key.WebcamPath) && File.Exists(key.WebcamPath))
+            config = config with { WebcamStyle = config.WebcamStyle ?? new WebcamOverlayStyle() };
         config = ApplyCursorAvailability(config, mouseData);
-
-        int recordingFps = isPrimary ? _project.Fps : segment.Fps;
-        if (recordingFps <= 0) recordingFps = _fps;
 
         var context = await BuildContextAsync(
             _device,
             segment.VideoFilePath,
             config,
             mouseData,
-            sourceWidth: isPrimary ? _project.Width : segment.SourceWidth,
-            sourceHeight: isPrimary ? _project.Height : segment.SourceHeight,
-            duration: ResolveSourceDuration(
-                _timeline,
-                segment.VideoFilePath,
-                isPrimary ? _project.Duration : segment.SourceStart + segment.SourceDuration),
-            mouseToVideoOffsetSeconds: isPrimary
-                ? _project.MouseToVideoOffsetSeconds
-                : segment.MouseToVideoOffsetSeconds,
-            cropOffsetX: isPrimary ? _project.CropOffsetX : segment.CropOffsetX,
-            cropOffsetY: isPrimary ? _project.CropOffsetY : segment.CropOffsetY,
-            dpiScale: isPrimary ? _project.DpiScale : segment.DpiScale,
-            webcamFilePath: isPrimary ? _project.WebcamFilePath : segment.WebcamFilePath,
-            recordingFps: recordingFps,
+            sourceWidth: key.SourceWidth,
+            sourceHeight: key.SourceHeight,
+            duration: key.Duration,
+            mouseToVideoOffsetSeconds: key.MouseOffset,
+            cropOffsetX: key.CropOffsetX,
+            cropOffsetY: key.CropOffsetY,
+            dpiScale: key.DpiScale,
+            webcamFilePath: key.WebcamPath,
+            recordingFps: key.RecordingFps,
             timeline: _timeline,
             ct);
 
@@ -908,7 +934,7 @@ public sealed class SegmentFrameComposer : IDisposable
         // Captured JPEG frames are preferred when they still exist, otherwise frames are
         // decoded from the finalized MP4. Either way they are indexed with the RECORDING fps.
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(
-            videoFilePath, recordingFps > 0 ? recordingFps : 30);
+            videoFilePath, recordingFps > 0 ? recordingFps : 30, forExport: true);
 
         // Only open the video file when it is actually needed: as the frame source when
         // no captured frames exist, or to recover dimensions the recording metadata does
@@ -1075,9 +1101,10 @@ public sealed class SegmentFrameComposer : IDisposable
 
         if (timeline is not null)
         {
-            foreach (var segment in timeline.Segments.OfType<VideoSegment>())
+            foreach (var item in timeline.Segments)
             {
-                if (!string.Equals(segment.VideoFilePath, videoFilePath, StringComparison.OrdinalIgnoreCase))
+                if (item is not VideoSegment segment
+                    || !string.Equals(segment.VideoFilePath, videoFilePath, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 var end = segment.SourceStart + segment.SourceDuration;
@@ -1149,6 +1176,46 @@ public sealed class SegmentFrameComposer : IDisposable
     }
 
     private static string NormalizePath(string path) => path.ToLowerInvariant();
+    private static string NormalizeOptionalPath(string? path)
+        => string.IsNullOrWhiteSpace(path) ? "" : NormalizePath(path);
+
+    private SourceKey CreateSourceKey(VideoSegment segment)
+    {
+        var duration = IsPrimarySource(segment.VideoFilePath)
+            ? _project.Duration : segment.SourceStart + segment.SourceDuration;
+        if (_sourceDurations.TryGetValue(segment.VideoFilePath, out var extent) && extent > duration)
+            duration = extent;
+        return CreateSourceKey(_project, _composition, _timeline, _fps, segment, duration);
+    }
+
+    internal static SourceKey CreateSourceKey(
+        Project project, CompositionConfig composition, TimelineModel? timeline, int outputFps,
+        VideoSegment? segment = null, TimeSpan? resolvedDuration = null)
+    {
+        string videoPath = segment?.VideoFilePath ?? project.VideoFilePath;
+        bool primaryVideo = string.Equals(videoPath, project.VideoFilePath, StringComparison.OrdinalIgnoreCase);
+        string cursorPath = NormalizeOptionalPath(primaryVideo && string.IsNullOrWhiteSpace(segment?.CursorDataFilePath)
+            ? project.CursorDataFilePath : segment?.CursorDataFilePath);
+        string webcamPath = NormalizeOptionalPath(primaryVideo && string.IsNullOrWhiteSpace(segment?.WebcamFilePath)
+            ? project.WebcamFilePath : segment?.WebcamFilePath);
+        bool primaryMouse = primaryVideo && cursorPath == NormalizeOptionalPath(project.CursorDataFilePath);
+        int recordingFps = primaryVideo ? project.Fps : segment!.Fps;
+
+        return new(
+            NormalizePath(videoPath), cursorPath, webcamPath,
+            segment?.FrameStyleOverride ?? composition.Background,
+            segment?.CursorStyleOverride ?? composition.Cursor,
+            primaryVideo, primaryMouse,
+            primaryVideo ? project.Width : segment!.SourceWidth,
+            primaryVideo ? project.Height : segment!.SourceHeight,
+            resolvedDuration ?? ResolveSourceDuration(timeline, videoPath,
+                primaryVideo ? project.Duration : segment!.SourceStart + segment.SourceDuration),
+            primaryMouse ? project.MouseToVideoOffsetSeconds : segment!.MouseToVideoOffsetSeconds,
+            primaryMouse ? project.CropOffsetX : segment!.CropOffsetX,
+            primaryMouse ? project.CropOffsetY : segment!.CropOffsetY,
+            primaryMouse ? project.DpiScale : segment!.DpiScale,
+            recordingFps > 0 ? recordingFps : outputFps);
+    }
 
     #endregion
 
@@ -1219,13 +1286,14 @@ public sealed class SegmentFrameComposer : IDisposable
     }
 
     /// <summary>
-    /// Identity of a render context: the same source file rendered with different
-    /// per-segment styles needs its own compositor, and segments sharing a file and
-    /// style share one.
+    /// All effective inputs used to build a source context. Lookup and retirement use the same factory.
     /// </summary>
-    private readonly record struct SourceKey(string Path, BackgroundStyle Background, CursorStyle Cursor);
+    internal readonly record struct SourceKey(
+        string Path, string CursorPath, string WebcamPath, BackgroundStyle Background, CursorStyle Cursor,
+        bool IsPrimaryVideo, bool UsePrimaryMouseData, int SourceWidth, int SourceHeight, TimeSpan Duration,
+        double MouseOffset, int CropOffsetX, int CropOffsetY, float DpiScale, int RecordingFps);
 
-    /// <summary>All render state owned for one (source file, style) combination.</summary>
+    /// <summary>All render state owned for one effective source identity.</summary>
     private sealed class SourceContext : IDisposable
     {
         public required string VideoFilePath { get; init; }

@@ -1,8 +1,10 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Effects;
 using Microsoft.Graphics.Canvas.Text;
+using Mixtri.Core.Diagnostics;
 using Mixtri.Core.Timeline;
 using Windows.Foundation;
 using Windows.UI;
@@ -21,11 +23,17 @@ public class TextSlideRenderer : IDisposable
 {
     private readonly CanvasDevice _device;
     private readonly AnimatedTextEngine _textEngine;
+    private readonly object _renderLock = new();
     private bool _disposed;
+    private CanvasTextFormat? _textFormat;
+    private (string Text, string Font, double Size, bool Bold, bool Italic, SlideTextAlignment Alignment, int W, int H) _textKey;
+    private double _textHeight;
 
     // Image background cache
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
+    private long _bgLoadGeneration;
+    internal Func<CanvasDevice, string, Task<CanvasBitmap>>? ImageLoaderOverride { get; set; }
 
     // Cached, slide-invariant base gradient. Only the per-frame displacement field
     // depends on time, so the underlying gradient texture is built once per
@@ -45,27 +53,53 @@ public class TextSlideRenderer : IDisposable
     public CanvasRenderTarget RenderSlide(
         TextSlideSegment slide, double progress, int width, int height, bool drawText = true)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_renderLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var target = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text slide frame");
+            try
+            {
+                RenderSlideCore(target, slide, progress, width, height, drawText);
+                return target;
+            }
+            catch
+            {
+                target.Dispose();
+                throw;
+            }
+        }
+    }
 
-        var target = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text slide frame");
+    private void RenderSlideCore(
+        CanvasRenderTarget target, TextSlideSegment slide, double progress, int width, int height, bool drawText)
+    {
         using var ds = target.CreateDrawingSession();
 
         DrawSlideBackground(ds, slide, progress, width, height);
 
         if (!drawText)
-            return target;
+            return;
 
-        using var format = AnimatedTextEngine.CreateFormat(
-            slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
-            ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
+        var key = (slide.Text, slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+            slide.TextAlignment, width, height);
+        if (_textFormat is null || _textKey != key)
+        {
+            _textFormat?.Dispose();
+            _textFormat = null;
+            _textHeight = MeasureTextHeight(slide, width * 0.84, height * 0.8);
+            _textFormat = AnimatedTextEngine.CreateFormat(
+                slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+                ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
+            _textKey = key;
+        }
+        double boxW = width * 0.84;
+        var rect = new Rect(slide.TextX * width - boxW / 2,
+            slide.TextY * height - _textHeight / 2, boxW, _textHeight);
 
-        var rect = ComputeTextRect(slide, width, height);
-
-        _textEngine.DrawAnimatedText(ds, slide.Text, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
+        _textEngine.DrawAnimatedText(ds, slide.Text, _textFormat, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
             slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
             TextAnimationWindow.FromSlide(slide));
 
-        return target;
     }
 
     /// <summary>
@@ -115,6 +149,11 @@ public class TextSlideRenderer : IDisposable
     private void DrawSlideBackground(
         CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
+        if (slide.BackgroundType != SlideBackgroundType.Image)
+        {
+            _bgLoadGeneration++;
+            ClearBackgroundCache();
+        }
         switch (slide.BackgroundType)
         {
             case SlideBackgroundType.Gradient:
@@ -252,31 +291,40 @@ public class TextSlideRenderer : IDisposable
     private void DrawImageBackground(
         CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
-        if (string.IsNullOrEmpty(slide.BackgroundImagePath) || !File.Exists(slide.BackgroundImagePath))
+        string? path = slide.BackgroundImagePath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
+            _bgLoadGeneration++;
+            ClearBackgroundCache();
             ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
             return;
         }
 
-        if (_bgImage is null || _bgImagePath != slide.BackgroundImagePath || _bgImage.Device != ds.Device)
+        if (!BackgroundMatches(ds.Device, path))
         {
-            _bgImage?.Dispose();
-            _bgImage = null;
-            _bgImagePath = null;
+            long generation = ++_bgLoadGeneration;
+            ClearBackgroundCache();
+            CanvasBitmap? loaded = null;
             try
             {
                 // Synchronous fallback. The UI/preview path pre-warms this cache via
                 // EnsureBackgroundLoadedAsync so this branch is only reached on the
                 // off-UI export thread (where blocking is acceptable).
-                _bgImage = CanvasBitmap.LoadAsync(ds.Device, slide.BackgroundImagePath)
-                    .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                _bgImagePath = slide.BackgroundImagePath;
+                loaded = LoadBackgroundImageAsync(ds.Device, path).ConfigureAwait(false).GetAwaiter().GetResult();
+                if (!PublishBackground(loaded, path, generation))
+                {
+                    ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+                    return;
+                }
+                loaded = null;
             }
-            catch
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or COMException)
             {
+                DiagLog.Write("TextSlide", $"Background load failed for '{path}': {ex}");
                 ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
                 return;
             }
+            finally { loaded?.Dispose(); }
         }
 
         DrawKenBurns(ds, _bgImage!, slide, progress, width, height);
@@ -287,34 +335,75 @@ public class TextSlideRenderer : IDisposable
     /// synchronous <see cref="RenderSlide"/> never has to block the calling thread
     /// on file I/O + GPU decode. Call this from the UI/preview path before rendering
     /// an image-backed slide. A no-op for non-image slides or when the image is
-    /// already cached. Failures are swallowed (the renderer falls back to the slide's
-    /// solid background colour).
+    /// already cached. Decode failures are logged and fall back to the slide's solid colour.
     /// </summary>
     public async Task EnsureBackgroundLoadedAsync(TextSlideSegment slide)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        string? path;
+        long generation;
+        lock (_renderLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            generation = ++_bgLoadGeneration;
+            path = slide.BackgroundType == SlideBackgroundType.Image ? slide.BackgroundImagePath : null;
+            if (string.IsNullOrEmpty(path))
+            {
+                ClearBackgroundCache();
+                return;
+            }
+            if (BackgroundMatches(_device, path)) return;
+        }
 
-        if (slide.BackgroundType != SlideBackgroundType.Image)
-            return;
-
-        var path = slide.BackgroundImagePath;
-        if (string.IsNullOrEmpty(path) || !File.Exists(path))
-            return;
-
-        if (_bgImage is not null && _bgImagePath == path && _bgImage.Device == _device)
-            return;
-
+        CanvasBitmap? loaded = null;
         try
         {
-            var loaded = await CanvasBitmap.LoadAsync(_device, path).AsTask().ConfigureAwait(false);
-            _bgImage?.Dispose();
-            _bgImage = loaded;
-            _bgImagePath = path;
+            if (!File.Exists(path))
+            {
+                lock (_renderLock)
+                    if (!_disposed && generation == _bgLoadGeneration) ClearBackgroundCache();
+                DiagLog.Write("TextSlide", $"Background image is missing: '{path}'.");
+                return;
+            }
+
+            loaded = await LoadBackgroundImageAsync(_device, path).ConfigureAwait(false);
+            lock (_renderLock)
+            {
+                if (slide.BackgroundType == SlideBackgroundType.Image
+                    && string.Equals(path, slide.BackgroundImagePath, StringComparison.OrdinalIgnoreCase)
+                    && PublishBackground(loaded, path, generation))
+                    loaded = null;
+            }
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or COMException)
         {
-            // Leave the cache empty; DrawImageBackground falls back to the solid colour.
+            DiagLog.Write("TextSlide", $"Background preload failed for '{path}': {ex}");
         }
+        finally { loaded?.Dispose(); }
+    }
+
+    private Task<CanvasBitmap> LoadBackgroundImageAsync(CanvasDevice device, string path)
+        => ImageLoaderOverride?.Invoke(device, path) ?? CanvasBitmap.LoadAsync(device, path).AsTask();
+
+    // Rendering, publication, and disposal all hold _renderLock. The async decode does not.
+    private bool BackgroundMatches(CanvasDevice device, string path)
+        => _bgImage is not null && _bgImage.Device == device
+            && string.Equals(_bgImagePath, path, StringComparison.OrdinalIgnoreCase);
+
+    private bool PublishBackground(CanvasBitmap loaded, string path, long generation)
+    {
+        if (_disposed || generation != _bgLoadGeneration) return false;
+        ClearBackgroundCache();
+        _bgImage = loaded;
+        _bgImagePath = path;
+        return true;
+    }
+
+    private void ClearBackgroundCache()
+    {
+        var previous = _bgImage;
+        _bgImage = null;
+        _bgImagePath = null;
+        previous?.Dispose();
     }
 
     /// <summary>
@@ -363,13 +452,19 @@ public class TextSlideRenderer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _bgImage?.Dispose();
-        _gradientCache?.Dispose();
-        // The engine owns a cached scratch render target for its blurred-text passes,
-        // so it has to be released with the renderer that created it.
-        _textEngine.Dispose();
+        lock (_renderLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _bgLoadGeneration++;
+            ClearBackgroundCache();
+            _gradientCache?.Dispose();
+            _gradientCache = null;
+            _textFormat?.Dispose();
+            _textFormat = null;
+            // The engine owns the scratch target used by blurred-text passes.
+            _textEngine.Dispose();
+        }
         GC.SuppressFinalize(this);
     }
 }

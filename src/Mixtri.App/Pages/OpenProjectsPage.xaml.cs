@@ -22,8 +22,6 @@ public sealed class ProjectCard
     /// the order within a day, and is the same value the card's date shows.
     /// </summary>
     public DateTime ModifiedAt { get; init; }
-
-    public BitmapImage? Poster { get; init; }
 }
 
 /// <summary>
@@ -40,24 +38,90 @@ public sealed class ProjectGroup
 /// file.
 /// </summary>
 /// <remarks>
-/// Cards are built from each package's manifest and poster entry only — no media is
-/// extracted — so listing stays cheap regardless of how large the recordings are.
+/// Cards use package manifests; posters are loaded only for realized image controls.
+/// No recording media is extracted, and cards do not retain decoded images offscreen.
 /// </remarks>
 public sealed partial class OpenProjectsPage : Page
 {
     private bool _isLoading;
+    private bool _pageLoaded;
+    private bool _postersVisible;
+    private bool _refreshNeeded = true;
+    private int _refreshGeneration;
+    private CancellationTokenSource? _refreshCts;
+    private readonly HashSet<Image> _realizedPosters = [];
+    private readonly Dictionary<Image, PosterRequest> _posterRequests = [];
+    private readonly SemaphoreSlim _posterGate = new(1, 1);
+
+    private sealed class PosterRequest(ProjectCard card)
+    {
+        internal ProjectCard Card { get; } = card;
+        internal CancellationTokenSource? Cancellation = new();
+
+        internal void Cancel()
+        {
+            var cancellation = Cancellation;
+            Cancellation = null;
+            cancellation?.Cancel();
+            cancellation?.Dispose();
+        }
+    }
 
     public OpenProjectsPage()
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs e) => await RefreshAsync();
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _pageLoaded = true;
+        SetImageResourceVisibility(App.Current.MainAppWindow is not MainWindow main || main.IsForegroundVisible);
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _pageLoaded = false;
+        SetImageResourceVisibility(false);
+        _realizedPosters.Clear();
+        ProjectsGrid.ItemsSource = null;
+        ProjectsSource.Source = null;
+        _refreshNeeded = true;
+    }
+
+    public void SetImageResourceVisibility(bool visible)
+    {
+        visible &= _pageLoaded;
+        if (_postersVisible == visible) return;
+        _postersVisible = visible;
+        if (!_postersVisible)
+        {
+            _refreshGeneration++;
+            _refreshCts?.Cancel();
+            _refreshCts?.Dispose();
+            _refreshCts = null;
+            _refreshNeeded |= _isLoading;
+            _isLoading = false;
+            LoadingRing.IsActive = false;
+            LoadingRing.Visibility = Visibility.Collapsed;
+            ClearPosters();
+            return;
+        }
+        if (_refreshNeeded) _ = RefreshAsync();
+        else foreach (var image in _realizedPosters) StartPosterLoad(image);
+    }
 
     private async Task RefreshAsync()
     {
-        if (_isLoading) return;
+        _refreshNeeded = true;
+        if (!_pageLoaded || !_postersVisible) return;
+        _refreshCts?.Cancel();
+        _refreshCts?.Dispose();
+        using var cancellation = new CancellationTokenSource();
+        _refreshCts = cancellation;
+        var ct = cancellation.Token;
+        int generation = ++_refreshGeneration;
         _isLoading = true;
 
         LoadingRing.IsActive = true;
@@ -66,18 +130,14 @@ public sealed partial class OpenProjectsPage : Page
 
         try
         {
-            var entries = await Task.Run(DiscoverProjects);
+            var entries = await Task.Run(() => DiscoverProjects(ct), ct);
 
             var cards = new List<ProjectCard>(entries.Count);
             foreach (var entry in entries)
             {
-                // Manifest and poster are read off the UI thread; the BitmapImage itself
-                // must be created on it.
-                var (name, subtitle, modified, poster) = await Task.Run(() => ReadCardData(entry));
-
-                BitmapImage? image = null;
-                if (poster is { Length: > 0 })
-                    image = await CreateBitmapAsync(poster);
+                ct.ThrowIfCancellationRequested();
+                var (name, subtitle, modified) = await Task.Run(() => ReadCardData(entry), ct);
+                ct.ThrowIfCancellationRequested();
 
                 cards.Add(new ProjectCard
                 {
@@ -85,24 +145,31 @@ public sealed partial class OpenProjectsPage : Page
                     Name = name,
                     Subtitle = subtitle,
                     ModifiedAt = modified,
-                    Poster = image,
                 });
             }
 
+            if (!_pageLoaded || !_postersVisible || generation != _refreshGeneration) return;
+            ClearPosters();
             ProjectsSource.Source = GroupByDay(cards);
             ProjectsGrid.ItemsSource = ProjectsSource.View;
             EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _refreshNeeded = false;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Refresh failed: {ex}");
-            EmptyState.Visibility = Visibility.Visible;
+            if (_pageLoaded && generation == _refreshGeneration) EmptyState.Visibility = Visibility.Visible;
         }
         finally
         {
-            LoadingRing.IsActive = false;
-            LoadingRing.Visibility = Visibility.Collapsed;
-            _isLoading = false;
+            if (generation == _refreshGeneration)
+            {
+                LoadingRing.IsActive = false;
+                LoadingRing.Visibility = Visibility.Collapsed;
+                _isLoading = false;
+            }
+            if (ReferenceEquals(_refreshCts, cancellation)) _refreshCts = null;
         }
     }
 
@@ -115,17 +182,22 @@ public sealed partial class OpenProjectsPage : Page
     /// on another machine and copied in. Scanning the save folder makes the page show
     /// what the user actually has, not just what this install happens to have recorded.
     /// </remarks>
-    private static List<RecentProject> DiscoverProjects()
+    private static List<RecentProject> DiscoverProjects(CancellationToken ct)
     {
         var byPath = new Dictionary<string, RecentProject>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var entry in RecentProjectsStore.Load())
+        {
+            ct.ThrowIfCancellationRequested();
             byPath[entry.Path] = entry;
+        }
 
         foreach (var folder in SaveFolders())
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
+                ct.ThrowIfCancellationRequested();
                 if (!Directory.Exists(folder))
                     continue;
 
@@ -150,6 +222,7 @@ public sealed partial class OpenProjectsPage : Page
                     };
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Scan '{folder}' failed: {ex.Message}");
@@ -211,11 +284,10 @@ public sealed partial class OpenProjectsPage : Page
             : day.ToString("d MMMM yyyy");
     }
 
-    private static (string Name, string Subtitle, DateTime Modified, byte[]? Poster) ReadCardData(
+    private static (string Name, string Subtitle, DateTime Modified) ReadCardData(
         RecentProject entry)
     {
         var manifest = MixtriPackageService.ReadManifest(entry.Path);
-        var poster = MixtriPackageService.ReadPoster(entry.Path);
 
         // The file name wins: it is what the user chose, what Explorer shows, and it stays
         // right even if the file is renamed outside the app. The stored project name is
@@ -243,7 +315,7 @@ public sealed partial class OpenProjectsPage : Page
         var modified = ResolveModifiedAt(entry, manifest, file);
 
         var subtitle = $"{FormatDuration(duration)}  ·  {FormatBytes(size)}  ·  {modified:d MMM yyyy}";
-        return (name!, subtitle, modified, poster);
+        return (name!, subtitle, modified);
     }
 
     /// <summary>
@@ -271,7 +343,85 @@ public sealed partial class OpenProjectsPage : Page
         return entry.LastUsedUtc.ToLocalTime().DateTime;
     }
 
-    private static async Task<BitmapImage?> CreateBitmapAsync(byte[] bytes)
+    private void Poster_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Image image) return;
+        _realizedPosters.Add(image);
+        StartPosterLoad(image);
+    }
+
+    private void Poster_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Image image) return;
+        _realizedPosters.Remove(image);
+        CancelPoster(image);
+    }
+
+    private void Poster_DataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
+    {
+        if (sender is Image image && _realizedPosters.Contains(image)) StartPosterLoad(image);
+    }
+
+    private void CancelPoster(Image image)
+    {
+        if (_posterRequests.Remove(image, out var request)) request.Cancel();
+        image.Source = null;
+    }
+
+    private void ClearPosters()
+    {
+        foreach (var request in _posterRequests.Values) request.Cancel();
+        _posterRequests.Clear();
+        foreach (var image in _realizedPosters) image.Source = null;
+    }
+
+    private void StartPosterLoad(Image image)
+    {
+        if (!_pageLoaded || !_postersVisible || !_realizedPosters.Contains(image)) return;
+        if (image.DataContext is not ProjectCard card)
+        {
+            CancelPoster(image);
+            return;
+        }
+        if (_posterRequests.TryGetValue(image, out var current) && ReferenceEquals(current.Card, card)) return;
+        CancelPoster(image);
+        var request = new PosterRequest(card);
+        _posterRequests[image] = request;
+        _ = LoadPosterAsync(image, request);
+    }
+
+    private async Task LoadPosterAsync(Image image, PosterRequest request)
+    {
+        var cancellation = request.Cancellation!;
+        var ct = cancellation.Token;
+        bool entered = false;
+        try
+        {
+            await _posterGate.WaitAsync(ct);
+            entered = true;
+            var bytes = await Task.Run(() => MixtriPackageService.ReadPoster(request.Card.Path), ct);
+            ct.ThrowIfCancellationRequested();
+            if (bytes is not { Length: > 0 }) return;
+            var bitmap = await CreateBitmapAsync(bytes, ct);
+            if (!ct.IsCancellationRequested && _pageLoaded && _postersVisible
+                && _realizedPosters.Contains(image) && ReferenceEquals(image.DataContext, request.Card)
+                && _posterRequests.TryGetValue(image, out var current) && ReferenceEquals(current, request))
+                image.Source = bitmap;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Poster load failed: {ex}");
+        }
+        finally
+        {
+            if (entered) _posterGate.Release();
+            if (ReferenceEquals(request.Cancellation, cancellation)) request.Cancellation = null;
+            cancellation.Dispose();
+        }
+    }
+
+    private static async Task<BitmapImage?> CreateBitmapAsync(byte[] bytes, CancellationToken ct)
     {
         try
         {
@@ -280,15 +430,16 @@ public sealed partial class OpenProjectsPage : Page
             using (var writer = new DataWriter(stream))
             {
                 writer.WriteBytes(bytes);
-                await writer.StoreAsync();
-                await writer.FlushAsync();
+                await writer.StoreAsync().AsTask(ct);
+                await writer.FlushAsync().AsTask(ct);
                 writer.DetachStream();
             }
 
             stream.Seek(0);
-            await image.SetSourceAsync(stream);
+            await image.SetSourceAsync(stream).AsTask(ct);
             return image;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Poster decode failed: {ex.Message}");
@@ -347,6 +498,11 @@ public sealed partial class OpenProjectsPage : Page
 
         try
         {
+            if (App.Current.EditorProcesses is { IsRecorder: true } processes)
+            {
+                await processes.OpenPackageAsync(packagePath);
+                return;
+            }
             await ProjectService.Instance.OpenPackageAsync(packagePath);
             (App.Current.MainAppWindow as MainWindow)?.ShowEditor();
         }

@@ -56,6 +56,7 @@ public class CursorRenderer : IDisposable
     private CanvasGeometry? _defaultCursorGeometry;
     private Dictionary<CursorShape, CursorGlyph>? _glyphs;
     private bool _disposed;
+    private readonly List<(CursorClick Click, double ClickTime)> _touchClicks = [];
 
     /// <summary>Recording start timestamp in ticks (from MouseRecordingData.StartTimestampTicks).</summary>
     public long StartTimestampTicks { get; set; }
@@ -168,6 +169,28 @@ public class CursorRenderer : IDisposable
         double lastMoveTimeSeconds,
         MotionBlurSettings? motionBlur = null,
         Vector2 cameraVelocity = default)
+        => RenderFrameCore(session, position, new CursorClickSource(activeClicks),
+            currentTimeSeconds, lastMoveTimeSeconds, motionBlur, cameraVelocity);
+
+    internal void RenderTransformedFrame(
+        CanvasDrawingSession session,
+        SmoothedPosition position,
+        List<CursorClick> activeClicks,
+        double currentTimeSeconds,
+        double lastMoveTimeSeconds,
+        MotionBlurSettings? motionBlur = null,
+        Vector2 cameraVelocity = default)
+        => RenderFrameCore(session, position, new CursorClickSource(activeClicks),
+            currentTimeSeconds, lastMoveTimeSeconds, motionBlur, cameraVelocity);
+
+    private void RenderFrameCore(
+        CanvasDrawingSession session,
+        SmoothedPosition position,
+        CursorClickSource activeClicks,
+        double currentTimeSeconds,
+        double lastMoveTimeSeconds,
+        MotionBlurSettings? motionBlur,
+        Vector2 cameraVelocity)
     {
         // Hidden: draw nothing at all. This has to be the FIRST check so that it also
         // suppresses the touch indicators, the click scale animation and both motion-blur
@@ -189,7 +212,7 @@ public class CursorRenderer : IDisposable
         float y = (float)position.Y;
 
         float clickScale = _style.ClickAnimationEnabled
-            ? GetClickScale(currentTimeSeconds, activeClicks, TickFrequency)
+            ? GetClickScaleCore(currentTimeSeconds, activeClicks, TickFrequency)
             : 1.0f;
 
         float finalScale = Math.Clamp(_style.Scale, 1.0f, 6.0f) * clickScale;
@@ -236,18 +259,20 @@ public class CursorRenderer : IDisposable
     /// </summary>
     private void RenderTouchClicks(
         CanvasDrawingSession session,
-        List<ClickEvent> activeClicks,
+        CursorClickSource activeClicks,
         double currentTimeSeconds)
     {
-        if (activeClicks is null || activeClicks.Count == 0 || TickFrequency <= 0)
+        var downClicks = _touchClicks;
+        downClicks.Clear();
+        if (activeClicks.Count == 0 || TickFrequency <= 0)
             return;
 
         float baseScale = Math.Clamp(_style.Scale, 1.0f, 6.0f);
 
         // Collect click-down events with computed click times (already sorted by timestamp)
-        var downClicks = new List<(ClickEvent Click, double ClickTime)>();
-        foreach (var click in activeClicks)
+        for (int i = 0; i < activeClicks.Count; i++)
         {
+            var click = activeClicks[i];
             if (!click.IsDown) continue;
             double clickTime = (click.TimestampTicks - StartTimestampTicks) / TickFrequency;
             downClicks.Add((click, clickTime));
@@ -278,7 +303,7 @@ public class CursorRenderer : IDisposable
     /// </summary>
     private void RenderTouchChain(
         CanvasDrawingSession session,
-        List<(ClickEvent Click, double ClickTime)> clicks,
+        List<(CursorClick Click, double ClickTime)> clicks,
         int startIdx, int endIdx,
         double currentTimeSeconds,
         float baseScale)
@@ -389,16 +414,20 @@ public class CursorRenderer : IDisposable
     /// On mouse-up:   0.8 → 1.0 over 200ms (SpringOut).
     /// </summary>
     public float GetClickScale(double currentTime, List<ClickEvent> clicks, double tickFrequency)
+        => GetClickScaleCore(currentTime, new CursorClickSource(clicks), tickFrequency);
+
+    private float GetClickScaleCore(double currentTime, CursorClickSource clicks, double tickFrequency)
     {
-        if (clicks == null || clicks.Count == 0 || tickFrequency <= 0)
+        if (clicks.Count == 0 || tickFrequency <= 0)
             return 1.0f;
 
         // Find the most recent down and up events before currentTime
         double latestDownTime = double.MinValue;
         double latestUpTime = double.MinValue;
 
-        foreach (var click in clicks)
+        for (int i = 0; i < clicks.Count; i++)
         {
+            var click = clicks[i];
             double clickTime = (click.TimestampTicks - StartTimestampTicks) / tickFrequency;
             if (clickTime > currentTime) continue;
 
@@ -850,11 +879,11 @@ public class CursorRenderer : IDisposable
     private Color ParseCursorColor(float opacity)
     {
         byte a = (byte)(opacity * 255);
-        string hex = (_style.Color ?? "#FFFFFF").TrimStart('#');
+        ReadOnlySpan<char> hex = (_style.Color ?? "#FFFFFF").AsSpan().TrimStart('#');
         if (hex.Length == 6 &&
-            byte.TryParse(hex.AsSpan(0, 2), System.Globalization.NumberStyles.HexNumber, null, out byte r) &&
-            byte.TryParse(hex.AsSpan(2, 2), System.Globalization.NumberStyles.HexNumber, null, out byte g) &&
-            byte.TryParse(hex.AsSpan(4, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b))
+            byte.TryParse(hex[..2], System.Globalization.NumberStyles.HexNumber, null, out byte r) &&
+            byte.TryParse(hex.Slice(2, 2), System.Globalization.NumberStyles.HexNumber, null, out byte g) &&
+            byte.TryParse(hex.Slice(4, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b))
         {
             return Color.FromArgb(a, r, g, b);
         }
@@ -913,5 +942,7 @@ public class CursorRenderer : IDisposable
         _defaultCursorGeometry = null;
         DisposeGlyphs();
         _shutterBlurScratchHolder.Dispose();
+        _touchClicks.Clear();
+        _touchClicks.Capacity = 0;
     }
 }

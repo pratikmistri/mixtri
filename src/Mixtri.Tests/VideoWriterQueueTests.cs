@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
 using Mixtri.Tests.TestSupport;
@@ -84,8 +85,8 @@ public class VideoWriterQueueTests
             "abort and dispose may drain pending frames while the writer loop is still stopping");
         Assert.IsFalse(options.SingleWriter,
             "capture callbacks may enqueue frames concurrently");
-        Assert.AreEqual(5, options.Capacity,
-            "the extra slot is reserved for the final gap-only marker");
+        Assert.AreEqual(4, options.Capacity,
+            "tail debt is drained after admitted producers exit; no marker slot is needed");
     }
 
     [TestMethod]
@@ -106,6 +107,7 @@ public class VideoWriterQueueTests
         Assert.AreEqual(Frames, writer.FrameCount, "blocking writes must never be dropped");
         Assert.AreEqual(0, writer.DroppedFrames);
         Assert.AreEqual(Frames, CountFrameFiles(writer));
+        Assert.AreEqual(0, writer.PooledTargets, "Stopped capture must not retain idle GPU surfaces during finalization.");
 
         for (int i = 0; i < Frames; i++)
         {
@@ -148,6 +150,158 @@ public class VideoWriterQueueTests
         Assert.AreEqual(4, writer.FrameCount, "slots owed at stop must still be written");
         Assert.AreEqual(4, CountFrameFiles(writer));
         Assert.AreEqual(TimeSpan.FromSeconds(4 / (double)Fps), writer.CfrDuration);
+    }
+
+    [TestMethod]
+    [DataRow(1920, 1080)]
+    [DataRow(3840, 2160)]
+    [DataRow(320, 240)]
+    public void QueueCapacityMatchesProducerAdmission(int width, int height)
+    {
+        int capacity = VideoWriter.ComputeQueueCapacity(width, height);
+        var options = VideoWriter.CreateQueueOptions(capacity);
+        Assert.AreEqual(capacity, options.Capacity);
+    }
+
+    [TestMethod]
+    public async Task StopWaitsForAdmittedProducer_BeforeDrainingItsLateGapSlots()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        var gate = (FrameSubmissionGate)typeof(VideoWriter)
+            .GetField("_frameAdmission", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(writer)!;
+        Assert.IsTrue(gate.TryEnter());
+        writer.StopAcceptingFrames();
+        var drain = writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        try
+        {
+            Assert.IsFalse(drain.IsCompleted);
+            Assert.IsFalse(gate.TryEnter(), "Stopping must reject any new producer.");
+            typeof(VideoWriter).GetField("_pendingSkippedSlots",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(writer, 3);
+        }
+        finally { gate.Exit(); }
+        await drain;
+        Assert.AreEqual(4L, writer.FrameCount);
+        Assert.AreEqual(4, CountFrameFiles(writer));
+        Assert.AreEqual(0, writer.QueuedFrames);
+    }
+
+    [TestMethod]
+    public async Task FinalizeRefusesDirectoryRead_WhenWriterIgnoresCancellation()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+
+        // Model an uncooperative external operation without stalling WinRT or adding a production hook.
+        var field = typeof(VideoWriter).GetField("_writerLoop",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var completedWriter = (Task)field.GetValue(writer)!;
+        var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        field.SetValue(writer, stalled.Task);
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            var failure = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+                writer.FinalizeAsync(cancellation.Token).WaitAsync(TimeSpan.FromSeconds(15)));
+            StringAssert.Contains(failure.Message, "frame writer did not stop");
+            Assert.IsFalse(writer.FinalizeSucceeded);
+            Assert.IsFalse(File.Exists(writer.OutputPath));
+            Assert.AreEqual(1, CountFrameFiles(writer));
+            Assert.AreEqual(0L, writer.DeleteCapturedFrames());
+        }
+        finally
+        {
+            stalled.TrySetResult();
+            field.SetValue(writer, completedWriter);
+        }
+    }
+
+    [TestMethod]
+    public async Task StaticTail_HoldsLastFrameThroughStopWithoutNewCaptures()    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(1.6));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+
+        Assert.AreEqual(16L, writer.FrameCount);
+        Assert.AreEqual(TimeSpan.FromSeconds(1.6), writer.CfrDuration);
+        var first = File.ReadAllBytes(Path.Combine(writer.FramesDirectory, "frame_00000000.jpg"));
+        var last = File.ReadAllBytes(Path.Combine(writer.FramesDirectory, "frame_00000015.jpg"));
+        CollectionAssert.AreEqual(first, last, "Holding a static frame must not re-encode or alter its pixels.");
+        if (new DriveInfo(Path.GetPathRoot(writer.FramesDirectory)!).DriveFormat == "NTFS")
+        {
+            Assert.AreEqual(15L, writer.LinkedGapFrames);
+            Assert.AreEqual(0L, writer.CopiedGapBytes);
+        }
+        Assert.IsFalse(Directory.EnumerateFiles(writer.FramesDirectory, "*.tmp").Any());
+        await writer.FinalizeAsync();
+        Assert.IsTrue(writer.FinalizeSucceeded);
+        if (writer.LinkedGapFrames > 0)
+        {
+            Assert.AreEqual(1L, writer.FinalizationDecodeCount, "A static held run should decode its JPEG only once.");
+            Assert.AreEqual(Width * Height * 4L, writer.MaximumDecodedCacheBytes);
+        }
+        var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(writer.OutputPath);
+        var properties = await file.Properties.GetVideoPropertiesAsync();
+        Assert.AreEqual(TimeSpan.FromSeconds(1.6), properties.Duration, "The MP4 must retain the same CFR duration.");
+    }
+
+    [TestMethod]
+    public async Task MinimumDuration_IsAppliedAfterQueuedFramesAndOwedSlots()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.WriteFrame(frame, TimeSpan.FromSeconds(.1));
+        writer.FillGapFrames(2);
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(.6));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        Assert.AreEqual(6L, writer.FrameCount, "Queued work and owed gaps must not be counted twice.");
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(6L, writer.FrameCount, "The first stop fixes the duration.");
+    }
+
+    [TestMethod]
+    public async Task MinimumDuration_DoesNotInventPixelsWhenNoFrameWasCaptured()
+    {
+        using var writer = CreateWriter();
+        writer.StopAcceptingFrames(TimeSpan.FromSeconds(2));
+        await writer.WaitForQuiescenceAsync(Quiescence, CancellationToken.None);
+        Assert.AreEqual(0L, writer.FrameCount);
+        Assert.AreEqual(0, CountFrameFiles(writer));
+    }
+
+    [TestMethod]
+    [DataRow(0L, 10, 0L)]
+    [DataRow(1L, 10, 1L)]
+    [DataRow(3000000L, 10, 3L)]
+    [DataRow(3000001L, 10, 4L)]
+    [DataRow(10000000L, 30, 30L)]
+    public void MinimumFrameCount_RoundsUpAtExactTickBoundaries(long ticks, int fps, long expected)
+    {
+        Assert.AreEqual(expected, VideoWriter.GetMinimumFrameCount(TimeSpan.FromTicks(ticks), fps));
+    }
+
+    [TestMethod]
+    public async Task StaticTail_CancellationStopsGapWritingBeforeReturning()
+    {
+        using var writer = CreateWriter();
+        using var frame = CreateFrame();
+        writer.WriteFrame(frame, TimeSpan.Zero);
+        writer.StopAcceptingFrames(TimeSpan.FromHours(1));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsExceptionAsync<TaskCanceledException>(() =>
+            writer.WaitForQuiescenceAsync(Quiescence, cancellation.Token));
+        long settled = writer.FrameCount;
+        await Task.Delay(50);
+        Assert.AreEqual(settled, writer.FrameCount, "Cancellation must leave no background writes racing finalization.");
     }
 
     [TestMethod]

@@ -48,6 +48,15 @@
                         <ComboBoxItem Content="Mini mode (compact toolbar)" Tag="Mini" />
                         <ComboBoxItem Content="Full app window" Tag="Full" />
                     </ComboBox>
+                    <ToggleSwitch
+                        x:Name="SeparateEditorToggle"
+                        Header="Release editor memory on close"
+                        Toggled="SeparateEditorToggle_Toggled"
+                        ToolTipService.ToolTip="Runs the full app window in a separate process while Mini and hotkeys stay available. Restart Mixtri after changing this setting." />
+                    <TextBlock
+                        Text="Releases full-window memory on close, but uses extra RAM while open. Reopening may take longer. Restart Mixtri after changing this setting."
+                        TextWrapping="Wrap"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <ComboBox
                         x:Name="ThemeSelector"
                         Header="Theme"

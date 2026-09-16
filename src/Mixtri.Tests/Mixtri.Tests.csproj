@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Mixtri.Core\Mixtri.Core.csproj" />
+    <Compile Include="..\Mixtri.App\Helpers\SuppressScope.cs" Link="TestSupport\SuppressScope.cs" />
+    <Compile Include="..\Mixtri.App\Controls\TimelineDrawingResources.cs" Link="TestSupport\TimelineDrawingResources.cs" />
   </ItemGroup>
 
 </Project>

@@ -87,6 +87,7 @@ public class FrameCompositor : IDisposable
 
     /// <summary>Anchors belonging to THIS compositor's source recording. See <see cref="CursorAnchor"/>.</summary>
     private IReadOnlyList<CursorAnchor> _cursorAnchors = [];
+    private readonly List<CursorClick> _activeClicks = [];
     private MouseRecordingData? _mouseData;
     private CanvasBitmap? _webcamFrame;
     private int _sourceWidth;
@@ -695,7 +696,8 @@ public class FrameCompositor : IDisposable
     /// </remarks>
     public void SyncCursorAnchors(IReadOnlyList<CursorAnchor> anchors)
     {
-        _cursorAnchors = anchors ?? [];
+        if (_cursorAnchors.SequenceEqual(anchors ?? [])) return;
+        _cursorAnchors = anchors?.ToArray() ?? [];
         if (_basePositions.Count == 0) return;
 
         ApplyCursorAnchors();
@@ -707,6 +709,7 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private void ApplyCursorAnchors()
     {
+        CursorPathBuildCount++;
         _smoothedPositions = _cursorAnchors.Count == 0
             ? [.. _basePositions]
             : CursorPathWarp.Apply(
@@ -870,7 +873,8 @@ public class FrameCompositor : IDisposable
     /// <see cref="CursorPathWarp.ClickSpan"/>. Merging the two silently reinterpreted every
     /// existing project's accumulated zoom suppressions as disabled clicks.
     /// </remarks>
-    private IReadOnlyCollection<long> _disabledClickTicks = [];
+    internal int CursorPathBuildCount { get; private set; }
+    private HashSet<long> _disabledClickTicks = [];
 
     /// <summary>
     /// Updates which clicks have had their AUTO-ZOOM suppressed. Affects zoom generation only;
@@ -878,7 +882,8 @@ public class FrameCompositor : IDisposable
     /// </summary>
     public void SyncSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
     {
-        _suppressedClickTicks = suppressedTicks ?? [];
+        if (_suppressedClickTicks.SetEquals(suppressedTicks ?? [])) return;
+        _suppressedClickTicks = new(suppressedTicks ?? []);
         SyncZoomEngineSuppression();
     }
 
@@ -887,7 +892,8 @@ public class FrameCompositor : IDisposable
     /// </summary>
     public void SyncDisabledClickTicks(IReadOnlyCollection<long> disabledTicks)
     {
-        _disabledClickTicks = disabledTicks ?? [];
+        if (_disabledClickTicks.SetEquals(disabledTicks ?? [])) return;
+        _disabledClickTicks = new(disabledTicks ?? []);
 
         // A disabled click must not generate a zoom either, so the engine sees both sets.
         SyncZoomEngineSuppression();
@@ -899,7 +905,7 @@ public class FrameCompositor : IDisposable
         InvalidateClickDerivedState();
     }
 
-    private IReadOnlyCollection<long> _suppressedClickTicks = [];
+    private HashSet<long> _suppressedClickTicks = [];
 
     private void SyncZoomEngineSuppression()
     {
@@ -928,13 +934,22 @@ public class FrameCompositor : IDisposable
     /// and once up front when a compositor is created for preview or export. The
     /// <see cref="TextOverlayRenderer"/> is created lazily the first time a
     /// non-empty list is supplied, so a project with no overlays never allocates
-    /// one or touches the GPU for it.
+    /// one or touches the GPU for it. Removing the final overlay releases that renderer.
     /// </summary>
     public void SyncTextOverlays(IReadOnlyList<TextOverlaySegment> overlays)
     {
         _textOverlays = overlays ?? [];
-        if (_textOverlays.Count > 0)
+        if (_textOverlays.Count == 0)
+            ReleaseTextOverlayRenderer();
+        else
             _textOverlayRenderer ??= new TextOverlayRenderer(_device);
+    }
+
+    private void ReleaseTextOverlayRenderer()
+    {
+        var renderer = _textOverlayRenderer;
+        _textOverlayRenderer = null;
+        renderer?.Dispose();
     }
 
     /// <summary>
@@ -1290,9 +1305,13 @@ public class FrameCompositor : IDisposable
     /// </summary>
     private void RenderTextOverlays(CanvasRenderTarget output, double timeSeconds)
     {
-        if (_textOverlayRenderer is null || _textOverlays.Count == 0)
+        if (_textOverlays.Count == 0)
+        {
+            ReleaseTextOverlayRenderer();
             return;
+        }
 
+        _textOverlayRenderer ??= new TextOverlayRenderer(_device);
         var sourceTime = TimeSpan.FromSeconds(timeSeconds);
         _textOverlayRenderer.Render(output, _textOverlays, sourceTime, OutputWidth, OutputHeight);
     }
@@ -1871,7 +1890,7 @@ public class FrameCompositor : IDisposable
 
         double lastMoveTime = _lastMoveTimes[frameIndex];
 
-        _cursorRenderer.RenderFrame(
+        _cursorRenderer.RenderTransformedFrame(
             session, transformedPos, activeClicks, timeSeconds, lastMoveTime, motionBlur, cameraVelocity);
     }
 
@@ -1881,15 +1900,17 @@ public class FrameCompositor : IDisposable
     /// Uses binary search for efficient lookup (clicks are sorted by TimestampTicks).
     /// The wider window (vs ±1s) ensures touch cursor chains can see upcoming clicks
     /// needed for smooth transitions between consecutive taps.
+    /// The returned scratch list is consumed synchronously before the next frame replaces it.
     /// </summary>
-    private List<ClickEvent> GetActiveClicks(
+    private List<CursorClick> GetActiveClicks(
         double timeSeconds, Rect viewport,
         float scaleX, float scaleY)
     {
-        if (_mouseData is null) return [];
+        var result = _activeClicks;
+        result.Clear();
+        if (_mouseData is null) return result;
 
         const double windowSeconds = 1.5;
-        var result = new List<ClickEvent>();
         var clicks = _mouseData.Clicks;
         if (clicks.Count == 0) return result;
 
@@ -1938,7 +1959,7 @@ public class FrameCompositor : IDisposable
             long adjustedTicks = click.TimestampTicks
                 - (long)(_mouseTimeOffset * tickFreq);
 
-            result.Add(new ClickEvent(adjustedTicks, cx, cy, click.Button, click.IsDown));
+            result.Add(new CursorClick(adjustedTicks, cx, cy, click.Button, click.IsDown));
         }
 
         return result;
@@ -1982,11 +2003,15 @@ public class FrameCompositor : IDisposable
             _bgCompositor.Dispose();
             _cursorRenderer.Dispose();
             _webcamCompositor?.Dispose();
-            _textOverlayRenderer?.Dispose();
+            _keyboardRenderer?.Dispose();
+            _subtitleBurner?.Dispose();
+            ReleaseTextOverlayRenderer();
             _smoothedPositions = [];
             _basePositions = [];
             _cursorAnchors = [];
             _clickDisplacements = [];
+            _activeClicks.Clear();
+            _activeClicks.Capacity = 0;
             _lastMoveTimes = [];
             _mouseData = null;
             _disposed = true;

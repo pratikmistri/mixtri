@@ -5,7 +5,6 @@ using Mixtri.Core.Processing;
 using Mixtri.Core.Settings;
 using Windows.Foundation;
 using Windows.Graphics.DirectX.Direct3D11;
-using Windows.Graphics.Imaging;
 using Windows.Media.Core;
 using Windows.Media.MediaProperties;
 using Windows.Media.Transcoding;
@@ -54,6 +53,14 @@ public sealed class VideoWriter : IDisposable
 
     /// <summary>Grace period given to the writer loop to observe cancellation before it is abandoned.</summary>
     private static readonly TimeSpan WriterShutdownGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Grace period given to outstanding sample decodes after finalization cancels them.
+    /// A WinRT JPEG decode that never observes cancellation must not be able to hang
+    /// <c>StopAsync</c> forever: the session's finalize watchdog is token-based, so an
+    /// unbounded wait here would sit outside it entirely.
+    /// </summary>
+    private static readonly TimeSpan SampleCleanupGrace = TimeSpan.FromSeconds(10);
 
     private const float JpegQuality = 0.85f;
 
@@ -115,7 +122,10 @@ public sealed class VideoWriter : IDisposable
     private volatile bool _disposed;
 
     // Track actual timestamps for each frame to handle variable capture rate
-    private readonly List<TimeSpan> _frameTimestamps = new(1000);
+    private long _timestampCount;
+    private TimeSpan _firstTimestamp;
+    private TimeSpan _previousTimestamp;
+    private TimeSpan _lastTimestamp;
     private readonly object _tsLock = new();
 
     // ── Bounded producer/consumer ───────────────────────────────────
@@ -124,11 +134,17 @@ public sealed class VideoWriter : IDisposable
     // encoding, gap filling and disk writes, so ordering needs no lock.
 
     private readonly Channel<PendingFrame> _frameQueue;
+    private readonly FrameSubmissionGate _frameAdmission;
     private readonly CancellationTokenSource _writerCts = new();
     private readonly Task _writerLoop;
     private readonly int _queueCapacity;
     private int _queueDepth;
     private int _writerCompleted;
+    private volatile bool _writerStopped;
+    private long _minimumFrameCount;
+    private readonly CaptureFrameFiles _frameFiles = new();
+    private long _finalizationDecodeCount;
+    private long _maximumDecodedCacheBytes;
 
     private long _droppedFrames;
     private long _failedWrites;
@@ -169,6 +185,11 @@ public sealed class VideoWriter : IDisposable
 
     /// <summary>Frames currently queued or being encoded (diagnostic).</summary>
     public int QueuedFrames => Volatile.Read(ref _queueDepth);
+    internal int PooledTargets { get { lock (_poolLock) return _targetPool.Count; } }
+    internal long LinkedGapFrames => _frameFiles.LinkedFrames;
+    internal long CopiedGapBytes => _frameFiles.CopiedBytes;
+    internal long FinalizationDecodeCount => Interlocked.Read(ref _finalizationDecodeCount);
+    internal long MaximumDecodedCacheBytes => Interlocked.Read(ref _maximumDecodedCacheBytes);
 
     /// <summary>
     /// Frames refused because the writer queue was saturated. Each one is replayed as a
@@ -216,16 +237,13 @@ public sealed class VideoWriter : IDisposable
         {
             lock (_tsLock)
             {
-                if (_frameTimestamps.Count <= 1)
+                if (_timestampCount <= 1)
                     return TimeSpan.Zero;
 
                 // Include the last frame's display time so the duration covers
                 // all captured frames, not just the span between first and last.
-                var frameDuration = _frameTimestamps.Count >= 2
-                    ? _frameTimestamps[^1] - _frameTimestamps[^2]
-                    : TimeSpan.FromSeconds(1.0 / _fps);
-
-                return _frameTimestamps[^1] - _frameTimestamps[0] + frameDuration;
+                var frameDuration = _lastTimestamp - _previousTimestamp;
+                return _lastTimestamp - _firstTimestamp + frameDuration;
             }
         }
     }
@@ -271,13 +289,13 @@ public sealed class VideoWriter : IDisposable
 
         _queueCapacity = ComputeQueueCapacity(width, height);
         _frameQueue = Channel.CreateBounded<PendingFrame>(CreateQueueOptions(_queueCapacity));
+        _frameAdmission = new FrameSubmissionGate(CompleteFrameQueue);
 
         _writerLoop = Task.Run(ProcessQueuedFramesAsync);
     }
 
     internal static BoundedChannelOptions CreateQueueOptions(int queueCapacity)
-        // +1 reserves a slot for the final gap-only marker enqueued by StopAcceptingFrames().
-        => new(queueCapacity + 1)
+        => new(queueCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
 
@@ -324,13 +342,16 @@ public sealed class VideoWriter : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Frames still in flight when the capture stops are expected, not an error.
-        if (_stopAccepting)
+        if (_stopAccepting || !_frameAdmission.TryEnter())
             return false;
 
-        if (_finalized)
-            throw new InvalidOperationException("Writer has been finalized.");
+        try { return WriteAcceptedFrame(surface, timestamp, skippedSlots, block); }
+        finally { _frameAdmission.Exit(); }
+    }
 
+    private bool WriteAcceptedFrame(
+        IDirect3DSurface surface, TimeSpan timestamp, int skippedSlots, bool block)
+    {
         if (skippedSlots < 0)
             skippedSlots = 0;
 
@@ -348,8 +369,7 @@ public sealed class VideoWriter : IDisposable
             int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
             if (!_frameQueue.Writer.TryWrite(new PendingFrame(copy, timestamp, skippedSlots + owed)))
             {
-                // The queue closed underneath us (stop/dispose raced this callback).
-                Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + owed);
+                Interlocked.Add(ref _pendingSkippedSlots, skippedSlots + owed + 1);
                 ReleaseFrame(new PendingFrame(copy, timestamp, 0));
                 return false;
             }
@@ -476,7 +496,7 @@ public sealed class VideoWriter : IDisposable
     {
         lock (_poolLock)
         {
-            if (!_disposed
+            if (!_disposed && !_stopAccepting
                 && (int)target.SizeInPixels.Width == _poolWidth
                 && (int)target.SizeInPixels.Height == _poolHeight
                 && _targetPool.Count <= _queueCapacity)
@@ -532,6 +552,15 @@ public sealed class VideoWriter : IDisposable
                         return;
                 }
             }
+            // Queue completion follows the last admitted producer, so no later submission
+            // can accrue more debt after this final drain.
+            int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+            if (owed > 0)
+                FillGapFramesCore(owed, ct);
+
+            long remaining = Interlocked.Read(ref _minimumFrameCount) - FrameCount;
+            if (remaining > 0)
+                FillGapFramesCore(remaining, ct);
         }
         catch (OperationCanceledException)
         {
@@ -545,6 +574,7 @@ public sealed class VideoWriter : IDisposable
         }
         finally
         {
+            _writerStopped = true;
             DrainQueue();
         }
     }
@@ -552,28 +582,30 @@ public sealed class VideoWriter : IDisposable
     private async Task WriteQueuedFrameAsync(PendingFrame frame, CancellationToken ct)
     {
         if (frame.SkippedSlots > 0)
-            FillGapFramesCore(frame.SkippedSlots);
+            FillGapFramesCore(frame.SkippedSlots, ct);
 
         if (frame.Bitmap is null)
             return;
 
         long index = Interlocked.Read(ref _frameCount);
         string framePath = Path.Combine(_framesDir, $"frame_{index:D8}.jpg");
+        string temporaryPath = framePath + ".tmp";
 
         try
         {
             ct.ThrowIfCancellationRequested();
 
-            using (var stream = new FileStream(framePath, FileMode.Create, FileAccess.Write))
+            using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write))
             {
                 await frame.Bitmap
                     .SaveAsync(stream.AsRandomAccessStream(), CanvasBitmapFileFormat.Jpeg, JpegQuality)
                     .AsTask(ct).ConfigureAwait(false);
             }
+            CaptureFrameFiles.Publish(temporaryPath, framePath);
 
             lock (_tsLock)
             {
-                _frameTimestamps.Add(frame.Timestamp);
+                AddTimestamp(frame.Timestamp);
             }
 
             // Publish the frame only once its JPEG is on disk: FrameCount is the
@@ -583,11 +615,13 @@ public sealed class VideoWriter : IDisposable
         }
         catch (OperationCanceledException)
         {
+            TryDeleteFrameFile(temporaryPath);
             TryDeleteFrameFile(framePath);
             throw;
         }
         catch (Exception ex)
         {
+            TryDeleteFrameFile(temporaryPath);
             TryDeleteFrameFile(framePath);
             RecordWriteFailure(ex, index);
         }
@@ -597,7 +631,7 @@ public sealed class VideoWriter : IDisposable
     /// Fills missed frame slots by duplicating the most recently written JPEG so frame N
     /// always corresponds to wall-clock time N/fps. Writer-thread only.
     /// </summary>
-    private void FillGapFramesCore(int count)
+    private void FillGapFramesCore(long count, CancellationToken ct)
     {
         long prevIndex = Interlocked.Read(ref _frameCount) - 1;
         if (prevIndex < 0) return;
@@ -605,22 +639,25 @@ public sealed class VideoWriter : IDisposable
         string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
         if (!File.Exists(srcPath)) return;
 
-        for (int i = 0; i < count; i++)
+        for (long i = 0; i < count; i++)
         {
+            ct.ThrowIfCancellationRequested();
             long gapIndex = Interlocked.Read(ref _frameCount);
             string dstPath = Path.Combine(_framesDir, $"frame_{gapIndex:D8}.jpg");
 
             try
             {
-                File.Copy(srcPath, dstPath, overwrite: true);
+                _frameFiles.Duplicate(srcPath, dstPath);
+                // A copy at the filesystem's link limit becomes the next chain's anchor.
+                srcPath = dstPath;
 
                 // Synthetic timestamp: interpolate between previous and next slot
                 lock (_tsLock)
                 {
-                    var lastTs = _frameTimestamps.Count > 0
-                        ? _frameTimestamps[^1]
+                    var lastTs = _timestampCount > 0
+                        ? _lastTimestamp
                         : TimeSpan.Zero;
-                    _frameTimestamps.Add(lastTs + TimeSpan.FromSeconds(1.0 / _fps));
+                    AddTimestamp(lastTs + TimeSpan.FromSeconds(1.0 / _fps));
                 }
 
                 Interlocked.Increment(ref _frameCount);
@@ -634,6 +671,13 @@ public sealed class VideoWriter : IDisposable
                 return;
             }
         }
+    }
+
+    private void AddTimestamp(TimeSpan timestamp)
+    {
+        if (_timestampCount++ == 0) _firstTimestamp = timestamp;
+        _previousTimestamp = _lastTimestamp;
+        _lastTimestamp = timestamp;
     }
 
     private void ReleaseFrame(PendingFrame frame)
@@ -706,24 +750,38 @@ public sealed class VideoWriter : IDisposable
     /// Closes the frame gate. Already-queued frames are still written; anything the capture
     /// engine hands over afterwards is ignored. Idempotent.
     /// </summary>
-    public void StopAcceptingFrames()
+    public void StopAcceptingFrames() => StopAcceptingFramesCore(0);
+
+    /// <summary>Holds the final captured frame through the requested content duration.</summary>
+    public void StopAcceptingFrames(TimeSpan minimumDuration)
+        => StopAcceptingFramesCore(GetMinimumFrameCount(minimumDuration, _fps));
+
+    internal static long GetMinimumFrameCount(TimeSpan duration, int fps)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(duration.Ticks, nameof(duration));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fps);
+        long seconds = Math.DivRem(duration.Ticks, TimeSpan.TicksPerSecond, out long remainder);
+        return checked(seconds * fps + (remainder * fps + TimeSpan.TicksPerSecond - 1) / TimeSpan.TicksPerSecond);
+    }
+
+    private void StopAcceptingFramesCore(long minimumFrameCount)
     {
         _stopAccepting = true;
 
         if (Interlocked.Exchange(ref _writerCompleted, 1) != 0)
             return;
 
-        // Flush the CFR slots owed by dropped frames so a recording whose tail was dropped
-        // still ends at the right wall-clock time.
-        int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
-        if (owed > 0)
-        {
-            Interlocked.Increment(ref _queueDepth);
-            if (!_frameQueue.Writer.TryWrite(new PendingFrame(null, TimeSpan.Zero, owed)))
-                Interlocked.Decrement(ref _queueDepth);
-        }
+        Interlocked.Exchange(ref _minimumFrameCount, minimumFrameCount);
+        ClearTargetPool();
 
+        _frameAdmission.Close();
+    }
+
+    private void CompleteFrameQueue()
+    {
         _frameQueue.Writer.TryComplete();
+        if (_writerStopped || _writerCts.IsCancellationRequested)
+            DrainQueue();
     }
 
     /// <summary>
@@ -780,10 +838,11 @@ public sealed class VideoWriter : IDisposable
         if (count <= 0) return;
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_stopAccepting)
+        if (_stopAccepting || !_frameAdmission.TryEnter())
             return;
 
-        Interlocked.Add(ref _pendingSkippedSlots, count);
+        try { Interlocked.Add(ref _pendingSkippedSlots, count); }
+        finally { _frameAdmission.Exit(); }
     }
 
     /// <summary>
@@ -864,39 +923,46 @@ public sealed class VideoWriter : IDisposable
         long firstFrameErrorIndex = -1;
         var frameErrorLock = new object();
 
-        using var finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var finalizeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // Not a `using`: if cleanup below has to abandon a stuck decode, ownership of the
+        // decoder moves to a continuation so it is never disposed out from under a task
+        // that is still reading it.
+        var frameDecoder = new CaptureFrameDecoder(
+            (int)profileWidth, (int)profileHeight, cacheLinkedFrames: _frameFiles.LinkedFrames > 0);
+        bool acceptingSamples = true;
 
-        streamSource.SampleRequested += (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
+        void OnSampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
         {
-            long frame = Interlocked.Increment(ref currentFrame);
-            if (frame >= totalFrames)
-            {
-                args.Request.Sample = null;
-                return;
-            }
-
-            var deferral = args.Request.GetDeferral();
-            var task = ProduceFrameSampleAsync(
-                args.Request, deferral, frame, (int)profileWidth, (int)profileHeight,
-                constantDuration, finalizeCts.Token,
-                onError: (ex, frameIdx) =>
-                {
-                    lock (frameErrorLock)
-                    {
-                        if (firstFrameError is null)
-                        {
-                            firstFrameError = ex;
-                            firstFrameErrorIndex = frameIdx;
-                        }
-                    }
-                });
-
             lock (pendingSamplesLock)
             {
+                long frame = Interlocked.Increment(ref currentFrame);
+                if (!acceptingSamples || frame >= totalFrames)
+                {
+                    args.Request.Sample = null;
+                    return;
+                }
+
+                var deferral = args.Request.GetDeferral();
+                var task = ProduceFrameSampleAsync(
+                    args.Request, deferral, frame, frameDecoder,
+                    constantDuration, finalizeCts.Token,
+                    onError: (ex, frameIdx) =>
+                    {
+                        lock (frameErrorLock)
+                        {
+                            if (firstFrameError is null)
+                            {
+                                firstFrameError = ex;
+                                firstFrameErrorIndex = frameIdx;
+                            }
+                        }
+                    });
+
                 pendingSamples.RemoveAll(t => t.IsCompleted);
                 pendingSamples.Add(task);
             }
-        };
+        }
+        streamSource.SampleRequested += OnSampleRequested;
 
         var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto);
         profile.Video ??= new VideoEncodingProperties();
@@ -926,12 +992,12 @@ public sealed class VideoWriter : IDisposable
         // process kill would otherwise destroy the only copy of the recording.
         string dir = Path.GetDirectoryName(_outputPath)!;
         var partialPath = _outputPath + PartialSuffix;
-        var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
-        var outputFile = await folder.CreateFileAsync(
-            Path.GetFileName(partialPath), CreationCollisionOption.ReplaceExisting);
 
         try
         {
+            var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(dir));
+            var outputFile = await folder.CreateFileAsync(
+                Path.GetFileName(partialPath), CreationCollisionOption.ReplaceExisting);
             using (var outputStream = await outputFile.OpenAsync(FileAccessMode.ReadWrite))
             {
                 var transcoder = new MediaTranscoder
@@ -997,6 +1063,58 @@ public sealed class VideoWriter : IDisposable
             catch (Exception ex) { Debug.WriteLine($"[VideoWriter] Could not remove partial MP4: {ex.Message}"); }
             throw;
         }
+        finally
+        {
+            Task[] remaining;
+            lock (pendingSamplesLock)
+            {
+                acceptingSamples = false;
+                remaining = pendingSamples.ToArray();
+            }
+            streamSource.SampleRequested -= OnSampleRequested;
+            finalizeCts.Cancel();
+
+            // Counters are plain reads, so capture them before ownership can move away.
+            Interlocked.Exchange(ref _finalizationDecodeCount, frameDecoder.DecodeCount);
+            Interlocked.Exchange(ref _maximumDecodedCacheBytes, frameDecoder.MaximumCachedBytes);
+
+            var cleanup = Task.WhenAll(remaining);
+            bool drained;
+            try
+            {
+                await cleanup.WaitAsync(SampleCleanupGrace).ConfigureAwait(false);
+                drained = true;
+            }
+            catch (TimeoutException)
+            {
+                drained = false;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[VideoWriter] Final sample cleanup failed: {ex}");
+                drained = true;
+            }
+
+            if (drained)
+            {
+                frameDecoder.Dispose();
+                finalizeCts.Dispose();
+            }
+            else
+            {
+                // A decode ignored cancellation. Return control to the caller so the stop
+                // watchdog stays meaningful, and let the stragglers release the decoder and
+                // the token source they are still holding.
+                Debug.WriteLine(
+                    $"[VideoWriter] {remaining.Length} sample task(s) did not observe cancellation; " +
+                    "deferring decoder disposal.");
+                _ = cleanup.ContinueWith(
+                    _ => { frameDecoder.Dispose(); finalizeCts.Dispose(); },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+        }
 
         // The MP4 is now the durable master for this recording, so the captured JPEGs
         // have served their purpose as a write-ahead buffer.
@@ -1009,7 +1127,7 @@ public sealed class VideoWriter : IDisposable
     /// </summary>
     /// <remarks>
     /// Older builds wrote a vertically flipped MP4 (see the <c>BitmapFlip.Vertical</c>
-    /// comment in <see cref="ProduceFrameSampleAsync"/>). Nothing displayed that file at
+    /// transform in <see cref="CaptureFrameDecoder"/>). Nothing displayed that file at
     /// the time, so the defect was invisible — but it means a legacy session's captured
     /// JPEGs are its only correctly oriented copy. Cleanup keys off this marker so those
     /// sessions keep their frames.
@@ -1103,8 +1221,7 @@ public sealed class VideoWriter : IDisposable
         MediaStreamSourceSampleRequest request,
         MediaStreamSourceSampleRequestDeferral deferral,
         long frameIndex,
-        int width,
-        int height,
+        CaptureFrameDecoder decoder,
         TimeSpan frameDuration,
         CancellationToken ct,
         Action<Exception, long>? onError)
@@ -1112,39 +1229,16 @@ public sealed class VideoWriter : IDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
+            // A cached hold can otherwise complete inline and re-enter SampleRequested
+            // before this producer has been added to the shutdown tracking list.
+            await Task.Yield();
 
             string framePath = Path.Combine(_framesDir, $"frame_{frameIndex:D8}.jpg");
             if (!File.Exists(framePath))
                 throw new FileNotFoundException("Frame JPEG not found.", framePath);
 
-            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
-            using var stream = await file.OpenAsync(FileAccessMode.Read);
-            var decoder = await BitmapDecoder.CreateAsync(stream);
-            var transform = new BitmapTransform
-            {
-                ScaledWidth = (uint)width,
-                ScaledHeight = (uint)height,
-                InterpolationMode = BitmapInterpolationMode.Fant,
-
-                // Media Foundation treats an uncompressed RGB media type with a positive
-                // stride as BOTTOM-UP, and `MediaStreamSample.CreateFromBuffer` hands it a
-                // raw buffer with no orientation metadata. The captured JPEGs are top-down,
-                // so without this the encoded MP4 comes out vertically mirrored.
-                // The export pipeline sidesteps the whole issue by passing a D3D surface
-                // (`MediaStreamSample.CreateFromDirect3D11Surface` in VideoEncoder), which
-                // carries its own orientation — this path cannot, so it flips explicitly.
-                Flip = BitmapFlip.Vertical,
-            };
-
-            using var bitmap = await decoder.GetSoftwareBitmapAsync(
-                BitmapPixelFormat.Bgra8,
-                BitmapAlphaMode.Premultiplied,
-                transform,
-                ExifOrientationMode.IgnoreExifOrientation,
-                ColorManagementMode.DoNotColorManage);
-
-            var buffer = new Windows.Storage.Streams.Buffer((uint)((long)width * height * 4));
-            bitmap.CopyToBuffer(buffer);
+            var buffer = await decoder.ReadAsync(framePath, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
 
             var timestamp = TimeSpan.FromSeconds((double)frameIndex / _fps);
             var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);
@@ -1164,9 +1258,16 @@ public sealed class VideoWriter : IDisposable
     }
 
     /// <summary>
-    /// Stops the frame gate and waits for the writer loop to finish, so finalization never
-    /// races a pending JPEG write. Falls back to cancelling the loop if it will not drain.
+    /// Ensures the writer loop has stopped touching the frames directory before finalization
+    /// reads it.
     /// </summary>
+    /// <remarks>
+    /// Aborting is bounded, so it can return with the loop still alive. Finalization must not
+    /// proceed in that state: it snapshots <c>_frameCount</c> and then enumerates and reads the
+    /// directory, so a still-running writer can publish further JPEGs and leave the MP4 a
+    /// truncated, inconsistent view of the capture. Failing here instead keeps the captured
+    /// frames, which remain the durable master for the take.
+    /// </remarks>
     private async Task DrainWriterForFinalizeAsync(CancellationToken ct)
     {
         StopAcceptingFrames();
@@ -1183,6 +1284,11 @@ public sealed class VideoWriter : IDisposable
             Debug.WriteLine($"[VideoWriter] Writer did not drain before finalize: {ex.Message}");
             await AbortWriterAsync().ConfigureAwait(false);
         }
+
+        if (!_writerLoop.IsCompleted)
+            throw new InvalidOperationException(
+                "The frame writer did not stop before finalization, so the MP4 would not match the "
+                + "captured frames. The recording's frames have been preserved.");
     }
 
     public void Dispose()

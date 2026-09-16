@@ -26,9 +26,15 @@ public record KeyboardOverlayStyle
 /// Renders keyboard shortcut overlays (e.g., "Ctrl + S") as pill/badge shapes
 /// with fade-in/out animation on a Win2D drawing session.
 /// </summary>
-public class KeyboardOverlayRenderer
+public class KeyboardOverlayRenderer : IDisposable
 {
     private readonly KeyboardOverlayStyle _style;
+    private CanvasTextFormat? _format;
+    private CanvasTextLayout? _layout;
+    private CanvasDevice? _layoutDevice;
+    private (string Text, int W, int H) _layoutKey;
+    private KeyPressEvent? _labelEvent;
+    private string? _label;
 
     public KeyboardOverlayRenderer(KeyboardOverlayStyle style)
     {
@@ -79,7 +85,16 @@ public class KeyboardOverlayRenderer
         string? bestComboText = null;
         double bestComboTime = double.MinValue;
 
-        for (int i = events.Count - 1; i >= 0; i--)
+        int lo = 0, hi = events.Count;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            if ((events[mid].TimestampTicks - originTick) / tickFrequency <= currentTimeSeconds)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        for (int i = lo - 1; i >= 0; i--)
         {
             var evt = events[i];
             if (!evt.IsDown) continue;
@@ -89,8 +104,8 @@ public class KeyboardOverlayRenderer
             // Only consider events within the display window
             double elapsed = currentTimeSeconds - eventTime;
             double totalDuration = _style.DisplayDurationSeconds + _style.FadeDurationSeconds;
-            if (elapsed < 0 || elapsed > totalDuration)
-                continue;
+            if (elapsed > totalDuration) break;
+            if (elapsed < 0) continue;
 
             // Filter: skip non-modifier combos if ModifierCombosOnly
             if (_style.ModifierCombosOnly && !evt.IsCtrl && !evt.IsAlt && !evt.IsShift && !evt.IsWin)
@@ -106,7 +121,12 @@ public class KeyboardOverlayRenderer
             if (eventTime > bestComboTime)
             {
                 bestComboTime = eventTime;
-                bestComboText = BuildComboString(evt);
+                if (_labelEvent != evt)
+                {
+                    _label = BuildComboString(evt);
+                    _labelEvent = evt;
+                }
+                bestComboText = _label;
             }
 
             // We found the most recent qualifying event; stop searching
@@ -175,7 +195,7 @@ public class KeyboardOverlayRenderer
         var bgColor = ColorHelper.ParseColor(_style.BackgroundColor);
         bgColor = Windows.UI.Color.FromArgb((byte)(opacity * bgColor.A), bgColor.R, bgColor.G, bgColor.B);
 
-        using var format = new CanvasTextFormat
+        _format ??= new CanvasTextFormat
         {
             FontFamily = _style.FontFamily,
             FontSize = _style.FontSize,
@@ -184,9 +204,17 @@ public class KeyboardOverlayRenderer
         };
 
         // Measure text to determine pill size
-        using var layout = new CanvasTextLayout(session, text, format, canvasWidth, canvasHeight);
-        float textWidth = (float)layout.DrawBounds.Width;
-        float textHeight = (float)layout.DrawBounds.Height;
+        var key = (text, canvasWidth, canvasHeight);
+        if (_layout is null || _layoutKey != key || _layoutDevice != session.Device)
+        {
+            _layout?.Dispose();
+            _layout = null;
+            _layout = new CanvasTextLayout(session, text, _format, canvasWidth, canvasHeight);
+            _layoutKey = key;
+            _layoutDevice = session.Device;
+        }
+        float textWidth = (float)_layout.DrawBounds.Width;
+        float textHeight = (float)_layout.DrawBounds.Height;
 
         float pillWidth = textWidth + _style.Padding * 2;
         float pillHeight = textHeight + _style.Padding * 2;
@@ -206,13 +234,15 @@ public class KeyboardOverlayRenderer
             text,
             new System.Numerics.Vector2(pillX + pillWidth / 2f, pillY + pillHeight / 2f),
             textColor,
-            new CanvasTextFormat
-            {
-                FontFamily = _style.FontFamily,
-                FontSize = _style.FontSize,
-                HorizontalAlignment = CanvasHorizontalAlignment.Center,
-                VerticalAlignment = CanvasVerticalAlignment.Center,
-            });
+            _format);
+    }
+
+    public void Dispose()
+    {
+        _layout?.Dispose();
+        _layout = null;
+        _format?.Dispose();
+        _format = null;
     }
 
     private (float x, float y) CalculatePillPosition(int canvasWidth, int canvasHeight,

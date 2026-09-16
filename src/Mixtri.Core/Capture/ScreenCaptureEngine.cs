@@ -100,26 +100,42 @@ public sealed class ScreenCaptureEngine : IDisposable
         }
     }
 
-    public void StartCapture()
+    /// <summary>Allocates and validates capture resources without starting frame delivery.</summary>
+    internal void PrepareCapture()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_itemClosed) throw new InvalidOperationException("The capture target is no longer available.");
+        if (_session is not null) return;
 
-        if (IsRecording)
-            return;
-
-        _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+        var framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
             _device,
             DirectXPixelFormat.B8G8R8A8UIntNormalized,
             2,
             _captureItem.Size);
 
-        _framePool.FrameArrived += OnFrameArrived;
+        GraphicsCaptureSession? session = null;
+        try
+        {
+            session = framePool.CreateCaptureSession(_captureItem);
+            if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
+                session.IsCursorCaptureEnabled = false;
+            framePool.FrameArrived += OnFrameArrived;
+            _framePool = framePool;
+            _session = session;
+        }
+        catch
+        {
+            session?.Dispose();
+            framePool.Dispose();
+            throw;
+        }
+    }
 
-        _session = _framePool.CreateCaptureSession(_captureItem);
-
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
-            _session.IsCursorCaptureEnabled = false;
-
+    public void StartCapture()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (IsRecording) return;
+        PrepareCapture();
         Interlocked.Exchange(ref _framesCaptured, 0);
         Interlocked.Exchange(ref _droppedFrames, 0);
         Interlocked.Exchange(ref _throttledFrames, 0);
@@ -127,7 +143,7 @@ public sealed class ScreenCaptureEngine : IDisposable
         _isPaused = false;
 
         _stopwatch.Restart();
-        _session.StartCapture();
+        _session!.StartCapture();
         IsRecording = true;
 
         CaptureStarted?.Invoke(this, EventArgs.Empty);
@@ -135,9 +151,9 @@ public sealed class ScreenCaptureEngine : IDisposable
 
     public void StopCapture()
     {
-        if (!IsRecording)
-            return;
+        if (_session is null && _framePool is null) return;
 
+        bool wasRecording = IsRecording;
         _stopwatch.Stop();
         IsRecording = false;
 
@@ -151,7 +167,7 @@ public sealed class ScreenCaptureEngine : IDisposable
             _framePool = null;
         }
 
-        CaptureStopped?.Invoke(this, EventArgs.Empty);
+        if (wasRecording) CaptureStopped?.Invoke(this, EventArgs.Empty);
     }
 
     public void PauseCapture()

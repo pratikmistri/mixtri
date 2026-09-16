@@ -124,7 +124,7 @@ public readonly record struct AudioTimelinePlacement(
 /// </remarks>
 public sealed class AudioPlaybackEngine : IDisposable
 {
-    private WaveOutEvent? _outputDevice;
+    private IWavePlayer? _outputDevice;
     private MixingSampleProvider? _mixer;
     private readonly List<AudioFileReader> _readers = [];
     private readonly List<MediaFoundationResampler> _resamplers = [];
@@ -139,10 +139,21 @@ public sealed class AudioPlaybackEngine : IDisposable
 
     private readonly object _transportLock = new();
     private readonly object _scrubQueueLock = new();
-    private Timer? _scrubTimer;
+    private readonly TimeProvider _timeProvider;
+    private ScrubStopTimer? _scrubTimer;
     private TimeSpan? _queuedScrubPosition;
     private bool _scrubWorkerRunning;
+    private int _scrubGeneration;
     private bool _disposed;
+
+    public AudioPlaybackEngine() : this(null, TimeProvider.System) { }
+
+    internal AudioPlaybackEngine(IWavePlayer? outputDevice, TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        _outputDevice = outputDevice;
+        _timeProvider = timeProvider;
+    }
 
     /// <summary>
     /// Initializes playback from the given WAV file paths.
@@ -508,6 +519,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
+            CancelQueuedScrub();
             if (_outputDevice?.PlaybackState != PlaybackState.Playing)
                 _outputDevice?.Play();
         }
@@ -517,6 +529,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
+            CancelQueuedScrub();
             // Use Stop to clear internal audio buffers so that after
             // seeking, Play() starts from the new position cleanly.
             try { _outputDevice?.Stop(); } catch { }
@@ -527,6 +540,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
+            CancelQueuedScrub();
             try { _outputDevice?.Stop(); } catch { }
         }
     }
@@ -538,7 +552,17 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
+            CancelQueuedScrub();
             SeekCore(position);
+        }
+    }
+
+    /// <summary>Cancels queued scrub seeks and their timeout without changing playback state.</summary>
+    public void CancelPendingScrub()
+    {
+        lock (_transportLock)
+        {
+            CancelQueuedScrub();
         }
     }
 
@@ -575,8 +599,9 @@ public sealed class AudioPlaybackEngine : IDisposable
 
         lock (_scrubQueueLock)
         {
-            _scrubTimer?.Dispose();
-            _scrubTimer = null;
+            if (_disposed) return;
+            _scrubTimer?.Cancel();
+            _scrubGeneration++;
             _queuedScrubPosition = position;
             if (_scrubWorkerRunning)
                 return;
@@ -584,7 +609,8 @@ public sealed class AudioPlaybackEngine : IDisposable
             _scrubWorkerRunning = true;
         }
 
-        ThreadPool.QueueUserWorkItem(_ => ProcessScrubQueue());
+        ThreadPool.QueueUserWorkItem(static (AudioPlaybackEngine engine) => engine.ProcessScrubQueue(),
+            this, preferLocal: false);
     }
 
     private void ProcessScrubQueue()
@@ -592,6 +618,7 @@ public sealed class AudioPlaybackEngine : IDisposable
         while (true)
         {
             TimeSpan position;
+            int generation;
             lock (_scrubQueueLock)
             {
                 if (_disposed || _queuedScrubPosition is not { } queued)
@@ -601,13 +628,17 @@ public sealed class AudioPlaybackEngine : IDisposable
                 }
 
                 position = queued;
+                generation = _scrubGeneration;
                 _queuedScrubPosition = null;
             }
 
             lock (_transportLock)
             {
-                if (_disposed)
-                    continue;
+                lock (_scrubQueueLock)
+                {
+                    if (_disposed || generation != _scrubGeneration)
+                        continue;
+                }
 
                 SeekCore(position);
                 try { _outputDevice?.Play(); } catch { }
@@ -619,7 +650,7 @@ public sealed class AudioPlaybackEngine : IDisposable
                     continue;
 
                 _scrubWorkerRunning = false;
-                if (_disposed)
+                if (_disposed || generation != _scrubGeneration)
                     return;
 
                 ResetScrubStopTimer();
@@ -671,14 +702,27 @@ public sealed class AudioPlaybackEngine : IDisposable
 
     private void ResetScrubStopTimer()
     {
-        _scrubTimer?.Dispose();
-        _scrubTimer = new Timer(_ =>
+        _scrubTimer ??= new ScrubStopTimer(_transportLock, StopScrubPlayback, _timeProvider);
+        _scrubTimer.Restart();
+    }
+
+    private void CancelQueuedScrub()
+    {
+        lock (_scrubQueueLock)
         {
-            lock (_transportLock)
-            {
-                try { _outputDevice?.Stop(); } catch { }
-            }
-        }, null, 80, Timeout.Infinite);
+            _scrubGeneration++;
+            _queuedScrubPosition = null;
+            _scrubTimer?.Cancel();
+        }
+    }
+
+    private void StopScrubPlayback()
+    {
+        try { _outputDevice?.Stop(); }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Audio", $"scrub stop failed: {ex.Message}");
+        }
     }
 
     public bool IsLoaded => _outputDevice is not null;
@@ -690,6 +734,7 @@ public sealed class AudioPlaybackEngine : IDisposable
         _disposed = true;
         lock (_scrubQueueLock)
         {
+            _scrubGeneration++;
             _queuedScrubPosition = null;
             _scrubTimer?.Dispose();
             _scrubTimer = null;

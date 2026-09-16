@@ -459,6 +459,7 @@ public partial class ExportViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(OutputPath) || CurrentProject is null) return;
 
+        using var activity = ProjectService.Instance.Activity.Begin();
         IsExporting = true;
         ExportSucceeded = false;
         ExportFailed = false;

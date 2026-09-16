@@ -83,6 +83,8 @@ public class AutoZoomEngine
 {
     private AutoZoomConfig _config;
     private readonly List<ZoomKeyframe> _manualKeyframes = [];
+    private ZoomKeyframe[] _lastManualKeyframes = [];
+    internal int PathBuildCount { get; private set; }
     private List<ZoomSegment> _autoSegments = [];
     private ZoomCameraPath _path = ZoomCameraPath.Empty;
     private int _sourceWidth;
@@ -167,6 +169,7 @@ public class AutoZoomEngine
     /// </summary>
     public void SetSuppressedClickTicks(IReadOnlyCollection<long> suppressedTicks)
     {
+        if (_suppressedClickTicks.SetEquals(suppressedTicks ?? [])) return;
         _suppressedClickTicks = suppressedTicks is null
             ? []
             : suppressedTicks is HashSet<long> hs
@@ -248,6 +251,8 @@ public class AutoZoomEngine
     /// </summary>
     public void SetManualKeyframes(IReadOnlyList<ZoomKeyframe> keyframes)
     {
+        if (_lastManualKeyframes.SequenceEqual(keyframes ?? [])) return;
+        _lastManualKeyframes = keyframes?.ToArray() ?? [];
         _manualKeyframes.Clear();
         if (keyframes is { Count: > 0 })
         {
@@ -298,6 +303,7 @@ public class AutoZoomEngine
     /// </summary>
     private void RebuildPath()
     {
+        PathBuildCount++;
         if (_sourceWidth <= 0 || _sourceHeight <= 0)
         {
             _path = ZoomCameraPath.Empty;

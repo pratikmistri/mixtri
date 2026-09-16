@@ -84,7 +84,16 @@ public class AnimatedTextEngine : IDisposable
     // review finding. Every call fully overwrites the target (Clear then Draw) before
     // reading it back, so reuse across passes/frames is safe.
     private CanvasRenderTarget? _blurScratch;
+    private GaussianBlurEffect? _blurEffect;
     private (int W, int H) _blurScratchKey;
+    private (string Text, string Font, float Size, ushort Weight, FontStyle Style,
+        CanvasHorizontalAlignment Horizontal, CanvasVerticalAlignment Vertical, CanvasWordWrapping Wrap,
+        double W, double H) _characterKey;
+    private Rect?[] _characterBounds = [];
+    private string[] _characters = [];
+    private CanvasTextFormat? _characterFormat;
+    internal int CharacterLayoutBuildCount { get; private set; }
+    internal int BlurEffectBuildCount { get; private set; }
 
     public AnimatedTextEngine(CanvasDevice? device = null)
     {
@@ -258,13 +267,36 @@ public class AnimatedTextEngine : IDisposable
         Color baseColor, TextSlideAnimation anim, double inP, double outP,
         double elapsedSeconds, float fontSize)
     {
-        using var layout = new CanvasTextLayout(_device, text, format,
-            (float)rect.Width, (float)rect.Height);
-
-        using var charFormat = CreateFormat(
-            format.FontFamily, format.FontSize,
-            format.FontWeight.Weight >= 600, format.FontStyle == FontStyle.Italic,
-            CanvasHorizontalAlignment.Left, CanvasVerticalAlignment.Top, wrap: false);
+        var key = (text, format.FontFamily, format.FontSize, format.FontWeight.Weight, format.FontStyle,
+            format.HorizontalAlignment, format.VerticalAlignment, format.WordWrapping, rect.Width, rect.Height);
+        if (_characterFormat is null || _characterKey != key)
+        {
+            _characterFormat?.Dispose();
+            _characterFormat = null;
+            using var layout = new CanvasTextLayout(_device, text, format, (float)rect.Width, (float)rect.Height);
+            _characterBounds = new Rect?[text.Length];
+            _characters = new string[text.Length];
+            for (int i = 0; i < text.Length; i++)
+            {
+                _characters[i] = text[i].ToString();
+                if (char.IsWhiteSpace(text[i])) continue;
+                try
+                {
+                    var regions = layout.GetCharacterRegions(i, 1);
+                    if (regions.Length > 0) _characterBounds[i] = regions[0].LayoutBounds;
+                }
+                catch (Exception ex)
+                {
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Text", $"Character layout failed at {i}: {ex.Message}");
+                }
+            }
+            _characterFormat = CreateFormat(
+                format.FontFamily, format.FontSize,
+                format.FontWeight.Weight >= 600, format.FontStyle == FontStyle.Italic,
+                CanvasHorizontalAlignment.Left, CanvasVerticalAlignment.Top, wrap: false);
+            _characterKey = key;
+            CharacterLayoutBuildCount++;
+        }
 
         int n = text.Length;
         int visibleCount = CountNonWhitespace(text);
@@ -276,12 +308,7 @@ public class AnimatedTextEngine : IDisposable
             char ch = text[i];
             if (char.IsWhiteSpace(ch)) continue;
 
-            CanvasTextLayoutRegion[] regions;
-            try { regions = layout.GetCharacterRegions(i, 1); }
-            catch { continue; }
-            if (regions.Length == 0) continue;
-
-            var rb = regions[0].LayoutBounds;
+            if (_characterBounds[i] is not { } rb) continue;
             float bx = (float)(rect.X + rb.X);
             float by = (float)(rect.Y + rb.Y);
             float ccx = bx + (float)rb.Width / 2;
@@ -298,7 +325,7 @@ public class AnimatedTextEngine : IDisposable
                 Matrix3x2.CreateScale(p.Scale, new Vector2(ccx, ccy)) *
                 Matrix3x2.CreateTranslation(p.Dx, p.Dy);
 
-            ds.DrawText(ch.ToString(), bx, by, WithAlpha(baseColor, p.Opacity), charFormat);
+            ds.DrawText(_characters[i], bx, by, WithAlpha(baseColor, p.Opacity), _characterFormat);
         }
 
         ds.Transform = saved;
@@ -504,16 +531,27 @@ public class AnimatedTextEngine : IDisposable
             rds.DrawText(text, rect, color, format);
         }
 
-        using var blur = new GaussianBlurEffect
+        if (_blurEffect is null)
         {
-            Source = rt,
-            BlurAmount = blurAmount,
-            BorderMode = EffectBorderMode.Soft,
-        };
+            var effect = new GaussianBlurEffect();
+            try
+            {
+                effect.Source = rt;
+                effect.BorderMode = EffectBorderMode.Soft;
+            }
+            catch
+            {
+                effect.Dispose();
+                throw;
+            }
+            _blurEffect = effect;
+            BlurEffectBuildCount++;
+        }
+        _blurEffect.BlurAmount = blurAmount;
 
         var saved = ds.Transform;
         ds.Transform = Matrix3x2.CreateScale(scale, new Vector2(cx, cy));
-        ds.DrawImage(blur);
+        ds.DrawImage(_blurEffect);
         ds.Transform = saved;
     }
 
@@ -530,6 +568,8 @@ public class AnimatedTextEngine : IDisposable
         if (_blurScratch is null || _blurScratch.Device != _device || _blurScratchKey != (width, height))
         {
             var next = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text-slide blur scratch");
+            _blurEffect?.Dispose();
+            _blurEffect = null;
             _blurScratch?.Dispose();
             _blurScratch = next;
             _blurScratchKey = (width, height);
@@ -538,19 +578,22 @@ public class AnimatedTextEngine : IDisposable
     }
 
     /// <summary>
-    /// Disposes the cached blur-scratch target. <see cref="AnimatedTextEngine"/> is a
-    /// shared helper used by both <see cref="TextOverlayRenderer"/> (which now disposes
-    /// its instance) and <c>TextSlideRenderer</c> (which currently does not — see that
-    /// type's own review follow-up). Disposal here is intentionally idempotent and the
-    /// only disposable state is this one bounded, keyed cache entry, so even an owner
-    /// that never calls <see cref="Dispose"/> only leaks a single render target sized to
-    /// its last-used resolution rather than growing unboundedly.
+    /// Releases the bounded blur graph/surface and per-character text resources.
+    /// Both text-slide and text-overlay renderers dispose this engine during teardown.
     /// </summary>
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+        _blurEffect?.Dispose();
+        _blurEffect = null;
         _blurScratch?.Dispose();
+        _blurScratch = null;
+        _characterFormat?.Dispose();
+        _characterFormat = null;
+        _characterKey = default;
+        _characterBounds = [];
+        _characters = [];
         GC.SuppressFinalize(this);
     }
 
@@ -636,28 +679,31 @@ public class AnimatedTextEngine : IDisposable
         if (string.IsNullOrWhiteSpace(hex))
             return Color.FromArgb(255, 255, 255, 255);
 
-        hex = hex.Trim().TrimStart('#');
+        scoped ReadOnlySpan<char> span = hex.AsSpan().Trim().TrimStart('#');
 
         // Expand 3-digit (RGB) and 4-digit (ARGB) shorthand to full form.
-        if (hex.Length == 3)
-            hex = string.Concat(hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]);
-        else if (hex.Length == 4)
-            hex = string.Concat(hex[0], hex[0], hex[1], hex[1], hex[2], hex[2], hex[3], hex[3]);
+        Span<char> expanded = stackalloc char[8];
+        if (span.Length is 3 or 4)
+        {
+            for (int i = 0; i < span.Length; i++)
+                expanded[i * 2] = expanded[i * 2 + 1] = span[i];
+            span = expanded[..(span.Length * 2)];
+        }
 
         const System.Globalization.NumberStyles Style = System.Globalization.NumberStyles.HexNumber;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
 
-        if (hex.Length == 6 &&
-            byte.TryParse(hex.AsSpan(0, 2), Style, ci, out var r) &&
-            byte.TryParse(hex.AsSpan(2, 2), Style, ci, out var g) &&
-            byte.TryParse(hex.AsSpan(4, 2), Style, ci, out var b))
+        if (span.Length == 6 &&
+            byte.TryParse(span[..2], Style, ci, out var r) &&
+            byte.TryParse(span.Slice(2, 2), Style, ci, out var g) &&
+            byte.TryParse(span.Slice(4, 2), Style, ci, out var b))
             return Color.FromArgb(255, r, g, b);
 
-        if (hex.Length == 8 &&
-            byte.TryParse(hex.AsSpan(0, 2), Style, ci, out var a) &&
-            byte.TryParse(hex.AsSpan(2, 2), Style, ci, out var r2) &&
-            byte.TryParse(hex.AsSpan(4, 2), Style, ci, out var g2) &&
-            byte.TryParse(hex.AsSpan(6, 2), Style, ci, out var b2))
+        if (span.Length == 8 &&
+            byte.TryParse(span[..2], Style, ci, out var a) &&
+            byte.TryParse(span.Slice(2, 2), Style, ci, out var r2) &&
+            byte.TryParse(span.Slice(4, 2), Style, ci, out var g2) &&
+            byte.TryParse(span.Slice(6, 2), Style, ci, out var b2))
             return Color.FromArgb(a, r2, g2, b2);
 
         return Color.FromArgb(255, 255, 255, 255);

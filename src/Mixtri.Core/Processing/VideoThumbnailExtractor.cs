@@ -1,20 +1,12 @@
-using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
+using Mixtri.Core.Diagnostics;
+using System.Runtime.ExceptionServices;
 using Windows.Media.Editing;
 using Windows.Storage;
 
 namespace Mixtri.Core.Processing;
 
-/// <summary>
-/// A generated filmstrip: evenly spaced thumbnails covering a video's full duration.
-/// </summary>
-/// <param name="Thumbnails">
-/// Thumbnails in time order. An entry is null when that instant could not be decoded.
-/// The caller owns and must dispose them.
-/// </param>
-/// <param name="IntervalSeconds">Spacing between consecutive thumbnails.</param>
-/// <param name="AspectRatio">Width / height of the source video.</param>
-/// <param name="Duration">Total duration of the source video.</param>
+/// <summary>Evenly spaced source-time thumbnails. The caller owns the returned bitmaps.</summary>
 public sealed record ThumbnailStrip(
     CanvasBitmap?[] Thumbnails,
     double IntervalSeconds,
@@ -22,199 +14,253 @@ public sealed record ThumbnailStrip(
     TimeSpan Duration);
 
 /// <summary>
-/// Extracts filmstrip thumbnails from a video file.
+/// Uses a dedicated MediaComposition for sparse frame access, never the preview decoder.
+/// Progressive consumers receive a four-frame overview, then bounded refinement batches.
 /// </summary>
-/// <remarks>
-/// <para>
-/// This deliberately does NOT go through <see cref="VideoFrameReader"/>. That reader owns a
-/// <c>MediaPlayer</c> positioned at a single point, so pulling sparse thumbnails from it
-/// means a seek per thumbnail — measured at ~334 ms each with roughly a quarter returning
-/// no frame at all, and competing with the preview's decoder for the same file.
-/// </para>
-/// <para>
-/// <c>MediaComposition.GetThumbnailsAsync</c> is built for exactly this access pattern:
-/// the same strip measured ~15 ms per thumbnail at 100 thumbnails with no failures, and it
-/// needs no <c>MediaPlayer</c>, so the preview is unaffected.
-/// </para>
-/// </remarks>
 public static class VideoThumbnailExtractor
 {
-    /// <summary>
-    /// Generates an evenly spaced strip of thumbnails spanning <paramref name="videoFilePath"/>.
-    /// </summary>
-    /// <param name="targetHeight">Thumbnail height in pixels; width follows the aspect ratio.</param>
-    /// <param name="maxCount">Upper bound on the number of thumbnails.</param>
-    /// <param name="minIntervalSeconds">Smallest spacing between thumbnails.</param>
-    /// <returns>The strip, or null when the video could not be read.</returns>
-    public static async Task<ThumbnailStrip?> ExtractAsync(
-        string videoFilePath,
-        int targetHeight,
-        CanvasDevice device,
-        int maxCount = 300,
-        double minIntervalSeconds = 0.5,
-        CancellationToken ct = default)
-    {
-        if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0)
-            return null;
+    /// <summary>Marks a consumer-callback fault so it is never reported as a decode failure.</summary>
+    private sealed class PublishFailedException(Exception inner)
+        : Exception("The thumbnail consumer rejected a batch.", inner);
 
+    public static Task<ThumbnailStrip?> ExtractAsync(
+        string videoFilePath, int targetHeight, CanvasDevice device, int maxCount = 300,
+        double minIntervalSeconds = 0.5, CancellationToken ct = default)
+        => CollectAsync(publish => ExtractVideoBatchesAsync(videoFilePath, targetHeight, device,
+            publish, progressive: false, maxCount, minIntervalSeconds, ct));
+
+    /// <summary>
+    /// The callback runs in the calling context. TakeFrames transfers ownership; untaken
+    /// frames are disposed after the callback, including when it throws or work is cancelled.
+    /// </summary>
+    public static Task<bool> ExtractProgressivelyAsync(
+        string videoFilePath, int targetHeight, CanvasDevice device, Action<ThumbnailBatch> publish,
+        int maxCount = 300, double minIntervalSeconds = 0.5, CancellationToken ct = default)
+        => ExtractVideoBatchesAsync(videoFilePath, targetHeight, device,
+            AsAsync(publish), progressive: true, maxCount, minIntervalSeconds, ct);
+
+    public static Task<bool> ExtractProgressivelyAsync(
+        string videoFilePath, int targetHeight, CanvasDevice device, Func<ThumbnailBatch, Task> publish,
+        int maxCount = 300, double minIntervalSeconds = 0.5, CancellationToken ct = default,
+        IReadOnlyList<TimeSpan>? priorityTimes = null)
+        => ExtractVideoBatchesAsync(videoFilePath, targetHeight, device,
+            publish, progressive: true, maxCount, minIntervalSeconds, ct, priorityTimes);
+
+    public static Task<ThumbnailStrip?> ExtractFromCapturedFramesAsync(
+        string videoFilePath, int fps, int targetHeight, CanvasDevice device, int maxCount = 300,
+        double minIntervalSeconds = 0.5, CancellationToken ct = default)
+        => CollectAsync(publish => ExtractJpegBatchesAsync(videoFilePath, fps, targetHeight, device,
+            publish, progressive: false, maxCount, minIntervalSeconds, ct));
+
+    public static Task<bool> ExtractCapturedFramesProgressivelyAsync(
+        string videoFilePath, int fps, int targetHeight, CanvasDevice device, Action<ThumbnailBatch> publish,
+        int maxCount = 300, double minIntervalSeconds = 0.5, CancellationToken ct = default)
+        => ExtractJpegBatchesAsync(videoFilePath, fps, targetHeight, device,
+            AsAsync(publish), progressive: true, maxCount, minIntervalSeconds, ct);
+
+    public static Task<bool> ExtractCapturedFramesProgressivelyAsync(
+        string videoFilePath, int fps, int targetHeight, CanvasDevice device, Func<ThumbnailBatch, Task> publish,
+        int maxCount = 300, double minIntervalSeconds = 0.5, CancellationToken ct = default)
+        => ExtractJpegBatchesAsync(videoFilePath, fps, targetHeight, device,
+            publish, progressive: true, maxCount, minIntervalSeconds, ct);
+
+    private static Func<ThumbnailBatch, Task> AsAsync(Action<ThumbnailBatch> publish)
+    {
+        ArgumentNullException.ThrowIfNull(publish);
+        return batch => { publish(batch); return Task.CompletedTask; };
+    }
+
+    private static async Task<ThumbnailStrip?> CollectAsync(Func<Func<ThumbnailBatch, Task>, Task<bool>> extract)
+    {
+        ThumbnailStrip? strip = null;
+        bool transferred = false;
         try
         {
-            var fileInfo = new FileInfo(videoFilePath);
-            if (!fileInfo.Exists || fileInfo.Length == 0)
-                return null;
-
-            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoFilePath));
-
-            // Guarded because a recording's MP4 can be absent or unfinalized — finalization
-            // is intentionally non-fatal — and MediaClip throws rather than reporting it.
-            var clip = await MediaClip.CreateFromFileAsync(file);
-            var composition = new MediaComposition();
-            composition.Clips.Add(clip);
-
-            var duration = clip.OriginalDuration;
-            if (duration <= TimeSpan.Zero)
-                return null;
-
-            var props = clip.GetVideoEncodingProperties();
-            double aspectRatio = props.Height > 0
-                ? props.Width / (double)props.Height
-                : 16.0 / 9.0;
-
-            double totalSeconds = duration.TotalSeconds;
-            double interval = Math.Max(minIntervalSeconds, totalSeconds / 200);
-            int count = Math.Clamp((int)(totalSeconds / interval) + 1, 1, maxCount);
-
-            var times = new List<TimeSpan>(count);
-            for (int i = 0; i < count; i++)
+            bool success = await extract(batch =>
             {
-                // Clamp inside the clip: a timestamp at or past the end yields no frame.
-                double t = Math.Min(i * interval, Math.Max(0, totalSeconds - 0.001));
-                times.Add(TimeSpan.FromSeconds(t));
-            }
+                strip ??= new(new CanvasBitmap?[batch.TotalCount],
+                    batch.IntervalSeconds, batch.AspectRatio, batch.Duration);
+                batch.TakeFrames().CopyTo(strip.Thumbnails, batch.StartIndex);
+                return Task.CompletedTask;
+            });
+            if (!success) return null;
+            transferred = true;
+            return strip;
+        }
+        finally
+        {
+            if (!transferred && strip is not null)
+                foreach (var frame in strip.Thumbnails) frame?.Dispose();
+        }
+    }
 
-            ct.ThrowIfCancellationRequested();
+    private static async Task<bool> ExtractVideoBatchesAsync(
+        string videoFilePath, int targetHeight, CanvasDevice device, Func<ThumbnailBatch, Task> publish,
+        bool progressive, int maxCount, double minIntervalSeconds, CancellationToken ct,
+        IReadOnlyList<TimeSpan>? priorityTimes = null)
+    {
+        ArgumentNullException.ThrowIfNull(publish);
+        ct.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0) return false;
+        MediaComposition? composition = null;
+        bool anyFrame = false;
+        try
+        {
+            var info = new FileInfo(videoFilePath);
+            if (!info.Exists || info.Length == 0) return false;
+            var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoFilePath));
+            var clip = await MediaClip.CreateFromFileAsync(file).AsTask(ct);
+            composition = new MediaComposition();
+            composition.Clips.Add(clip);
+            var duration = clip.OriginalDuration;
+            if (duration <= TimeSpan.Zero) return false;
+            var props = clip.GetVideoEncodingProperties();
+            double aspect = props.Height > 0 ? props.Width / (double)props.Height : 16.0 / 9.0;
+            var plan = ThumbnailSamplingPlan.Create(duration, maxCount, minIntervalSeconds);
+            bool flip = Capture.RecordingMarker.NeedsVerticalFlip(videoFilePath);
 
-            var streams = await composition.GetThumbnailsAsync(
-                times, 0, targetHeight, VideoFramePrecision.NearestFrame).AsTask(ct);
-
-            var thumbnails = new CanvasBitmap?[count];
-            bool flip = Mixtri.Core.Capture.RecordingMarker.NeedsVerticalFlip(videoFilePath);
-            for (int i = 0; i < count && i < streams.Count; i++)
+            bool overviewPending = progressive && plan.Count > 4;
+            for (int start = 0; start < plan.Count;)
             {
                 ct.ThrowIfCancellationRequested();
+                int[]? overview = overviewPending ? plan.OverviewIndices(priorityTimes) : null;
+                int count = overview?.Length ?? plan.BatchCountAt(start, progressive);
+                var indices = overview ?? Enumerable.Range(start, count).ToArray();
+                var times = indices.Select(plan.TimeAt).ToList();
+                // MediaComposition can corrupt a cold nonzero seek. Warm each batch at zero;
+                // the extra image is discarded, so all published source times stay unchanged.
+                int warmup = indices[0] > 0 ? 1 : 0;
+                if (warmup != 0) times.Insert(0, TimeSpan.Zero);
+                var streams = await composition.GetThumbnailsAsync(
+                    times, 0, targetHeight, VideoFramePrecision.NearestFrame).AsTask(ct);
+                var frames = new CanvasBitmap?[count];
+                using var batch = new ThumbnailBatch(frames, start, plan.Count, plan.IntervalSeconds, aspect, duration, overview);
                 try
                 {
-                    var loaded = await CanvasBitmap.LoadAsync(device, streams[i]);
-                    thumbnails[i] = flip ? FlipVertically(loaded, device) : loaded;
+                    for (int i = 0; i < count && i + warmup < streams.Count; i++)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            var loaded = await CanvasBitmap.LoadAsync(device, streams[i + warmup]).AsTask(ct);
+                            frames[i] = flip ? FlipVertically(loaded, device) : loaded;
+                            anyFrame = true;
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex)
+                        {
+                            DiagLog.Write("Filmstrip", $"thumbnail {indices[i]} failed: {ex.Message}");
+                        }
+                    }
                 }
-                catch (Exception ex)
+                finally
                 {
-                    Debug.WriteLine($"[VideoThumbnailExtractor] Thumbnail {i} failed to load: {ex.Message}");
+                    foreach (var stream in streams) stream.Dispose();
                 }
+                ct.ThrowIfCancellationRequested();
+                // A consumer fault is not a decode fault: letting it fall into the catch below
+                // would report "extraction failed", silently start the JPEG fallback after MP4
+                // batches were already accepted, and discard the real stack.
+                try { await publish(batch).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { throw new PublishFailedException(ex); }
+                if (overviewPending) overviewPending = false;
+                else start += count;
+                if (progressive) await Task.Yield();
             }
-
-            return new ThumbnailStrip(thumbnails, interval, aspectRatio, duration);
+            return anyFrame;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) { throw; }
+        catch (PublishFailedException ex)
         {
+            ExceptionDispatchInfo.Capture(ex.InnerException!).Throw();
             throw;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[VideoThumbnailExtractor] Failed for '{videoFilePath}': {ex.Message}");
-            return null;
+            DiagLog.Write("Filmstrip", $"video extraction failed for '{videoFilePath}': {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            composition?.Clips.Clear();
         }
     }
 
-    /// <summary>
-    /// Builds a filmstrip from a session's captured JPEGs instead of its MP4.
-    /// </summary>
-    /// <remarks>
-    /// The JPEGs survive exactly when MP4 finalization failed — which is the case the
-    /// whole write-ahead design exists for, and precisely when
-    /// <see cref="ExtractAsync"/> can return nothing. Without this the preview would play
-    /// happily from the frames while the timeline showed a flat colour block.
-    /// </remarks>
-    /// <param name="fps">Recording FPS, used to turn frame indices into timestamps.</param>
-    public static async Task<ThumbnailStrip?> ExtractFromCapturedFramesAsync(
-        string videoFilePath,
-        int fps,
-        int targetHeight,
-        CanvasDevice device,
-        int maxCount = 300,
-        double minIntervalSeconds = 0.5,
-        CancellationToken ct = default)
+    private static async Task<bool> ExtractJpegBatchesAsync(
+        string videoFilePath, int fps, int targetHeight, CanvasDevice device, Func<ThumbnailBatch, Task> publish,
+        bool progressive, int maxCount, double minIntervalSeconds, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0 || fps <= 0)
-            return null;
-
-        var sessionFolder = Path.GetDirectoryName(Path.GetFullPath(videoFilePath));
-        if (string.IsNullOrEmpty(sessionFolder))
-            return null;
-
-        using var source = JpegFrameSource.Open(sessionFolder, device);
-        if (source is null || source.FrameCount == 0)
-            return null;
-
-        double totalSeconds = source.FrameCount / (double)fps;
-        double interval = Math.Max(minIntervalSeconds, totalSeconds / 200);
-        int count = Math.Clamp((int)(totalSeconds / interval) + 1, 1, maxCount);
-
-        var thumbnails = new CanvasBitmap?[count];
-        double aspectRatio = 16.0 / 9.0;
-
-        for (int i = 0; i < count; i++)
+        ArgumentNullException.ThrowIfNull(publish);
+        ct.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0 || fps <= 0) return false;
+        var folder = Path.GetDirectoryName(Path.GetFullPath(videoFilePath));
+        if (string.IsNullOrEmpty(folder)) return false;
+        using var source = JpegFrameSource.Open(folder, device);
+        if (source is null || source.FrameCount == 0) return false;
+        var duration = TimeSpan.FromSeconds(source.FrameCount / (double)fps);
+        var plan = ThumbnailSamplingPlan.Create(duration, maxCount, minIntervalSeconds);
+        double aspect = 16.0 / 9.0;
+        bool anyFrame = false;
+        bool overviewPending = progressive && plan.Count > 4;
+        for (int start = 0; start < plan.Count;)
         {
             ct.ThrowIfCancellationRequested();
-
-            int frameIndex = Math.Clamp(
-                (int)(i * interval * fps), 0, source.FrameCount - 1);
-
-            using var frame = await source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
-            if (frame is null)
-                continue;
-
-            double frameAspect = frame.Size.Height > 0
-                ? frame.Size.Width / frame.Size.Height
-                : aspectRatio;
-            if (i == 0)
-                aspectRatio = frameAspect;
-
+            int[]? overview = overviewPending ? plan.OverviewIndices() : null;
+            int count = overview?.Length ?? plan.BatchCountAt(start, progressive);
+            var frames = new CanvasBitmap?[count];
             try
             {
-                int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
-                var scaled = Win2DUtils.CreateRenderTarget(device, width, targetHeight, 96, "video thumbnail");
-                using (var ds = scaled.CreateDrawingSession())
-                    ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
-
-                thumbnails[i] = scaled;
+                for (int i = 0; i < count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int sample = overview is null ? start + i : overview[i];
+                    int index = Math.Clamp((int)(sample * plan.IntervalSeconds * fps), 0, source.FrameCount - 1);
+                    using var frame = await source.LoadFrameAsync(index);
+                    if (frame is null) continue;
+                    double frameAspect = frame.Size.Height > 0 ? frame.Size.Width / frame.Size.Height : aspect;
+                    if (start + i == 0) aspect = frameAspect;
+                    CanvasRenderTarget? scaled = null;
+                    try
+                    {
+                        int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
+                        scaled = Win2DUtils.CreateRenderTarget(device, width, targetHeight, 96, "video thumbnail");
+                        using (var ds = scaled.CreateDrawingSession())
+                            ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
+                        frames[i] = scaled;
+                        scaled = null;
+                        anyFrame = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagLog.Write("Filmstrip", $"captured thumbnail {start + i} failed: {ex.Message}");
+                    }
+                    finally { scaled?.Dispose(); }
+                }
+                ct.ThrowIfCancellationRequested();
+                using var batch = new ThumbnailBatch(frames, start, plan.Count, plan.IntervalSeconds, aspect, duration, overview);
+                frames = []; // batch owns these until the callback explicitly takes them
+                await publish(batch).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.WriteLine($"[VideoThumbnailExtractor] JPEG thumbnail {i} failed: {ex.Message}");
+                foreach (var frame in frames) frame?.Dispose();
             }
+            if (overviewPending) overviewPending = false;
+            else start += count;
+            if (progressive) await Task.Yield();
         }
-
-        return new ThumbnailStrip(
-            thumbnails, interval, aspectRatio, TimeSpan.FromSeconds(totalSeconds));
+        return anyFrame;
     }
 
-    /// <summary>
-    /// Returns a vertically mirrored copy of <paramref name="source"/> and disposes it.
-    /// </summary>
-    /// <remarks>
-    /// Needed for recordings written by the pre-orientation-fix encoder. The preview
-    /// applies the same correction when decoding, so without it the filmstrip and the
-    /// package poster would be the only upside-down surfaces in the app.
-    /// </remarks>
     private static CanvasBitmap FlipVertically(CanvasBitmap source, CanvasDevice device)
     {
+        CanvasRenderTarget? flipped = null;
         try
         {
             float height = (float)source.Size.Height;
-            var flipped = Win2DUtils.CreateRenderTarget(
+            flipped = Win2DUtils.CreateRenderTarget(
                 device, (float)source.Size.Width, height, source.Dpi, "flipped video thumbnail");
-
             using (var ds = flipped.CreateDrawingSession())
             {
                 ds.Transform =
@@ -222,13 +268,13 @@ public static class VideoThumbnailExtractor
                     System.Numerics.Matrix3x2.CreateTranslation(0, height);
                 ds.DrawImage(source);
             }
-
             source.Dispose();
             return flipped;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[VideoThumbnailExtractor] Flip failed: {ex.Message}");
+            flipped?.Dispose();
+            DiagLog.Write("Filmstrip", $"legacy thumbnail flip failed: {ex.Message}");
             return source;
         }
     }

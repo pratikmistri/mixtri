@@ -28,6 +28,10 @@ public sealed partial class MiniWindow : Window
 {
     private readonly RecordingViewModel _viewModel = RecordingViewModel.Shared;
     private bool _isClosingProgrammatically;
+    private nint _previousWindowProc;
+    private WindowProcDelegate? _windowProc;
+    internal bool HasQuiesceHandler => _previousWindowProc != nint.Zero;
+    private delegate nint WindowProcDelegate(nint hwnd, uint message, nint wParam, nint lParam);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _revealTimer;
     private System.Diagnostics.Stopwatch? _revealStopwatch;
@@ -136,7 +140,29 @@ public sealed partial class MiniWindow : Window
         // Any resize (ours or the framework's) re-docks, so the pill can never be
         // left floating away from the bottom edge on a stale height.
         AppWindow.Changed += OnAppWindowChanged;
+        _windowProc = HandleWindowMessage;
+        _previousWindowProc = SetWindowLongPtr(hwnd, -4, Marshal.GetFunctionPointerForDelegate(_windowProc));
+        if (_previousWindowProc == nint.Zero)
+            Mixtri.Core.Diagnostics.DiagLog.Write("Shell", "Mini shutdown hook could not be installed; full-window lifetime will be retained.");
     }
+
+    private nint HandleWindowMessage(nint hwnd, uint message, nint wParam, nint lParam)
+    {
+        if (message == 0x0011) // WM_QUERYENDSESSION
+        {
+            App.Current.BeginQuiesce();
+            return 1;
+        }
+        if (message == 0x0016 && wParam != nint.Zero) // WM_ENDSESSION
+        {
+            App.Current.BeginQuiesce();
+            return nint.Zero;
+        }
+        return CallWindowProc(_previousWindowProc, hwnd, message, wParam, lParam);
+    }
+
+    [DllImport("user32.dll", EntryPoint = "CallWindowProcW")]
+    private static extern nint CallWindowProc(nint previous, nint hwnd, uint message, nint wParam, nint lParam);
 
     private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {

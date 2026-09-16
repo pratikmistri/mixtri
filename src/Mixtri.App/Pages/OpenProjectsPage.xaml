@@ -165,7 +165,9 @@
                                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                     Glyph="&#xE714;" />
                                 <Image
-                                    Source="{x:Bind Poster}"
+                                    Loaded="Poster_Loaded"
+                                    Unloaded="Poster_Unloaded"
+                                    DataContextChanged="Poster_DataContextChanged"
                                     Stretch="UniformToFill" />
                             </Grid>
                         </Border>

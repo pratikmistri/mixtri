@@ -94,6 +94,15 @@ public sealed class BackgroundCompositor : IDisposable
     private readonly CancellationTokenSource _shutdownCts = new();
 
     private bool _disposed;
+    private CanvasDevice? _decorationDevice;
+    private (float X, float Y, float W, float H, float Radius, BackgroundStyle Style) _decorationKey;
+    private CanvasGeometry? _contentGeometry;
+    private CanvasCommandList? _shadowMask;
+    private ShadowEffect? _shadowEffect;
+    private CanvasLinearGradientBrush? _gradientBrush;
+    private (float W, float H, BackgroundStyle Style) _gradientBrushKey;
+    private CanvasDevice? _gradientDevice;
+    internal int DecorationBuildCount { get; private set; }
 
     /// <summary>
     /// Returns the output canvas dimensions. Padding now insets the content within
@@ -134,6 +143,7 @@ public sealed class BackgroundCompositor : IDisposable
         float sw = srcWidth;
         float sh = srcHeight;
         float radius = style.CornerRadius;
+        EnsureDecoration(session.Device, sx, sy, sw, sh, radius, style);
 
         // 1. Background fills the entire output canvas — everything outside the
         //    source rect is one continuous background container.
@@ -183,9 +193,17 @@ public sealed class BackgroundCompositor : IDisposable
         }
     }
 
-    private static void DrawGradientBackground(
+    private void DrawGradientBackground(
         CanvasDrawingSession session, float w, float h, BackgroundStyle style)
     {
+        var key = (w, h, style);
+        if (_gradientBrush is not null && _gradientBrushKey == key && _gradientDevice == session.Device)
+        {
+            session.FillRectangle(0, 0, w, h, _gradientBrush);
+            return;
+        }
+        _gradientBrush?.Dispose();
+        _gradientBrush = null;
         double angleRad = style.GradientAngle * Math.PI / 180.0;
         float cx = w / 2f;
         float cy = h / 2f;
@@ -196,13 +214,15 @@ public sealed class BackgroundCompositor : IDisposable
         var startColor = ColorHelper.ParseColor(style.Color);
         var endColor = ColorHelper.ParseColor(style.GradientEndColor);
 
-        using var brush = new CanvasLinearGradientBrush(session, startColor, endColor)
+        _gradientBrush = new CanvasLinearGradientBrush(session, startColor, endColor)
         {
             StartPoint = new Vector2(cx - dx, cy - dy),
             EndPoint = new Vector2(cx + dx, cy + dy)
         };
 
-        session.FillRectangle(0, 0, w, h, brush);
+        _gradientBrushKey = key;
+        _gradientDevice = session.Device;
+        session.FillRectangle(0, 0, w, h, _gradientBrush);
     }
 
     private void DrawImageBackground(
@@ -225,7 +245,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             if (_cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, path)
-                && ReferenceEquals(_cachedDevice, session.Device))
+                && _cachedDevice == session.Device)
             {
                 DrawScaledToFill(session, _cachedBackgroundImage, w, h);
                 return;
@@ -332,7 +352,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             return _cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, style.BackgroundImagePath)
-                && ReferenceEquals(_cachedDevice, device);
+                && _cachedDevice == device;
         }
     }
 
@@ -371,14 +391,14 @@ public sealed class BackgroundCompositor : IDisposable
 
             if (_cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, path)
-                && ReferenceEquals(_cachedDevice, device))
+                && _cachedDevice == device)
             {
                 return Task.CompletedTask;
             }
 
             if (_inflightLoad is not null
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && _inflightDevice == device)
             {
                 inflight = _inflightLoad;
             }
@@ -406,7 +426,7 @@ public sealed class BackgroundCompositor : IDisposable
                 // cleared the in-flight key; only record it while it is genuinely current.
                 if (_currentLoadId == loadId
                     && PathMatches(_inflightPath, path)
-                    && ReferenceEquals(_inflightDevice, device))
+                    && _inflightDevice == device)
                 {
                     _inflightLoad = inflight;
                 }
@@ -438,7 +458,7 @@ public sealed class BackgroundCompositor : IDisposable
             if (!CanAttempt(path, device)) return;
             if (_inflightLoad is not null
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && _inflightDevice == device)
             {
                 return;
             }
@@ -461,7 +481,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// </summary>
     private bool CanAttempt(string path, CanvasDevice device)
     {
-        if (!PathMatches(_failedPath, path) || !ReferenceEquals(_failedDevice, device))
+        if (!PathMatches(_failedPath, path) || _failedDevice != device)
             return true;
         if (_failedAttempts >= MaxLoadAttempts)
             return false;
@@ -481,7 +501,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// <summary>Must be called under <see cref="_cacheLock"/>.</summary>
     private void ClearFailureFor(string path, CanvasDevice device)
     {
-        if (PathMatches(_failedPath, path) && ReferenceEquals(_failedDevice, device))
+        if (PathMatches(_failedPath, path) && _failedDevice == device)
             ClearFailure();
     }
 
@@ -491,7 +511,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// </summary>
     private int MarkFailed(string path, CanvasDevice device, string reason)
     {
-        if (!PathMatches(_failedPath, path) || !ReferenceEquals(_failedDevice, device))
+        if (!PathMatches(_failedPath, path) || _failedDevice != device)
         {
             _failedPath = path;
             _failedDevice = device;
@@ -564,7 +584,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             if (_currentLoadId == loadId
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && _inflightDevice == device)
             {
                 _inflightLoad = null;
                 _inflightPath = null;
@@ -653,36 +673,49 @@ public sealed class BackgroundCompositor : IDisposable
         session.DrawImage(blurEffect, new Vector2(0, 0));
     }
 
-    private static void DrawShadow(
+    private void EnsureDecoration(
+        CanvasDevice device, float x, float y, float w, float h, float radius, BackgroundStyle style)
+    {
+        var key = (x, y, w, h, radius, style);
+        if (_contentGeometry is not null && _decorationDevice == device && _decorationKey == key
+            && (!style.ShadowEnabled || _shadowEffect is not null)) return;
+        DisposeDecoration();
+        _contentGeometry = CanvasGeometry.CreateRoundedRectangle(device, x, y, w, h, radius, radius);
+        _decorationDevice = device;
+        _decorationKey = key;
+        DecorationBuildCount++;
+        if (!style.ShadowEnabled) return;
+        _shadowMask = new CanvasCommandList(device);
+        using (var maskSession = _shadowMask.CreateDrawingSession())
+            maskSession.FillGeometry(_contentGeometry,
+                ColorHelper.WithOpacity(ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity));
+        _shadowEffect = new ShadowEffect
+        {
+            Source = _shadowMask,
+            BlurAmount = style.ShadowBlur,
+            ShadowColor = ColorHelper.WithOpacity(ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity)
+        };
+    }
+
+    private void DisposeDecoration()
+    {
+        _shadowEffect?.Dispose();
+        _shadowEffect = null;
+        _shadowMask?.Dispose();
+        _shadowMask = null;
+        _contentGeometry?.Dispose();
+        _contentGeometry = null;
+    }
+
+    private void DrawShadow(
         CanvasDrawingSession session,
         float x, float y, float w, float h,
         float radius, BackgroundStyle style)
     {
-        var device = session.Device;
-
-        // Create a rounded rectangle mask as the shadow source
-        using var geometry = CanvasGeometry.CreateRoundedRectangle(device, x, y, w, h, radius, radius);
-
-        using var commandList = new CanvasCommandList(device);
-        using (var maskSession = commandList.CreateDrawingSession())
-        {
-            var shadowBaseColor = ColorHelper.ParseColor(style.ShadowColor);
-            var shadowColor = ColorHelper.WithOpacity(shadowBaseColor, style.ShadowOpacity);
-            maskSession.FillGeometry(geometry, shadowColor);
-        }
-
-        using var shadowEffect = new ShadowEffect
-        {
-            Source = commandList,
-            BlurAmount = style.ShadowBlur,
-            ShadowColor = ColorHelper.WithOpacity(
-                ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity)
-        };
-
-        session.DrawImage(shadowEffect, new Vector2(style.ShadowOffsetX, style.ShadowOffsetY));
+        session.DrawImage(_shadowEffect, new Vector2(style.ShadowOffsetX, style.ShadowOffsetY));
     }
 
-    private static void DrawContent(
+    private void DrawContent(
         CanvasDrawingSession session,
         CanvasBitmap screenFrame,
         float x, float y, float w, float h,
@@ -692,9 +725,7 @@ public sealed class BackgroundCompositor : IDisposable
 
         if (radius > 0)
         {
-            using var clipGeometry = CanvasGeometry.CreateRoundedRectangle(
-                session.Device, x, y, w, h, radius, radius);
-            using var layer = session.CreateLayer(1.0f, clipGeometry);
+            using var layer = session.CreateLayer(1.0f, _contentGeometry);
             session.DrawImage(screenFrame, destRect);
         }
         else
@@ -822,5 +853,8 @@ public sealed class BackgroundCompositor : IDisposable
         catch (ObjectDisposedException) { /* already torn down */ }
 
         SafeDispose(stale);
+        DisposeDecoration();
+        _gradientBrush?.Dispose();
+        _gradientBrush = null;
     }
 }

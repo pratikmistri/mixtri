@@ -76,22 +76,55 @@ public sealed partial class PropertiesPane : UserControl
     public ScenePropertiesView Scene => SceneView;
 
     /// <summary>Text slide panel.</summary>
-    public TextSlidePropertiesView TextSlide => TextSlideView;
+    public TextSlidePropertiesView TextSlide => EnsurePane(TextSlideView, nameof(TextSlideView), PropertyPaneKind.TextSlide);
 
     /// <summary>Mouse / cursor panel.</summary>
-    public CursorPropertiesView Cursor => CursorView;
+    public CursorPropertiesView Cursor => EnsurePane(CursorView, nameof(CursorView), PropertyPaneKind.Cursor);
 
     /// <summary>Video / camera overlay panel.</summary>
-    public VideoPropertiesView Video => VideoView;
+    public VideoPropertiesView Video => EnsurePane(VideoView, nameof(VideoView), PropertyPaneKind.Video);
 
     /// <summary>Animated text overlay panel.</summary>
-    public TextOverlayPropertiesView TextOverlay => TextOverlayView;
+    public TextOverlayPropertiesView TextOverlay => EnsurePane(TextOverlayView, nameof(TextOverlayView), PropertyPaneKind.TextOverlay);
 
     /// <summary>Transition boundary panel.</summary>
-    public TransitionPropertiesView Transition => TransitionView;
+    public TransitionPropertiesView Transition => EnsurePane(TransitionView, nameof(TransitionView), PropertyPaneKind.Transition);
 
     /// <summary>Selected zoom segment panel.</summary>
-    public ZoomPropertiesView Zoom => ZoomView;
+    public ZoomPropertiesView Zoom => EnsurePane(ZoomView, nameof(ZoomView), PropertyPaneKind.Zoom);
+
+    public event EventHandler<PropertyPaneKind>? PaneCreated;
+
+    public bool IsPaneCreated(PropertyPaneKind kind) => kind switch
+    {
+        PropertyPaneKind.TextSlide => TextSlideView is not null,
+        PropertyPaneKind.Cursor => CursorView is not null,
+        PropertyPaneKind.Video => VideoView is not null,
+        PropertyPaneKind.TextOverlay => TextOverlayView is not null,
+        PropertyPaneKind.Transition => TransitionView is not null,
+        PropertyPaneKind.Zoom => ZoomView is not null,
+        _ => SceneView is not null,
+    };
+
+    private T EnsurePane<T>(T? current, string name, PropertyPaneKind kind) where T : UserControl
+    {
+        if (current is not null) return current;
+        var created = FindName(name) as T
+            ?? throw new InvalidOperationException($"The {kind} property panel could not be created.");
+        PaneCreated?.Invoke(this, kind);
+        return created;
+    }
+
+    private UserControl ViewFor(PropertyPaneKind kind) => kind switch
+    {
+        PropertyPaneKind.TextSlide => TextSlide,
+        PropertyPaneKind.Cursor => Cursor,
+        PropertyPaneKind.Video => Video,
+        PropertyPaneKind.TextOverlay => TextOverlay,
+        PropertyPaneKind.Transition => Transition,
+        PropertyPaneKind.Zoom => Zoom,
+        _ => Scene,
+    };
 
     private PropertyPaneKind _selected = PropertyPaneKind.Scene;
     private bool _isOpen = true;
@@ -185,6 +218,7 @@ public sealed partial class PropertiesPane : UserControl
 
     private void UpdateVisualState()
     {
+        if (_isOpen) _ = ViewFor(_selected);
         PaneBody.Visibility = _isOpen ? Visibility.Visible : Visibility.Collapsed;
         PaneTitle.Text = TitleFor(_selected);
 
@@ -196,13 +230,13 @@ public sealed partial class PropertiesPane : UserControl
         TransitionTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Transition;
         ZoomTab.IsChecked = _isOpen && _selected == PropertyPaneKind.Zoom;
 
-        SceneView.Visibility = Vis(PropertyPaneKind.Scene);
-        TextSlideView.Visibility = Vis(PropertyPaneKind.TextSlide);
-        CursorView.Visibility = Vis(PropertyPaneKind.Cursor);
-        VideoView.Visibility = Vis(PropertyPaneKind.Video);
-        TextOverlayView.Visibility = Vis(PropertyPaneKind.TextOverlay);
-        TransitionView.Visibility = Vis(PropertyPaneKind.Transition);
-        ZoomView.Visibility = Vis(PropertyPaneKind.Zoom);
+        SetVisibility(SceneView, PropertyPaneKind.Scene);
+        SetVisibility(TextSlideView, PropertyPaneKind.TextSlide);
+        SetVisibility(CursorView, PropertyPaneKind.Cursor);
+        SetVisibility(VideoView, PropertyPaneKind.Video);
+        SetVisibility(TextOverlayView, PropertyPaneKind.TextOverlay);
+        SetVisibility(TransitionView, PropertyPaneKind.Transition);
+        SetVisibility(ZoomView, PropertyPaneKind.Zoom);
 
         // Each panel starts at the top rather than inheriting the previous panel's scroll.
         if (_renderedPane != _selected)
@@ -213,8 +247,11 @@ public sealed partial class PropertiesPane : UserControl
 
         UpdateEdgeFades();
 
-        Visibility Vis(PropertyPaneKind kind)
-            => _selected == kind ? Visibility.Visible : Visibility.Collapsed;
+        void SetVisibility(UserControl? view, PropertyPaneKind kind)
+        {
+            if (view is not null)
+                view.Visibility = _selected == kind ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     // ─── Scrolled-content edge fades ────────────────────────────────────

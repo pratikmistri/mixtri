@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
+using Mixtri.Core.Diagnostics;
 
 namespace Mixtri.Core.Projects;
 
@@ -94,6 +97,7 @@ public static class RecentProjectsStore
         {
             lock (Gate)
             {
+                using var processLock = AcquireProcessLock();
                 return MergedRaw()
                     .Where(e => !string.IsNullOrWhiteSpace(e.Path) && File.Exists(e.Path))
                     .OrderByDescending(e => e.LastUsedUtc)
@@ -120,6 +124,7 @@ public static class RecentProjectsStore
         {
             lock (Gate)
             {
+                using var processLock = AcquireProcessLock();
                 var entries = MergedRaw();
 
                 entries.RemoveAll(e =>
@@ -152,6 +157,7 @@ public static class RecentProjectsStore
         {
             lock (Gate)
             {
+                using var processLock = AcquireProcessLock();
                 var entries = MergedRaw();
                 if (entries.RemoveAll(e =>
                         string.Equals(e.Path, packagePath, StringComparison.OrdinalIgnoreCase)) > 0)
@@ -231,6 +237,42 @@ public static class RecentProjectsStore
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        File.WriteAllText(IndexPath, JsonSerializer.Serialize(entries, JsonOptions));
+        string temporary = IndexPath + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(entries, JsonOptions));
+            File.Move(temporary, IndexPath, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private static IDisposable AcquireProcessLock()
+    {
+        string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            Path.GetFullPath(IndexPath).ToUpperInvariant())));
+        var mutex = new Mutex(false, @"Local\Mixtri-Recents-" + key);
+        try
+        {
+            try
+            {
+                if (!mutex.WaitOne(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("Another Mixtri process is updating recent projects.");
+            }
+            catch (AbandonedMutexException)
+            {
+                DiagLog.Write("RecentProjects", "Recovered the recent-projects lock after another process exited.");
+            }
+            return new ProcessLock(mutex);
+        }
+        catch { mutex.Dispose(); throw; }
+    }
+
+    private sealed class ProcessLock(Mutex mutex) : IDisposable
+    {
+        public void Dispose()
+        {
+            mutex.ReleaseMutex();
+            mutex.Dispose();
+        }
     }
 }

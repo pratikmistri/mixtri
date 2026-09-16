@@ -17,6 +17,8 @@ public class ProjectService
     public static ProjectService Instance => _instance ??= new();
 
     public Project? CurrentProject { get; set; }
+    public Mixtri.Core.Shell.ProjectActivity Activity { get; } = new();
+    public bool IsOperationInFlight => IsSaveInFlight || OpenInFlightPath is not null || Activity.IsBusy;
 
     /// <summary>
     /// Package whose open is currently in flight, or <c>null</c>. Published before the

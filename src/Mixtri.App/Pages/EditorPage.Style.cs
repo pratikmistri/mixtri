@@ -28,6 +28,10 @@ public sealed partial class EditorPage
 {
     private bool _suppressStyleEvents;
     private List<string>? _wallpaperPaths;
+    private Task? _wallpaperLoadTask;
+    private string? _wallpaperSelectionPath;
+    private int _wallpaperGeneration;
+    private bool _wallpapersLoaded;
     private bool _suppressCursorEvents;
 
     // Webcam overlay drag state
@@ -55,6 +59,12 @@ public sealed partial class EditorPage
 
     private void SyncCursorControlsToConfig(CursorStyle cursor)
     {
+        if (!PropertiesPanel.IsPaneCreated(PropertyPaneKind.Cursor))
+        {
+            _pendingCursorStyle = cursor;
+            return;
+        }
+        _pendingCursorStyle = null;
         using var _ = SuppressScope.Enter(ref _suppressCursorEvents);
 
         // Cursor type. Default/System/Custom all present as "Mouse" — the pane exposes
@@ -209,6 +219,7 @@ public sealed partial class EditorPage
 
     private void InitializeStyleControls(Project project, CompositionConfig config)
     {
+        ReleaseWallpaperThumbnails();
         // Style panel is available for all capture types. Monitor (full-screen)
         // captures start with zeroed defaults (see ProjectService.SetProject) but
         // users can still customize padding, corner radius, shadow, border, etc.
@@ -221,33 +232,81 @@ public sealed partial class EditorPage
         foreach (var preset in DefaultBrandPresets.All)
             PresetCombo.Items.Add(BuildPresetItem(preset, isCustom: false));
 
-        // Load system wallpapers (async). Pass the project's currently-selected
-        // background image so a custom path from a reopened project is merged
-        // into the grid and selection survives the async load.
-        _ = LoadSystemWallpapersAsync(config.Background.BackgroundImagePath);
-
         // Sync controls to current config, suppressing change events
         SyncStyleControlsToConfig(config.Background);
     }
 
-    private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
+    private async Task EnsureWallpapersLoadedAsync(string? initialCustomPath)
+    {
+        if (_pageUnloaded || _previewSuspended) return;
+        _wallpaperSelectionPath = initialCustomPath;
+        int generation = _wallpaperGeneration;
+        Task? task = null;
+        try
+        {
+            if (_wallpapersLoaded)
+            {
+                SelectWallpaperPath(initialCustomPath);
+                return;
+            }
+            if (_wallpaperLoadTask is { } pending)
+            {
+                await pending;
+                return;
+            }
+            generation = ++_wallpaperGeneration;
+            task = LoadSystemWallpapersAsync(generation);
+            _wallpaperLoadTask = task;
+            await task;
+        }
+        catch (Exception ex)
+        {
+            if (generation == _wallpaperGeneration) ReleaseWallpaperThumbnails();
+            Mixtri.Core.Diagnostics.DiagLog.Write("Wallpaper", $"Could not prepare wallpaper thumbnails: {ex.Message}");
+        }
+        finally
+        {
+            if (task is not null && ReferenceEquals(_wallpaperLoadTask, task)) _wallpaperLoadTask = null;
+        }
+    }
+
+    private void ReleaseWallpaperThumbnails()
+    {
+        _wallpaperGeneration++;
+        _wallpapersLoaded = false;
+        _wallpaperLoadTask = null;
+        _wallpaperSelectionPath = null;
+        using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
+        foreach (var item in WallpaperGrid.Items.OfType<Border>())
+            if (item.Child is Image image) image.Source = null;
+        WallpaperGrid.Items.Clear();
+    }
+
+    private async Task LoadSystemWallpapersAsync(int generation)
     {
         var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
 
         // Enumerate and sort files on a background thread to avoid freezing the UI
-        var systemPaths = await Task.Run(() =>
+        List<string> systemPaths;
+        try
         {
-            if (!Directory.Exists(wallpaperDir))
-                return new List<string>();
-
-            return Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
-                .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(f => new FileInfo(f).Length)
-                .ToList();
-        });
+            systemPaths = await Task.Run(() =>
+            {
+                if (!Directory.Exists(wallpaperDir)) return new List<string>();
+                return Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
+                    .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                                f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+                                f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                                f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(f => new FileInfo(f).Length).ToList();
+            });
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Wallpaper", $"Could not load wallpaper choices: {ex.Message}");
+            return;
+        }
+        if (_pageUnloaded || _previewSuspended || generation != _wallpaperGeneration) return;
 
         // Preserve any custom (non-system) paths the user already picked while
         // the system load was in flight — otherwise we'd silently drop them.
@@ -255,41 +314,33 @@ public sealed partial class EditorPage
             .Where(p => !p.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        if (!string.IsNullOrEmpty(initialCustomPath)
-            && !initialCustomPath.StartsWith(wallpaperDir, StringComparison.OrdinalIgnoreCase)
-            && !existingCustom.Any(p => string.Equals(p, initialCustomPath, StringComparison.OrdinalIgnoreCase)))
-        {
-            existingCustom.Insert(0, initialCustomPath);
-        }
-
         _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
 
+        using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
         WallpaperGrid.Items.Clear();
         WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
         {
             WallpaperGrid.Items.Add(BuildWallpaperTile(path));
         }
+        _wallpapersLoaded = true;
+        SelectWallpaperPath(_wallpaperSelectionPath);
+    }
 
-        // After the async load completes the synchronous SyncStyleControlsToConfig
-        // call ran before the grid was populated; re-apply selection now that
-        // the items exist so the user sees the active wallpaper highlighted.
-        // Prefer the project's current background image (it may have changed
-        // since the load started — e.g. the user picked a wallpaper while the
-        // system enumeration was still running) and fall back to the initial
-        // path passed in.
-        var currentImagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
-        var targetPath = !string.IsNullOrEmpty(currentImagePath) ? currentImagePath : initialCustomPath;
-        if (!string.IsNullOrEmpty(targetPath))
+    private void SelectWallpaperPath(string? path)
+    {
+        if (!_wallpapersLoaded || _wallpaperPaths is null) return;
+        using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
+        int index = string.IsNullOrEmpty(path) ? -1 : _wallpaperPaths.FindIndex(p =>
+            string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+        if (index < 0 && !string.IsNullOrEmpty(path))
         {
-            int idx = _wallpaperPaths.FindIndex(p =>
-                string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-            {
-                using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
-                WallpaperGrid.SelectedIndex = idx + 1;
-            }
+            var tile = BuildWallpaperTile(path);
+            _wallpaperPaths.Add(path);
+            WallpaperGrid.Items.Add(tile);
+            index = _wallpaperPaths.Count - 1;
         }
+        WallpaperGrid.SelectedIndex = index < 0 ? -1 : index + 1;
     }
 
     // Sentinel tag used to identify the "+" tile in the wallpaper grid.
@@ -340,13 +391,16 @@ public sealed partial class EditorPage
 
     private static Border BuildWallpaperTile(string path)
     {
+        var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
+        {
+            DecodePixelHeight = 96,
+            DecodePixelType = Microsoft.UI.Xaml.Media.Imaging.DecodePixelType.Physical,
+        };
+        bitmap.UriSource = new Uri(path);
         var img = new Microsoft.UI.Xaml.Controls.Image
         {
             Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
-            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
-            {
-                DecodePixelHeight = 96, // small thumbnails for perf
-            },
+            Source = bitmap,
         };
         return new Border
         {
@@ -357,7 +411,7 @@ public sealed partial class EditorPage
 
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
     {
-        using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
+        using var styleSync = SuppressScope.Enter(ref _suppressStyleEvents);
         {
             // Background type combo
             int typeIndex = bg.Type switch
@@ -380,6 +434,8 @@ public sealed partial class EditorPage
             bool isImage = bg.Type == BackgroundType.Image;
             GradientPanel.Visibility = isGradient ? Visibility.Visible : Visibility.Collapsed;
             WallpaperPanel.Visibility = isImage ? Visibility.Visible : Visibility.Collapsed;
+            if (isImage) _ = EnsureWallpapersLoadedAsync(bg.BackgroundImagePath);
+            else ReleaseWallpaperThumbnails();
             ColorPanel.Visibility = bg.Type is not BackgroundType.Blur and not BackgroundType.Image
                 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -390,14 +446,6 @@ public sealed partial class EditorPage
                 GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
                 GradEndColorText.Text = bg.GradientEndColor;
                 GradAngleSlider.Value = bg.GradientAngle;
-            }
-
-            if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
-            {
-                int wpIdx = _wallpaperPaths.FindIndex(p =>
-                    string.Equals(p, bg.BackgroundImagePath, StringComparison.OrdinalIgnoreCase));
-                // +1 because index 0 in the grid is the "+" add-tile.
-                WallpaperGrid.SelectedIndex = wpIdx >= 0 ? wpIdx + 1 : -1;
             }
 
             // Sliders
@@ -570,6 +618,11 @@ public sealed partial class EditorPage
             ? Visibility.Visible : Visibility.Collapsed;
         WallpaperPanel.Visibility = selectedType == BackgroundType.Image
             ? Visibility.Visible : Visibility.Collapsed;
+        if (selectedType == BackgroundType.Image)
+            _ = EnsureWallpapersLoadedAsync((SelectedVideoSegment?.FrameStyleOverride
+                ?? ProjectService.Instance.CurrentComposition?.Background)?.BackgroundImagePath);
+        else
+            ReleaseWallpaperThumbnails();
         ColorPanel.Visibility = selectedType is not BackgroundType.Blur and not BackgroundType.Image
             ? Visibility.Visible : Visibility.Collapsed;
 
@@ -778,7 +831,8 @@ public sealed partial class EditorPage
                 // Wallpaper list hasn't finished loading yet (or selection was
                 // cleared) — preserve the project's currently-applied image so a
                 // background sync from another control doesn't blank it out.
-                imagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+                imagePath = (SelectedVideoSegment?.FrameStyleOverride
+                    ?? ProjectService.Instance.CurrentComposition?.Background)?.BackgroundImagePath;
             }
         }
 
@@ -977,6 +1031,7 @@ public sealed partial class EditorPage
     private async Task RebuildPreviewRendererAsync(
         CompositionConfig config, VideoSegment? forSegment = null)
     {
+        if (_previewSuspended || _pageUnloaded) return;
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
 
@@ -997,10 +1052,13 @@ public sealed partial class EditorPage
 
             // Drain coalesced requests. Bounded purely as a backstop — the segment-scoped
             // rebuild above converges — so a future regression degrades to a stale frame
-            // rather than to a frozen app.
+            // rather than to a frozen app. Re-tests page state every iteration: an unload
+            // during the previous await must stop the loop, or it would build a renderer
+            // onto a page that has already torn down and will never dispose it.
             for (int i = 0; i < MaxCoalescedRendererRebuilds && _pendingRendererRebuild is { } pending; i++)
             {
                 _pendingRendererRebuild = null;
+                if (_previewSuspended || _pageUnloaded) break;
                 if (ProjectService.Instance.CurrentProject is not { } current) break;
                 await RebuildPreviewRendererCoreAsync(current, pending.Config, pending.Segment);
             }
@@ -1016,6 +1074,18 @@ public sealed partial class EditorPage
     private const int MaxCoalescedRendererRebuilds = 4;
     private bool _rebuildingPreviewRenderer;
     private (CompositionConfig Config, VideoSegment? Segment)? _pendingRendererRebuild;
+
+    /// <summary>
+    /// Bumped whenever the page tears down or suspends, so a rebuild that is mid-await can
+    /// tell that the renderer it is building is no longer wanted.
+    /// </summary>
+    private int _rendererRebuildGeneration;
+
+    internal void AbandonRendererRebuilds()
+    {
+        _rendererRebuildGeneration++;
+        _pendingRendererRebuild = null;
+    }
 
     private async Task RebuildPreviewRendererCoreAsync(
         Project project, CompositionConfig config, VideoSegment? forSegment)
@@ -1054,11 +1124,18 @@ public sealed partial class EditorPage
 
         _compositorReady = false;
         _previewRenderer?.Dispose();
+        _previewRenderer = null;
 
+        // Build into a local and publish only if this page still wants it. Assigning the
+        // field before the await would let a permanent unload dispose and null it mid-init,
+        // after which this continuation would mark a disposed renderer ready — or, worse,
+        // install a freshly built one onto a dead page with no teardown left to release it.
+        int generation = _rendererRebuildGeneration;
+        PreviewRenderer? built = null;
         try
         {
-            _previewRenderer = new PreviewRenderer();
-            await _previewRenderer.InitializeAsync(
+            built = new PreviewRenderer();
+            await built.InitializeAsync(
                 mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
@@ -1067,6 +1144,15 @@ public sealed partial class EditorPage
                 project.CropOffsetX,
                 project.CropOffsetY,
                 project.DpiScale);
+
+            if (generation != _rendererRebuildGeneration || _pageUnloaded)
+            {
+                built.Dispose();
+                return;
+            }
+
+            _previewRenderer = built;
+            built = null;
 
             // Re-sync zoom state from the model. The new compositor has just regenerated
             // auto-zoom from the raw mouse data, so this has to run unconditionally —
@@ -1077,9 +1163,12 @@ public sealed partial class EditorPage
         }
         catch
         {
+            built?.Dispose();
             _previewRenderer?.Dispose();
             _previewRenderer = null;
         }
+
+        if (generation != _rendererRebuildGeneration || _pageUnloaded) return;
 
         // Re-render at current playhead position
         _lastRenderedFrameIndex = -1;
@@ -1293,12 +1382,20 @@ public sealed partial class EditorPage
 
     private void SyncWebcamOverlayUI(WebcamOverlayStyle style)
     {
-        _suppressWebcamEvents = true;
+        if (!PropertiesPanel.IsPaneCreated(PropertyPaneKind.Video))
+        {
+            _pendingWebcamStyle = style;
+            return;
+        }
+        _pendingWebcamStyle = null;
+        using var _ = SuppressScope.Enter(ref _suppressWebcamEvents);
         WebcamShapeCombo.SelectedIndex = style.Shape == WebcamShape.RoundedRect ? 1 : 0;
         WebcamBorderSlider.Value = style.BorderWidth;
         WebcamMirrorToggle.IsOn = style.Mirrored;
-        _suppressWebcamEvents = false;
     }
+
+    private CursorStyle? _pendingCursorStyle;
+    private WebcamOverlayStyle? _pendingWebcamStyle;
 
     private void WebcamMirrorToggle_Toggled(object sender, RoutedEventArgs e)
     {

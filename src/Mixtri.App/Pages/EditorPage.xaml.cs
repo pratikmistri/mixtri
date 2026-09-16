@@ -101,6 +101,16 @@ public sealed partial class EditorPage : Page
 
     // Thumbnail generation versioning — prevents stale results
     private int _thumbnailGenerationId;
+    private int _activeThumbnailGenerations;
+    private CancellationTokenSource _thumbnailCts = new();
+
+    private void CancelThumbnailGeneration()
+    {
+        _thumbnailGenerationId++;
+        _thumbnailCts.Cancel();
+        _thumbnailCts.Dispose();
+        _thumbnailCts = new();
+    }
 
     /// <summary>
     /// Preview initialization versioning. <see cref="InitializePreviewCoreAsync"/> awaits a
@@ -183,10 +193,10 @@ public sealed partial class EditorPage : Page
         ViewModel = new EditorViewModel();
         ExportVM = new ExportViewModel();
         InitializeComponent();
+        if (App.Current.MainAppWindow is MainWindow owner) owner.MarkEditorGraphicsUsed();
         _graphicsDeviceManager = new EditorGraphicsDeviceManager(
             DispatcherQueue, RecoverGraphicsDeviceAsync, FlushPendingRenderAsync,
-            () => _pageUnloaded);
-        _graphicsDeviceManager.Attach();
+            () => _pageUnloaded || _previewSuspended);
 
         // A CanvasControl recovers from GPU device loss on its own, and need not raise
         // DeviceLost on the shared device the manager watches. When that happens every
@@ -200,14 +210,9 @@ public sealed partial class EditorPage : Page
         Loaded += (_, _) =>
         {
             _pageUnloaded = false;
-            _graphicsDeviceManager.Attach();
+            _ = SetPreviewVisibilityAsync(App.Current.MainAppWindow is MainWindow main && main.IsForegroundVisible);
         };
         WirePropertyPanels();
-
-        // OverlayHeightSlider lives in the same view as OverlayWidthSlider (wired in
-        // WirePropertyPanels, which this file does not own), so it is wired here instead —
-        // same handler shape/style as OverlayWidthSlider_ValueChanged.
-        PropertiesPanel.TextOverlay.OverlayHeightSlider.ValueChanged += OverlayHeightSlider_ValueChanged;
 
         Preview.Duration = GetMappedDuration();
 
@@ -326,6 +331,10 @@ public sealed partial class EditorPage : Page
             if (!HasPreviewAudio) return;
             if (isPlaying)
             {
+                // A scrub pulse may already be playing; its timeout must not stop normal playback.
+                _audioPlayer?.CancelPendingScrub();
+                _insertedAudioPlayer?.CancelPendingScrub();
+                _stretchedAudioPlayer?.CancelPendingScrub();
                 // Seeks, starts, or leaves it paused if the playhead is somewhere with no
                 // audio behind it (a title slide, say) — PlaybackTick picks it up on entry.
                 SyncAudioToPlayhead(Preview.PlayheadPosition);
@@ -474,6 +483,9 @@ public sealed partial class EditorPage : Page
         Unloaded += (_, _) =>
         {
             _pageUnloaded = true;
+            _previewWorkCts.Cancel();
+            _insertedAudioGeneration++;
+            _stretchedAudioGeneration++;
             _graphicsDeviceManager.Detach();
             _styleDebouncer?.Stop();
             _styleDebouncer = null;
@@ -486,10 +498,13 @@ public sealed partial class EditorPage : Page
 
             // Stop playback to halt timer ticks
             Preview.Pause();
+            Preview.ClearFrame();
 
             // Abandon any preview init still awaiting the decoder open, so it disposes
             // rather than publishes whatever it built onto this dead page.
             _previewInitGeneration++;
+            AbandonRendererRebuilds();
+            CancelWaveformWork();
 
             // Dispose owned resources
             DisposeOffUiThread(_frameReader);
@@ -513,11 +528,15 @@ public sealed partial class EditorPage : Page
             _lastWebcamFrame?.Dispose();
             _lastWebcamFrame = null;
             _compositorReady = false;
-            _thumbnailGenerationId++; // cancel any in-flight thumbnail generation
+            CancelThumbnailGeneration();
             Timeline.ClearThumbnails();
             _thumbnailsCompletedForPath = null;
             _thumbnailsInFlightForPath = null;
             _thumbnailsDoneForFiles.Clear();
+            _insertedAudioWaveforms.Clear();
+            ReleaseWallpaperThumbnails();
+            Timeline.ReleaseRenderResources(removeFromTree: true);
+            Preview.ReleaseRenderResources(removeFromTree: true);
 
             // Unsubscribe VMs from singleton event sources
             ViewModel.Cleanup();
@@ -548,11 +567,12 @@ public sealed partial class EditorPage : Page
         while (_isRendering && !_pageUnloaded)
             await Task.Delay(25);
 
-        if (_pageUnloaded)
+        if (_pageUnloaded || _previewSuspended)
             return;
 
         _previewInitGeneration++;
-        _thumbnailGenerationId++;
+        CancelWaveformWork();
+        CancelThumbnailGeneration();
         _segmentPreviewGeneration++;
 
         Preview.ClearFrame();
@@ -609,7 +629,7 @@ public sealed partial class EditorPage : Page
     /// </summary>
     private async Task FlushPendingRenderAsync()
     {
-        if (_pageUnloaded) return;
+        if (_pageUnloaded || _previewSuspended) return;
 
         var position = _pendingRenderPosition ?? Preview.PlayheadPosition;
         _pendingRenderPosition = null;

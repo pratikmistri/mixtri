@@ -45,13 +45,14 @@ public class GifEncoder
 
         using var stream = await file.OpenAsync(FileAccessMode.ReadWrite);
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
+        using var pixels = new GifFramePixels();
 
         for (int i = 0; i < totalFrames; i++)
         {
             ct.ThrowIfCancellationRequested();
 
             var frame = frames[i];
-            var pixelBytes = frame.GetPixelBytes();
+            var pixelBytes = pixels.Read(frame);
             uint width = (uint)frame.SizeInPixels.Width;
             uint height = (uint)frame.SizeInPixels.Height;
 
@@ -73,6 +74,7 @@ public class GifEncoder
 
             if (i < totalFrames - 1)
             {
+                // Commit before the next iteration refills the shared pixel array.
                 await encoder.GoToNextFrameAsync();
             }
 
@@ -115,6 +117,7 @@ public class GifEncoder
 
         using var stream = await file.OpenAsync(FileAccessMode.ReadWrite);
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
+        using var pixels = new GifFramePixels();
 
         for (int i = 0; i < totalFrames; i++)
         {
@@ -122,7 +125,7 @@ public class GifEncoder
 
             using var composedFrame = await composeFrame(i);
 
-            var pixelBytes = composedFrame.GetPixelBytes();
+            var pixelBytes = pixels.Read(composedFrame);
             uint width = (uint)composedFrame.SizeInPixels.Width;
             uint height = (uint)composedFrame.SizeInPixels.Height;
 
@@ -143,6 +146,7 @@ public class GifEncoder
 
             if (i < totalFrames - 1)
             {
+                // Commit before the next iteration refills the shared pixel array.
                 await encoder.GoToNextFrameAsync();
             }
 

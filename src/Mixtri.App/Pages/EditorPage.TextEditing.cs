@@ -65,8 +65,6 @@ public sealed partial class EditorPage
     /// </summary>
     private void SyncTextOverlayUI(string? overlayId)
     {
-        if (OverlayTextBox is null) return;
-
         var overlay = overlayId is null
             ? null
             : ViewModel.Model.TextOverlays.FirstOrDefault(o => o.Id == overlayId);
@@ -374,8 +372,6 @@ public sealed partial class EditorPage
     /// </remarks>
     private void SyncTransitionUI(string? incomingSegmentId)
     {
-        if (TransitionFamilyCombo is null) return;
-
         TimelineSegment? incoming = null;
         TimelineSegment? outgoing = null;
         if (incomingSegmentId is not null)

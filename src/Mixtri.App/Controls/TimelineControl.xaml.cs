@@ -1,4 +1,3 @@
-using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Geometry;
 using Microsoft.Graphics.Canvas.UI;
@@ -278,17 +277,58 @@ public sealed partial class TimelineControl : UserControl
     // recordings draw from their OWN source file, so per-file sets are stored in
     // _thumbnailsByFile keyed by VideoSegment.VideoFilePath to avoid showing the
     // primary's frames under an appended segment.
-    private CanvasBitmap[]? _thumbnails;
+    private CanvasBitmap?[]? _thumbnails;
     private double _thumbnailIntervalSeconds;
     private double _videoAspectRatio = 16.0 / 9.0;
     private string? _primaryThumbnailFilePath;
 
     private sealed class ThumbnailSet
     {
-        public required CanvasBitmap[] Thumbnails;
+        public required CanvasBitmap?[] Thumbnails;
         public double IntervalSeconds;
         public double AspectRatio = 16.0 / 9.0;
+        public double DurationSeconds;
+        public int CompletedCount;
+        public bool IsLoading;
+        public CanvasBitmap?[] Overview = [];
+        public int[] OverviewIndices = [];
+        public long OverviewArrival;
+        public long[] Arrivals = [];
+        public long LastArrival;
+        public double RevealFrom;
+        public double RevealTo;
+
+        public double DisplayedCount(long now)
+            => RevealFrom + (RevealTo - RevealFrom) *
+                ThumbnailReveal.Progress((now - LastArrival) / (double)System.Diagnostics.Stopwatch.Frequency);
+
+        public CanvasBitmap? OverviewAt(int index)
+        {
+            CanvasBitmap? best = null;
+            int distance = int.MaxValue;
+            for (int i = 0; i < Overview.Length; i++)
+            {
+                int delta = Math.Abs(OverviewIndices[i] - index);
+                if (Overview[i] is not null && delta < distance)
+                {
+                    best = Overview[i];
+                    distance = delta;
+                }
+            }
+            return best;
+        }
+
+        public void DisposeOverview()
+        {
+            foreach (var frame in Overview) SafeDispose(frame);
+            Overview = [];
+            OverviewIndices = [];
+        }
     }
+
+    private DispatcherTimer? _filmstripRevealTimer;
+    private bool _renderResourcesReleased;
+    private readonly bool _filmstripAnimationsEnabled = new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
 
     private readonly Dictionary<string, ThumbnailSet> _thumbnailsByFile =
         new(StringComparer.OrdinalIgnoreCase);
@@ -346,6 +386,7 @@ public sealed partial class TimelineControl : UserControl
     }
 
     private const double TrimHandleWidth = 8;
+    private readonly TimelineDrawingResources _drawingResources = new();
 
     public TimelineControl()
     {
@@ -369,7 +410,7 @@ public sealed partial class TimelineControl : UserControl
         Loaded += (_, _) => UpdatePlayheadVisual();
         TimeRulerCanvas.SizeChanged += (_, _) => UpdatePlayheadVisual();
 
-        // The chip hover machinery owns a DispatcherTimer and a native text format; neither is
+        // The chip hover machinery owns a DispatcherTimer and native drawing formats; neither is
         // tied to a canvas's own lifetime, so they are released explicitly when the control
         // leaves the tree (e.g. navigating away from the editor mid-hover) rather than left
         // ticking against a control that is no longer shown.
@@ -378,8 +419,7 @@ public sealed partial class TimelineControl : UserControl
             _hoveredTransitionChipId = null;
             HideTransitionChipToolTip();
             _transitionChipHoverTimer = null;
-            _transitionChipGlyphFormat?.Dispose();
-            _transitionChipGlyphFormat = null;
+            _drawingResources.Clear();
 
             // The drop-hint reveal timer is the same class of leak: it ticks a layout pass and
             // a canvas invalidation, so it must not outlive the control that owns them.
@@ -402,6 +442,46 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public event EventHandler? DeviceRecreated;
 
+    public void ReleaseRenderResources(bool removeFromTree = false)
+    {
+        if (_renderResourcesReleased) return;
+        ClearThumbnails();
+        ClearSegmentTrackVisuals();
+        _cursorRibbonCache.Clear();
+        _transitionChipHoverTimer?.Stop();
+        _hintLaneRevealTimer?.Stop();
+        _drawingResources.Clear();
+        if (removeFromTree && _filmstripRevealTimer is not null)
+        {
+            _filmstripRevealTimer.Tick -= OnFilmstripRevealTick;
+            _filmstripRevealTimer = null;
+        }
+        if (removeFromTree)
+        {
+            _renderResourcesReleased = true;
+            _drawingResources.Dispose();
+            DetachCanvas(TimeRulerCanvas, TimeRulerCanvas_Draw);
+            DetachCanvas(VideoTrackCanvas, VideoTrackCanvas_Draw);
+            DetachCanvas(CameraTrackCanvas, CameraTrackCanvas_Draw);
+            DetachCanvas(TextTrackCanvas, TextTrackCanvas_Draw);
+            DetachCanvas(AudioTrackCanvas, AudioTrackCanvas_Draw);
+            DetachCanvas(MicTrackCanvas, MicTrackCanvas_Draw);
+            DetachCanvas(VoiceOverTrackCanvas, VoiceOverTrackCanvas_Draw);
+            DetachCanvas(MusicTrackCanvas, MusicTrackCanvas_Draw);
+            TimeRulerCanvas = VideoTrackCanvas = CameraTrackCanvas = TextTrackCanvas = null;
+            AudioTrackCanvas = MicTrackCanvas = VoiceOverTrackCanvas = MusicTrackCanvas = null;
+            _lastRecoveredDevice = null;
+        }
+    }
+
+    private void DetachCanvas(CanvasControl? canvas, TypedEventHandler<CanvasControl, CanvasDrawEventArgs> draw)
+    {
+        if (canvas is null) return;
+        canvas.Draw -= draw;
+        canvas.CreateResources -= TrackCanvas_CreateResources;
+        canvas.RemoveFromVisualTree();
+    }
+
     private IEnumerable<CanvasControl?> TrackCanvases()
     {
         yield return TimeRulerCanvas;
@@ -418,6 +498,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void TrackCanvas_CreateResources(CanvasControl sender, CanvasCreateResourcesEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         if (args.Reason != CanvasCreateResourcesReason.NewDevice) return;
 
         // All eight track canvases raise this for the same underlying loss when they share a
@@ -634,6 +715,7 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public void InvalidateAllCanvases()
     {
+        if (_renderResourcesReleased) return;
         UpdateTrackVisibility();
 
         TimeRulerCanvas?.Invalidate();
@@ -1104,7 +1186,7 @@ public sealed partial class TimelineControl : UserControl
     /// registered per-file so appended recordings show their own frames; this path
     /// is treated as the primary set used by the legacy clip filmstrip.
     /// </param>
-    public void SetThumbnails(CanvasBitmap[]? thumbnails, double intervalSeconds, double aspectRatio,
+    public void SetThumbnails(CanvasBitmap?[]? thumbnails, double intervalSeconds, double aspectRatio,
         string? filePath = null)
     {
         if (_thumbnails is not null)
@@ -1114,7 +1196,8 @@ public sealed partial class TimelineControl : UserControl
             var shared = _thumbnailsByFile
                 .Where(kv => ReferenceEquals(kv.Value.Thumbnails, _thumbnails))
                 .Select(kv => kv.Key).ToList();
-            foreach (var key in shared) _thumbnailsByFile.Remove(key);
+            foreach (var key in shared)
+                if (_thumbnailsByFile.Remove(key, out var set)) set.DisposeOverview();
 
             foreach (var t in _thumbnails)
                 SafeDispose(t);
@@ -1136,7 +1219,7 @@ public sealed partial class TimelineControl : UserControl
     /// recording). The control does NOT take ownership of these bitmaps beyond the
     /// per-file cache; they are disposed by <see cref="ClearThumbnails"/>.
     /// </summary>
-    public void SetThumbnailsForFile(string filePath, CanvasBitmap[] thumbnails,
+    public void SetThumbnailsForFile(string filePath, CanvasBitmap?[] thumbnails,
         double intervalSeconds, double aspectRatio)
     {
         if (string.IsNullOrEmpty(filePath) || thumbnails.Length == 0) return;
@@ -1144,6 +1227,7 @@ public sealed partial class TimelineControl : UserControl
         if (_thumbnailsByFile.TryGetValue(filePath, out var existing) &&
             !ReferenceEquals(existing.Thumbnails, thumbnails))
         {
+            existing.DisposeOverview();
             foreach (var t in existing.Thumbnails)
                 SafeDispose(t);
         }
@@ -1153,9 +1237,137 @@ public sealed partial class TimelineControl : UserControl
             Thumbnails = thumbnails,
             IntervalSeconds = intervalSeconds,
             AspectRatio = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0,
+            CompletedCount = thumbnails.Length,
         };
         VideoTrackCanvas?.Invalidate();
     }
+
+    /// <summary>Prioritizes the exact source samples the currently visible filmstrip tiles need.</summary>
+    public IReadOnlyList<TimeSpan> VisibleFilmstripSourceTimes(string filePath)
+    {
+        var times = new List<TimeSpan>();
+        var model = Model;
+        if (model is null || VideoTrackCanvas.ActualWidth <= 0) return times;
+        int trackCount = VideoDisplayTrackCount(model);
+        foreach (var video in model.Segments.OfType<VideoSegment>())
+        {
+            if (!string.Equals(video.VideoFilePath, filePath, StringComparison.OrdinalIgnoreCase)) continue;
+            var (x1, x2) = GetSegmentDisplayX(video);
+            int track = GetSegmentDisplayTrackIndex(video, trackCount);
+            var (_, height, padding) = VideoTrackRowBounds(track, trackCount);
+            double aspect = video.SourceHeight > 0 ? video.SourceWidth / (double)video.SourceHeight : 16.0 / 9.0;
+            float width = (height - padding * 2) * (float)aspect;
+            if (width < 2) continue;
+            float visibleEnd = Math.Min((float)VideoTrackCanvas.ActualWidth, x2);
+            float first = x1 + Math.Max(0, MathF.Floor(-x1 / width)) * width;
+            for (float x = first; x < visibleEnd; x += width)
+                times.Add(FilmstripSourceTime(video, Math.Clamp(x + width / 2, x1, x2)));
+        }
+        return times;
+    }
+
+    /// <summary>Transfers only newly published frames; previously displayed frames remain owned here.</summary>
+    public void AppendThumbnailBatch(string filePath, ThumbnailBatch batch, bool isPrimary, bool reset)
+    {
+        if (_renderResourcesReleased) return; // Untaken frames remain the producer's responsibility.
+        if (reset || !_thumbnailsByFile.TryGetValue(filePath, out var current)
+            || current.Thumbnails.Length != batch.TotalCount)
+        {
+            var placeholders = new CanvasBitmap?[batch.TotalCount];
+            if (isPrimary)
+                SetThumbnails(placeholders, batch.IntervalSeconds, batch.AspectRatio, filePath);
+            else
+                SetThumbnailsForFile(filePath, placeholders, batch.IntervalSeconds, batch.AspectRatio);
+        }
+        var set = _thumbnailsByFile[filePath];
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (set.Arrivals.Length != batch.TotalCount) set.Arrivals = new long[batch.TotalCount];
+        set.RevealFrom = reset ? 0 : set.DisplayedCount(now);
+        set.LastArrival = now;
+        set.DurationSeconds = batch.Duration.TotalSeconds;
+        if (batch.IsOverview)
+        {
+            set.DisposeOverview();
+            set.OverviewIndices = Enumerable.Range(0, batch.Count).Select(batch.FrameIndexAt).ToArray();
+            set.Overview = batch.TakeFrames();
+            set.OverviewArrival = now;
+            set.CompletedCount = 0;
+            set.RevealTo = 0;
+            set.IsLoading = true;
+            StartFilmstripReveal();
+            return;
+        }
+        var frames = batch.TakeFrames();
+        try
+        {
+            for (int i = 0; i < frames.Length; i++)
+            {
+                int index = batch.StartIndex + i;
+                if (frames[i] is null && index > 0 && set.Thumbnails[index - 1] is { } previous)
+                {
+                    var repeat = Win2DUtils.CreateRenderTarget(previous.Device,
+                        previous.SizeInPixels.Width, previous.SizeInPixels.Height, 96, "filmstrip repeated thumbnail");
+                    try
+                    {
+                        using (var ds = repeat.CreateDrawingSession()) ds.DrawImage(previous);
+                        frames[i] = repeat;
+                    }
+                    catch { repeat.Dispose(); throw; }
+                }
+                SafeDispose(set.Thumbnails[index]);
+                set.Thumbnails[index] = frames[i];
+                set.Arrivals[index] = now;
+                frames[i] = null;
+            }
+            set.CompletedCount = batch.StartIndex + batch.Count;
+            set.RevealTo = set.CompletedCount;
+            set.IsLoading = !batch.IsComplete;
+        }
+        finally
+        {
+            foreach (var frame in frames) SafeDispose(frame);
+        }
+        StartFilmstripReveal();
+    }
+
+    public void FinishThumbnailLoading(string filePath)
+    {
+        if (_renderResourcesReleased) return;
+        if (_thumbnailsByFile.TryGetValue(filePath, out var set)) set.IsLoading = false;
+        VideoTrackCanvas.Invalidate();
+    }
+
+    private void StartFilmstripReveal()
+    {
+        VideoTrackCanvas.Invalidate();
+        if (!_filmstripAnimationsEnabled) return;
+        if (_filmstripRevealTimer is null)
+        {
+            _filmstripRevealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+            _filmstripRevealTimer.Tick += OnFilmstripRevealTick;
+        }
+        _filmstripRevealTimer.Start();
+    }
+
+    private void OnFilmstripRevealTick(object? sender, object e)
+    {
+        if (_renderResourcesReleased) return;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        bool animating = false;
+        foreach (var set in _thumbnailsByFile.Values)
+        {
+            bool active = RevealProgress(set.LastArrival, now) < 1;
+            animating |= active;
+            if (!active && !set.IsLoading && set.Thumbnails.All(frame => frame is not null))
+                set.DisposeOverview();
+        }
+        VideoTrackCanvas.Invalidate();
+        if (!animating) _filmstripRevealTimer?.Stop();
+    }
+
+    private float RevealProgress(long started, long now)
+        => !_filmstripAnimationsEnabled || started == 0 ? 1
+            : ThumbnailReveal.Progress((now - started) / (double)System.Diagnostics.Stopwatch.Frequency);
 
     /// <summary>
     /// Resolves the thumbnail set to draw for a segment's source file. Returns null
@@ -1179,6 +1391,7 @@ public sealed partial class TimelineControl : UserControl
                 Thumbnails = _thumbnails,
                 IntervalSeconds = _thumbnailIntervalSeconds,
                 AspectRatio = _videoAspectRatio,
+                CompletedCount = _thumbnails.Length,
             };
         }
 
@@ -1199,6 +1412,7 @@ public sealed partial class TimelineControl : UserControl
     /// <summary>Clears and disposes all cached thumbnails (primary and per-file).</summary>
     public void ClearThumbnails()
     {
+        _filmstripRevealTimer?.Stop();
         // The primary array may also be registered in _thumbnailsByFile; dispose each
         // bitmap exactly once by deduplicating on reference.
         var primary = _thumbnails;
@@ -1207,6 +1421,7 @@ public sealed partial class TimelineControl : UserControl
         bool primaryDisposed = false;
         foreach (var set in _thumbnailsByFile.Values)
         {
+            set.DisposeOverview();
             if (ReferenceEquals(set.Thumbnails, primary)) primaryDisposed = true;
             foreach (var t in set.Thumbnails)
                 SafeDispose(t);
@@ -1299,10 +1514,10 @@ public sealed partial class TimelineControl : UserControl
     private const double TrackContentInset = TimeCoordinateConverter.TrackContentInset;
 
     private double TimeToX(TimeSpan time) =>
-        TimeCoordinateConverter.TimeToX(Model, time, TimeRulerCanvas.ActualWidth, ActualWidth);
+        TimeCoordinateConverter.TimeToX(Model, time, TimeRulerCanvas?.ActualWidth ?? 0, ActualWidth);
 
     private TimeSpan XToTime(double x) =>
-        TimeCoordinateConverter.XToTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
+        TimeCoordinateConverter.XToTime(Model, x, TimeRulerCanvas?.ActualWidth ?? 0, ActualWidth);
 
     /// <summary>
     /// Output-timeline time under a point expressed in THIS CONTROL's coordinate space, for
@@ -1328,7 +1543,7 @@ public sealed partial class TimelineControl : UserControl
     /// after text slides shift later content.
     /// </summary>
     private double SourceTimeToX(TimeSpan sourceTime) =>
-        TimeCoordinateConverter.SourceTimeToX(Model, sourceTime, TimeRulerCanvas.ActualWidth, ActualWidth);
+        TimeCoordinateConverter.SourceTimeToX(Model, sourceTime, TimeRulerCanvas?.ActualWidth ?? 0, ActualWidth);
 
     /// <summary>
     /// Converts an X coordinate to a source-video time in the PRIMARY recording's time
@@ -1341,7 +1556,7 @@ public sealed partial class TimelineControl : UserControl
     /// primary video segment at all to clamp against.
     /// </summary>
     private TimeSpan? XToPrimarySourceTime(double x) =>
-        TimeCoordinateConverter.XToPrimarySourceTime(Model, x, TimeRulerCanvas.ActualWidth, ActualWidth);
+        TimeCoordinateConverter.XToPrimarySourceTime(Model, x, TimeRulerCanvas?.ActualWidth ?? 0, ActualWidth);
 
     /// <summary>
     /// Internal alias for <see cref="InvalidateAllCanvases"/>, used by the drag/edit
@@ -1365,6 +1580,7 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private void UpdatePlayheadVisual()
     {
+        if (_renderResourcesReleased) return;
         if (PlayheadLine is null) return;
 
         double viewportWidth = TimeRulerCanvas?.ActualWidth ?? 0;
@@ -1415,6 +1631,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void TimeRulerCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -1452,11 +1669,7 @@ public sealed partial class TimelineControl : UserControl
 
             string label = FormatTime(TimeSpan.FromSeconds(t));
             ds.DrawText(label, x + 3, 1, RulerTextColor,
-                new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 11,
-                    FontFamily = "Segoe UI"
-                });
+                _drawingResources.GetTextFormat(TimelineTextStyle.Plain11));
         }
     }
 
@@ -1486,6 +1699,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void VideoTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -1764,12 +1978,7 @@ public sealed partial class TimelineControl : UserControl
 
                 string speedLabel = $"{clip.SpeedFactor:0.##}x";
                 ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 12,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-                    });
+                    _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold12));
             }
         }
 
@@ -1817,12 +2026,7 @@ public sealed partial class TimelineControl : UserControl
 
             string speedLabel = $"{seg.Speed:0.##}x";
             ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
-                new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 12,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-                });
+                _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold12));
         }
 
         // Trim handles
@@ -1858,24 +2062,14 @@ public sealed partial class TimelineControl : UserControl
 
         using var geom = CanvasGeometry.CreateRoundedRectangle(
             ds, x1, pad, blockW, blockH, VideoClipCornerRadius, VideoClipCornerRadius);
-        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
-
         ds.FillGeometry(geom, EmptyPlaceholderFill);
-        ds.DrawGeometry(geom, EmptyPlaceholderStroke, 1.2f, dashed);
+        ds.DrawGeometry(geom, EmptyPlaceholderStroke, 1.2f, _drawingResources.DashedStroke);
 
-        using var format = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-        {
-            FontSize = 12,
-            FontFamily = "Segoe UI",
-            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-            WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-        };
         ds.DrawText(
             "Record or import a video to start your timeline",
             new Rect(x1, pad, blockW, blockH),
             TrackHintTextColor,
-            format);
+            _drawingResources.GetTextFormat(TimelineTextStyle.EmptyPlaceholder));
     }
 
     /// <summary>
@@ -1915,12 +2109,7 @@ public sealed partial class TimelineControl : UserControl
                     $"V{track}",
                     6, rowY + 3,
                     TrackHintTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 10,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                    _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold10));
             }
         }
 
@@ -1956,7 +2145,18 @@ public sealed partial class TimelineControl : UserControl
                 {
                     using (ds.CreateLayer(1f, segGeom))
                     {
-                        ds.FillGeometry(segGeom, FilmstripBackplateColor);
+                        long arrived = thumbSet.OverviewArrival != 0 ? thumbSet.OverviewArrival
+                            : thumbSet.Arrivals.FirstOrDefault(value => value != 0);
+                        float reveal = RevealProgress(arrived, System.Diagnostics.Stopwatch.GetTimestamp());
+                        if (reveal < 1)
+                        {
+                            ds.FillGeometry(segGeom, isSelected ? VideoClipSelectedColor : VideoClipColor);
+                            using (ds.CreateLayer(reveal)) ds.FillGeometry(segGeom, FilmstripBackplateColor);
+                        }
+                        else
+                        {
+                            ds.FillGeometry(segGeom, FilmstripBackplateColor);
+                        }
                         DrawFilmstripForSegment(ds, x1, x2, clipY, clipH, video, thumbSet);
                     }
                     var strokeColor = isSelected ? VideoClipSelectedBorder : FilmstripStrokeColor;
@@ -1980,16 +2180,7 @@ public sealed partial class TimelineControl : UserControl
                 if (segW > 20)
                 {
                     var labelText = slide.Text.Length > 24 ? slide.Text[..24] + "…" : slide.Text;
-                    using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = Math.Min(15, clipH * 0.35f),
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                        HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-                        VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                        WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                        TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    };
+                    var fmt = _drawingResources.GetSlideLabel(Math.Min(15, clipH * 0.35f));
                     ds.DrawText(labelText, new Rect(x1 + 4, clipY, segW - 8, clipH), textLabelColor, fmt);
                 }
 
@@ -2080,15 +2271,7 @@ public sealed partial class TimelineControl : UserControl
             label,
             new Rect(badgeX + 6f + iconSize, badgeY, textW, badgeH),
             SpeedBadgeForegroundColor,
-            new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-            {
-                FontSize = 10,
-                FontFamily = "Segoe UI",
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
-                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-            });
+            _drawingResources.GetTextFormat(TimelineTextStyle.SpeedBadge));
     }
 
     /// <summary>
@@ -2133,21 +2316,14 @@ public sealed partial class TimelineControl : UserControl
         float hintH = Math.Max(1f, rowH - rowPad * 2);
         float hintW = Math.Max(2f, w - 2);
 
-        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
-        using var label = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-        {
-            FontSize = 10,
-            FontFamily = "Segoe UI",
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        };
-
         using (ds.CreateLayer(reveal, new Rect(0, rowY, w, rowH)))
         {
             ds.DrawLine(0, rowY, w, rowY, TrackEmptyLineColor, 1f);
             if (armed)
                 ds.FillRoundedRectangle(1, hintY, hintW, hintH, 4, 4, Color.FromArgb(28, 255, 255, 255));
-            ds.DrawRoundedRectangle(1, hintY, hintW, hintH, 4, 4, hintColor, 1.2f, dashed);
-            ds.DrawText($"V{track}  ·  drop to create", 6, rowY + 3, TrackHintTextColor, label);
+            ds.DrawRoundedRectangle(1, hintY, hintW, hintH, 4, 4, hintColor, 1.2f, _drawingResources.DashedStroke);
+            ds.DrawText($"V{track}  ·  drop to create", 6, rowY + 3, TrackHintTextColor,
+                _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold10));
         }
     }
 
@@ -2779,27 +2955,8 @@ public sealed partial class TimelineControl : UserControl
             (float)rect.X, (float)rect.Y, (float)rect.Width, (float)rect.Height, radius, radius,
             border, isSelected ? 2f : 1f);
 
-        ds.DrawText(glyph, rect, glyphColor, TransitionChipGlyphFormat);
+        ds.DrawText(glyph, rect, glyphColor, _drawingResources.GetTextFormat(TimelineTextStyle.TransitionGlyph));
     }
-
-    /// <summary>
-    /// Shared text format for every chip glyph. Cached for the same reason the chip no longer
-    /// builds a <see cref="CanvasGeometry"/> per draw — it is otherwise re-created for every
-    /// boundary on every invalidation. Disposed with the control.
-    /// </summary>
-    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat TransitionChipGlyphFormat =>
-        _transitionChipGlyphFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-        {
-            FontSize = 10,
-            FontFamily = "Segoe UI",
-            // The unconfigured chip is weighted the same as a configured one: it is an equally
-            // clickable affordance, and rendering it lighter is what made it read as decorative.
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-        };
-
-    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _transitionChipGlyphFormat;
 
     /// <summary>
     /// Hit-tests the boundary chips on the primary track. Returns the incoming
@@ -2976,27 +3133,44 @@ public sealed partial class TimelineControl : UserControl
         float visibleX2 = Math.Min(canvasWidth, clipX2);
         if (visibleX1 >= visibleX2) return;
 
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        float loadedEndX = clipX2;
+        // Only a set with no overview has a visible loading edge: there is nothing to
+        // paint past the newest arrival, so the strip is clipped to the frames that
+        // exist. Once an overview is published every tile already has a bitmap and the
+        // strip covers the whole clip, refining in place via the arrival crossfade.
+        if (thumbSet.Overview.Length == 0 &&
+            (thumbSet.IsLoading || RevealProgress(thumbSet.LastArrival, now) < 1))
+        {
+            double displayedCount = _filmstripAnimationsEnabled ? thumbSet.DisplayedCount(now) : thumbSet.CompletedCount;
+            double loadedSourceEnd = Math.Clamp(displayedCount * intervalSeconds, 0, thumbSet.DurationSeconds);
+            double sourceSpan = segment.Duration.TotalSeconds * segment.SpeedFactor;
+            double fraction = sourceSpan > 0
+                ? Math.Clamp((loadedSourceEnd - segment.SourceStart.TotalSeconds) / sourceSpan, 0, 1)
+                : 0;
+            loadedEndX = clipX1 + (clipX2 - clipX1) * (float)fraction;
+            visibleX2 = Math.Min(visibleX2, loadedEndX);
+        }
+
         for (float tileX = clipX1; tileX < visibleX2; tileX += thumbW)
         {
             if (tileX + thumbW < visibleX1) continue;
 
             float tileCenterX = Math.Clamp(tileX + thumbW / 2, clipX1, clipX2);
-            var timelineTime = XToTime(tileCenterX);
-
-            // Map timeline time → source time within this segment
-            var offset = timelineTime - segment.Start;
-            if (offset < TimeSpan.Zero) offset = TimeSpan.Zero;
-            var sourceTime = segment.SourceStart +
-                TimeSpan.FromTicks((long)(offset.Ticks * segment.SpeedFactor));
+            var sourceTime = FilmstripSourceTime(segment, tileCenterX);
 
             int thumbIndex = (int)(sourceTime.TotalSeconds / intervalSeconds);
             thumbIndex = Math.Clamp(thumbIndex, 0, thumbnails.Length - 1);
+            if (thumbSet.IsLoading && thumbSet.Overview.Length == 0)
+                thumbIndex = Math.Min(thumbIndex, Math.Max(0, thumbSet.CompletedCount - 1));
 
-            var thumb = thumbnails[thumbIndex];
+            var overview = thumbSet.OverviewAt(thumbIndex);
+            var detailed = thumbnails[thumbIndex];
+            var thumb = detailed ?? overview;
             if (thumb is null) continue;
 
             float drawX = Math.Max(tileX, clipX1);
-            float drawEndX = Math.Min(tileX + thumbW, clipX2);
+            float drawEndX = Math.Min(tileX + thumbW, loadedEndX);
             float drawW = drawEndX - drawX;
             if (drawW <= 0) continue;
 
@@ -3005,9 +3179,12 @@ public sealed partial class TimelineControl : UserControl
 
             try
             {
-                ds.DrawImage(thumb,
-                    new Rect(drawX, y, drawW, thumbH),
-                    new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height));
+                var destination = new Rect(drawX, y, drawW, thumbH);
+                var source = new Rect(srcX, 0, srcW, thumb.SizeInPixels.Height);
+                float progress = detailed is null
+                    ? RevealProgress(thumbSet.OverviewArrival, now)
+                    : RevealProgress(thumbSet.Arrivals.Length > thumbIndex ? thumbSet.Arrivals[thumbIndex] : 0, now);
+                ThumbnailReveal.Draw(ds, thumb, detailed is not null ? overview : null, destination, source, progress);
             }
             catch (ObjectDisposedException)
             {
@@ -3015,6 +3192,13 @@ public sealed partial class TimelineControl : UserControl
                 // leaves the whole remainder of the track unpainted.
             }
         }
+    }
+
+    private TimeSpan FilmstripSourceTime(VideoSegment segment, float tileCenterX)
+    {
+        var offset = XToTime(tileCenterX) - segment.Start;
+        if (offset < TimeSpan.Zero) offset = TimeSpan.Zero;
+        return segment.SourceStart + TimeSpan.FromTicks((long)(offset.Ticks * segment.SpeedFactor));
     }
 
     // ── Cross-track selection mutual exclusion ──
@@ -3406,7 +3590,7 @@ public sealed partial class TimelineControl : UserControl
                 using var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, py, cw, ph, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
                 ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
                 ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
-                    new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+                    _drawingResources.DashedStroke);
             }
         }
     }
@@ -3430,17 +3614,9 @@ public sealed partial class TimelineControl : UserControl
         {
             if (trackIndex == TimelineModel.BaseTrackIndex && model.ZoomKeyframes.Count == 0)
             {
-                using var hintFormat = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 10,
-                    FontFamily = "Segoe UI",
-                    FontStyle = Windows.UI.Text.FontStyle.Italic,
-                    HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                };
-
                 ds.DrawText("Drag on zoom track to add segment",
-                    new Rect(0, bandY, w, bandH), TrackHintTextColor, hintFormat);
+                    new Rect(0, bandY, w, bandH), TrackHintTextColor,
+                    _drawingResources.GetTextFormat(TimelineTextStyle.ZoomHint));
             }
             return;
         }
@@ -3492,12 +3668,7 @@ public sealed partial class TimelineControl : UserControl
                 string label = $"{kf.ZoomLevel:0.#}x";
                 ds.DrawText(label, x1 + 6, segY + segH / 2 - 8,
                     muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 11,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                    _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold11));
             }
 
             // Resize handles (visible when selected)
@@ -3570,12 +3741,7 @@ public sealed partial class TimelineControl : UserControl
             if (right <= left)
                 continue;
 
-            using var stroke = new CanvasStrokeStyle
-            {
-                StartCap = CanvasCapStyle.Round,
-                EndCap = CanvasCapStyle.Round,
-            };
-            ds.DrawLine(left, bridgeY, right, bridgeY, ZoomSegmentLinkedConnector, 3f, stroke);
+            ds.DrawLine(left, bridgeY, right, bridgeY, ZoomSegmentLinkedConnector, 3f, _drawingResources.RoundedStroke);
         }
     }
 
@@ -4356,12 +4522,14 @@ public sealed partial class TimelineControl : UserControl
 
     private void AudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         DrawWaveformTrack(sender, args, isMic: false, AudioWaveformColor, AudioEnvelopeColor,
             Model?.EffectiveVolume(AudioMixChannel.System) <= 0);
     }
 
     private void MicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         DrawWaveformTrack(sender, args, isMic: true, MicWaveformColor, MicEnvelopeColor,
             Model?.EffectiveVolume(AudioMixChannel.Mic) <= 0);
     }
@@ -4925,6 +5093,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void DrawInsertedAudioLane(CanvasControl sender, CanvasDrawEventArgs args, bool music)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -5028,22 +5197,12 @@ public sealed partial class TimelineControl : UserControl
 
             if (blockW > 40)
             {
-                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 10,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-                };
                 string label = item.IsMuted ? item.Name + " (muted)" : item.Name;
                 // Inset past both handles so the label never sits under a grab target.
                 float textInset = InsertedAudioHandleWidth + 4;
                 ds.DrawText(label,
                     new Rect(x1 + textInset, blockY, Math.Max(1, blockW - textInset * 2), blockH),
-                    textColor, fmt);
+                    textColor, _drawingResources.GetTextFormat(TimelineTextStyle.AudioLabel));
             }
 
             // Trim handles are drawn on EVERY block, not just the selected one: an invisible
@@ -5340,22 +5499,11 @@ public sealed partial class TimelineControl : UserControl
 
         if (muted && blockW > 46)
         {
-            using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-            {
-                FontSize = 10,
-                FontFamily = "Segoe UI",
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-            };
-
             ds.DrawText(
                 "muted",
                 new Rect(x1 + 6, blockY, Math.Max(1, blockW - 12), blockH),
                 Color.FromArgb(230, 235, 235, 240),
-                fmt);
+                _drawingResources.GetTextFormat(TimelineTextStyle.AudioLabel));
         }
     }
 
@@ -7385,6 +7533,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void CameraTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -7428,11 +7577,7 @@ public sealed partial class TimelineControl : UserControl
                 ds.DrawGeometry(pr, presenceBorder, 1f);
                 if (sw > 44)
                     ds.DrawText("Camera", sx1 + 6, py + ph / 2 - 7, Color.FromArgb(200, 255, 255, 255),
-                        new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                        {
-                            FontSize = 11,
-                            FontFamily = "Segoe UI",
-                        });
+                        _drawingResources.GetTextFormat(TimelineTextStyle.Plain11));
             }
         }
 
@@ -7455,12 +7600,7 @@ public sealed partial class TimelineControl : UserControl
             {
                 string label = seg.Enabled ? "Camera" : "Camera (off)";
                 ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, textColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 11,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                    _drawingResources.GetTextFormat(TimelineTextStyle.SemiBold11));
             }
 
             if (isSelected)
@@ -7481,7 +7621,7 @@ public sealed partial class TimelineControl : UserControl
             float ch = h - CameraSegmentVerticalPadding * 2;
             using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
             ds.FillGeometry(preview, Color.FromArgb(120, 76, 175, 80));
-            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+            ds.DrawGeometry(preview, border, 1f, _drawingResources.DashedStroke);
         }
     }
 
@@ -7778,6 +7918,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void TextTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_renderResourcesReleased) return;
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -7821,17 +7962,8 @@ public sealed partial class TimelineControl : UserControl
                 // property pane for every block, falling back to "Text" when empty.
                 string baseText = string.IsNullOrWhiteSpace(seg.Text) ? "Text" : seg.Text;
                 string label = seg.Enabled ? baseText : baseText + " (off)";
-                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 11,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-                };
-                ds.DrawText(label, new Rect(x1 + 6, segY, segW - 12, segH), textColor, fmt);
+                ds.DrawText(label, new Rect(x1 + 6, segY, segW - 12, segH), textColor,
+                    _drawingResources.GetTextFormat(TimelineTextStyle.OverlayLabel));
             }
 
             if (isSelected)
@@ -7852,7 +7984,7 @@ public sealed partial class TimelineControl : UserControl
             float ch = h - TextOverlayVerticalPadding * 2;
             using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
             ds.FillGeometry(preview, Color.FromArgb(120, 245, 166, 35));
-            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+            ds.DrawGeometry(preview, border, 1f, _drawingResources.DashedStroke);
         }
     }
 
