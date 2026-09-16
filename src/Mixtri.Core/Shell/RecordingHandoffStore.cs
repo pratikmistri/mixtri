@@ -11,6 +11,7 @@ public sealed class RecordingHandoffStore
     private readonly string _root;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly string _processLockName;
+    internal Action<string, string>? HandoffPublisherOverride { get; set; }
 
     public RecordingHandoffStore(string root)
     {
@@ -31,10 +32,11 @@ public sealed class RecordingHandoffStore
             try
             {
                 Directory.CreateDirectory(_root);
-                File.WriteAllBytes(temporary, JsonSerializer.SerializeToUtf8Bytes(request));
-                if (File.Exists(TombstonePath(path)))
-                    ClearAcknowledged(path);
-                File.Move(temporary, path, overwrite: true);
+                WriteDurableFile(temporary, JsonSerializer.SerializeToUtf8Bytes(request));
+                bool hadAcknowledgement = ScopeExistingAcknowledgement(path);
+                if (HandoffPublisherOverride is { } publish) publish(temporary, path);
+                else File.Move(temporary, path, overwrite: true);
+                if (hadAcknowledgement) TryRemoveAcknowledgement(path);
             }
             finally
             {
@@ -60,15 +62,30 @@ public sealed class RecordingHandoffStore
             foreach (var path in Directory.EnumerateFiles(_root, "*.json").Order(StringComparer.Ordinal))
             {
                 ct.ThrowIfCancellationRequested();
-                if (File.Exists(TombstonePath(path)))
+                byte[] raw;
+                try
                 {
-                    TryClearAcknowledged(path);
+                    raw = File.ReadAllBytes(path);
+                    var acknowledgedHash = ReadAcknowledgementHash(path);
+                    if (acknowledgedHash is not null)
+                    {
+                        if (acknowledgedHash.Length == 0
+                            || acknowledgedHash.AsSpan().SequenceEqual(SHA256.HashData(raw)))
+                        {
+                            TryClearAcknowledged(path);
+                            continue;
+                        }
+                        TryRemoveAcknowledgement(path);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    DiagLog.Write("Shell", $"Could not inspect recording handoff '{path}'; kept for retry: {ex}");
                     continue;
                 }
 
                 try
                 {
-                    var raw = File.ReadAllBytes(path);
                     var request = JsonSerializer.Deserialize<ShellProcessRequest>(raw);
                     if (request?.Command != ShellProcessCommand.RecordingCompleted || request.Project is null
                         || request.Id == Guid.Empty || !string.Equals(path, GetPath(request.Id), StringComparison.OrdinalIgnoreCase))
@@ -111,7 +128,7 @@ public sealed class RecordingHandoffStore
     /// Marks a delivered recording as consumed.
     /// </summary>
     /// <remarks>
-    /// Writes a tombstone BEFORE removing the handoff. Deleting alone is not enough: the
+    /// Writes a content-scoped tombstone BEFORE removing the handoff. Deleting alone is not enough: the
     /// in-memory request dedup does not survive a process restart, so if the delete failed
     /// and the handoff stayed on disk, the next start would replay it and
     /// <c>AppendRecording</c> would add the same take a second time. The tombstone is what
@@ -131,10 +148,12 @@ public sealed class RecordingHandoffStore
         return WithStoreLockAsync(() =>
         {
             Directory.CreateDirectory(_root);
+            byte[] raw;
             ShellProcessRequest? current;
             try
             {
-                current = JsonSerializer.Deserialize<ShellProcessRequest>(File.ReadAllBytes(path));
+                raw = File.ReadAllBytes(path);
+                current = JsonSerializer.Deserialize<ShellProcessRequest>(raw);
             }
             catch (FileNotFoundException) { return true; }
 
@@ -145,8 +164,7 @@ public sealed class RecordingHandoffStore
                 throw new RecordingHandoffChangedException(delivered.Id);
             try
             {
-                using var marker = new FileStream(tombstone, FileMode.Create, FileAccess.Write, FileShare.None);
-                marker.Flush(flushToDisk: true);
+                WriteAcknowledgementHash(tombstone, SHA256.HashData(raw));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -164,6 +182,75 @@ public sealed class RecordingHandoffStore
         ArgumentNullException.ThrowIfNull(request);
         if (request.Command != ShellProcessCommand.RecordingCompleted || request.Project is null || request.Id == Guid.Empty)
             throw new ArgumentException("A completed recording is required.", nameof(request));
+    }
+
+    private static void WriteDurableFile(string path, byte[] bytes)
+    {
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        stream.Write(bytes);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static byte[]? ReadAcknowledgementHash(string handoff)
+    {
+        string marker = TombstonePath(handoff);
+        try
+        {
+            if ((File.GetAttributes(marker) & FileAttributes.Directory) != 0)
+            {
+                DiagLog.Write("Shell", $"Acknowledgement path is a directory, not a receipt: '{marker}'.");
+                return null;
+            }
+            var bytes = File.ReadAllBytes(marker);
+            if (bytes.Length is not (0 or 32))
+                throw new InvalidDataException($"Invalid recording acknowledgement: '{marker}'.");
+            return bytes;
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+    }
+
+    private static bool ScopeExistingAcknowledgement(string handoff)
+    {
+        var hash = ReadAcknowledgementHash(handoff);
+        if (hash is null) return false;
+        if (hash.Length == 0)
+        {
+            // Upgrade legacy ID-only receipts before publication. Neither the old JSON
+            // nor its acknowledged state is removed, and the receipt cannot consume new contents.
+            byte[] previous;
+            try { previous = File.ReadAllBytes(handoff); }
+            catch (FileNotFoundException) { previous = []; }
+            WriteAcknowledgementHash(TombstonePath(handoff), SHA256.HashData(previous));
+        }
+        return true;
+    }
+
+    private static void WriteAcknowledgementHash(string path, byte[] hash)
+    {
+        string temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            WriteDurableFile(temporary, hash);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(temporary); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                DiagLog.Write("Shell", $"Could not remove acknowledgement temporary '{temporary}': {ex}");
+            }
+        }
+    }
+
+    private static void TryRemoveAcknowledgement(string handoff)
+    {
+        try { File.Delete(TombstonePath(handoff)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            DiagLog.Write("Shell", $"Could not clear an obsolete acknowledgement for '{handoff}': {ex}");
+        }
     }
 
     private async Task<T> WithStoreLockAsync<T>(Func<T> operation, CancellationToken ct)

@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using Mixtri.Core.Models;
 using Mixtri.Core.Shell;
 using Mixtri.Tests.TestSupport;
@@ -17,9 +18,50 @@ public sealed class RecordingHandoffStoreTests
     };
 
     [TestMethod]
-    [DataRow(true)]
     [DataRow(false)]
-    public async Task SaveAfterAcknowledgement_RemovesObsoleteTombstone(bool handoffSurvives)
+    [DataRow(true)]
+    public async Task FailedReplacementPublicationRetainsAcknowledgedState(bool legacyMarker)
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_publish_failure_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        string path = Path.Combine(directory.Path, $"{request.Id:N}.json");
+        byte[] original = await File.ReadAllBytesAsync(path);
+        using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await store.AcknowledgeAsync(request);
+        Assert.IsTrue(File.Exists(path + ".done"));
+        if (legacyMarker) await File.WriteAllBytesAsync(path + ".done", []);
+
+        var failure = new IOException("Injected replacement publication failure.");
+        bool attempted = false;
+        store.HandoffPublisherOverride = (_, _) =>
+        {
+            attempted = true;
+            throw failure;
+        };
+        var replacement = request with { EditorId = Guid.NewGuid() };
+        var actual = await Assert.ThrowsExceptionAsync<IOException>(() => store.SaveAsync(replacement));
+        Assert.AreSame(failure, actual);
+        Assert.IsTrue(attempted);
+        Assert.IsTrue(File.Exists(path), "The previous handoff must survive a failed atomic replacement.");
+        CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(path));
+        Assert.IsTrue(File.Exists(path + ".done"), "Its acknowledgement must also survive.");
+        CollectionAssert.AreEqual(SHA256.HashData(original), await File.ReadAllBytesAsync(path + ".done"));
+        Assert.IsFalse(Directory.EnumerateFiles(directory.Path, "*.tmp").Any());
+
+        store.HandoffPublisherOverride = null;
+        await store.SaveAsync(replacement);
+        Assert.AreEqual(replacement.EditorId,
+            (await new RecordingHandoffStore(directory.Path).ReadPendingAsync()).Single().EditorId);
+    }
+
+    [TestMethod]
+    [DataRow(true, false)]
+    [DataRow(false, false)]
+    [DataRow(true, true)]
+    [DataRow(false, true)]
+    public async Task SaveAfterAcknowledgement_RemovesObsoleteTombstone(bool handoffSurvives, bool legacyMarker)
     {
         using var directory = new TempDirectoryFixture("mixtri_handoff_replace_");
         var store = new RecordingHandoffStore(directory.Path);
@@ -30,6 +72,7 @@ public sealed class RecordingHandoffStoreTests
         using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             await store.AcknowledgeAsync(request);
         Assert.IsTrue(File.Exists(path + ".done"));
+        if (legacyMarker) await File.WriteAllBytesAsync(path + ".done", []);
         if (!handoffSurvives) File.Delete(path);
 
         var replacement = request with { EditorId = Guid.NewGuid() };
@@ -104,7 +147,7 @@ public sealed class RecordingHandoffStoreTests
     }
 
     [TestMethod]
-    public async Task FailedAcknowledgedCleanup_DoesNotPublishReplacementOrLoseMarker()
+    public async Task LockedAcknowledgedFile_DoesNotPublishReplacementOrLoseMarker()
     {
         using var directory = new TempDirectoryFixture("mixtri_handoff_locked_");
         var store = new RecordingHandoffStore(directory.Path);
@@ -115,8 +158,12 @@ public sealed class RecordingHandoffStoreTests
         using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             await store.AcknowledgeAsync(request);
-            await Assert.ThrowsExceptionAsync<IOException>(() =>
-                store.SaveAsync(request with { EditorId = Guid.NewGuid() }));
+            try
+            {
+                await store.SaveAsync(request with { EditorId = Guid.NewGuid() });
+                Assert.Fail("Replacing a file held without delete sharing must fail.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(path));
             Assert.IsTrue(File.Exists(path + ".done"));
             Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
@@ -125,6 +172,79 @@ public sealed class RecordingHandoffStoreTests
         Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
         Assert.IsFalse(File.Exists(path));
         Assert.IsFalse(File.Exists(path + ".done"));
+    }
+
+    [TestMethod]
+    public async Task PublishedReplacementSurvivesAnObsoleteMarkerThatCannotBeDeleted()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_marker_cleanup_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        string path = Path.Combine(directory.Path, $"{request.Id:N}.json");
+        byte[] original = await File.ReadAllBytesAsync(path);
+        using (var pin = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await store.AcknowledgeAsync(request);
+        var replacement = request with { EditorId = Guid.NewGuid() };
+
+        using (var markerPin = new FileStream(path + ".done", FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            await store.SaveAsync(replacement);
+            Assert.IsTrue(File.Exists(path + ".done"));
+            CollectionAssert.AreEqual(SHA256.HashData(original), await File.ReadAllBytesAsync(path + ".done"));
+            var restarted = new RecordingHandoffStore(directory.Path);
+            Assert.AreEqual(replacement.EditorId, (await restarted.ReadPendingAsync()).Single().EditorId,
+                "A marker for the old bytes must not consume the published replacement.");
+            Assert.IsTrue(File.Exists(path));
+        }
+
+        Assert.AreEqual(replacement.EditorId, (await store.ReadPendingAsync()).Single().EditorId);
+        Assert.IsFalse(File.Exists(path + ".done"));
+        Assert.IsFalse(Directory.EnumerateFiles(directory.Path, "*.tmp").Any());
+    }
+
+    [TestMethod]
+    public async Task LegacyMarkerUpgradeFailureLeavesBothOldFilesUntouched()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_legacy_marker_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        string path = Path.Combine(directory.Path, $"{request.Id:N}.json");
+        byte[] original = await File.ReadAllBytesAsync(path);
+        await File.WriteAllBytesAsync(path + ".done", []);
+        bool publicationAttempted = false;
+        store.HandoffPublisherOverride = (_, _) => publicationAttempted = true;
+
+        using (var pin = new FileStream(path + ".done", FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            try
+            {
+                await store.SaveAsync(request with { EditorId = Guid.NewGuid() });
+                Assert.Fail("The pinned legacy marker cannot be replaced.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            Assert.IsFalse(publicationAttempted, "An unscoped legacy marker must not coexist with newly published contents.");
+            CollectionAssert.AreEqual(original, await File.ReadAllBytesAsync(path));
+            Assert.AreEqual(0L, new FileInfo(path + ".done").Length);
+        }
+        Assert.IsFalse(Directory.EnumerateFiles(directory.Path, "*.tmp").Any());
+    }
+
+    [TestMethod]
+    public async Task CorruptAcknowledgementDoesNotQuarantineOrDeleteValidHandoff()
+    {
+        using var directory = new TempDirectoryFixture("mixtri_handoff_corrupt_marker_");
+        var store = new RecordingHandoffStore(directory.Path);
+        var request = Request();
+        await store.SaveAsync(request);
+        string path = Path.Combine(directory.Path, $"{request.Id:N}.json");
+        await File.WriteAllTextAsync(path + ".done", "invalid");
+        Assert.AreEqual(0, (await store.ReadPendingAsync()).Count);
+        Assert.IsTrue(File.Exists(path));
+        Assert.IsFalse(File.Exists(path + ".bad"));
+        File.Delete(path + ".done");
+        Assert.AreEqual(request.Id, (await store.ReadPendingAsync()).Single().Id);
     }
 
     [TestMethod]
