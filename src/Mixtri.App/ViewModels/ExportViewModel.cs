@@ -503,7 +503,8 @@ public partial class ExportViewModel : ObservableObject
                 outputFolder,
                 timeline: timeline,
                 progress: exportProgress,
-                ct: _exportCts.Token);
+                ct: _exportCts.Token,
+                superResolutionProvider: new WindowsVideoSuperResolutionProvider());
 
             ExportedFilePath = exportedPath;
             ExportSucceeded = true;

@@ -29,7 +29,8 @@ public class ExportEngine
         string outputFolder,
         TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IVideoSuperResolutionProvider? superResolutionProvider = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(settings);
@@ -125,7 +126,8 @@ public class ExportEngine
                 timelineMapper,
                 timeline,
                 progress,
-                ct);
+                ct,
+                superResolutionProvider);
         }
 
         return outputPath;

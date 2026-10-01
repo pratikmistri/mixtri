@@ -76,7 +76,8 @@ public class VideoEncoder : IDisposable
         TimelineMapper? timelineMapper = null,
         TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IVideoSuperResolutionProvider? superResolutionProvider = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(project.VideoFilePath);
@@ -111,12 +112,25 @@ public class VideoEncoder : IDisposable
         int compositorWidth = composer.OutputWidth;
         int compositorHeight = composer.OutputHeight;
 
-        // Encode at the user-selected resolution while preserving the
-        // compositor's aspect ratio (the compositor has already applied
-        // AspectRatio + padding). Never upscale beyond the compositor's
-        // native size. Floored to mod-16 for H.264 macroblock alignment.
-        var (encW, encH) = AspectRatioHelper.ComputeExportDimensions(
-            compositorWidth, compositorHeight, _settings.Resolution);
+        // Try Windows AI super resolution only when the selected resolution requires
+        // an upscale within the API's documented frame-size range. Unsupported devices
+        // retain the existing no-upscale behavior.
+        var (upscaledWidth, upscaledHeight) = AspectRatioHelper.ComputeExportDimensions(
+            compositorWidth, compositorHeight, _settings.Resolution, allowUpscale: true);
+        bool requiresUpscaling =
+            upscaledWidth > compositorWidth || upscaledHeight > compositorHeight;
+        IVideoSuperResolutionSession? superResolution = null;
+        if (requiresUpscaling && superResolutionProvider is not null)
+        {
+            superResolution = await superResolutionProvider.TryCreateAsync(
+                compositorWidth, compositorHeight, upscaledWidth, upscaledHeight, ct);
+        }
+        using var superResolutionLifetime = superResolution;
+
+        var (encW, encH) = superResolution is not null
+            ? (upscaledWidth, upscaledHeight)
+            : AspectRatioHelper.ComputeExportDimensions(
+                compositorWidth, compositorHeight, _settings.Resolution);
         targetWidth = encW;
         targetHeight = encH;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
@@ -203,6 +217,7 @@ public class VideoEncoder : IDisposable
                     compositorWidth, compositorHeight,
                     targetWidth, targetHeight,
                     needsScaling,
+                    superResolution,
                     progress, stopwatch, ct,
                     progressFloor: stretchProgressFloor,
                     onError: (ex, frameIdx) =>
@@ -337,6 +352,7 @@ public class VideoEncoder : IDisposable
         int compositorWidth, int compositorHeight,
         int targetWidth, int targetHeight,
         bool needsScaling,
+        IVideoSuperResolutionSession? superResolution,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
@@ -371,8 +387,11 @@ public class VideoEncoder : IDisposable
             if (needsScaling)
             {
                 outputSurface = CreateRenderTarget(device, targetWidth, targetHeight, "scaled encoder output");
-                using (var ds = outputSurface.CreateDrawingSession())
+                bool superResolutionApplied =
+                    superResolution?.TryScale(composedFrame, outputSurface) == true;
+                if (!superResolutionApplied)
                 {
+                    using var ds = outputSurface.CreateDrawingSession();
                     ds.DrawImage(composedFrame,
                         new Windows.Foundation.Rect(0, 0, targetWidth, targetHeight),
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));

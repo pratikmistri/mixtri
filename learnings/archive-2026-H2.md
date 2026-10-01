@@ -3069,3 +3069,24 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Preset merge mirrors the recents merge, with one deliberate difference**: `DeletePreset` writes to the legacy folder (deleting from it), which nothing else does. It must — a legacy-only preset would otherwise be re-read by the very next `LoadPresets` and reappear immediately after the user deleted it. `LoadPresets` reads current-folder-first so a re-saved preset shadows its old copy instead of appearing twice; saving still only ever writes to the current folder, so an edit migrates it.
 - **Testability**: `LoadPresets`/`DeletePreset` were made `internal` static taking explicit folders, because `PresetManager`'s constructor resolves real machine paths and has no seam. Tests then drive them against temp directories with no risk to the developer's real presets.
 - **Verified**: `Mixtri.sln` restore, `Mixtri.App` ARM64 Debug and `Mixtri.Tests` x64 Debug all build 0 errors; suite **1398 passed, 0 failed, 3 skipped** (7 new preset tests). All three review threads replied to and resolved.
+
+## Mini-mode recording: no taskbar button
+
+- **Feature/area**: `ShellCoordinator` Recording state, `RecordingOverlayWindow` (taskbar presence while recording).
+- **Approaches tried**: Traced the taskbar button to two sources: `MinimizeMainWindow()` (`SW_MINIMIZE`) on the main window that Mini mode had *hidden* - minimizing a hidden window shows it on the taskbar - and the recording overlay pill, which never set `IsShownInSwitchers = false`.
+- **What worked**: Use `AppShellStateMachine.RecordingOrigin`: when recording starts from Mini, `HideMainWindow()` (SW_HIDE) instead of minimizing; `HideForPicker` skips minimizing for the same origin. The overlay pill sets `AppWindow.IsShownInSwitchers = false` always; a recording started from the full window still gets its taskbar button from the minimized main window.
+- **What didn't work**: Full build on this host - the VS 2022 BuildTools `MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage` folder is now missing, so PriGen/AppxPackage tasks fail with MSB4062 even under VS MSBuild. Only Core built and a `/t:Compile /p:BuildProjectReferences=false` pass of the App was possible (XAML-codegen errors are expected there); reinstall the BuildTools "MSIX Packaging Tools"/UWP workload to restore full builds.
+- **Follow-up (build restored)**: Installing the BuildTools `Microsoft.VisualStudio.Workload.UniversalBuildTools` workload (elevated `setup.exe modify --installPath <BuildTools> --add ... --passive`) restored the `AppxPackage` folder; the ARM64 Debug build then succeeded, and the dev package was re-registered and launched ("Mixtri (dev) Mini").
+
+## Super-resolution feasibility for export
+- **Feature/area**: Investigated optional super-resolution in the MP4 export frame pipeline.
+- **Approaches tried**: Traced `VideoEncoder.ProduceSampleAsync` and checked Microsoft's Windows AI VideoScaler and DirectSR documentation.
+- **What worked**: Windows AI `VideoScaler` can be readiness-checked and used per frame, with a normal scaling fallback; the current export already has a per-frame GPU-surface stage for insertion.
+- **What didn't work**: DirectSR is not a drop-in for this Win2D/D3D11 export path; it requires a D3D12 integration. Existing export dimensions explicitly prohibit upscaling, so that policy must also change to enable higher-resolution output.
+
+## Optional Windows AI super-resolution in MP4 export
+- **Feature/area**: Optional VideoScaler upscaling in `VideoEncoder`, invoked by the app's MP4 export path.
+- **Approaches tried**: Kept the Windows AI dependency in the app layer behind Core provider/session interfaces; tried Windows App SDK 1.8 first, then moved to stable 2.5 after confirming VideoScaler is only exposed by SDK 2.0+.
+- **What worked**: Readiness/model initialization gates export upscaling; unsupported startup retains no-upscale dimensions, while per-frame errors disable the scaler and fall back to standard rendering. Reusable BGR buffers bridge Win2D BGRA frames to VideoScaler `ImageBuffer`.
+- **What didn't work**: Referencing the AI package directly from Core imported MSIX build targets into the non-app Core project; SDK 1.8 had AI APIs but no VideoScaler type. The provider seam and SDK 2.5 app reference avoid both issues.
+- **Verified**: ARM64 app build and x64 test build succeeded; focused export sizing tests passed; dev app registered and launched with package data preserved.

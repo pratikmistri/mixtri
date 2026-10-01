@@ -318,7 +318,7 @@ Mixtri/
 
 1. **Cursor captured separately**: WGC captures screen WITHOUT cursor (`IsCursorCaptureEnabled = false`). Mouse position recorded via low-level hook at high frequency. This allows complete cursor replacement and smoothing in post-processing.
 
-2. **Post-processing model**: All effects (cursor, zoom, background) applied during export, not during capture. This keeps capture lightweight (no frame drops) and allows unlimited adjustments after recording.
+2. **Post-processing model**: All effects (cursor, zoom, background) applied during export, not during capture. This keeps capture lightweight (no frame drops) and allows unlimited adjustments after recording. MP4 export can use Windows AI VideoScaler to upscale to the selected output resolution when the API and model are ready; if unavailable at startup, it preserves the existing no-upscale behavior, and a processing failure falls back to standard scaling.
 
 3. **Spring physics for smoothing**: Primary smoothing algorithm is a damped spring model (`F = -kx - bv`). Parameters: spring constant `k`, damping `b`, mass `m`. Adjustable via "smoothing strength" slider.
 
