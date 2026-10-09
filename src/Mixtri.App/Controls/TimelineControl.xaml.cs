@@ -433,7 +433,6 @@ public sealed partial class TimelineControl : UserControl
         // redrawn because nothing can draw them any more; the host regenerates them as part
         // of the recovery this request kicks off.
         ClearThumbnails();
-        ClearSegmentTrackVisuals();
         Mixtri.Core.Diagnostics.DiagLog.Write(
             "Timeline", "track CanvasControl built a new device after loss; requesting rebuild");
         DeviceRecreated?.Invoke(this, EventArgs.Empty);

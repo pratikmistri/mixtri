@@ -253,6 +253,7 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"InitializePreview FAILED: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
     }
 
@@ -307,6 +308,7 @@ public sealed partial class EditorPage
     private void ResetPreviewToEmptyState()
     {
         _previewInitGeneration++;
+        _previewInitializing = false;
         _thumbnailGenerationId++;
         _segmentPreviewGeneration++;
 
@@ -368,20 +370,41 @@ public sealed partial class EditorPage
         // blank preview plus blank timeline tracks with no diagnosable cause. Keeping whatever
         // the editor already shows is strictly better than destroying it for nothing.
         var project = ProjectService.Instance.CurrentProject;
-        if (project is null || string.IsNullOrEmpty(project.VideoFilePath))
+        if (_pageUnloaded || project is null)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
                 project is null
                     ? "preview init skipped: no current project; existing preview left intact"
-                    : "preview init skipped: current project has no video file; existing preview left intact");
+                    : "preview init skipped: editor page is unloaded");
             Preview.HideQualityIndicator();
             return;
         }
 
-        // Every await below is a point where this page can be unloaded or a newer init can
-        // start. Anything built after the generation moves on is disposed, never published.
         int initGeneration = ++_previewInitGeneration;
+        _previewInitializing = true;
+        try
+        {
+            await BuildPreviewForProjectAsync(project, initGeneration);
+        }
+        finally
+        {
+            if (initGeneration == _previewInitGeneration)
+            {
+                _previewInitializing = false;
+                await UpdatePreviewFrameAsync(Timeline.PlayheadPosition, force: true);
+            }
+        }
+    }
 
+    private bool _previewInitializing;
+
+    private bool IsPreviewCurrent(int generation) =>
+        !_pageUnloaded && !_previewInitializing
+        && !_graphicsDeviceManager.IsRecoveryInProgress
+        && generation == _previewInitGeneration;
+
+    private async Task BuildPreviewForProjectAsync(Project project, int initGeneration)
+    {
         DisposeOffUiThread(_frameReader);
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
@@ -395,6 +418,9 @@ public sealed partial class EditorPage
         _compositorReady = false;
         _lastRenderedFrameIndex = -1;
         _lastRenderedSegmentId = null;
+        _primaryRenderBackground = null;
+        _primaryRenderCursor = null;
+        _pendingRendererRebuild = null;
 
         // The pipeline about to be rebuilt is the one any in-flight trim-edge preview was
         // rendering through, and the segment it named may not survive the reload.
@@ -484,11 +510,13 @@ public sealed partial class EditorPage
         }
 
         _frameReader = reader;
-        if (_frameReader is null)
+        if (_frameReader is null && !string.IsNullOrEmpty(videoPath))
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
-                $"no decodable video at '{videoPath}'; preview unavailable");
-            return;
+                $"no decodable primary video at '{videoPath}'; title slides and other sources remain available");
+            EditorInfoBar.Message = "The original video could not be opened. Other clips and title slides remain available.";
+            EditorInfoBar.Severity = InfoBarSeverity.Warning;
+            EditorInfoBar.IsOpen = true;
         }
 
         // Load per-file cursor + audio track data for appended recordings so their
@@ -693,9 +721,13 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"PreviewRenderer init failed: {ex}");
+            if (initGeneration != _previewInitGeneration) return;
             // Compositor init failed — fall back to raw frames
-            _previewRenderer?.Dispose();
+            TryDispose(_previewRenderer);
             _previewRenderer = null;
+            _compositorReady = false;
+            // Recovery owns bounded retries; silently requeueing here would bypass them.
+            if (GpuContext.IsDeviceLoss(ex)) throw;
         }
 
         // Load webcam composition for preview overlay
@@ -714,13 +746,12 @@ public sealed partial class EditorPage
         // Aspect ratio + fit + crop anchor controls (always visible)
         InitializeAspectRatioControls();
 
-        _ = UpdatePreviewFrameAsync(TimeSpan.Zero);
     }
 
     private async Task UpdatePreviewFrameAsync(TimeSpan position, bool force = false)
     {
-        if (_frameReader is null) return;
-        if (_graphicsDeviceManager.IsRecoveryInProgress)
+        if (_pageUnloaded) return;
+        if (_previewInitializing || _graphicsDeviceManager.IsRecoveryInProgress)
         {
             _pendingRenderPosition = position;
             _pendingRenderForce |= force;
@@ -751,6 +782,11 @@ public sealed partial class EditorPage
                 long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _decodeMissed = false;
                 await RenderFrameAtAsync(currentPos, currentForce);
+
+                // Recovery waits for this loop to stop before disposing resources. Do not
+                // drain requests parked by a rebuild back into the pipeline being replaced.
+                if (_pageUnloaded || _previewInitializing || _graphicsDeviceManager.IsRecoveryInProgress)
+                    break;
 
                 // A decode miss leaves whatever was last presented on screen — often nothing,
                 // i.e. a black preview. Rendering is entirely event-driven, so with the
@@ -790,6 +826,13 @@ public sealed partial class EditorPage
                     break;
                 }
             } while (true);
+        }
+        catch (Exception ex)
+        {
+            _lastRenderedFrameIndex = -1;
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
+                $"preview render failed at {position}: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
         finally
         {
@@ -888,7 +931,8 @@ public sealed partial class EditorPage
 
     private async Task RenderFrameAtAsync(TimeSpan position, bool force)
     {
-        if (_frameReader is null) return;
+        int generation = _previewInitGeneration;
+        if (!IsPreviewCurrent(generation)) return;
 
         // A trim edge is being dragged: the frame the user is choosing lives at a source
         // instant the (still untrimmed) model maps no output position to, so it takes
@@ -925,6 +969,7 @@ public sealed partial class EditorPage
                 try
                 {
                     incoming = await ComposePreviewFrameAsync(position);
+                    if (!IsPreviewCurrent(generation)) return;
                     if (incoming is not null)
                     {
                         var (w, h) = GetPreviewCanvasSize();
@@ -984,6 +1029,7 @@ public sealed partial class EditorPage
                                 incomingVideoFilePath, incomingSourceTimeSeconds,
                                 incomingSourceStartSeconds)
                             : null;
+                        if (!IsPreviewCurrent(generation)) return;
 
                         // Force the normal path to fully redraw once the dissolve ends.
                         _lastRenderedFrameIndex = -1;
@@ -1079,8 +1125,10 @@ public sealed partial class EditorPage
                 // that differs from what the primary renderer was last built with,
                 // rebuild it so per-segment styles apply across primary splits.
                 await EnsurePrimaryRendererForSegmentAsync(videoSeg);
+                if (!IsPreviewCurrent(generation)) return;
 
                 await RenderSegmentVideoAsync(videoSeg, sourceInSeg, force);
+                if (!IsPreviewCurrent(generation)) return;
                 UpdateOverlayEditPreview(videoSeg.VideoFilePath, sourceInSeg);
                 return;
             }
@@ -1168,12 +1216,16 @@ public sealed partial class EditorPage
         if (segment is TextSlideSegment slide)
         {
             _textSlideRenderer ??= new TextSlideRenderer();
-            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+            var renderer = _textSlideRenderer;
+            int generation = _previewInitGeneration;
+            await renderer.EnsureBackgroundLoadedAsync(slide);
+            if (!IsPreviewCurrent(generation) || !ReferenceEquals(renderer, _textSlideRenderer))
+                return null;
             var (w, h) = GetPreviewCanvasSize();
             double progress = slide.Duration.TotalSeconds > 0
                 ? Math.Clamp(localOffset.TotalSeconds / slide.Duration.TotalSeconds, 0, 1)
                 : 0;
-            return _textSlideRenderer.RenderSlide(slide, progress, w, h);
+            return renderer.RenderSlide(slide, progress, w, h);
         }
 
         if (segment is not VideoSegment seg)
@@ -1247,11 +1299,7 @@ public sealed partial class EditorPage
                 }
                 else
                 {
-                    var device = CanvasDevice.GetSharedDevice();
-                    var rt = Win2DUtils.CreateRenderTarget(device,
-                        bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "preview fallback frame");
-                    using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
-                    return rt;
+                    return CreateRawPreviewFrame(bitmap, "preview fallback frame");
                 }
                 return null;
             }
@@ -1281,7 +1329,7 @@ public sealed partial class EditorPage
 
         try
         {
-            if (ctxGeneration != _segmentPreviewGeneration) return null;
+            if (!IsSegmentPreviewCurrent(seg.Id, ctx, ctxGeneration)) return null;
 
             if (ctx.Ready && ctx.Renderer is not null)
             {
@@ -1292,7 +1340,11 @@ public sealed partial class EditorPage
                     try
                     {
                         var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
-                        if (ctxGeneration != _segmentPreviewGeneration) return null;
+                        if (!IsSegmentPreviewCurrent(seg.Id, ctx, ctxGeneration))
+                        {
+                            TryDispose(wf);
+                            return null;
+                        }
                         if (wf is not null)
                         {
                             ctx.LastWebcamFrame?.Dispose();
@@ -1300,18 +1352,19 @@ public sealed partial class EditorPage
                             ctx.Renderer.SetWebcamFrame(wf);
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"transition webcam render failed: {ex}");
+                        _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+                        if (!IsSegmentPreviewCurrent(seg.Id, ctx, ctxGeneration)) return null;
+                    }
                 }
                 var composed = ctx.Renderer.RenderPreviewFrame(segBitmap, sourceTime);
                 if (composed is not null) return composed;
                 return null;
             }
 
-            var dev = CanvasDevice.GetSharedDevice();
-            var fallback = Win2DUtils.CreateRenderTarget(dev,
-                segBitmap.SizeInPixels.Width, segBitmap.SizeInPixels.Height, 96, "segment preview fallback frame");
-            using (var ds = fallback.CreateDrawingSession()) ds.DrawImage(segBitmap);
-            return fallback;
+            return CreateRawPreviewFrame(segBitmap, "segment preview fallback frame");
         }
         finally
         {
@@ -1493,12 +1546,14 @@ public sealed partial class EditorPage
     private async Task RenderTextSlidePreviewAsync(TextSlideSegment slide, TimeSpan localOffset)
     {
         _textSlideRenderer ??= new TextSlideRenderer();
+        var renderer = _textSlideRenderer;
+        int generation = _previewInitGeneration;
 
         // Pre-load the (image) background off the UI thread so the synchronous
         // RenderSlide call below never blocks on file I/O + GPU decode.
         try
         {
-            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+            await renderer.EnsureBackgroundLoadedAsync(slide);
         }
         catch (Exception ex)
         {
@@ -1506,6 +1561,8 @@ public sealed partial class EditorPage
             _graphicsDeviceManager.RecoverFromRenderFailure(ex);
             return;
         }
+        if (!IsPreviewCurrent(generation) || !ReferenceEquals(renderer, _textSlideRenderer))
+            return;
 
         var (width, height) = GetPreviewCanvasSize();
 
@@ -1522,7 +1579,7 @@ public sealed partial class EditorPage
         {
             // While editing, render background only — the editable TextBox shows the text.
             bool drawText = _editingTextId != slide.Id;
-            var frame = _textSlideRenderer.RenderSlide(slide, progress, width, height, drawText);
+            var frame = renderer.RenderSlide(slide, progress, width, height, drawText);
             _lastRenderedFrameIndex = -1; // force redraw next time
             Preview.SetFrame(frame);
         }
@@ -1554,18 +1611,26 @@ public sealed partial class EditorPage
         _previewFrameW = width;
         _previewFrameH = height;
 
+        CanvasRenderTarget? frame = null;
         try
         {
             var device = Microsoft.Graphics.Canvas.CanvasDevice.GetSharedDevice();
-            var frame = new Microsoft.Graphics.Canvas.CanvasRenderTarget(device, width, height, 96);
+            frame = Win2DUtils.CreateRenderTarget(device, width, height, 96, "empty preview frame");
+            using (var session = frame.CreateDrawingSession())
+                session.Clear(Color.FromArgb(0, 0, 0, 0));
             _lastRenderedFrameIndex = -1; // force redraw next time
             Preview.SetFrame(frame);
+            frame = null;
         }
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"empty-gap frame render failed: {ex.GetType().Name}: {ex.Message}");
             _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+        }
+        finally
+        {
+            TryDispose(frame);
         }
 
         HideTextEditOverlay();
@@ -1606,7 +1671,7 @@ public sealed partial class EditorPage
         _ = Task.Delay(delayMs).ContinueWith(
             _ => DispatcherQueue.TryEnqueue(() =>
             {
-                if (_pageUnloaded || _frameReader is null) return;
+                if (_pageUnloaded || Preview.IsPlaying || Timeline.PlayheadPosition != position) return;
                 if (generation != _previewInitGeneration) return;
 
                 _ = UpdatePreviewFrameAsync(position, force: true);
@@ -1616,12 +1681,25 @@ public sealed partial class EditorPage
 
     private async Task RenderVideoFrameAsync(TimeSpan sourcePosition, bool force)
     {
-        if (_frameReader is null) return;
+        if (_frameReader is null)
+        {
+            Preview.ClearFrame();
+            return;
+        }
+        var reader = _frameReader;
+        var renderer = _previewRenderer;
+        int generation = _previewInitGeneration;
+        int stateGeneration = _primaryPreviewStateGeneration;
+        bool Current() => IsPreviewCurrent(generation)
+            && stateGeneration == _primaryPreviewStateGeneration
+            && ReferenceEquals(reader, _frameReader)
+            && ReferenceEquals(renderer, _previewRenderer);
 
-        int frameIndex = _frameReader.GetFrameIndex(sourcePosition);
+        int frameIndex = reader.GetFrameIndex(sourcePosition);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
-        var bitmap = await _frameReader.LoadFrameAtTimeAsync(sourcePosition);
+        using var bitmap = await reader.LoadFrameAtTimeAsync(sourcePosition);
+        if (!Current()) return;
         if (bitmap is null)
         {
             // The decoder produced nothing. Whatever was presented last — often a text
@@ -1636,19 +1714,19 @@ public sealed partial class EditorPage
 
         try
         {
-            if (_compositorReady && _previewRenderer is not null)
+            if (_compositorReady && renderer is not null)
             {
                 // Region-edit mode composes at rest so the picker frames the SAME image the
                 // export produces (background, padding, cursor) minus the zoom being edited.
-                _previewRenderer.SuppressZoom = _zoomRegionEditMode;
+                renderer.SuppressZoom = _zoomRegionEditMode;
 
                 // Extract webcam frame for overlay
                 await SetWebcamFrameForPreviewAsync(sourcePosition);
+                if (!Current()) return;
 
-                var composed = _previewRenderer.RenderPreviewFrame(bitmap, sourcePosition);
+                var composed = renderer.RenderPreviewFrame(bitmap, sourcePosition);
                 if (composed is not null)
                 {
-                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
@@ -1658,14 +1736,7 @@ public sealed partial class EditorPage
             }
 
             // Fallback: show raw frame without effects
-            var device = CanvasDevice.GetSharedDevice();
-            var renderTarget = Win2DUtils.CreateRenderTarget(device,
-                bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
-            using (var ds = renderTarget.CreateDrawingSession())
-            {
-                ds.DrawImage(bitmap);
-            }
-            bitmap.Dispose();
+            var renderTarget = CreateRawPreviewFrame(bitmap, "raw frame fallback");
             _lastRenderedFrameIndex = frameIndex;
             Preview.SetFrame(renderTarget);
         }
@@ -1676,7 +1747,6 @@ public sealed partial class EditorPage
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"frame render failed at {sourcePosition}: {ex.GetType().Name}: {ex.Message}");
             _graphicsDeviceManager.RecoverFromRenderFailure(ex);
-            bitmap.Dispose();
         }
     }
 
@@ -1694,12 +1764,22 @@ public sealed partial class EditorPage
         }
 
         var ctx = await GetOrBuildSegmentPreviewAsync(seg);
-        if (ctx?.Reader is null) return;
+        if (ctx?.Reader is null)
+        {
+            _decodeMissed = true;
+            return;
+        }
+        int generation = _previewInitGeneration;
+        int contextGeneration = _segmentPreviewGeneration;
+        var reader = ctx.Reader;
+        bool Current() => IsPreviewCurrent(generation)
+            && IsSegmentPreviewCurrent(seg.Id, ctx, contextGeneration);
 
-        int frameIndex = ctx.Reader.GetFrameIndex(sourceTime);
+        int frameIndex = reader.GetFrameIndex(sourceTime);
         if (!force && frameIndex == _lastRenderedFrameIndex) return;
 
-        var bitmap = await ctx.Reader.LoadFrameAtTimeAsync(sourceTime);
+        using var bitmap = await reader.LoadFrameAtTimeAsync(sourceTime);
+        if (!Current()) return;
         if (bitmap is null)
         {
             _lastRenderedFrameIndex = -1;
@@ -1720,6 +1800,11 @@ public sealed partial class EditorPage
                     try
                     {
                         var wf = await ExtractWebcamFrameAsync(ctx.Webcam, sourceTime, ctx.WebcamW, ctx.WebcamH);
+                        if (!Current())
+                        {
+                            TryDispose(wf);
+                            return;
+                        }
                         if (wf is not null)
                         {
                             ctx.LastWebcamFrame?.Dispose();
@@ -1727,13 +1812,17 @@ public sealed partial class EditorPage
                             ctx.Renderer.SetWebcamFrame(wf);
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"segment webcam render failed: {ex}");
+                        _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+                        if (!Current()) return;
+                    }
                 }
 
                 var composed = ctx.Renderer.RenderPreviewFrame(bitmap, sourceTime);
                 if (composed is not null)
                 {
-                    bitmap.Dispose();
                     _lastRenderedFrameIndex = frameIndex;
                     Preview.SetFrame(composed);
                     return;
@@ -1742,10 +1831,7 @@ public sealed partial class EditorPage
             }
 
             // Fallback: raw frame
-            var device = CanvasDevice.GetSharedDevice();
-            var rt = Win2DUtils.CreateRenderTarget(device, bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, "raw frame fallback");
-            using (var ds = rt.CreateDrawingSession()) ds.DrawImage(bitmap);
-            bitmap.Dispose();
+            var rt = CreateRawPreviewFrame(bitmap, "raw frame fallback");
             _lastRenderedFrameIndex = frameIndex;
             Preview.SetFrame(rt);
         }
@@ -1754,9 +1840,31 @@ public sealed partial class EditorPage
             System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"appended segment render failed: {ex.GetType().Name}: {ex.Message}");
-            bitmap.Dispose();
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
     }
+
+    private static CanvasRenderTarget CreateRawPreviewFrame(CanvasBitmap bitmap, string caller)
+    {
+        var target = Win2DUtils.CreateRenderTarget(CanvasDevice.GetSharedDevice(),
+            bitmap.SizeInPixels.Width, bitmap.SizeInPixels.Height, 96, caller);
+        try
+        {
+            using (var session = target.CreateDrawingSession()) session.DrawImage(bitmap);
+            return target;
+        }
+        catch
+        {
+            target.Dispose();
+            throw;
+        }
+    }
+
+    private bool IsSegmentPreviewCurrent(string segmentId, SegmentPreview context, int generation) =>
+        !_pageUnloaded && !_graphicsDeviceManager.IsRecoveryInProgress
+        && generation == _segmentPreviewGeneration
+        && _segmentPreviews.TryGetValue(segmentId, out var current)
+        && ReferenceEquals(current, context);
 
     /// <summary>
     /// Longest source extent used by <paramref name="videoFilePath"/> anywhere on the
@@ -1831,7 +1939,13 @@ public sealed partial class EditorPage
             }
 
             ctx.Reader = reader;
-            if (ctx.Reader is null) return ctx;
+            if (ctx.Reader is null)
+            {
+                _segmentPreviews.Remove(seg.Id);
+                Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
+                    $"no decodable video for segment '{seg.VideoFilePath}'; leaving it retryable");
+                return Abandon();
+            }
 
             MouseRecordingData? mouseData = null;
             if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath))
@@ -1872,9 +1986,9 @@ public sealed partial class EditorPage
 
             config = HideCursorWhenNoSamples(config, mouseData);
 
+            PreviewRenderer? renderer = new PreviewRenderer();
             try
             {
-                var renderer = new PreviewRenderer();
                 // The compositor is driven with ABSOLUTE source times
                 // (SourceStart + localOffset), so its timelines must span the end of
                 // the clip's source extent, not just the clip's length. Passing the
@@ -1906,11 +2020,11 @@ public sealed partial class EditorPage
 
                 if (Abandoned())
                 {
-                    renderer.Dispose();
                     return Abandon();
                 }
 
                 ctx.Renderer = renderer;
+                renderer = null;
                 ctx.Ready = true;
             }
             catch (Exception ex)
@@ -1921,6 +2035,11 @@ public sealed partial class EditorPage
                 ctx.Renderer?.Dispose();
                 ctx.Renderer = null;
                 ctx.Ready = false;
+                _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            }
+            finally
+            {
+                TryDispose(renderer);
             }
 
             if (!string.IsNullOrWhiteSpace(seg.WebcamFilePath) && File.Exists(seg.WebcamFilePath))
@@ -1946,6 +2065,9 @@ public sealed partial class EditorPage
             System.Diagnostics.Debug.WriteLine($"[EditorPage] GetOrBuildSegmentPreview failed: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"GetOrBuildSegmentPreview failed: {ex.GetType().Name}: {ex.Message}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            if (!Abandoned()) _segmentPreviews.Remove(seg.Id);
+            return Abandon();
         }
 
         return Abandoned() ? Abandon() : ctx;
@@ -1967,6 +2089,7 @@ public sealed partial class EditorPage
 
     private async Task LoadWebcamCompositionAsync(Project project)
     {
+        int generation = _previewInitGeneration;
         // Clear previous webcam state so stale resources don't persist
         // when loading a new project or one without a webcam file.
         _webcamComposition?.Clips.Clear();
@@ -1981,6 +2104,7 @@ public sealed partial class EditorPage
         {
             var webcamFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(project.WebcamFilePath);
             var webcamClip = await Windows.Media.Editing.MediaClip.CreateFromFileAsync(webcamFile);
+            if (_pageUnloaded || generation != _previewInitGeneration) return;
             var props = webcamClip.GetVideoEncodingProperties();
             _webcamWidth = (int)props.Width;
             _webcamHeight = (int)props.Height;
@@ -1999,6 +2123,10 @@ public sealed partial class EditorPage
     private async Task SetWebcamFrameForPreviewAsync(TimeSpan position)
     {
         if (_webcamComposition is null || _previewRenderer is null) return;
+        var composition = _webcamComposition;
+        var renderer = _previewRenderer;
+        int generation = _primaryPreviewStateGeneration;
+        int initGeneration = _previewInitGeneration;
 
         // Independent camera track: when camera segments exist, the webcam overlay
         // is only shown while the (source) playhead is inside an enabled segment,
@@ -2050,27 +2178,33 @@ public sealed partial class EditorPage
                 extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
             }
 
-            var thumbnail = await _webcamComposition.GetThumbnailAsync(
+            using var thumbnail = await composition.GetThumbnailAsync(
                 clamped, extractW, extractH,
                 Windows.Media.Editing.VideoFramePrecision.NearestFrame);
 
             var device = CanvasDevice.GetSharedDevice();
-            var stream = thumbnail.AsStream();
-            var ras = stream.AsRandomAccessStream();
+            using var stream = thumbnail.AsStream();
+            using var ras = stream.AsRandomAccessStream();
             webcamFrame = await CanvasBitmap.LoadAsync(device, ras);
-
-            // Dispose intermediate streams — ignore errors from WinRT stream flush
-            try { ras.Dispose(); } catch { }
-            try { stream.Dispose(); } catch { }
-            try { thumbnail.Dispose(); } catch { }
         }
-        catch { /* frame extraction failed — keep previous frame */ }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"webcam frame extraction failed: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+        }
 
         if (webcamFrame is not null)
         {
+            if (!IsPreviewCurrent(initGeneration) || generation != _primaryPreviewStateGeneration
+                || !ReferenceEquals(renderer, _previewRenderer)
+                || !ReferenceEquals(composition, _webcamComposition))
+            {
+                TryDispose(webcamFrame);
+                return;
+            }
             _lastWebcamFrame?.Dispose();
             _lastWebcamFrame = webcamFrame;
-            _previewRenderer.SetWebcamFrame(_lastWebcamFrame);
+            renderer.SetWebcamFrame(_lastWebcamFrame);
         }
     }
 

@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
+using Mixtri.Core.Diagnostics;
 using Windows.Media.Editing;
 using Windows.Storage;
 
@@ -57,6 +57,8 @@ public static class VideoThumbnailExtractor
         if (string.IsNullOrWhiteSpace(videoFilePath) || targetHeight <= 0)
             return null;
 
+        CanvasBitmap?[]? thumbnails = null;
+        bool transferred = false;
         try
         {
             var fileInfo = new FileInfo(videoFilePath);
@@ -97,32 +99,46 @@ public static class VideoThumbnailExtractor
             var streams = await composition.GetThumbnailsAsync(
                 times, 0, targetHeight, VideoFramePrecision.NearestFrame).AsTask(ct);
 
-            var thumbnails = new CanvasBitmap?[count];
-            bool flip = Mixtri.Core.Capture.RecordingMarker.NeedsVerticalFlip(videoFilePath);
-            for (int i = 0; i < count && i < streams.Count; i++)
+            thumbnails = new CanvasBitmap?[count];
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                try
+                bool flip = Mixtri.Core.Capture.RecordingMarker.NeedsVerticalFlip(videoFilePath);
+                for (int i = 0; i < count && i < streams.Count; i++)
                 {
-                    var loaded = await CanvasBitmap.LoadAsync(device, streams[i]);
-                    thumbnails[i] = flip ? FlipVertically(loaded, device) : loaded;
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[VideoThumbnailExtractor] Thumbnail {i} failed to load: {ex.Message}");
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var loaded = await CanvasBitmap.LoadAsync(device, streams[i]);
+                        thumbnails[i] = flip ? FlipVertically(loaded, device) : loaded;
+                    }
+                    catch (Exception ex) when (!GpuContext.IsDeviceLoss(ex))
+                    {
+                        DiagLog.Write("Filmstrip", $"thumbnail {i} failed to load: {ex}");
+                    }
                 }
             }
+            finally
+            {
+                foreach (var stream in streams) stream.Dispose();
+            }
 
+            if (!thumbnails.Any(t => t is not null)) return null;
+            transferred = true;
             return new ThumbnailStrip(thumbnails, interval, aspectRatio, duration);
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!GpuContext.IsDeviceLoss(ex))
         {
-            Debug.WriteLine($"[VideoThumbnailExtractor] Failed for '{videoFilePath}': {ex.Message}");
+            DiagLog.Write("Filmstrip", $"extraction failed for '{videoFilePath}': {ex}");
             return null;
+        }
+        finally
+        {
+            if (!transferred && thumbnails is not null)
+                foreach (var thumbnail in thumbnails) thumbnail?.Dispose();
         }
     }
 
@@ -163,40 +179,57 @@ public static class VideoThumbnailExtractor
         var thumbnails = new CanvasBitmap?[count];
         double aspectRatio = 16.0 / 9.0;
 
-        for (int i = 0; i < count; i++)
+        bool transferred = false;
+        try
         {
-            ct.ThrowIfCancellationRequested();
-
-            int frameIndex = Math.Clamp(
-                (int)(i * interval * fps), 0, source.FrameCount - 1);
-
-            using var frame = await source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
-            if (frame is null)
-                continue;
-
-            double frameAspect = frame.Size.Height > 0
-                ? frame.Size.Width / frame.Size.Height
-                : aspectRatio;
-            if (i == 0)
-                aspectRatio = frameAspect;
-
-            try
+            for (int i = 0; i < count; i++)
             {
-                int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
-                var scaled = Win2DUtils.CreateRenderTarget(device, width, targetHeight, 96, "video thumbnail");
-                using (var ds = scaled.CreateDrawingSession())
-                    ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
+                ct.ThrowIfCancellationRequested();
 
-                thumbnails[i] = scaled;
+                int frameIndex = Math.Clamp(
+                    (int)(i * interval * fps), 0, source.FrameCount - 1);
+
+                using var frame = await source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+                if (frame is null)
+                    continue;
+
+                double frameAspect = frame.Size.Height > 0
+                    ? frame.Size.Width / frame.Size.Height
+                    : aspectRatio;
+                if (i == 0)
+                    aspectRatio = frameAspect;
+
+                CanvasRenderTarget? scaled = null;
+                try
+                {
+                    int width = Math.Max(1, (int)Math.Round(targetHeight * frameAspect));
+                    scaled = Win2DUtils.CreateRenderTarget(device, width, targetHeight, 96, "video thumbnail");
+                    using (var ds = scaled.CreateDrawingSession())
+                        ds.DrawImage(frame, new Windows.Foundation.Rect(0, 0, width, targetHeight));
+
+                    thumbnails[i] = scaled;
+                    scaled = null;
+                }
+                catch (Exception ex) when (!GpuContext.IsDeviceLoss(ex))
+                {
+                    DiagLog.Write("Filmstrip", $"JPEG thumbnail {i} failed: {ex}");
+                }
+                finally
+                {
+                    scaled?.Dispose();
+                }
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[VideoThumbnailExtractor] JPEG thumbnail {i} failed: {ex.Message}");
-            }
+
+            if (!thumbnails.Any(t => t is not null)) return null;
+            transferred = true;
+            return new ThumbnailStrip(
+                thumbnails, interval, aspectRatio, TimeSpan.FromSeconds(totalSeconds));
         }
-
-        return new ThumbnailStrip(
-            thumbnails, interval, aspectRatio, TimeSpan.FromSeconds(totalSeconds));
+        finally
+        {
+            if (!transferred)
+                foreach (var thumbnail in thumbnails) thumbnail?.Dispose();
+        }
     }
 
     /// <summary>
@@ -209,10 +242,11 @@ public static class VideoThumbnailExtractor
     /// </remarks>
     private static CanvasBitmap FlipVertically(CanvasBitmap source, CanvasDevice device)
     {
+        CanvasRenderTarget? flipped = null;
         try
         {
             float height = (float)source.Size.Height;
-            var flipped = Win2DUtils.CreateRenderTarget(
+            flipped = Win2DUtils.CreateRenderTarget(
                 device, (float)source.Size.Width, height, source.Dpi, "flipped video thumbnail");
 
             using (var ds = flipped.CreateDrawingSession())
@@ -224,12 +258,23 @@ public static class VideoThumbnailExtractor
             }
 
             source.Dispose();
-            return flipped;
+            var result = flipped;
+            flipped = null;
+            return result;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[VideoThumbnailExtractor] Flip failed: {ex.Message}");
+            if (GpuContext.IsDeviceLoss(ex))
+            {
+                source.Dispose();
+                throw;
+            }
+            DiagLog.Write("Filmstrip", $"thumbnail flip failed: {ex}");
             return source;
+        }
+        finally
+        {
+            flipped?.Dispose();
         }
     }
 }

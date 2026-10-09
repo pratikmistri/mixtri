@@ -995,7 +995,7 @@ public sealed partial class EditorPage
         CompositionConfig config, VideoSegment? forSegment = null)
     {
         var project = ProjectService.Instance.CurrentProject;
-        if (project is null) return;
+        if (_pageUnloaded || project is null) return;
 
         // A rebuild ends by re-rendering, and rendering can ask for another rebuild, so
         // this must not recurse. Requests that arrive mid-rebuild are coalesced rather
@@ -1043,9 +1043,8 @@ public sealed partial class EditorPage
         var effective = config;
         if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
         if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
-        _primaryRenderBackground = effective.Background;
-        _primaryRenderCursor = effective.Cursor;
-        _primaryRendererSegmentId = activePrimary?.Id;
+        var background = effective.Background;
+        var cursor = effective.Cursor;
 
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -1068,14 +1067,14 @@ public sealed partial class EditorPage
         // _primaryPreviewStateGeneration so any transition compose already in flight
         // against the OLD singleton detects this rebuild instead of using it past disposal.
         DisposePrimaryStyleRenderers();
-
-        _compositorReady = false;
-        _previewRenderer?.Dispose();
+        int generation = _primaryPreviewStateGeneration;
+        int initGeneration = _previewInitGeneration;
+        PreviewRenderer? renderer = new PreviewRenderer();
+        bool rebuilt = false;
 
         try
         {
-            _previewRenderer = new PreviewRenderer();
-            await _previewRenderer.InitializeAsync(
+            await renderer.InitializeAsync(
                 mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
@@ -1085,24 +1084,39 @@ public sealed partial class EditorPage
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom state from the model. The new compositor has just regenerated
-            // auto-zoom from the raw mouse data, so this has to run unconditionally —
-            // an empty keyframe list and an empty suppression set are both meaningful.
-            SyncZoomStateToRenderer();
+            // A project reload or recovery may finish while initialization awaits.
+            // Never publish this renderer onto, or dispose resources owned by, that run.
+            if (_pageUnloaded || generation != _primaryPreviewStateGeneration
+                || initGeneration != _previewInitGeneration
+                || !ReferenceEquals(project, ProjectService.Instance.CurrentProject))
+                return;
+
+            // Synchronize the candidate before publishing or disposing the usable renderer.
+            EditorTimelineMediator.SyncZoomStateToRenderer(ViewModel.Model, renderer, PrimaryVideoPath);
+            var previous = _previewRenderer;
+            _previewRenderer = renderer;
+            renderer = null;
+            TryDispose(previous);
+            _primaryRenderBackground = background;
+            _primaryRenderCursor = cursor;
+            _primaryRendererSegmentId = activePrimary?.Id;
 
             _compositorReady = true;
+            rebuilt = true;
         }
         catch (Exception ex)
         {
-            _previewRenderer?.Dispose();
-            _previewRenderer = null;
-            _primaryRenderBackground = null;
-            _primaryRenderCursor = null;
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"scene renderer rebuild failed: {ex}");
             _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
+        finally
+        {
+            TryDispose(renderer);
+        }
 
         // Re-render at current playhead position
+        if (_pageUnloaded || initGeneration != _previewInitGeneration) return;
+        if (_isRendering && !rebuilt) return;
         _lastRenderedFrameIndex = -1;
         var position = Timeline.PlayheadPosition;
         await UpdatePreviewFrameAsync(position, force: true);

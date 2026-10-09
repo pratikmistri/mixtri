@@ -65,8 +65,9 @@ public sealed class JpegFrameSource : IFrameSource
         {
             return await CanvasBitmap.LoadAsync(_device, path);
         }
-        catch
+        catch (Exception ex) when (!GpuContext.IsDeviceLoss(ex))
         {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"captured frame load failed '{path}': {ex}");
             return null;
         }
     }

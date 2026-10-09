@@ -11,6 +11,26 @@ namespace Mixtri.Core.Processing;
 public static class GpuContext
 {
     public static CanvasDevice GetSharedDevice() => CanvasDevice.GetSharedDevice();
+
+    /// <summary>Recognizes device loss even when an allocation helper wrapped the COM error.</summary>
+    public static bool IsDeviceLoss(Exception exception) => IsDeviceLoss(exception, 0);
+
+    private static bool IsDeviceLoss(Exception exception, int depth)
+    {
+        if (depth >= 8) return false;
+        if (exception is RecoverableDeviceLostException
+            || exception.HResult is unchecked((int)0x887A0005) // DXGI_ERROR_DEVICE_REMOVED
+                or unchecked((int)0x887A0006)                 // DXGI_ERROR_DEVICE_HUNG
+                or unchecked((int)0x887A0007)                 // DXGI_ERROR_DEVICE_RESET
+                or unchecked((int)0x887A0020)                 // DXGI_ERROR_DRIVER_INTERNAL_ERROR
+                or unchecked((int)0x8899000C))                // D2DERR_RECREATE_TARGET
+            return true;
+
+        if (exception is AggregateException aggregate)
+            return aggregate.InnerExceptions.Any(inner => IsDeviceLoss(inner, depth + 1));
+
+        return exception.InnerException is { } cause && IsDeviceLoss(cause, depth + 1);
+    }
 }
 
 /// <summary>

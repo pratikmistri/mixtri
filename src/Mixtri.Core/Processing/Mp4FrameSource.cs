@@ -127,6 +127,7 @@ public sealed class Mp4FrameSource : IFrameSource
             return null;
 
         MediaPlayer? player = null;
+        Mp4FrameSource? reader = null;
         try
         {
             var fullPath = Path.GetFullPath(videoFilePath);
@@ -192,7 +193,7 @@ public sealed class Mp4FrameSource : IFrameSource
             var (outputWidth, outputHeight) = ComputeOutputDimensions(
                 width, height, options.MaxWidth, options.MaxHeight);
 
-            var reader = new Mp4FrameSource(
+            reader = new Mp4FrameSource(
                 player, device, outputWidth, outputHeight, fps, frameCount, flipVertical, options);
             player = null; // ownership transferred
 
@@ -201,8 +202,10 @@ public sealed class Mp4FrameSource : IFrameSource
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Mp4FrameSource] Failed to open '{videoFilePath}': {ex.Message}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"failed to open '{videoFilePath}': {ex}");
             player?.Dispose();
+            reader?.Dispose();
+            if (GpuContext.IsDeviceLoss(ex)) throw;
             return null;
         }
     }
@@ -234,7 +237,7 @@ public sealed class Mp4FrameSource : IFrameSource
         {
             using var first = await LoadFrameAsync(0);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!GpuContext.IsDeviceLoss(ex))
         {
             Debug.WriteLine($"[Mp4FrameSource] Priming failed: {ex.Message}");
         }
@@ -287,28 +290,34 @@ public sealed class Mp4FrameSource : IFrameSource
             // _surface is reused across calls, so hand back an independent copy the
             // caller can hold and dispose on its own schedule.
             var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
-            using (var ds = copy.CreateDrawingSession())
+            try
             {
-                // Legacy recordings are stored upside down; correcting it here keeps the
-                // preview, the export compositor and the filmstrip consistent, because
-                // they all read frames through this one path.
-                if (_flipVertical)
+                using (var ds = copy.CreateDrawingSession())
                 {
-                    ds.Transform =
-                        System.Numerics.Matrix3x2.CreateScale(1, -1) *
-                        System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                    // Legacy recordings are stored upside down; correct all reader consumers.
+                    if (_flipVertical)
+                    {
+                        ds.Transform =
+                            System.Numerics.Matrix3x2.CreateScale(1, -1) *
+                            System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                    }
+
+                    ds.DrawImage(_surface);
                 }
-
-                ds.DrawImage(_surface);
+                return copy;
             }
-
-            return copy;
+            catch
+            {
+                copy.Dispose();
+                throw;
+            }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Mp4FrameSource] Failed to decode frame {frameIndex}: {ex.Message}");
             _lastDeliveredIndex = -1;
             _needsDrain = true;
+            if (GpuContext.IsDeviceLoss(ex)) throw;
             return null;
         }
         finally
@@ -535,7 +544,10 @@ public sealed class Mp4FrameSource : IFrameSource
         catch (Exception ex)
         {
             Debug.WriteLine($"[Mp4FrameSource] CopyFrameToVideoSurface failed: {ex.Message}");
-            pending.TrySetResult(false);
+            if (GpuContext.IsDeviceLoss(ex))
+                pending.TrySetException(ex);
+            else
+                pending.TrySetResult(false);
         }
     }
 
