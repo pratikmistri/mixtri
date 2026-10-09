@@ -745,14 +745,23 @@ public sealed partial class EditorPage
 
     private void ScheduleStyleUpdate()
     {
+        // Capture both the values and the target before selection/playback can change.
+        _pendingSceneStyle = (BuildBackgroundStyleFromControls(), SceneVideoSegment);
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
         _styleDebouncer ??= new Debouncer(() =>
         {
-            var bg = BuildBackgroundStyleFromControls();
-            ApplyBackgroundStyle(bg);
+            if (_pendingSceneStyle is not { } pending) return;
+            _pendingSceneStyle = null;
+            if (pending.Segment is not null && !ViewModel.Model.Segments.Contains(pending.Segment)) return;
+            ApplyBackgroundStyle(pending.Style, pending.Segment);
         });
         _styleDebouncer.Schedule();
     }
+
+    private (BackgroundStyle Style, VideoSegment? Segment)? _pendingSceneStyle;
+
+    private VideoSegment? SceneVideoSegment => SceneStyleTarget.Resolve(
+        ViewModel.Model, _selectedPrimarySegmentId, Timeline.PlayheadPosition);
 
     private BackgroundStyle BuildBackgroundStyleFromControls()
     {
@@ -778,7 +787,8 @@ public sealed partial class EditorPage
                 // Wallpaper list hasn't finished loading yet (or selection was
                 // cleared) — preserve the project's currently-applied image so a
                 // background sync from another control doesn't blank it out.
-                imagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+                imagePath = SceneVideoSegment?.FrameStyleOverride?.BackgroundImagePath
+                    ?? ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
             }
         }
 
@@ -890,7 +900,8 @@ public sealed partial class EditorPage
         var wantBg = seg.FrameStyleOverride ?? global.Background;
         var wantCursor = seg.CursorStyleOverride ?? global.Cursor;
 
-        if (Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
+        if (_compositorReady && _previewRenderer is not null
+            && Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
             return;
 
         // Rebuild FOR THIS SEGMENT. Letting the rebuild re-derive the style from the
@@ -905,15 +916,21 @@ public sealed partial class EditorPage
 
     private void ApplyBackgroundStyle(BackgroundStyle bg)
     {
+        _styleDebouncer?.Stop();
+        _pendingSceneStyle = null;
+        ApplyBackgroundStyle(bg, SceneVideoSegment);
+    }
+
+    private void ApplyBackgroundStyle(BackgroundStyle bg, VideoSegment? target)
+    {
         // Mark preset as Custom if it no longer matches
         _suppressStyleEvents = true;
         PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
         _suppressStyleEvents = false;
 
-        // Frame style is per-segment: when a video segment is selected, store the
-        // override on it and rebuild only that segment's renderer. Otherwise update
-        // the global config so segments without an override follow it.
-        if (SelectedVideoSegment is { } seg)
+        // Use the selected clip, or the visible video when selection is cleared.
+        // Otherwise an existing clip override masks every edit to the global style.
+        if (target is { } seg)
         {
             seg.FrameStyleOverride = bg;
             _ = RebuildForSegmentStyleChangeAsync(seg);
@@ -1075,10 +1092,14 @@ public sealed partial class EditorPage
 
             _compositorReady = true;
         }
-        catch
+        catch (Exception ex)
         {
             _previewRenderer?.Dispose();
             _previewRenderer = null;
+            _primaryRenderBackground = null;
+            _primaryRenderCursor = null;
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"scene renderer rebuild failed: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
 
         // Re-render at current playhead position

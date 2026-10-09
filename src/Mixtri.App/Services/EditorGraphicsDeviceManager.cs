@@ -98,6 +98,31 @@ public sealed class EditorGraphicsDeviceManager
     private void OnGraphicsDeviceLost(CanvasDevice sender, object args)
         => RequestRecovery("shared CanvasDevice lost");
 
+    /// <summary>Caught Win2D errors must still enter the device recovery path.</summary>
+    public void RecoverFromRenderFailure(Exception exception)
+    {
+        if (_isUnloaded()) return;
+        if (exception is RecoverableDeviceLostException)
+        {
+            RequestRecovery("render reported a lost graphics device");
+            return;
+        }
+        try
+        {
+            if (_graphicsDevice is not null && _graphicsDevice.IsDeviceLost(exception.HResult))
+            {
+                // Notify Win2D as well as our resource owners, so GetSharedDevice returns
+                // a replacement rather than handing recovery the same unusable device.
+                _graphicsDevice.RaiseDeviceLost();
+                RequestRecovery($"render failed with device loss 0x{exception.HResult:X8}");
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Editor", $"device-loss check failed: {ex}");
+        }
+    }
+
     /// <summary>
     /// Schedules a full editor graphics rebuild. Also callable for losses the shared-device
     /// subscription cannot see: a <c>CanvasControl</c> recovers from a device loss internally,

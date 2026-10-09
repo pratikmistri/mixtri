@@ -571,6 +571,9 @@ public sealed partial class EditorPage
 
             UpdateZoomPanelVisibility();
 
+            if (SelectedSlide() is { } selectedSlide)
+                ShowTextSlidePanel(selectedSlide);
+
             // Undo/redo and every undoable edit funnel through here, which makes this the one
             // place that reliably sees the timeline gain its first segment or lose its last.
             UpdateEmptyStateVisibility();
@@ -617,6 +620,7 @@ public sealed partial class EditorPage
 
     private void OnSegmentSelected(object? sender, string? segmentId)
     {
+        _styleDebouncer?.Flush();
         _selectedPrimarySegmentId = segmentId;
 
         // Show the text slide panel only when a text slide is selected; for a
@@ -633,7 +637,7 @@ public sealed partial class EditorPage
 
         // Reflect the selected video segment's effective frame style + cursor in the
         // flyout controls, so editing per-segment style starts from its current state.
-        if (SelectedVideoSegment is { } vseg)
+        if (SceneVideoSegment is { } vseg)
         {
             var global = ProjectService.Instance.CurrentComposition;
             if (global is not null)

@@ -247,6 +247,23 @@ public class MixtriPackageTests
     }
 
     [TestMethod]
+    public async Task SaveThenOpen_PreservesBundledTitleImageAndPresetSelection()
+    {
+        var (project, timeline) = BuildProject();
+        var preset = TextSlidePresets.All.Single(p => p.Id == "image-eclipse");
+        var slide = new TextSlideSegment { Text = "Chapter one" };
+        preset.Apply(slide);
+        timeline.Segments.Add(slide);
+        var packagePath = Path.Combine(_root, "image-title.mixtri");
+        await MixtriPackageService.SaveAsync(packagePath, project, new CompositionConfig(), timeline);
+        var opened = await MixtriPackageService.OpenAsync(packagePath, _workingRoot);
+        var restored = opened.Timeline.Segments.OfType<TextSlideSegment>().Single(s => s.Id == slide.Id);
+        Assert.AreEqual(slide.BackgroundImagePath, restored.BackgroundImagePath);
+        Assert.AreSame(preset, TextSlidePresets.Selected(restored));
+        Assert.IsTrue(File.Exists(TitleSlideImages.Resolve(restored.BackgroundImagePath)));
+    }
+
+    [TestMethod]
     public async Task SaveThenOpen_PacksPerSegmentStyleOverrideImages()
     {
         var (project, timeline) = BuildProject();

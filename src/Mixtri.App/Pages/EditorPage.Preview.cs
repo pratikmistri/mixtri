@@ -1024,6 +1024,7 @@ public sealed partial class EditorPage
                 {
                     Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
                         $"slide crossfade preview error at {position}: {ex.Message}");
+                    _graphicsDeviceManager.RecoverFromRenderFailure(ex);
                 }
                 finally
                 {
@@ -1495,7 +1496,16 @@ public sealed partial class EditorPage
 
         // Pre-load the (image) background off the UI thread so the synchronous
         // RenderSlide call below never blocks on file I/O + GPU decode.
-        await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+        try
+        {
+            await _textSlideRenderer.EnsureBackgroundLoadedAsync(slide);
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"title background preload failed: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            return;
+        }
 
         var (width, height) = GetPreviewCanvasSize();
 
@@ -1521,7 +1531,8 @@ public sealed partial class EditorPage
             System.Diagnostics.Debug.WriteLine(
                 $"[EditorPage] Text slide preview error: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
-                $"text slide render failed: {ex.GetType().Name}: {ex.Message}");
+                $"text slide render failed (0x{ex.HResult:X8}): {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
 
         ShowTextEditOverlay();
@@ -1554,6 +1565,7 @@ public sealed partial class EditorPage
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"empty-gap frame render failed: {ex.GetType().Name}: {ex.Message}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
 
         HideTextEditOverlay();
@@ -1663,6 +1675,7 @@ public sealed partial class EditorPage
                 $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"frame render failed at {sourcePosition}: {ex.GetType().Name}: {ex.Message}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
             bitmap.Dispose();
         }
     }

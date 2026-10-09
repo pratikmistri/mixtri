@@ -42,10 +42,11 @@ public static class CursorGeometryLibrary
 
             // Pointing hand (link cursor) — fill silhouette from a user-provided SVG
             // (23x26 viewBox, Windows-style hand). Scaled up to match the other
-            // cursors' visual size; hotspot at the index fingertip.
+            // cursors' visual size; hotspot at the index fingertip. The thumb curves
+            // meet directly to avoid a backtracking segment that spikes when stroked.
             [CursorShape.Hand] =
-                ("M8.03536 13.2L7.14874 11.8453C6.54336 10.9203 5.25384 10.5829 4.26748 11.09" +
-                 "L4.49731 10.9718C4.25253 11.0977 4.13515 11.4114 4.23593 11.6721" +
+                ("M8.03536 13.2L7.14874 11.8453C6.54336 10.9203 5.25384 10.5829 4.49731 10.9718" +
+                 "C4.25253 11.0977 4.13515 11.4114 4.23593 11.6721" +
                  "L5.46321 14.8474C5.65776 15.3508 6.15466 16.0627 6.56642 16.4203" +
                  "C6.56642 16.4203 9.03536 18.4639 9.03536 19.23V20.2H13.0354H14.1292H15.0354H16.0354" +
                  "V19.23C16.0354 18.4639 17.5442 16.0507 17.5442 16.0507" +

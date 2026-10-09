@@ -13,9 +13,11 @@ namespace Mixtri_App.Helpers;
 internal sealed class Debouncer
 {
     private readonly DispatcherTimer _timer;
+    private readonly Action _callback;
 
     public Debouncer(Action callback, int intervalMilliseconds = 200)
     {
+        _callback = callback;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(intervalMilliseconds) };
         _timer.Tick += (_, _) =>
         {
@@ -33,4 +35,12 @@ internal sealed class Debouncer
 
     /// <summary>Cancels any pending callback without invoking it.</summary>
     public void Stop() => _timer.Stop();
+
+    /// <summary>Commits pending input before another edit resynchronizes its controls.</summary>
+    public void Flush()
+    {
+        if (!_timer.IsEnabled) return;
+        _timer.Stop();
+        _callback();
+    }
 }

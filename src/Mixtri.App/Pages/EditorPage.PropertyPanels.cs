@@ -84,7 +84,7 @@ public sealed partial class EditorPage
     private TextBlock SlideBgColorText => PropertiesPanel.TextSlide.SlideBgColorText;
     private ColorPicker SlideBgColorPicker => PropertiesPanel.TextSlide.SlideBgColorPicker;
     private StackPanel SlideGradientPanel => PropertiesPanel.TextSlide.SlideGradientPanel;
-    private GridView SlideGradientPresets => PropertiesPanel.TextSlide.SlideGradientPresets;
+    private GridView SlideAppearancePresets => PropertiesPanel.TextSlide.SlideAppearancePresets;
     private Border SlideGradEndColorSwatch => PropertiesPanel.TextSlide.SlideGradEndColorSwatch;
     private TextBlock SlideGradEndColorText => PropertiesPanel.TextSlide.SlideGradEndColorText;
     private ColorPicker SlideGradEndColorPicker => PropertiesPanel.TextSlide.SlideGradEndColorPicker;
@@ -263,7 +263,9 @@ public sealed partial class EditorPage
         SlideAlignSegmented.SelectionChanged += SlideAlignSegmented_SelectionChanged;
         SlideBgTypeCombo.SelectionChanged += SlideBgTypeCombo_SelectionChanged;
         SlideBgColorPicker.ColorChanged += SlideBgColorPicker_ColorChanged;
-        SlideGradientPresets.SelectionChanged += SlideGradientPreset_SelectionChanged;
+        SlideAppearancePresets.ItemClick += SlideAppearancePreset_Click;
+        PropertiesPanel.TextSlide.SlideUppercaseToggle.Click += SlideUppercase_Click;
+        PropertiesPanel.TextSlide.SlideGradientMotionCombo.SelectionChanged += SlideGradientMotion_SelectionChanged;
         SlideGradEndColorPicker.ColorChanged += SlideGradEndColorPicker_ColorChanged;
         SlideGradAngleSlider.ValueChanged += SlideGradAngleSlider_ValueChanged;
         PropertiesPanel.TextSlide.ChooseSlideImageButton.Click += ChooseSlideImage_Click;

@@ -22,6 +22,24 @@
         </StackPanel>
 
         <StackPanel Spacing="6">
+            <TextBlock Text="Style" Style="{StaticResource PropertyLabelStyle}" />
+            <GridView x:Name="SlideAppearancePresets" x:FieldModifier="public"
+                      Padding="0" SelectionMode="Single" IsItemClickEnabled="True"
+                      AutomationProperties.Name="Title slide style"
+                      ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                      ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <GridView.ItemContainerStyle>
+                    <Style TargetType="GridViewItem">
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="Margin" Value="0,0,6,6" />
+                        <Setter Property="MinWidth" Value="0" />
+                        <Setter Property="MinHeight" Value="0" />
+                    </Style>
+                </GridView.ItemContainerStyle>
+            </GridView>
+        </StackPanel>
+
+        <StackPanel Spacing="6">
             <TextBlock Text="Animation" Style="{StaticResource PropertyLabelStyle}" />
             <ComboBox
                 x:Name="SlideAnimationCombo"
@@ -47,6 +65,41 @@
             </ComboBox>
         </StackPanel>
 
+        <NumberBox x:Name="SlideDurationBox" x:FieldModifier="public"
+                   Header="Duration (s)" Minimum="0.5" Maximum="30"
+                   SpinButtonPlacementMode="Inline" SmallChange="0.5" />
+
+        <StackPanel Spacing="10">
+            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInAtSlider"
+                x:FieldModifier="public"
+                Header="Text in at (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutBySlider"
+                x:FieldModifier="public"
+                Header="Text out by (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextInRampSlider"
+                x:FieldModifier="public"
+                Header="In ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
+                x:Name="SlideTextOutRampSlider"
+                x:FieldModifier="public"
+                Header="Out ramp (s)"
+                Minimum="0" Maximum="30"
+                StepFrequency="0.05" />
+        </StackPanel>
+
+        <!-- Appearance is opt-in; animation and timing always remain available. -->
+        <StackPanel x:Name="SlideCustomAppearancePanel" x:FieldModifier="public"
+                    Spacing="20" Visibility="Collapsed">
         <StackPanel Spacing="6">
             <TextBlock Text="Font" Style="{StaticResource PropertyLabelStyle}" />
             <ComboBox
@@ -54,7 +107,7 @@
                 x:FieldModifier="public"
                 HorizontalAlignment="Stretch">
                 <ComboBoxItem Content="Segoe UI" Tag="Segoe UI" FontFamily="Segoe UI" />
-                <ComboBoxItem Content="Segoe UI Variable" Tag="Segoe UI Variable" FontFamily="Segoe UI Variable" />
+                <ComboBoxItem Content="Bahnschrift" Tag="Bahnschrift" FontFamily="Bahnschrift" />
                 <ComboBoxItem Content="Arial" Tag="Arial" FontFamily="Arial" />
                 <ComboBoxItem Content="Calibri" Tag="Calibri" FontFamily="Calibri" />
                 <ComboBoxItem Content="Cambria" Tag="Cambria" FontFamily="Cambria" />
@@ -70,32 +123,11 @@
             </ComboBox>
         </StackPanel>
 
-        <Grid ColumnSpacing="10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Spacing="6">
-                <TextBlock Text="Duration (s)" Style="{StaticResource PropertyLabelStyle}" />
-                <NumberBox
-                    x:Name="SlideDurationBox"
-                    x:FieldModifier="public"
-                    Minimum="0.5"
-                    Maximum="30"
-                    SpinButtonPlacementMode="Inline"
-                    SmallChange="0.5" />
-            </StackPanel>
-            <StackPanel Grid.Column="1" Spacing="6">
-                <TextBlock Text="Font Size" Style="{StaticResource PropertyLabelStyle}" />
-                <NumberBox
-                    x:Name="SlideFontSizeBox"
-                    x:FieldModifier="public"
-                    Minimum="12"
-                    Maximum="200"
-                    SpinButtonPlacementMode="Inline"
-                    SmallChange="4" />
-            </StackPanel>
-        </Grid>
+        <StackPanel Spacing="6">
+            <TextBlock Text="Font Size" Style="{StaticResource PropertyLabelStyle}" />
+            <NumberBox x:Name="SlideFontSizeBox" x:FieldModifier="public"
+                       Minimum="12" Maximum="200" SpinButtonPlacementMode="Inline" SmallChange="4" />
+        </StackPanel>
 
         <!-- Text color -->
         <StackPanel Spacing="6">
@@ -156,6 +188,8 @@
             </StackPanel>
         </StackPanel>
 
+        <CheckBox x:Name="SlideUppercaseToggle" x:FieldModifier="public" Content="Uppercase" />
+
         <!-- Background type -->
         <StackPanel Spacing="6">
             <TextBlock Text="Background" Style="{StaticResource PropertyLabelStyle}" />
@@ -197,18 +231,11 @@
 
         <!-- Gradient controls -->
         <StackPanel x:Name="SlideGradientPanel" x:FieldModifier="public" Spacing="10" Visibility="Collapsed">
-            <TextBlock Text="Presets" Style="{StaticResource PropertyLabelStyle}" />
-            <!-- Grows to fit its tiles; the panel's ScrollViewer owns the overflow so the
-                 user never gets a second scrollbar nested inside the pane. -->
-            <GridView
-                x:Name="SlideGradientPresets"
-                x:FieldModifier="public"
-                Padding="0"
-                ScrollViewer.VerticalScrollMode="Disabled"
-                ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                ScrollViewer.HorizontalScrollMode="Disabled"
-                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                SelectionMode="Single" />
+            <ComboBox x:Name="SlideGradientMotionCombo" x:FieldModifier="public"
+                      Header="Background motion" HorizontalAlignment="Stretch">
+                <ComboBoxItem Content="Subtle drift" Tag="SubtleDrift" />
+                <ComboBoxItem Content="Organic wave" Tag="OrganicWave" />
+            </ComboBox>
             <StackPanel Spacing="6">
                 <TextBlock Text="End Color" Style="{StaticResource PropertyLabelStyle}" />
                 <DropDownButton HorizontalAlignment="Stretch">
@@ -254,34 +281,6 @@
                        TextTrimming="CharacterEllipsis" />
         </StackPanel>
 
-        <!-- Animation window: last, because it tunes the text animation chosen at the top
-             against the finished slide, and its ranges depend on the slide duration. -->
-        <StackPanel Spacing="10">
-            <TextBlock Text="Animation Window" Style="{StaticResource PropertyLabelStyle}" />
-            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                x:Name="SlideTextInAtSlider"
-                x:FieldModifier="public"
-                Header="Text in at (s)"
-                Minimum="0" Maximum="30"
-                StepFrequency="0.05" />
-            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                x:Name="SlideTextOutBySlider"
-                x:FieldModifier="public"
-                Header="Text out by (s)"
-                Minimum="0" Maximum="30"
-                StepFrequency="0.05" />
-            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                x:Name="SlideTextInRampSlider"
-                x:FieldModifier="public"
-                Header="In ramp (s)"
-                Minimum="0" Maximum="30"
-                StepFrequency="0.05" />
-            <Slider HeaderTemplate="{StaticResource PropertyHeaderTemplate}"
-                x:Name="SlideTextOutRampSlider"
-                x:FieldModifier="public"
-                Header="Out ramp (s)"
-                Minimum="0" Maximum="30"
-                StepFrequency="0.05" />
         </StackPanel>
 
         <Button

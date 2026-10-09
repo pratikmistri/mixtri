@@ -3090,3 +3090,74 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: Readiness/model initialization gates export upscaling; unsupported startup retains no-upscale dimensions, while per-frame errors disable the scaler and fall back to standard rendering. Reusable BGR buffers bridge Win2D BGRA frames to VideoScaler `ImageBuffer`.
 - **What didn't work**: Referencing the AI package directly from Core imported MSIX build targets into the non-app Core project; SDK 1.8 had AI APIs but no VideoScaler type. The provider seam and SDK 2.5 app reference avoid both issues.
 - **Verified**: ARM64 app build and x64 test build succeeded; focused export sizing tests passed; dev app registered and launched with package data preserved.
+
+## 2026-09-16: ARM64 Debug build and launch
+
+- **Feature/area**: Local dev build and launch; no application source changes.
+- **Approaches tried**: Built `Mixtri.App.csproj` with VS 2022 BuildTools ARM64 MSBuild, then launched the matching `PratikMistri.Musio.Dev` AppsFolder registration.
+- **What worked**: The existing dev registration already pointed at the ARM64 Debug output. The build succeeded and `Mixtri (dev) Mini` opened and remained responsive.
+- **What didn't work**: None; no dependency restore or registration reset was needed.
+
+## 2026-09-19: Fresh toolchain setup and ARM64 dev launch
+
+- **Feature/area**: Local build and launch on a host without the required build tools; no application source changes.
+- **Approaches tried**: Installed Visual Studio Build Tools 2026 with ManagedDesktopBuildTools, then added UniversalBuildTools with recommended components after the first build reported missing PriGen/MSIX tasks. User enabled Windows Developer Mode.
+- **What worked**: VS MSBuild with /restore /t:Build /p:Configuration=Debug /p:Platform=ARM64 completed successfully. Registered the generated ARM64 AppxManifest.xml and launched PratikMistri.Musio.Dev_9gph0n9984scy!App; verified Mixtri (dev) Mini had a window and a responsive process.
+- **What did not work**: ManagedDesktopBuildTools alone lacked Microsoft.Build.Packaging.Pri.Tasks.dll. Registration before enabling Developer Mode failed with 0x80073CFF. The successful build emitted MVVMTK0045 AOT compatibility warnings.
+
+## 2026-09-19: Hand cursor thumb outline
+
+- **Feature/area**: Vector hand cursor rendering.
+- **Approaches tried**: Inspected the thumb silhouette and removed a tiny reversing line between two curves.
+- **What worked**: Joining the curves directly eliminates the backtracking stroke at the thumb tip. Native ARM64 test build succeeded; all 15 CursorShapeTests passed.
+- **What did not work**: Initial build lacked dotnet on PATH; setting DOTNET_ROOT/PATH resolved SDK discovery. Build/test required access to user NuGet/.NET configuration outside the sandbox. Use ARM64 verification on this device.
+
+## 2026-09-20 — Title slide appearance presets
+
+- **Feature/area**: Added twelve Windows-inbox-font chapter styles as preview tiles after the title text, plus a final Custom tile. Animation choice, duration and all four animation-window sliders remain outside the custom appearance group.
+- **Approaches tried**: Reused XAML gradients and TextBlocks for lightweight tile previews; added a style-only undo snapshot rather than replacing a slide or changing its text/timing. Preset uppercase is a display property so switching styles preserves original text casing.
+- **What worked**: Persisted preset ID with appearance matching, a non-destructive Custom action, and playhead-driven 18-second drift shared by preview/export. Existing slides default to Custom and retain organic-wave motion. Fixed title-text sync to honor suppression; pending timing input is flushed before applying presets.
+- **Validation**: Clean ARM64 app build succeeded with VS MSBuild; full suite passed (1,403 passed, 3 skipped), including new preset preservation/undo/serialization cases. This host required DOTNET_ROOT and DOTNET_MSBUILD_SDK_RESOLVER_CLI_DIR pointing to C:/Program Files/dotnet, plus MSBuildSDKsPath pointing to the installed 10.0.401 SDK. Native visual verification was incomplete: Mini is capture-excluded and the Explorer automation window disappeared during recovery.
+- **What did not work**: Default SDK discovery selected a dotnet installation without an SDK; explicitly selecting the installed ARM64 SDK resolved it. One diagnostic DLL remained locked during bin cleanup, but obj cleanup and the subsequent clean XAML build succeeded.
+
+### 2026-09-20: Playback blanking investigation after image motion
+- The app log lives under the Dev package's LocalCache/Local/Mixtri, not the non-packaged LocalAppData/Mixtri test log. This incident logged stale decoded frames but no device reset; the exact trigger remains unconfirmed.
+- Cache the two image displacement noise fields at bounded 768x768 resolution per TextSlideRenderer. Transform these cached fields per frame rather than evaluating oversized procedural noise at video resolution each frame.
+- Dispose a newly allocated slide render target if drawing or EndDraw throws. Let image-load device-loss errors reach the editor; caught off-canvas Win2D failures need IsDeviceLost and RaiseDeviceLost to enter recovery.
+- Validation: ARM64 app build passed; 1408 tests passed, 3 skipped, including 420 image frames with preset switches and renderer recreation on software rendering. Hardware playback loss was not reproduced by these tests.
+
+### 2026-09-20: Scene background edits masked by clip overrides
+- Scene background handlers wrote global composition when no clip was selected; an existing override on the visible clip then masked every edit. SceneStyleTarget now resolves the selected video, otherwise the video under the playhead, keeping global fallback for title slides/empty scenes.
+- Debounced Scene edits capture values and clip together, and flush before selection changes. Preserve the effective clip wallpaper while its thumbnail selection is unavailable.
+- A failed primary compositor rebuild must clear its remembered style and log the exception; matching style values alone do not prove a usable renderer exists. Route device-loss exceptions into graphics recovery.
+- ARM64 app build and 1411 tests passed (3 skipped), including selected/deselected/appended Scene target regressions. The user's exact interactive failure was not reproduced; app windows were already closed during inspection.
+
+### 2026-10-06: Current branch lookup
+- **Feature/area**: Repository branch identification.
+- **Approaches tried**: `git branch --show-current`, then reading `.git\HEAD`.
+- **What worked**: `.git\HEAD` identified the current branch as `master`.
+- **What didn't work**: `git` was unavailable on the shell's PATH.
+
+### 2026-10-06: Feature branch checkout blocked
+- **Feature/area**: Switching to `feature/video-super-resolution`.
+- **Approaches tried**: Checked installed Git locations, used SHA-256-verified portable ARM64 MinGit, fetched the remote branch, and attempted a normal `git switch`.
+- **What worked**: Fetched `origin/feature/video-super-resolution`; Git's checkout safeguards preserved existing local changes.
+- **What didn't work**: Pre-existing uncommitted archive edits blocked checkout. Stayed on `master` because approval to stash those edits was unavailable.
+
+### 2026-10-06: Feature branch checkout preserving local work
+- **Feature/area**: Switching to `feature/video-super-resolution` without losing local edits.
+- **Approaches tried**: Stashed only the blocking archive, switched to the tracking branch, reapplied the archive, and resolved its append-only conflict by keeping both histories.
+- **What worked**: The requested branch was checked out; all 14 modified source files remained byte-for-byte unchanged, and both sets of archive entries were preserved.
+- **What didn't work**: Direct checkout was blocked by archive edits; automatic stash application conflicted because both histories appended entries to the same file.
+
+### 2026-10-08: Instability-fix topic branch
+- **Feature/area**: Created `fix/app-instabilities` from `feature/video-super-resolution`.
+- **Approaches tried**: Checked PATH and installed/previous portable Git locations, then downloaded official ARM64 MinGit and verified its SHA-256 digest.
+- **What worked**: `git switch -c fix/app-instabilities` created and checked out the branch without disturbing existing local changes; confirmed with `git branch --show-current`.
+- **What didn't work**: Git was unavailable on PATH and in the checked install locations.
+
+### 2026-10-09: Commit pending work before instability fixes
+- **Feature/area**: Saving pending source, tests, app assets, and learnings on `feature/video-super-resolution` before returning to `fix/app-instabilities`.
+- **Approaches tried**: Switched back to the feature branch, explicitly staged `src` and the archive, then committed and fast-forwarded the instability branch.
+- **What worked**: Both branches share the saved-work commit; generated `output` files remain untracked and untouched.
+- **What didn't work**: The previous attempt was blocked by plan-mode permissions; no stashing, resetting, or history rewriting was needed.
