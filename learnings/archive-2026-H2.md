@@ -3180,3 +3180,9 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Approaches tried**: Explicitly staged `src` and the current archive for a normal commit and upstream push.
 - **What worked**: Path-scoped staging included all three new recovery/test files while leaving generated `output` files untracked. The export investigation is documentation only; no audio-mux implementation change is included.
 - **What didn't work**: No failed staging approach; no reset, force push, or commit amendment was needed.
+
+### 2026-10-09: Push blocked by unavailable GitHub authentication
+- **Feature/area**: Publishing the editor stability commit.
+- **Approaches tried**: Normal upstream push, then restored official checksum-verified portable ARM64 GitHub CLI to replace the missing configured credential helper.
+- **What worked**: Created commit `38b3290` with the stability source changes, tests, and investigation notes. The portable CLI was verified and extracted successfully.
+- **What didn't work**: Push failed because the configured GitHub CLI executable was absent. The restored CLI also had no usable authentication, so pushing still requires user sign-in. The initial checksum lookup needed byte-content decoding and line-ending normalization. No credentials were extracted, no force push was attempted, and generated output remains excluded.
