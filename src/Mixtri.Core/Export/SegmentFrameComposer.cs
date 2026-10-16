@@ -41,12 +41,16 @@ public sealed class SegmentFrameComposer : IDisposable
     private readonly TimelineMapper? _mapper;
     private readonly int _fps;
     private readonly CanvasDevice _device;
+    private readonly bool _ownsDevice;
     private readonly Dictionary<SourceKey, SourceContext> _contexts = [];
     private readonly SourceContext _primaryContext;
 
     private TextSlideRenderer? _textSlideRenderer;
     private TransitionRenderer? _transitionRenderer;
     private bool _disposed;
+    private long _contextUse;
+    internal const int MaxSourceContexts = 3;
+    internal int CachedContextCount => _contexts.Count;
 
     /// <summary>Width of every frame returned by <see cref="ComposeFrameAsync"/>.</summary>
     public int OutputWidth { get; }
@@ -69,7 +73,8 @@ public sealed class SegmentFrameComposer : IDisposable
         int fps,
         CanvasDevice device,
         SourceKey primaryKey,
-        SourceContext primaryContext)
+        SourceContext primaryContext,
+        bool ownsDevice)
     {
         _project = project;
         _primaryMouseData = primaryMouseData;
@@ -78,6 +83,7 @@ public sealed class SegmentFrameComposer : IDisposable
         _mapper = mapper;
         _fps = fps;
         _device = device;
+        _ownsDevice = ownsDevice;
         _primaryContext = primaryContext;
         _contexts[primaryKey] = primaryContext;
 
@@ -98,7 +104,8 @@ public sealed class SegmentFrameComposer : IDisposable
         TimelineModel? timeline,
         TimelineMapper? mapper,
         int fps,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        CanvasDevice? device = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(primaryMouseData);
@@ -108,7 +115,8 @@ public sealed class SegmentFrameComposer : IDisposable
 
         ct.ThrowIfCancellationRequested();
 
-        var device = GpuContext.GetSharedDevice();
+        bool ownsDevice = device is null;
+        device ??= GpuContext.CreateExportDevice();
 
         // The key is built from the *unmodified* composition styles so that primary
         // segments without an override resolve back to this same context.
@@ -137,11 +145,12 @@ public sealed class SegmentFrameComposer : IDisposable
 
             return new SegmentFrameComposer(
                 project, primaryMouseData, composition, timeline, mapper, fps,
-                device, primaryKey, primary);
+                device, primaryKey, primary, ownsDevice);
         }
         catch
         {
             primary?.Dispose();
+            if (ownsDevice) device.Dispose();
             throw;
         }
     }
@@ -820,7 +829,20 @@ public sealed class SegmentFrameComposer : IDisposable
         var key = new SourceKey(NormalizePath(segment.VideoFilePath), background, cursor);
 
         if (_contexts.TryGetValue(key, out var cached))
+        {
+            cached.LastUsed = ++_contextUse;
             return cached;
+        }
+
+        // Returned frames are independently owned, so an inactive source can be evicted
+        // even while a transition retains its last composed picture.
+        if (_contexts.Count >= MaxSourceContexts)
+        {
+            var oldest = _contexts.Where(pair => !ReferenceEquals(pair.Value, _primaryContext))
+                .MinBy(pair => pair.Value.LastUsed);
+            _contexts.Remove(oldest.Key);
+            oldest.Value.Dispose();
+        }
 
         bool isPrimary = IsPrimarySource(segment.VideoFilePath);
         var mouseData = isPrimary
@@ -882,6 +904,7 @@ public sealed class SegmentFrameComposer : IDisposable
             throw new ObjectDisposedException(nameof(SegmentFrameComposer));
         }
 
+        context.LastUsed = ++_contextUse;
         _contexts[key] = context;
         return context;
     }
@@ -908,7 +931,7 @@ public sealed class SegmentFrameComposer : IDisposable
         // Captured JPEG frames are preferred when they still exist, otherwise frames are
         // decoded from the finalized MP4. Either way they are indexed with the RECORDING fps.
         var reader = await VideoFrameReader.OpenFromVideoPathAsync(
-            videoFilePath, recordingFps > 0 ? recordingFps : 30);
+            videoFilePath, recordingFps > 0 ? recordingFps : 30, device, cacheFrames: false);
 
         // Only open the video file when it is actually needed: as the frame source when
         // no captured frames exist, or to recover dimensions the recording metadata does
@@ -965,7 +988,7 @@ public sealed class SegmentFrameComposer : IDisposable
                 context.SourceComposition = composition;
             }
 
-            var compositor = new FrameCompositor(config);
+            var compositor = new FrameCompositor(config, device);
             context.Compositor = compositor;
             await compositor.InitializeAsync(
                 mouseData, sourceWidth, sourceHeight, EnsureRenderableDuration(duration),
@@ -1214,6 +1237,7 @@ public sealed class SegmentFrameComposer : IDisposable
         _textSlideRenderer = null;
         _transitionRenderer?.Dispose();
         _transitionRenderer = null;
+        if (_ownsDevice) _device.Dispose();
 
         GC.SuppressFinalize(this);
     }
@@ -1228,6 +1252,7 @@ public sealed class SegmentFrameComposer : IDisposable
     /// <summary>All render state owned for one (source file, style) combination.</summary>
     private sealed class SourceContext : IDisposable
     {
+        public long LastUsed { get; set; }
         public required string VideoFilePath { get; init; }
         public required int SourceWidth { get; init; }
         public required int SourceHeight { get; init; }

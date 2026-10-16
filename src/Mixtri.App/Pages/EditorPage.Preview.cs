@@ -782,6 +782,8 @@ public sealed partial class EditorPage
                 long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _decodeMissed = false;
                 await RenderFrameAtAsync(currentPos, currentForce);
+                ExportVM.ReportPreviewFrame(
+                    System.Diagnostics.Stopwatch.GetElapsedTime(renderStarted));
 
                 // Recovery waits for this loop to stop before disposing resources. Do not
                 // drain requests parked by a rebuild back into the pipeline being replaced.

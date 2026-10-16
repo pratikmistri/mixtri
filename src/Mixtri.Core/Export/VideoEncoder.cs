@@ -77,7 +77,8 @@ public class VideoEncoder : IDisposable
         TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default,
-        IVideoSuperResolutionProvider? superResolutionProvider = null)
+        IVideoSuperResolutionProvider? superResolutionProvider = null,
+        ExportWorkScheduler? scheduler = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(project.VideoFilePath);
@@ -89,7 +90,7 @@ public class VideoEncoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var stopwatch = Stopwatch.StartNew();
-        var device = GpuContext.GetSharedDevice();
+        using var device = GpuContext.CreateExportDevice();
         _deviceLostGuard = new DeviceLostGuard(
             device,
             "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
@@ -103,7 +104,7 @@ public class VideoEncoder : IDisposable
         // recordings render from their own files, with their own cursor data, zoom
         // keyframes, and per-segment frame/cursor style overrides.
         using var composer = await SegmentFrameComposer.CreateAsync(
-            project, mouseData, compositionConfig, timeline, timelineMapper, _settings.Fps, ct);
+            project, mouseData, compositionConfig, timeline, timelineMapper, _settings.Fps, ct, device);
 
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).
@@ -135,6 +136,10 @@ public class VideoEncoder : IDisposable
         targetHeight = encH;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
         PreflightRenderTargetMemory(targetWidth, targetHeight, needsScaling);
+        using var inFlight = new ExportFrameLimiter(targetWidth, targetHeight);
+        using var frameCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+            $"process {Environment.ProcessId}: {targetWidth}x{targetHeight}, {inFlight.Capacity} encoder surface slots");
 
         // Resolve which audio sources the edited timeline actually needs, and where each
         // belongs on the output. Placements whose media has no audio are dropped here so
@@ -167,6 +172,10 @@ public class VideoEncoder : IDisposable
         // using the composer when it is disposed (including on the failure path).
         var pendingSamples = new List<Task>();
         var pendingSamplesLock = new object();
+        var frameToken = frameCancellation.Token;
+        MediaStreamSource? streamSource = null;
+        Windows.Foundation.TypedEventHandler<MediaStreamSource, MediaStreamSourceSampleRequestedEventArgs>?
+            sampleRequested = null;
 
         try
         {
@@ -191,7 +200,7 @@ public class VideoEncoder : IDisposable
 
             var videoDesc = new VideoStreamDescriptor(videoProps);
 
-            var streamSource = new MediaStreamSource(videoDesc);
+            streamSource = new MediaStreamSource(videoDesc);
             streamSource.Duration = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(totalFrames, _settings.Fps));
             streamSource.BufferTime = TimeSpan.Zero;
 
@@ -200,45 +209,42 @@ public class VideoEncoder : IDisposable
                 args.Request.SetActualStartPosition(TimeSpan.Zero);
             };
 
-            streamSource.SampleRequested += (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
+            sampleRequested = (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
             {
-                // Atomically reserve a frame index to avoid duplicate/skipped frames
-                int frame = Interlocked.Increment(ref currentFrame) - 1;
-                if (frame >= totalFrames)
-                {
-                    args.Request.Sample = null; // end of stream
-                    return;
-                }
-
-                var deferral = args.Request.GetDeferral();
-                var task = ProduceSampleAsync(
-                    args.Request, deferral, frame, totalFrames,
-                    composer, device,
-                    compositorWidth, compositorHeight,
-                    targetWidth, targetHeight,
-                    needsScaling,
-                    superResolution,
-                    progress, stopwatch, ct,
-                    progressFloor: stretchProgressFloor,
-                    onError: (ex, frameIdx) =>
-                    {
-                        lock (frameErrorLock)
-                        {
-                            if (firstFrameError is null)
-                            {
-                                firstFrameError = ex;
-                                firstFrameErrorIndex = frameIdx;
-                            }
-                        }
-                    });
-
+                // Reserve and enqueue in one order, including EOS. Publishing EOS ahead
+                // of deferred frames can strand their encoder-held surface credits.
                 lock (pendingSamplesLock)
                 {
+                    int frame = currentFrame++;
+                    var deferral = args.Request.GetDeferral();
+                    var task = ProduceSampleAsync(
+                        args.Request, deferral, frame, totalFrames,
+                        composer, device,
+                        compositorWidth, compositorHeight,
+                        targetWidth, targetHeight,
+                        needsScaling,
+                        superResolution,
+                        inFlight, scheduler,
+                        progress, stopwatch, frameToken,
+                        progressFloor: stretchProgressFloor,
+                        onError: (ex, frameIdx) =>
+                        {
+                            lock (frameErrorLock)
+                            {
+                                if (firstFrameError is null)
+                                {
+                                    firstFrameError = ex;
+                                    firstFrameErrorIndex = frameIdx;
+                                }
+                            }
+                        });
+
                     // Remove completed tasks to prevent unbounded list growth
                     pendingSamples.RemoveAll(t => t.IsCompleted);
                     pendingSamples.Add(task);
                 }
             };
+            streamSource.SampleRequested += sampleRequested;
 
             // Transcode: composited BGRA8 frames → H.264 MP4
             // Use software encoding to avoid hardware encoder quirks with
@@ -260,6 +266,8 @@ public class VideoEncoder : IDisposable
                 throw new InvalidOperationException(
                     $"Transcoder cannot encode: {prepResult.FailureReason}");
 
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: starting {totalFrames} frames");
             await TranscodeWithTimeoutAsync(prepResult, ct);
 
             // Drain any still-running sample tasks before disposing shared state
@@ -302,6 +310,9 @@ public class VideoEncoder : IDisposable
         }
         finally
         {
+            if (streamSource is not null && sampleRequested is not null)
+                streamSource.SampleRequested -= sampleRequested;
+            frameCancellation.Cancel();
             // Never dispose the composer (owned by the enclosing `using`) while a sample
             // task might still be compositing with it — including on the failure path,
             // where the transcode threw before the drain above.
@@ -353,6 +364,8 @@ public class VideoEncoder : IDisposable
         int targetWidth, int targetHeight,
         bool needsScaling,
         IVideoSuperResolutionSession? superResolution,
+        ExportFrameLimiter inFlight,
+        ExportWorkScheduler? scheduler,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
@@ -361,6 +374,7 @@ public class VideoEncoder : IDisposable
     {
         CanvasRenderTarget? outputSurface = null;
         CanvasRenderTarget? composedFrame = null;
+        ExportFrameLimiter.Slot? slot = null;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -375,6 +389,13 @@ public class VideoEncoder : IDisposable
             {
             await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
             semaphoreAcquired = true;
+            if (frameIndex >= totalFrames)
+            {
+                request.Sample = null;
+                return;
+            }
+            slot = await inFlight.AcquireAsync(ct).ConfigureAwait(false);
+            if (scheduler is not null) await scheduler.WaitForTurnAsync(ct).ConfigureAwait(false);
 
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
@@ -413,11 +434,13 @@ public class VideoEncoder : IDisposable
 
             // Dispose the GPU surface after the encoder has consumed it.
             // Capture in a local to avoid double-dispose if the catch block also disposes.
-            var surfaceToDispose = outputSurface;
-            outputSurface = null; // prevent catch block from disposing
-            sample.Processed += (s, e) => surfaceToDispose.Dispose();
+            slot.Attach(outputSurface);
+            outputSurface = null;
+            var consumedSlot = slot;
+            sample.Processed += (s, e) => consumedSlot.Dispose();
 
             request.Sample = sample;
+            slot = null;
 
             }
             finally
@@ -443,6 +466,8 @@ public class VideoEncoder : IDisposable
         catch (Exception ex)
         {
             Debug.WriteLine($"[VideoEncoder] Frame {frameIndex} error: {ex}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: frame {frameIndex} failed: {ex}");
             // Notify caller so the export can fail loudly rather than truncating.
             onError?.Invoke(ex, frameIndex);
             // Dispose GPU surface if it was created but never handed to the encoder
@@ -450,6 +475,7 @@ public class VideoEncoder : IDisposable
             // Dispose the composed frame too if an exception hit before it was scaled
             // into outputSurface or handed off (it is nulled at those handoff points).
             composedFrame?.Dispose();
+            slot?.Dispose();
             request.Sample = null;
         }
         finally

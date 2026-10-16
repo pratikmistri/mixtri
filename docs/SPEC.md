@@ -142,6 +142,14 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
 - ~~**Hardware acceleration**: Auto-detect GPU encoder (NVENC / QSV / AMF), fallback to CPU~~
 - ~~**Copy to clipboard**: Export result directly to clipboard~~
 - ~~**Export presets**: Save named export configurations~~
+- **Concurrent editing/playback**: Export runs in a headless worker process from a detached
+  project snapshot. It owns a private low-priority graphics device and yields between
+  frames during playback/scrubbing. Source contexts are limited to three, sequential
+  export readers do not retain a decoded-frame cache, and encoder-held surfaces are
+  limited to three / 128 MiB. Cancellation drains the worker or terminates that worker
+  after a bounded wait; no editor graphics resources are shared with it. There is no
+  in-process fallback: separate devices alone do not isolate Win2D's process-wide
+  synchronization and native codec callbacks from interactive rendering.
 
 ### F10: Webcam Overlay
 - ~~Capture webcam via `MediaCapture` API~~
@@ -322,7 +330,7 @@ Mixtri/
 
 3. **Spring physics for smoothing**: Primary smoothing algorithm is a damped spring model (`F = -kx - bv`). Parameters: spring constant `k`, damping `b`, mass `m`. Adjustable via "smoothing strength" slider.
 
-4. **Hardware encoding**: Real-time capture uses HW encoder for temp file. Export also uses HW encoder with higher quality settings. Auto-detect: NVENC (NVIDIA) → QSV (Intel) → AMF (AMD) → CPU fallback.
+4. **Encoding and rendering isolation**: H.264 export uses software encoding for driver compatibility; composition remains GPU-accelerated on a private low-priority device. The interactive editor and export worker do not share mutable models, decoders, render targets, or device recovery. Cross-API MediaPlayer copies into Win2D surfaces acquire the owning device's interop lock. An adapter-wide driver reset can still affect both processes.
 
 5. **Project file format**: A recording session produces a working folder under `%LOCALAPPDATA%\Mixtri\Sessions\session_*` (raw video MP4, cursor/keyboard data, audio tracks). A session is working state, not a deliverable, so the user's Videos folder only ever receives things they asked for: a saved `.mixtri` project or an exported MP4. Saving bundles the session into a single `.mixtri` file — a ZIP with a `manifest.json` plus stored media entries — so a project is one item in Explorer, portable, and re-openable for non-destructive editing. Compression is per entry: already-compressed media is stored verbatim, PCM audio and event logs are deflated.
 

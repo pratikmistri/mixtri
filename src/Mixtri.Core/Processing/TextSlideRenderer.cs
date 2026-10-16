@@ -63,7 +63,7 @@ public class TextSlideRenderer : IDisposable
                 slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
                 ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
 
-            var rect = ComputeTextRect(slide, width, height);
+            var rect = ComputeTextRect(slide, width, height, _device);
 
             _textEngine.DrawAnimatedText(ds, slide.DisplayText, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
                 slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
@@ -84,11 +84,12 @@ public class TextSlideRenderer : IDisposable
     /// of the slide (the wrapping width); the height hugs the actual measured
     /// text so the box doesn't fill the whole slide.
     /// </summary>
-    public static Rect ComputeTextRect(TextSlideSegment slide, int width, int height)
+    public static Rect ComputeTextRect(
+        TextSlideSegment slide, int width, int height, CanvasDevice? device = null)
     {
         double boxW = width * 0.84;
         double maxH = height * 0.8;
-        double boxH = MeasureTextHeight(slide, boxW, maxH);
+        double boxH = MeasureTextHeight(slide, boxW, maxH, device ?? CanvasDevice.GetSharedDevice());
         double left = slide.TextX * width - boxW / 2;
         double top = slide.TextY * height - boxH / 2;
         return new Rect(left, top, boxW, boxH);
@@ -98,7 +99,8 @@ public class TextSlideRenderer : IDisposable
     /// Measures the wrapped text height (in output pixels) for the slide, clamped
     /// between roughly one line and <paramref name="maxHeight"/>.
     /// </summary>
-    private static double MeasureTextHeight(TextSlideSegment slide, double maxWidth, double maxHeight)
+    private static double MeasureTextHeight(
+        TextSlideSegment slide, double maxWidth, double maxHeight, CanvasDevice device)
     {
         double minH = Math.Min(slide.FontSize * 1.3, maxHeight);
         if (string.IsNullOrEmpty(slide.Text) || maxWidth <= 0)
@@ -108,7 +110,7 @@ public class TextSlideRenderer : IDisposable
             slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
             ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Top, wrap: true);
         using var layout = new CanvasTextLayout(
-            CanvasDevice.GetSharedDevice(), slide.DisplayText, format, (float)maxWidth, (float)maxHeight);
+            device, slide.DisplayText, format, (float)maxWidth, (float)maxHeight);
 
         return Math.Clamp(layout.LayoutBounds.Height, minH, maxHeight);
     }

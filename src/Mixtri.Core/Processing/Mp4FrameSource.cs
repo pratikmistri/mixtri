@@ -67,6 +67,7 @@ public sealed class Mp4FrameSource : IFrameSource
     private readonly CanvasDevice _device;
     private readonly CanvasRenderTarget _surface;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _surfaceGate = new();
     private readonly int _fps;
     private readonly bool _flipVertical;
     private readonly int _seekAttempts;
@@ -76,7 +77,7 @@ public sealed class Mp4FrameSource : IFrameSource
     private TaskCompletionSource<bool>? _framePending;
     private int _lastDeliveredIndex = -1;
     private bool _needsDrain;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public int FrameCount { get; }
     public int Width { get; }
@@ -289,27 +290,32 @@ public sealed class Mp4FrameSource : IFrameSource
 
             // _surface is reused across calls, so hand back an independent copy the
             // caller can hold and dispose on its own schedule.
-            var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
-            try
+            lock (_surfaceGate)
             {
-                using (var ds = copy.CreateDrawingSession())
+                if (_disposed) return null;
+                using var deviceLock = _device.Lock();
+                var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
+                try
                 {
-                    // Legacy recordings are stored upside down; correct all reader consumers.
-                    if (_flipVertical)
+                    using (var ds = copy.CreateDrawingSession())
                     {
-                        ds.Transform =
-                            System.Numerics.Matrix3x2.CreateScale(1, -1) *
-                            System.Numerics.Matrix3x2.CreateTranslation(0, Height);
-                    }
+                        // Legacy recordings are stored upside down; correct all reader consumers.
+                        if (_flipVertical)
+                        {
+                            ds.Transform =
+                                System.Numerics.Matrix3x2.CreateScale(1, -1) *
+                                System.Numerics.Matrix3x2.CreateTranslation(0, Height);
+                        }
 
-                    ds.DrawImage(_surface);
+                        ds.DrawImage(_surface);
+                    }
+                    return copy;
                 }
-                return copy;
-            }
-            catch
-            {
-                copy.Dispose();
-                throw;
+                catch
+                {
+                    copy.Dispose();
+                    throw;
+                }
             }
         }
         catch (Exception ex)
@@ -345,6 +351,8 @@ public sealed class Mp4FrameSource : IFrameSource
     private async Task<bool> PositionAtAsync(int frameIndex)
     {
         int gap = frameIndex - _lastDeliveredIndex;
+        if (_lastDeliveredIndex >= 0 && gap == 0)
+            return true;
 
         if (_lastDeliveredIndex >= 0 && gap > 0 && gap <= MaxStepAhead)
         {
@@ -529,25 +537,28 @@ public sealed class Mp4FrameSource : IFrameSource
 
     private void OnVideoFrameAvailable(MediaPlayer sender, object args)
     {
-        // Consume the request atomically. A single seek or step is not guaranteed to raise
-        // this exactly once, and a second raise would overwrite _surface while the waiting
-        // thread is already drawing from it — a silently wrong frame in an export.
-        var pending = Interlocked.Exchange(ref _framePending, null);
-        if (pending is null)
-            return;
+        if (_disposed) return;
+        lock (_surfaceGate)
+        {
+            if (_disposed) return;
+            var pending = Interlocked.Exchange(ref _framePending, null);
+            if (pending is null) return;
 
-        try
-        {
-            sender.CopyFrameToVideoSurface(_surface);
-            pending.TrySetResult(true);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[Mp4FrameSource] CopyFrameToVideoSurface failed: {ex.Message}");
-            if (GpuContext.IsDeviceLoss(ex))
-                pending.TrySetException(ex);
-            else
-                pending.TrySetResult(false);
+            try
+            {
+                // MediaPlayer is outside Win2D's automatic device synchronization.
+                using (_device.Lock())
+                    sender.CopyFrameToVideoSurface(_surface);
+                pending.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"video surface copy failed: {ex}");
+                if (GpuContext.IsDeviceLoss(ex))
+                    pending.TrySetException(ex);
+                else
+                    pending.TrySetResult(false);
+            }
         }
     }
 
@@ -571,13 +582,22 @@ public sealed class Mp4FrameSource : IFrameSource
         try
         {
             _player.VideoFrameAvailable -= OnVideoFrameAvailable;
-            _player.Source = null;
-            _player.Dispose();
-            _surface.Dispose();
+            // A callback may have already claimed its request before cancellation.
+            // Drain it before closing either native object, including after a gate timeout.
+            try
+            {
+                lock (_surfaceGate)
+                    _surface.Dispose();
+            }
+            finally
+            {
+                try { _player.Source = null; }
+                finally { _player.Dispose(); }
+            }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Mp4FrameSource] Dispose failed: {ex.Message}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"decoder disposal failed: {ex}");
         }
         finally
         {

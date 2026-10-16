@@ -12,6 +12,12 @@ public static class GpuContext
 {
     public static CanvasDevice GetSharedDevice() => CanvasDevice.GetSharedDevice();
 
+    public static CanvasDevice CreateExportDevice() => new()
+    {
+        LowPriority = true,
+        MaximumCacheSize = 32 * 1024 * 1024,
+    };
+
     /// <summary>Recognizes device loss even when an allocation helper wrapped the COM error.</summary>
     public static bool IsDeviceLoss(Exception exception) => IsDeviceLoss(exception, 0);
 

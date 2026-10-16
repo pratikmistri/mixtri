@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.Input;
 using Mixtri.Core.Export;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
+using Mixtri.Core.Projects;
 using Mixtri.Core.Services;
 using Mixtri.Core.Settings;
 using Mixtri_App.Services;
@@ -14,13 +15,18 @@ namespace Mixtri_App.ViewModels;
 public partial class ExportViewModel : ObservableObject
 {
     private readonly PresetManager _presetManager;
-    private readonly ExportEngine _exportEngine;
+    private readonly ExportWorkerClient _exportWorker;
     private CancellationTokenSource? _exportCts;
+
+    public void SetPreviewPlayback(bool playing) => _exportWorker.SetPlaybackActive(playing);
+
+    public void ReportPreviewFrame(TimeSpan elapsed) => _exportWorker.ReportPreviewFrame(elapsed);
 
     public ExportViewModel()
     {
         _presetManager = new PresetManager();
-        _exportEngine = new ExportEngine();
+        _exportWorker = new ExportWorkerClient(
+            Environment.ProcessPath ?? throw new InvalidOperationException("The app executable path is unavailable."));
 
         // Seed defaults from AppSettings so the user's preferred export
         // resolution/quality are applied to new export sessions.
@@ -37,7 +43,7 @@ public partial class ExportViewModel : ObservableObject
 
     private void OnProjectChanged(object? sender, EventArgs e)
     {
-        PrepareForExport();
+        if (!IsExporting) PrepareForExport();
     }
 
     /// <summary>
@@ -47,6 +53,7 @@ public partial class ExportViewModel : ObservableObject
     public void Cleanup()
     {
         ProjectService.Instance.ProjectChanged -= OnProjectChanged;
+        _exportCts?.Cancel();
     }
 
     /// <summary>
@@ -457,7 +464,8 @@ public partial class ExportViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanExport))]
     private async Task ExportAsync()
     {
-        if (string.IsNullOrWhiteSpace(OutputPath) || CurrentProject is null) return;
+        var project = CurrentProject;
+        if (string.IsNullOrWhiteSpace(OutputPath) || project is null) return;
 
         IsExporting = true;
         ExportSucceeded = false;
@@ -496,32 +504,25 @@ public partial class ExportViewModel : ObservableObject
 
             string outputFolder = Path.GetDirectoryName(OutputPath) ?? OutputPath;
 
-            string exportedPath = await _exportEngine.ExportProjectAsync(
-                CurrentProject,
+            var snapshot = ProjectStateSnapshot.Capture(
+                project, ProjectService.Instance.CurrentComposition, timeline);
+            string exportedPath = await _exportWorker.ExportAsync(
+                snapshot,
                 settings,
-                CompositionConfig,
                 outputFolder,
-                timeline: timeline,
-                progress: exportProgress,
-                ct: _exportCts.Token,
-                superResolutionProvider: new WindowsVideoSuperResolutionProvider());
+                exportProgress,
+                _exportCts.Token);
 
             ExportedFilePath = exportedPath;
             ExportSucceeded = true;
             ProgressStatus = "Export complete!";
             ProgressPercent = 100;
 
-            // Clean up raw frames to reclaim disk space.
-            // The exported file is self-contained; .frames/ is no longer needed.
-            if (CurrentProject is not null)
-            {
-                var sessionDir = Path.GetDirectoryName(CurrentProject.VideoFilePath);
-                if (sessionDir is not null)
-                {
-                    SessionCleanupService.MarkSessionExported(sessionDir);
-                    _ = Task.Run(() => SessionCleanupService.CleanupSession(sessionDir));
-                }
-            }
+            // Readers in the editor may still own these files. Mark for the next
+            // startup cleanup, never delete active preview media when export completes.
+            var sessionDir = Path.GetDirectoryName(snapshot.Project.VideoFilePath);
+            if (sessionDir is not null)
+                SessionCleanupService.MarkSessionExported(sessionDir);
         }
         catch (OperationCanceledException)
         {

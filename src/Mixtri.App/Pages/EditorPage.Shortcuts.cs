@@ -422,6 +422,13 @@ public sealed partial class EditorPage
 
     private void ExportVM_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(ExportViewModel.IsExporting) && ExportVM.IsExporting)
+        {
+            _styleDebouncer?.Flush();
+            _cursorDebouncer?.Flush();
+            _slideTextWindowDebouncer?.Flush();
+        }
+
         if (e.PropertyName == nameof(ExportViewModel.IsExporting) && !ExportVM.IsExporting)
         {
             DispatcherQueue.TryEnqueue(() =>

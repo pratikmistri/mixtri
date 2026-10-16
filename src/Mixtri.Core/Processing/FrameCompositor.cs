@@ -327,10 +327,10 @@ public class FrameCompositor : IDisposable
     private ZoomState RestZoomState() =>
         _zoomEngine.ComputeViewportForCenter(1f, _sourceWidth / 2f, _sourceHeight / 2f);
 
-    public FrameCompositor(CompositionConfig config)
+    public FrameCompositor(CompositionConfig config, CanvasDevice? device = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        _device = GpuContext.GetSharedDevice();
+        _device = device ?? GpuContext.GetSharedDevice();
         _bgCompositor = new BackgroundCompositor();
         _deviceLostGuard = new DeviceLostGuard(
             _device,

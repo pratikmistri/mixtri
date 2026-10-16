@@ -24,7 +24,7 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
         {
             cancellationToken.ThrowIfCancellationRequested();
             var catalog = ExecutionProviderCatalog.GetDefault();
-            await catalog.EnsureAndRegisterCertifiedAsync();
+            await catalog.EnsureAndRegisterCertifiedAsync().AsTask(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
             var readyState = VideoScaler.GetReadyState();
@@ -36,7 +36,7 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
 
             if (readyState == AIFeatureReadyState.NotReady)
             {
-                var readyOperation = await VideoScaler.EnsureReadyAsync();
+                var readyOperation = await VideoScaler.EnsureReadyAsync().AsTask(cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (readyOperation.Status != AIFeatureReadyResultState.Success)
                 {
@@ -47,7 +47,7 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
                 }
             }
 
-            scaler = await VideoScaler.CreateAsync();
+            scaler = await VideoScaler.CreateAsync().AsTask(cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             var session = new WindowsVideoSuperResolutionSession(
                 scaler, inputWidth, inputHeight, outputWidth, outputHeight);

@@ -32,6 +32,7 @@ public sealed class VideoFrameReader : IDisposable
     private readonly IFrameSource _source;
     private readonly int _fps;
     private readonly long _cacheBudgetBytes;
+    private readonly bool _cacheFrames;
 
     private readonly Dictionary<int, CanvasBitmap> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
@@ -50,11 +51,13 @@ public sealed class VideoFrameReader : IDisposable
         ? TimeSpan.FromSeconds((double)_source.FrameCount / _fps)
         : TimeSpan.Zero;
 
-    private VideoFrameReader(IFrameSource source, int fps, long cacheBudgetBytes = 0)
+    internal VideoFrameReader(
+        IFrameSource source, int fps, long cacheBudgetBytes = 0, bool cacheFrames = true)
     {
         _source = source;
         _fps = fps;
         _cacheBudgetBytes = cacheBudgetBytes;
+        _cacheFrames = cacheFrames;
     }
 
     /// <summary>
@@ -83,25 +86,26 @@ public sealed class VideoFrameReader : IDisposable
     /// Opens the recording that <paramref name="videoFilePath"/> belongs to, preferring the
     /// captured JPEGs alongside it and falling back to decoding the file itself.
     /// </summary>
-    public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(string videoFilePath, int fps)
+    public static async Task<VideoFrameReader?> OpenFromVideoPathAsync(
+        string videoFilePath, int fps, CanvasDevice? device = null, bool cacheFrames = true)
     {
         if (string.IsNullOrEmpty(videoFilePath) || fps <= 0)
             return null;
 
-        var device = CanvasDevice.GetSharedDevice();
+        device ??= CanvasDevice.GetSharedDevice();
 
         var dir = Path.GetDirectoryName(videoFilePath);
         if (dir is not null)
         {
             var jpeg = JpegFrameSource.Open(dir, device);
             if (jpeg is not null)
-                return new VideoFrameReader(jpeg, fps);
+                return new VideoFrameReader(jpeg, fps, cacheFrames: cacheFrames);
         }
 
         var mp4 = await Mp4FrameSource.OpenAsync(
             videoFilePath, fps, device, RecordingMarker.NeedsVerticalFlip(videoFilePath))
             .ConfigureAwait(false);
-        return mp4 is not null ? new VideoFrameReader(mp4, fps) : null;
+        return mp4 is not null ? new VideoFrameReader(mp4, fps, cacheFrames: cacheFrames) : null;
     }
 
     /// <summary>
@@ -157,7 +161,7 @@ public sealed class VideoFrameReader : IDisposable
 
         // JPEG loads are cheap and already backed by the OS file cache; adding a GPU-side
         // cache on top would cost memory for no gain.
-        if (_source.Kind == FrameSourceKind.CapturedJpeg)
+        if (!_cacheFrames || _source.Kind == FrameSourceKind.CapturedJpeg)
             return await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
 
         if (!await TryEnterCacheAsync().ConfigureAwait(false))
@@ -178,6 +182,10 @@ public sealed class VideoFrameReader : IDisposable
         var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
         if (decoded is null)
             return null;
+
+        // A single oversized frame must not be evicted and disposed before it is returned.
+        if (_cacheBudgetBytes > 0 && EstimateBytes(decoded) > _cacheBudgetBytes)
+            return decoded;
 
         if (!await TryEnterCacheAsync().ConfigureAwait(false))
         {
@@ -283,17 +291,25 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     private static CanvasBitmap Clone(CanvasBitmap source)
     {
+        using var deviceLock = source.Device.Lock();
         var copy = Win2DUtils.CreateRenderTarget(
-            GpuContext.GetSharedDevice(),
+            source.Device,
             source.SizeInPixels.Width,
             source.SizeInPixels.Height,
             96,
             "video frame cache clone");
 
-        using (var ds = copy.CreateDrawingSession())
-            ds.DrawImage(source);
-
-        return copy;
+        try
+        {
+            using (var ds = copy.CreateDrawingSession())
+                ds.DrawImage(source);
+            return copy;
+        }
+        catch
+        {
+            copy.Dispose();
+            throw;
+        }
     }
 
     public void Dispose()

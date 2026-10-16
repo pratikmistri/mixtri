@@ -255,6 +255,7 @@ public sealed partial class EditorPage : Page
         // Hide the in-place text editor while playing
         Preview.IsPlayingChanged += (_, playing) =>
         {
+            ExportVM.SetPreviewPlayback(playing);
             if (!playing) return;
             HideTextEditOverlay();
 
