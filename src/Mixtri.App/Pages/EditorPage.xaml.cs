@@ -274,6 +274,7 @@ public sealed partial class EditorPage : Page
             {
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
+                SyncSceneStyleControls();
                 if (_syncingTimelineFromPlayback)
                     return;
 

@@ -3186,3 +3186,16 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Approaches tried**: Normal upstream push, then restored official checksum-verified portable ARM64 GitHub CLI to replace the missing configured credential helper.
 - **What worked**: Created commit `38b3290` with the stability source changes, tests, and investigation notes. The portable CLI was verified and extracted successfully.
 - **What didn't work**: Push failed because the configured GitHub CLI executable was absent. The restored CLI also had no usable authentication, so pushing still requires user sign-in. The initial checksum lookup needed byte-content decoding and line-ending normalization. No credentials were extracted, no force push was attempted, and generated output remains excluded.
+
+### 2026-10-16: Branch review and Scene control target synchronization
+- **Feature/area**: Reviewed `fix/app-instabilities` against `origin/master`; fixed stale Scene controls overwriting another clip's background and padding after unselected playhead movement.
+- **Approaches tried**: Full branch review, caller/lifetime tracing, and a session-only probe exercising the actual WinUI editor before and after the fix.
+- **What worked**: Track the clip represented by the controls, flush pending edits before changing that target, and synchronize on initialization, selection, playback/scrubbing, model edits, and reset. Suppress wallpaper-list population events and restore the active clip's image after committing pending input. The follow-up review found no remaining actionable findings.
+- **Validation**: Production ARM64 app build and responsive normal startup passed; 14 live Scene assertions and 118 targeted tests passed, with 2 opt-in decoder tests skipped. Removed temporary app hooks and verified the production assembly contains no probe.
+- **What didn't work**: Target capture alone did not synchronize the control values being captured. The first probe fixture omitted segment position recalculation; corrected it before establishing the baseline. Normal NuGet restore stalled on feed metadata; cached packages plus a session-local index routing missing package downloads through the configured proxy enabled validation without repository configuration changes.
+
+### 2026-10-16: Publishing Scene review fixes
+- **Feature/area**: Committing and publishing the reviewed Scene control synchronization changes.
+- **Approaches tried**: Explicit staging of the three editor source files and current archive, followed by a normal commit and upstream push.
+- **What worked**: The source changes match the already-validated review fix; path-scoped staging excludes the existing generated `output` files.
+- **What didn't work**: Not applicable; no new implementation approach was needed.

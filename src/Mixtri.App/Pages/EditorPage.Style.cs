@@ -224,10 +224,10 @@ public sealed partial class EditorPage
         // Load system wallpapers (async). Pass the project's currently-selected
         // background image so a custom path from a reopened project is merged
         // into the grid and selection survives the async load.
-        _ = LoadSystemWallpapersAsync(config.Background.BackgroundImagePath);
+        var background = SceneVideoSegment?.FrameStyleOverride ?? config.Background;
+        _ = LoadSystemWallpapersAsync(background.BackgroundImagePath);
 
-        // Sync controls to current config, suppressing change events
-        SyncStyleControlsToConfig(config.Background);
+        SyncSceneStyleControls(force: true);
     }
 
     private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
@@ -249,6 +249,8 @@ public sealed partial class EditorPage
                 .ToList();
         });
 
+        _styleDebouncer?.Flush();
+
         // Preserve any custom (non-system) paths the user already picked while
         // the system load was in flight — otherwise we'd silently drop them.
         var existingCustom = (_wallpaperPaths ?? new List<string>())
@@ -264,6 +266,7 @@ public sealed partial class EditorPage
 
         _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
 
+        using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
         WallpaperGrid.Items.Clear();
         WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
@@ -274,19 +277,14 @@ public sealed partial class EditorPage
         // After the async load completes the synchronous SyncStyleControlsToConfig
         // call ran before the grid was populated; re-apply selection now that
         // the items exist so the user sees the active wallpaper highlighted.
-        // Prefer the project's current background image (it may have changed
-        // since the load started — e.g. the user picked a wallpaper while the
-        // system enumeration was still running) and fall back to the initial
-        // path passed in.
-        var currentImagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
-        var targetPath = !string.IsNullOrEmpty(currentImagePath) ? currentImagePath : initialCustomPath;
+        var targetPath = _sceneStyleControlsTarget?.FrameStyleOverride?.BackgroundImagePath
+            ?? ProjectService.Instance.CurrentComposition.Background.BackgroundImagePath;
         if (!string.IsNullOrEmpty(targetPath))
         {
             int idx = _wallpaperPaths.FindIndex(p =>
                 string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
-                using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
                 WallpaperGrid.SelectedIndex = idx + 1;
             }
         }
@@ -355,6 +353,23 @@ public sealed partial class EditorPage
         };
     }
 
+    private VideoSegment? _sceneStyleControlsTarget;
+    private bool _sceneStyleControlsInitialized;
+
+    private void SyncSceneStyleControls(bool force = false)
+    {
+        if (!_sceneStyleControlsInitialized && !force) return;
+        var target = SceneVideoSegment;
+        if (!force && ReferenceEquals(target, _sceneStyleControlsTarget)) return;
+
+        // Commit controls to their old target before replacing them with the new clip's values.
+        _styleDebouncer?.Flush();
+        _sceneStyleControlsTarget = target;
+        _sceneStyleControlsInitialized = true;
+        SyncStyleControlsToConfig(
+            target?.FrameStyleOverride ?? ProjectService.Instance.CurrentComposition.Background);
+    }
+
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
     {
         using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
@@ -383,16 +398,13 @@ public sealed partial class EditorPage
             ColorPanel.Visibility = bg.Type is not BackgroundType.Blur and not BackgroundType.Image
                 ? Visibility.Visible : Visibility.Collapsed;
 
-            if (isGradient)
-            {
-                var endColor = ParseHexColor(bg.GradientEndColor);
-                GradEndColorPicker.Color = endColor;
-                GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
-                GradEndColorText.Text = bg.GradientEndColor;
-                GradAngleSlider.Value = bg.GradientAngle;
-            }
+            var endColor = ParseHexColor(bg.GradientEndColor);
+            GradEndColorPicker.Color = endColor;
+            GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
+            GradEndColorText.Text = bg.GradientEndColor;
+            GradAngleSlider.Value = bg.GradientAngle;
 
-            if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
+            if (_wallpaperPaths is not null)
             {
                 int wpIdx = _wallpaperPaths.FindIndex(p =>
                     string.Equals(p, bg.BackgroundImagePath, StringComparison.OrdinalIgnoreCase));
@@ -746,7 +758,7 @@ public sealed partial class EditorPage
     private void ScheduleStyleUpdate()
     {
         // Capture both the values and the target before selection/playback can change.
-        _pendingSceneStyle = (BuildBackgroundStyleFromControls(), SceneVideoSegment);
+        _pendingSceneStyle = (BuildBackgroundStyleFromControls(), _sceneStyleControlsTarget);
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
         _styleDebouncer ??= new Debouncer(() =>
         {
@@ -787,7 +799,7 @@ public sealed partial class EditorPage
                 // Wallpaper list hasn't finished loading yet (or selection was
                 // cleared) — preserve the project's currently-applied image so a
                 // background sync from another control doesn't blank it out.
-                imagePath = SceneVideoSegment?.FrameStyleOverride?.BackgroundImagePath
+                imagePath = _sceneStyleControlsTarget?.FrameStyleOverride?.BackgroundImagePath
                     ?? ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
             }
         }

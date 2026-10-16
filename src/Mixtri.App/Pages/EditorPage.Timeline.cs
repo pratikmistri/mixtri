@@ -585,6 +585,7 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
+            SyncSceneStyleControls(force: true);
 
             if (SelectedSlide() is { } selectedSlide)
                 ShowTextSlidePanel(selectedSlide);
@@ -650,14 +651,14 @@ public sealed partial class EditorPage
         else
             HideTextSlidePanel();
 
-        // Reflect the selected video segment's effective frame style + cursor in the
-        // flyout controls, so editing per-segment style starts from its current state.
+        SyncSceneStyleControls(force: true);
+
+        // Cursor controls retain their existing selection-based behavior.
         if (SceneVideoSegment is { } vseg)
         {
             var global = ProjectService.Instance.CurrentComposition;
             if (global is not null)
             {
-                SyncStyleControlsToConfig(vseg.FrameStyleOverride ?? global.Background);
                 SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
             }
         }
@@ -924,7 +925,7 @@ public sealed partial class EditorPage
         // InitializeStyleControls only runs when there is a project to initialise from, so
         // without this the Scene pane would keep displaying the discarded take's numbers while
         // the composition behind them has already gone back to defaults.
-        SyncStyleControlsToConfig(ProjectService.Instance.CurrentComposition.Background);
+        SyncSceneStyleControls(force: true);
 
         UpdateEmptyStateVisibility();
     }
