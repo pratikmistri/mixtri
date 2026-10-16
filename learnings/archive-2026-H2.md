@@ -3199,3 +3199,15 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Approaches tried**: Explicit staging of the three editor source files and current archive, followed by a normal commit and upstream push.
 - **What worked**: The source changes match the already-validated review fix; path-scoped staging excludes the existing generated `output` files.
 - **What didn't work**: Not applicable; no new implementation approach was needed.
+
+### 2026-10-16: Summarizing branch stability changes
+- **Feature/area**: User-facing summary of the branch's UI disappearance, preview lifecycle, filmstrip, Scene editing, and other bug fixes; no application code changes.
+- **Approaches tried**: Compared the branch with `origin/master` and reconciled source behavior with the recorded investigations.
+- **What worked**: Separated implemented fixes from title/export enhancements and the investigation-only audio-mux timeout findings.
+- **What didn't work**: The original hardware-triggered blanking incident was not reproduced, so the summary does not claim every GPU-related disappearance is resolved.
+
+### 2026-10-16: Publishing the branch summary record
+- **Feature/area**: Publishing the documentation-only stability summary entry.
+- **Approaches tried**: Stage only the current archive, then use a normal commit and upstream push.
+- **What worked**: No application source changes were pending; explicit staging excludes generated `output` files.
+- **What didn't work**: Not applicable; no implementation changes were needed.
