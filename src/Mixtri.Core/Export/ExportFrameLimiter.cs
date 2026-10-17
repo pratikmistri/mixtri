@@ -1,15 +1,17 @@
+using Windows.Media.Core;
+
 namespace Mixtri.Core.Export;
 
-/// <summary>Bounds encoder-held surfaces; a slot is returned only after sample consumption.</summary>
+/// <summary>Tracks encoder surface memory without blocking the native pipeline's input requests.</summary>
 internal sealed class ExportFrameLimiter : IDisposable
 {
-    private readonly SemaphoreSlim _gate;
     private readonly object _sync = new();
     private readonly HashSet<Slot> _active = [];
     private bool _disposed;
 
     internal int Capacity { get; }
     internal int ActiveCount { get { lock (_sync) return _active.Count; } }
+    internal int PeakCount { get; private set; }
 
     public ExportFrameLimiter(int width, int height)
     {
@@ -18,22 +20,24 @@ internal sealed class ExportFrameLimiter : IDisposable
         long frameBytes = checked((long)width * height * 4);
         if (frameBytes > 128L * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(width), "An encoder surface exceeds the export memory budget.");
-        Capacity = (int)Math.Clamp(128L * 1024 * 1024 / frameBytes, 1, 3);
-        _gate = new SemaphoreSlim(Capacity, Capacity);
+        Capacity = (int)(128L * 1024 * 1024 / frameBytes);
     }
 
-    public async Task<Slot> AcquireAsync(CancellationToken ct)
+    public Slot Reserve(CancellationToken ct)
     {
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
         lock (_sync)
         {
-            if (_disposed)
-            {
-                _gate.Release();
-                throw new ObjectDisposedException(nameof(ExportFrameLimiter));
-            }
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            // A codec may retain old samples until it receives additional input.
+            // Waiting here for Processed would deadlock that request/consume cycle.
+            if (_active.Count >= Capacity)
+                throw new InvalidOperationException(
+                    "The video encoder exceeded the 128 MiB buffered-frame budget. " +
+                    "Reduce the export resolution and retry.");
             var slot = new Slot(this);
             _active.Add(slot);
+            PeakCount = Math.Max(PeakCount, _active.Count);
             return slot;
         }
     }
@@ -41,7 +45,6 @@ internal sealed class ExportFrameLimiter : IDisposable
     private void Release(Slot slot)
     {
         lock (_sync) _active.Remove(slot);
-        _gate.Release();
     }
 
     public void Dispose()
@@ -61,22 +64,26 @@ internal sealed class ExportFrameLimiter : IDisposable
                 Mixtri.Core.Diagnostics.DiagLog.Write("Export", $"encoder surface release failed: {ex}");
             }
         }
-        // Queued producers are cancelled and drained by the encoder; never dispose their gate.
     }
 
     internal sealed class Slot(ExportFrameLimiter owner) : IDisposable
     {
         private readonly object _sync = new();
         private IDisposable? _resource;
+        private MediaStreamSample? _sample;
         private bool _disposed;
 
-        public void Attach(IDisposable resource)
+        public void Attach(IDisposable resource, MediaStreamSample? sample = null)
         {
             lock (_sync)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_resource is not null)
                     throw new InvalidOperationException("An export slot already owns a surface.");
+                // CsWinRT event state is tied to the managed sample wrapper. Retain it
+                // with the surface so GC cannot revoke Processed before consumption.
+                _sample = sample;
+                if (sample is not null) sample.Processed += OnProcessed;
                 _resource = resource;
             }
         }
@@ -84,15 +91,27 @@ internal sealed class ExportFrameLimiter : IDisposable
         public void Dispose()
         {
             IDisposable? resource;
+            MediaStreamSample? sample;
             lock (_sync)
             {
                 if (_disposed) return;
                 _disposed = true;
                 resource = _resource;
                 _resource = null;
+                sample = _sample;
+                _sample = null;
             }
-            try { resource?.Dispose(); }
-            finally { owner.Release(this); }
+            try
+            {
+                if (sample is not null) sample.Processed -= OnProcessed;
+            }
+            finally
+            {
+                try { resource?.Dispose(); }
+                finally { owner.Release(this); }
+            }
         }
+
+        private void OnProcessed(MediaStreamSample sender, object args) => Dispose();
     }
 }

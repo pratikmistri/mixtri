@@ -3237,3 +3237,23 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Approaches tried**: Explicitly stage the implementation, tests, workflow, specification, and current archive, then create a normal commit and upstream push.
 - **What worked**: The pending source matches the validated implementation; explicit file staging excludes generated `output` files and all local deployment artifacts.
 - **What didn't work**: Not applicable; no history rewriting or additional implementation changes were needed.
+
+### 2026-10-16: Full-solution ARM64 Release build and deployment
+- **Feature/area**: Built and deployed revision `6b9a70b` for local use; no application source changes.
+- **Approaches tried**: Built `Mixtri.sln` with VS MSBuild using Release/ARM64 and the native runtime identifier, then deployed the complete app layout into a new versioned per-user directory.
+- **What worked**: App, Core, and Tests compiled successfully. Verified deployed binary hashes, ARM64 executable architecture, all seven title backgrounds, and both Release worker integration tests. Updated `Mixtri (dev)` to `%LOCALAPPDATA%\Programs\Mixtri.Dev\builds\6b9a70b-arm64-release\Mixtri.App.exe`; launched it and verified a responsive `Mixtri Mini` window.
+- **What didn't work**: No new failures. Reused the supported self-contained deployment route instead of retrying the previously policy-blocked unsigned MSIX registration; no Store package or system policy was changed.
+
+### 2026-10-16: Live export stall at frame 288 - managed sample ownership
+- **Feature/area**: Native sample lifetime, export admission/backpressure, progress watchdog, and realistic export regressions.
+- **Approaches tried**: Inspected the running worker without cancelling it; captured a private heap, async waits and object counts. Replaced the fixed three-credit wait with nonblocking byte reservations, then tested an isolated copy of the actual saved project. Investigated the remaining reservation leak and retained the managed sample/event owner with its GPU surface.
+- **What worked**: The heap showed frame 288/1474 waiting for a zero-count semaphore with three retained surfaces but only one managed `MediaStreamSample` wrapper. CsWinRT event state follows that wrapper; native ownership alone did not preserve `Processed`. Each lease now roots the sample, unsubscribes its callback, and releases both together. Native input never waits on `Processed` credits; the 128 MiB byte budget fails explicitly instead of deadlocking. Added a two-minute no-progress watchdog and retained-surface peak diagnostics.
+- **Validation**: Forced-GC ownership/release tests and a 450-frame 2304x1456 regression passed. The actual saved-project copy completed all 1,474 frames including audio with peak retained surfaces of three; original file size/write time were unchanged. Full suite: 1,451 passed, 3 existing skips. Debug/Release builds passed; the deployed Release repeated the saved-project export successfully and passed worker cancellation/failure tests.
+- **What didn't work**: Removing the wait alone only moved the failure to frame 797 when leaked reservations filled the byte budget. Raising a frame limit cannot repair a lost release callback. The earlier 20-frame tests did not exercise GC and sustained native ownership. Do not substitute short/synthetic-only exports for a reported longer export.
+- **Deployment/privacy**: Updated `Mixtri (dev)` to the verified `%LOCALAPPDATA%\Programs\Mixtri.Dev\builds\export-stall-fix-20261016` layout without closing the user's editor. The obsolete instance must exit before relaunch. Deleted the private heap capture after extracting technical evidence; no recording/package content was added to the repository.
+
+### 2026-10-16: Publishing the verified export-stall correction
+- **Feature/area**: Publishing managed sample ownership, nonblocking frame reservations, watchdog, regression coverage, and related documentation.
+- **Approaches tried**: Explicit staging of the seven verified source/test/documentation files, followed by a normal commit and upstream push.
+- **What worked**: The pending implementation matches the validated correction; generated `output` files, local deployment layouts, and private diagnostics are excluded from the commit.
+- **What didn't work**: Not applicable; no history rewriting or additional source changes were needed.

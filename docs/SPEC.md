@@ -146,7 +146,12 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
   project snapshot. It owns a private low-priority graphics device and yields between
   frames during playback/scrubbing. Source contexts are limited to three, sequential
   export readers do not retain a decoded-frame cache, and encoder-held surfaces are
-  limited to three / 128 MiB. Cancellation drains the worker or terminates that worker
+  limited by a 128 MiB byte budget, not a fixed frame count. Native input requests
+  never wait for old samples' `Processed` callbacks; budget exhaustion fails explicitly
+  instead of creating an encoder deadlock. Each lease retains both the managed sample
+  and its surface so garbage collection cannot revoke the consumption callback.
+  Two minutes without submitted-frame or native-encoding progress fails explicitly.
+  Cancellation drains or terminates that worker
   after a bounded wait; no editor graphics resources are shared with it. There is no
   in-process fallback: separate devices alone do not isolate Win2D's process-wide
   synchronization and native codec callbacks from interactive rendering.

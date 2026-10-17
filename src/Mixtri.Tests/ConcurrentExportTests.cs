@@ -251,6 +251,116 @@ public class ConcurrentExportTests
     }
 
     [TestMethod]
+    [Timeout(240000)]
+    public async Task LongWorkerExport_AdvancesPast288FramesAtReportedNativeResolution()
+    {
+        var workerPath = Environment.GetEnvironmentVariable("MIXTRI_TEST_WORKER_PATH");
+        if (string.IsNullOrEmpty(workerPath))
+            Assert.Inconclusive("Set MIXTRI_TEST_WORKER_PATH to exercise sustained native export.");
+        using var temp = new TempDirectoryFixture("mixtri_long_native_export_");
+        const int width = 2304, height = 1456, fps = 30, totalFrames = 450;
+        var sourceRoot = Path.Combine(temp.Path, "source");
+        var framesRoot = Path.Combine(sourceRoot, VideoFrameReader.FramesDirectoryName);
+        Directory.CreateDirectory(framesRoot);
+        using (var device = new CanvasDevice(forceSoftwareRenderer: true))
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                using var frame = new CanvasRenderTarget(device, width, height, 96);
+                using (var ds = frame.CreateDrawingSession())
+                {
+                    ds.Clear(Color.FromArgb(255, (byte)(20 + 50 * i), 80, 200));
+                    ds.FillRectangle(0, 0, width / 2, height / 2, Color.FromArgb(255, 220, 30, 20));
+                    ds.FillRectangle(width / 2, height / 2, width / 2, height / 2, Color.FromArgb(255, 20, 210, 30));
+                }
+                await frame.SaveAsync(Path.Combine(framesRoot, $"frame_{i:D8}.jpg"),
+                    CanvasBitmapFileFormat.Jpeg, 1);
+            }
+        }
+        for (int i = 4; i < fps; i++)
+            File.Copy(Path.Combine(framesRoot, $"frame_{i % 4:D8}.jpg"),
+                Path.Combine(framesRoot, $"frame_{i:D8}.jpg"));
+        var project = new Project
+        {
+            Name = "Sustained", VideoFilePath = Path.Combine(sourceRoot, "video.mp4"),
+            Width = width, Height = height, Fps = fps, Duration = TimeSpan.FromSeconds(1),
+        };
+        var segments = Enumerable.Range(0, totalFrames / fps).Select(_ => (TimelineSegment)new VideoSegment
+        {
+            VideoFilePath = project.VideoFilePath, Fps = fps,
+            Duration = TimeSpan.FromSeconds(1), SourceDuration = TimeSpan.FromSeconds(1),
+        }).ToArray();
+        var timeline = TestTimelineBuilder.ModelWithPrimaryPath(project.VideoFilePath, segments);
+        timeline.Fps = fps;
+        timeline.Duration = timeline.TotalSegmentsDuration;
+        timeline.TrimEnd = timeline.Duration;
+        var snapshot = ProjectStateSnapshot.Capture(
+            project, Config() with { OutputFps = fps }, timeline);
+        var client = new ExportWorkerClient(workerPath);
+        int lastFrame = 0;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(180));
+        var path = await client.ExportAsync(snapshot, new ExportSettings
+        {
+            Fps = fps, Resolution = Mixtri.Core.Settings.VideoResolution.UHD4K,
+        }, Path.Combine(temp.Path, "output"),
+            new FrameProgress(progress => Volatile.Write(ref lastFrame, progress.CurrentFrame)), cancellation.Token);
+        Assert.AreEqual(totalFrames, Volatile.Read(ref lastFrame));
+        Assert.IsNull(client.ActiveProcessId);
+        var clip = await MediaClip.CreateFromFileAsync(await StorageFile.GetFileFromPathAsync(path));
+        Assert.AreEqual(TimeSpan.FromSeconds(totalFrames / (double)fps), clip.OriginalDuration);
+        var encoding = clip.GetVideoEncodingProperties();
+        Assert.AreEqual((uint)width, encoding.Width);
+        Assert.AreEqual((uint)height, encoding.Height);
+        var composition = new MediaComposition();
+        try
+        {
+            composition.Clips.Add(clip);
+            using var stream = await composition.GetThumbnailAsync(
+                TimeSpan.FromSeconds(12), Width, Height, VideoFramePrecision.NearestFrame);
+            using var decoded = await CanvasBitmap.LoadAsync(GpuContext.GetSharedDevice(), stream);
+            AssertVideoPixels(decoded, "Native-resolution export beyond the stalled frame");
+        }
+        finally { composition.Clips.Clear(); }
+    }
+
+    [TestMethod]
+    [Timeout(600000)]
+    public async Task SavedProjectExport_CompletesFromAnIsolatedCopy()
+    {
+        var workerPath = Environment.GetEnvironmentVariable("MIXTRI_TEST_WORKER_PATH");
+        var projectPath = Environment.GetEnvironmentVariable("MIXTRI_TEST_PROJECT_PATH");
+        if (string.IsNullOrEmpty(workerPath) || string.IsNullOrEmpty(projectPath))
+            Assert.Inconclusive("Set worker and project paths for an opt-in saved-project regression.");
+        using var temp = new TempDirectoryFixture("mixtri_saved_export_");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        var original = new FileInfo(projectPath);
+        long originalLength = original.Length;
+        var originalWritten = original.LastWriteTimeUtc;
+        var opened = await MixtriPackageService.OpenAsync(
+            projectPath, Path.Combine(temp.Path, "working"), ct: cancellation.Token);
+        var snapshot = ProjectStateSnapshot.Capture(opened.Project, opened.Composition, opened.Timeline);
+        const int fps = 30;
+        int expectedFrames = new TimelineMapper(opened.Timeline, fps).TotalOutputFrames;
+        int completed = 0;
+        var client = new ExportWorkerClient(workerPath);
+        var output = await client.ExportAsync(snapshot, new ExportSettings
+        {
+            Fps = fps, Resolution = Mixtri.Core.Settings.VideoResolution.UHD4K,
+        }, Path.Combine(temp.Path, "output"),
+            new FrameProgress(value => Volatile.Write(ref completed, value.CurrentFrame)),
+            cancellation.Token);
+        Assert.IsTrue(expectedFrames > 288, "The regression project must extend beyond the stalled frame.");
+        Assert.AreEqual(expectedFrames, Volatile.Read(ref completed));
+        Assert.IsNull(client.ActiveProcessId);
+        var clip = await MediaClip.CreateFromFileAsync(await StorageFile.GetFileFromPathAsync(output));
+        Assert.IsTrue(Math.Abs(clip.OriginalDuration.TotalSeconds - expectedFrames / (double)fps) < .2);
+        original.Refresh();
+        Assert.AreEqual(originalLength, original.Length);
+        Assert.AreEqual(originalWritten, original.LastWriteTimeUtc);
+        Console.WriteLine($"Saved-project export completed all {expectedFrames} frames.");
+    }
+
+    [TestMethod]
     [Timeout(90000)]
     public async Task MediaPlayerInterop_ConcurrentCopiesAndTeardownRemainSafe()
     {

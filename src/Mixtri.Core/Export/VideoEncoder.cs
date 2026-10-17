@@ -49,6 +49,8 @@ public class VideoEncoder : IDisposable
 
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
     private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
+    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromMinutes(2);
+    private long _lastProgressTimestamp;
 
     // Serializes frame compositing so the shared SegmentFrameComposer (and the
     // per-source compositors it owns) is never accessed concurrently by overlapping
@@ -277,6 +279,8 @@ public class VideoEncoder : IDisposable
                 snapshot = pendingSamples.ToArray();
             }
             await Task.WhenAll(snapshot).ConfigureAwait(false);
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: native encoding drained; peak retained surfaces {inFlight.PeakCount}");
 
             // If any frame failed during compositing, fail the export loudly.
             // Without this, MediaStreamSource silently treats Sample=null as EOS,
@@ -394,7 +398,7 @@ public class VideoEncoder : IDisposable
                 request.Sample = null;
                 return;
             }
-            slot = await inFlight.AcquireAsync(ct).ConfigureAwait(false);
+            slot = inFlight.Reserve(ct);
             if (scheduler is not null) await scheduler.WaitForTurnAsync(ct).ConfigureAwait(false);
 
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
@@ -434,13 +438,12 @@ public class VideoEncoder : IDisposable
 
             // Dispose the GPU surface after the encoder has consumed it.
             // Capture in a local to avoid double-dispose if the catch block also disposes.
-            slot.Attach(outputSurface);
+            slot.Attach(outputSurface, sample);
             outputSurface = null;
-            var consumedSlot = slot;
-            sample.Processed += (s, e) => consumedSlot.Dispose();
 
             request.Sample = sample;
             slot = null;
+            Volatile.Write(ref _lastProgressTimestamp, Stopwatch.GetTimestamp());
 
             }
             finally
@@ -1071,7 +1074,20 @@ public class VideoEncoder : IDisposable
 
     private async Task TranscodeWithTimeoutAsync(PrepareTranscodeResult prepResult, CancellationToken ct)
     {
+        long started = Stopwatch.GetTimestamp();
+        Volatile.Write(ref _lastProgressTimestamp, started);
         var transcodeOp = prepResult.TranscodeAsync();
+        double lastNativeProgress = -1;
+        var progressLock = new object();
+        transcodeOp.Progress = (_, value) =>
+        {
+            lock (progressLock)
+            {
+                if (value <= lastNativeProgress) return;
+                lastNativeProgress = value;
+                Volatile.Write(ref _lastProgressTimestamp, Stopwatch.GetTimestamp());
+            }
+        };
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var reg = ct.Register(() => transcodeOp.Cancel());
         transcodeOp.Completed = (info, status) =>
@@ -1084,13 +1100,20 @@ public class VideoEncoder : IDisposable
                 tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Video transcode failed."));
         };
 
-        var timeoutTask = Task.Delay(MainTranscodeTimeout);
-        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+        while (!tcs.Task.IsCompleted)
         {
-            ct.ThrowIfCancellationRequested();
-            transcodeOp.Cancel();
-            throw new TimeoutException(
-                $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+            bool elapsed = Stopwatch.GetElapsedTime(started) >= MainTranscodeTimeout;
+            bool stalled = Stopwatch.GetElapsedTime(Volatile.Read(ref _lastProgressTimestamp)) >= NoProgressTimeout;
+            if (elapsed || stalled)
+            {
+                transcodeOp.Cancel();
+                await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                throw new TimeoutException(stalled
+                    ? "Video export made no progress for two minutes. Cancel the export and retry."
+                    : $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+            }
+            await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
         }
 
         await tcs.Task;
