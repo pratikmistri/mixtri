@@ -116,14 +116,7 @@ public class ExportEngine
         string outputPath = Path.Combine(outputFolder, $"{sanitizedName}{extension}");
         outputPath = EnsureUniqueFilePath(outputPath);
 
-        var effectiveSettings = new ExportSettings
-        {
-            Resolution = exportSettings.Resolution,
-            Fps = exportSettings.Fps,
-            Format = effectiveFormat,
-            Quality = exportSettings.Quality,
-            AspectRatio = exportSettings.AspectRatio,
-        };
+        var effectiveSettings = exportSettings with { Format = effectiveFormat };
 
         if (effectiveFormat == VideoFormat.GIF)
         {
@@ -168,8 +161,9 @@ public class ExportEngine
         CancellationToken ct,
         ExportWorkScheduler? scheduler)
     {
+        using var device = GpuContext.CreateExportDevice(settings.ForceSoftwareRendering);
         using var composer = await SegmentFrameComposer.CreateAsync(
-            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct);
+            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct, device);
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? composer.TotalFrames;
 

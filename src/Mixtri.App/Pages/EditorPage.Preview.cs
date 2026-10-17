@@ -1260,15 +1260,13 @@ public sealed partial class EditorPage
             // effective style WITHOUT mutating the singleton _previewRenderer — see the
             // method's remarks for why EnsurePrimaryRendererForSegmentAsync (which the
             // ordinary, non-transition render path still uses) is unsafe to call from here.
+            int stateGen = _primaryPreviewStateGeneration;
             var compositor = await GetPrimaryTransitionCompositorAsync(seg);
 
-            // Snapshot AFTER the awaits above (building an alt-style compositor can itself
-            // await a multi-frame compositor init) so both checks below reflect state as of
-            // right now, then re-validate after the frame decode await — see the remarks on
-            // _primaryPreviewStateGeneration for why a rebuild/teardown that completes
-            // during either await must not be silently composited past.
-            if (!ReferenceEquals(reader, _frameReader)) return null;
-            int stateGen = _primaryPreviewStateGeneration;
+            // Lookup can itself await initialization. Do not adopt a newer generation
+            // around an older compositor returned just before a replacement was published.
+            if (stateGen != _primaryPreviewStateGeneration || !ReferenceEquals(reader, _frameReader))
+                return null;
 
             var bitmap = await reader.LoadFrameAtTimeAsync(sourceTime);
             if (bitmap is null) return null;

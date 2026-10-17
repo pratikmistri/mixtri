@@ -1106,6 +1106,9 @@ public sealed partial class EditorPage
 
             // Synchronize the candidate before publishing or disposing the usable renderer.
             EditorTimelineMediator.SyncZoomStateToRenderer(ViewModel.Model, renderer, PrimaryVideoPath);
+            // Transitions may have acquired the old renderer while initialization awaited.
+            // Invalidate them and any alternate contexts built during that interval.
+            DisposePrimaryStyleRenderers();
             var previous = _previewRenderer;
             _previewRenderer = renderer;
             renderer = null;

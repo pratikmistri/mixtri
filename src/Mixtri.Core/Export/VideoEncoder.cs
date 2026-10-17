@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Audio;
 using Mixtri.Core.Models;
@@ -23,6 +25,8 @@ public record ExportSettings
     public VideoFormat Format { get; init; } = VideoFormat.MP4;
     public VideoQuality Quality { get; init; } = VideoQuality.High;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
+    /// <summary>Use WARP for environments without a reliable hardware graphics adapter.</summary>
+    public bool ForceSoftwareRendering { get; init; }
 }
 
 /// <summary>
@@ -92,7 +96,7 @@ public class VideoEncoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var stopwatch = Stopwatch.StartNew();
-        using var device = GpuContext.CreateExportDevice();
+        using var device = GpuContext.CreateExportDevice(_settings.ForceSoftwareRendering);
         _deviceLostGuard = new DeviceLostGuard(
             device,
             "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
@@ -378,6 +382,7 @@ public class VideoEncoder : IDisposable
     {
         CanvasRenderTarget? outputSurface = null;
         CanvasRenderTarget? composedFrame = null;
+        byte[]? softwarePixels = null;
         ExportFrameLimiter.Slot? slot = null;
         try
         {
@@ -430,15 +435,29 @@ public class VideoEncoder : IDisposable
                 composedFrame = null;
             }
 
-            // Give the D3D11 surface directly to the encoder — bypasses all
-            // pixel extraction and stride alignment issues entirely.
+            // Hardware rendering keeps the direct-surface handoff. WARP cannot
+            // rely on the media pipeline's hardware D3D interop path.
             var timestamp = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _settings.Fps));
-            var sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
+            MediaStreamSample sample;
+            if (device.ForceSoftwareRenderer)
+            {
+                // Media Foundation's surface path expects a hardware D3D device.
+                // WARP uses owned CPU pixels instead, with MF's bottom-up RGB layout.
+                softwarePixels = outputSurface.GetPixelBytes();
+                FlipEncoderRows(softwarePixels, targetWidth, targetHeight);
+                sample = MediaStreamSample.CreateFromBuffer(softwarePixels.AsBuffer(), timestamp);
+                outputSurface.Dispose();
+                outputSurface = null;
+            }
+            else
+            {
+                sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
+            }
             sample.Duration = frameDuration;
 
             // Dispose the GPU surface after the encoder has consumed it.
             // Capture in a local to avoid double-dispose if the catch block also disposes.
-            slot.Attach(outputSurface, sample);
+            slot.Attach(outputSurface, sample, softwarePixels);
             outputSurface = null;
 
             request.Sample = sample;
@@ -485,6 +504,24 @@ public class VideoEncoder : IDisposable
         {
             deferral.Complete();
         }
+    }
+
+    internal static void FlipEncoderRows(byte[] pixels, int width, int height)
+    {
+        int stride = checked(width * 4);
+        if (width <= 0 || height <= 0 || pixels.Length != checked(stride * height))
+            throw new ArgumentException("Encoder pixels do not match the frame dimensions.", nameof(pixels));
+        var row = ArrayPool<byte>.Shared.Rent(stride);
+        try
+        {
+            for (int top = 0, bottom = (height - 1) * stride; top < bottom; top += stride, bottom -= stride)
+            {
+                Buffer.BlockCopy(pixels, top, row, 0, stride);
+                Buffer.BlockCopy(pixels, bottom, pixels, top, stride);
+                Buffer.BlockCopy(row, 0, pixels, bottom, stride);
+            }
+        }
+        finally { ArrayPool<byte>.Shared.Return(row); }
     }
 
     /// <summary>

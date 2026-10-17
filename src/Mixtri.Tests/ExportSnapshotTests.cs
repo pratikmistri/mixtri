@@ -71,12 +71,14 @@ public class ExportSnapshotTests
         var snapshot = ProjectStateSnapshot.Capture(new Project(), new CompositionConfig(), timeline);
         var json = ExportWorkerProtocol.Serialize(new ExportWorkerMessage(ExportWorkerMessageKind.Start)
         {
-            Snapshot = snapshot, Settings = new ExportSettings(), OutputFolder = @"C:\Output",
+            Snapshot = snapshot, Settings = new ExportSettings { ForceSoftwareRendering = true },
+            OutputFolder = @"C:\Output",
         });
         Assert.IsFalse(json.Contains('\n'));
         var restored = ExportWorkerProtocol.Deserialize(json);
         Assert.AreEqual(2, restored.Snapshot!.Timeline!.Segments.Count);
         Assert.AreEqual("Title\nSecond line", ((TextSlideSegment)restored.Snapshot.Timeline.Segments[0]).Text);
         Assert.IsInstanceOfType<VideoSegment>(restored.Snapshot.Timeline.Segments[1]);
+        Assert.IsTrue(restored.Settings!.ForceSoftwareRendering);
     }
 }

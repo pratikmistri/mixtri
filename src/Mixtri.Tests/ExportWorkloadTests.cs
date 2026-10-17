@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Mixtri.Core.Export;
+using Mixtri.Core.Processing;
 using Windows.Media.Core;
 
 namespace Mixtri.Tests;
@@ -8,6 +9,26 @@ namespace Mixtri.Tests;
 [TestClass]
 public class ExportWorkloadTests
 {
+    [TestMethod]
+    public void SoftwareEncoderRows_AreBottomUpWithoutChangingPixelsOrStride()
+    {
+        byte[] pixels = [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255];
+        VideoEncoder.FlipEncoderRows(pixels, 2, 2);
+        CollectionAssert.AreEqual(
+            new byte[] { 7, 8, 9, 255, 10, 11, 12, 255, 1, 2, 3, 255, 4, 5, 6, 255 }, pixels);
+        VideoEncoder.FlipEncoderRows(pixels, 2, 2);
+        Assert.AreEqual((byte)1, pixels[0]);
+    }
+
+    [TestMethod]
+    public void ExportDevice_SoftwareRenderingIsExplicitAndStillLowPriority()
+    {
+        using var device = GpuContext.CreateExportDevice(forceSoftwareRenderer: true);
+        Assert.IsTrue(device.ForceSoftwareRenderer);
+        Assert.IsTrue(device.LowPriority);
+        Assert.IsFalse(new ExportSettings().ForceSoftwareRendering);
+    }
+
     [TestMethod]
     public void FrameLimiter_RetainsManagedSampleAndEventUntilConsumption()
     {

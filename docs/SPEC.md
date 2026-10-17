@@ -157,6 +157,10 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
   synchronization and native codec callbacks from interactive rendering.
   Preview control writes time out after two seconds; cancellation has an independent
   five-second worker-termination deadline even if stdin is blocked.
+  Hosted CI explicitly selects WARP through export settings and retains all native
+  codec, resolution, frame-count, pixel, and cancellation checks. Software-rendered
+  MP4 frames use owned bottom-up BGRA CPU buffers; normal app exports still default
+  to hardware rendering and direct D3D-surface samples.
 
 ### F10: Webcam Overlay
 - ~~Capture webcam via `MediaCapture` API~~

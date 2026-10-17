@@ -12,7 +12,7 @@ public static class GpuContext
 {
     public static CanvasDevice GetSharedDevice() => CanvasDevice.GetSharedDevice();
 
-    public static CanvasDevice CreateExportDevice() => new()
+    public static CanvasDevice CreateExportDevice(bool forceSoftwareRenderer = false) => new(forceSoftwareRenderer)
     {
         LowPriority = true,
         MaximumCacheSize = 32 * 1024 * 1024,

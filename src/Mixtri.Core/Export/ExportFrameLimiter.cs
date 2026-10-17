@@ -71,20 +71,22 @@ internal sealed class ExportFrameLimiter : IDisposable
         private readonly object _sync = new();
         private IDisposable? _resource;
         private MediaStreamSample? _sample;
+        private byte[]? _pixels;
         private bool _disposed;
 
-        public void Attach(IDisposable resource, MediaStreamSample? sample = null)
+        public void Attach(IDisposable? resource, MediaStreamSample? sample = null, byte[]? pixels = null)
         {
             lock (_sync)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                if (_resource is not null)
+                if (_resource is not null || _sample is not null || _pixels is not null)
                     throw new InvalidOperationException("An export slot already owns a surface.");
                 // CsWinRT event state is tied to the managed sample wrapper. Retain it
                 // with the surface so GC cannot revoke Processed before consumption.
                 _sample = sample;
                 if (sample is not null) sample.Processed += OnProcessed;
                 _resource = resource;
+                _pixels = pixels;
             }
         }
 
@@ -100,6 +102,7 @@ internal sealed class ExportFrameLimiter : IDisposable
                 _resource = null;
                 sample = _sample;
                 _sample = null;
+                _pixels = null;
             }
             try
             {

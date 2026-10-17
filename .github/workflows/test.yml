@@ -39,6 +39,7 @@ jobs:
       - name: Run tests
         env:
           MIXTRI_TEST_WORKER_PATH: '${{ github.workspace }}\src\Mixtri.App\bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\Mixtri.App.exe'
+          MIXTRI_TEST_SOFTWARE_RENDERING: '1'
         run: dotnet test src/Mixtri.Tests/Mixtri.Tests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
 
       - name: Upload test results

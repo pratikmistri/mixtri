@@ -22,6 +22,12 @@ public class ConcurrentExportTests
     private const int Height = 192;
     private const int Fps = 10;
 
+    private static ExportSettings Settings(int fps = Fps) => new()
+    {
+        Fps = fps,
+        ForceSoftwareRendering = Environment.GetEnvironmentVariable("MIXTRI_TEST_SOFTWARE_RENDERING") == "1",
+    };
+
     private static CompositionConfig Config() => new()
     {
         OutputFps = Fps,
@@ -136,7 +142,7 @@ public class ConcurrentExportTests
         var timeline = Timeline(project);
         var config = Config();
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var settings = new ExportSettings { Fps = Fps };
+        var settings = Settings();
         var snapshot = ProjectStateSnapshot.Capture(project, config, timeline);
         var client = new ExportWorkerClient(workerPath);
         var baseline = await client.ExportAsync(
@@ -180,7 +186,7 @@ public class ConcurrentExportTests
         client.SetPlaybackActive(true);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         int completedFrames = 0;
-        var export = client.ExportAsync(snapshot, new ExportSettings { Fps = Fps },
+        var export = client.ExportAsync(snapshot, Settings(),
             Path.Combine(temp.Path, "output"),
             new FrameProgress(value => Volatile.Write(ref completedFrames, value.CurrentFrame)), timeout.Token);
         int observed;
@@ -198,7 +204,7 @@ public class ConcurrentExportTests
         Assert.IsNull(client.ActiveProcessId);
         client.SetPlaybackActive(false);
         var baseline = await client.ExportAsync(
-            snapshot, new ExportSettings { Fps = Fps },
+            snapshot, Settings(),
             Path.Combine(temp.Path, "baseline"), null, timeout.Token);
         await AssertVideosMatchAsync(baseline, path);
 
@@ -206,7 +212,7 @@ public class ConcurrentExportTests
         using var cancellation = new CancellationTokenSource();
         cancellation.CancelAfter(TimeSpan.FromSeconds(10));
         int framesBeforeCancellation = 0;
-        var cancelled = client.ExportAsync(snapshot, new ExportSettings { Fps = Fps },
+        var cancelled = client.ExportAsync(snapshot, Settings(),
             Path.Combine(temp.Path, "cancelled"), new FrameProgress(value =>
             {
                 Volatile.Write(ref framesBeforeCancellation, value.CurrentFrame);
@@ -217,7 +223,7 @@ public class ConcurrentExportTests
         Assert.IsTrue(Volatile.Read(ref framesBeforeCancellation) > 0, "Cancel after rendering has begun.");
         Assert.IsNull(client.ActiveProcessId);
 
-        var gifSettings = new ExportSettings { Fps = Fps, Format = Mixtri.Core.Settings.VideoFormat.GIF };
+        var gifSettings = Settings() with { Format = Mixtri.Core.Settings.VideoFormat.GIF };
         var gif = await client.ExportAsync(
             snapshot, gifSettings, Path.Combine(temp.Path, "gif"), null, timeout.Token);
         using (var gifStream = await (await StorageFile.GetFileFromPathAsync(gif)).OpenReadAsync())
@@ -238,10 +244,10 @@ public class ConcurrentExportTests
             VideoFilePath = Path.Combine(temp.Path, "missing", "video.mp4"), Duration = TimeSpan.FromSeconds(1),
         }, Config(), null);
         await Assert.ThrowsExceptionAsync<InvalidOperationException>(async () =>
-            await client.ExportAsync(invalid, new ExportSettings(), temp.Path, null, failedTimeout.Token));
+            await client.ExportAsync(invalid, Settings(), temp.Path, null, failedTimeout.Token));
         Assert.IsNull(client.ActiveProcessId);
 
-        var crashed = client.ExportAsync(snapshot, new ExportSettings { Fps = Fps },
+        var crashed = client.ExportAsync(snapshot, Settings(),
             Path.Combine(temp.Path, "crashed"), null, failedTimeout.Token);
         while (client.ActiveProcessId is null)
             await Task.Delay(10, failedTimeout.Token);
@@ -301,7 +307,7 @@ public class ConcurrentExportTests
         var client = new ExportWorkerClient(workerPath);
         int lastFrame = 0;
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(180));
-        var path = await client.ExportAsync(snapshot, new ExportSettings
+        var path = await client.ExportAsync(snapshot, Settings(fps) with
         {
             Fps = fps, Resolution = Mixtri.Core.Settings.VideoResolution.UHD4K,
         }, Path.Combine(temp.Path, "output"),
@@ -345,7 +351,7 @@ public class ConcurrentExportTests
         int expectedFrames = new TimelineMapper(opened.Timeline, fps).TotalOutputFrames;
         int completed = 0;
         var client = new ExportWorkerClient(workerPath);
-        var output = await client.ExportAsync(snapshot, new ExportSettings
+        var output = await client.ExportAsync(snapshot, Settings(fps) with
         {
             Fps = fps, Resolution = Mixtri.Core.Settings.VideoResolution.UHD4K,
         }, Path.Combine(temp.Path, "output"),
@@ -374,7 +380,7 @@ public class ConcurrentExportTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         var client = new ExportWorkerClient(workerPath);
         var path = await client.ExportAsync(
-            ProjectStateSnapshot.Capture(project, Config(), null), new ExportSettings { Fps = Fps },
+            ProjectStateSnapshot.Capture(project, Config(), null), Settings(),
             Path.Combine(temp.Path, "encoded"), null, cancellation.Token);
         var device = GpuContext.GetSharedDevice();
         var reference = new MediaComposition();
