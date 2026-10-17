@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Audio;
 using Mixtri.Core.Models;
@@ -23,6 +25,8 @@ public record ExportSettings
     public VideoFormat Format { get; init; } = VideoFormat.MP4;
     public VideoQuality Quality { get; init; } = VideoQuality.High;
     public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
+    /// <summary>Use WARP for environments without a reliable hardware graphics adapter.</summary>
+    public bool ForceSoftwareRendering { get; init; }
 }
 
 /// <summary>
@@ -49,6 +53,8 @@ public class VideoEncoder : IDisposable
 
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
     private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
+    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromMinutes(2);
+    private long _lastProgressTimestamp;
 
     // Serializes frame compositing so the shared SegmentFrameComposer (and the
     // per-source compositors it owns) is never accessed concurrently by overlapping
@@ -76,7 +82,9 @@ public class VideoEncoder : IDisposable
         TimelineMapper? timelineMapper = null,
         TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IVideoSuperResolutionProvider? superResolutionProvider = null,
+        ExportWorkScheduler? scheduler = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(project.VideoFilePath);
@@ -88,7 +96,7 @@ public class VideoEncoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var stopwatch = Stopwatch.StartNew();
-        var device = GpuContext.GetSharedDevice();
+        using var device = GpuContext.CreateExportDevice(_settings.ForceSoftwareRendering);
         _deviceLostGuard = new DeviceLostGuard(
             device,
             "The graphics device was lost while exporting video. Retry the export after closing other GPU-heavy applications.");
@@ -102,7 +110,7 @@ public class VideoEncoder : IDisposable
         // recordings render from their own files, with their own cursor data, zoom
         // keyframes, and per-segment frame/cursor style overrides.
         using var composer = await SegmentFrameComposer.CreateAsync(
-            project, mouseData, compositionConfig, timeline, timelineMapper, _settings.Fps, ct);
+            project, mouseData, compositionConfig, timeline, timelineMapper, _settings.Fps, ct, device);
 
         // Total output frames based on the EXPORT fps, not the compositor's
         // internal fps (which is capped at 30 for cursor/click timing).
@@ -111,16 +119,33 @@ public class VideoEncoder : IDisposable
         int compositorWidth = composer.OutputWidth;
         int compositorHeight = composer.OutputHeight;
 
-        // Encode at the user-selected resolution while preserving the
-        // compositor's aspect ratio (the compositor has already applied
-        // AspectRatio + padding). Never upscale beyond the compositor's
-        // native size. Floored to mod-16 for H.264 macroblock alignment.
-        var (encW, encH) = AspectRatioHelper.ComputeExportDimensions(
-            compositorWidth, compositorHeight, _settings.Resolution);
+        // Try Windows AI super resolution only when the selected resolution requires
+        // an upscale within the API's documented frame-size range. Unsupported devices
+        // retain the existing no-upscale behavior.
+        var (upscaledWidth, upscaledHeight) = AspectRatioHelper.ComputeExportDimensions(
+            compositorWidth, compositorHeight, _settings.Resolution, allowUpscale: true);
+        bool requiresUpscaling =
+            upscaledWidth > compositorWidth || upscaledHeight > compositorHeight;
+        IVideoSuperResolutionSession? superResolution = null;
+        if (requiresUpscaling && superResolutionProvider is not null)
+        {
+            superResolution = await superResolutionProvider.TryCreateAsync(
+                compositorWidth, compositorHeight, upscaledWidth, upscaledHeight, ct);
+        }
+        using var superResolutionLifetime = superResolution;
+
+        var (encW, encH) = superResolution is not null
+            ? (upscaledWidth, upscaledHeight)
+            : AspectRatioHelper.ComputeExportDimensions(
+                compositorWidth, compositorHeight, _settings.Resolution);
         targetWidth = encW;
         targetHeight = encH;
         bool needsScaling = targetWidth != compositorWidth || targetHeight != compositorHeight;
         PreflightRenderTargetMemory(targetWidth, targetHeight, needsScaling);
+        using var inFlight = new ExportFrameLimiter(targetWidth, targetHeight);
+        using var frameCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+            $"process {Environment.ProcessId}: {targetWidth}x{targetHeight}, {inFlight.Capacity} encoder surface slots");
 
         // Resolve which audio sources the edited timeline actually needs, and where each
         // belongs on the output. Placements whose media has no audio are dropped here so
@@ -153,6 +178,10 @@ public class VideoEncoder : IDisposable
         // using the composer when it is disposed (including on the failure path).
         var pendingSamples = new List<Task>();
         var pendingSamplesLock = new object();
+        var frameToken = frameCancellation.Token;
+        MediaStreamSource? streamSource = null;
+        Windows.Foundation.TypedEventHandler<MediaStreamSource, MediaStreamSourceSampleRequestedEventArgs>?
+            sampleRequested = null;
 
         try
         {
@@ -177,7 +206,7 @@ public class VideoEncoder : IDisposable
 
             var videoDesc = new VideoStreamDescriptor(videoProps);
 
-            var streamSource = new MediaStreamSource(videoDesc);
+            streamSource = new MediaStreamSource(videoDesc);
             streamSource.Duration = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(totalFrames, _settings.Fps));
             streamSource.BufferTime = TimeSpan.Zero;
 
@@ -186,44 +215,42 @@ public class VideoEncoder : IDisposable
                 args.Request.SetActualStartPosition(TimeSpan.Zero);
             };
 
-            streamSource.SampleRequested += (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
+            sampleRequested = (MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args) =>
             {
-                // Atomically reserve a frame index to avoid duplicate/skipped frames
-                int frame = Interlocked.Increment(ref currentFrame) - 1;
-                if (frame >= totalFrames)
-                {
-                    args.Request.Sample = null; // end of stream
-                    return;
-                }
-
-                var deferral = args.Request.GetDeferral();
-                var task = ProduceSampleAsync(
-                    args.Request, deferral, frame, totalFrames,
-                    composer, device,
-                    compositorWidth, compositorHeight,
-                    targetWidth, targetHeight,
-                    needsScaling,
-                    progress, stopwatch, ct,
-                    progressFloor: stretchProgressFloor,
-                    onError: (ex, frameIdx) =>
-                    {
-                        lock (frameErrorLock)
-                        {
-                            if (firstFrameError is null)
-                            {
-                                firstFrameError = ex;
-                                firstFrameErrorIndex = frameIdx;
-                            }
-                        }
-                    });
-
+                // Reserve and enqueue in one order, including EOS. Publishing EOS ahead
+                // of deferred frames can strand their encoder-held surface credits.
                 lock (pendingSamplesLock)
                 {
+                    int frame = currentFrame++;
+                    var deferral = args.Request.GetDeferral();
+                    var task = ProduceSampleAsync(
+                        args.Request, deferral, frame, totalFrames,
+                        composer, device,
+                        compositorWidth, compositorHeight,
+                        targetWidth, targetHeight,
+                        needsScaling,
+                        superResolution,
+                        inFlight, scheduler,
+                        progress, stopwatch, frameToken,
+                        progressFloor: stretchProgressFloor,
+                        onError: (ex, frameIdx) =>
+                        {
+                            lock (frameErrorLock)
+                            {
+                                if (firstFrameError is null)
+                                {
+                                    firstFrameError = ex;
+                                    firstFrameErrorIndex = frameIdx;
+                                }
+                            }
+                        });
+
                     // Remove completed tasks to prevent unbounded list growth
                     pendingSamples.RemoveAll(t => t.IsCompleted);
                     pendingSamples.Add(task);
                 }
             };
+            streamSource.SampleRequested += sampleRequested;
 
             // Transcode: composited BGRA8 frames → H.264 MP4
             // Use software encoding to avoid hardware encoder quirks with
@@ -245,6 +272,8 @@ public class VideoEncoder : IDisposable
                 throw new InvalidOperationException(
                     $"Transcoder cannot encode: {prepResult.FailureReason}");
 
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: starting {totalFrames} frames");
             await TranscodeWithTimeoutAsync(prepResult, ct);
 
             // Drain any still-running sample tasks before disposing shared state
@@ -254,6 +283,8 @@ public class VideoEncoder : IDisposable
                 snapshot = pendingSamples.ToArray();
             }
             await Task.WhenAll(snapshot).ConfigureAwait(false);
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: native encoding drained; peak retained surfaces {inFlight.PeakCount}");
 
             // If any frame failed during compositing, fail the export loudly.
             // Without this, MediaStreamSource silently treats Sample=null as EOS,
@@ -287,6 +318,9 @@ public class VideoEncoder : IDisposable
         }
         finally
         {
+            if (streamSource is not null && sampleRequested is not null)
+                streamSource.SampleRequested -= sampleRequested;
+            frameCancellation.Cancel();
             // Never dispose the composer (owned by the enclosing `using`) while a sample
             // task might still be compositing with it — including on the failure path,
             // where the transcode threw before the drain above.
@@ -337,6 +371,9 @@ public class VideoEncoder : IDisposable
         int compositorWidth, int compositorHeight,
         int targetWidth, int targetHeight,
         bool needsScaling,
+        IVideoSuperResolutionSession? superResolution,
+        ExportFrameLimiter inFlight,
+        ExportWorkScheduler? scheduler,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
         CancellationToken ct,
@@ -345,6 +382,8 @@ public class VideoEncoder : IDisposable
     {
         CanvasRenderTarget? outputSurface = null;
         CanvasRenderTarget? composedFrame = null;
+        byte[]? softwarePixels = null;
+        ExportFrameLimiter.Slot? slot = null;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -359,6 +398,13 @@ public class VideoEncoder : IDisposable
             {
             await _frameSemaphore.WaitAsync(ct).ConfigureAwait(false);
             semaphoreAcquired = true;
+            if (frameIndex >= totalFrames)
+            {
+                request.Sample = null;
+                return;
+            }
+            slot = inFlight.Reserve(ct);
+            if (scheduler is not null) await scheduler.WaitForTurnAsync(ct).ConfigureAwait(false);
 
             var frameDuration = TimeSpan.FromSeconds(1.0 / _settings.Fps);
 
@@ -371,8 +417,11 @@ public class VideoEncoder : IDisposable
             if (needsScaling)
             {
                 outputSurface = CreateRenderTarget(device, targetWidth, targetHeight, "scaled encoder output");
-                using (var ds = outputSurface.CreateDrawingSession())
+                bool superResolutionApplied =
+                    superResolution?.TryScale(composedFrame, outputSurface) == true;
+                if (!superResolutionApplied)
                 {
+                    using var ds = outputSurface.CreateDrawingSession();
                     ds.DrawImage(composedFrame,
                         new Windows.Foundation.Rect(0, 0, targetWidth, targetHeight),
                         new Windows.Foundation.Rect(0, 0, compositorWidth, compositorHeight));
@@ -386,19 +435,34 @@ public class VideoEncoder : IDisposable
                 composedFrame = null;
             }
 
-            // Give the D3D11 surface directly to the encoder — bypasses all
-            // pixel extraction and stride alignment issues entirely.
+            // Hardware rendering keeps the direct-surface handoff. WARP cannot
+            // rely on the media pipeline's hardware D3D interop path.
             var timestamp = TimeSpan.FromSeconds(FrameTimeConverter.FrameToTime(frameIndex, _settings.Fps));
-            var sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
+            MediaStreamSample sample;
+            if (device.ForceSoftwareRenderer)
+            {
+                // Media Foundation's surface path expects a hardware D3D device.
+                // WARP uses owned CPU pixels instead, with MF's bottom-up RGB layout.
+                softwarePixels = outputSurface.GetPixelBytes();
+                FlipEncoderRows(softwarePixels, targetWidth, targetHeight);
+                sample = MediaStreamSample.CreateFromBuffer(softwarePixels.AsBuffer(), timestamp);
+                outputSurface.Dispose();
+                outputSurface = null;
+            }
+            else
+            {
+                sample = MediaStreamSample.CreateFromDirect3D11Surface(outputSurface, timestamp);
+            }
             sample.Duration = frameDuration;
 
             // Dispose the GPU surface after the encoder has consumed it.
             // Capture in a local to avoid double-dispose if the catch block also disposes.
-            var surfaceToDispose = outputSurface;
-            outputSurface = null; // prevent catch block from disposing
-            sample.Processed += (s, e) => surfaceToDispose.Dispose();
+            slot.Attach(outputSurface, sample, softwarePixels);
+            outputSurface = null;
 
             request.Sample = sample;
+            slot = null;
+            Volatile.Write(ref _lastProgressTimestamp, Stopwatch.GetTimestamp());
 
             }
             finally
@@ -424,6 +488,8 @@ public class VideoEncoder : IDisposable
         catch (Exception ex)
         {
             Debug.WriteLine($"[VideoEncoder] Frame {frameIndex} error: {ex}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                $"process {Environment.ProcessId}: frame {frameIndex} failed: {ex}");
             // Notify caller so the export can fail loudly rather than truncating.
             onError?.Invoke(ex, frameIndex);
             // Dispose GPU surface if it was created but never handed to the encoder
@@ -431,12 +497,31 @@ public class VideoEncoder : IDisposable
             // Dispose the composed frame too if an exception hit before it was scaled
             // into outputSurface or handed off (it is nulled at those handoff points).
             composedFrame?.Dispose();
+            slot?.Dispose();
             request.Sample = null;
         }
         finally
         {
             deferral.Complete();
         }
+    }
+
+    internal static void FlipEncoderRows(byte[] pixels, int width, int height)
+    {
+        int stride = checked(width * 4);
+        if (width <= 0 || height <= 0 || pixels.Length != checked(stride * height))
+            throw new ArgumentException("Encoder pixels do not match the frame dimensions.", nameof(pixels));
+        var row = ArrayPool<byte>.Shared.Rent(stride);
+        try
+        {
+            for (int top = 0, bottom = (height - 1) * stride; top < bottom; top += stride, bottom -= stride)
+            {
+                Buffer.BlockCopy(pixels, top, row, 0, stride);
+                Buffer.BlockCopy(pixels, bottom, pixels, top, stride);
+                Buffer.BlockCopy(row, 0, pixels, bottom, stride);
+            }
+        }
+        finally { ArrayPool<byte>.Shared.Return(row); }
     }
 
     /// <summary>
@@ -1026,7 +1111,20 @@ public class VideoEncoder : IDisposable
 
     private async Task TranscodeWithTimeoutAsync(PrepareTranscodeResult prepResult, CancellationToken ct)
     {
+        long started = Stopwatch.GetTimestamp();
+        Volatile.Write(ref _lastProgressTimestamp, started);
         var transcodeOp = prepResult.TranscodeAsync();
+        double lastNativeProgress = -1;
+        var progressLock = new object();
+        transcodeOp.Progress = (_, value) =>
+        {
+            lock (progressLock)
+            {
+                if (value <= lastNativeProgress) return;
+                lastNativeProgress = value;
+                Volatile.Write(ref _lastProgressTimestamp, Stopwatch.GetTimestamp());
+            }
+        };
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var reg = ct.Register(() => transcodeOp.Cancel());
         transcodeOp.Completed = (info, status) =>
@@ -1039,13 +1137,20 @@ public class VideoEncoder : IDisposable
                 tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Video transcode failed."));
         };
 
-        var timeoutTask = Task.Delay(MainTranscodeTimeout);
-        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
+        while (!tcs.Task.IsCompleted)
         {
-            ct.ThrowIfCancellationRequested();
-            transcodeOp.Cancel();
-            throw new TimeoutException(
-                $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+            bool elapsed = Stopwatch.GetElapsedTime(started) >= MainTranscodeTimeout;
+            bool stalled = Stopwatch.GetElapsedTime(Volatile.Read(ref _lastProgressTimestamp)) >= NoProgressTimeout;
+            if (elapsed || stalled)
+            {
+                transcodeOp.Cancel();
+                await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                throw new TimeoutException(stalled
+                    ? "Video export made no progress for two minutes. Cancel the export and retry."
+                    : $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+            }
+            await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
         }
 
         await tcs.Task;

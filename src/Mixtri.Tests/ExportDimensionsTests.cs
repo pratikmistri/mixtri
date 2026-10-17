@@ -1,5 +1,6 @@
 namespace Mixtri.Tests;
 
+using Mixtri.Core.Export;
 using Mixtri.Core.Processing;
 using Mixtri.Core.Settings;
 
@@ -43,6 +44,26 @@ public sealed class ExportDimensionsTests
         var (w, h) = AspectRatioHelper.ComputeExportDimensions(1280, 720, VideoResolution.UHD4K);
         Assert.AreEqual(1280, w);
         Assert.AreEqual(720, h);
+    }
+
+    [TestMethod]
+    public void ComputeExportDimensions_AllowUpscale_FillsSelectedBounds()
+    {
+        var (w, h) = AspectRatioHelper.ComputeExportDimensions(
+            1280, 720, VideoResolution.UHD4K, allowUpscale: true);
+
+        Assert.AreEqual(3840, w);
+        Assert.AreEqual(2160, h);
+    }
+
+    [TestMethod]
+    public void VideoSuperResolutionUpscaler_SupportsOnlyDocumentedUpscaleSizes()
+    {
+        Assert.IsTrue(VideoSuperResolutionSupport.SupportsDimensions(1280, 720, 1920, 1072));
+        Assert.IsTrue(VideoSuperResolutionSupport.SupportsDimensions(1920, 1080, 2560, 1440));
+        Assert.IsTrue(VideoSuperResolutionSupport.SupportsDimensions(1080, 1920, 2160, 3840));
+        Assert.IsFalse(VideoSuperResolutionSupport.SupportsDimensions(1280, 720, 1280, 720));
+        Assert.IsFalse(VideoSuperResolutionSupport.SupportsDimensions(320, 200, 1280, 800));
     }
 
     [TestMethod]

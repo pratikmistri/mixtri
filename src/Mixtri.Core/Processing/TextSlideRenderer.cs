@@ -11,7 +11,7 @@ namespace Mixtri.Core.Processing;
 
 /// <summary>
 /// Renders <see cref="TextSlideSegment"/> full-screen text slide frames using
-/// Win2D drawing APIs — backgrounds (solid, gradient, or Ken-Burns-animated image)
+/// Win2D drawing APIs — backgrounds (solid, gradient, or organically animated image)
 /// plus the slide's text. The cinematic / After-Effects-style text animation engine
 /// itself (entrance/exit timing, per-character effects, typewriter, blur, etc.) has
 /// been extracted to <see cref="AnimatedTextEngine"/> so it can be shared with other
@@ -26,6 +26,8 @@ public class TextSlideRenderer : IDisposable
     // Image background cache
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
+    private CanvasRenderTarget? _flowNoiseA;
+    private CanvasRenderTarget? _flowNoiseB;
 
     // Cached, slide-invariant base gradient. Only the per-frame displacement field
     // depends on time, so the underlying gradient texture is built once per
@@ -48,24 +50,32 @@ public class TextSlideRenderer : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var target = Win2DUtils.CreateRenderTarget(_device, width, height, 96, "text slide frame");
-        using var ds = target.CreateDrawingSession();
+        try
+        {
+            using var ds = target.CreateDrawingSession();
 
-        DrawSlideBackground(ds, slide, progress, width, height);
+            DrawSlideBackground(ds, slide, progress, width, height);
 
-        if (!drawText)
+            if (!drawText)
+                return target;
+
+            using var format = AnimatedTextEngine.CreateFormat(
+                slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
+                ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
+
+            var rect = ComputeTextRect(slide, width, height, _device);
+
+            _textEngine.DrawAnimatedText(ds, slide.DisplayText, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
+                slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
+                TextAnimationWindow.FromSlide(slide));
+
             return target;
-
-        using var format = AnimatedTextEngine.CreateFormat(
-            slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
-            ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Center, wrap: true);
-
-        var rect = ComputeTextRect(slide, width, height);
-
-        _textEngine.DrawAnimatedText(ds, slide.Text, format, rect, AnimatedTextEngine.ParseColor(slide.TextColor),
-            slide.Animation, progress, width, height, (float)slide.FontSize, slide.Duration.TotalSeconds,
-            TextAnimationWindow.FromSlide(slide));
-
-        return target;
+        }
+        catch
+        {
+            target.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -74,11 +84,12 @@ public class TextSlideRenderer : IDisposable
     /// of the slide (the wrapping width); the height hugs the actual measured
     /// text so the box doesn't fill the whole slide.
     /// </summary>
-    public static Rect ComputeTextRect(TextSlideSegment slide, int width, int height)
+    public static Rect ComputeTextRect(
+        TextSlideSegment slide, int width, int height, CanvasDevice? device = null)
     {
         double boxW = width * 0.84;
         double maxH = height * 0.8;
-        double boxH = MeasureTextHeight(slide, boxW, maxH);
+        double boxH = MeasureTextHeight(slide, boxW, maxH, device ?? CanvasDevice.GetSharedDevice());
         double left = slide.TextX * width - boxW / 2;
         double top = slide.TextY * height - boxH / 2;
         return new Rect(left, top, boxW, boxH);
@@ -88,7 +99,8 @@ public class TextSlideRenderer : IDisposable
     /// Measures the wrapped text height (in output pixels) for the slide, clamped
     /// between roughly one line and <paramref name="maxHeight"/>.
     /// </summary>
-    private static double MeasureTextHeight(TextSlideSegment slide, double maxWidth, double maxHeight)
+    private static double MeasureTextHeight(
+        TextSlideSegment slide, double maxWidth, double maxHeight, CanvasDevice device)
     {
         double minH = Math.Min(slide.FontSize * 1.3, maxHeight);
         if (string.IsNullOrEmpty(slide.Text) || maxWidth <= 0)
@@ -98,7 +110,7 @@ public class TextSlideRenderer : IDisposable
             slide.FontFamily, slide.FontSize, slide.IsBold, slide.IsItalic,
             ToCanvasAlignment(slide.TextAlignment), CanvasVerticalAlignment.Top, wrap: true);
         using var layout = new CanvasTextLayout(
-            CanvasDevice.GetSharedDevice(), slide.Text, format, (float)maxWidth, (float)maxHeight);
+            device, slide.DisplayText, format, (float)maxWidth, (float)maxHeight);
 
         return Math.Clamp(layout.LayoutBounds.Height, minH, maxHeight);
     }
@@ -146,6 +158,25 @@ public class TextSlideRenderer : IDisposable
     {
         // Elapsed seconds within the slide drives the motion (frozen on a static frame).
         float t = (float)(Math.Clamp(progress, 0, 1) * Math.Max(0.001, slide.Duration.TotalSeconds));
+
+        if (slide.GradientMotion == SlideGradientMotion.SubtleDrift)
+        {
+            // Same gentle 18-second orbit as the chapter previews, driven by playhead time.
+            // Draw a brush directly: no cached per-frame textures, turbulence or edge sampling.
+            double phase = t * Math.PI * 2 / 18;
+            double angle = (slide.GradientAngle + Math.Sin(phase) * 4) * Math.PI / 180;
+            var center = new Vector2(
+                (float)(width * (.5 + Math.Sin(phase) * .065)),
+                (float)(height * (.5 + Math.Cos(phase) * .045)));
+            float radius = MathF.Sqrt((float)width * width + (float)height * height) / 2;
+            var offset = new Vector2((float)Math.Cos(angle), (float)Math.Sin(angle)) * radius;
+            using var brush = new CanvasLinearGradientBrush(ds,
+                AnimatedTextEngine.ParseColor(slide.BackgroundColor),
+                AnimatedTextEngine.ParseColor(slide.GradientEndColor))
+            { StartPoint = center - offset, EndPoint = center + offset };
+            ds.FillRectangle(0, 0, width, height, brush);
+            return;
+        }
 
         // Stationary base gradient (no global drift — drift reads as a linear pan).
         double angleRad = slide.GradientAngle * Math.PI / 180.0;
@@ -252,13 +283,14 @@ public class TextSlideRenderer : IDisposable
     private void DrawImageBackground(
         CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
-        if (string.IsNullOrEmpty(slide.BackgroundImagePath) || !File.Exists(slide.BackgroundImagePath))
+        var path = TitleSlideImages.Resolve(slide.BackgroundImagePath);
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
             ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
             return;
         }
 
-        if (_bgImage is null || _bgImagePath != slide.BackgroundImagePath || _bgImage.Device != ds.Device)
+        if (_bgImage is null || _bgImagePath != path || _bgImage.Device != ds.Device)
         {
             _bgImage?.Dispose();
             _bgImage = null;
@@ -268,18 +300,19 @@ public class TextSlideRenderer : IDisposable
                 // Synchronous fallback. The UI/preview path pre-warms this cache via
                 // EnsureBackgroundLoadedAsync so this branch is only reached on the
                 // off-UI export thread (where blocking is acceptable).
-                _bgImage = CanvasBitmap.LoadAsync(ds.Device, slide.BackgroundImagePath)
+                _bgImage = CanvasBitmap.LoadAsync(ds.Device, path)
                     .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                _bgImagePath = slide.BackgroundImagePath;
+                _bgImagePath = path;
             }
-            catch
+            catch (Exception ex)
             {
+                if (_device.IsDeviceLost(ex.HResult)) throw;
                 ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
                 return;
             }
         }
 
-        DrawKenBurns(ds, _bgImage!, slide, progress, width, height);
+        DrawFlowingImage(ds, _bgImage!, slide, progress, width, height);
     }
 
     /// <summary>
@@ -287,8 +320,8 @@ public class TextSlideRenderer : IDisposable
     /// synchronous <see cref="RenderSlide"/> never has to block the calling thread
     /// on file I/O + GPU decode. Call this from the UI/preview path before rendering
     /// an image-backed slide. A no-op for non-image slides or when the image is
-    /// already cached. Failures are swallowed (the renderer falls back to the slide's
-    /// solid background colour).
+    /// already cached. File/decode failures fall back to the slide's solid background
+    /// colour; device-loss failures propagate so the editor can rebuild its graphics.
     /// </summary>
     public async Task EnsureBackgroundLoadedAsync(TextSlideSegment slide)
     {
@@ -297,7 +330,7 @@ public class TextSlideRenderer : IDisposable
         if (slide.BackgroundType != SlideBackgroundType.Image)
             return;
 
-        var path = slide.BackgroundImagePath;
+        var path = TitleSlideImages.Resolve(slide.BackgroundImagePath);
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
             return;
 
@@ -311,54 +344,126 @@ public class TextSlideRenderer : IDisposable
             _bgImage = loaded;
             _bgImagePath = path;
         }
-        catch
+        catch (Exception ex)
         {
+            if (_device.IsDeviceLost(ex.HResult)) throw;
             // Leave the cache empty; DrawImageBackground falls back to the solid colour.
         }
     }
 
     /// <summary>
-    /// Draws an image background with a slow "Ken Burns" motion (continuous gentle
-    /// zoom + elliptical pan) so an image-backed slide reads like a living shot
-    /// rather than a frozen still. The image is overscaled beyond a simple cover
-    /// fit to leave headroom, then a breathing zoom and a slow elliptical pan —
-    /// both driven by sine/cosine of elapsed time so they never settle into a
-    /// stopped end state — push the framing around within that headroom. The pan
-    /// stays inside the available slack so the image edges are never revealed.
-    /// <paramref name="progress"/> (0..1 over the slide's duration) is converted to
-    /// elapsed seconds so the motion advances with the playhead (frozen when paused)
-    /// and is identical in the live preview and the exported video.
+    /// Broad, evolving displacement makes the image's surfaces flow in place.
+    /// Gentle camera motion complements the flowing surfaces. Both noise fields use normalized
+    /// frequencies and playhead time, keeping preview/export and different sizes consistent.
     /// </summary>
-    private static void DrawKenBurns(
+    private void DrawFlowingImage(
         CanvasDrawingSession ds, CanvasBitmap bitmap, TextSlideSegment slide,
         double progress, int width, int height)
     {
-        // Elapsed seconds within the slide drives the motion (frozen on a static frame).
         float t = (float)(Math.Clamp(progress, 0, 1) * Math.Max(0.001, slide.Duration.TotalSeconds));
+        var src = bitmap.Size;
+        using var framed = new Transform2DEffect
+        {
+            Source = bitmap,
+            TransformMatrix = ImageMotionTransform((float)src.Width, (float)src.Height, width, height, t),
+            InterpolationMode = CanvasImageInterpolation.HighQualityCubic,
+        };
+        using var clamped = new BorderEffect
+        {
+            Source = framed,
+            ExtendX = CanvasEdgeBehavior.Clamp,
+            ExtendY = CanvasEdgeBehavior.Clamp,
+        };
+        // Materialize the broad fields once at a bounded resolution. Evaluating two
+        // oversized procedural fields at video resolution on every frame competes with
+        // decode and every timeline canvas on the same graphics device.
+        EnsureFlowNoise();
+        var fieldScale = Matrix3x2.CreateScale(width / 256f, height / 256f);
+        using var flowA = new Transform2DEffect
+        {
+            Source = _flowNoiseA,
+            TransformMatrix = fieldScale * Matrix3x2.CreateTranslation(
+                -width + MathF.Sin(t * .40f) * width * .22f,
+                -height + MathF.Cos(t * .32f) * height * .22f),
+        };
+        using var flowB = new Transform2DEffect
+        {
+            Source = _flowNoiseB,
+            TransformMatrix = fieldScale * Matrix3x2.CreateTranslation(
+                -width - MathF.Cos(t * .29f) * width * .18f,
+                -height + MathF.Sin(t * .37f) * height * .18f),
+        };
+        using var field = new ArithmeticCompositeEffect
+        {
+            Source1 = flowA, Source2 = flowB,
+            Source1Amount = .5f, Source2Amount = .5f,
+            MultiplyAmount = 0, Offset = 0,
+        };
+        using var flowing = new DisplacementMapEffect
+        {
+            Source = clamped, Displacement = field,
+            Amount = Math.Min(width, height) * .085f,
+            XChannelSelect = EffectChannelSelect.Red,
+            YChannelSelect = EffectChannelSelect.Green,
+        };
+        // Cubic sampling can round opaque alpha down by one; composite over the
+        // preset's base tone so the background remains fully opaque for transitions.
+        ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+        ds.DrawImage(flowing, new Rect(0, 0, width, height), new Rect(0, 0, width, height));
+    }
 
-        var src = bitmap.SizeInPixels;
-        float fill = Math.Max((float)width / src.Width, (float)height / src.Height);
+    private void EnsureFlowNoise()
+    {
+        if (_flowNoiseA is not null && _flowNoiseB is not null) return;
+        CanvasRenderTarget? nextA = null, nextB = null;
+        try
+        {
+            nextA = CreateFlowNoise(new Vector2(2.2f / 256, 2.6f / 256), 1);
+            nextB = CreateFlowNoise(new Vector2(3.1f / 256, 1.8f / 256), 37);
+            _flowNoiseA = nextA; _flowNoiseB = nextB;
+        }
+        catch
+        {
+            nextA?.Dispose(); nextB?.Dispose();
+            throw;
+        }
+    }
 
-        // Overscale beyond cover-fit gives headroom for the pan + breathing zoom
-        // without ever exposing the image edges. The zoom slowly breathes and the
-        // pan slowly drifts on an elliptical path — neither ever comes to rest.
-        float zoom = 1.14f + 0.05f * MathF.Sin(t * 0.18f);
+    private CanvasRenderTarget CreateFlowNoise(Vector2 frequency, int seed)
+    {
+        var target = Win2DUtils.CreateRenderTarget(_device, 768, 768, 96, "title flow field");
+        try
+        {
+            using var ds = target.CreateDrawingSession();
+            using var noise = new TurbulenceEffect
+            {
+                Frequency = frequency, Octaves = 2, Size = new Vector2(768, 768),
+                Seed = seed, Noise = TurbulenceEffectNoise.FractalSum,
+            };
+            ds.DrawImage(noise);
+            return target;
+        }
+        catch { target.Dispose(); throw; }
+    }
 
-        float scale = fill * zoom;
-        float drawW = src.Width * scale;
-        float drawH = src.Height * scale;
-
-        // Slack = how far we can shift the (over-sized) image while still covering
-        // the frame. Keep the pan within ~70% of it so a corner is never revealed.
-        float slackX = (drawW - width) * 0.5f;
-        float slackY = (drawH - height) * 0.5f;
-        float panX = MathF.Sin(t * 0.13f) * slackX * 0.7f;
-        float panY = MathF.Cos(t * 0.11f) * slackY * 0.7f;
-
-        float drawX = (width - drawW) * 0.5f + panX;
-        float drawY = (height - drawH) * 0.5f + panY;
-
-        ds.DrawImage(bitmap, new Rect(drawX, drawY, drawW, drawH));
+    internal static Matrix3x2 ImageMotionTransform(float sourceWidth, float sourceHeight, int width, int height, float seconds)
+    {
+        float rotation = MathF.Sin(seconds * .18f) * (MathF.PI / 180 * .65f);
+        float driftX = MathF.Sin(seconds * .16f) * width * .008f;
+        float driftY = MathF.Sin(seconds * .13f) * height * .006f;
+        // Cover the inverse-rotated viewport plus the maximum displacement sample
+        // radius. This also works for portrait and ultrawide exports without corners showing.
+        float margin = Math.Min(width, height) * .0425f + 2;
+        float halfW = width / 2f + MathF.Abs(driftX) + margin;
+        float halfH = height / 2f + MathF.Abs(driftY) + margin;
+        float c = MathF.Abs(MathF.Cos(rotation)), s = MathF.Abs(MathF.Sin(rotation));
+        float cover = Math.Max(2 * (c * halfW + s * halfH) / sourceWidth,
+            2 * (s * halfW + c * halfH) / sourceHeight);
+        float scale = cover * (1.02f + .015f * MathF.Sin(seconds * .22f));
+        return Matrix3x2.CreateTranslation(-sourceWidth / 2, -sourceHeight / 2)
+            * Matrix3x2.CreateScale(scale)
+            * Matrix3x2.CreateRotation(rotation)
+            * Matrix3x2.CreateTranslation(width / 2f + driftX, height / 2f + driftY);
     }
 
     public void Dispose()
@@ -366,6 +471,8 @@ public class TextSlideRenderer : IDisposable
         if (_disposed) return;
         _disposed = true;
         _bgImage?.Dispose();
+        _flowNoiseA?.Dispose();
+        _flowNoiseB?.Dispose();
         _gradientCache?.Dispose();
         // The engine owns a cached scratch render target for its blurred-text passes,
         // so it has to be released with the renderer that created it.

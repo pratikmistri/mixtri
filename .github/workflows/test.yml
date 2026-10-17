@@ -27,6 +27,9 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Build export worker
+        run: msbuild src\Mixtri.App\Mixtri.App.csproj /restore /t:Build /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifiers=win-x64 /v:minimal
+
       - name: Restore dependencies
         run: dotnet restore src/Mixtri.Tests/Mixtri.Tests.csproj
 
@@ -34,6 +37,9 @@ jobs:
         run: msbuild src/Mixtri.Tests/Mixtri.Tests.csproj /p:Configuration=Release /p:Platform=AnyCPU /t:Build /v:minimal
 
       - name: Run tests
+        env:
+          MIXTRI_TEST_WORKER_PATH: '${{ github.workspace }}\src\Mixtri.App\bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\Mixtri.App.exe'
+          MIXTRI_TEST_SOFTWARE_RENDERING: '1'
         run: dotnet test src/Mixtri.Tests/Mixtri.Tests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
 
       - name: Upload test results

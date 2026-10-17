@@ -139,7 +139,7 @@ public sealed class ShellCoordinator : IDisposable
 
         if (_stateMachine.CurrentState == AppShellState.Mini)
             _miniWindow?.HideMini();
-        else
+        else if (_stateMachine.RecordingOrigin != AppShellState.Mini)
             MinimizeMainWindow();
     }
 
@@ -207,7 +207,13 @@ public sealed class ShellCoordinator : IDisposable
 
             case AppShellState.Recording:
                 _miniWindow?.HideMini();
-                MinimizeMainWindow();
+                // SW_MINIMIZE on the hidden main window would put it on the taskbar,
+                // so a recording started from the Mini pill keeps it hidden. Only a
+                // recording started from the full window leaves a taskbar button.
+                if (_stateMachine.RecordingOrigin == AppShellState.Mini)
+                    HideMainWindow();
+                else
+                    MinimizeMainWindow();
                 // OnRecordingBegan puts up the recording highlight instead.
                 break;
         }

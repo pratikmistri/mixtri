@@ -3,6 +3,7 @@ using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
+using Mixtri.Core.Projects;
 using Mixtri.Core.Settings;
 using Mixtri.Core.Timeline;
 using Windows.ApplicationModel.DataTransfer;
@@ -14,6 +15,7 @@ namespace Mixtri.Core.Export;
 /// <summary>
 /// High-level orchestrator for the full export pipeline.
 /// Coordinates encoder detection, video encoding, and output delivery.
+/// The app invokes this in its export worker, never in the interactive editor process.
 /// </summary>
 public class ExportEngine
 {
@@ -22,14 +24,30 @@ public class ExportEngine
     /// and writes the final video to <paramref name="outputFolder"/>.
     /// </summary>
     /// <returns>The full path to the exported file.</returns>
-    public async Task<string> ExportProjectAsync(
+    public Task<string> ExportProjectAsync(
         Project project,
         ExportSettings settings,
         CompositionConfig composition,
         string outputFolder,
         TimelineModel? timeline = null,
         IProgress<ExportProgress>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IVideoSuperResolutionProvider? superResolutionProvider = null,
+        ExportWorkScheduler? scheduler = null)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ct.ThrowIfCancellationRequested();
+        var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
+        return Task.Run(() => ExportDetachedAsync(
+            snapshot.Project, settings with { }, snapshot.Composition, outputFolder,
+            snapshot.Timeline, progress, ct, superResolutionProvider, scheduler), ct);
+    }
+
+    private async Task<string> ExportDetachedAsync(
+        Project project, ExportSettings settings, CompositionConfig composition,
+        string outputFolder, TimelineModel? timeline, IProgress<ExportProgress>? progress,
+        CancellationToken ct, IVideoSuperResolutionProvider? superResolutionProvider,
+        ExportWorkScheduler? scheduler)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(settings);
@@ -98,20 +116,13 @@ public class ExportEngine
         string outputPath = Path.Combine(outputFolder, $"{sanitizedName}{extension}");
         outputPath = EnsureUniqueFilePath(outputPath);
 
-        var effectiveSettings = new ExportSettings
-        {
-            Resolution = exportSettings.Resolution,
-            Fps = exportSettings.Fps,
-            Format = effectiveFormat,
-            Quality = exportSettings.Quality,
-            AspectRatio = exportSettings.AspectRatio,
-        };
+        var effectiveSettings = exportSettings with { Format = effectiveFormat };
 
         if (effectiveFormat == VideoFormat.GIF)
         {
             await ExportGifAsync(
                 project, mouseData, exportComposition,
-                effectiveSettings, timelineMapper, timeline, outputPath, progress, ct);
+                effectiveSettings, timelineMapper, timeline, outputPath, progress, ct, scheduler);
         }
         else
         {
@@ -125,7 +136,9 @@ public class ExportEngine
                 timelineMapper,
                 timeline,
                 progress,
-                ct);
+                ct,
+                superResolutionProvider,
+                scheduler);
         }
 
         return outputPath;
@@ -145,10 +158,12 @@ public class ExportEngine
         TimelineModel? timeline,
         string outputPath,
         IProgress<ExportProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        ExportWorkScheduler? scheduler)
     {
+        using var device = GpuContext.CreateExportDevice(settings.ForceSoftwareRendering);
         using var composer = await SegmentFrameComposer.CreateAsync(
-            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct);
+            project, mouseData, composition, timeline, timelineMapper, settings.Fps, ct, device);
 
         int totalFrames = timelineMapper?.TotalOutputFrames ?? composer.TotalFrames;
 
@@ -160,7 +175,11 @@ public class ExportEngine
 
         var gifEncoder = new GifEncoder();
         await gifEncoder.EncodeComposedFramesAsync(
-            frameIndex => ComposeGifFrameAsync(composer, frameIndex, gifWidth, gifHeight, ct),
+            async frameIndex =>
+            {
+                if (scheduler is not null) await scheduler.WaitForTurnAsync(ct).ConfigureAwait(false);
+                return await ComposeGifFrameAsync(composer, frameIndex, gifWidth, gifHeight, ct);
+            },
             totalFrames,
             settings.Fps,
             outputPath,

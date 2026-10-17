@@ -24,6 +24,18 @@ namespace Mixtri_App;
 public partial class App : Application
 {
     private Window? _window;
+
+    private static async System.Threading.Tasks.Task RunExportWorkerAsync()
+    {
+        int exitCode;
+        try { exitCode = await ExportWorkerHost.RunAsync(); }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Export", $"worker terminated unexpectedly: {ex}");
+            exitCode = 1;
+        }
+        Environment.Exit(exitCode);
+    }
     private ShellCoordinator? _shell;
     private SystemTrayService? _trayService;
     private GlobalHotkeyService? _hotkeyService;
@@ -502,6 +514,13 @@ public partial class App : Application
     /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Skip(1).Contains(
+                Mixtri.Core.Export.ExportWorkerProtocol.Argument, StringComparer.Ordinal))
+        {
+            _ = RunExportWorkerAsync();
+            return;
+        }
+
         // Resolved before anything is constructed: launching by double-clicking a
         // .mixtri forces the full window, and may hand the whole activation to an
         // instance that already has that file open.

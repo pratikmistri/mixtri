@@ -3069,3 +3069,212 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **Preset merge mirrors the recents merge, with one deliberate difference**: `DeletePreset` writes to the legacy folder (deleting from it), which nothing else does. It must — a legacy-only preset would otherwise be re-read by the very next `LoadPresets` and reappear immediately after the user deleted it. `LoadPresets` reads current-folder-first so a re-saved preset shadows its old copy instead of appearing twice; saving still only ever writes to the current folder, so an edit migrates it.
 - **Testability**: `LoadPresets`/`DeletePreset` were made `internal` static taking explicit folders, because `PresetManager`'s constructor resolves real machine paths and has no seam. Tests then drive them against temp directories with no risk to the developer's real presets.
 - **Verified**: `Mixtri.sln` restore, `Mixtri.App` ARM64 Debug and `Mixtri.Tests` x64 Debug all build 0 errors; suite **1398 passed, 0 failed, 3 skipped** (7 new preset tests). All three review threads replied to and resolved.
+
+## Mini-mode recording: no taskbar button
+
+- **Feature/area**: `ShellCoordinator` Recording state, `RecordingOverlayWindow` (taskbar presence while recording).
+- **Approaches tried**: Traced the taskbar button to two sources: `MinimizeMainWindow()` (`SW_MINIMIZE`) on the main window that Mini mode had *hidden* - minimizing a hidden window shows it on the taskbar - and the recording overlay pill, which never set `IsShownInSwitchers = false`.
+- **What worked**: Use `AppShellStateMachine.RecordingOrigin`: when recording starts from Mini, `HideMainWindow()` (SW_HIDE) instead of minimizing; `HideForPicker` skips minimizing for the same origin. The overlay pill sets `AppWindow.IsShownInSwitchers = false` always; a recording started from the full window still gets its taskbar button from the minimized main window.
+- **What didn't work**: Full build on this host - the VS 2022 BuildTools `MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage` folder is now missing, so PriGen/AppxPackage tasks fail with MSB4062 even under VS MSBuild. Only Core built and a `/t:Compile /p:BuildProjectReferences=false` pass of the App was possible (XAML-codegen errors are expected there); reinstall the BuildTools "MSIX Packaging Tools"/UWP workload to restore full builds.
+- **Follow-up (build restored)**: Installing the BuildTools `Microsoft.VisualStudio.Workload.UniversalBuildTools` workload (elevated `setup.exe modify --installPath <BuildTools> --add ... --passive`) restored the `AppxPackage` folder; the ARM64 Debug build then succeeded, and the dev package was re-registered and launched ("Mixtri (dev) Mini").
+
+## Super-resolution feasibility for export
+- **Feature/area**: Investigated optional super-resolution in the MP4 export frame pipeline.
+- **Approaches tried**: Traced `VideoEncoder.ProduceSampleAsync` and checked Microsoft's Windows AI VideoScaler and DirectSR documentation.
+- **What worked**: Windows AI `VideoScaler` can be readiness-checked and used per frame, with a normal scaling fallback; the current export already has a per-frame GPU-surface stage for insertion.
+- **What didn't work**: DirectSR is not a drop-in for this Win2D/D3D11 export path; it requires a D3D12 integration. Existing export dimensions explicitly prohibit upscaling, so that policy must also change to enable higher-resolution output.
+
+## Optional Windows AI super-resolution in MP4 export
+- **Feature/area**: Optional VideoScaler upscaling in `VideoEncoder`, invoked by the app's MP4 export path.
+- **Approaches tried**: Kept the Windows AI dependency in the app layer behind Core provider/session interfaces; tried Windows App SDK 1.8 first, then moved to stable 2.5 after confirming VideoScaler is only exposed by SDK 2.0+.
+- **What worked**: Readiness/model initialization gates export upscaling; unsupported startup retains no-upscale dimensions, while per-frame errors disable the scaler and fall back to standard rendering. Reusable BGR buffers bridge Win2D BGRA frames to VideoScaler `ImageBuffer`.
+- **What didn't work**: Referencing the AI package directly from Core imported MSIX build targets into the non-app Core project; SDK 1.8 had AI APIs but no VideoScaler type. The provider seam and SDK 2.5 app reference avoid both issues.
+- **Verified**: ARM64 app build and x64 test build succeeded; focused export sizing tests passed; dev app registered and launched with package data preserved.
+
+## 2026-09-16: ARM64 Debug build and launch
+
+- **Feature/area**: Local dev build and launch; no application source changes.
+- **Approaches tried**: Built `Mixtri.App.csproj` with VS 2022 BuildTools ARM64 MSBuild, then launched the matching `PratikMistri.Musio.Dev` AppsFolder registration.
+- **What worked**: The existing dev registration already pointed at the ARM64 Debug output. The build succeeded and `Mixtri (dev) Mini` opened and remained responsive.
+- **What didn't work**: None; no dependency restore or registration reset was needed.
+
+## 2026-09-19: Fresh toolchain setup and ARM64 dev launch
+
+- **Feature/area**: Local build and launch on a host without the required build tools; no application source changes.
+- **Approaches tried**: Installed Visual Studio Build Tools 2026 with ManagedDesktopBuildTools, then added UniversalBuildTools with recommended components after the first build reported missing PriGen/MSIX tasks. User enabled Windows Developer Mode.
+- **What worked**: VS MSBuild with /restore /t:Build /p:Configuration=Debug /p:Platform=ARM64 completed successfully. Registered the generated ARM64 AppxManifest.xml and launched PratikMistri.Musio.Dev_9gph0n9984scy!App; verified Mixtri (dev) Mini had a window and a responsive process.
+- **What did not work**: ManagedDesktopBuildTools alone lacked Microsoft.Build.Packaging.Pri.Tasks.dll. Registration before enabling Developer Mode failed with 0x80073CFF. The successful build emitted MVVMTK0045 AOT compatibility warnings.
+
+## 2026-09-19: Hand cursor thumb outline
+
+- **Feature/area**: Vector hand cursor rendering.
+- **Approaches tried**: Inspected the thumb silhouette and removed a tiny reversing line between two curves.
+- **What worked**: Joining the curves directly eliminates the backtracking stroke at the thumb tip. Native ARM64 test build succeeded; all 15 CursorShapeTests passed.
+- **What did not work**: Initial build lacked dotnet on PATH; setting DOTNET_ROOT/PATH resolved SDK discovery. Build/test required access to user NuGet/.NET configuration outside the sandbox. Use ARM64 verification on this device.
+
+## 2026-09-20 — Title slide appearance presets
+
+- **Feature/area**: Added twelve Windows-inbox-font chapter styles as preview tiles after the title text, plus a final Custom tile. Animation choice, duration and all four animation-window sliders remain outside the custom appearance group.
+- **Approaches tried**: Reused XAML gradients and TextBlocks for lightweight tile previews; added a style-only undo snapshot rather than replacing a slide or changing its text/timing. Preset uppercase is a display property so switching styles preserves original text casing.
+- **What worked**: Persisted preset ID with appearance matching, a non-destructive Custom action, and playhead-driven 18-second drift shared by preview/export. Existing slides default to Custom and retain organic-wave motion. Fixed title-text sync to honor suppression; pending timing input is flushed before applying presets.
+- **Validation**: Clean ARM64 app build succeeded with VS MSBuild; full suite passed (1,403 passed, 3 skipped), including new preset preservation/undo/serialization cases. This host required DOTNET_ROOT and DOTNET_MSBUILD_SDK_RESOLVER_CLI_DIR pointing to C:/Program Files/dotnet, plus MSBuildSDKsPath pointing to the installed 10.0.401 SDK. Native visual verification was incomplete: Mini is capture-excluded and the Explorer automation window disappeared during recovery.
+- **What did not work**: Default SDK discovery selected a dotnet installation without an SDK; explicitly selecting the installed ARM64 SDK resolved it. One diagnostic DLL remained locked during bin cleanup, but obj cleanup and the subsequent clean XAML build succeeded.
+
+### 2026-09-20: Playback blanking investigation after image motion
+- The app log lives under the Dev package's LocalCache/Local/Mixtri, not the non-packaged LocalAppData/Mixtri test log. This incident logged stale decoded frames but no device reset; the exact trigger remains unconfirmed.
+- Cache the two image displacement noise fields at bounded 768x768 resolution per TextSlideRenderer. Transform these cached fields per frame rather than evaluating oversized procedural noise at video resolution each frame.
+- Dispose a newly allocated slide render target if drawing or EndDraw throws. Let image-load device-loss errors reach the editor; caught off-canvas Win2D failures need IsDeviceLost and RaiseDeviceLost to enter recovery.
+- Validation: ARM64 app build passed; 1408 tests passed, 3 skipped, including 420 image frames with preset switches and renderer recreation on software rendering. Hardware playback loss was not reproduced by these tests.
+
+### 2026-09-20: Scene background edits masked by clip overrides
+- Scene background handlers wrote global composition when no clip was selected; an existing override on the visible clip then masked every edit. SceneStyleTarget now resolves the selected video, otherwise the video under the playhead, keeping global fallback for title slides/empty scenes.
+- Debounced Scene edits capture values and clip together, and flush before selection changes. Preserve the effective clip wallpaper while its thumbnail selection is unavailable.
+- A failed primary compositor rebuild must clear its remembered style and log the exception; matching style values alone do not prove a usable renderer exists. Route device-loss exceptions into graphics recovery.
+- ARM64 app build and 1411 tests passed (3 skipped), including selected/deselected/appended Scene target regressions. The user's exact interactive failure was not reproduced; app windows were already closed during inspection.
+
+### 2026-10-06: Current branch lookup
+- **Feature/area**: Repository branch identification.
+- **Approaches tried**: `git branch --show-current`, then reading `.git\HEAD`.
+- **What worked**: `.git\HEAD` identified the current branch as `master`.
+- **What didn't work**: `git` was unavailable on the shell's PATH.
+
+### 2026-10-06: Feature branch checkout blocked
+- **Feature/area**: Switching to `feature/video-super-resolution`.
+- **Approaches tried**: Checked installed Git locations, used SHA-256-verified portable ARM64 MinGit, fetched the remote branch, and attempted a normal `git switch`.
+- **What worked**: Fetched `origin/feature/video-super-resolution`; Git's checkout safeguards preserved existing local changes.
+- **What didn't work**: Pre-existing uncommitted archive edits blocked checkout. Stayed on `master` because approval to stash those edits was unavailable.
+
+### 2026-10-06: Feature branch checkout preserving local work
+- **Feature/area**: Switching to `feature/video-super-resolution` without losing local edits.
+- **Approaches tried**: Stashed only the blocking archive, switched to the tracking branch, reapplied the archive, and resolved its append-only conflict by keeping both histories.
+- **What worked**: The requested branch was checked out; all 14 modified source files remained byte-for-byte unchanged, and both sets of archive entries were preserved.
+- **What didn't work**: Direct checkout was blocked by archive edits; automatic stash application conflicted because both histories appended entries to the same file.
+
+### 2026-10-08: Instability-fix topic branch
+- **Feature/area**: Created `fix/app-instabilities` from `feature/video-super-resolution`.
+- **Approaches tried**: Checked PATH and installed/previous portable Git locations, then downloaded official ARM64 MinGit and verified its SHA-256 digest.
+- **What worked**: `git switch -c fix/app-instabilities` created and checked out the branch without disturbing existing local changes; confirmed with `git branch --show-current`.
+- **What didn't work**: Git was unavailable on PATH and in the checked install locations.
+
+### 2026-10-09: Commit pending work before instability fixes
+- **Feature/area**: Saving pending source, tests, app assets, and learnings on `feature/video-super-resolution` before returning to `fix/app-instabilities`.
+- **Approaches tried**: Switched back to the feature branch, explicitly staged `src` and the archive, then committed and fast-forwarded the instability branch.
+- **What worked**: Both branches share the saved-work commit; generated `output` files remain untracked and untouched.
+- **What didn't work**: The previous attempt was blocked by plan-mode permissions; no stashing, resetting, or history rewriting was needed.
+
+### 2026-10-09: Timeline and preview visual recovery
+- **Feature/area**: Editor graphics recovery, asynchronous preview ownership, filmstrip generation, and decoder failure propagation on `fix/app-instabilities`.
+- **Approaches tried**: Traced shared-device and CanvasControl recovery, decoder catches, and overlapping initialization/style work. Added cause-aware device-loss detection, a testable serialized recovery coordinator, generation/identity checks around awaits, and explicit GPU/stream ownership. Exercised real editor canvases with a session-only synthetic-frame probe.
+- **What worked**: Park rendering immediately when recovery is queued, repaint after rebuilding, and bound both thrown failures and repeated recovery requests. Let device-loss exceptions escape decoding and compositor initialization. Keep replacement renderers private until initialized and synchronized. Independent filmstrips share the project/device lifetime rather than cancelling each other. Missing primary decoding no longer blocks appended video or titles; gaps clear transparently, and GPU recreation retains CPU track metadata.
+- **Validation**: ARM64 targeted rendering/recovery suite passed (289 passed, 2 opt-in media tests skipped). Two final live-probe runs each passed three injected recoveries with preview/ruler/video draws and usable filmstrips, an actual asynchronous style/reload overlap, unload during initialization, replacement-page rendering, missing-primary/appended/title rendering, and gap clearing. Normal ARM64 rebuild and responsive startup passed; verified the production assembly contains no temporary probe. A real hardware GPU reset was not forced or reproduced.
+- **What didn't work**: `RaiseDeviceLost` cannot simulate loss on a healthy device; inject a wrapped reset HRESULT into the recovery owner instead. Static title fixtures alone did not fix a white-pixel assertion inside the intentional video/title crossfade; validate settled title pixels outside that window. Draw-count checks were intermittent without an unoccluded probe window; temporarily keeping it above other windows, then restoring its state, made repeated runs consistent. Sideload registration was policy-blocked, so used direct executable launch without changing policy. Temporary SDK overrides failed before the full BuildTools/UWP workload installation completed; the installed global SDK and VS MSBuild worked.
+
+### 2026-10-09: Investigating occasional audio-mux export timeout
+- **Feature/area**: Investigated the five-minute `MuxAudioAsync` timeout without changing shipping export code. The report came from another machine, possibly exporting videos of two minutes or longer.
+- **Approaches tried**: Traced both export passes, the native completion callback, timeout, and cleanup. Used a session-only probe to generate a software-encoded MediaStreamSource MP4 and WAV, invoke the actual mux, compare open/closed staging-stream cases, and inspect compressed H.264 picture slices rather than only container bytes.
+- **What worked**: Both staging-stream cases completed with audio. The mux changed compressed picture slices and increased video payload from 1,957 to 3,626 bytes: `MediaComposition.RenderToFileAsync` performs another video encode here, not a stream-copy mux. Its unconditional five-minute elapsed limit ignores duration, resolution, and continuing progress. A two-minute 30-fps output must exceed 12 fps in this second pass to finish within that deadline. The timeout throw also precedes the cleanup `try/finally`, bypassing composition cleanup. These are confirmed pipeline defects; the customer's slow-progress versus native-stall trigger remains unproven because mux progress is not logged.
+- **What didn't work**: No local logs can establish an incident on the other machine. The open staging stream did not stall either synthetic mux, so it is not a demonstrated cause. Python was unavailable; used .NET MP4 parsing instead. Reading the source with `File.ReadAllBytes` while its writer remained open caused a diagnostic-only sharing violation; caching source samples before opening the writer resolved it.
+
+### 2026-10-09: Publishing editor stability work
+- **Feature/area**: Committing the validated editor recovery changes, regression tests, and export-timeout investigation notes on `fix/app-instabilities`.
+- **Approaches tried**: Explicitly staged `src` and the current archive for a normal commit and upstream push.
+- **What worked**: Path-scoped staging included all three new recovery/test files while leaving generated `output` files untracked. The export investigation is documentation only; no audio-mux implementation change is included.
+- **What didn't work**: No failed staging approach; no reset, force push, or commit amendment was needed.
+
+### 2026-10-09: Push blocked by unavailable GitHub authentication
+- **Feature/area**: Publishing the editor stability commit.
+- **Approaches tried**: Normal upstream push, then restored official checksum-verified portable ARM64 GitHub CLI to replace the missing configured credential helper.
+- **What worked**: Created commit `38b3290` with the stability source changes, tests, and investigation notes. The portable CLI was verified and extracted successfully.
+- **What didn't work**: Push failed because the configured GitHub CLI executable was absent. The restored CLI also had no usable authentication, so pushing still requires user sign-in. The initial checksum lookup needed byte-content decoding and line-ending normalization. No credentials were extracted, no force push was attempted, and generated output remains excluded.
+
+### 2026-10-16: Branch review and Scene control target synchronization
+- **Feature/area**: Reviewed `fix/app-instabilities` against `origin/master`; fixed stale Scene controls overwriting another clip's background and padding after unselected playhead movement.
+- **Approaches tried**: Full branch review, caller/lifetime tracing, and a session-only probe exercising the actual WinUI editor before and after the fix.
+- **What worked**: Track the clip represented by the controls, flush pending edits before changing that target, and synchronize on initialization, selection, playback/scrubbing, model edits, and reset. Suppress wallpaper-list population events and restore the active clip's image after committing pending input. The follow-up review found no remaining actionable findings.
+- **Validation**: Production ARM64 app build and responsive normal startup passed; 14 live Scene assertions and 118 targeted tests passed, with 2 opt-in decoder tests skipped. Removed temporary app hooks and verified the production assembly contains no probe.
+- **What didn't work**: Target capture alone did not synchronize the control values being captured. The first probe fixture omitted segment position recalculation; corrected it before establishing the baseline. Normal NuGet restore stalled on feed metadata; cached packages plus a session-local index routing missing package downloads through the configured proxy enabled validation without repository configuration changes.
+
+### 2026-10-16: Publishing Scene review fixes
+- **Feature/area**: Committing and publishing the reviewed Scene control synchronization changes.
+- **Approaches tried**: Explicit staging of the three editor source files and current archive, followed by a normal commit and upstream push.
+- **What worked**: The source changes match the already-validated review fix; path-scoped staging excludes the existing generated `output` files.
+- **What didn't work**: Not applicable; no new implementation approach was needed.
+
+### 2026-10-16: Summarizing branch stability changes
+- **Feature/area**: User-facing summary of the branch's UI disappearance, preview lifecycle, filmstrip, Scene editing, and other bug fixes; no application code changes.
+- **Approaches tried**: Compared the branch with `origin/master` and reconciled source behavior with the recorded investigations.
+- **What worked**: Separated implemented fixes from title/export enhancements and the investigation-only audio-mux timeout findings.
+- **What didn't work**: The original hardware-triggered blanking incident was not reproduced, so the summary does not claim every GPU-related disappearance is resolved.
+
+### 2026-10-16: Publishing the branch summary record
+- **Feature/area**: Publishing the documentation-only stability summary entry.
+- **Approaches tried**: Stage only the current archive, then use a normal commit and upstream push.
+- **What worked**: No application source changes were pending; explicit staging excludes generated `output` files.
+- **What didn't work**: Not applicable; no implementation changes were needed.
+
+### 2026-10-16: ARM64 Release build and usable local deployment
+- **Feature/area**: Built the current branch for local use; no application source changes.
+- **Approaches tried**: VS BuildTools ARM64 MSBuild Release build, loose development-package registration, then a self-contained per-user deployment with a Start-menu shortcut.
+- **What worked**: Restored the missing ARM64 Crossgen2 pack through the configured package proxy and built with the native runtime identifier. Copied the complete Release layout to `%LOCALAPPDATA%\Programs\Mixtri.Dev`, created `Mixtri (dev)` in the Start menu, and launched it. Verified matching app/Core binaries, ARM64 PE architecture, all seven bundled backgrounds, the persistent shortcut target, and a responsive app; left it running.
+- **What didn't work**: Cache-only restore initially lacked Crossgen2. Registration with `-DisableDevelopmentMode` rejected the loose package root; normal `Add-AppxPackage -Register` then failed with `0x80073CFF` because sideloading is disabled. Used the supported direct-executable deployment without changing system policy or touching Store installations.
+
+### 2026-10-16: Concurrent export/playback corruption diagnosis and architecture
+- **Feature/area**: Investigated the reported patterned preview during export and proposed fixes; left application code and the running editor unchanged.
+- **Approaches tried**: Traced decoder callbacks, frame/sample ownership, export/preview devices, caches, live export inputs, and current diagnostics; checked Microsoft's Win2D interop-lock and low-priority-device documentation.
+- **What worked**: Identified an unguarded non-Win2D `MediaPlayer.CopyFrameToVideoSurface` call on a Win2D surface, while export and preview use the shared device. The per-export semaphore does not coordinate that interop with preview. Recommended a scoped device lock at synchronous interop boundaries, a fully injected private low-priority export device, detached export inputs, bounded aggregate caches/in-flight samples, and playback-first scheduling, with process isolation as a further reliability boundary.
+- **What didn't work / limits**: Sharing a device is not itself invalid: Win2D calls are thread-safe, but external Direct3D access needs its synchronization contract. Existing software H.264 encoding does not remove GPU rendering/decoding. Current logs show a decode miss, not the exact corrupted command or a demonstrated device reset; the screenshot's specific cause still needs controlled concurrent pixel/completion diagnostics. Do not hold a global lock across an entire export or claim process isolation prevents adapter-wide resets.
+
+### 2026-10-16: Implementing isolated, playback-friendly export
+- **Feature/area**: Decoder interop, detached export inputs, private graphics ownership, bounded frame/context lifetimes, worker-process execution, and PR #114's super-resolution cancellation comment.
+- **Approaches tried**: Scoped surface/device synchronization; explicit device propagation through readers, compositors and text rendering; in-process concurrent stress; isolated-worker pixel comparisons; native decoder concurrency, cancellation, failure/crash, MP4/GIF and snapshot-mutation tests.
+- **What worked**: Export now runs only in a headless below-normal-priority worker with a private low-priority device and a detached snapshot. It yields to playback/scrubbing, retains at most three source contexts, disables sequential decoded-frame caching, and bounds encoder-held surfaces to three / 128 MiB. Source copies stay on their owner device, oversized cache entries cannot be disposed before return, repeated decoder-frame requests reuse the known surface, and surface teardown drains callbacks. Serialize EOS with deferred samples, cancel/drain producers, and detach native callbacks before disposing their owners. All three Windows AI initialization operations now use `AsTask(cancellationToken)`. Export completion no longer deletes media still used by the editor.
+- **Validation**: ARM64 Debug/Release builds passed; full suite passed with 1,447 tests and 3 existing skips. The deployed Release worker also passed both production-boundary integration cases, including pixel comparison, live-model mutation, active-render cancellation, missing media, forced process death and GIF flush. CI now builds the worker and enables those integration cases.
+- **What didn't work / limits**: Increasing the surface cap alone did not reliably fix native stalls; EOS could overtake deferred frames. Separate devices alone also did not make tight in-process concurrent rendering reliable, so there is deliberately no editor-process fallback and integration tests exercise the actual worker boundary. Initial native probes exposed uninitialized/redundant decoder reads; scope copying as a device transaction and reuse an already-delivered frame rather than issuing an identical paused seek. Adapter-wide resets and the exact user's original hardware incident were not forced.
+- **Local deployment**: Verified the versioned Release layout at `%LOCALAPPDATA%\Programs\Mixtri.Dev\builds\export-isolation-20261016` and updated the `Mixtri (dev)` Start-menu shortcut. Left the running older editor and its open project untouched; exit it and relaunch to use the new build.
+
+### 2026-10-16: Publishing export isolation and cancellation fixes
+- **Feature/area**: Publishing the validated export worker, graphics ownership fixes, regression tests, CI coverage, and PR #114 initialization cancellation fix.
+- **Approaches tried**: Explicitly stage the implementation, tests, workflow, specification, and current archive, then create a normal commit and upstream push.
+- **What worked**: The pending source matches the validated implementation; explicit file staging excludes generated `output` files and all local deployment artifacts.
+- **What didn't work**: Not applicable; no history rewriting or additional implementation changes were needed.
+
+### 2026-10-16: Full-solution ARM64 Release build and deployment
+- **Feature/area**: Built and deployed revision `6b9a70b` for local use; no application source changes.
+- **Approaches tried**: Built `Mixtri.sln` with VS MSBuild using Release/ARM64 and the native runtime identifier, then deployed the complete app layout into a new versioned per-user directory.
+- **What worked**: App, Core, and Tests compiled successfully. Verified deployed binary hashes, ARM64 executable architecture, all seven title backgrounds, and both Release worker integration tests. Updated `Mixtri (dev)` to `%LOCALAPPDATA%\Programs\Mixtri.Dev\builds\6b9a70b-arm64-release\Mixtri.App.exe`; launched it and verified a responsive `Mixtri Mini` window.
+- **What didn't work**: No new failures. Reused the supported self-contained deployment route instead of retrying the previously policy-blocked unsigned MSIX registration; no Store package or system policy was changed.
+
+### 2026-10-16: Live export stall at frame 288 - managed sample ownership
+- **Feature/area**: Native sample lifetime, export admission/backpressure, progress watchdog, and realistic export regressions.
+- **Approaches tried**: Inspected the running worker without cancelling it; captured a private heap, async waits and object counts. Replaced the fixed three-credit wait with nonblocking byte reservations, then tested an isolated copy of the actual saved project. Investigated the remaining reservation leak and retained the managed sample/event owner with its GPU surface.
+- **What worked**: The heap showed frame 288/1474 waiting for a zero-count semaphore with three retained surfaces but only one managed `MediaStreamSample` wrapper. CsWinRT event state follows that wrapper; native ownership alone did not preserve `Processed`. Each lease now roots the sample, unsubscribes its callback, and releases both together. Native input never waits on `Processed` credits; the 128 MiB byte budget fails explicitly instead of deadlocking. Added a two-minute no-progress watchdog and retained-surface peak diagnostics.
+- **Validation**: Forced-GC ownership/release tests and a 450-frame 2304x1456 regression passed. The actual saved-project copy completed all 1,474 frames including audio with peak retained surfaces of three; original file size/write time were unchanged. Full suite: 1,451 passed, 3 existing skips. Debug/Release builds passed; the deployed Release repeated the saved-project export successfully and passed worker cancellation/failure tests.
+- **What didn't work**: Removing the wait alone only moved the failure to frame 797 when leaked reservations filled the byte budget. Raising a frame limit cannot repair a lost release callback. The earlier 20-frame tests did not exercise GC and sustained native ownership. Do not substitute short/synthetic-only exports for a reported longer export.
+- **Deployment/privacy**: Updated `Mixtri (dev)` to the verified `%LOCALAPPDATA%\Programs\Mixtri.Dev\builds\export-stall-fix-20261016` layout without closing the user's editor. The obsolete instance must exit before relaunch. Deleted the private heap capture after extracting technical evidence; no recording/package content was added to the repository.
+
+### 2026-10-16: Publishing the verified export-stall correction
+- **Feature/area**: Publishing managed sample ownership, nonblocking frame reservations, watchdog, regression coverage, and related documentation.
+- **Approaches tried**: Explicit staging of the seven verified source/test/documentation files, followed by a normal commit and upstream push.
+- **What worked**: The pending implementation matches the validated correction; generated `output` files, local deployment layouts, and private diagnostics are excluded from the commit.
+- **What didn't work**: Not applicable; no history rewriting or additional source changes were needed.
+
+### 2026-10-16: CI reference encoding and PR review corrections
+- **Feature/area**: CI/native integration fixtures, high-priority blocked-worker cancellation, undo/redo pane preservation, and cursor-control ownership.
+- **Approaches tried**: Read CI run `39000472770` and PR #114 review details; traced the failing reference encode and control-pipe waits. Tested real unresponsive PowerShell child processes and exercised the actual WinUI editor with a session-only probe.
+- **What worked**: Baseline/fixture encodes now use workers as production does, preserving pixel comparisons instead of entering the unreliable in-process native encoder path. Native decoder concurrency checks validate twelve freshly copied frames rather than the cached priming surface. Preview writes have bounded, cancellation-aware waits; a separate cancellation watchdog kills an unresponsive worker independently of the writer, and pending I/O drains after shutdown. Title control synchronization no longer opens/selects its pane. Cursor controls follow the selected clip or global style, flush before selection changes, and preserve hidden override fields.
+- **Validation**: Full local ARM64 Release suite passed: 1,453 tests and 4 skips (including the opt-in saved-project case). Three hostile-worker cases passed: blocked Preview writes, no startup stdin/stdout, and explicit control-write timeout. Twelve live UI assertions passed; temporary app/project hooks were removed and the production assembly was checked for their absence.
+- **What didn't work**: CI's reference encode ran in the test process after preview work and failed with a GPU-device-suspended COMException; repeating that topology would preserve the failure risk. A cached frame-zero assertion also tested native priming rather than concurrent copies. MSTest requires exact exception types, while cancellation legitimately returns either OperationCanceledException or TaskCanceledException; the new tests check the cancellation contract rather than one subtype. No tests were disabled to address the CI failure.
+
+### 2026-10-16: Hosted CI software-rendering path
+- **Feature/area**: Follow-up to CI run `39002556799`, which still reported a suspended graphics device inside the long export worker after test-host fixture encoding was isolated.
+- **Approaches tried**: Kept the native-resolution/450-frame regression, explicitly selected a private WARP device, then bridged its output to Media Foundation through owned CPU BGRA samples instead of hardware D3D-surface input.
+- **What worked**: `ForceSoftwareRendering` is opt-in export state carried through the worker protocol and both MP4/GIF paths; normal exports retain the hardware default. Software MP4 samples retain their own pixel arrays until consumption and invert whole BGRA rows for Media Foundation's bottom-up layout. Hosted tests select WARP explicitly without removing pixel, frame-count, resolution, process, or cancellation assertions.
+- **What didn't work**: WARP render targets passed directly to the media pipeline's D3D-surface path stalled locally; selecting software rendering alone was insufficient. The CPU-buffer bridge is required for that mode. Device errors are not swallowed or turned into passing/skipped tests.
+- **Validation**: The complete local Release suite passed in the hosted configuration: 1,455 passed and 4 skips, including native-resolution sustained export, pixel/orientation comparisons, process cancellation and blocked-pipe regressions. Hardware rendering remains the default and is explicitly asserted by a regression test.
+
+### 2026-10-16: Renderer publication invalidates pending transitions
+- **Feature/area**: High-priority PR #114 renderer-generation review finding.
+- **Approaches tried**: Traced unchanged-style singleton lookup and decoder awaits, then used a session-only initialization gate and delayed frame source to orchestrate the exact overlap in a real WinUI editor.
+- **What worked**: Invalidate the primary renderer generation again immediately before publication, using the existing alternate-renderer disposal helper to also clear contexts acquired during initialization. Capture the generation before asynchronous compositor lookup and validate it after lookup and decoding, rather than adopting a new generation around a stale returned renderer.
+- **Validation**: Six live assertions passed: the old singleton remained available while initialization waited, publication advanced the generation and cleared alternate contexts, the pending transition discarded its decoded frame without touching the disposed renderer, and subsequent work rendered on the replacement. Removed every temporary source/project hook afterward.
+- **What didn't work**: Incrementing only at rebuild start cannot invalidate work that acquires the still-published renderer during initialization. Checking only after decoding also misses a swap between asynchronous compositor lookup and the caller's generation snapshot.

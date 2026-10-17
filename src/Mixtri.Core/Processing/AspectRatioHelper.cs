@@ -184,11 +184,12 @@ public static class AspectRatioHelper
     /// Computes the final encoder dimensions for an export, given the compositor's
     /// already-aspect-corrected output size and the user-selected resolution cap.
     /// The compositor's aspect ratio is preserved; dimensions are clamped within the
-    /// resolution bounds, never upscaled beyond the compositor's native size, and
-    /// floored to mod-16 for H.264 macroblock alignment.
+    /// resolution bounds, never upscaled beyond the compositor's native size unless
+    /// <paramref name="allowUpscale"/> is true, and floored to mod-16 for H.264 alignment.
     /// </summary>
     public static (int Width, int Height) ComputeExportDimensions(
-        int compositorWidth, int compositorHeight, VideoResolution resolution)
+        int compositorWidth, int compositorHeight, VideoResolution resolution,
+        bool allowUpscale = false)
     {
         // Degenerate inputs: return the smallest encoder-friendly size rather
         // than throwing — the encoder will produce a tiny but valid file.
@@ -197,10 +198,10 @@ public static class AspectRatioHelper
 
         var (maxW, maxH) = GetResolutionBounds(resolution);
 
-        // Never upscale: cap bounds at compositor's native size so a 720p
-        // recording exported "at 4K" stays at 720p instead of wasting bits.
-        int boundW = Math.Min(maxW, compositorWidth);
-        int boundH = Math.Min(maxH, compositorHeight);
+        // By default, a low-resolution recording exported "at 4K" stays at native
+        // size. MP4 export may opt in after its optional super-resolution probe succeeds.
+        int boundW = allowUpscale ? maxW : Math.Min(maxW, compositorWidth);
+        int boundH = allowUpscale ? maxH : Math.Min(maxH, compositorHeight);
 
         var (fitW, fitH) = FitWithinBounds(compositorWidth, compositorHeight, boundW, boundH);
 
@@ -209,9 +210,8 @@ public static class AspectRatioHelper
         // when the software encoder is in use). Aspect ratio is approximately
         // preserved — for 1080-tall outputs the drift is ~0.75% (1080 -> 1072),
         // which is imperceptible.
-        // Edge case: if the compositor itself is smaller than 16px on a side,
-        // honor "no upscale" by returning the (even-rounded) compositor size
-        // directly rather than padding up to 16.
+        // Edge case: if the fitted side is smaller than 16px, keep it even rather
+        // than padding up to 16.
         int outW = fitW < 16 ? Math.Max(2, fitW - (fitW % 2)) : (fitW / 16) * 16;
         int outH = fitH < 16 ? Math.Max(2, fitH - (fitH % 2)) : (fitH / 16) * 16;
         return (outW, outH);

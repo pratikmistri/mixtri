@@ -156,7 +156,8 @@ public static class MixtriPathRewriter
                     Add(v.CursorStyleOverride?.CustomImagePath);
                     break;
                 case TextSlideSegment slide:
-                    Add(slide.BackgroundImagePath);
+                    if (!TitleSlideImages.IsBundled(slide.BackgroundImagePath))
+                        Add(slide.BackgroundImagePath);
                     break;
                 case CameraSegment camera:
                     // Captured webcam media, not a decorative asset: dropping it on save
@@ -235,7 +236,8 @@ public static class MixtriPathRewriter
 
                 case TextSlideSegment slide:
                     // BackgroundImagePath is settable, so the segment can be updated in place.
-                    slide.BackgroundImagePath = ApplyOptional(slide.BackgroundImagePath, map);
+                    if (!TitleSlideImages.IsBundled(slide.BackgroundImagePath))
+                        slide.BackgroundImagePath = ApplyOptional(slide.BackgroundImagePath, map);
                     break;
 
                 case CameraSegment camera:

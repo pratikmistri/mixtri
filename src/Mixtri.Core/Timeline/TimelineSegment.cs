@@ -179,6 +179,12 @@ public enum SegmentAudioMode
 /// </summary>
 public record TextSlideSegment : TimelineSegment
 {
+    public string? AppearancePresetId { get; set; }
+    public bool Uppercase { get; set; }
+    // Zero preserves the motion of projects saved before chapter presets existed.
+    public SlideGradientMotion GradientMotion { get; set; } = SlideGradientMotion.OrganicWave;
+    [JsonIgnore]
+    public string DisplayText => Uppercase ? Text.ToUpperInvariant() : Text;
     private const double AutomaticTextRampSeconds = 0.6;
     private const double AutomaticTextRampDurationFraction = 0.45;
 
@@ -716,6 +722,8 @@ public record TextOverlaySegment : TimelineSegment
 /// <summary>
 /// Animation style for text slides and text overlays.
 /// </summary>
+public enum SlideGradientMotion { OrganicWave, SubtleDrift }
+
 public enum TextSlideAnimation
 {
     None,

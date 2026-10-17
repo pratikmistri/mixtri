@@ -114,6 +114,15 @@ The single most-churned area. The process is **PerMonitorV2**, which is the key 
 - **Always guard `MediaClip.CreateFromFileAsync`** — `video.mp4` is often corrupt/empty because
   `VideoWriter.FinalizeAsync` is intentionally non-fatal during recording. On failure
   ("The parameter is incorrect"), fall back to `project.Width/Height` and the `.frames/` JPEGs.
+- **Never block `MediaStreamSource.SampleRequested` on `MediaStreamSample.Processed` credits.**
+  The codec may need additional input before releasing retained samples. A fixed frame pool
+  creates a circular wait (confirmed in a live worker at frame 288). Let native pull requests
+  drive backpressure; reserve memory synchronously and fail explicitly if the byte budget is
+  exhausted. `Processed` releases ownership, not permission to produce the next requested frame.
+- **Retain the managed `MediaStreamSample` wrapper along with its surface until `Processed`.**
+  CsWinRT event state follows the managed wrapper, not just the native sample retained by the
+  encoder. Losing that wrapper can lose the release callback and leak surface reservations.
+  Keep both in the ownership lease and unsubscribe/release them together on consumption.
 
 ## Playbook: WinUI flyout/control initialization & XAML resource pitfalls
 

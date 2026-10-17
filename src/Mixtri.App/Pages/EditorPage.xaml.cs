@@ -185,7 +185,14 @@ public sealed partial class EditorPage : Page
         InitializeComponent();
         _graphicsDeviceManager = new EditorGraphicsDeviceManager(
             DispatcherQueue, RecoverGraphicsDeviceAsync, FlushPendingRenderAsync,
-            () => _pageUnloaded);
+            () => _pageUnloaded,
+            _ =>
+            {
+                if (_pageUnloaded) return;
+                EditorInfoBar.Message = "Graphics recovery failed. Save your work, then reopen the project to retry.";
+                EditorInfoBar.Severity = InfoBarSeverity.Error;
+                EditorInfoBar.IsOpen = true;
+            });
         _graphicsDeviceManager.Attach();
 
         // A CanvasControl recovers from GPU device loss on its own, and need not raise
@@ -248,6 +255,7 @@ public sealed partial class EditorPage : Page
         // Hide the in-place text editor while playing
         Preview.IsPlayingChanged += (_, playing) =>
         {
+            ExportVM.SetPreviewPlayback(playing);
             if (!playing) return;
             HideTextEditOverlay();
 
@@ -267,6 +275,7 @@ public sealed partial class EditorPage : Page
             {
                 Preview.PlayheadPosition = Timeline.PlayheadPosition;
                 ViewModel.Model.PlayheadPosition = Timeline.PlayheadPosition;
+                SyncSceneStyleControls();
                 if (_syncingTimelineFromPlayback)
                     return;
 
@@ -486,6 +495,7 @@ public sealed partial class EditorPage : Page
 
             // Stop playback to halt timer ticks
             Preview.Pause();
+            Preview.ClearFrame();
 
             // Abandon any preview init still awaiting the decoder open, so it disposes
             // rather than publishes whatever it built onto this dead page.
@@ -494,11 +504,11 @@ public sealed partial class EditorPage : Page
             // Dispose owned resources
             DisposeOffUiThread(_frameReader);
             _frameReader = null;
-            _previewRenderer?.Dispose();
+            TryDispose(_previewRenderer);
             _previewRenderer = null;
-            _textSlideRenderer?.Dispose();
+            TryDispose(_textSlideRenderer);
             _textSlideRenderer = null;
-            _transitionRenderer?.Dispose();
+            TryDispose(_transitionRenderer);
             _transitionRenderer = null;
             DisposeSegmentPreviews();
             DisposePrimaryStyleRenderers();
@@ -508,9 +518,13 @@ public sealed partial class EditorPage : Page
             _insertedAudioPlayer = null;
             _stretchedAudioPlayer?.Dispose();
             _stretchedAudioPlayer = null;
-            _webcamComposition?.Clips.Clear();
+            try { _webcamComposition?.Clips.Clear(); }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"webcam teardown failed: {ex}");
+            }
             _webcamComposition = null;
-            _lastWebcamFrame?.Dispose();
+            TryDispose(_lastWebcamFrame);
             _lastWebcamFrame = null;
             _compositorReady = false;
             _thumbnailGenerationId++; // cancel any in-flight thumbnail generation

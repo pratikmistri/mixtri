@@ -37,6 +37,7 @@ public sealed partial class EditorPage
     private async Task LoadAppendedTrackVisualsAsync()
     {
         var model = ViewModel.Model;
+        int generation = _previewInitGeneration;
         var primary = PrimaryVideoPath;
 
         var segs = model.Segments.OfType<VideoSegment>()
@@ -73,6 +74,8 @@ public sealed partial class EditorPage
 
                 // Audio waveforms (system + mic), spanning the file's audio duration
                 var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+                if (_pageUnloaded || generation != _previewInitGeneration
+                    || !ReferenceEquals(model, ViewModel.Model)) return;
                 visual.SystemWaveform = sys;
                 visual.MicWaveform = mic;
                 visual.WaveformDurationSeconds = durSec > 0
@@ -204,11 +207,11 @@ public sealed partial class EditorPage
     /// <summary>
     /// Generates filmstrip thumbnails for the primary recording and then for each
     /// distinct appended recording's source file, so every video segment shows its
-    /// own frames. Runs sequentially so the shared generation id never cancels an
-    /// earlier still-running pass.
+    /// own frames. Sources share the project/device lifetime, not a per-strip generation.
     /// </summary>
     private async Task GenerateAllTimelineThumbnailsAsync(string? primaryPath, int fps)
     {
+        int generation = _thumbnailGenerationId;
         // Fire-and-forget, so anything thrown here would vanish and leave the track blank
         // with no indication why.
         try
@@ -222,7 +225,8 @@ public sealed partial class EditorPage
                 }
                 finally
                 {
-                    if (string.Equals(_thumbnailsInFlightForPath, primaryPath,
+                    if (generation == _thumbnailGenerationId
+                        && string.Equals(_thumbnailsInFlightForPath, primaryPath,
                             StringComparison.OrdinalIgnoreCase))
                     {
                         _thumbnailsInFlightForPath = null;
@@ -240,7 +244,8 @@ public sealed partial class EditorPage
                     "sources can get a strip.");
             }
 
-            await GenerateAppendedThumbnailsAsync(primaryPath);
+            if (!_pageUnloaded && generation == _thumbnailGenerationId)
+                await GenerateAppendedThumbnailsAsync(primaryPath);
         }
         catch (Exception ex)
         {
@@ -248,6 +253,7 @@ public sealed partial class EditorPage
                 $"[EditorPage] Filmstrip generation failed for '{primaryPath}': {ex}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
                 $"generation failed for '{primaryPath}': {ex.GetType().Name}: {ex.Message}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
         }
     }
 
@@ -258,6 +264,7 @@ public sealed partial class EditorPage
     private async Task GenerateAppendedThumbnailsAsync(string? primaryPath)
     {
         var model = ViewModel.Model;
+        int generation = _thumbnailGenerationId;
         var files = model.Segments.OfType<VideoSegment>()
             .Where(v => !string.IsNullOrEmpty(v.VideoFilePath) &&
                         !string.Equals(v.VideoFilePath, primaryPath, StringComparison.OrdinalIgnoreCase))
@@ -267,8 +274,7 @@ public sealed partial class EditorPage
 
         foreach (var (file, segmentFps) in files)
         {
-            if (!File.Exists(file)) continue;
-
+            if (_pageUnloaded || generation != _thumbnailGenerationId) return;
             // Claim the file before awaiting: two overlapping initialisations would
             // otherwise both build the same strip, and the loser's bitmaps would be handed
             // to the timeline after the winner's and leak the ones it replaced.
@@ -281,15 +287,18 @@ public sealed partial class EditorPage
 
                 // A pass cancelled by a newer generation applied nothing, so the claim must
                 // be released or this source would never get a strip again.
-                if (!applied) _thumbnailsDoneForFiles.Remove(file);
+                if (!applied && generation == _thumbnailGenerationId)
+                    _thumbnailsDoneForFiles.Remove(file);
             }
             catch (Exception ex)
             {
-                _thumbnailsDoneForFiles.Remove(file);
+                if (generation == _thumbnailGenerationId)
+                    _thumbnailsDoneForFiles.Remove(file);
                 System.Diagnostics.Debug.WriteLine(
                     $"[EditorPage] Appended thumbnail generation failed for {file}: {ex.Message}");
                 Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
                     $"appended generation failed for '{file}': {ex.GetType().Name}: {ex.Message}");
+                _graphicsDeviceManager.RecoverFromRenderFailure(ex);
             }
         }
     }
@@ -311,7 +320,9 @@ public sealed partial class EditorPage
     /// </returns>
     private async Task<bool> GenerateTimelineThumbnailsAsync(string filePath, bool isPrimary, int fps)
     {
-        var generationId = ++_thumbnailGenerationId;
+        // Different sources may build concurrently. Only a project/device teardown
+        // invalidates their shared lifetime; starting another strip must not cancel it.
+        var generationId = _thumbnailGenerationId;
 
         // Thumbnail size: match video track height (60px row minus padding)
         const int thumbH = 52;
@@ -322,10 +333,11 @@ public sealed partial class EditorPage
         // The MP4 is unreadable — unfinalized, or finalization failed. The captured JPEGs
         // are still there in exactly that case and the preview is already using them, so
         // the filmstrip must not be the one surface that gives up.
-        strip ??= await VideoThumbnailExtractor.ExtractFromCapturedFramesAsync(
-            filePath, fps, thumbH, device);
+        if (generationId == _thumbnailGenerationId && !_pageUnloaded)
+            strip ??= await VideoThumbnailExtractor.ExtractFromCapturedFramesAsync(
+                filePath, fps, thumbH, device);
 
-        if (strip is null || generationId != _thumbnailGenerationId)
+        if (strip is null || generationId != _thumbnailGenerationId || _pageUnloaded)
         {
             // Both outcomes leave the filmstrip empty, but for very different reasons:
             // a null strip means extraction failed, whereas a generation mismatch means a
@@ -346,42 +358,45 @@ public sealed partial class EditorPage
         // nearest earlier tile instead — slightly stale footage reads as continuous, an
         // empty slot reads as a broken timeline.
         var thumbnails = strip.Thumbnails;
-        int thumbW = Math.Max(1, (int)(thumbH * strip.AspectRatio));
-        for (int i = 0; i < thumbnails.Length; i++)
+        bool transferred = false;
+        try
         {
-            if (thumbnails[i] is not null || i == 0) continue;
-            if (thumbnails[i - 1] is not { } previous) continue;
+            int thumbW = Math.Max(1, (int)(thumbH * strip.AspectRatio));
+            for (int i = 0; i < thumbnails.Length; i++)
+            {
+                if (thumbnails[i] is not null || i == 0) continue;
+                if (thumbnails[i - 1] is not { } previous) continue;
 
-            var repeat = Win2DUtils.CreateRenderTarget(device, thumbW, thumbH, 96, "timeline thumbnail repeat");
-            using (var session = repeat.CreateDrawingSession())
-                session.DrawImage(previous, new Rect(0, 0, thumbW, thumbH));
-            thumbnails[i] = repeat;
+                var repeat = Win2DUtils.CreateRenderTarget(device, thumbW, thumbH, 96, "timeline thumbnail repeat");
+                thumbnails[i] = repeat;
+                using (var session = repeat.CreateDrawingSession())
+                    session.DrawImage(previous, new Rect(0, 0, thumbW, thumbH));
+            }
+
+            var owned = new CanvasBitmap[thumbnails.Length];
+            for (int i = 0; i < thumbnails.Length; i++) owned[i] = thumbnails[i]!;
+
+            // TimelineControl takes ownership even if invalidating its canvas throws.
+            transferred = true;
+            if (isPrimary)
+            {
+                Timeline.SetThumbnails(owned, strip.IntervalSeconds, strip.AspectRatio, filePath);
+                _thumbnailsCompletedForPath = filePath;
+                Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
+                    $"primary strip installed for '{filePath}' ({owned.Length} tiles)");
+            }
+            else
+            {
+                Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
+            }
+
+            return true;
         }
-
-        var owned = new CanvasBitmap[thumbnails.Length];
-        for (int i = 0; i < thumbnails.Length; i++) owned[i] = thumbnails[i]!;
-
-        // TimelineControl takes ownership of the bitmaps.
-        if (isPrimary)
+        finally
         {
-            Timeline.SetThumbnails(owned, strip.IntervalSeconds, strip.AspectRatio, filePath);
-            // Only a pass that ran to completion may mark the strip done; a cancelled one
-            // would otherwise pin a half-filled filmstrip permanently.
-            _thumbnailsCompletedForPath = filePath;
-
-            // Logged so a "no thumbnails ... (primary '')" line can be told apart from a real
-            // failure: that miss is also emitted by the first draw, which legitimately happens
-            // before this asynchronous pass finishes. A miss followed by this line is benign;
-            // a miss with no matching install is the bug.
-            Mixtri.Core.Diagnostics.DiagLog.Write("Filmstrip",
-                $"primary strip installed for '{filePath}' ({owned.Length} tiles)");
+            if (!transferred)
+                foreach (var thumbnail in thumbnails) TryDispose(thumbnail);
         }
-        else
-        {
-            Timeline.SetThumbnailsForFile(filePath, owned, strip.IntervalSeconds, strip.AspectRatio);
-        }
-
-        return true;
     }
 
     private TimelineMapper? EnsureTimelineMapper()
@@ -570,6 +585,10 @@ public sealed partial class EditorPage
             }
 
             UpdateZoomPanelVisibility();
+            SyncSceneStyleControls(force: true);
+
+            if (SelectedSlide() is { } selectedSlide)
+                SyncTextSlideControls(selectedSlide);
 
             // Undo/redo and every undoable edit funnel through here, which makes this the one
             // place that reliably sees the timeline gain its first segment or lose its last.
@@ -617,6 +636,8 @@ public sealed partial class EditorPage
 
     private void OnSegmentSelected(object? sender, string? segmentId)
     {
+        _styleDebouncer?.Flush();
+        _cursorDebouncer?.Flush();
         _selectedPrimarySegmentId = segmentId;
 
         // Show the text slide panel only when a text slide is selected; for a
@@ -631,17 +652,10 @@ public sealed partial class EditorPage
         else
             HideTextSlidePanel();
 
-        // Reflect the selected video segment's effective frame style + cursor in the
-        // flyout controls, so editing per-segment style starts from its current state.
-        if (SelectedVideoSegment is { } vseg)
-        {
-            var global = ProjectService.Instance.CurrentComposition;
-            if (global is not null)
-            {
-                SyncStyleControlsToConfig(vseg.FrameStyleOverride ?? global.Background);
-                SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
-            }
-        }
+        SyncSceneStyleControls(force: true);
+
+        var global = ProjectService.Instance.CurrentComposition;
+        SyncCursorControlsToConfig(SelectedVideoSegment?.CursorStyleOverride ?? global.Cursor);
     }
 
     private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e) =>
@@ -905,7 +919,7 @@ public sealed partial class EditorPage
         // InitializeStyleControls only runs when there is a project to initialise from, so
         // without this the Scene pane would keep displaying the discarded take's numbers while
         // the composition behind them has already gone back to defaults.
-        SyncStyleControlsToConfig(ProjectService.Instance.CurrentComposition.Background);
+        SyncSceneStyleControls(force: true);
 
         UpdateEmptyStateVisibility();
     }
@@ -1547,6 +1561,8 @@ public sealed partial class EditorPage
 
                 return (sysWf, micWf);
             });
+
+            if (_pageUnloaded || initGeneration != _previewInitGeneration) return;
 
             if (systemWaveform is { Length: > 0 })
                 ViewModel.Model.SystemAudioWaveformSamples = systemWaveform;

@@ -170,7 +170,8 @@ public sealed partial class EditorPage
         var config = ProjectService.Instance.CurrentComposition;
         if (config is null) return;
 
-        var cursorType = ReadCursorTypeFromControls(config.Cursor.Type);
+        var currentCursor = SelectedVideoSegment?.CursorStyleOverride ?? config.Cursor;
+        var cursorType = ReadCursorTypeFromControls(currentCursor.Type);
 
         string color = "#FFFFFF";
         foreach (var child in CursorColorPanel.Children)
@@ -182,7 +183,7 @@ public sealed partial class EditorPage
             }
         }
 
-        var newCursor = config.Cursor with
+        var newCursor = currentCursor with
         {
             Type = cursorType,
             Scale = (float)CursorSizeSlider.Value,
@@ -224,10 +225,10 @@ public sealed partial class EditorPage
         // Load system wallpapers (async). Pass the project's currently-selected
         // background image so a custom path from a reopened project is merged
         // into the grid and selection survives the async load.
-        _ = LoadSystemWallpapersAsync(config.Background.BackgroundImagePath);
+        var background = SceneVideoSegment?.FrameStyleOverride ?? config.Background;
+        _ = LoadSystemWallpapersAsync(background.BackgroundImagePath);
 
-        // Sync controls to current config, suppressing change events
-        SyncStyleControlsToConfig(config.Background);
+        SyncSceneStyleControls(force: true);
     }
 
     private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
@@ -249,6 +250,8 @@ public sealed partial class EditorPage
                 .ToList();
         });
 
+        _styleDebouncer?.Flush();
+
         // Preserve any custom (non-system) paths the user already picked while
         // the system load was in flight — otherwise we'd silently drop them.
         var existingCustom = (_wallpaperPaths ?? new List<string>())
@@ -264,6 +267,7 @@ public sealed partial class EditorPage
 
         _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
 
+        using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
         WallpaperGrid.Items.Clear();
         WallpaperGrid.Items.Add(BuildAddWallpaperTile());
         foreach (var path in _wallpaperPaths)
@@ -274,19 +278,14 @@ public sealed partial class EditorPage
         // After the async load completes the synchronous SyncStyleControlsToConfig
         // call ran before the grid was populated; re-apply selection now that
         // the items exist so the user sees the active wallpaper highlighted.
-        // Prefer the project's current background image (it may have changed
-        // since the load started — e.g. the user picked a wallpaper while the
-        // system enumeration was still running) and fall back to the initial
-        // path passed in.
-        var currentImagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
-        var targetPath = !string.IsNullOrEmpty(currentImagePath) ? currentImagePath : initialCustomPath;
+        var targetPath = _sceneStyleControlsTarget?.FrameStyleOverride?.BackgroundImagePath
+            ?? ProjectService.Instance.CurrentComposition.Background.BackgroundImagePath;
         if (!string.IsNullOrEmpty(targetPath))
         {
             int idx = _wallpaperPaths.FindIndex(p =>
                 string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
-                using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
                 WallpaperGrid.SelectedIndex = idx + 1;
             }
         }
@@ -355,6 +354,23 @@ public sealed partial class EditorPage
         };
     }
 
+    private VideoSegment? _sceneStyleControlsTarget;
+    private bool _sceneStyleControlsInitialized;
+
+    private void SyncSceneStyleControls(bool force = false)
+    {
+        if (!_sceneStyleControlsInitialized && !force) return;
+        var target = SceneVideoSegment;
+        if (!force && ReferenceEquals(target, _sceneStyleControlsTarget)) return;
+
+        // Commit controls to their old target before replacing them with the new clip's values.
+        _styleDebouncer?.Flush();
+        _sceneStyleControlsTarget = target;
+        _sceneStyleControlsInitialized = true;
+        SyncStyleControlsToConfig(
+            target?.FrameStyleOverride ?? ProjectService.Instance.CurrentComposition.Background);
+    }
+
     private void SyncStyleControlsToConfig(BackgroundStyle bg)
     {
         using var _ = SuppressScope.Enter(ref _suppressStyleEvents);
@@ -383,16 +399,13 @@ public sealed partial class EditorPage
             ColorPanel.Visibility = bg.Type is not BackgroundType.Blur and not BackgroundType.Image
                 ? Visibility.Visible : Visibility.Collapsed;
 
-            if (isGradient)
-            {
-                var endColor = ParseHexColor(bg.GradientEndColor);
-                GradEndColorPicker.Color = endColor;
-                GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
-                GradEndColorText.Text = bg.GradientEndColor;
-                GradAngleSlider.Value = bg.GradientAngle;
-            }
+            var endColor = ParseHexColor(bg.GradientEndColor);
+            GradEndColorPicker.Color = endColor;
+            GradEndColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(endColor);
+            GradEndColorText.Text = bg.GradientEndColor;
+            GradAngleSlider.Value = bg.GradientAngle;
 
-            if (isImage && _wallpaperPaths is not null && !string.IsNullOrEmpty(bg.BackgroundImagePath))
+            if (_wallpaperPaths is not null)
             {
                 int wpIdx = _wallpaperPaths.FindIndex(p =>
                     string.Equals(p, bg.BackgroundImagePath, StringComparison.OrdinalIgnoreCase));
@@ -745,14 +758,23 @@ public sealed partial class EditorPage
 
     private void ScheduleStyleUpdate()
     {
+        // Capture both the values and the target before selection/playback can change.
+        _pendingSceneStyle = (BuildBackgroundStyleFromControls(), _sceneStyleControlsTarget);
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
         _styleDebouncer ??= new Debouncer(() =>
         {
-            var bg = BuildBackgroundStyleFromControls();
-            ApplyBackgroundStyle(bg);
+            if (_pendingSceneStyle is not { } pending) return;
+            _pendingSceneStyle = null;
+            if (pending.Segment is not null && !ViewModel.Model.Segments.Contains(pending.Segment)) return;
+            ApplyBackgroundStyle(pending.Style, pending.Segment);
         });
         _styleDebouncer.Schedule();
     }
+
+    private (BackgroundStyle Style, VideoSegment? Segment)? _pendingSceneStyle;
+
+    private VideoSegment? SceneVideoSegment => SceneStyleTarget.Resolve(
+        ViewModel.Model, _selectedPrimarySegmentId, Timeline.PlayheadPosition);
 
     private BackgroundStyle BuildBackgroundStyleFromControls()
     {
@@ -778,7 +800,8 @@ public sealed partial class EditorPage
                 // Wallpaper list hasn't finished loading yet (or selection was
                 // cleared) — preserve the project's currently-applied image so a
                 // background sync from another control doesn't blank it out.
-                imagePath = ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
+                imagePath = _sceneStyleControlsTarget?.FrameStyleOverride?.BackgroundImagePath
+                    ?? ProjectService.Instance.CurrentComposition?.Background.BackgroundImagePath;
             }
         }
 
@@ -890,7 +913,8 @@ public sealed partial class EditorPage
         var wantBg = seg.FrameStyleOverride ?? global.Background;
         var wantCursor = seg.CursorStyleOverride ?? global.Cursor;
 
-        if (Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
+        if (_compositorReady && _previewRenderer is not null
+            && Equals(wantBg, _primaryRenderBackground) && Equals(wantCursor, _primaryRenderCursor))
             return;
 
         // Rebuild FOR THIS SEGMENT. Letting the rebuild re-derive the style from the
@@ -905,15 +929,21 @@ public sealed partial class EditorPage
 
     private void ApplyBackgroundStyle(BackgroundStyle bg)
     {
+        _styleDebouncer?.Stop();
+        _pendingSceneStyle = null;
+        ApplyBackgroundStyle(bg, SceneVideoSegment);
+    }
+
+    private void ApplyBackgroundStyle(BackgroundStyle bg, VideoSegment? target)
+    {
         // Mark preset as Custom if it no longer matches
         _suppressStyleEvents = true;
         PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
         _suppressStyleEvents = false;
 
-        // Frame style is per-segment: when a video segment is selected, store the
-        // override on it and rebuild only that segment's renderer. Otherwise update
-        // the global config so segments without an override follow it.
-        if (SelectedVideoSegment is { } seg)
+        // Use the selected clip, or the visible video when selection is cleared.
+        // Otherwise an existing clip override masks every edit to the global style.
+        if (target is { } seg)
         {
             seg.FrameStyleOverride = bg;
             _ = RebuildForSegmentStyleChangeAsync(seg);
@@ -978,7 +1008,7 @@ public sealed partial class EditorPage
         CompositionConfig config, VideoSegment? forSegment = null)
     {
         var project = ProjectService.Instance.CurrentProject;
-        if (project is null) return;
+        if (_pageUnloaded || project is null) return;
 
         // A rebuild ends by re-rendering, and rendering can ask for another rebuild, so
         // this must not recurse. Requests that arrive mid-rebuild are coalesced rather
@@ -1026,9 +1056,8 @@ public sealed partial class EditorPage
         var effective = config;
         if (activePrimary?.FrameStyleOverride is { } bg) effective = effective with { Background = bg };
         if (activePrimary?.CursorStyleOverride is { } cur) effective = effective with { Cursor = cur };
-        _primaryRenderBackground = effective.Background;
-        _primaryRenderCursor = effective.Cursor;
-        _primaryRendererSegmentId = activePrimary?.Id;
+        var background = effective.Background;
+        var cursor = effective.Cursor;
 
         MouseRecordingData? mouseData = null;
         if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
@@ -1051,14 +1080,14 @@ public sealed partial class EditorPage
         // _primaryPreviewStateGeneration so any transition compose already in flight
         // against the OLD singleton detects this rebuild instead of using it past disposal.
         DisposePrimaryStyleRenderers();
-
-        _compositorReady = false;
-        _previewRenderer?.Dispose();
+        int generation = _primaryPreviewStateGeneration;
+        int initGeneration = _previewInitGeneration;
+        PreviewRenderer? renderer = new PreviewRenderer();
+        bool rebuilt = false;
 
         try
         {
-            _previewRenderer = new PreviewRenderer();
-            await _previewRenderer.InitializeAsync(
+            await renderer.InitializeAsync(
                 mouseData, effective,
                 project.Width > 0 ? project.Width : 1920,
                 project.Height > 0 ? project.Height : 1080,
@@ -1068,20 +1097,42 @@ public sealed partial class EditorPage
                 project.CropOffsetY,
                 project.DpiScale);
 
-            // Re-sync zoom state from the model. The new compositor has just regenerated
-            // auto-zoom from the raw mouse data, so this has to run unconditionally —
-            // an empty keyframe list and an empty suppression set are both meaningful.
-            SyncZoomStateToRenderer();
+            // A project reload or recovery may finish while initialization awaits.
+            // Never publish this renderer onto, or dispose resources owned by, that run.
+            if (_pageUnloaded || generation != _primaryPreviewStateGeneration
+                || initGeneration != _previewInitGeneration
+                || !ReferenceEquals(project, ProjectService.Instance.CurrentProject))
+                return;
+
+            // Synchronize the candidate before publishing or disposing the usable renderer.
+            EditorTimelineMediator.SyncZoomStateToRenderer(ViewModel.Model, renderer, PrimaryVideoPath);
+            // Transitions may have acquired the old renderer while initialization awaited.
+            // Invalidate them and any alternate contexts built during that interval.
+            DisposePrimaryStyleRenderers();
+            var previous = _previewRenderer;
+            _previewRenderer = renderer;
+            renderer = null;
+            TryDispose(previous);
+            _primaryRenderBackground = background;
+            _primaryRenderCursor = cursor;
+            _primaryRendererSegmentId = activePrimary?.Id;
 
             _compositorReady = true;
+            rebuilt = true;
         }
-        catch
+        catch (Exception ex)
         {
-            _previewRenderer?.Dispose();
-            _previewRenderer = null;
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"scene renderer rebuild failed: {ex}");
+            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+        }
+        finally
+        {
+            TryDispose(renderer);
         }
 
         // Re-render at current playhead position
+        if (_pageUnloaded || initGeneration != _previewInitGeneration) return;
+        if (_isRendering && !rebuilt) return;
         _lastRenderedFrameIndex = -1;
         var position = Timeline.PlayheadPosition;
         await UpdatePreviewFrameAsync(position, force: true);

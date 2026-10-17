@@ -1027,7 +1027,7 @@ public sealed partial class EditorPage
 
     /// <summary>
     /// Populates <see cref="OverlayPresets"/> from <see cref="TextOverlayPresets.All"/>, one
-    /// tile per preset showing its glyph and name — mirrors <see cref="BuildGradientPresetsIfNeeded"/>'s
+    /// tile per preset showing its glyph and name — mirrors <see cref="BuildSlideAppearancePresetsIfNeeded"/>'s
     /// tile-construction approach for the text slide pane's gradient presets.
     /// </summary>
     private void BuildOverlayPresetsIfNeeded()
@@ -1096,7 +1096,7 @@ public sealed partial class EditorPage
 
     private void SlideTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_selectedTextSlideId is null) return;
+        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
         var slide = ViewModel.Model.Segments
             .OfType<TextSlideSegment>()
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
@@ -1228,9 +1228,15 @@ public sealed partial class EditorPage
     {
         if (PropertiesPanel is null) return;
 
-        _suppressSlideEvents = true;
-
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
+        SyncTextSlideControls(slide);
+        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
+    }
+
+    private void SyncTextSlideControls(TextSlideSegment slide)
+    {
+        if (PropertiesPanel is null) return;
+        using var suppression = SuppressScope.Enter(ref _suppressSlideEvents);
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -1240,6 +1246,9 @@ public sealed partial class EditorPage
         // Formatting toggles
         SlideBoldToggle.IsChecked = slide.IsBold;
         SlideItalicToggle.IsChecked = slide.IsItalic;
+        PropertiesPanel.TextSlide.SlideUppercaseToggle.IsChecked = slide.Uppercase;
+        PropertiesPanel.TextSlide.SlideGradientMotionCombo.SelectedIndex =
+            slide.GradientMotion == SlideGradientMotion.SubtleDrift ? 0 : 1;
         SlideAlignSegmented.SelectedIndex = slide.TextAlignment switch
         {
             SlideTextAlignment.Left => 0,
@@ -1279,15 +1288,11 @@ public sealed partial class EditorPage
         }
 
         SlideImagePathText.Text = string.IsNullOrEmpty(slide.BackgroundImagePath)
-            ? "No image selected" : System.IO.Path.GetFileName(slide.BackgroundImagePath);
+            ? "No image selected" : System.IO.Path.GetFileName(TitleSlideImages.Resolve(slide.BackgroundImagePath)) ?? "Unavailable image";
 
-        BuildGradientPresetsIfNeeded();
+        BuildSlideAppearancePresetsIfNeeded();
+        SyncSlideAppearanceSelection(slide);
         UpdateSlideBgPanels(slide.BackgroundType);
-
-        _suppressSlideEvents = false;
-
-        // Reveal the text slide panel so properties are immediately editable on selection.
-        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
     }
 
     private void SyncTextSlideWindowControls(TextSlideSegment slide)
@@ -1503,58 +1508,115 @@ public sealed partial class EditorPage
         RefreshSlidePreview();
     }
 
-    private bool _slideGradientPresetsBuilt;
+    private bool _slideAppearancePresetsBuilt;
 
-    private void BuildGradientPresetsIfNeeded()
+    private void BuildSlideAppearancePresetsIfNeeded()
     {
-        if (_slideGradientPresetsBuilt) return;
-        _slideGradientPresetsBuilt = true;
+        if (_slideAppearancePresetsBuilt) return;
+        _slideAppearancePresetsBuilt = true;
 
-        foreach (var preset in Mixtri.Core.Settings.DefaultBrandPresets.All)
+        foreach (var preset in TextSlidePresets.All)
         {
+            // Aspect-aware endpoints match the 16:9 slide renderer, rather than forcing
+            // every preview into a top-left/bottom-right diagonal.
+            double angle = preset.GradientAngle * Math.PI / 180;
+            double radius = Math.Sqrt(16 * 16 + 9 * 9) / 2;
             var brush = new Microsoft.UI.Xaml.Media.LinearGradientBrush
             {
-                StartPoint = new Windows.Foundation.Point(0, 0),
-                EndPoint = new Windows.Foundation.Point(1, 1),
+                StartPoint = new Windows.Foundation.Point(.5 - radius * Math.Cos(angle) / 16, .5 - radius * Math.Sin(angle) / 9),
+                EndPoint = new Windows.Foundation.Point(.5 + radius * Math.Cos(angle) / 16, .5 + radius * Math.Sin(angle) / 9),
             };
             brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
             { Color = ParseHexColor(preset.BackgroundColor), Offset = 0 });
             brush.GradientStops.Add(new Microsoft.UI.Xaml.Media.GradientStop
             { Color = ParseHexColor(preset.GradientEndColor), Offset = 1 });
 
-            var tile = new Border
+            Microsoft.UI.Xaml.Media.Brush background = brush;
+            if (preset.ImageName is not null)
             {
-                Width = 56,
-                Height = 40,
-                CornerRadius = new CornerRadius(6),
-                Background = brush,
-                Tag = preset,
-                BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
-                BorderThickness = new Thickness(1),
+                var path = TitleSlideImages.Resolve(TitleSlideImages.Prefix + preset.ImageName)!;
+                background = new Microsoft.UI.Xaml.Media.ImageBrush
+                {
+                    ImageSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path)),
+                    Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+                };
+            }
+
+            var preview = new Border
+            {
+                Width = 92, Height = 52,
+                CornerRadius = new CornerRadius(4),
+                Background = background,
+                Child = new TextBlock
+                {
+                    Text = preset.Uppercase ? "AA" : "Aa",
+                    FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(preset.FontFamily),
+                    FontSize = preset.FontSize / 5,
+                    FontWeight = preset.IsBold ? Microsoft.UI.Text.FontWeights.Bold : Microsoft.UI.Text.FontWeights.Normal,
+                    Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(ParseHexColor(preset.TextColor)),
+                    HorizontalAlignment = preset.Alignment == SlideTextAlignment.Left ? HorizontalAlignment.Left : HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(10, 0, 10, 0),
+                },
             };
-            ToolTipService.SetToolTip(tile, preset.Name);
-            SlideGradientPresets.Items.Add(tile);
+            var tile = new StackPanel { Width = 92, Spacing = 4, Tag = preset };
+            tile.Children.Add(preview);
+            tile.Children.Add(new TextBlock { Text = preset.Name, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center });
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(tile, preset.Name);
+            ToolTipService.SetToolTip(tile, $"{preset.Name} · {preset.FontFamily} · {preset.FontSize}px");
+            SlideAppearancePresets.Items.Add(tile);
         }
+
+        var custom = new StackPanel { Width = 92, Spacing = 4 };
+        custom.Children.Add(new Border
+        {
+            Width = 92, Height = 52, CornerRadius = new CornerRadius(4),
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["ControlFillColorDefaultBrush"],
+            Child = new FontIcon { Glyph = "\uE713", FontSize = 22 },
+        });
+        custom.Children.Add(new TextBlock { Text = "Custom", FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center });
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(custom, "Custom title slide style");
+        ToolTipService.SetToolTip(custom, "Customize fonts, colors and background");
+        SlideAppearancePresets.Items.Add(custom);
     }
 
-    private void SlideGradientPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void SyncSlideAppearanceSelection(TextSlideSegment slide)
     {
-        if (_suppressSlideEvents) return;
-        if (SlideGradientPresets.SelectedItem is not Border { Tag: Mixtri.Core.Settings.BrandPreset preset }) return;
+        var preset = TextSlidePresets.Selected(slide);
+        SlideAppearancePresets.SelectedItem = SlideAppearancePresets.Items.OfType<StackPanel>()
+            .FirstOrDefault(item => ReferenceEquals(item.Tag, preset));
+        PropertiesPanel.TextSlide.SlideCustomAppearancePanel.Visibility =
+            preset is null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SlideAppearancePreset_Click(object sender, ItemClickEventArgs e)
+    {
+        if (_suppressSlideEvents || e.ClickedItem is not StackPanel tile) return;
         var slide = SelectedSlide();
         if (slide is null) return;
-
-        _suppressSlideEvents = true;
-        slide.BackgroundColor = preset.BackgroundColor;
-        slide.GradientEndColor = preset.GradientEndColor;
-        slide.GradientAngle = preset.GradientAngle;
-
-        UpdateSlideColorSwatch(SlideBgColorSwatch, SlideBgColorText, SlideBgColorPicker, slide.BackgroundColor);
-        UpdateSlideColorSwatch(SlideGradEndColorSwatch, SlideGradEndColorText, SlideGradEndColorPicker, slide.GradientEndColor);
-        SlideGradAngleSlider.Value = slide.GradientAngle;
-        _suppressSlideEvents = false;
-
+        // Flush a pending timing drag before changing/syncing the controls.
+        _slideTextWindowDebouncer?.Flush();
+        ViewModel.UndoRedoManager.Execute(new ApplyTextSlidePresetOperation(slide.Id, tile.Tag as TextSlidePreset));
+        ShowTextSlidePanel(slide);
         RefreshSlidePreview();
+    }
+
+    private void SlideUppercase_Click(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSlideEvents || SelectedSlide() is not { } slide) return;
+        slide.Uppercase = PropertiesPanel.TextSlide.SlideUppercaseToggle.IsChecked == true;
+        RefreshSlidePreview();
+    }
+
+    private void SlideGradientMotion_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSlideEvents || SelectedSlide() is not { } slide) return;
+        if (PropertiesPanel.TextSlide.SlideGradientMotionCombo.SelectedItem is ComboBoxItem item &&
+            Enum.TryParse<SlideGradientMotion>(item.Tag?.ToString(), out var motion))
+        {
+            slide.GradientMotion = motion;
+            RefreshSlidePreview();
+        }
     }
 
     private async void ChooseSlideImage_Click(object sender, RoutedEventArgs e)

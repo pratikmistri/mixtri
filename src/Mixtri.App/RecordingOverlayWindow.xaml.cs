@@ -78,6 +78,10 @@ public sealed partial class RecordingOverlayWindow : Window
         ExtendsContentIntoTitleBar = true;
         Controls.OverlayWindowBase.ConfigureBorderlessAlwaysOnTopPresenter(AppWindow);
 
+        // The pill is transient chrome; the taskbar button (if any) belongs to the
+        // main window, which stays minimized only when recording began from it.
+        AppWindow.IsShownInSwitchers = false;
+
         // Exclude overlay from screen capture
         NativeMethods.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
