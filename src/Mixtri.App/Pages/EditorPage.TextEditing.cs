@@ -1228,9 +1228,15 @@ public sealed partial class EditorPage
     {
         if (PropertiesPanel is null) return;
 
-        _suppressSlideEvents = true;
-
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextSlide, true);
+        SyncTextSlideControls(slide);
+        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
+    }
+
+    private void SyncTextSlideControls(TextSlideSegment slide)
+    {
+        if (PropertiesPanel is null) return;
+        using var suppression = SuppressScope.Enter(ref _suppressSlideEvents);
 
         SlideTextBox.Text = slide.Text;
         SlideDurationBox.Value = slide.Duration.TotalSeconds;
@@ -1287,11 +1293,6 @@ public sealed partial class EditorPage
         BuildSlideAppearancePresetsIfNeeded();
         SyncSlideAppearanceSelection(slide);
         UpdateSlideBgPanels(slide.BackgroundType);
-
-        _suppressSlideEvents = false;
-
-        // Reveal the text slide panel so properties are immediately editable on selection.
-        PropertiesPanel.ShowPane(PropertyPaneKind.TextSlide);
     }
 
     private void SyncTextSlideWindowControls(TextSlideSegment slide)

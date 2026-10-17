@@ -588,7 +588,7 @@ public sealed partial class EditorPage
             SyncSceneStyleControls(force: true);
 
             if (SelectedSlide() is { } selectedSlide)
-                ShowTextSlidePanel(selectedSlide);
+                SyncTextSlideControls(selectedSlide);
 
             // Undo/redo and every undoable edit funnel through here, which makes this the one
             // place that reliably sees the timeline gain its first segment or lose its last.
@@ -637,6 +637,7 @@ public sealed partial class EditorPage
     private void OnSegmentSelected(object? sender, string? segmentId)
     {
         _styleDebouncer?.Flush();
+        _cursorDebouncer?.Flush();
         _selectedPrimarySegmentId = segmentId;
 
         // Show the text slide panel only when a text slide is selected; for a
@@ -653,15 +654,8 @@ public sealed partial class EditorPage
 
         SyncSceneStyleControls(force: true);
 
-        // Cursor controls retain their existing selection-based behavior.
-        if (SceneVideoSegment is { } vseg)
-        {
-            var global = ProjectService.Instance.CurrentComposition;
-            if (global is not null)
-            {
-                SyncCursorControlsToConfig(vseg.CursorStyleOverride ?? global.Cursor);
-            }
-        }
+        var global = ProjectService.Instance.CurrentComposition;
+        SyncCursorControlsToConfig(SelectedVideoSegment?.CursorStyleOverride ?? global.Cursor);
     }
 
     private void OnSegmentMoveRequested(object? sender, (string Id, int TargetIndex) e) =>

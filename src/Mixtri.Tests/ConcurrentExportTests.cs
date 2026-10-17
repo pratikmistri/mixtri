@@ -137,11 +137,11 @@ public class ConcurrentExportTests
         var config = Config();
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var settings = new ExportSettings { Fps = Fps };
-        var baseline = await new ExportEngine().ExportProjectAsync(
-            project, settings, config, Path.Combine(temp.Path, "baseline"), timeline, ct: cancellation.Token);
-
         var snapshot = ProjectStateSnapshot.Capture(project, config, timeline);
         var client = new ExportWorkerClient(workerPath);
+        var baseline = await client.ExportAsync(
+            snapshot, settings, Path.Combine(temp.Path, "baseline"), null, cancellation.Token);
+
         client.SetPlaybackActive(true);
         client.ReportPreviewFrame(TimeSpan.FromMilliseconds(40));
         int completedFrames = 0;
@@ -196,11 +196,13 @@ public class ConcurrentExportTests
         Assert.IsTrue(observed >= 5);
         Assert.IsTrue(File.Exists(path));
         Assert.IsNull(client.ActiveProcessId);
-        var baseline = await new ExportEngine().ExportProjectAsync(
-            project, new ExportSettings { Fps = Fps }, Config(),
-            Path.Combine(temp.Path, "baseline"), Timeline(project), ct: timeout.Token);
+        client.SetPlaybackActive(false);
+        var baseline = await client.ExportAsync(
+            snapshot, new ExportSettings { Fps = Fps },
+            Path.Combine(temp.Path, "baseline"), null, timeout.Token);
         await AssertVideosMatchAsync(baseline, path);
 
+        client.SetPlaybackActive(true);
         using var cancellation = new CancellationTokenSource();
         cancellation.CancelAfter(TimeSpan.FromSeconds(10));
         int framesBeforeCancellation = 0;
@@ -364,12 +366,16 @@ public class ConcurrentExportTests
     [Timeout(90000)]
     public async Task MediaPlayerInterop_ConcurrentCopiesAndTeardownRemainSafe()
     {
+        var workerPath = Environment.GetEnvironmentVariable("MIXTRI_TEST_WORKER_PATH");
+        if (string.IsNullOrEmpty(workerPath))
+            Assert.Inconclusive("Set MIXTRI_TEST_WORKER_PATH to generate the native decoder fixture.");
         using var temp = new TempDirectoryFixture("mixtri_decoder_interop_");
         var project = await WriteFramesAsync(Path.Combine(temp.Path, "source"));
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var path = await new ExportEngine().ExportProjectAsync(
-            project, new ExportSettings { Fps = Fps }, Config(), Path.Combine(temp.Path, "encoded"),
-            ct: cancellation.Token);
+        var client = new ExportWorkerClient(workerPath);
+        var path = await client.ExportAsync(
+            ProjectStateSnapshot.Capture(project, Config(), null), new ExportSettings { Fps = Fps },
+            Path.Combine(temp.Path, "encoded"), null, cancellation.Token);
         var device = GpuContext.GetSharedDevice();
         var reference = new MediaComposition();
         try
@@ -388,7 +394,9 @@ public class ConcurrentExportTests
 
         async Task ReadFrames(Mp4FrameSource source, string name)
         {
-            for (int i = 0; i < 12; i++)
+            // Frame zero reuses the startup/priming surface. Exercise twelve fresh
+            // native copies on each decoder instead of asserting that cached surface.
+            for (int i = 1; i <= 12; i++)
             {
                 using var frame = await source.LoadFrameAsync(i).WaitAsync(cancellation.Token);
                 Assert.IsNotNull(frame, $"Decoder did not deliver frame {i}.");

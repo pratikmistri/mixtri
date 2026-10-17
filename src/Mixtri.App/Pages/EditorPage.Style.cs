@@ -170,7 +170,8 @@ public sealed partial class EditorPage
         var config = ProjectService.Instance.CurrentComposition;
         if (config is null) return;
 
-        var cursorType = ReadCursorTypeFromControls(config.Cursor.Type);
+        var currentCursor = SelectedVideoSegment?.CursorStyleOverride ?? config.Cursor;
+        var cursorType = ReadCursorTypeFromControls(currentCursor.Type);
 
         string color = "#FFFFFF";
         foreach (var child in CursorColorPanel.Children)
@@ -182,7 +183,7 @@ public sealed partial class EditorPage
             }
         }
 
-        var newCursor = config.Cursor with
+        var newCursor = currentCursor with
         {
             Type = cursorType,
             Scale = (float)CursorSizeSlider.Value,

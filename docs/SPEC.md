@@ -155,6 +155,8 @@ Windows Snipping Tool drops frames during screen recording, and OBS Studio consu
   after a bounded wait; no editor graphics resources are shared with it. There is no
   in-process fallback: separate devices alone do not isolate Win2D's process-wide
   synchronization and native codec callbacks from interactive rendering.
+  Preview control writes time out after two seconds; cancellation has an independent
+  five-second worker-termination deadline even if stdin is blocked.
 
 ### F10: Webcam Overlay
 - ~~Capture webcam via `MediaCapture` API~~
