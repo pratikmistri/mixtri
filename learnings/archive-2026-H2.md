@@ -3278,3 +3278,27 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
 - **What worked**: Invalidate the primary renderer generation again immediately before publication, using the existing alternate-renderer disposal helper to also clear contexts acquired during initialization. Capture the generation before asynchronous compositor lookup and validate it after lookup and decoding, rather than adopting a new generation around a stale returned renderer.
 - **Validation**: Six live assertions passed: the old singleton remained available while initialization waited, publication advanced the generation and cleared alternate contexts, the pending transition discarded its decoded frame without touching the disposed renderer, and subsequent work rendered on the replacement. Removed every temporary source/project hook afterward.
 - **What didn't work**: Incrementing only at rebuild start cannot invalidate work that acquires the still-published renderer during initialization. Checking only after decoding also misses a swap between asynchronous compositor lookup and the caller's generation snapshot.
+
+### 2026-10-20: Primary branch synchronization
+- **Feature/area**: Git working branch; no application code changes.
+- **Approaches tried**: Checked worktree status, available primary-branch names, and the remote default before switching.
+- **What worked**: Switched to the repository's default `master` branch and fast-forwarded to `origin/master` at `7056904`, preserving the existing untracked `output` directory.
+- **What didn't work**: No `main` branch exists; used the actual default `master` without creating or renaming branches.
+
+### 2026-10-20: Prepare the 1.6.0 Store release branch
+- **Feature/area**: Created local `release/1.6.0` from current `master`; bumped the package manifest to `1.6.0.0` and Settings to `1.6.0`, preserving the Store identity and publisher.
+- **Approaches tried**: Checked Microsoft's live listing and DisplayCatalog, inspected all three existing publish profiles, and evaluated the documented packaging properties with VS MSBuild for x86, x64/AMD64, and ARM64.
+- **What worked**: The live catalog for Store product `9PDRBRJL32H8` lists `1.5.0.0`, so `1.6.0.0` is the next minor release. README now documents sequential, unsigned, self-contained Store package builds for all three architectures; version/identity assertions, architecture-specific MSBuild evaluations, and PowerShell syntax checks passed. No packages were built or uploaded; existing `output` files were left untouched.
+- **What didn't work**: The Store page and StoreEdge `Version` field do not expose the package version reliably. Use `https://displaycatalog.mp.microsoft.com/v7.0/products/9PDRBRJL32H8?market=US&languages=en-us`, then inspect `Product.DisplaySkuAvailabilities[].Sku.Properties.Packages[].PackageFullName` rather than the Store website's own application build number.
+
+### 2026-10-20: Build and deliver the two 1.6.0 Store packages
+- **Feature/area**: User clarified that only ARM64 and x64/AMD64 MSIX packages are needed, then requested delivery to Downloads. Updated the README build loop accordingly; retained x86 project support without building it.
+- **Approaches tried**: Built each architecture sequentially with native ARM64 VS MSBuild, Release/self-contained output, unchanged Store identity, no dev branding, no signing, and no bundle.
+- **What worked**: Restored the current SDK's missing runtime/compiler packs from the configured proxy and produced `Mixtri.App_1.6.0.0_arm64.msix` and `Mixtri.App_1.6.0.0_x64.msix`. Inspected both embedded manifests for identity, publisher, version, architecture and Store branding; checked executable PE architecture and absence of `AppxSignature.p7x`. Copied both to the Windows Downloads folder and confirmed matching SHA-256 hashes. Kept the running dev app and existing `output` files untouched; no Store upload or installation was performed.
+- **What didn't work**: Cache-only restore lacked .NET 9.0.21 packs required by the newly installed SDK 9.0.319. The proxy's flat-package endpoint rejects HEAD; direct GET downloads into a temporary local feed restored the needed packs without pinning an older runtime or modifying dependencies.
+
+### 2026-10-20: Commit and publish the release preparation
+- **Feature/area**: Publish the version bump and release documentation on `release/1.6.0`.
+- **Approaches tried**: Reviewed the complete tracked diff and staged the manifest, Settings, README, and archive explicitly.
+- **What worked**: Kept the release changes together and excluded generated packages and the existing untracked `output` directory. Both requested packages had already been built and delivered to Downloads.
+- **What didn't work**: None; no additional application changes were needed.

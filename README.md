@@ -53,6 +53,40 @@ $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere
 > or register the build output with
 > `Add-AppxPackage -Register <bin>\AppxManifest.xml`.
 
+## Microsoft Store release packages
+
+The `release/1.6.0` branch uses package version **1.6.0.0** and displays **1.6.0** in
+Settings. Before packaging, check the [live Store listing](https://apps.microsoft.com/detail/9PDRBRJL32H8)
+and Partner Center for any newer published or pending version. Keep the manifest and Settings
+versions synchronized; the fourth component of the Store package version must remain zero.
+
+From the repository root, locate `$msbuild` as above, then build the architectures sequentially:
+
+```powershell
+$packageDir = Join-Path (Get-Location) 'src\Mixtri.App\AppPackages\1.6.0\'
+
+# x64 = AMD64 / x86-64; ARM64 = native Windows on Arm.
+foreach ($platform in 'x64', 'ARM64') {
+    $rid = "win-$($platform.ToLowerInvariant())"
+    & $msbuild 'src\Mixtri.App\Mixtri.App.csproj' /restore /t:Build `
+        /p:Configuration=Release "/p:Platform=$platform" `
+        "/p:RuntimeIdentifier=$rid" "/p:RuntimeIdentifiers=$rid" `
+        /p:SelfContained=true /p:GenerateAppxPackageOnBuild=true `
+        /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never `
+        /p:MixtriDevBranding=false "/p:AppxPackageDir=$packageDir" /nr:false
+    if ($LASTEXITCODE -ne 0) {
+        throw "Store packaging failed for $platform."
+    }
+}
+```
+
+The output is under `src\Mixtri.App\AppPackages\1.6.0\`. Submit the architecture-specific
+unsigned `.msix` packages together in the same Partner Center submission; Microsoft signs them.
+Before uploading, inspect each package as a ZIP: `AppxManifest.xml` must retain identity
+`PratikMistri.Musio`, its existing publisher, version `1.6.0.0`, and the expected architecture.
+Also verify the packaged executable's PE architecture and that `AppxSignature.p7x` is absent.
+Do not submit a `.Dev` package or change the Store identity to match the display name.
+
 ## Tests
 
 Build the test project with MSBuild first, then run it without rebuilding:
