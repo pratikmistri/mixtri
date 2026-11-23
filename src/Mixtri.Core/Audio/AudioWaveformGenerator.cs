@@ -224,10 +224,12 @@ public static class AudioWaveformGenerator
 
         if (monoSamples == 0) return [];
 
-        // Ceiling, so the bucket count never exceeds the target and the tail lands in the
-        // last (possibly partial) bucket instead of being cut off.
-        long samplesPerBucket = Math.Max(1, (monoSamples + targetSampleCount - 1) / targetSampleCount);
-        int bucketCount = (int)((monoSamples + samplesPerBucket - 1) / samplesPerBucket);
+        // Proportional bucketing: exactly targetSampleCount buckets (or one per sample for very
+        // short audio), each covering an even share of the range. Callers space peaks by the
+        // count they asked for, so a rounded-up bucket size that yields FEWER buckets would
+        // compress the waveform against the timeline; proportional mapping also keeps the
+        // tail in the last bucket instead of cutting it off.
+        int bucketCount = (int)Math.Min(targetSampleCount, monoSamples);
         var result = new float[bucketCount];
 
         // ~1 s per read: per-bucket reads cost one decoder round-trip per peak.
@@ -252,7 +254,7 @@ public static class AudioWaveformGenerator
                     if (value > peak) peak = value;
                 }
 
-                int bucket = (int)((frameIndex + frame) / samplesPerBucket);
+                int bucket = (int)((frameIndex + frame) * bucketCount / monoSamples);
                 if (peak > result[bucket]) result[bucket] = peak;
             }
 

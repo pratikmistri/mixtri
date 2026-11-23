@@ -50,10 +50,22 @@ public sealed class AudioFixWaveformAndStretchCacheTests
 
         var peaks = AudioWaveformGenerator.GenerateWaveform(path, 100);
 
-        Assert.IsTrue(peaks.Length <= 100, $"Expected at most 100 peaks, got {peaks.Length}");
-        Assert.IsTrue(peaks.Length >= 99, $"Expected about 100 peaks, got {peaks.Length}");
+        Assert.AreEqual(100, peaks.Length, "exactly the requested peak count, so callers' spacing matches");
         Assert.IsTrue(peaks[^1] > 0.7f, $"The loud tail must land in the last bucket, got {peaks[^1]}");
         Assert.AreEqual(0f, peaks[0], 0.001f);
+    }
+
+    [TestMethod]
+    public void GenerateWaveform_File_TargetCloseToSampleCount_StillReturnsTheTargetCount()
+    {
+        // 480 frames into 300 buckets: a rounded-up bucket size (2) would yield only 240
+        // peaks, which callers spacing by 300 would draw compressed against the timeline.
+        string path = WriteSilenceWithLoudTail("short.wav", 0.01, 0.001);
+
+        var peaks = AudioWaveformGenerator.GenerateWaveform(path, 300);
+
+        Assert.AreEqual(300, peaks.Length);
+        Assert.IsTrue(peaks[^1] > 0.7f, "the tail still lands in the last bucket");
     }
 
     [TestMethod]
