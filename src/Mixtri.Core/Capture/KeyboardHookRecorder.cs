@@ -198,7 +198,8 @@ public sealed class KeyboardHookRecorder : IDisposable
         }
 
         // No hook thread is running yet, so this cannot race the callback.
-        _recordedDownKeys.Clear();
+        _typedTextFilter.Reset();
+        _typedTextFilterResetPending = false;
         _ctrlDown = false;
         _altDown = false;
         _shiftDown = false;
@@ -275,6 +276,9 @@ public sealed class KeyboardHookRecorder : IDisposable
         if (!IsRecording)
             throw new InvalidOperationException("Not recording.");
         _paused = true;
+        // Releases arriving while paused are never seen, so press decisions taken before the
+        // pause go stale; the hook thread drops them on its next event.
+        _typedTextFilterResetPending = true;
     }
 
     public void ResumeRecording()
@@ -288,6 +292,7 @@ public sealed class KeyboardHookRecorder : IDisposable
         _altDown = IsKeyDown(VK_MENU);
         _shiftDown = IsKeyDown(VK_SHIFT);
         _winDown = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+        _typedTextFilterResetPending = true;
         _paused = false;
     }
 
@@ -353,6 +358,13 @@ public sealed class KeyboardHookRecorder : IDisposable
         {
             if (nCode >= 0 && IsRecording && !_paused)
             {
+                // Pause/resume asks for this; only the hook thread ever touches the filter.
+                if (_typedTextFilterResetPending)
+                {
+                    _typedTextFilterResetPending = false;
+                    _typedTextFilter.Reset();
+                }
+
                 var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
                 int msg = (int)wParam;
                 int vk = (int)hookData.vkCode;
@@ -365,16 +377,10 @@ public sealed class KeyboardHookRecorder : IDisposable
                 // presses and releases stay balanced (Ctrl+C released after Ctrl would
                 // otherwise leave a recorded "C" down with no up, and a dropped "c" press
                 // would otherwise surface as a lone release).
-                bool record;
-                if (RecordTypedText)
-                    record = true;
-                else if (isDown)
-                {
-                    record = ShouldRecordKey(vk, _ctrlDown, _altDown, _winDown, recordTypedText: false);
-                    if (record) _recordedDownKeys.Add(vk);
-                }
-                else
-                    record = _recordedDownKeys.Remove(vk);
+                bool record = RecordTypedText
+                    || _typedTextFilter.ShouldRecord(
+                        vk, isDown, _ctrlDown, _altDown, _winDown,
+                        isExtended: (hookData.flags & LLKHF_EXTENDED) != 0);
 
                 if (!record)
                     return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -487,9 +493,11 @@ public sealed class KeyboardHookRecorder : IDisposable
             || vk == 0xE2; // OEM_102 (extra key on ISO layouts)
     }
 
-    // Keys whose press was recorded while typed text is excluded. Touched only on the hook
-    // thread (the low-level hook callback), so it needs no lock.
-    private readonly HashSet<int> _recordedDownKeys = new();
+    // Typed-text exclusion state (balanced press/release, Alt+hex sequences). Touched only on
+    // the hook thread; other threads ask for a reset through the volatile flag.
+    private readonly TypedTextFilter _typedTextFilter = new();
+    private volatile bool _typedTextFilterResetPending;
+    private const uint LLKHF_EXTENDED = 0x01;
 
     /// <summary>
     /// Filtering rule for the "Record typed text" setting. With <paramref name="recordTypedText"/>
@@ -499,7 +507,8 @@ public sealed class KeyboardHookRecorder : IDisposable
     /// Modifier keys, Ctrl/Alt/Win shortcut combos, and non-text keys (function, navigation,
     /// Enter, Tab, Esc, Backspace, Delete) are kept.
     /// </summary>
-    internal static bool ShouldRecordKey(int vk, bool isCtrl, bool isAlt, bool isWin, bool recordTypedText)
+    internal static bool ShouldRecordKey(
+        int vk, bool isCtrl, bool isAlt, bool isWin, bool recordTypedText, bool isExtended = false)
     {
         if (recordTypedText)
             return true;
@@ -509,7 +518,10 @@ public sealed class KeyboardHookRecorder : IDisposable
 
         bool altGrChord = isCtrl && isAlt && !isWin
             && IsCharacterKey(vk, isCtrl: false, isAlt: false, isWin: false);
-        bool altNumpadCode = isAlt && !isCtrl && !isWin && IsAltCodeKey(vk);
+        // Only KEYPAD-originated codes enter Alt+numpad characters. The dedicated navigation
+        // cluster reports the same virtual keys (Left, Home, ...) but with the extended flag,
+        // and Alt+Left / Alt+Home there are ordinary shortcuts.
+        bool altNumpadCode = isAlt && !isCtrl && !isWin && !isExtended && IsAltCodeKey(vk);
 
         return !altGrChord && !altNumpadCode;
     }
@@ -700,5 +712,51 @@ public sealed class KeyboardHookRecorder : IDisposable
         AbortHookThread();
 
         _hookReady.Dispose();
+    }
+}
+
+/// <summary>
+/// Stateful half of the "Record typed text = off" rule, run on the keyboard hook thread.
+/// Presses are judged by <see cref="KeyboardHookRecorder.ShouldRecordKey"/>; a release is
+/// recorded exactly when its press was, so the overlay never sees unbalanced pairs. Alt+hex
+/// input (Alt held, Num+, then hex digits on any keys, with Windows' EnableHexNumpad) types a
+/// character from keys that look like shortcuts, so from Num+ until Alt is released nothing
+/// but Alt itself is recorded.
+/// </summary>
+internal sealed class TypedTextFilter
+{
+    private const int VK_ADD = 0x6B;
+    private readonly HashSet<int> _recordedDown = new();
+    private bool _altHexActive;
+
+    public void Reset()
+    {
+        _recordedDown.Clear();
+        _altHexActive = false;
+    }
+
+    /// <param name="alt">Alt state AFTER this event's modifier update.</param>
+    public bool ShouldRecord(int vk, bool isDown, bool ctrl, bool alt, bool win, bool isExtended)
+    {
+        bool isAltKey = vk is 0x12 or 0xA4 or 0xA5; // VK_MENU, VK_LMENU, VK_RMENU
+
+        if (!isDown)
+        {
+            if (isAltKey && !alt) _altHexActive = false;
+            return _recordedDown.Remove(vk);
+        }
+
+        if (_altHexActive && !isAltKey)
+            return false;
+
+        if (alt && !ctrl && !win && vk == VK_ADD)
+        {
+            _altHexActive = true;
+            return false;
+        }
+
+        bool record = KeyboardHookRecorder.ShouldRecordKey(vk, ctrl, alt, win, recordTypedText: false, isExtended);
+        if (record) _recordedDown.Add(vk);
+        return record;
     }
 }
