@@ -215,6 +215,9 @@ public class ConcurrentExportTests
         var cancelled = client.ExportAsync(snapshot, Settings(),
             Path.Combine(temp.Path, "cancelled"), new FrameProgress(value =>
             {
+                // Status-only reports ("Preparing audio…", "Preparing AI upscaler…") arrive
+                // with CurrentFrame 0 before rendering starts; cancel on the first real frame.
+                if (value.CurrentFrame <= 0) return;
                 Volatile.Write(ref framesBeforeCancellation, value.CurrentFrame);
                 cancellation.Cancel();
             }), cancellation.Token);
