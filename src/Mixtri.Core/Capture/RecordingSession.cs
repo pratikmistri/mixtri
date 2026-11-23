@@ -505,7 +505,8 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             // finalization, or the captured frames are stranded with no project pointing at
             // them. Each failure is a fault on an otherwise completed recording.
 
-            // Stop screen capture first, then drain in-flight frame writes before finalizing.
+            // Stop screen capture first; the frame writer keeps writing in the background and is
+            // drained once every other source has stopped (below).
             RunStopStep("stop screen capture", () => _screenEngine?.StopCapture());
 
             if (writer is not null)
@@ -522,13 +523,12 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                 {
                     Debug.WriteLine($"[RecordingSession] Trailing gap fill failed: {ex.Message}");
                 }
-
-                await DrainFrameWritesAsync(writer, ct).ConfigureAwait(false);
-
-                // A lost frame must reach the user even if the writer's event was missed.
-                ReportRetainedWriteFailure(writer);
             }
 
+            // Stop every other source BEFORE draining the frame writer: draining can take a
+            // while (a long static tail expands into many gap frames), and the screen clock is
+            // already frozen, so audio, webcam and input must end at the same instant rather
+            // than keep recording past the video's end.
             RunStopStep("stop mouse recording", () => _mouseRecorder?.StopRecording());
             RunStopStep("stop keyboard recording", () => _keyboardRecorder?.StopRecording());
             RunStopStep("stop audio recording", () => _audioEngine?.StopRecording());
@@ -557,6 +557,14 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                         "incomplete; the screen recording is unaffected.",
                         Exception: _webcamEngine.LastStopError));
                 }
+            }
+
+            if (writer is not null)
+            {
+                await DrainFrameWritesAsync(writer, ct).ConfigureAwait(false);
+
+                // A lost frame must reach the user even if the writer's event was missed.
+                ReportRetainedWriteFailure(writer);
             }
 
             // Save mouse cursor data
