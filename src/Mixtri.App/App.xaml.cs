@@ -47,6 +47,43 @@ public partial class App : Application
 
     /// <summary>The main application window, accessible for minimize/restore operations.</summary>
     public Window? MainAppWindow => _window;
+
+    /// <summary>
+    /// True once a shutdown (tray Exit, OS session end, quiesce) has begun. Windows closed by
+    /// that teardown use it to tell "closed by the user" from "closed by the app exiting".
+    /// </summary>
+    public bool IsExiting => _isExiting;
+
+    /// <summary>The theme chosen in Settings, applied to every window the app owns.</summary>
+    public ElementTheme RequestedElementTheme { get; private set; } = ElementTheme.Default;
+
+    /// <summary>Maps the persisted <see cref="AppSettings.Theme"/> value to an element theme.</summary>
+    public static ElementTheme ResolveTheme(string? themeName) => themeName switch
+    {
+        "Light" => ElementTheme.Light,
+        "Dark" => ElementTheme.Dark,
+        _ => ElementTheme.Default,
+    };
+
+    /// <summary>
+    /// Applies a theme choice ("Light", "Dark" or "System") to the full window and the Mini
+    /// pill. The recording overlay deliberately stays dark regardless.
+    /// </summary>
+    public void ApplyTheme(string? themeName)
+    {
+        RequestedElementTheme = ResolveTheme(themeName);
+
+        try
+        {
+            if (_window?.Content is FrameworkElement root)
+                root.RequestedTheme = RequestedElementTheme;
+            _shell?.ApplyTheme(RequestedElementTheme);
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Could not apply theme '{themeName}': {ex.Message}");
+        }
+    }
     public bool IsMiniHotkeyRegistered { get; private set; }
 
     public static new App Current => (App)Application.Current;
@@ -79,21 +116,49 @@ public partial class App : Application
             bool wrongThread = hr is 0x802B000A or 0x8001010E /* RPC_E_WRONG_THREAD */;
             bool comFault = e.Exception is System.Runtime.InteropServices.COMException
                 or System.Runtime.InteropServices.InvalidComObjectException;
-            bool msgThread = e.Exception.Message?.Contains("thread", StringComparison.OrdinalIgnoreCase) == true;
-            if (wrongThread || comFault || msgThread)
+            // No message-text match: "thread" appears in plenty of benign, caught exceptions
+            // (cancellation, thread-pool and timer noise), which flooded crash.log. The
+            // HRESULT test above already catches the genuine wrong-thread faults.
+            if (wrongThread || comFault)
                 LogCrash($"FirstChance HR=0x{hr:X8}", e.Exception);
         };
     }
+
+    /// <summary>
+    /// crash.log is rotated past this size, keeping one previous generation, so first-chance
+    /// COM noise over a long session cannot grow it without bound.
+    /// </summary>
+    private const long MaxCrashLogBytes = 1024 * 1024;
+
+    private static readonly object CrashLogLock = new();
 
     private static void LogCrash(string source, Exception? ex)
     {
         try
         {
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
-            System.IO.File.AppendAllText(LogPath,
-                $"[{DateTime.Now:O}] ({source}) {DescribeException(ex)}\n");
+            lock (CrashLogLock)
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(LogPath)!);
+                RotateCrashLogIfNeeded();
+                System.IO.File.AppendAllText(LogPath,
+                    $"[{DateTime.Now:O}] ({source}) {DescribeException(ex)}\n");
+            }
         }
         catch { }
+    }
+
+    private static void RotateCrashLogIfNeeded()
+    {
+        try
+        {
+            var info = new System.IO.FileInfo(LogPath);
+            if (info.Exists && info.Length > MaxCrashLogBytes)
+                System.IO.File.Move(LogPath, LogPath + ".1", overwrite: true);
+        }
+        catch
+        {
+            // Rotation is best-effort; appending is still worth attempting.
+        }
     }
 
     /// <summary>
@@ -421,8 +486,17 @@ public partial class App : Application
         // A recording owns both the screen and the project state. Swapping the project
         // under a live capture would repoint the save target and spin the editor up
         // mid-capture, and raising the window would film it — so nothing here is safe,
-        // not just the window manipulation.
-        if (_shell?.CurrentState == Mixtri.Core.Shell.AppShellState.Recording) return;
+        // not just the window manipulation. The request is parked instead of dropped (the
+        // sending process has already exited, so dropping it would lose the double-click
+        // outright) and served once the recording ends — see OnRecordingSessionEnded.
+        if (_shell?.CurrentState == Mixtri.Core.Shell.AppShellState.Recording)
+        {
+            _deferredActivationOwed = true;
+            if (requestedPath is not null)
+                _deferredActivationPath = requestedPath;
+            DiagLog.Write("Shell", "Project activation arrived during a recording; deferred until it ends.");
+            return;
+        }
 
         if (requestedPath is not null && _window is MainWindow mainWindow)
             ServeRedirectedOpen(mainWindow, requestedPath);
@@ -476,6 +550,29 @@ public partial class App : Application
         }
 
         _ = OpenActivationProjectAsync(window, requestedPath);
+    }
+
+    /// <summary>An activation that arrived mid-recording and is still owed once it ends.</summary>
+    private bool _deferredActivationOwed;
+
+    /// <summary>The project that deferred activation asked for, if any.</summary>
+    private string? _deferredActivationPath;
+
+    /// <summary>
+    /// Serves an activation parked during a recording. Routed through the ordinary
+    /// redirect handling, so the same safety checks apply — in particular, the fresh,
+    /// never-saved take the recording just produced is unrecoverable work, so the open is
+    /// refused with a visible notice rather than silently replacing it.
+    /// </summary>
+    private void OnRecordingSessionEnded(object? sender, EventArgs e)
+    {
+        if (!_deferredActivationOwed) return;
+
+        var path = _deferredActivationPath;
+        _deferredActivationOwed = false;
+        _deferredActivationPath = null;
+
+        _window?.DispatcherQueue.TryEnqueue(() => HandleRedirectedActivation(path));
     }
 
     /// <summary>Guards <see cref="_window"/> publication against redirects racing startup.</summary>
@@ -564,6 +661,12 @@ public partial class App : Application
             ShellSettings.ResolveLaunchMode(
                 ShellSettings.Instance.StartupMode,
                 hasFileActivation: activationPath is not null));
+        _shell.RecordingSessionEnded += OnRecordingSessionEnded;
+
+        // Restored before the shell shows anything, so neither surface flashes in the
+        // system theme first. The Mini pill picks it up as it is created.
+        ApplyTheme(AppSettings.Instance.Theme);
+
         _shell.Start();
 
         // Shown AFTER the shell, so the configured startup surface (Mini by default) is
@@ -780,8 +883,13 @@ public partial class App : Application
 
         try
         {
-            _window?.DispatcherQueue.TryEnqueue(() =>
+            _window?.DispatcherQueue.TryEnqueue(async () =>
             {
+                // A live recording gets a bounded chance to finalize first: closing under it
+                // would abandon the capture mid-write. The hard timer above still bounds the
+                // whole shutdown, so this can only use the budget, never extend it.
+                await TryStopRecordingForShutdownAsync(timeoutMs - 300);
+
                 try { _window?.Close(); }
                 catch { Environment.Exit(0); }
             });
@@ -796,6 +904,141 @@ public partial class App : Application
     /// Back-compat shim — older call sites used this name.
     /// </summary>
     public void HandleSystemShutdown() => BeginQuiesce();
+
+    /// <summary>
+    /// Starts finalizing a live recording and waits for it for at most
+    /// <paramref name="budgetMs"/>. Never throws; a recording that is not done in time is
+    /// left to the hard quiesce timer.
+    /// </summary>
+    private static async Task TryStopRecordingForShutdownAsync(int budgetMs)
+    {
+        try
+        {
+            var recording = Mixtri_App.ViewModels.RecordingViewModel.Shared;
+            if (!recording.IsRecording || budgetMs <= 0) return;
+
+            var stop = recording.StopAndFinalizeAsync();
+            if (await Task.WhenAny(stop, Task.Delay(budgetMs)) != stop)
+                DiagLog.Write("Shell", "Recording did not finalize within the shutdown budget.");
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Stopping the recording for shutdown failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// WM_QUERYENDSESSION: the OS is ASKING whether the session may end. Another app can
+    /// still veto it, so nothing here may exit or tear anything down. The only work started
+    /// is finalizing a live recording — it has to stop either way for the session to end, and
+    /// every second of head start matters against the OS shutdown budget.
+    /// </summary>
+    public void OnQueryEndSession()
+    {
+        try
+        {
+            var recording = Mixtri_App.ViewModels.RecordingViewModel.Shared;
+            if (recording.IsRecording)
+                _ = recording.StopAndFinalizeAsync();
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Session-end recording stop failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// WM_ENDSESSION with wParam != 0: the session IS ending, and the process may be
+    /// terminated as soon as the message handler returns. Gives a live recording and any
+    /// unsaved edits a bounded, best-effort chance to reach disk, then quiesces.
+    /// </summary>
+    /// <remarks>
+    /// Both waits are synchronous because nothing after this handler is guaranteed to run.
+    /// They wait only on thread-pool work that needs nothing from the (blocked) UI thread,
+    /// so they cannot deadlock — see <see cref="Mixtri_App.ViewModels.RecordingViewModel.WaitForSessionStop"/>
+    /// and <see cref="ProjectService.TrySaveForSessionEnd"/>.
+    /// </remarks>
+    public void OnEndSession()
+    {
+        if (_isExiting) return;
+
+        try
+        {
+            var recording = Mixtri_App.ViewModels.RecordingViewModel.Shared;
+            if (recording.IsRecording)
+            {
+                _ = recording.StopAndFinalizeAsync();
+                if (!recording.WaitForSessionStop(TimeSpan.FromMilliseconds(SessionEndRecordingBudgetMs)))
+                    DiagLog.Write("Shell", "Recording did not finalize before the session ended.");
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Session-end recording stop failed: {ex.Message}");
+        }
+
+        try
+        {
+            if (ProjectService.Instance.TrySaveForSessionEnd(TimeSpan.FromMilliseconds(SessionEndSaveBudgetMs)))
+                DiagLog.Write("Shell", "Unsaved edits were saved before the session ended.");
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Session-end save failed: {ex.Message}");
+        }
+
+        BeginQuiesce();
+    }
+
+    /// <summary>Session-end budgets; together they stay inside the OS's ~5 s hung-app window.</summary>
+    private const int SessionEndRecordingBudgetMs = 2000;
+    private const int SessionEndSaveBudgetMs = 2500;
+
+    /// <summary>
+    /// How long a user-initiated Exit waits for a live recording to finalize before giving up
+    /// on it. Generous, because nothing external is racing it — but bounded, so Exit always
+    /// exits.
+    /// </summary>
+    private static readonly TimeSpan ExitRecordingFinalizeTimeout = TimeSpan.FromMinutes(2);
+
+    private bool _exitAfterRecordingPending;
+
+    /// <summary>
+    /// Tray Exit during a recording: finalize the take (the overlay shows progress) and then
+    /// run the ordinary Exit path, whose save prompt is where the user decides whether to
+    /// keep it — the new take is unrecoverable work, so it is always asked about.
+    /// </summary>
+    private async Task ExitAfterRecordingAsync()
+    {
+        if (_exitAfterRecordingPending) return;
+        _exitAfterRecordingPending = true;
+
+        try
+        {
+            var stop = Mixtri_App.ViewModels.RecordingViewModel.Shared.StopAndFinalizeAsync();
+            if (await Task.WhenAny(stop, Task.Delay(ExitRecordingFinalizeTimeout)) != stop)
+            {
+                DiagLog.Write("Shell", "Recording did not finalize within the Exit budget; exiting anyway.");
+                BeginQuiesce(timeoutMs: 2000);
+                return;
+            }
+
+            // Queued, not called: the shell's own end-of-recording hand-off (editor, current
+            // project) is already queued on the dispatcher and must land before the prompt
+            // asks about that project.
+            _window?.DispatcherQueue.TryEnqueue(() => OnExitRequested(this, EventArgs.Empty));
+        }
+        catch (Exception ex)
+        {
+            // Fail closed: the app keeps running rather than exiting over a recording whose
+            // state is unknown.
+            DiagLog.Write("Shell", $"Exit during recording failed: {ex}");
+        }
+        finally
+        {
+            _exitAfterRecordingPending = false;
+        }
+    }
 
     private void OnWindowVisibilityChanged(object sender, WindowVisibilityChangedEventArgs args)
     {
@@ -869,6 +1112,21 @@ public partial class App : Application
 
     private void OnExitRequested(object? sender, EventArgs e)
     {
+        if (_isExiting) return;
+
+        // A live recording is finalized first (and then asked about), never torn down by the
+        // quiesce below — that would abandon the capture with no prompt at all.
+        if (Mixtri_App.ViewModels.RecordingViewModel.Shared.IsRecording)
+        {
+            _ = ExitAfterRecordingAsync();
+            return;
+        }
+
+        // An export would be killed by the shutdown below. Ask first; the prompt re-drives
+        // this handler if the user chooses to cancel the export and exit.
+        if (TryConfirmCancelExport("exit", () => OnExitRequested(this, EventArgs.Empty)))
+            return;
+
         // Exiting from the tray skips the window entirely, so it is the one shutdown route
         // that can discard edits without the user ever seeing the window again.
         if (TryPromptUnsavedChanges(afterSaveDecision: () => BeginQuiesce(timeoutMs: 2000)))
@@ -890,7 +1148,15 @@ public partial class App : Application
         // behind a ContentDialog, so dismissing here would park the window WITH the dialog
         // on it — invisible, unanswerable, and blocking every later exit on the guard below.
         // Cancel the dismissal and leave the question where the user can answer it.
-        if (_promptingUnsavedChanges || ProjectSaveCoordinator.IsPromptActive)
+        if (_promptingUnsavedChanges || _exportPromptOpen || ProjectSaveCoordinator.IsPromptActive)
+        {
+            args.Cancel = true;
+            return;
+        }
+
+        // Dismissing the window closes the project and tears the editor down, which kills an
+        // export in flight. Same cancel-and-re-drive shape as the save prompt below.
+        if (TryConfirmCancelExport("close Mixtri", ContinueWindowDismissal))
         {
             args.Cancel = true;
             return;
@@ -917,6 +1183,126 @@ public partial class App : Application
 
         args.Cancel = true;
         DismissMainWindow();
+    }
+
+    /// <summary>
+    /// Re-drives a window dismissal after the export prompt was answered. AppWindow.Closing
+    /// is not raised again for a programmatic close, so this repeats what the Closing handler
+    /// would have done: ask about unsaved work, then dismiss.
+    /// </summary>
+    private void ContinueWindowDismissal()
+    {
+        if (TryPromptUnsavedChanges(afterSaveDecision: DismissMainWindow)) return;
+        DismissMainWindow();
+    }
+
+    /// <summary>True while the export prompt is on screen and owns the decision.</summary>
+    private bool _exportPromptOpen;
+
+    /// <summary>One-shot: the user already agreed to cancel the export for this dismissal.</summary>
+    private bool _exportCancelConfirmed;
+
+    /// <summary>
+    /// Whether the editor is exporting. An export lives only while the editor is the current
+    /// page (EditorPage cancels navigation away from itself mid-export), so the current page
+    /// is the one place to ask.
+    /// </summary>
+    private bool IsExportInProgress()
+    {
+        try
+        {
+            return _window is MainWindow mainWindow
+                && mainWindow.ContentFrame.Content is EditorPage editor
+                && editor.ExportVM.IsExporting;
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Could not read export state: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// When an export is running, asks whether to cancel it before <paramref name="action"/>
+    /// and returns true — the caller must abandon what it was doing; <paramref name="resume"/>
+    /// re-drives it if the user agrees. Returns false when there is no export to lose.
+    /// </summary>
+    /// <remarks>
+    /// Fails CLOSED: if the prompt cannot be shown (no XamlRoot, or WinUI refusing a second
+    /// ContentDialog), the export keeps running and the app stays. Not used on OS session
+    /// end, which cannot be refused and goes straight to <see cref="BeginQuiesce"/>.
+    /// </remarks>
+    private bool TryConfirmCancelExport(string action, Action resume)
+    {
+        if (_isExiting || _exportCancelConfirmed || !IsExportInProgress()) return false;
+        if (_exportPromptOpen) return true;
+
+        _exportPromptOpen = true;
+        EnsureMainWindowVisible();
+        _ = RunCancelExportPromptAsync(action, resume);
+        return true;
+    }
+
+    private async Task RunCancelExportPromptAsync(string action, Action resume)
+    {
+        try
+        {
+            var root = _window?.Content?.XamlRoot;
+            for (int i = 0; root is null && i < 20; i++)
+            {
+                await Task.Delay(50);
+                root = _window?.Content?.XamlRoot;
+            }
+
+            if (root is null)
+            {
+                DiagLog.Write("Shell", "Export prompt has no XamlRoot; dismissal abandoned.");
+                return;
+            }
+
+            var dialog = new ContentDialog
+            {
+                Title = "Export in progress",
+                Content = $"An export is in progress. Cancel it and {action}?",
+                PrimaryButtonText = $"Cancel export and {action}",
+                CloseButtonText = "Keep exporting",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = root,
+            };
+
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+            // The export may have finished while the question was up; cancel only if not.
+            if (_window is MainWindow mainWindow
+                && mainWindow.ContentFrame.Content is EditorPage editor
+                && editor.ExportVM.IsExporting
+                && editor.ExportVM.CancelExportCommand.CanExecute(null))
+            {
+                editor.ExportVM.CancelExportCommand.Execute(null);
+            }
+
+            // Cleared before resuming: the resumed path may raise the save prompt, and a
+            // still-set flag would make the Closing handler refuse every later close.
+            _exportPromptOpen = false;
+            _exportCancelConfirmed = true;
+            try
+            {
+                resume();
+            }
+            finally
+            {
+                _exportCancelConfirmed = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Most likely another ContentDialog is open. Keep exporting, keep running.
+            DiagLog.Write("Shell", $"Export prompt failed; dismissal abandoned: {ex.Message}");
+        }
+        finally
+        {
+            _exportPromptOpen = false;
+        }
     }
 
     /// <summary>
@@ -967,7 +1353,11 @@ public partial class App : Application
         // nothing to reopen. See ProjectService.HasUnrecoverableWork — the same predicate
         // ServeRedirectedOpen uses to refuse an open, which is the identical question.
         if (!ProjectService.Instance.HasUnrecoverableWork) return false;
-        if (_window?.Content?.XamlRoot is null) return false;
+
+        // There is work to lose. From here on this method ALWAYS takes ownership of the
+        // dismissal (returns true), even if the prompt then cannot be shown: a missing
+        // XamlRoot is handled inside RunUnsavedChangesPromptAsync by abandoning the dismissal,
+        // never by letting it through. Guards fail closed.
 
         // A ContentDialog on a hidden window renders nowhere. The tray's Exit item runs with
         // the window parked in the tray, so without this the app would appear to ignore Exit
@@ -1031,8 +1421,21 @@ public partial class App : Application
     {
         try
         {
+            // A window that was only just surfaced may need a layout pass before it has a
+            // XamlRoot. Give it a moment; if there is still nowhere to ask, abandon the
+            // dismissal — the work stays, the app stays.
             var root = _window?.Content?.XamlRoot;
-            if (root is null) return;
+            for (int i = 0; root is null && i < 20; i++)
+            {
+                await Task.Delay(50);
+                root = _window?.Content?.XamlRoot;
+            }
+
+            if (root is null)
+            {
+                DiagLog.Write("Shell", "Unsaved-changes prompt has no XamlRoot; dismissal abandoned.");
+                return;
+            }
 
             var decision = await ProjectSaveCoordinator.PromptUnsavedChangesAsync(
                 root, _window, "before closing?");

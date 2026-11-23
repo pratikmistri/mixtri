@@ -33,7 +33,23 @@ public class ProjectService
     /// completion, so anything that swaps the project mid-save would leave the new
     /// project bound to the old project's file.
     /// </summary>
-    public bool IsSaveInFlight { get; private set; }
+    /// <remarks>
+    /// Backed by a counter, not a flag: two overlapping saves (Ctrl+S racing the close
+    /// prompt's save) used to clear a shared bool when the FIRST finished, reporting "no
+    /// save running" while the second was still writing.
+    /// </remarks>
+    public bool IsSaveInFlight => _savesInFlight > 0;
+
+    private int _savesInFlight;
+
+    /// <summary>
+    /// Bumped on every edit (every <see cref="MarkDirty"/> call, including the ones that find
+    /// the project already dirty). A save records the revision it started from and only
+    /// marks the project clean if no edit landed while it was writing — otherwise those
+    /// edits are not in the file, and clearing the flag would let the next close discard
+    /// them without a prompt.
+    /// </summary>
+    private long _editRevision;
 
     private CompositionConfig _currentComposition = new();
 
@@ -111,6 +127,10 @@ public class ProjectService
     /// </summary>
     public void MarkDirty()
     {
+        // Counted even when already dirty: a save in flight compares against this to learn
+        // whether it captured every edit.
+        _editRevision++;
+
         // Nothing to lose until there is a project, so a dirty flag before one exists would
         // only produce a save prompt with nothing behind it.
         if (CurrentProject is null || HasUnsavedChanges) return;
@@ -194,7 +214,11 @@ public class ProjectService
         if (!string.IsNullOrWhiteSpace(chosenName))
             project.Name = chosenName;
 
-        IsSaveInFlight = true;
+        // Taken before the first await: everything up to here ran synchronously on the UI
+        // thread, so this is exactly the state the package will contain.
+        var revisionAtStart = _editRevision;
+
+        _savesInFlight++;
         try
         {
             await MixtriPackageService.SaveAsync(
@@ -213,15 +237,60 @@ public class ProjectService
                 CurrentPackagePath = packagePath;
                 // Guarded by the same check as the rebind above: if an open completed while
                 // this save was running, the project on screen is NOT the one just written
-                // and its own edits are still unsaved.
-                MarkSaved();
+                // and its own edits are still unsaved. Likewise, an edit made DURING the save
+                // is not in the file — the project stays dirty so it is still asked about.
+                if (_editRevision == revisionAtStart)
+                    MarkSaved();
             }
 
             RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
         }
         finally
         {
-            IsSaveInFlight = false;
+            _savesInFlight--;
+        }
+    }
+
+    /// <summary>
+    /// Last-chance save for the OS session ending (logoff/shutdown/update): writes the
+    /// current project back to the package it came from, waiting at most
+    /// <paramref name="timeout"/>. Returns true only if the write finished in time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called from <c>WM_ENDSESSION</c>, after which the process may be killed at any moment,
+    /// so it blocks the UI thread by design. The write runs on the thread pool and talks to
+    /// <see cref="MixtriPackageService"/> directly — never through <see cref="SavePackageAsync"/>,
+    /// whose continuations need the very UI thread this call is blocking. The package is
+    /// written to a temporary file and moved into place, so a write cut short by the OS
+    /// leaves the previous save intact.
+    /// </para>
+    /// <para>
+    /// Only a project that already HAS a package is saved: there is no one to ask where a
+    /// never-saved project should go. Nothing is published back (no path rebind, no
+    /// <see cref="MarkSaved"/>) — the process is ending.
+    /// </para>
+    /// </remarks>
+    public bool TrySaveForSessionEnd(TimeSpan timeout)
+    {
+        var project = CurrentProject;
+        var path = CurrentPackagePath;
+        if (project is null || path is null || !HasUnsavedChanges || IsSaveInFlight)
+            return false;
+
+        var composition = CurrentComposition;
+        var timeline = CurrentTimeline;
+
+        try
+        {
+            var write = Task.Run(() => MixtriPackageService.SaveAsync(
+                path, project, composition, timeline, null, CancellationToken.None));
+            return write.Wait(timeout);
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Shell", $"Session-end save of '{path}' failed: {ex.Message}");
+            return false;
         }
     }
 
@@ -231,6 +300,12 @@ public class ProjectService
     public async Task OpenPackageAsync(
         string packagePath, IProgress<double>? progress = null, CancellationToken ct = default)
     {
+        // One open at a time. Two overlapping opens each publish their project only when
+        // they finish, so the slower one would silently win — and both extract into the
+        // shared package cache. Refused rather than queued: the caller surfaces the message.
+        if (OpenInFlightPath is not null)
+            throw new InvalidOperationException("Another project is still opening. Try again in a moment.");
+
         // Marked here rather than at the call sites so every open path is covered —
         // file activation, the Open dialog and the recents list alike.
         OpenInFlightPath = packagePath;

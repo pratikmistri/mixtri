@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Text.Json;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
+using Mixtri.Core.Diagnostics;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
 using Mixtri.Core.Timeline;
@@ -84,13 +85,23 @@ public static class MixtriPackageService
 
         // A save writes over the file it came from, so a reference that silently vanishes
         // here takes the only copy of that media with it. Cosmetic assets may be dropped;
-        // captured content may not.
+        // the primary content (recorded/imported video, inserted audio tracks) may not.
+        // Optional sidecars (cursor/keyboard logs, webcam, recorded audio) are skipped with
+        // a warning instead: refusing would leave the user unable to save AT ALL — losing
+        // every edit since — over data the project does not need to open.
         var references = MixtriPathRewriter.EnumerateReferences(project, timeline, composition);
 
         var missing = references
             .Where(r => r.Kind == MediaReferenceKind.Recording && !File.Exists(r.Path))
             .Select(r => r.Path)
             .ToList();
+
+        foreach (var skipped in references.Where(r =>
+                     r.Kind == MediaReferenceKind.RecordingSidecar && !File.Exists(r.Path)))
+        {
+            DiagLog.Write("MixtriPackage",
+                $"Save: optional recording file is missing and will not be packed: '{skipped.Path}'.");
+        }
 
         if (missing.Count > 0)
         {
@@ -120,7 +131,16 @@ public static class MixtriPackageService
             SavedAt = DateTimeOffset.UtcNow,
             Project = Clone(project),
             Composition = Clone(composition),
-            Timeline = timeline is null ? new TimelineModel() : Clone(timeline),
+            // A bare `new TimelineModel()` would persist Duration = 0, and the reopened
+            // project would show a zero-length timeline; seed it from the project instead.
+            Timeline = timeline is null
+                ? new TimelineModel
+                {
+                    Duration = project.Duration,
+                    TrimEnd = project.Duration,
+                    Fps = project.Fps,
+                }
+                : Clone(timeline),
             MediaEntries = [.. entryByPath.Values],
         };
 
@@ -455,21 +475,10 @@ public static class MixtriPackageService
                     || !TimestampsMatch(existing.LastWriteTimeUtc, entry.LastWriteTime.UtcDateTime))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                    entry.ExtractToFile(destination, overwrite: true);
 
-                    // Stamp it explicitly so the reuse check above is self-consistent on
-                    // the next open rather than depending on extraction preserving it.
-                    try
-                    {
-                        File.SetLastWriteTimeUtc(destination, entry.LastWriteTime.UtcDateTime);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                               or ArgumentOutOfRangeException)
-                    {
-                        // Only costs a redundant re-extract next time.
-                        Debug.WriteLine(
-                            $"[MixtriPackage] Could not stamp '{destination}': {ex.Message}");
-                    }
+                    // The extraction can land somewhere other than the canonical path when
+                    // that file is locked; every reference to this entry must follow it.
+                    destination = ExtractEntryAtomically(entry, destination);
                 }
 
                 pathByEntry[entry.FullName] = destination;
@@ -485,9 +494,139 @@ public static class MixtriPackageService
                 manifest.Composition,
                 entryName => pathByEntry.TryGetValue(entryName, out var path) ? path : null);
 
+            SeedAbsentTimeline(manifest.Timeline, manifest.Project);
+
             return new MixtriOpenResult(
                 manifest.Project, composition, manifest.Timeline, mediaFolder);
         }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Treats a saved timeline with no length and no content as ABSENT, giving it the
+    /// project's duration.
+    /// </summary>
+    /// <remarks>
+    /// Older builds packed <c>new TimelineModel()</c> (Duration = 0) whenever the editor had
+    /// no timeline to hand over, and opening such a package produced a zero-length editor.
+    /// A timeline that has real content is left untouched, whatever its Duration says.
+    /// </remarks>
+    internal static void SeedAbsentTimeline(TimelineModel timeline, Project project)
+    {
+        if (timeline.Duration > TimeSpan.Zero || !timeline.IsEmpty || timeline.Clips.Count > 0)
+            return;
+        if (project.Duration <= TimeSpan.Zero)
+            return;
+
+        timeline.Duration = project.Duration;
+        if (timeline.TrimEnd <= TimeSpan.Zero)
+            timeline.TrimEnd = project.Duration;
+    }
+
+    /// <summary>
+    /// Extracts <paramref name="entry"/> to a <c>.part</c> sibling and moves it over
+    /// <paramref name="destination"/> only once complete.
+    /// </summary>
+    /// <returns>
+    /// The path the entry's content now lives at: <paramref name="destination"/>, or a fresh
+    /// path in the same cache folder when the destination could not be replaced.
+    /// </returns>
+    /// <remarks>
+    /// Extracting straight onto the destination truncated it first, so a failure part-way
+    /// (disk full, cancellation, a crash) left a damaged media file that the next open's
+    /// reuse check could even accept. And when the destination is locked — another Mixtri
+    /// window, or a preview still holding it open — the overwrite throws. This is only
+    /// reached once the existing copy has already failed the identity check, so keeping it
+    /// would open the manifest against media from a different save, and a later save would
+    /// write that stale copy back over the package's correct media. Instead the new content
+    /// is moved to a unique subfolder beside the destination (keeping the original file
+    /// name, so a later save does not rename the entry) and the caller maps the entry there.
+    /// </remarks>
+    private static string ExtractEntryAtomically(ZipArchiveEntry entry, string destination)
+    {
+        var partPath = destination + ".part";
+        try
+        {
+            entry.ExtractToFile(partPath, overwrite: true);
+        }
+        catch
+        {
+            // A failed extraction (disk full, a corrupt entry) must surface: keeping an
+            // existing copy here could open the project on media from a different save.
+            TryDelete(partPath);
+            throw;
+        }
+
+        // Stamp it explicitly so the reuse check is self-consistent on the next open rather
+        // than depending on extraction preserving it. The move keeps it.
+        try
+        {
+            File.SetLastWriteTimeUtc(partPath, entry.LastWriteTime.UtcDateTime);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                   or ArgumentOutOfRangeException)
+        {
+            // Only costs a redundant re-extract next time.
+            Debug.WriteLine($"[MixtriPackage] Could not stamp '{partPath}': {ex.Message}");
+        }
+
+        try
+        {
+            File.Move(partPath, destination, overwrite: true);
+            return destination;
+        }
+        catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException)
+                                   && File.Exists(destination))
+        {
+            // Destination is locked (in use by another window or a preview) and holds
+            // different content. Never fall back to it: relocate the fresh copy instead.
+            string relocated;
+            try
+            {
+                relocated = MoveToFreshPath(partPath, destination);
+            }
+            catch
+            {
+                TryDelete(partPath);
+                throw;
+            }
+
+            DiagLog.Write("MixtriPackage",
+                $"Open: could not replace '{destination}' ({ex.Message}); " +
+                $"extracted the current media to '{relocated}' instead.");
+            return relocated;
+        }
+        catch
+        {
+            TryDelete(partPath);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Moves <paramref name="partPath"/> into a newly created, uniquely named subfolder of
+    /// <paramref name="destination"/>'s folder, keeping <paramref name="destination"/>'s
+    /// file name, and returns the new path.
+    /// </summary>
+    private static string MoveToFreshPath(string partPath, string destination)
+    {
+        var folder = Path.GetDirectoryName(destination)!;
+        var fileName = Path.GetFileName(destination);
+
+        for (int attempt = 0; ; attempt++)
+        {
+            var freshFolder = Path.Combine(folder, "alt-" + Guid.NewGuid().ToString("N")[..12]);
+            if (Directory.Exists(freshFolder) || File.Exists(freshFolder))
+            {
+                if (attempt >= 4)
+                    throw new IOException($"Could not find a free path to extract '{fileName}' to.");
+                continue;
+            }
+
+            Directory.CreateDirectory(freshFolder);
+            var fresh = Path.Combine(freshFolder, fileName);
+            File.Move(partPath, fresh, overwrite: false);
+            return fresh;
+        }
     }
 
     /// <summary>

@@ -59,6 +59,7 @@ public sealed record FrameSourceOptions
         SeekAttempts = 1,
         SeekAttemptTimeout = TimeSpan.FromMilliseconds(400),
         EnableSeekRecovery = false,
+        PreferLatency = true,
     };
 
     public int MaxWidth { get; init; }
@@ -66,4 +67,13 @@ public sealed record FrameSourceOptions
     public int SeekAttempts { get; init; } = 3;
     public TimeSpan SeekAttemptTimeout { get; init; } = TimeSpan.FromMilliseconds(600);
     public bool EnableSeekRecovery { get; init; } = true;
+
+    /// <summary>
+    /// Interactive preview: after a stalled frame step, seek immediately instead of first
+    /// waiting out the abandoned frame, and wait out abandoned frames only briefly. A late
+    /// stale frame can then briefly show the wrong image — a preview glitch the next frame
+    /// corrects — whereas waiting compounds every stall into a visible freeze. Export and
+    /// other correctness-first readers leave this off.
+    /// </summary>
+    public bool PreferLatency { get; init; }
 }

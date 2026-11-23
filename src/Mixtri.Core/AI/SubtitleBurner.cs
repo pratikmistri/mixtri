@@ -34,22 +34,62 @@ public record SubtitleStyle
 /// Renders subtitle text onto Win2D <see cref="CanvasDrawingSession"/> frames
 /// during video composition.
 /// </summary>
-public class SubtitleBurner
+/// <remarks>
+/// Called once per composed frame, so the active segment is found by binary search and
+/// its text format/layout are built once per segment (not per frame) and reused until the
+/// segment, canvas size or device changes.
+/// <para>
+/// Overlapping segments resolve by one fixed rule on every lookup: the active segment is
+/// the latest-starting segment that contains the time (ties on start go to the later one
+/// in the input list). The result never depends on which time was looked up before, so
+/// seeking straight to a time and playing up to it render the same subtitle.
+/// </para>
+/// </remarks>
+public class SubtitleBurner : IDisposable
 {
-    private readonly List<SubtitleSegment> _segments;
+    private readonly SubtitleSegment[] _segments;
+    // _maxEnd[i] = latest End among _segments[0..i]; bounds the backwards scan for
+    // overlapping segments.
+    private readonly TimeSpan[] _maxEnd;
     private readonly SubtitleStyle _style;
     private readonly Color _textColor;
     private readonly Color _bgColor;
+    private readonly CanvasTextFormat _textFormat;
+
+    private SubtitleSegment? _cachedSegment;
+    // Index into _segments of the last resolved active segment, or -1. Lets consecutive
+    // frames skip the binary search without changing which segment wins an overlap.
+    private int _lastActiveIndex = -1;
+    private int _cachedWidth;
+    private int _cachedHeight;
+    private CanvasDevice? _cachedDevice;
+    private CanvasTextLayout? _cachedLayout;
+    private bool _disposed;
 
     public SubtitleBurner(List<SubtitleSegment> segments, SubtitleStyle style)
     {
         ArgumentNullException.ThrowIfNull(segments);
         ArgumentNullException.ThrowIfNull(style);
 
-        _segments = segments;
+        _segments = segments.OrderBy(s => s.Start).ToArray();
+        _maxEnd = new TimeSpan[_segments.Length];
+        var maxEnd = TimeSpan.MinValue;
+        for (int i = 0; i < _segments.Length; i++)
+        {
+            if (_segments[i].End > maxEnd) maxEnd = _segments[i].End;
+            _maxEnd[i] = maxEnd;
+        }
+
         _style = style;
         _textColor = ParseColor(style.TextColor);
         _bgColor = ParseColor(style.BackgroundColor);
+        _textFormat = new CanvasTextFormat
+        {
+            FontFamily = _style.FontFamily,
+            FontSize = _style.FontSize,
+            HorizontalAlignment = CanvasHorizontalAlignment.Center,
+            WordWrapping = CanvasWordWrapping.Wrap
+        };
     }
 
     /// <summary>
@@ -63,23 +103,13 @@ public class SubtitleBurner
         int canvasHeight)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ObjectDisposedException.ThrowIf(_disposed, this);
 
         var current = FindActiveSegment(timeSeconds);
         if (current is null)
             return;
 
-        using var textFormat = new CanvasTextFormat
-        {
-            FontFamily = _style.FontFamily,
-            FontSize = _style.FontSize,
-            HorizontalAlignment = CanvasHorizontalAlignment.Center,
-            WordWrapping = CanvasWordWrapping.Wrap
-        };
-
-        // Measure the text to size the background rectangle
-        var maxTextWidth = canvasWidth - (_style.PaddingHorizontal * 4);
-        using var textLayout = new CanvasTextLayout(
-            session, current.Text, textFormat, maxTextWidth, canvasHeight);
+        var textLayout = GetLayout(session, current, canvasWidth, canvasHeight);
 
         var textWidth = (float)textLayout.LayoutBounds.Width;
         var textHeight = (float)textLayout.LayoutBounds.Height;
@@ -98,10 +128,94 @@ public class SubtitleBurner
         session.DrawTextLayout(textLayout, new Vector2(textX, textY), _textColor);
     }
 
-    private SubtitleSegment? FindActiveSegment(double timeSeconds)
+    private CanvasTextLayout GetLayout(
+        CanvasDrawingSession session, SubtitleSegment segment, int canvasWidth, int canvasHeight)
+    {
+        var device = session.Device;
+        if (_cachedLayout is not null
+            && ReferenceEquals(_cachedSegment, segment)
+            && _cachedWidth == canvasWidth
+            && _cachedHeight == canvasHeight
+            // Win2D equality, not reference equality: session.Device can hand out a new
+            // projection wrapper for the same native device (see GrowOnlyBuffer.Ensure).
+            && _cachedDevice == device)
+        {
+            return _cachedLayout;
+        }
+
+        // Measure the text to size the background rectangle
+        var maxTextWidth = canvasWidth - (_style.PaddingHorizontal * 4);
+        var layout = new CanvasTextLayout(device, segment.Text, _textFormat, maxTextWidth, canvasHeight);
+        _cachedLayout?.Dispose();
+        _cachedLayout = layout;
+        _cachedSegment = segment;
+        _cachedWidth = canvasWidth;
+        _cachedHeight = canvasHeight;
+        _cachedDevice = device;
+        return layout;
+    }
+
+    /// <summary>
+    /// Returns the latest-starting segment containing <paramref name="timeSeconds"/>
+    /// (<c>Start &lt;= t &lt; End</c>), or null when none does.
+    /// </summary>
+    internal SubtitleSegment? FindActiveSegment(double timeSeconds)
     {
         var ts = TimeSpan.FromSeconds(timeSeconds);
-        return _segments.FirstOrDefault(s => ts >= s.Start && ts < s.End);
+
+        // Consecutive frames almost always stay on the same segment. The shortcut is only
+        // taken when that segment is ALSO what the full search would pick: it still
+        // contains ts and no later-starting segment has begun by ts. Otherwise an earlier
+        // overlapping segment would keep winning merely because playback reached it first.
+        int last = _lastActiveIndex;
+        if (last >= 0 && last < _segments.Length)
+        {
+            var cached = _segments[last];
+            if (ts >= cached.Start && ts < cached.End
+                && (last + 1 >= _segments.Length || _segments[last + 1].Start > ts))
+            {
+                return cached;
+            }
+        }
+
+        // Last segment starting at or before ts.
+        int lo = 0, hi = _segments.Length - 1, candidate = -1;
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) / 2);
+            if (_segments[mid].Start <= ts)
+            {
+                candidate = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        // Walk back only while an earlier segment could still cover ts (overlaps).
+        for (int i = candidate; i >= 0 && _maxEnd[i] > ts; i--)
+        {
+            if (ts < _segments[i].End)
+            {
+                _lastActiveIndex = i;
+                return _segments[i];
+            }
+        }
+
+        return null;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _cachedLayout?.Dispose();
+        _cachedLayout = null;
+        _cachedDevice = null;
+        _textFormat.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     private float CalculateY(int canvasHeight, float bgHeight) => _style.Position switch

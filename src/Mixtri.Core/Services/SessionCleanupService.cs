@@ -321,6 +321,67 @@ public static class SessionCleanupService
     }
 
     /// <summary>
+    /// Lists <c>session_*</c> folders under <paramref name="outputFolder"/> that hold captured
+    /// JPEGs but no proven-complete <c>video.mp4</c> — recordings interrupted by a crash, a
+    /// kill or a failed encode before finalization, including a legacy in-place encode that
+    /// left a non-empty but unfinalized MP4. Their frames are the only copy of the recording;
+    /// cleanup never deletes them, and this is how a caller can offer to recover them.
+    /// </summary>
+    /// <remarks>
+    /// Read-only. Call it when no recording is in progress: a live session also has frames
+    /// and no MP4 until it stops.
+    /// </remarks>
+    /// <returns>Full paths of recoverable session folders, oldest name first; empty on error.</returns>
+    public static IReadOnlyList<string> FindRecoverableSessions(string outputFolder)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(outputFolder) || !Directory.Exists(outputFolder))
+            return results;
+
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(outputFolder, "session_*"))
+            {
+                if (IsRecoverableSession(dir))
+                    results.Add(dir);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SessionCleanup] Error scanning for recoverable sessions: {ex.Message}");
+        }
+
+        results.Sort(StringComparer.OrdinalIgnoreCase);
+        return results;
+    }
+
+    /// <summary>
+    /// True when <paramref name="sessionFolder"/> has captured frames and no MP4 proven to
+    /// be a completed encode.
+    /// </summary>
+    /// <remarks>
+    /// A non-empty <c>video.mp4</c> alone is not that proof: older builds wrote it in place,
+    /// so an interrupted finalize leaves a non-empty file with no usable header. The test is
+    /// the same encoder-completion marker <see cref="CanReleaseFrames"/> requires, so the two
+    /// stay complementary — every session that still has frames is either releasable or
+    /// offered for recovery, never neither.
+    /// </remarks>
+    internal static bool IsRecoverableSession(string sessionFolder)
+    {
+        try
+        {
+            if (CanReleaseFrames(sessionFolder))
+                return false;
+
+            return RecordingSession.CapturedFramesRemain(Path.Combine(sessionFolder, FramesDir));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Calculates total reclaimable space from sessions that still have a <c>.frames/</c>
     /// directory alongside a finalized MP4.
     /// </summary>

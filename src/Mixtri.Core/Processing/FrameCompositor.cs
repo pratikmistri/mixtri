@@ -88,6 +88,8 @@ public class FrameCompositor : IDisposable
     /// <summary>Anchors belonging to THIS compositor's source recording. See <see cref="CursorAnchor"/>.</summary>
     private IReadOnlyList<CursorAnchor> _cursorAnchors = [];
     private MouseRecordingData? _mouseData;
+    /// <summary>Compositor-owned copy of <c>_mouseData.Clicks</c>, sorted by timestamp.</summary>
+    private List<ClickEvent> _clicks = [];
     private CanvasBitmap? _webcamFrame;
     private int _sourceWidth;
     private int _sourceHeight;
@@ -364,7 +366,10 @@ public class FrameCompositor : IDisposable
         }
 
         if (config.SubtitleStyle is not null && config.Subtitles is not null)
+        {
+            _subtitleBurner?.Dispose();
             _subtitleBurner = new SubtitleBurner(config.Subtitles, config.SubtitleStyle);
+        }
     }
 
     /// <summary>
@@ -392,8 +397,11 @@ public class FrameCompositor : IDisposable
 
         _mouseData = mouseData;
 
-        // Ensure clicks are sorted by timestamp for binary search in GetActiveClicks
-        _mouseData.Clicks.Sort((a, b) => a.TimestampTicks.CompareTo(b.TimestampTicks));
+        // Sorted, compositor-owned copy for binary search in GetActiveClicks. The caller's
+        // list is never mutated: it may be shared with the project model or another renderer.
+        var sortedClicks = new List<ClickEvent>(mouseData.Clicks);
+        sortedClicks.Sort((a, b) => a.TimestampTicks.CompareTo(b.TimestampTicks));
+        _clicks = sortedClicks;
 
         _sourceWidth = sourceWidth;
         _sourceHeight = sourceHeight;
@@ -788,7 +796,7 @@ public class FrameCompositor : IDisposable
         // while holding left) interleaves two presses.
         var open = new Dictionary<MouseButton, int>();
 
-        foreach (var click in _mouseData.Clicks)
+        foreach (var click in _clicks)
         {
             // A disabled click gets no protected span: the user has said this press is not a
             // moment the pointer must be pinned to.
@@ -823,7 +831,7 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Per-click displacement, parallel to <c>_mouseData.Clicks</c>, so a click absorbed into an
+    /// Per-click displacement, parallel to <c>_clicks</c>, so a click absorbed into an
     /// anchor's motion is DRAWN where the cursor now is rather than where it was recorded.
     /// </summary>
     /// <remarks>
@@ -835,19 +843,19 @@ public class FrameCompositor : IDisposable
 
     private void RecomputeClickDisplacements()
     {
-        if (_mouseData is null || _mouseData.Clicks.Count == 0 || _basePositions.Count == 0)
+        if (_mouseData is null || _clicks.Count == 0 || _basePositions.Count == 0)
         {
             _clickDisplacements = [];
             return;
         }
 
-        var displacements = new (double X, double Y)[_mouseData.Clicks.Count];
+        var displacements = new (double X, double Y)[_clicks.Count];
         int last = _basePositions.Count - 1;
 
-        for (int i = 0; i < _mouseData.Clicks.Count; i++)
+        for (int i = 0; i < _clicks.Count; i++)
         {
             double mouseSeconds =
-                (_mouseData.Clicks[i].TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
+                (_clicks[i].TimestampTicks - _mouseData.StartTimestampTicks) / _tickFrequency;
             int frame = Math.Clamp(
                 FrameTimeConverter.TimeToFrameRounded(mouseSeconds, _config.OutputFps), 0, last);
 
@@ -1150,44 +1158,54 @@ public class FrameCompositor : IDisposable
 
         // Create output render target
         var output = CreateRenderTarget(OutputWidth, OutputHeight, "direct composition output");
-        using (var ds = output.CreateDrawingSession())
+        try
         {
-            // Background + shadow + content + border
-            _bgCompositor.CompositeFrame(
-                ds, croppedFrame, OutputWidth, OutputHeight,
-                _sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight,
-                _config.Background);
-
-            // Cursor overlay with position transformed to output space
-            RenderCursorOverlay(
-                ds, cursorPos, viewport, timeSeconds, cursorIndex, _config.MotionBlur, cameraVelocity);
-
-            // Webcam overlay
-            if (_webcamCompositor is not null && _webcamFrame is not null)
+            using (var ds = output.CreateDrawingSession())
             {
-                _webcamCompositor.RenderWebcam(ds, _webcamFrame, OutputWidth, OutputHeight);
+                // Background + shadow + content + border
+                _bgCompositor.CompositeFrame(
+                    ds, croppedFrame, OutputWidth, OutputHeight,
+                    _sourceAreaOffsetX, _sourceAreaOffsetY, _sourceAreaWidth, _sourceAreaHeight,
+                    _config.Background);
+
+                // Cursor overlay with position transformed to output space
+                RenderCursorOverlay(
+                    ds, cursorPos, viewport, timeSeconds, cursorIndex, _config.MotionBlur, cameraVelocity);
+
+                // Webcam overlay
+                if (_webcamCompositor is not null && _webcamFrame is not null)
+                {
+                    _webcamCompositor.RenderWebcam(ds, _webcamFrame, OutputWidth, OutputHeight);
+                }
+
+                // Keyboard shortcut overlay
+                if (_keyboardRenderer is not null && _keyboardEvents is not null)
+                {
+                    _keyboardRenderer.RenderKeyOverlay(
+                        ds, _keyboardEvents, timeSeconds, _tickFrequency,
+                        OutputWidth, OutputHeight, _videoStartTick);
+                }
+
+                // Subtitle overlay
+                _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
             }
 
-            // Keyboard shortcut overlay
-            if (_keyboardRenderer is not null && _keyboardEvents is not null)
-            {
-                _keyboardRenderer.RenderKeyOverlay(
-                    ds, _keyboardEvents, timeSeconds, _tickFrequency,
-                    OutputWidth, OutputHeight, _videoStartTick);
-            }
-
-            // Subtitle overlay
-            _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
+            // Text overlays are drawn after the drawing session above has closed (not inside
+            // it) because TextOverlayRenderer's frosted-blur background samples the pixels of
+            // the already-composed frame — it needs `output` fully flushed and readable, not
+            // an in-progress drawing session. They stay fixed on screen and are never scaled
+            // by a zoom, the same rule webcam/keyboard/subtitle overlays follow above (there is
+            // no zoom in this direct-composition path to begin with, but the rule still holds
+            // if that ever changes).
+            RenderTextOverlays(output, timeSeconds);
         }
-
-        // Text overlays are drawn after the drawing session above has closed (not inside
-        // it) because TextOverlayRenderer's frosted-blur background samples the pixels of
-        // the already-composed frame — it needs `output` fully flushed and readable, not
-        // an in-progress drawing session. They stay fixed on screen and are never scaled
-        // by a zoom, the same rule webcam/keyboard/subtitle overlays follow above (there is
-        // no zoom in this direct-composition path to begin with, but the rule still holds
-        // if that ever changes).
-        RenderTextOverlays(output, timeSeconds);
+        catch
+        {
+            // The caller never receives `output` on failure, so it would otherwise leak a
+            // full-resolution GPU surface per failed frame (same rule as TransitionRenderer.Render).
+            output.Dispose();
+            throw;
+        }
         return output;
     }
 
@@ -1243,41 +1261,48 @@ public class FrameCompositor : IDisposable
         // 5. Draw zoomed composite (shutter-blurred when the camera is moving
         //    fast enough) + fixed overlays
         var output = CreateRenderTarget(OutputWidth, OutputHeight, "post-composite zoom output");
-        using (var ds = output.CreateDrawingSession())
+        try
         {
-            // Use high-quality interpolation only when zoomed; linear is cheaper at 1:1
-            var interpolation = (frameCropRect.Width < OutputWidth * 0.95
-                || frameCropRect.Height < OutputHeight * 0.95)
-                ? CanvasImageInterpolation.HighQualityCubic
-                : CanvasImageInterpolation.Linear;
-
-            DrawCompositeWithMotionBlur(ds, viewport1x, frameCropRect, timeSeconds, interpolation);
-
-            // Webcam overlay (fixed position, not zoomed)
-            if (_webcamCompositor is not null && _webcamFrame is not null)
+            using (var ds = output.CreateDrawingSession())
             {
-                _webcamCompositor.RenderWebcam(ds, _webcamFrame, OutputWidth, OutputHeight);
+                // One interpolation rule for every resample (see ResolveResampleInterpolation):
+                // a hard 0.95 threshold here used to flip filters mid-zoom, a visible pop.
+                var interpolation = ResolveResampleInterpolation(
+                    OutputWidth / frameCropRect.Width, OutputHeight / frameCropRect.Height);
+
+                DrawCompositeWithMotionBlur(ds, viewport1x, frameCropRect, timeSeconds, interpolation);
+
+                // Webcam overlay (fixed position, not zoomed)
+                if (_webcamCompositor is not null && _webcamFrame is not null)
+                {
+                    _webcamCompositor.RenderWebcam(ds, _webcamFrame, OutputWidth, OutputHeight);
+                }
+
+                // Keyboard shortcut overlay (fixed position, not zoomed)
+                if (_keyboardRenderer is not null && _keyboardEvents is not null)
+                {
+                    _keyboardRenderer.RenderKeyOverlay(
+                        ds, _keyboardEvents, timeSeconds, _tickFrequency,
+                        OutputWidth, OutputHeight, _videoStartTick);
+                }
+
+                // Subtitle overlay (fixed position, not zoomed)
+                _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
             }
 
-            // Keyboard shortcut overlay (fixed position, not zoomed)
-            if (_keyboardRenderer is not null && _keyboardEvents is not null)
-            {
-                _keyboardRenderer.RenderKeyOverlay(
-                    ds, _keyboardEvents, timeSeconds, _tickFrequency,
-                    OutputWidth, OutputHeight, _videoStartTick);
-            }
-
-            // Subtitle overlay (fixed position, not zoomed)
-            _subtitleBurner?.RenderSubtitle(ds, timeSeconds, OutputWidth, OutputHeight);
+            // Text overlays, like the fixed overlays above, are drawn outside the drawing
+            // session and after the zoom: outside because TextOverlayRenderer's
+            // frosted-blur background samples the already-composed `output` pixels (it
+            // needs a closed, flushed drawing session to read from, not an open one), and
+            // after the zoom because overlays stay fixed on screen and are never scaled by
+            // it — the same rule the webcam/keyboard/subtitle overlays follow just above.
+            RenderTextOverlays(output, timeSeconds);
         }
-
-        // Text overlays, like the fixed overlays above, are drawn outside the drawing
-        // session and after the zoom: outside because TextOverlayRenderer's
-        // frosted-blur background samples the already-composed `output` pixels (it
-        // needs a closed, flushed drawing session to read from, not an open one), and
-        // after the zoom because overlays stay fixed on screen and are never scaled by
-        // it — the same rule the webcam/keyboard/subtitle overlays follow just above.
-        RenderTextOverlays(output, timeSeconds);
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
         return output;
     }
 
@@ -1503,16 +1528,16 @@ public class FrameCompositor : IDisposable
         // (Valid here only because every sample covers the entire opaque canvas; see
         // CursorRenderer, where sparse sprites need additive accumulation instead.)
         //
-        // Samples use Linear interpolation regardless of the sharp-frame choice: the
-        // result is being averaged into a smear, so the extra bandwidth of
-        // HighQualityCubic buys nothing visible and multiplies the per-frame cost by
-        // the sample count — which is what made playback stutter during zooms.
+        // Samples use the SAME interpolation as the sharp frame. Mixing filters (Linear
+        // samples, HighQualityCubic sharp frames) made the image visibly change character
+        // the moment blur engaged or released. The cost is bounded by MaxSamples, and the
+        // filter is resolved once per frame rather than per sample.
         DrawProgressiveShutterSamples(sampleCount, timeSeconds, shutterSeconds, (sampleTime, opacity) =>
         {
             var sampleCrop = ComputeCompositeCropRect(ResolveZoomState(sampleTime), viewport1x);
             ds.DrawImage(_compositeBuffer,
                 new Rect(0, 0, OutputWidth, OutputHeight), sampleCrop, opacity,
-                CanvasImageInterpolation.Linear);
+                interpolation);
         });
     }
 
@@ -1751,13 +1776,14 @@ public class FrameCompositor : IDisposable
         ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
 
         // Progressive averaging — see DrawCompositeWithMotionBlur for why 1/(i+1)
-        // (not a uniform 1/N) opacity gives an exact running mean. Samples use Linear
-        // rather than the sharp-path interpolation for the same reason as there: the
-        // result is a smear, so the cost of HighQualityCubic per sample buys nothing.
+        // (not a uniform 1/N) opacity gives an exact running mean. Samples use the
+        // sharp-path interpolation for the same reason as there: one filter rule, no pop
+        // when blur engages or releases.
+        var interpolation = ResolveCropInterpolation(source, viewport);
         DrawProgressiveShutterSamples(sampleCount, timeSeconds, shutterSeconds, (sampleTime, opacity) =>
         {
             var sampleViewport = ComputeEffectiveViewport(ResolveZoomState(sampleTime));
-            DrawSourceCropSample(ds, source, sampleViewport, CanvasImageInterpolation.Linear, opacity);
+            DrawSourceCropSample(ds, source, sampleViewport, interpolation, opacity);
         });
 
         return _croppedBuffer;
@@ -1781,25 +1807,31 @@ public class FrameCompositor : IDisposable
     }
 
     /// <summary>
-    /// Adaptive interpolation: HighQualityCubic is a 4-tap bicubic filter,
-    /// significantly more expensive than Linear. It only meaningfully improves
-    /// quality when actually resampling (zoom in/out or aspect-ratio crop with
-    /// non-unit scale). At ~1:1 the bicubic filter produces output essentially
-    /// identical to Linear, so use the cheaper path. Use the same explicit
-    /// near-unit threshold form as ComposeFramePostCompositeZoom so the two
-    /// paths stay aligned over time.
+    /// Interpolation for the source crop, by <see cref="ResolveResampleInterpolation"/>.
     /// </summary>
     private CanvasImageInterpolation ResolveCropInterpolation(CanvasBitmap source, Rect viewport)
     {
         var bitmapViewport = ToBitmapViewport(source, viewport);
-        double scaleX = _sourceAreaWidth / bitmapViewport.Width;
-        double scaleY = _sourceAreaHeight / bitmapViewport.Height;
-        const double nearUnitScaleMinimum = 0.95;
-        const double nearUnitScaleMaximum = 1.05;
-        bool nearUnitScale =
-            scaleX >= nearUnitScaleMinimum && scaleX <= nearUnitScaleMaximum &&
-            scaleY >= nearUnitScaleMinimum && scaleY <= nearUnitScaleMaximum;
-        return nearUnitScale
+        return ResolveResampleInterpolation(
+            _sourceAreaWidth / bitmapViewport.Width,
+            _sourceAreaHeight / bitmapViewport.Height);
+    }
+
+    /// <summary>
+    /// The single interpolation rule for every resampling draw in the compositor (source
+    /// crop, post-composite zoom, and their shutter-blur samples): Linear only when the
+    /// draw is a 1:1 copy, HighQualityCubic for any real resample. A wide "near unit"
+    /// band (the old 0.95-1.05) switched filters partway through a slow zoom, which reads
+    /// as a sharpness pop; a hairline epsilon only absorbs rounding of the crop rect.
+    /// </summary>
+    internal static CanvasImageInterpolation ResolveResampleInterpolation(double scaleX, double scaleY)
+    {
+        const double unitScaleEpsilon = 0.002;
+        bool unitScale =
+            double.IsFinite(scaleX) && double.IsFinite(scaleY) &&
+            Math.Abs(scaleX - 1.0) <= unitScaleEpsilon &&
+            Math.Abs(scaleY - 1.0) <= unitScaleEpsilon;
+        return unitScale
             ? CanvasImageInterpolation.Linear
             : CanvasImageInterpolation.HighQualityCubic;
     }
@@ -1890,7 +1922,7 @@ public class FrameCompositor : IDisposable
 
         const double windowSeconds = 1.5;
         var result = new List<ClickEvent>();
-        var clicks = _mouseData.Clicks;
+        var clicks = _clicks;
         if (clicks.Count == 0) return result;
 
         long startTick = _mouseData.StartTimestampTicks;
@@ -1921,7 +1953,7 @@ public class FrameCompositor : IDisposable
                 break;
 
             // A disabled click draws no ripple. Skipped here rather than filtered out of the
-            // list up front so _clickDisplacements stays index-parallel with _mouseData.Clicks.
+            // list up front so _clickDisplacements stays index-parallel with _clicks.
             if (IsClickDisabled(click))
                 continue;
 
@@ -1983,12 +2015,16 @@ public class FrameCompositor : IDisposable
             _cursorRenderer.Dispose();
             _webcamCompositor?.Dispose();
             _textOverlayRenderer?.Dispose();
+            _keyboardRenderer?.Dispose();
+            _subtitleBurner?.Dispose();
+            _subtitleBurner = null;
             _smoothedPositions = [];
             _basePositions = [];
             _cursorAnchors = [];
             _clickDisplacements = [];
             _lastMoveTimes = [];
             _mouseData = null;
+            _clicks = [];
             _disposed = true;
             GC.SuppressFinalize(this);
         }

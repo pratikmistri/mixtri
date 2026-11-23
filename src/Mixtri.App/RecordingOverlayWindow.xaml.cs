@@ -63,6 +63,7 @@ public sealed partial class RecordingOverlayWindow : Window
 
         // Show initial elapsed time
         ElapsedText.Text = _viewModel.ElapsedTime;
+        UpdateWarning();
 
         // Subscribe to VM changes for live elapsed time updates
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -134,13 +135,87 @@ public sealed partial class RecordingOverlayWindow : Window
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(RecordingViewModel.ElapsedTime))
+        switch (e.PropertyName)
         {
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                ElapsedText.Text = _viewModel.ElapsedTime;
-            });
+            case nameof(RecordingViewModel.ElapsedTime):
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    ElapsedText.Text = _viewModel.ElapsedTime;
+                });
+                break;
+
+            case nameof(RecordingViewModel.RecordingWarning):
+                DispatcherQueue.TryEnqueue(UpdateWarning);
+                break;
+
+            // A stop can begin without this overlay's Stop button — the recorded window
+            // closing, tray Exit, OS shutdown — and the pill must still say it is finalizing
+            // rather than keep showing a frozen timer and a live-looking Stop button.
+            case nameof(RecordingViewModel.IsStopping):
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (!_viewModel.IsStopping || _stopRequested || _isClosingProgrammatically) return;
+                    _stopRequested = true;
+                    StopButton.IsEnabled = false;
+                    ShowStoppingState();
+                });
+                break;
+
+            case nameof(RecordingViewModel.FinalizationProgress):
+                DispatcherQueue.TryEnqueue(UpdateFinalizationProgress);
+                break;
         }
+    }
+
+    private void UpdateWarning()
+    {
+        if (WarningIcon is null) return;
+
+        var warning = _viewModel.RecordingWarning;
+        if (string.IsNullOrWhiteSpace(warning))
+        {
+            WarningIcon.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        WarningIcon.Visibility = Visibility.Visible;
+        Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(WarningIcon, warning);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(WarningIcon, warning);
+    }
+
+    /// <summary>
+    /// Replaces the rotating phrases with a real percentage once the session reports
+    /// finalization progress, so a long encode reads as progressing rather than stuck.
+    /// </summary>
+    private void UpdateFinalizationProgress()
+    {
+        if (!_stopRequested || _isClosingProgrammatically || StoppingTextA is null) return;
+
+        var progress = _viewModel.FinalizationProgress;
+        if (progress < 0) return;
+
+        // The ticker has done its job; from here on the number is the message.
+        if (_phraseTimer is not null)
+        {
+            _phraseTimer.Stop();
+            _phraseTimer = null;
+            _currentPhraseStoryboard?.Stop();
+            _currentPhraseStoryboard = null;
+
+            StoppingTextA.Opacity = 1;
+            StoppingTextATranslate.Y = 0;
+            StoppingTextB.Opacity = 0;
+            _showingA = true;
+        }
+
+        var percent = (int)Math.Round(Math.Clamp(progress, 0.0, 1.0) * 100);
+        StoppingTextA.Text = $"Saving… {percent}%";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(StoppingTextHost, $"Saving recording, {percent} percent");
+
+        StoppingSpinner.IsIndeterminate = false;
+        StoppingSpinner.Minimum = 0;
+        StoppingSpinner.Maximum = 100;
+        StoppingSpinner.Value = percent;
     }
 
     private async void Stop_Click(object sender, RoutedEventArgs e)
@@ -190,6 +265,9 @@ public sealed partial class RecordingOverlayWindow : Window
             AnimateToPhrase(StoppingPhrases[_phraseIndex]);
         };
         _phraseTimer.Start();
+
+        // Progress may already have been reported by the time this state is shown.
+        UpdateFinalizationProgress();
     }
 
     private bool _showingA = true;

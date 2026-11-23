@@ -19,6 +19,11 @@ public sealed partial class PreviewCanvas : UserControl
     private System.Diagnostics.Stopwatch? _playbackClock;
     private TimeSpan _playbackStartPosition;
     private bool _isPlaying;
+
+    // True only while OnPlaybackTick writes its own clock-derived position, so
+    // OnPlayheadPositionChanged can tell a tick apart from an external seek (timeline
+    // click/drag, keyboard step) made during playback.
+    private bool _settingPositionFromTick;
     private bool _pointerOverPreview;
     private Color _previewClearColor = Color.FromArgb(255, 20, 20, 20);
 
@@ -340,7 +345,15 @@ public sealed partial class PreviewCanvas : UserControl
             PlaybackLooped?.Invoke(this, EventArgs.Empty);
         }
 
-        PlayheadPosition = newPosition;
+        _settingPositionFromTick = true;
+        try
+        {
+            PlayheadPosition = newPosition;
+        }
+        finally
+        {
+            _settingPositionFromTick = false;
+        }
         PlaybackTick?.Invoke(this, EventArgs.Empty);
     }
 
@@ -376,8 +389,19 @@ public sealed partial class PreviewCanvas : UserControl
 
     private static void OnPlayheadPositionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is PreviewCanvas canvas)
-            canvas.UpdateTimeDisplay();
+        if (d is not PreviewCanvas canvas) return;
+
+        // An external seek during playback (timeline click/drag, a keyboard step) must move
+        // the playback clock's origin too — otherwise the next tick recomputes the position
+        // from the old origin and snaps the playhead straight back. The host resyncs audio
+        // from the playhead on every tick, so no separate audio seek is needed here.
+        if (canvas._isPlaying && !canvas._settingPositionFromTick && canvas._playbackClock is not null)
+        {
+            canvas._playbackStartPosition = (TimeSpan)e.NewValue;
+            canvas._playbackClock.Restart();
+        }
+
+        canvas.UpdateTimeDisplay();
     }
 
     private static void OnDurationChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)

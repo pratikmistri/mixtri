@@ -231,24 +231,45 @@ public sealed partial class EditorPage
         SyncSceneStyleControls(force: true);
     }
 
+    // The Windows wallpaper folder does not change while the app runs, so it is enumerated
+    // (and every file stat'ed for the size sort) once per process rather than on every editor
+    // initialisation. Only ever touched on the UI thread.
+    private static List<string>? s_systemWallpaperPaths;
+
     private async Task LoadSystemWallpapersAsync(string? initialCustomPath = null)
     {
         var wallpaperDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Web", "Wallpaper");
 
-        // Enumerate and sort files on a background thread to avoid freezing the UI
-        var systemPaths = await Task.Run(() =>
+        var systemPaths = s_systemWallpaperPaths;
+        if (systemPaths is null)
         {
-            if (!Directory.Exists(wallpaperDir))
-                return new List<string>();
+            // Enumerate and sort files on a background thread to avoid freezing the UI
+            try
+            {
+                systemPaths = await Task.Run(() =>
+                {
+                    if (!Directory.Exists(wallpaperDir))
+                        return new List<string>();
 
-            return Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
-                .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
-                .OrderBy(f => new FileInfo(f).Length)
-                .ToList();
-        });
+                    return Directory.GetFiles(wallpaperDir, "*.*", SearchOption.AllDirectories)
+                        .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                                    f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+                                    f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                                    f.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(f => new FileInfo(f).Length)
+                        .ToList();
+                });
+                s_systemWallpaperPaths = systemPaths;
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"system wallpaper enumeration failed: {ex.Message}");
+                systemPaths = new List<string>();
+            }
+
+            // The page may have been torn down while the enumeration ran.
+            if (_pageUnloaded) return;
+        }
 
         _styleDebouncer?.Flush();
 
@@ -265,14 +286,24 @@ public sealed partial class EditorPage
             existingCustom.Insert(0, initialCustomPath);
         }
 
-        _wallpaperPaths = existingCustom.Concat(systemPaths).ToList();
+        var newPaths = existingCustom.Concat(systemPaths).ToList();
 
         using var suppress = SuppressScope.Enter(ref _suppressStyleEvents);
-        WallpaperGrid.Items.Clear();
-        WallpaperGrid.Items.Add(BuildAddWallpaperTile());
-        foreach (var path in _wallpaperPaths)
+
+        // Rebuild the tiles only when the list actually changed: every tile decodes a
+        // thumbnail, and re-initialising the editor would otherwise redo all of them.
+        bool unchanged = _wallpaperPaths is not null
+            && WallpaperGrid.Items.Count == _wallpaperPaths.Count + 1
+            && _wallpaperPaths.SequenceEqual(newPaths, StringComparer.OrdinalIgnoreCase);
+        _wallpaperPaths = newPaths;
+        if (!unchanged)
         {
-            WallpaperGrid.Items.Add(BuildWallpaperTile(path));
+            WallpaperGrid.Items.Clear();
+            WallpaperGrid.Items.Add(BuildAddWallpaperTile());
+            foreach (var path in _wallpaperPaths)
+            {
+                WallpaperGrid.Items.Add(BuildWallpaperTile(path));
+            }
         }
 
         // After the async load completes the synchronous SyncStyleControlsToConfig
@@ -280,14 +311,18 @@ public sealed partial class EditorPage
         // the items exist so the user sees the active wallpaper highlighted.
         var targetPath = _sceneStyleControlsTarget?.FrameStyleOverride?.BackgroundImagePath
             ?? ProjectService.Instance.CurrentComposition.Background.BackgroundImagePath;
-        if (!string.IsNullOrEmpty(targetPath))
+        int idx = string.IsNullOrEmpty(targetPath)
+            ? -1
+            : _wallpaperPaths.FindIndex(p => string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0)
         {
-            int idx = _wallpaperPaths.FindIndex(p =>
-                string.Equals(p, targetPath, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-            {
-                WallpaperGrid.SelectedIndex = idx + 1;
-            }
+            WallpaperGrid.SelectedIndex = idx + 1;
+        }
+        else if (unchanged)
+        {
+            // A rebuild clears the selection; a kept grid must not keep showing the
+            // previous project's wallpaper as active.
+            WallpaperGrid.SelectedIndex = -1;
         }
     }
 
@@ -760,6 +795,7 @@ public sealed partial class EditorPage
     {
         // Capture both the values and the target before selection/playback can change.
         _pendingSceneStyle = (BuildBackgroundStyleFromControls(), _sceneStyleControlsTarget);
+        _pendingSceneStyleProject = ProjectService.Instance.CurrentProject;
         // Debounce rapid changes (e.g. slider drags) to avoid thrashing the renderer
         _styleDebouncer ??= new Debouncer(() =>
         {
@@ -772,6 +808,43 @@ public sealed partial class EditorPage
     }
 
     private (BackgroundStyle Style, VideoSegment? Segment)? _pendingSceneStyle;
+
+    // The project the pending scene edit was made against, so a reload onto a DIFFERENT
+    // project never writes the old project's style onto the new one.
+    private Project? _pendingSceneStyleProject;
+
+    /// <summary>
+    /// Writes a debounced-but-unapplied scene style edit straight to the model, WITHOUT the
+    /// preview rebuild <see cref="ApplyBackgroundStyle(BackgroundStyle, VideoSegment?)"/>
+    /// starts. For callers about to rebuild (or tear down) the preview themselves — a preview
+    /// re-init, or page unload — where stopping the debouncer would silently drop the edit
+    /// and a concurrent renderer rebuild would race the re-init.
+    /// </summary>
+    private void CommitPendingSceneStyleWithoutRebuild()
+    {
+        _styleDebouncer?.Stop();
+        var pendingProject = _pendingSceneStyleProject;
+        _pendingSceneStyleProject = null;
+        if (_pendingSceneStyle is not { } pending) return;
+        _pendingSceneStyle = null;
+
+        if (!ReferenceEquals(pendingProject, ProjectService.Instance.CurrentProject))
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", "pending scene style dropped: project changed");
+            return;
+        }
+
+        if (pending.Segment is { } seg)
+        {
+            if (!ViewModel.Model.Segments.Contains(seg)) return;
+            seg.FrameStyleOverride = pending.Style;
+            ProjectService.Instance.MarkDirty();
+            return;
+        }
+
+        if (ProjectService.Instance.CurrentComposition is { } config)
+            ProjectService.Instance.CurrentComposition = config with { Background = pending.Style };
+    }
 
     private VideoSegment? SceneVideoSegment => SceneStyleTarget.Resolve(
         ViewModel.Model, _selectedPrimarySegmentId, Timeline.PlayheadPosition);
@@ -937,9 +1010,10 @@ public sealed partial class EditorPage
     private void ApplyBackgroundStyle(BackgroundStyle bg, VideoSegment? target)
     {
         // Mark preset as Custom if it no longer matches
-        _suppressStyleEvents = true;
-        PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
-        _suppressStyleEvents = false;
+        using (SuppressScope.Enter(ref _suppressStyleEvents))
+        {
+            PresetCombo.SelectedIndex = FindMatchingPresetIndex(bg);
+        }
 
         // Use the selected clip, or the visible video when selection is cleared.
         // Otherwise an existing clip override masks every edit to the global style.
@@ -1043,6 +1117,53 @@ public sealed partial class EditorPage
         }
     }
 
+    // Parsed primary cursor log, keyed by path + last write time so a re-recorded or
+    // replaced file is re-read. MouseRecordingData is never mutated by its consumers, so
+    // one instance is safely shared by every renderer built from it.
+    private (string Path, DateTime WriteTimeUtc, MouseRecordingData Data)? _primaryCursorDataCache;
+
+    /// <summary>
+    /// Loads the cursor recording at <paramref name="path"/>, reusing the last parse when the
+    /// file is unchanged and parsing on the thread pool otherwise. Returns null when there is
+    /// no file or it cannot be read (callers fall back to an empty recording).
+    /// </summary>
+    private async Task<MouseRecordingData?> LoadPrimaryCursorDataCachedAsync(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+
+        DateTime stamp;
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) return null;
+            stamp = info.LastWriteTimeUtc;
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (_primaryCursorDataCache is { } cached
+            && string.Equals(cached.Path, path, StringComparison.OrdinalIgnoreCase)
+            && cached.WriteTimeUtc == stamp)
+        {
+            return cached.Data;
+        }
+
+        try
+        {
+            var data = await Task.Run(() => MouseHookRecorder.LoadFromFile(path));
+            if (data is not null)
+                _primaryCursorDataCache = (path, stamp, data);
+            return data;
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"cursor load FAILED '{path}': {ex.Message}");
+            return null;
+        }
+    }
+
     private const int MaxCoalescedRendererRebuilds = 4;
     private bool _rebuildingPreviewRenderer;
     private (CompositionConfig Config, VideoSegment? Segment)? _pendingRendererRebuild;
@@ -1059,12 +1180,11 @@ public sealed partial class EditorPage
         var background = effective.Background;
         var cursor = effective.Cursor;
 
-        MouseRecordingData? mouseData = null;
-        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
-        {
-            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
-            catch { /* no cursor data */ }
-        }
+        // Cached per file + write time and parsed off the UI thread: this runs on every
+        // debounced style/cursor slider commit, and re-reading the whole cursor log on the UI
+        // thread each time was a visible hitch on long recordings.
+        var mouseData = await LoadPrimaryCursorDataCachedAsync(project.CursorDataFilePath);
+        if (_pageUnloaded) return;
 
         mouseData ??= new MouseRecordingData();
 
@@ -1344,11 +1464,10 @@ public sealed partial class EditorPage
 
     private void SyncWebcamOverlayUI(WebcamOverlayStyle style)
     {
-        _suppressWebcamEvents = true;
+        using var _ = SuppressScope.Enter(ref _suppressWebcamEvents);
         WebcamShapeCombo.SelectedIndex = style.Shape == WebcamShape.RoundedRect ? 1 : 0;
         WebcamBorderSlider.Value = style.BorderWidth;
         WebcamMirrorToggle.IsOn = style.Mirrored;
-        _suppressWebcamEvents = false;
     }
 
     private void WebcamMirrorToggle_Toggled(object sender, RoutedEventArgs e)

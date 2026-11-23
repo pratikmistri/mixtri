@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Imaging;
@@ -11,6 +12,13 @@ namespace Mixtri_App.Services;
 
 internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutionProvider
 {
+    /// <summary>
+    /// Upper bound on preparing the upscaler (execution-provider registration and model
+    /// download/initialization). Past it the export continues with standard scaling rather
+    /// than sitting at 0% indefinitely.
+    /// </summary>
+    private static readonly TimeSpan SetupTimeout = TimeSpan.FromSeconds(60);
+
     public async Task<IVideoSuperResolutionSession?> TryCreateAsync(
         int inputWidth, int inputHeight, int outputWidth, int outputHeight,
         CancellationToken cancellationToken)
@@ -19,12 +27,18 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
                 inputWidth, inputHeight, outputWidth, outputHeight))
             return null;
 
+        using var setupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        setupTimeout.CancelAfter(SetupTimeout);
+        // WaitAsync guarantees the await returns at the deadline even if a WinRT operation
+        // ignores Cancel(); AsTask alone waits for the operation to acknowledge it.
+        var setupToken = setupTimeout.Token;
+
         VideoScaler? scaler = null;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             var catalog = ExecutionProviderCatalog.GetDefault();
-            await catalog.EnsureAndRegisterCertifiedAsync().AsTask(cancellationToken);
+            await catalog.EnsureAndRegisterCertifiedAsync().AsTask(setupToken).WaitAsync(setupToken);
             cancellationToken.ThrowIfCancellationRequested();
 
             var readyState = VideoScaler.GetReadyState();
@@ -36,7 +50,7 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
 
             if (readyState == AIFeatureReadyState.NotReady)
             {
-                var readyOperation = await VideoScaler.EnsureReadyAsync().AsTask(cancellationToken);
+                var readyOperation = await VideoScaler.EnsureReadyAsync().AsTask(setupToken).WaitAsync(setupToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (readyOperation.Status != AIFeatureReadyResultState.Success)
                 {
@@ -47,7 +61,7 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
                 }
             }
 
-            scaler = await VideoScaler.CreateAsync().AsTask(cancellationToken);
+            scaler = await VideoScaler.CreateAsync().AsTask(setupToken).WaitAsync(setupToken);
             cancellationToken.ThrowIfCancellationRequested();
             var session = new WindowsVideoSuperResolutionSession(
                 scaler, inputWidth, inputHeight, outputWidth, outputHeight);
@@ -61,6 +75,13 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (setupTimeout.IsCancellationRequested)
+        {
+            DiagLog.Write(
+                "Export",
+                $"Windows AI VideoScaler setup did not finish within {SetupTimeout.TotalSeconds:0}s; using standard scaling.");
+            return null;
         }
         catch (Exception ex)
         {
@@ -80,9 +101,12 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
         private readonly VideoScaler _scaler;
         private readonly ImageBuffer _inputImage;
         private readonly ImageBuffer _outputImage;
+        private readonly byte[] _inputBgra;
         private readonly byte[] _inputBgr;
         private readonly byte[] _outputBgr;
         private readonly byte[] _outputBgra;
+        private readonly Windows.Storage.Streams.IBuffer _inputBgraBuffer;
+        private readonly Windows.Storage.Streams.IBuffer _outputBgraBuffer;
         private bool _disabled;
         private bool _disposed;
 
@@ -93,9 +117,13 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
 
             int inputPixelCount = checked(inputWidth * inputHeight);
             int outputPixelCount = checked(outputWidth * outputHeight);
+            // All staging buffers are allocated once per export and reused for every frame.
+            _inputBgra = new byte[checked(inputPixelCount * 4)];
             _inputBgr = new byte[checked(inputPixelCount * 3)];
             _outputBgr = new byte[checked(outputPixelCount * 3)];
             _outputBgra = new byte[checked(outputPixelCount * 4)];
+            _inputBgraBuffer = _inputBgra.AsBuffer();
+            _outputBgraBuffer = _outputBgra.AsBuffer();
 
             _inputImage = ImageBuffer.CreateForBuffer(
                 _inputBgr.AsBuffer(), ImageBufferPixelFormat.Bgr8,
@@ -112,13 +140,8 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
             ObjectDisposedException.ThrowIf(_disposed, this);
             try
             {
-                var bgra = source.GetPixelBytes();
-                for (int src = 0, dst = 0; dst < _inputBgr.Length; src += 4, dst += 3)
-                {
-                    _inputBgr[dst] = bgra[src];
-                    _inputBgr[dst + 1] = bgra[src + 1];
-                    _inputBgr[dst + 2] = bgra[src + 2];
-                }
+                source.GetPixelBytes(_inputBgraBuffer);
+                BgraToBgr(_inputBgra, _inputBgr);
 
                 var result = _scaler.ScaleImageBuffer(
                     _inputImage, _outputImage, new VideoScalerOptions());
@@ -126,14 +149,8 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
                     throw new InvalidOperationException($"VideoScaler returned {result.Status}.");
 
                 _outputImage.CopyToByteArray(_outputBgr);
-                for (int src = 0, dst = 0; src < _outputBgr.Length; src += 3, dst += 4)
-                {
-                    _outputBgra[dst] = _outputBgr[src];
-                    _outputBgra[dst + 1] = _outputBgr[src + 1];
-                    _outputBgra[dst + 2] = _outputBgr[src + 2];
-                    _outputBgra[dst + 3] = byte.MaxValue;
-                }
-                destination.SetPixelBytes(_outputBgra);
+                BgrToOpaqueBgra(_outputBgr, _outputBgra);
+                destination.SetPixelBytes(_outputBgraBuffer);
                 return true;
             }
             catch (Exception ex)
@@ -143,6 +160,25 @@ internal sealed class WindowsVideoSuperResolutionProvider : IVideoSuperResolutio
                 Dispose();
                 return false;
             }
+        }
+
+        private static void BgraToBgr(ReadOnlySpan<byte> bgra, Span<byte> bgr)
+        {
+            int pixels = bgr.Length / 3;
+            for (int i = 0, src = 0, dst = 0; i < pixels; i++, src += 4, dst += 3)
+            {
+                bgr[dst] = bgra[src];
+                bgr[dst + 1] = bgra[src + 1];
+                bgr[dst + 2] = bgra[src + 2];
+            }
+        }
+
+        private static void BgrToOpaqueBgra(ReadOnlySpan<byte> bgr, Span<byte> bgra)
+        {
+            // One 32-bit store per pixel (little-endian B, G, R, A=255).
+            var output = MemoryMarshal.Cast<byte, uint>(bgra);
+            for (int i = 0, src = 0; i < output.Length; i++, src += 3)
+                output[i] = bgr[src] | ((uint)bgr[src + 1] << 8) | ((uint)bgr[src + 2] << 16) | 0xFF000000u;
         }
 
         public void Dispose()

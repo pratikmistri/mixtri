@@ -81,7 +81,14 @@ public class PerformanceMonitor
     /// <summary>Gets current managed + unmanaged working set in MB.</summary>
     public long GetCurrentMemoryUsageMB()
     {
-        var bytes = Process.GetCurrentProcess().WorkingSet64;
+        // Process wraps a native handle; dispose it rather than leaking one per call.
+        using var process = Process.GetCurrentProcess();
+        return GetCurrentMemoryUsageMB(process);
+    }
+
+    private long GetCurrentMemoryUsageMB(Process process)
+    {
+        var bytes = process.WorkingSet64;
         UpdatePeakMemory(bytes);
         return bytes / (1024 * 1024);
     }
@@ -89,8 +96,14 @@ public class PerformanceMonitor
     /// <summary>Gets the peak memory usage observed in MB.</summary>
     public long GetPeakMemoryUsageMB()
     {
+        using var process = Process.GetCurrentProcess();
+        return GetPeakMemoryUsageMB(process);
+    }
+
+    private long GetPeakMemoryUsageMB(Process process)
+    {
         // Refresh peak from the OS value as well
-        var osPeak = Process.GetCurrentProcess().PeakWorkingSet64;
+        var osPeak = process.PeakWorkingSet64;
         UpdatePeakMemory(osPeak);
         return Interlocked.Read(ref _peakMemoryBytes) / (1024 * 1024);
     }
@@ -119,6 +132,9 @@ public class PerformanceMonitor
         var encCount = Interlocked.Read(ref _encodingCount);
         var encTicks = Interlocked.Read(ref _totalEncodingTimeTicks);
 
+        // One Process snapshot for both memory figures, disposed with the report.
+        using var process = Process.GetCurrentProcess();
+
         return new PerformanceReport
         {
             TotalFramesCaptured = captured,
@@ -136,8 +152,8 @@ public class PerformanceMonitor
                 ? TimeSpan.FromTicks(encTicks / encCount).TotalMilliseconds
                 : 0.0,
             MaxCaptureTimeMs = TimeSpan.FromTicks(maxCaptureTicks).TotalMilliseconds,
-            CurrentMemoryMB = GetCurrentMemoryUsageMB(),
-            PeakMemoryMB = GetPeakMemoryUsageMB()
+            CurrentMemoryMB = GetCurrentMemoryUsageMB(process),
+            PeakMemoryMB = GetPeakMemoryUsageMB(process)
         };
     }
 

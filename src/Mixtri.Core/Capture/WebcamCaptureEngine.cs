@@ -52,6 +52,12 @@ public sealed class WebcamCaptureEngine : IDisposable
     public bool IsRecording { get; private set; }
     public string? OutputFilePath { get; private set; }
 
+    /// <summary>
+    /// <see cref="Stopwatch"/> timestamp taken when recording to <see cref="OutputFilePath"/>
+    /// started (0 until then). Approximates the webcam file's position 0.
+    /// </summary>
+    public long StartedTicks { get; private set; }
+
     /// <summary>Outcome of the last stop attempt (diagnostic).</summary>
     public WebcamStopOutcome LastStopOutcome { get; private set; } = WebcamStopOutcome.NotRecording;
 
@@ -88,6 +94,11 @@ public sealed class WebcamCaptureEngine : IDisposable
 
         _mediaCapture = new MediaCapture();
 
+        // Only the file THIS attempt creates may be removed on failure: OutputFilePath can
+        // still name a previous, successful recording if the engine is started again.
+        string? createdThisAttempt = null;
+        OutputFilePath = null;
+
         try
         {
             var settings = new MediaCaptureInitializationSettings
@@ -103,6 +114,7 @@ public sealed class WebcamCaptureEngine : IDisposable
             var folder = await StorageFolder.GetFolderFromPathAsync(outputFolder);
             var file = await folder.CreateFileAsync(fileName, CreationCollisionOption.GenerateUniqueName);
 
+            createdThisAttempt = file.Path;
             OutputFilePath = file.Path;
 
             var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD720p);
@@ -111,10 +123,21 @@ public sealed class WebcamCaptureEngine : IDisposable
         catch
         {
             DisposeMediaCapture();
+
+            // Never advertise a webcam file that a failed start left empty or absent.
+            var abandoned = createdThisAttempt;
+            OutputFilePath = null;
+            if (abandoned is not null)
+            {
+                try { File.Delete(abandoned); }
+                catch (Exception ex) { Debug.WriteLine($"[WebcamCaptureEngine] Could not remove '{abandoned}': {ex.Message}"); }
+            }
+
             throw;
         }
 
         IsRecording = true;
+        StartedTicks = Stopwatch.GetTimestamp();
     }
 
     /// <summary>

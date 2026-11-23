@@ -67,9 +67,11 @@
                 VerticalAlignment="Center"
                 FontSize="24"
                 FontWeight="SemiBold"
+                AutomationProperties.HeadingLevel="Level1"
                 Text="Gallery" />
 
             <Button
+                x:Name="OpenButton"
                 Grid.Column="1"
                 Height="36"
                 VerticalAlignment="Center"
@@ -144,6 +146,8 @@
                 <DataTemplate x:DataType="local:ProjectCard">
                     <Grid
                         Width="260"
+                        AutomationProperties.Name="{x:Bind Name}"
+                        AutomationProperties.HelpText="{x:Bind Subtitle}"
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1"
@@ -160,11 +164,14 @@
                             Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
                             CornerRadius="8,8,0,0">
                             <Grid>
+                                <!-- Decorative: the card's name and subtitle carry its meaning. -->
                                 <FontIcon
+                                    AutomationProperties.AccessibilityView="Raw"
                                     FontSize="28"
                                     Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                     Glyph="&#xE714;" />
                                 <Image
+                                    AutomationProperties.AccessibilityView="Raw"
                                     Source="{x:Bind Poster}"
                                     Stretch="UniformToFill" />
                             </Grid>
@@ -194,6 +201,7 @@
                         <DataTemplate x:DataType="local:ProjectGroup">
                             <TextBlock
                                 Margin="0,0,0,8"
+                                AutomationProperties.HeadingLevel="Level2"
                                 FontSize="14"
                                 FontWeight="SemiBold"
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"

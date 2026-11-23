@@ -222,12 +222,20 @@ public class ResizeZoomSegmentOperation : IEditOperation
             // Moving right edge: change End → recalculate HoldDuration (keep PostDuration fixed)
             var newEnd = _newEdgeTime;
 
-            // Clamp: new End can't go before Timestamp + minimum
+            // Clamp to the end of the keyframe's own recording, when known. Keyframe times
+            // are SOURCE times in the file the keyframe belongs to, and model.Duration is the
+            // PRIMARY recording's length only — clamping an appended recording's keyframe to
+            // it could pull the end before the timestamp and drive PostDuration negative.
+            if (IsPrimaryRecordingKeyframe(model, kf) && model.Duration > TimeSpan.Zero
+                && newEnd > model.Duration)
+            {
+                newEnd = model.Duration;
+            }
+
+            // Clamp: new End can't go before Timestamp + minimum. Applied LAST so it wins over
+            // the upper clamp above, which keeps HoldDuration/PostDuration non-negative.
             var minEnd = kf.Timestamp + ZoomKeyframe.MinSegmentDuration;
             if (newEnd < minEnd) newEnd = minEnd;
-
-            // Clamp to timeline duration
-            if (newEnd > model.Duration) newEnd = model.Duration;
 
             var totalAfterTimestamp = newEnd - kf.Timestamp;
             var newPost = kf.PostDuration;
@@ -259,6 +267,16 @@ public class ResizeZoomSegmentOperation : IEditOperation
 
         model.ZoomKeyframes[index] = _previousKeyframe;
     }
+
+    /// <summary>
+    /// Whether <paramref name="keyframe"/> is tagged to the primary recording — the only file
+    /// whose length the model knows (<see cref="TimelineModel.Duration"/>). Null means primary,
+    /// per <see cref="ZoomKeyframe.SourceVideoFilePath"/>'s convention.
+    /// </summary>
+    private static bool IsPrimaryRecordingKeyframe(TimelineModel model, ZoomKeyframe keyframe)
+        => keyframe.SourceVideoFilePath is null
+           || (model.PrimaryVideoFilePath is { } primary
+               && string.Equals(keyframe.SourceVideoFilePath, primary, StringComparison.OrdinalIgnoreCase));
 }
 
 public class UpdateZoomSegmentPropertiesOperation : IEditOperation

@@ -25,6 +25,12 @@ public sealed class SystemTrayService : IDisposable
     private WndProcDelegate? _wndProcDelegate;
     private IntPtr _iconHandle;
 
+    /// <summary>
+    /// Broadcast by Explorer when the taskbar is (re)created — an Explorer crash or restart,
+    /// or a DPI change. Every notification icon is lost at that point and must be re-added.
+    /// </summary>
+    private uint _taskbarCreatedMessage;
+
     // Menu item IDs
     private const uint IDM_START_RECORDING = 1001;
     private const uint IDM_OPEN = 1002;
@@ -34,6 +40,7 @@ public sealed class SystemTrayService : IDisposable
     public void Initialize(Window mainWindow)
     {
         _mainWindow = mainWindow;
+        _taskbarCreatedMessage = RegisterWindowMessageW("TaskbarCreated");
         CreateMessageWindow();
         LoadIcon();
         SetupNotifyIconData();
@@ -95,10 +102,14 @@ public sealed class SystemTrayService : IDisposable
 
         RegisterClassW(ref wndClass);
 
+        // A hidden top-level window rather than a message-only (HWND_MESSAGE) one: message-only
+        // windows never receive broadcasts, and the "TaskbarCreated" broadcast is the only way
+        // to learn that Explorer restarted and the tray icon has to be added again. Never
+        // shown (no WS_VISIBLE), and a tool window so it stays out of Alt-Tab regardless.
         _messageWindowHwnd = CreateWindowExW(
-            0, "MixtriTrayMsgWindow", "Mixtri Tray", 0,
+            WS_EX_TOOLWINDOW, "MixtriTrayMsgWindow", "Mixtri Tray", 0,
             0, 0, 0, 0,
-            HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
+            IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
     }
 
     private void LoadIcon()
@@ -106,7 +117,13 @@ public sealed class SystemTrayService : IDisposable
         var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
         if (System.IO.File.Exists(iconPath))
         {
-            _iconHandle = LoadImage(IntPtr.Zero, iconPath, IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+            // The notification area draws at the small-icon size for the current DPI (20px at
+            // 125%, 32px at 200%); loading a fixed 16px frame made the shell upscale it blurry.
+            int cx = GetSystemMetrics(SM_CXSMICON);
+            int cy = GetSystemMetrics(SM_CYSMICON);
+            if (cx <= 0) cx = 16;
+            if (cy <= 0) cy = 16;
+            _iconHandle = LoadImage(IntPtr.Zero, iconPath, IMAGE_ICON, cx, cy, LR_LOADFROMFILE);
         }
     }
 
@@ -129,6 +146,35 @@ public sealed class SystemTrayService : IDisposable
 
     private IntPtr TrayWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // A managed exception must never unwind through this native callback — that is a
+        // process-killing failfast with no managed handler in the way. Every handler below
+        // raises app events that run arbitrary shell code, so contain them all here.
+        try
+        {
+            return HandleTrayMessage(hWnd, msg, wParam, lParam);
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Tray", $"Tray message 0x{msg:X4} failed: {ex}");
+            try { return DefWindowProcW(hWnd, msg, wParam, lParam); }
+            catch { return IntPtr.Zero; }
+        }
+    }
+
+    private IntPtr HandleTrayMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (_taskbarCreatedMessage != 0 && msg == _taskbarCreatedMessage)
+        {
+            // Explorer came back with an empty notification area. Re-add (NIM_ADD) rather
+            // than modify, since the shell no longer knows this icon at all.
+            if (!_disposed && _isVisible)
+            {
+                _isVisible = false;
+                Show();
+            }
+            return IntPtr.Zero;
+        }
+
         if (msg == WM_TRAYICON)
         {
             var mouseMsg = (uint)(lParam.ToInt64() & 0xFFFF);
@@ -217,7 +263,10 @@ public sealed class SystemTrayService : IDisposable
     private const uint IMAGE_ICON = 1;
     private const uint LR_LOADFROMFILE = 0x0010;
 
-    private static readonly IntPtr HWND_MESSAGE = new(-3);
+    private const uint WS_EX_TOOLWINDOW = 0x00000080;
+
+    private const int SM_CXSMICON = 49;
+    private const int SM_CYSMICON = 50;
 
     #endregion
 
@@ -307,6 +356,12 @@ public sealed class SystemTrayService : IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessageW(string lpString);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     #endregion
 }

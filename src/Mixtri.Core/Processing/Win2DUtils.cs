@@ -13,6 +13,17 @@ namespace Mixtri.Core.Processing;
 public static class Win2DUtils
 {
     /// <summary>
+    /// Whether two references denote the same Win2D device. Uses Win2D's own equality, not
+    /// <see cref="object.ReferenceEquals"/>: reading a device back (e.g. from
+    /// <c>CanvasDrawingSession.Device</c>) can return a different projection wrapper around the
+    /// same native device, so reference identity makes per-frame caches miss every frame
+    /// (see <see cref="GrowOnlyBuffer.Ensure"/>). Do not put devices inside tuple/record cache
+    /// keys either; compare them separately with this.
+    /// </summary>
+    public static bool SameDevice(CanvasDevice? a, CanvasDevice? b)
+        => a is null ? b is null : b is not null && a == b;
+
+    /// <summary>
     /// Allocates a <see cref="CanvasRenderTarget"/>, wrapping an <see cref="OutOfMemoryException"/>
     /// or <see cref="COMException"/> raised during allocation into a logged, user-friendly
     /// <see cref="InvalidOperationException"/>. <paramref name="purpose"/> is a short
@@ -39,6 +50,17 @@ public static class Win2DUtils
             DiagLog.Write(
                 "Win2DUtils",
                 $"Failed to allocate {purpose} render target ({width}x{height}): {ex.Message}");
+
+            // A removed/reset device is not a size problem: advising a lower resolution would
+            // send the user after the wrong fix. The COM error stays the inner exception, so
+            // GpuContext.IsDeviceLoss still classifies this as recoverable device loss.
+            if (GpuContext.IsDeviceLossHResult(ex.HResult))
+            {
+                throw new InvalidOperationException(
+                    $"Failed to allocate {purpose} render target ({width}x{height}): the graphics " +
+                    "device was lost or reset and must be recreated.", ex);
+            }
+
             throw new InvalidOperationException(
                 $"Failed to allocate {purpose} render target ({width}x{height}). " +
                 "Try a lower resolution or close other GPU-heavy applications.", ex);

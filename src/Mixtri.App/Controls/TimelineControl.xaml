@@ -6,7 +6,10 @@
     xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    IsTabStop="True"
+    UseSystemFocusVisuals="True"
+    AutomationProperties.Name="Timeline">
 
     <Grid
         PointerWheelChanged="Grid_PointerWheelChanged">
@@ -126,7 +129,13 @@
             Grid.Row="0"
             Grid.Column="1"
             Draw="TimeRulerCanvas_Draw"
-            PointerPressed="Track_PointerPressed" />
+            PointerPressed="Track_PointerPressed"
+            PointerMoved="Track_PointerMoved"
+            PointerReleased="Track_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
+            AutomationProperties.Name="Time ruler" />
 
         <canvas:CanvasControl
             x:Name="VideoTrackCanvas"
@@ -151,7 +160,11 @@
             PointerPressed="CameraTrack_PointerPressed"
             PointerMoved="CameraTrack_PointerMoved"
             PointerReleased="CameraTrack_PointerReleased"
-            RightTapped="CameraTrack_RightTapped" />
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
+            RightTapped="CameraTrack_RightTapped"
+            AutomationProperties.Name="Camera track" />
 
         <canvas:CanvasControl
             x:Name="TextTrackCanvas"
@@ -161,6 +174,9 @@
             PointerPressed="TextTrack_PointerPressed"
             PointerMoved="TextTrack_PointerMoved"
             PointerReleased="TextTrack_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
             RightTapped="TextTrack_RightTapped"
             DoubleTapped="TextTrack_DoubleTapped"
             AutomationProperties.Name="Text overlay track" />
@@ -171,7 +187,13 @@
             Grid.Column="1"
             Draw="AudioTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed"
-            RightTapped="RecordedAudioTrack_RightTapped" />
+            PointerMoved="Track_PointerMoved"
+            PointerReleased="Track_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
+            RightTapped="RecordedAudioTrack_RightTapped"
+            AutomationProperties.Name="System audio track" />
 
         <canvas:CanvasControl
             x:Name="MicTrackCanvas"
@@ -179,7 +201,13 @@
             Grid.Column="1"
             Draw="MicTrackCanvas_Draw"
             PointerPressed="Track_PointerPressed"
-            RightTapped="RecordedAudioTrack_RightTapped" />
+            PointerMoved="Track_PointerMoved"
+            PointerReleased="Track_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
+            RightTapped="RecordedAudioTrack_RightTapped"
+            AutomationProperties.Name="Microphone track" />
 
         <canvas:CanvasControl
             x:Name="VoiceOverTrackCanvas"
@@ -190,6 +218,9 @@
             PointerPressed="AudioTrackLane_PointerPressed"
             PointerMoved="AudioTrackLane_PointerMoved"
             PointerReleased="AudioTrackLane_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
             RightTapped="AudioTrackLane_RightTapped"
             AutomationProperties.Name="Voice over track" />
 
@@ -202,6 +233,9 @@
             PointerPressed="AudioTrackLane_PointerPressed"
             PointerMoved="AudioTrackLane_PointerMoved"
             PointerReleased="AudioTrackLane_PointerReleased"
+            PointerCaptureLost="Track_PointerCaptureLost"
+            PointerCanceled="Track_PointerCaptureLost"
+            PointerExited="Track_PointerExited"
             RightTapped="AudioTrackLane_RightTapped"
             AutomationProperties.Name="Music track" />
 

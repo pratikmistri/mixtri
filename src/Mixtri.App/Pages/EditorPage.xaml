@@ -123,6 +123,8 @@
                         PointerPressed="ZoomRegionCanvas_PointerPressed"
                         PointerMoved="ZoomRegionCanvas_PointerMoved"
                         PointerReleased="ZoomRegionCanvas_PointerReleased"
+                        PointerCaptureLost="ZoomRegionCanvas_PointerCaptureLost"
+                        PointerCanceled="ZoomRegionCanvas_PointerCanceled"
                         SizeChanged="ZoomRegionCanvas_SizeChanged">
                     <Rectangle x:Name="DimTop" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
                     <Rectangle x:Name="DimBottom" Fill="{ThemeResource OverlayDimBrush}" IsHitTestVisible="False" />
@@ -417,13 +419,16 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Undo / Redo buttons -->
+            <!-- Undo / Redo buttons. The plain command buttons never take focus on click
+                 (AllowFocusOnInteraction="False"): a focused button would swallow Space and keep
+                 re-triggering itself instead of letting the page shortcuts run. -->
             <StackPanel
                 Grid.Column="0"
                 Orientation="Horizontal"
                 Spacing="4">
                 <Button
                     Padding="8,6"
+                    AllowFocusOnInteraction="False"
                     Command="{x:Bind ViewModel.UndoCommand}"
                     IsEnabled="{x:Bind ViewModel.CanUndo, Mode=OneWay}"
                     ToolTipService.ToolTip="{x:Bind ViewModel.UndoTooltip, Mode=OneWay}">
@@ -431,6 +436,7 @@
                 </Button>
                 <Button
                     Padding="8,6"
+                    AllowFocusOnInteraction="False"
                     Command="{x:Bind ViewModel.RedoCommand}"
                     IsEnabled="{x:Bind ViewModel.CanRedo, Mode=OneWay}"
                     ToolTipService.ToolTip="{x:Bind ViewModel.RedoTooltip, Mode=OneWay}">
@@ -441,18 +447,21 @@
 
                 <Button
                     Padding="8,6"
+                    AllowFocusOnInteraction="False"
                     Command="{x:Bind ViewModel.SplitAtPlayheadCommand}"
                     ToolTipService.ToolTip="Split at Playhead (S)">
                     <PathIcon Data="M 4,2 C 2.5,2 2,3.5 2,5 L 2,15 C 2,16.5 2.5,18 4,18 L 7,18 L 7,16 L 4.5,16 C 3.7,16 4,15 4,14.5 L 4,5.5 C 4,5 3.7,4 4.5,4 L 7,4 L 7,2 Z  M 16,2 C 17.5,2 18,3.5 18,5 L 18,15 C 18,16.5 17.5,18 16,18 L 13,18 L 13,16 L 15.5,16 C 16.3,16 16,15 16,14.5 L 16,5.5 C 16,5 16.3,4 15.5,4 L 13,4 L 13,2 Z  M 9.5,1 L 10.5,1 L 10.5,19 L 9.5,19 Z" />
                 </Button>
                 <Button
                     Padding="8,6"
+                    AllowFocusOnInteraction="False"
                     Click="DeleteSelected_Click"
                     ToolTipService.ToolTip="Delete Segment (Del)">
                     <FontIcon FontSize="16" Glyph="&#xE74D;" />
                 </Button>
                 <Button
                     Padding="8,6"
+                    AllowFocusOnInteraction="False"
                     Click="CutSelection_Click"
                     ToolTipService.ToolTip="Cut Selection (Ctrl+X)">
                     <FontIcon FontSize="16" Glyph="&#xE8C6;" />
@@ -634,6 +643,7 @@
                                     <Button
                                         HorizontalAlignment="Center"
                                         Click="CancelExport_Click"
+                                        IsEnabled="{x:Bind ExportVM.CanCancel, Mode=OneWay}"
                                         Content="Cancel" />
                                 </StackPanel>
 
@@ -659,6 +669,13 @@
                                         TextAlignment="Center"
                                         TextWrapping="Wrap"
                                         Text="{x:Bind ExportVM.ExportedFilePath, Mode=OneWay}" />
+                                    <TextBlock
+                                        x:Name="ExportWarningTextBlock"
+                                        FontSize="12"
+                                        TextWrapping="Wrap"
+                                        TextAlignment="Center"
+                                        Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                        Text="{x:Bind ExportVM.ExportWarningText, Mode=OneWay}" />
                                     <StackPanel
                                         HorizontalAlignment="Center"
                                         Orientation="Horizontal"

@@ -107,9 +107,14 @@ public sealed class EditorGraphicsDeviceManager
         => RequestRecovery("shared CanvasDevice lost");
 
     /// <summary>Caught Win2D errors must still enter the device recovery path.</summary>
-    public void RecoverFromRenderFailure(Exception exception)
+    /// <returns>
+    /// True when the failure was a device loss (recovery now owns it). False for any other
+    /// failure, which recovery will NOT fix — callers that render repeatedly must track those
+    /// themselves rather than let the same error repeat silently every frame.
+    /// </returns>
+    public bool RecoverFromRenderFailure(Exception exception)
     {
-        if (_isUnloaded()) return;
+        if (_isUnloaded()) return false;
         bool lost = GpuContext.IsDeviceLoss(exception);
         try
         {
@@ -130,6 +135,8 @@ public sealed class EditorGraphicsDeviceManager
             if (lost)
                 RequestRecovery($"render failed with device loss 0x{exception.HResult:X8}");
         }
+
+        return lost;
     }
 
     /// <summary>

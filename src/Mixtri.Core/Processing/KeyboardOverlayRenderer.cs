@@ -26,9 +26,21 @@ public record KeyboardOverlayStyle
 /// Renders keyboard shortcut overlays (e.g., "Ctrl + S") as pill/badge shapes
 /// with fade-in/out animation on a Win2D drawing session.
 /// </summary>
-public class KeyboardOverlayRenderer
+public class KeyboardOverlayRenderer : IDisposable
 {
     private readonly KeyboardOverlayStyle _style;
+
+    // The style is immutable, so one format serves every frame for both measuring and
+    // drawing. (Drawing used to construct a fresh, never-disposed CanvasTextFormat per
+    // frame — a native-object leak for every frame a combo was on screen.)
+    private CanvasTextFormat? _format;
+
+    // Whether the event list last seen is in timestamp order, so the active combo can be
+    // found by binary search. Re-checked only when a different list (or a changed count)
+    // arrives; an out-of-order list falls back to the linear scan.
+    private List<KeyPressEvent>? _orderCheckedEvents;
+    private int _orderCheckedCount = -1;
+    private bool _orderCheckedSorted;
 
     public KeyboardOverlayRenderer(KeyboardOverlayStyle style)
     {
@@ -78,17 +90,27 @@ public class KeyboardOverlayRenderer
 
         string? bestComboText = null;
         double bestComboTime = double.MinValue;
+        double totalDuration = _style.DisplayDurationSeconds + _style.FadeDurationSeconds;
 
-        for (int i = events.Count - 1; i >= 0; i--)
+        // In a time-ordered list, start at the last event not after the playhead and stop
+        // at the first one older than the display window, instead of scanning the whole
+        // recording from the end on every frame.
+        bool sorted = IsTimeOrdered(events);
+        int startIndex = sorted
+            ? LastIndexAtOrBefore(events, currentTimeSeconds, originTick, tickFrequency)
+            : events.Count - 1;
+
+        for (int i = startIndex; i >= 0; i--)
         {
             var evt = events[i];
-            if (!evt.IsDown) continue;
-
             double eventTime = (evt.TimestampTicks - originTick) / tickFrequency;
 
             // Only consider events within the display window
             double elapsed = currentTimeSeconds - eventTime;
-            double totalDuration = _style.DisplayDurationSeconds + _style.FadeDurationSeconds;
+            if (sorted && elapsed > totalDuration)
+                break;
+
+            if (!evt.IsDown) continue;
             if (elapsed < 0 || elapsed > totalDuration)
                 continue;
 
@@ -119,6 +141,54 @@ public class KeyboardOverlayRenderer
         double bestElapsed = currentTimeSeconds - bestComboTime;
         double bestDuration = _style.DisplayDurationSeconds + _style.FadeDurationSeconds;
         return (bestComboText, bestElapsed, bestDuration);
+    }
+
+    private bool IsTimeOrdered(List<KeyPressEvent> events)
+    {
+        if (!ReferenceEquals(events, _orderCheckedEvents) || events.Count != _orderCheckedCount)
+        {
+            bool sorted = true;
+            for (int i = 1; i < events.Count; i++)
+            {
+                if (events[i].TimestampTicks < events[i - 1].TimestampTicks)
+                {
+                    sorted = false;
+                    break;
+                }
+            }
+
+            _orderCheckedEvents = events;
+            _orderCheckedCount = events.Count;
+            _orderCheckedSorted = sorted;
+        }
+
+        return _orderCheckedSorted;
+    }
+
+    /// <summary>
+    /// Index of the last event whose time is at or before <paramref name="currentTimeSeconds"/>
+    /// (−1 when none), using the same time expression as the scan so the boundary agrees.
+    /// </summary>
+    private static int LastIndexAtOrBefore(
+        List<KeyPressEvent> events, double currentTimeSeconds, long originTick, double tickFrequency)
+    {
+        int lo = 0, hi = events.Count - 1, result = -1;
+        while (lo <= hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            double eventTime = (events[mid].TimestampTicks - originTick) / tickFrequency;
+            if (currentTimeSeconds - eventTime >= 0)
+            {
+                result = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        return result;
     }
 
     private static bool IsModifierKey(int vk) => vk is
@@ -175,7 +245,7 @@ public class KeyboardOverlayRenderer
         var bgColor = ColorHelper.ParseColor(_style.BackgroundColor);
         bgColor = Windows.UI.Color.FromArgb((byte)(opacity * bgColor.A), bgColor.R, bgColor.G, bgColor.B);
 
-        using var format = new CanvasTextFormat
+        var format = _format ??= new CanvasTextFormat
         {
             FontFamily = _style.FontFamily,
             FontSize = _style.FontSize,
@@ -206,13 +276,14 @@ public class KeyboardOverlayRenderer
             text,
             new System.Numerics.Vector2(pillX + pillWidth / 2f, pillY + pillHeight / 2f),
             textColor,
-            new CanvasTextFormat
-            {
-                FontFamily = _style.FontFamily,
-                FontSize = _style.FontSize,
-                HorizontalAlignment = CanvasHorizontalAlignment.Center,
-                VerticalAlignment = CanvasVerticalAlignment.Center,
-            });
+            format);
+    }
+
+    public void Dispose()
+    {
+        _format?.Dispose();
+        _format = null;
+        GC.SuppressFinalize(this);
     }
 
     private (float x, float y) CalculatePillPosition(int canvasWidth, int canvasHeight,

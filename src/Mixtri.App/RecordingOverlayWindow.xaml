@@ -19,6 +19,17 @@
                 FontFamily="Consolas"
                 VerticalAlignment="Center"
                 MinWidth="48" />
+            <!-- Shown when the session records a fault mid-recording (dropped writes, a lost
+                 audio device, ...). The full window is off screen for the whole recording,
+                 so this is the only place the user can learn of it before pressing Stop. -->
+            <FontIcon
+                x:Name="WarningIcon"
+                Glyph="&#xE7BA;"
+                FontSize="16"
+                Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                VerticalAlignment="Center"
+                Visibility="Collapsed"
+                AutomationProperties.Name="Recording problem" />
         </StackPanel>
 
         <Button

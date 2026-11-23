@@ -72,9 +72,18 @@ internal sealed class ExportFrameLimiter : IDisposable
         private IDisposable? _resource;
         private MediaStreamSample? _sample;
         private byte[]? _pixels;
+        private bool _pixelsPooled;
         private bool _disposed;
 
-        public void Attach(IDisposable? resource, MediaStreamSample? sample = null, byte[]? pixels = null)
+        /// <param name="returnPixelsToPool">
+        /// <paramref name="pixels"/> was rented from <see cref="System.Buffers.ArrayPool{T}.Shared"/>.
+        /// It is returned only when the encoder reports <c>Processed</c> (it no longer reads the
+        /// buffer); a forced release at shutdown leaves it to the GC instead, because the native
+        /// pipeline may still reference it.
+        /// </param>
+        public void Attach(
+            IDisposable? resource, MediaStreamSample? sample = null, byte[]? pixels = null,
+            bool returnPixelsToPool = false)
         {
             lock (_sync)
             {
@@ -87,13 +96,17 @@ internal sealed class ExportFrameLimiter : IDisposable
                 if (sample is not null) sample.Processed += OnProcessed;
                 _resource = resource;
                 _pixels = pixels;
+                _pixelsPooled = pixels is not null && returnPixelsToPool;
             }
         }
 
-        public void Dispose()
+        public void Dispose() => ReleaseCore(processed: false);
+
+        private void ReleaseCore(bool processed)
         {
             IDisposable? resource;
             MediaStreamSample? sample;
+            byte[]? pooledPixels = null;
             lock (_sync)
             {
                 if (_disposed) return;
@@ -102,8 +115,12 @@ internal sealed class ExportFrameLimiter : IDisposable
                 _resource = null;
                 sample = _sample;
                 _sample = null;
+                if (processed && _pixelsPooled) pooledPixels = _pixels;
                 _pixels = null;
+                _pixelsPooled = false;
             }
+            if (pooledPixels is not null)
+                System.Buffers.ArrayPool<byte>.Shared.Return(pooledPixels);
             try
             {
                 if (sample is not null) sample.Processed -= OnProcessed;
@@ -115,6 +132,6 @@ internal sealed class ExportFrameLimiter : IDisposable
             }
         }
 
-        private void OnProcessed(MediaStreamSample sender, object args) => Dispose();
+        private void OnProcessed(MediaStreamSample sender, object args) => ReleaseCore(processed: true);
     }
 }

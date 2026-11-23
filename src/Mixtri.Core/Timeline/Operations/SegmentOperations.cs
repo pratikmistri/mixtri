@@ -739,7 +739,17 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
             var sourceOffset = TimeSpan.FromTicks((long)(localOffset.Ticks * video.SpeedFactor));
             firstHalf = video with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                // Detached-audio blocks link back to their segment by id
+                // (AudioTrack.DetachedFromSegmentId). Minting a fresh id here would orphan
+                // them: Re-attach would no longer be offered, and the menu would fall back to
+                // a plain unmute that plays the capture twice. So when such a link exists the
+                // first half inherits the original id — the same rule
+                // AutomaticTypingSpeedOperation applies to its first piece. The second half
+                // stays muted (copied AudioMode), which is correct while the blocks play its
+                // audio; after a re-attach it can be unmuted on its own.
+                Id = ReattachSegmentAudioOperation.HasDetachedAudio(model, video.Id)
+                    ? video.Id
+                    : Guid.NewGuid().ToString("N"),
                 Duration = localOffset,
                 SourceDuration = sourceOffset,
             };
@@ -777,7 +787,9 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
         }
         else
         {
-            return false;
+            // Neither a video nor a slide: nothing was split and nothing changed, so this must
+            // report a no-op rather than push an undo entry that undoes nothing.
+            return NothingToDo();
         }
 
         model.Segments.RemoveAt(splitIndex);
@@ -899,7 +911,8 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
         switch (_previous)
         {
             case VideoSegment video:
-                model.Segments[_index] = TrimVideo(video, _fromStart, _requestedDuration);
+                model.Segments[_index] = TrimVideo(
+                    video, _fromStart, _requestedDuration, KnownSourceEnd(model, video));
                 break;
             case TextSlideSegment slide:
                 model.Segments[_index] = slide with { Duration = ClampDuration(_requestedDuration) };
@@ -948,7 +961,15 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
     /// points this operation will write on release — see
     /// <see cref="ResolveEdgeSourceTime"/>.
     /// </summary>
-    public static VideoSegment TrimVideo(VideoSegment video, bool fromStart, TimeSpan requestedDuration)
+    /// <param name="sourceEnd">
+    /// Where the segment's source file really ends, when known (see
+    /// <see cref="KnownSourceEnd"/>). Bounds the out edge so it cannot be dragged past the
+    /// last recorded frame. Null leaves the out edge unbounded, as before. A segment that
+    /// already extends past it is never shortened by the bound — only further growth is
+    /// refused.
+    /// </param>
+    public static VideoSegment TrimVideo(
+        VideoSegment video, bool fromStart, TimeSpan requestedDuration, TimeSpan? sourceEnd = null)
     {
         double speed = video.SpeedFactor != 0 ? video.SpeedFactor : 1.0;
         var newDuration = ClampDuration(requestedDuration);
@@ -957,6 +978,19 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
         {
             // Right (out) edge: keep the in-point, change how much footage plays.
             var newSourceDuration = TimeSpan.FromTicks((long)(newDuration.Ticks * speed));
+            if (sourceEnd is { } end && end > video.SourceStart)
+            {
+                var available = end - video.SourceStart;
+                if (available < video.SourceDuration) available = video.SourceDuration;
+                if (newSourceDuration > available)
+                {
+                    // Keep SourceDuration = Duration x SpeedFactor: re-derive the duration
+                    // from the capped footage rather than clamping one side alone.
+                    newSourceDuration = available;
+                    newDuration = TimeSpan.FromTicks((long)(available.Ticks / speed));
+                }
+            }
+
             return video with
             {
                 Duration = newDuration,
@@ -1011,9 +1045,9 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
     /// </para>
     /// </remarks>
     public static (TimeSpan EffectiveDuration, TimeSpan SourceTime) ResolveEdgePreview(
-        VideoSegment video, bool fromStart, TimeSpan requestedDuration)
+        VideoSegment video, bool fromStart, TimeSpan requestedDuration, TimeSpan? sourceEnd = null)
     {
-        var trimmed = TrimVideo(video, fromStart, requestedDuration);
+        var trimmed = TrimVideo(video, fromStart, requestedDuration, sourceEnd);
         if (fromStart) return (trimmed.Duration, trimmed.SourceStart);
 
         var lastKept = trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1);
@@ -1023,11 +1057,35 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
     private static TimeSpan ClampDuration(TimeSpan requested) =>
         requested < MinDuration ? MinDuration : requested;
 
+    /// <summary>
+    /// The source-file end a trim of <paramref name="video"/> must respect, or null when the
+    /// model does not know it.
+    /// </summary>
+    /// <remarks>
+    /// Only the PRIMARY recording's length is on the timeline (<see cref="TimelineModel.Duration"/>,
+    /// seeded from the project). Appended recordings carry no file length on their segments, so
+    /// they stay unbounded; a legacy model with no <see cref="TimelineModel.PrimaryVideoFilePath"/>
+    /// cannot tell primary segments from appended ones and is left unbounded too.
+    /// </remarks>
+    public static TimeSpan? KnownSourceEnd(TimelineModel model, VideoSegment video)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        ArgumentNullException.ThrowIfNull(video);
+
+        if (model.Duration <= TimeSpan.Zero || string.IsNullOrEmpty(model.PrimaryVideoFilePath))
+            return null;
+
+        return string.Equals(video.VideoFilePath, model.PrimaryVideoFilePath, StringComparison.OrdinalIgnoreCase)
+            ? model.Duration
+            : null;
+    }
+
     protected override bool UndoCore(TimelineModel model)
     {
-        if (_previous is null || _index < 0) return false;
-        if (_index >= model.Segments.Count) return false;
-        model.Segments[_index] = _previous;
+        if (_previous is null) return false;
+        int index = ResolveSegmentIndex(model, _segmentId, _index);
+        if (index < 0) return false;
+        model.Segments[index] = _previous;
         return true;
     }
 }
@@ -1141,9 +1199,10 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
 
     protected override bool UndoCore(TimelineModel model)
     {
-        if (_previous is null || _index < 0) return false;
-        if (_index >= model.Segments.Count) return false;
-        model.Segments[_index] = _previous;
+        if (_previous is null) return false;
+        int index = ResolveSegmentIndex(model, _segmentId, _index);
+        if (index < 0) return false;
+        model.Segments[index] = _previous;
         return true;
     }
 }
@@ -1191,8 +1250,9 @@ public class ChangeSegmentAudioModeOperation : SegmentEditOperationBase
 
     protected override bool UndoCore(TimelineModel model)
     {
-        if (_index < 0 || _index >= model.Segments.Count) return false;
-        if (model.Segments[_index] is not VideoSegment video) return false;
+        int index = ResolveSegmentIndex(model, _segmentId, _index);
+        if (index < 0) return false;
+        if (model.Segments[index] is not VideoSegment video) return false;
 
         video.AudioMode = _previousMode;
         return false;

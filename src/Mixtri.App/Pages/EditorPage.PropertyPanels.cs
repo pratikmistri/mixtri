@@ -295,6 +295,12 @@ public sealed partial class EditorPage
         // Text overlay
         OverlayPresets.SelectionChanged += OverlayPreset_SelectionChanged;
         OverlayTextBox.TextChanged += OverlayTextBox_TextChanged;
+        OverlayTextBox.LostFocus += OverlayTextBox_LostFocus;
+        // handledEventsToo: a multi-line TextBox consumes Enter itself.
+        OverlayTextBox.AddHandler(
+            Microsoft.UI.Xaml.UIElement.KeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler(OverlayTextBox_KeyDown),
+            true);
         OverlayAnimationCombo.SelectionChanged += OverlayAnimationCombo_SelectionChanged;
         OverlayFontCombo.SelectionChanged += OverlayFontCombo_SelectionChanged;
         OverlayDurationBox.ValueChanged += OverlayDurationBox_ValueChanged;

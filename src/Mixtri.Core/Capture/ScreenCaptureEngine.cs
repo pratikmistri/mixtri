@@ -34,6 +34,10 @@ public sealed class ScreenCaptureEngine : IDisposable
     private int _captureItemClosedUnsubscribed;
     private int _disposeStarted;
 
+    // 1 while a capture session is live. Claimed with Interlocked so a user stop and the
+    // capture item's Closed callback (which arrives on another thread) tear down exactly once.
+    private int _captureActive;
+
     // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
     private long _lastEmittedSlot = -1;
 
@@ -53,6 +57,13 @@ public sealed class ScreenCaptureEngine : IDisposable
     public event EventHandler? CaptureStarted;
     public event EventHandler? CaptureStopped;
     public event EventHandler<string>? Error;
+
+    /// <summary>
+    /// Raised once when the capture target itself goes away (the recorded window closed or
+    /// the display was disconnected), before capture is stopped. Unlike
+    /// <see cref="CaptureStopped"/>, it never fires for a stop the caller asked for.
+    /// </summary>
+    public event EventHandler? CaptureItemClosed;
 
     private ScreenCaptureEngine(IDirect3DDevice device, GraphicsCaptureItem item, int fps)
     {
@@ -129,29 +140,58 @@ public sealed class ScreenCaptureEngine : IDisposable
         _stopwatch.Restart();
         _session.StartCapture();
         IsRecording = true;
+        Volatile.Write(ref _captureActive, 1);
 
         CaptureStarted?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>
+    /// Stops capture. Idempotent and safe to call concurrently with the capture item's
+    /// Closed callback: only the first caller tears the session and frame pool down.
+    /// </summary>
     public void StopCapture()
     {
-        if (!IsRecording)
+        if (Interlocked.Exchange(ref _captureActive, 0) == 0)
             return;
 
         _stopwatch.Stop();
         IsRecording = false;
 
-        _session?.Dispose();
-        _session = null;
+        // Take ownership of the session and pool before disposing them, so a concurrent
+        // caller can never observe (or dispose) a half-torn-down instance.
+        var session = Interlocked.Exchange(ref _session, null);
+        var framePool = Interlocked.Exchange(ref _framePool, null);
 
-        if (_framePool is not null)
+        try
         {
-            _framePool.FrameArrived -= OnFrameArrived;
-            _framePool.Dispose();
-            _framePool = null;
+            session?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ScreenCaptureEngine] Session dispose failed: {ex.Message}");
         }
 
-        CaptureStopped?.Invoke(this, EventArgs.Empty);
+        if (framePool is not null)
+        {
+            try
+            {
+                framePool.FrameArrived -= OnFrameArrived;
+                framePool.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ScreenCaptureEngine] Frame pool dispose failed: {ex.Message}");
+            }
+        }
+
+        try
+        {
+            CaptureStopped?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ScreenCaptureEngine] CaptureStopped handler threw: {ex.Message}");
+        }
     }
 
     public void PauseCapture()
@@ -254,6 +294,18 @@ public sealed class ScreenCaptureEngine : IDisposable
 
         if (Interlocked.Exchange(ref _itemClosedHandled, 1) != 0)
             return;
+
+        if (!_disposed && Volatile.Read(ref _captureActive) != 0)
+        {
+            try
+            {
+                CaptureItemClosed?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ScreenCaptureEngine] CaptureItemClosed handler threw: {ex.Message}");
+            }
+        }
 
         try
         {

@@ -21,8 +21,11 @@ namespace Mixtri.Core.Audio;
 /// last-write time and length, the source interval, the speed and the requested output
 /// duration — so re-exporting, reopening the project, or previewing the same segment reuses
 /// the rendered file, while editing the segment's speed or trim misses the cache and renders
-/// a new one. Stale entries are simply never referenced again; they live beside the
-/// recording and are removed with it.
+/// a new one. Stale entries are never referenced again; they live beside the recording, are
+/// removed with it, and are bounded meanwhile by <see cref="PruneCacheAfterBatch"/>, which
+/// each consumer runs once its whole batch of rendered files is open or finished with —
+/// never from <see cref="Render"/> itself, where it could evict a file an in-flight batch
+/// had already been handed but not yet opened.
 /// </para>
 /// <para>
 /// <b>Every failure is soft.</b> An unreadable, missing or exotic source returns
@@ -89,7 +92,12 @@ public sealed class SegmentAudioRenderer
                 BuildCacheFileName(source, sourceStart, sourceDuration, speed, outputDuration));
 
             if (File.Exists(destination) && new FileInfo(destination).Length > 0)
+            {
+                // Record the hit as an ACCESS, not a write: pruning ranks by recency of use,
+                // while the write time must keep meaning "when this was rendered".
+                TouchAccessTime(destination);
                 return destination;
+            }
 
             Directory.CreateDirectory(cacheDirectory);
 
@@ -101,6 +109,9 @@ public sealed class SegmentAudioRenderer
             {
                 RenderCore(sourcePath, sourceStart, sourceDuration, speed, outputDuration, scratch, cancellationToken);
                 File.Move(scratch, destination, overwrite: true);
+
+                // No pruning here: the caller may be partway through a batch whose earlier
+                // paths it has not opened yet. It calls PruneCacheAfterBatch when done.
                 return destination;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -130,6 +141,182 @@ public sealed class SegmentAudioRenderer
                 $"@{speed:0.###}x: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>Cache entries unused for longer than this are deleted by <see cref="PruneCache(string)"/>.</summary>
+    public static readonly TimeSpan DefaultMaxCacheAge = TimeSpan.FromDays(14);
+
+    /// <summary>Total size one cache folder is trimmed back to (least recently used first).</summary>
+    public const long DefaultMaxCacheBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Bounds a <see cref="CacheFolderName"/> folder: deletes rendered <c>stretch_*.wav</c>
+    /// files unused for longer than <see cref="DefaultMaxCacheAge"/>, then the least recently
+    /// used ones until the folder is under <see cref="DefaultMaxCacheBytes"/>. Also removes
+    /// scratch files abandoned by a crashed render.
+    /// </summary>
+    /// <remarks>
+    /// Best-effort and safe to call at any time: a file another reader (the preview engine, an
+    /// export) holds open cannot be deleted and is simply skipped, so a file in use is never
+    /// lost. Without this the folder only ever grew — every speed/trim edit renders a new key
+    /// and the old one is never referenced again.
+    /// </remarks>
+    public static void PruneCache(string folder)
+        => PruneCache(folder, keepPaths: null, DefaultMaxCacheAge, DefaultMaxCacheBytes);
+
+    /// <summary>
+    /// Prunes every cache folder a batch rendered into, keeping every file of the batch.
+    /// Call it once the batch's consumer has opened (editor preview) or finished with
+    /// (export mux) all of <paramref name="batchPaths"/>; <c>null</c> entries (renders that
+    /// failed) are ignored. Returns how many files were removed.
+    /// </summary>
+    public static int PruneCacheAfterBatch(IEnumerable<string?> batchPaths)
+    {
+        ArgumentNullException.ThrowIfNull(batchPaths);
+
+        int removed = 0;
+        try
+        {
+            var keep = batchPaths
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => Path.GetFullPath(p!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var folder in keep
+                         .Select(p => Path.GetDirectoryName(p))
+                         .Where(d => !string.IsNullOrEmpty(d)
+                             // Batches can mix rendered stretch files with native source
+                             // files (appended recordings); only ever prune the cache folder.
+                             && string.Equals(Path.GetFileName(d), CacheFolderName,
+                                 StringComparison.OrdinalIgnoreCase))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                removed += PruneCache(folder!, keep, DefaultMaxCacheAge, DefaultMaxCacheBytes);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Called from cleanup paths (an export's finally block): pruning is a bound on
+            // disk use, never a reason to fail or mask the caller's own outcome.
+            Diagnostics.DiagLog.Write("Audio", $"stretch cache prune after batch failed: {ex.Message}");
+        }
+        return removed;
+    }
+
+    /// <summary>
+    /// <see cref="PruneCache(string)"/> with explicit limits. No file in
+    /// <paramref name="keepPaths"/> is ever deleted (their size still counts toward the
+    /// budget). Returns how many files were removed.
+    /// </summary>
+    public static int PruneCache(
+        string folder, IEnumerable<string>? keepPaths, TimeSpan maxAge, long maxTotalBytes)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return 0;
+
+        int removed = 0;
+        try
+        {
+            if (!Directory.Exists(folder)) return 0;
+
+            var now = DateTime.UtcNow;
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (keepPaths is not null)
+            {
+                foreach (var keepPath in keepPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(keepPath)) keep.Add(Path.GetFullPath(keepPath));
+                }
+            }
+
+            // Scratch files are only ever live for the duration of one render; a day-old one
+            // belongs to a render that crashed or was killed.
+            foreach (var scratch in Directory.EnumerateFiles(folder, ".*.tmp.wav"))
+            {
+                try
+                {
+                    if (now - File.GetLastWriteTimeUtc(scratch) > TimeSpan.FromDays(1)
+                        && TryDeleteCacheFile(scratch))
+                        removed++;
+                }
+                catch { }
+            }
+
+            var entries = new List<(FileInfo File, DateTime LastUsed)>();
+            foreach (var path in Directory.EnumerateFiles(folder, "stretch_*.wav"))
+            {
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (keep.Contains(info.FullName))
+                        continue;
+
+                    var lastUsed = info.LastAccessTimeUtc > info.LastWriteTimeUtc
+                        ? info.LastAccessTimeUtc
+                        : info.LastWriteTimeUtc;
+                    entries.Add((info, lastUsed));
+                }
+                catch { }
+            }
+
+            // Oldest first, so both passes below remove the least recently used entries.
+            entries.Sort((a, b) => a.LastUsed.CompareTo(b.LastUsed));
+
+            // Kept files in this folder still occupy the budget; kept files elsewhere do not.
+            long total = 0;
+            string folderFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            foreach (var kept in keep)
+            {
+                try
+                {
+                    if (string.Equals(Path.GetDirectoryName(kept), folderFull, StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(kept))
+                        total += new FileInfo(kept).Length;
+                }
+                catch { }
+            }
+            foreach (var entry in entries) total += entry.File.Length;
+
+            foreach (var (file, lastUsed) in entries)
+            {
+                bool expired = now - lastUsed > maxAge;
+                bool overBudget = total > maxTotalBytes;
+                if (!expired && !overBudget) continue;
+
+                long length = file.Length;
+                if (TryDeleteCacheFile(file.FullName))
+                {
+                    removed++;
+                    total -= length;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.DiagLog.Write("Audio", $"stretch cache prune failed for '{folder}': {ex.Message}");
+        }
+
+        return removed;
+    }
+
+    private static bool TryDeleteCacheFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+            return true;
+        }
+        catch
+        {
+            // Typically a sharing violation: the file is open for playback/export. Leave it.
+            return false;
+        }
+    }
+
+    private static void TouchAccessTime(string path)
+    {
+        try { File.SetLastAccessTimeUtc(path, DateTime.UtcNow); }
+        catch { /* recency is a pruning hint only */ }
     }
 
     /// <summary><see cref="Render"/> on a background thread.</summary>

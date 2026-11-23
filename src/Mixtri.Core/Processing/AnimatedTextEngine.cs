@@ -258,38 +258,21 @@ public class AnimatedTextEngine : IDisposable
         Color baseColor, TextSlideAnimation anim, double inP, double outP,
         double elapsedSeconds, float fontSize)
     {
-        using var layout = new CanvasTextLayout(_device, text, format,
-            (float)rect.Width, (float)rect.Height);
-
-        using var charFormat = CreateFormat(
-            format.FontFamily, format.FontSize,
-            format.FontWeight.Weight >= 600, format.FontStyle == FontStyle.Italic,
-            CanvasHorizontalAlignment.Left, CanvasVerticalAlignment.Top, wrap: false);
-
-        int n = text.Length;
-        int visibleCount = CountNonWhitespace(text);
-        int visibleIndex = 0;
+        var layout = GetPerCharacterLayout(text, format, rect);
+        var glyphs = layout.Glyphs;
+        int visibleCount = layout.VisibleCount;
         var saved = ds.Transform;
 
-        for (int i = 0; i < n; i++)
+        for (int visibleIndex = 0; visibleIndex < glyphs.Length; visibleIndex++)
         {
-            char ch = text[i];
-            if (char.IsWhiteSpace(ch)) continue;
-
-            CanvasTextLayoutRegion[] regions;
-            try { regions = layout.GetCharacterRegions(i, 1); }
-            catch { continue; }
-            if (regions.Length == 0) continue;
-
-            var rb = regions[0].LayoutBounds;
-            float bx = (float)(rect.X + rb.X);
-            float by = (float)(rect.Y + rb.Y);
-            float ccx = bx + (float)rb.Width / 2;
-            float ccy = by + (float)rb.Height / 2;
+            var g = glyphs[visibleIndex];
+            float bx = (float)(rect.X + g.X);
+            float by = (float)(rect.Y + g.Y);
+            float ccx = bx + g.Width / 2;
+            float ccy = by + g.Height / 2;
 
             double frac = visibleCount <= 1 ? 0 : (double)visibleIndex / (visibleCount - 1);
             var p = ComputeCharParams(anim, inP, outP, elapsedSeconds, frac, visibleIndex, fontSize);
-            visibleIndex++;
 
             if (p.Opacity <= 0.003) continue;
 
@@ -298,10 +281,105 @@ public class AnimatedTextEngine : IDisposable
                 Matrix3x2.CreateScale(p.Scale, new Vector2(ccx, ccy)) *
                 Matrix3x2.CreateTranslation(p.Dx, p.Dy);
 
-            ds.DrawText(ch.ToString(), bx, by, WithAlpha(baseColor, p.Opacity), charFormat);
+            ds.DrawText(g.Glyph, bx, by, WithAlpha(baseColor, p.Opacity), layout.CharFormat);
         }
 
         ds.Transform = saved;
+    }
+
+    // ── Per-character layout cache ──
+    //
+    // The character regions depend only on the text, the format and the box size, all
+    // constant for an overlay/slide across its frames — yet they were re-measured (a full
+    // CanvasTextLayout, a CanvasTextFormat and one string per character) on every frame.
+    // A handful of entries covers every overlay that can be on screen at once; the cache
+    // is simply cleared when it overflows.
+
+    private const int MaxPerCharacterLayouts = 8;
+
+    private readonly record struct PerCharacterKey(
+        string Text, string Family, float Size, ushort Weight, FontStyle Style,
+        CanvasHorizontalAlignment HAlign, CanvasVerticalAlignment VAlign,
+        CanvasWordWrapping Wrapping, float Width, float Height);
+
+    /// <summary>One measured glyph: its string and its layout bounds relative to the text rect.</summary>
+    private readonly record struct PerCharacterGlyph(string Glyph, float X, float Y, float Width, float Height);
+
+    private sealed class PerCharacterLayout(
+        CanvasTextFormat charFormat, PerCharacterGlyph[] glyphs, int visibleCount) : IDisposable
+    {
+        public CanvasTextFormat CharFormat { get; } = charFormat;
+
+        /// <summary>Drawable glyphs in order; the array index is the visible index.</summary>
+        public PerCharacterGlyph[] Glyphs { get; } = glyphs;
+
+        /// <summary>Non-whitespace character count (the stagger denominator).</summary>
+        public int VisibleCount { get; } = visibleCount;
+
+        public void Dispose() => CharFormat.Dispose();
+    }
+
+    private readonly Dictionary<PerCharacterKey, PerCharacterLayout> _perCharacterLayouts = [];
+
+    private PerCharacterLayout GetPerCharacterLayout(string text, CanvasTextFormat format, Rect rect)
+    {
+        var key = new PerCharacterKey(
+            text, format.FontFamily, format.FontSize, format.FontWeight.Weight, format.FontStyle,
+            format.HorizontalAlignment, format.VerticalAlignment, format.WordWrapping,
+            (float)rect.Width, (float)rect.Height);
+
+        if (_perCharacterLayouts.TryGetValue(key, out var cached))
+            return cached;
+
+        var built = BuildPerCharacterLayout(text, format, rect);
+        if (_perCharacterLayouts.Count >= MaxPerCharacterLayouts)
+            ClearPerCharacterLayouts();
+        _perCharacterLayouts[key] = built;
+        return built;
+    }
+
+    private PerCharacterLayout BuildPerCharacterLayout(string text, CanvasTextFormat format, Rect rect)
+    {
+        using var layout = new CanvasTextLayout(_device, text, format,
+            (float)rect.Width, (float)rect.Height);
+
+        var charFormat = CreateFormat(
+            format.FontFamily, format.FontSize,
+            format.FontWeight.Weight >= 600, format.FontStyle == FontStyle.Italic,
+            CanvasHorizontalAlignment.Left, CanvasVerticalAlignment.Top, wrap: false);
+
+        try
+        {
+            var glyphs = new List<PerCharacterGlyph>(text.Length);
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+                if (char.IsWhiteSpace(ch)) continue;
+
+                CanvasTextLayoutRegion[] regions;
+                try { regions = layout.GetCharacterRegions(i, 1); }
+                catch { continue; }
+                if (regions.Length == 0) continue;
+
+                var rb = regions[0].LayoutBounds;
+                glyphs.Add(new PerCharacterGlyph(
+                    ch.ToString(), (float)rb.X, (float)rb.Y, (float)rb.Width, (float)rb.Height));
+            }
+
+            return new PerCharacterLayout(charFormat, glyphs.ToArray(), CountNonWhitespace(text));
+        }
+        catch
+        {
+            charFormat.Dispose();
+            throw;
+        }
+    }
+
+    private void ClearPerCharacterLayouts()
+    {
+        foreach (var entry in _perCharacterLayouts.Values)
+            entry.Dispose();
+        _perCharacterLayouts.Clear();
     }
 
     private readonly record struct CharParams(float Dx, float Dy, float Scale, float Angle, double Opacity);
@@ -551,6 +629,7 @@ public class AnimatedTextEngine : IDisposable
         if (_disposed) return;
         _disposed = true;
         _blurScratch?.Dispose();
+        ClearPerCharacterLayouts();
         GC.SuppressFinalize(this);
     }
 

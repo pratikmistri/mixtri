@@ -4,6 +4,26 @@ using Mixtri.Core.Capture;
 namespace Mixtri.Core.Processing;
 
 /// <summary>
+/// A frame source that can say whether a delivered frame is known to be the frame at the
+/// requested index.
+/// </summary>
+/// <remarks>
+/// <see cref="Mp4FrameSource"/> in preview (latency-first) mode may accept a frame after a
+/// decoder stall without waiting out the stalled command's late frame, so what it returns
+/// may be an earlier frame. That is acceptable to display once, but
+/// <see cref="VideoFrameReader"/> must never cache such a frame under the index, or the
+/// wrong image would be served for that index for as long as it stays cached.
+/// </remarks>
+internal interface IConfirmingFrameSource
+{
+    /// <summary>
+    /// Like <see cref="IFrameSource.LoadFrameAsync"/>, plus whether the frame is confirmed
+    /// to be the one at <paramref name="frameIndex"/>. The caller owns the bitmap.
+    /// </summary>
+    Task<(CanvasBitmap? Frame, bool Confirmed)> LoadFrameWithConfirmationAsync(int frameIndex);
+}
+
+/// <summary>
 /// Provides frame-at-time lookup for the editor preview and the export compositor,
 /// backed by either a session's captured JPEGs or its finalized MP4.
 /// </summary>
@@ -36,6 +56,14 @@ public sealed class VideoFrameReader : IDisposable
 
     private readonly Dictionary<int, CanvasBitmap> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
+
+    // Indices delivered once without being cached. A frame is only worth a cache slot (and
+    // the extra copy that costs) once it has been asked for twice: sequential playback
+    // requests every index exactly once, so caching on first delivery cost a second
+    // full-frame allocation and blit per frame for a cache that never hit.
+    private const int SeenHistoryCapacity = 64;
+    private readonly HashSet<int> _seenOnce = [];
+    private readonly Queue<int> _seenOrder = new();
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     private long _cachedBytes;
 
@@ -179,9 +207,26 @@ public sealed class VideoFrameReader : IDisposable
             ReleaseCache();
         }
 
-        var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        CanvasBitmap? decoded;
+        bool confirmed = true;
+        if (_source is IConfirmingFrameSource confirming)
+        {
+            (decoded, confirmed) = await confirming.LoadFrameWithConfirmationAsync(frameIndex)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        }
+
         if (decoded is null)
             return null;
+
+        // A frame the source could not confirm is the right index may be a stale earlier
+        // frame. Hand it to the caller (one displayed glitch the next request corrects) but
+        // never cache it or count it as a delivery of this index.
+        if (!confirmed)
+            return decoded;
 
         // A single oversized frame must not be evicted and disposed before it is returned.
         if (_cacheBudgetBytes > 0 && EstimateBytes(decoded) > _cacheBudgetBytes)
@@ -202,6 +247,16 @@ public sealed class VideoFrameReader : IDisposable
                 return Clone(raced);
             }
 
+            // First delivery of this index: hand the decoded bitmap straight to the caller
+            // (it owns it, exactly as before) and only remember that it was seen.
+            if (!_seenOnce.Contains(frameIndex))
+            {
+                RememberSeen(frameIndex);
+                return decoded;
+            }
+
+            // A repeat request (playhead re-render, scrubbing back over a range): now the
+            // frame earns a cache slot. The cache keeps `decoded`; the caller gets a copy.
             _cache[frameIndex] = decoded;
             _cachedBytes += EstimateBytes(decoded);
             _cacheOrder.AddFirst(frameIndex);
@@ -259,6 +314,17 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public Task<CanvasBitmap?> LoadFrameAtTimeAsync(TimeSpan time)
         => LoadFrameAsync(GetFrameIndex(time));
+
+    /// <summary>Records a first, uncached delivery. Must be called under the cache lock.</summary>
+    private void RememberSeen(int frameIndex)
+    {
+        if (!_seenOnce.Add(frameIndex))
+            return;
+
+        _seenOrder.Enqueue(frameIndex);
+        while (_seenOrder.Count > SeenHistoryCapacity)
+            _seenOnce.Remove(_seenOrder.Dequeue());
+    }
 
     private void Touch(int frameIndex)
     {
@@ -320,21 +386,52 @@ public sealed class VideoFrameReader : IDisposable
         _disposed = true;
 
         // Wait for any in-flight clone to finish before disposing the bitmaps it is
-        // reading from. The gate is only ever held for GPU blits, so this is brief.
+        // reading from. The gate is only ever held for GPU blits, so it is normally free
+        // at once. If it is not and this is a UI/dispatcher thread, finish the teardown
+        // on the thread pool rather than blocking the UI for up to the 5 s bound.
         bool held = false;
         try
         {
-            held = _cacheGate.Wait(TimeSpan.FromSeconds(5));
+            held = _cacheGate.Wait(0);
         }
         catch (ObjectDisposedException) { }
 
+        if (!held && SynchronizationContext.Current is not null)
+        {
+            _ = Task.Run(() => DisposeCore(WaitForCacheGate()));
+            return;
+        }
+
+        DisposeCore(held || WaitForCacheGate());
+    }
+
+    private bool WaitForCacheGate()
+    {
+        try
+        {
+            return _cacheGate.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    private void DisposeCore(bool held)
+    {
         try
         {
             foreach (var bitmap in _cache.Values)
                 bitmap.Dispose();
             _cache.Clear();
             _cacheOrder.Clear();
+            _seenOnce.Clear();
+            _seenOrder.Clear();
             _cachedBytes = 0;
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"frame cache disposal failed: {ex}");
         }
         finally
         {

@@ -96,6 +96,13 @@ public sealed partial class MiniWindow : Window
         ConfigureWindow();
     }
 
+    /// <summary>Applies the user's Light/Dark/System choice from Settings to the pill.</summary>
+    public void ApplyTheme(ElementTheme theme)
+    {
+        if (RootGrid is not null)
+            RootGrid.RequestedTheme = theme;
+    }
+
     private void ConfigureWindow()
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);

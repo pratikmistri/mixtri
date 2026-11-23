@@ -95,17 +95,104 @@ public readonly record struct WaveformWindow(
 /// </summary>
 public static class AudioWaveformGenerator
 {
+    /// <summary>Entries kept by the in-memory peak cache before the oldest is evicted.</summary>
+    private const int PeakCacheCapacity = 64;
+
+    private static readonly object PeakCacheGate = new();
+    private static readonly Dictionary<string, float[]> PeakCache = new(StringComparer.Ordinal);
+    private static readonly LinkedList<string> PeakCacheOrder = new();
+
     /// <summary>
     /// Generate waveform peak samples from a WAV file.
     /// Returns normalized peak values (0..1) suitable for rendering.
     /// </summary>
     /// <param name="startSeconds">Seconds to skip from the start (e.g. audio pre-roll before video).</param>
     /// <param name="maxDurationSeconds">Max seconds of audio to process (0 = read to end).</param>
+    /// <remarks>
+    /// <para>
+    /// Returns at most <paramref name="targetSampleCount"/> peaks covering the WHOLE requested
+    /// range: the bucket size is rounded up, so the last bucket may be partial but no audio at
+    /// the tail is dropped (rounding down produced extra buckets that were then cut off).
+    /// </para>
+    /// <para>
+    /// Decodes in ~1 s blocks rather than one read per bucket, and caches results in memory
+    /// keyed by the file's full path, last-write time and length plus the arguments, so
+    /// re-opening the editor or rebuilding the timeline does not re-decode an unchanged file.
+    /// The cache is in-memory and bounded (<see cref="PeakCacheCapacity"/> entries) on
+    /// purpose: there is no app cache folder with a pruning policy to put an on-disk sidecar in.
+    /// </para>
+    /// </remarks>
     public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount,
         double startSeconds = 0, double maxDurationSeconds = 0)
     {
         if (targetSampleCount <= 0) return [];
 
+        string? cacheKey = BuildPeakCacheKey(wavFilePath, targetSampleCount, startSeconds, maxDurationSeconds);
+        if (cacheKey is not null)
+        {
+            lock (PeakCacheGate)
+            {
+                if (PeakCache.TryGetValue(cacheKey, out var cached))
+                {
+                    PeakCacheOrder.Remove(cacheKey);
+                    PeakCacheOrder.AddLast(cacheKey);
+                    // Copy: callers own the returned array and may modify it.
+                    return (float[])cached.Clone();
+                }
+            }
+        }
+
+        var result = GenerateWaveformCore(wavFilePath, targetSampleCount, startSeconds, maxDurationSeconds);
+
+        if (cacheKey is not null)
+        {
+            lock (PeakCacheGate)
+            {
+                if (!PeakCache.ContainsKey(cacheKey))
+                {
+                    PeakCache[cacheKey] = (float[])result.Clone();
+                    PeakCacheOrder.AddLast(cacheKey);
+                    while (PeakCacheOrder.Count > PeakCacheCapacity && PeakCacheOrder.First is { } oldest)
+                    {
+                        PeakCache.Remove(oldest.Value);
+                        PeakCacheOrder.RemoveFirst();
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Cache key covering every input that changes the result, or <c>null</c> when the file
+    /// cannot be stat'ed (then nothing is cached and the decode reports the real error).
+    /// </summary>
+    private static string? BuildPeakCacheKey(
+        string wavFilePath, int targetSampleCount, double startSeconds, double maxDurationSeconds)
+    {
+        try
+        {
+            var info = new FileInfo(wavFilePath);
+            if (!info.Exists) return null;
+
+            return string.Join('|',
+                info.FullName.ToUpperInvariant(),
+                info.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                info.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                targetSampleCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                startSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                maxDurationSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static float[] GenerateWaveformCore(string wavFilePath, int targetSampleCount,
+        double startSeconds, double maxDurationSeconds)
+    {
         using var reader = new AudioFileReader(wavFilePath);
 
         if (startSeconds > 0)
@@ -130,34 +217,51 @@ public static class AudioWaveformGenerator
         }
 
         int bytesPerSample = reader.WaveFormat.BitsPerSample / 8;
+        int channels = Math.Max(1, reader.WaveFormat.Channels);
+        if (bytesPerSample <= 0) return [];
         long totalSamples = remainingBytes / bytesPerSample;
-        int channels = reader.WaveFormat.Channels;
         long monoSamples = totalSamples / channels;
 
         if (monoSamples == 0) return [];
 
-        int samplesPerBucket = Math.Max(1, (int)(monoSamples / targetSampleCount));
-        var result = new List<float>(targetSampleCount);
-        var buffer = new float[samplesPerBucket * channels];
-        long bytesRead = 0;
+        // Proportional bucketing: exactly targetSampleCount buckets (or one per sample for very
+        // short audio), each covering an even share of the range. Callers space peaks by the
+        // count they asked for, so a rounded-up bucket size that yields FEWER buckets would
+        // compress the waveform against the timeline; proportional mapping also keeps the
+        // tail in the last bucket instead of cutting it off.
+        int bucketCount = (int)Math.Min(targetSampleCount, monoSamples);
+        var result = new float[bucketCount];
 
-        int read;
-        while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+        // ~1 s per read: per-bucket reads cost one decoder round-trip per peak.
+        int blockFrames = Math.Max(1, reader.WaveFormat.SampleRate);
+        var buffer = new float[blockFrames * channels];
+
+        long frameIndex = 0;
+        while (frameIndex < monoSamples)
         {
-            bytesRead += read * sizeof(float);
-            if (bytesRead > remainingBytes) break;
+            int wantFrames = (int)Math.Min(blockFrames, monoSamples - frameIndex);
+            int read = reader.Read(buffer, 0, wantFrames * channels);
+            int frames = read / channels;
+            if (frames <= 0) break;
 
-            float peak = 0f;
-            for (int i = 0; i < read; i++)
-                peak = Math.Max(peak, Math.Abs(buffer[i]));
-            result.Add(peak);
+            for (int frame = 0; frame < frames; frame++)
+            {
+                int baseIndex = frame * channels;
+                float peak = 0f;
+                for (int ch = 0; ch < channels; ch++)
+                {
+                    float value = Math.Abs(buffer[baseIndex + ch]);
+                    if (value > peak) peak = value;
+                }
+
+                int bucket = (int)((frameIndex + frame) * bucketCount / monoSamples);
+                if (peak > result[bucket]) result[bucket] = peak;
+            }
+
+            frameIndex += frames;
         }
 
-        // Trim or pad to targetSampleCount
-        if (result.Count > targetSampleCount)
-            return result.Take(targetSampleCount).ToArray();
-
-        return [.. result];
+        return result;
     }
 
     /// <summary>

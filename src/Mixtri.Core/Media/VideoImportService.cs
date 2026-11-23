@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Mixtri.Core.Capture;
 using Windows.Media.Core;
-using Windows.Media.Editing;
 using Windows.Media.MediaProperties;
 using Windows.Media.Playback;
 using Windows.Media.Transcoding;
@@ -307,17 +306,33 @@ public static class VideoImportService
         int Width, int Height, TimeSpan Duration, int Fps, bool HasAudio);
 
     /// <summary>
-    /// Gathers metadata using several tolerant paths, each guarded so one failing never denies
-    /// the others. Dimensions/duration come first from <see cref="Windows.Storage.FileProperties.VideoProperties"/>
-    /// (which reads container metadata and tolerates fragmented MP4s), then any gaps — and the
-    /// frame rate, which those properties do not expose — are filled from <c>MediaClip</c> and
-    /// finally a <c>MediaPlaybackItem</c>.
+    /// Gathers metadata using two tolerant paths, each guarded so one failing never denies
+    /// the other. Dimensions/duration/orientation come first from
+    /// <see cref="Windows.Storage.FileProperties.VideoProperties"/> (which reads container
+    /// metadata and tolerates fragmented MP4s), then any gaps — and the frame rate and audio
+    /// presence, which those properties do not expose — are filled from a disposable
+    /// <see cref="MediaSource"/>/<see cref="MediaPlaybackItem"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately NOT <c>MediaClip</c>: it is not closable and holds the source file open
+    /// until it is collected, so a probe through it pinned the user's file for an unbounded
+    /// time. The playback-item probe yields the same frame rate, size and audio-track data and
+    /// releases the handle before returning.
+    /// </para>
+    /// <para>
+    /// <b>Rotation.</b> Phone footage is usually stored landscape with a 90/270° rotation flag.
+    /// Both probes report the STORED (coded) size, so for those orientations the returned
+    /// width/height are swapped to the DISPLAY size — the encoding profile must be portrait
+    /// or the rotated picture is squeezed into a landscape frame.
+    /// </para>
+    /// </remarks>
     private static async Task<ProbeResult> ProbeAsync(StorageFile file, CancellationToken ct)
     {
         int width = 0, height = 0, fps = 0;
         var duration = TimeSpan.Zero;
         bool hasAudio = false;
+        bool rotatedQuarterTurn = false;
 
         // (a) Container properties — most tolerant, but no frame rate.
         try
@@ -326,6 +341,9 @@ public static class VideoImportService
             width = (int)props.Width;
             height = (int)props.Height;
             duration = props.Duration;
+            rotatedQuarterTurn = props.Orientation
+                is Windows.Storage.FileProperties.VideoOrientation.Rotate90
+                or Windows.Storage.FileProperties.VideoOrientation.Rotate270;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -333,43 +351,25 @@ public static class VideoImportService
             Debug.WriteLine($"[VideoImportService] VideoProperties probe failed: {ex.Message}");
         }
 
-        // (b) MediaClip — gives an exact frame rate and audio-track count, but throws on
-        //     fragmented MP4s / edit lists, hence the guard.
+        // (b) MediaSource/MediaPlaybackItem — frame rate and audio presence, plus any size or
+        //     duration (a) could not read. Disposable, so the file is released on return.
         try
         {
-            var clip = await MediaClip.CreateFromFileAsync(file).AsTask(ct);
-            var vprops = clip.GetVideoEncodingProperties();
-            if (width <= 0) width = (int)vprops.Width;
-            if (height <= 0) height = (int)vprops.Height;
-            if (duration <= TimeSpan.Zero) duration = clip.OriginalDuration;
-            if (vprops.FrameRate.Denominator > 0)
-                fps = (int)Math.Round(vprops.FrameRate.Numerator / (double)vprops.FrameRate.Denominator);
-            hasAudio = clip.EmbeddedAudioTracks.Count > 0;
+            var (pbW, pbH, pbFps, pbHasAudio, pbDuration) = await ProbePlaybackItemAsync(file, ct);
+            if (width <= 0) width = pbW;
+            if (height <= 0) height = pbH;
+            if (duration <= TimeSpan.Zero) duration = pbDuration;
+            fps = pbFps;
+            hasAudio = pbHasAudio;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[VideoImportService] MediaClip probe failed (expected for fragmented MP4s): {ex.Message}");
+            Debug.WriteLine($"[VideoImportService] MediaPlaybackItem probe failed: {ex.Message}");
         }
 
-        // (c) MediaPlaybackItem — the tolerant frame-server path. Only worth trying when the
-        //     cheaper probes left something unknown (the common fragmented-MP4 case).
-        if (fps <= 0 || width <= 0 || height <= 0)
-        {
-            try
-            {
-                var (pbW, pbH, pbFps, pbHasAudio) = await ProbePlaybackItemAsync(file, ct);
-                if (width <= 0) width = pbW;
-                if (height <= 0) height = pbH;
-                if (fps <= 0) fps = pbFps;
-                hasAudio = hasAudio || pbHasAudio;
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[VideoImportService] MediaPlaybackItem probe failed: {ex.Message}");
-            }
-        }
+        if (rotatedQuarterTurn)
+            (width, height) = (height, width);
 
         return new ProbeResult(width, height, duration, fps, hasAudio);
     }
@@ -379,7 +379,7 @@ public static class VideoImportService
     /// presence without decoding a frame. The item populates its track lists asynchronously,
     /// so we await <see cref="MediaSource.OpenAsync"/> before reading them.
     /// </summary>
-    private static async Task<(int Width, int Height, int Fps, bool HasAudio)> ProbePlaybackItemAsync(
+    private static async Task<(int Width, int Height, int Fps, bool HasAudio, TimeSpan Duration)> ProbePlaybackItemAsync(
         StorageFile file, CancellationToken ct)
     {
         var source = MediaSource.CreateFromStorageFile(file);
@@ -398,7 +398,8 @@ public static class VideoImportService
                     fps = (int)Math.Round(vprops.FrameRate.Numerator / (double)vprops.FrameRate.Denominator);
             }
 
-            return (width, height, fps, item.AudioTracks.Count > 0);
+            var duration = source.Duration is { } d && d > TimeSpan.Zero ? d : TimeSpan.Zero;
+            return (width, height, fps, item.AudioTracks.Count > 0, duration);
         }
         finally
         {
@@ -609,20 +610,40 @@ public static class VideoImportService
         });
 
         var transcodeTask = op.AsTask();
-        // Not linked to ct: cancellation flows through the registration above (which cancels
-        // the op, completing transcodeTask), so the timeout must not itself complete on cancel
-        // or a cancelled import could be misreported as a timeout.
-        var timeoutTask = Task.Delay(TranscodeTimeout);
 
-        var completed = await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false);
-        if (completed != transcodeTask)
+        // The watchdog has its OWN token, cancelled in `finally` so a completed transcode does
+        // not leave a 30-minute timer queued. It is deliberately not linked to ct: user
+        // cancellation flows through the registration above (cancelling the op, completing
+        // transcodeTask), so the timeout never completes on cancel and a cancelled import
+        // cannot be misreported as a timeout.
+        using var watchdog = new CancellationTokenSource();
+        try
         {
-            try { op.Cancel(); } catch { }
-            try { await transcodeTask.ConfigureAwait(false); } catch { }
-            throw new VideoImportException($"Importing the video timed out after {TranscodeTimeout}.");
-        }
+            var timeoutTask = Task.Delay(TranscodeTimeout, watchdog.Token);
 
-        await transcodeTask.ConfigureAwait(false);
+            var completed = await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false);
+            if (completed != transcodeTask)
+            {
+                try { op.Cancel(); } catch { }
+                try { await transcodeTask.ConfigureAwait(false); } catch { }
+                throw new VideoImportException($"Importing the video timed out after {TranscodeTimeout}.");
+            }
+
+            try
+            {
+                await transcodeTask.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ct.IsCancellationRequested && ex is not OperationCanceledException)
+            {
+                // A WinRT op cancelled via op.Cancel() can surface as a COMException rather
+                // than TaskCanceledException; report it as the cancellation it is, not a failure.
+                throw new OperationCanceledException("Video import was cancelled.", ex, ct);
+            }
+        }
+        finally
+        {
+            watchdog.Cancel();
+        }
     }
 
     /// <summary>

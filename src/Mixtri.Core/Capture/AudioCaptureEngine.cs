@@ -16,6 +16,12 @@ public sealed class AudioCaptureEngine : IDisposable
     private string? _systemAudioFilePath;
     private string? _micAudioFilePath;
 
+    // Wall-clock alignment per stream (see AudioClockAligner). Guarded by _lock.
+    private AudioClockAligner? _systemAligner;
+    private AudioClockAligner? _micAligner;
+    private int _systemBlockAlign;
+    private int _micBlockAlign;
+
     private bool _isPaused;
     private bool _disposed;
     private long _firstDataTicks;
@@ -38,6 +44,14 @@ public sealed class AudioCaptureEngine : IDisposable
     /// Call after the recording overlay is visible.
     /// </summary>
     public void OpenGate() => _gateOpen = true;
+
+    /// <summary>
+    /// Raised when an audio device could not be started, or stopped delivering audio with an
+    /// error mid-recording. The argument is a user-facing description. Raised outside the
+    /// engine's lock, possibly on a WASAPI thread; the recording continues without that
+    /// stream.
+    /// </summary>
+    public event EventHandler<string>? DeviceFailed;
 
     // ── Device enumeration ──────────────────────────────────────────
 
@@ -90,6 +104,8 @@ public sealed class AudioCaptureEngine : IDisposable
 
     public void StartRecording(string outputFolder)
     {
+        var failures = new List<string>();
+
         lock (_lock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -98,9 +114,15 @@ public sealed class AudioCaptureEngine : IDisposable
             Directory.CreateDirectory(outputFolder);
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
+            // A restarted engine must not carry the previous recording's paths into this
+            // attempt: a start failure abandons (deletes) whatever path is current.
+            _systemAudioFilePath = null;
+            _micAudioFilePath = null;
+
             using var enumerator = new MMDeviceEnumerator();
 
-            // System audio (WASAPI loopback)
+            // System audio (WASAPI loopback). A device that cannot start is reported and
+            // skipped: a recording without system audio beats no recording at all.
             if (IsSystemAudioEnabled)
             {
                 try
@@ -113,15 +135,24 @@ public sealed class AudioCaptureEngine : IDisposable
 
                         _systemCapture = new WasapiLoopbackCapture(device);
                         _systemWriter = new Pcm16CaptureWriter(_systemAudioFilePath, _systemCapture.WaveFormat);
+                        _systemBlockAlign = _systemCapture.WaveFormat.BlockAlign;
+                        _systemAligner = new AudioClockAligner(
+                            _systemCapture.WaveFormat.SampleRate, Stopwatch.Frequency);
 
                         _systemCapture.DataAvailable += OnSystemDataAvailable;
                         _systemCapture.RecordingStopped += OnSystemRecordingStopped;
                         _systemCapture.StartRecording();
                     }
+                    else
+                    {
+                        failures.Add("No system audio output device was found; recording without system audio.");
+                    }
                 }
-                catch (System.Runtime.InteropServices.COMException)
+                catch (Exception ex)
                 {
-                    // System audio device unavailable — continue without it
+                    Debug.WriteLine($"[AudioCaptureEngine] System audio start failed: {ex}");
+                    AbandonSystemCaptureLocked();
+                    failures.Add($"System audio could not be recorded: {ex.Message}");
                 }
             }
 
@@ -138,28 +169,102 @@ public sealed class AudioCaptureEngine : IDisposable
 
                         _micCapture = new WasapiCapture(device);
                         _micWriter = new Pcm16CaptureWriter(_micAudioFilePath, _micCapture.WaveFormat);
+                        _micBlockAlign = _micCapture.WaveFormat.BlockAlign;
+                        _micAligner = new AudioClockAligner(
+                            _micCapture.WaveFormat.SampleRate, Stopwatch.Frequency);
 
                         _micCapture.DataAvailable += OnMicDataAvailable;
                         _micCapture.RecordingStopped += OnMicRecordingStopped;
                         _micCapture.StartRecording();
                     }
+                    else
+                    {
+                        failures.Add("No microphone was found; recording without the microphone.");
+                    }
                 }
-                catch (System.Runtime.InteropServices.COMException)
+                catch (Exception ex)
                 {
-                    // Mic device unavailable — continue without it
-                }
-                catch (Exception)
-                {
-                    // Unexpected mic failure — clean up already-started system capture
-                    StopAndDisposeCapture(_systemCapture, _systemWriter);
-                    _systemCapture = null;
-                    _systemWriter = null;
-                    throw;
+                    Debug.WriteLine($"[AudioCaptureEngine] Mic start failed: {ex}");
+                    AbandonMicCaptureLocked();
+                    failures.Add($"The microphone could not be recorded: {ex.Message}");
                 }
             }
 
             _isPaused = false;
             IsRecording = true;
+        }
+
+        foreach (var failure in failures)
+            RaiseDeviceFailed(failure);
+    }
+
+    /// <summary>
+    /// Tears down a system capture that failed to start and forgets its file, so the session
+    /// never lists a header-only WAV as recorded audio. Caller holds <see cref="_lock"/>.
+    /// </summary>
+    private void AbandonSystemCaptureLocked()
+    {
+        var capture = _systemCapture;
+        var writer = _systemWriter;
+        var path = _systemAudioFilePath;
+        _systemCapture = null;
+        _systemWriter = null;
+        _systemAligner = null;
+        _systemAudioFilePath = null;
+
+        if (capture is not null)
+        {
+            capture.DataAvailable -= OnSystemDataAvailable;
+            capture.RecordingStopped -= OnSystemRecordingStopped;
+        }
+
+        SafeDisposeWriter(writer);
+        try { capture?.Dispose(); } catch { /* best-effort */ }
+        TryDeleteFile(path);
+    }
+
+    /// <summary>Mic counterpart of <see cref="AbandonSystemCaptureLocked"/>.</summary>
+    private void AbandonMicCaptureLocked()
+    {
+        var capture = _micCapture;
+        var writer = _micWriter;
+        var path = _micAudioFilePath;
+        _micCapture = null;
+        _micWriter = null;
+        _micAligner = null;
+        _micAudioFilePath = null;
+
+        if (capture is not null)
+        {
+            capture.DataAvailable -= OnMicDataAvailable;
+            capture.RecordingStopped -= OnMicRecordingStopped;
+        }
+
+        SafeDisposeWriter(writer);
+        try { capture?.Dispose(); } catch { /* best-effort */ }
+        TryDeleteFile(path);
+    }
+
+    private static void TryDeleteFile(string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+
+        try { File.Delete(path); }
+        catch (Exception ex) { Debug.WriteLine($"[AudioCaptureEngine] Could not remove '{path}': {ex.Message}"); }
+    }
+
+    private void RaiseDeviceFailed(string message)
+    {
+        Debug.WriteLine($"[AudioCaptureEngine] Device failure: {message}");
+        try
+        {
+            DeviceFailed?.Invoke(this, message);
+        }
+        catch (Exception ex)
+        {
+            // A subscriber must never take down a WASAPI thread or the start path.
+            Debug.WriteLine($"[AudioCaptureEngine] DeviceFailed handler threw: {ex.Message}");
         }
     }
 
@@ -178,6 +283,16 @@ public sealed class AudioCaptureEngine : IDisposable
             if (!IsRecording) return;
 
             IsRecording = false;
+
+            // Bring each stream up to the stop time, so a recording that ended in silence
+            // (loopback delivers nothing then) is as long as the wall clock says it was.
+            if (!_isPaused)
+            {
+                long now = Stopwatch.GetTimestamp();
+                PadToNowLocked(_systemWriter, _systemAligner, now, "System");
+                PadToNowLocked(_micWriter, _micAligner, now, "Mic");
+            }
+
             _isPaused = false;
 
             sysCapture = _systemCapture; _systemCapture = null;
@@ -188,6 +303,28 @@ public sealed class AudioCaptureEngine : IDisposable
 
         StopAndDisposeCapture(sysCapture, sysWriter);
         StopAndDisposeCapture(micCapture, micWriter);
+    }
+
+    /// <summary>Writes trailing silence up to <paramref name="now"/>. Caller holds the lock.</summary>
+    private void PadToNowLocked(
+        Pcm16CaptureWriter? writer, AudioClockAligner? aligner, long now, string label)
+    {
+        if (writer is null || aligner is null)
+            return;
+
+        try
+        {
+            long pad = aligner.ComputeTrailingSilence(Interlocked.Read(ref _firstDataTicks), now);
+            if (pad > 0)
+            {
+                writer.WriteSilence(pad);
+                aligner.Commit(pad, 0, now);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AudioCaptureEngine] {label} trailing pad failed: {ex.Message}");
+        }
     }
 
     public void PauseRecording()
@@ -225,7 +362,9 @@ public sealed class AudioCaptureEngine : IDisposable
             if (_isPaused || _systemWriter == null) return;
             try
             {
-                _systemWriter.Write(e.Buffer, e.BytesRecorded);
+                // Loopback goes quiet (no packets at all) while nothing plays; fill the hole
+                // so everything after it stays aligned with the video.
+                WriteAligned(_systemWriter, _systemAligner, _systemBlockAlign, e);
             }
             catch (Exception ex)
             {
@@ -244,7 +383,9 @@ public sealed class AudioCaptureEngine : IDisposable
             if (_isPaused || _micWriter == null) return;
             try
             {
-                _micWriter.Write(e.Buffer, e.BytesRecorded);
+                // A live mic delivers continuously, so this only pads after a pause or a
+                // late device start — the same wall-clock holes the loopback stream has.
+                WriteAligned(_micWriter, _micAligner, _micBlockAlign, e);
             }
             catch (Exception ex)
             {
@@ -253,10 +394,50 @@ public sealed class AudioCaptureEngine : IDisposable
         }
     }
 
+    /// <summary>
+    /// Writes a captured buffer, preceded by any silence needed to keep the stream on the
+    /// wall clock. Caller holds <see cref="_lock"/>.
+    /// </summary>
+    private void WriteAligned(
+        Pcm16CaptureWriter writer, AudioClockAligner? aligner, int blockAlign, WaveInEventArgs e)
+    {
+        if (aligner is null || blockAlign <= 0)
+        {
+            writer.Write(e.Buffer, e.BytesRecorded);
+            return;
+        }
+
+        long now = Stopwatch.GetTimestamp();
+        long incomingFrames = e.BytesRecorded / blockAlign;
+        long pad = aligner.ComputeLeadingSilence(
+            Interlocked.Read(ref _firstDataTicks), now, incomingFrames);
+
+        if (pad > 0)
+        {
+            Debug.WriteLine(
+                $"[AudioCaptureEngine] Padding {pad} frames of silence to stay on the wall clock.");
+            writer.WriteSilence(pad);
+        }
+
+        writer.Write(e.Buffer, e.BytesRecorded);
+        aligner.Commit(pad, incomingFrames, now);
+    }
+
     // RecordingStopped fires on the WASAPI thread during Dispose —
     // no lock needed since writers are already detached in StopRecording.
-    private void OnSystemRecordingStopped(object? sender, StoppedEventArgs e) { }
-    private void OnMicRecordingStopped(object? sender, StoppedEventArgs e) { }
+    // A non-null exception means the device failed (unplugged, invalidated, exclusive-mode
+    // takeover) while it was still supposed to be recording.
+    private void OnSystemRecordingStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception is { } ex)
+            RaiseDeviceFailed($"System audio stopped recording: {ex.Message}");
+    }
+
+    private void OnMicRecordingStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception is { } ex)
+            RaiseDeviceFailed($"The microphone stopped recording: {ex.Message}");
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────
 
@@ -310,6 +491,16 @@ public sealed class AudioCaptureEngine : IDisposable
             _disposed = true;
 
             IsRecording = false;
+
+            // Bring each stream up to the stop time, so a recording that ended in silence
+            // (loopback delivers nothing then) is as long as the wall clock says it was.
+            if (!_isPaused)
+            {
+                long now = Stopwatch.GetTimestamp();
+                PadToNowLocked(_systemWriter, _systemAligner, now, "System");
+                PadToNowLocked(_micWriter, _micAligner, now, "Mic");
+            }
+
             _isPaused = false;
 
             sysCapture = _systemCapture; _systemCapture = null;

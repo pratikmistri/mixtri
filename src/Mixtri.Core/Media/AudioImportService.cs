@@ -256,20 +256,42 @@ public static class AudioImportService
         });
 
         var transcodeTask = op.AsTask();
-        // Not linked to ct: cancellation flows through the registration above (which cancels
-        // the op, completing transcodeTask), so the timeout must not itself complete on
-        // cancel or a cancelled import would be misreported as a timeout.
-        var timeoutTask = Task.Delay(TranscodeTimeout);
 
-        var completed = await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false);
-        if (completed != transcodeTask)
+        // The watchdog has its OWN token, cancelled in `finally` so a completed transcode does
+        // not leave the timeout timer queued. Not linked to ct: cancellation flows through the
+        // registration above (which cancels the op, completing transcodeTask), so the timeout
+        // must not itself complete on cancel or a cancelled import would be misreported as a
+        // timeout.
+        using (var watchdog = new CancellationTokenSource())
         {
-            try { op.Cancel(); } catch { }
-            try { await transcodeTask.ConfigureAwait(false); } catch { }
-            throw new AudioImportException($"Importing the audio timed out after {TranscodeTimeout}.");
-        }
+            try
+            {
+                var timeoutTask = Task.Delay(TranscodeTimeout, watchdog.Token);
 
-        await transcodeTask.ConfigureAwait(false);
+                var completed = await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false);
+                if (completed != transcodeTask)
+                {
+                    try { op.Cancel(); } catch { }
+                    try { await transcodeTask.ConfigureAwait(false); } catch { }
+                    throw new AudioImportException($"Importing the audio timed out after {TranscodeTimeout}.");
+                }
+
+                try
+                {
+                    await transcodeTask.ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ct.IsCancellationRequested && ex is not OperationCanceledException)
+                {
+                    // op.Cancel() can surface as a COMException rather than a
+                    // TaskCanceledException; report it as the cancellation it is.
+                    throw new OperationCanceledException("Audio import was cancelled.", ex, ct);
+                }
+            }
+            finally
+            {
+                watchdog.Cancel();
+            }
+        }
 
         if (new FileInfo(partialPath).Length == 0)
             throw new AudioImportException("Importing the audio produced an empty file.");

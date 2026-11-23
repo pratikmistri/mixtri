@@ -53,11 +53,26 @@ public sealed class ExportWorkerClient
         ProjectStateSnapshot snapshot, ExportSettings settings, string outputFolder,
         IProgress<ExportProgress>? progress, CancellationToken ct)
     {
+        var result = await ExportWithResultAsync(
+            snapshot, settings, outputFolder, outputFilePath: null, progress, ct).ConfigureAwait(false);
+        return result.OutputPath;
+    }
+
+    /// <summary>
+    /// Runs one export in the worker. <paramref name="outputFilePath"/> is the exact file
+    /// the user chose (see <see cref="ExportEngine.ResolveOutputPath"/>); <c>null</c> names
+    /// the file after the project inside <paramref name="outputFolder"/>.
+    /// </summary>
+    public async Task<ExportResult> ExportWithResultAsync(
+        ProjectStateSnapshot snapshot, ExportSettings settings, string outputFolder,
+        string? outputFilePath, IProgress<ExportProgress>? progress, CancellationToken ct)
+    {
         if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
             throw new InvalidOperationException("An export is already running.");
         try
         {
-            return await ExportCoreAsync(snapshot, settings, outputFolder, progress, ct).ConfigureAwait(false);
+            return await ExportCoreAsync(snapshot, settings, outputFolder, outputFilePath, progress, ct)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -68,11 +83,16 @@ public sealed class ExportWorkerClient
         }
     }
 
-    private async Task<string> ExportCoreAsync(
+    private async Task<ExportResult> ExportCoreAsync(
         ProjectStateSnapshot snapshot, ExportSettings settings, string outputFolder,
-        IProgress<ExportProgress>? progress, CancellationToken ct)
+        string? outputFilePath, IProgress<ExportProgress>? progress, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        // Names every staging/temp file the worker creates for this job, so cleanup after a
+        // killed worker deletes exactly those files and nothing else.
+        string jobId = ExportJobFiles.NewJobId();
+        string? plannedPath = null;
+        bool succeeded = false;
         var start = new ProcessStartInfo(_executablePath)
         {
             UseShellExecute = false,
@@ -99,9 +119,11 @@ public sealed class ExportWorkerClient
                 new ExportWorkerMessage(ExportWorkerMessageKind.Start)
                 {
                     Snapshot = snapshot, Settings = settings, OutputFolder = outputFolder,
+                    OutputFilePath = outputFilePath, JobId = jobId,
                 }, ct).WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
             controls = SendControlsAsync(process, ct, stopControls.Token);
             string? outputPath = null;
+            string[]? warnings = null;
             string? failure = null;
             while (true)
             {
@@ -118,8 +140,12 @@ public sealed class ExportWorkerClient
                     case ExportWorkerMessageKind.Progress when message.Progress is not null:
                         progress?.Report(message.Progress);
                         break;
+                    case ExportWorkerMessageKind.OutputPlanned:
+                        plannedPath = message.OutputPath;
+                        break;
                     case ExportWorkerMessageKind.Completed:
                         outputPath = message.OutputPath;
+                        warnings = message.Warnings;
                         break;
                     case ExportWorkerMessageKind.Failed:
                         failure = message.Error ?? "The export worker failed.";
@@ -139,7 +165,19 @@ public sealed class ExportWorkerClient
             if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(outputPath) || !File.Exists(outputPath))
                 throw new InvalidOperationException(
                     $"The export worker exited without completing the export (exit {process.ExitCode}). {errorText}");
-            return outputPath;
+            succeeded = true;
+            return new ExportResult(outputPath, warnings ?? []);
+        }
+        catch (IOException ex) when (!ct.IsCancellationRequested)
+        {
+            // The worker died (crash or kill) while a pipe write or read was in flight — for
+            // example before the Start message finished writing. Report it like any other
+            // worker that exited without completing, not as a raw pipe error.
+            try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+            catch (TimeoutException) { }
+            string exit = process.HasExited ? $"exit {process.ExitCode}" : "still running";
+            throw new InvalidOperationException(
+                $"The export worker exited without completing the export ({exit}): {ex.Message}", ex);
         }
         finally
         {
@@ -171,6 +209,30 @@ public sealed class ExportWorkerClient
             var errorText = await errors.ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(errorText))
                 DiagLog.Write("Export", $"worker stderr: {errorText}");
+            // The worker deletes its own staging/temp files when it can unwind; a worker
+            // that had to be killed (cancellation grace expired, crash) cannot, so do it here.
+            // The destination itself is never touched: the worker only replaces it on success.
+            if (!succeeded && plannedPath is not null)
+                RemoveJobFiles(plannedPath, jobId);
+        }
+    }
+
+    /// <summary>
+    /// Deletes what a non-successful export job left behind: exactly the staging and temp
+    /// files named with <paramref name="jobId"/> (see <see cref="ExportJobFiles"/>). The
+    /// planned output itself is never deleted — the worker writes it only by atomically
+    /// replacing it on success, so whatever is there is either untouched or complete.
+    /// </summary>
+    internal static int RemoveJobFiles(string plannedPath, string jobId)
+    {
+        try
+        {
+            return ExportJobFiles.For(plannedPath, jobId).DeleteOwnedTempFiles();
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
+        {
+            DiagLog.Write("Export", $"could not resolve export temp files for cleanup: {ex.Message}");
+            return 0;
         }
     }
 

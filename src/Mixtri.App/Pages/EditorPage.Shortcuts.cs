@@ -34,7 +34,7 @@ public sealed partial class EditorPage
 
     private void UndoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         if (ViewModel.CanUndo)
         {
@@ -45,7 +45,7 @@ public sealed partial class EditorPage
 
     private void RedoAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         if (ViewModel.CanRedo)
         {
@@ -56,7 +56,7 @@ public sealed partial class EditorPage
 
     private void SplitAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         // A selected inserted audio block claims the split, so the same key cuts whichever
         // track the user is actually working on rather than always the primary video.
@@ -73,7 +73,7 @@ public sealed partial class EditorPage
 
     private void DeleteAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         DeleteSelection();
         args.Handled = true;
@@ -90,8 +90,7 @@ public sealed partial class EditorPage
     /// <summary>
     /// Removes whatever the user is currently working on, in the order the timeline layers it:
     /// an inserted audio block, a camera move, a text overlay, a zoom, then the selected
-    /// primary-track segment. With nothing selected the segment under the playhead is the
-    /// intended target — that is the block the preview is showing.
+    /// primary-track segment. With nothing selected nothing is deleted.
     /// </summary>
     private void DeleteSelection()
     {
@@ -151,22 +150,16 @@ public sealed partial class EditorPage
             return;
         }
 
-        // Nothing selected: fall back to the segment under the playhead. Routed through the
-        // same helper so an unselected delete leaves exactly as little behind as a selected one.
+        // Nothing selected: do NOT fall back to the segment under the playhead. A stray Delete
+        // (focus left on some control, a selection just cleared by undo) used to ripple-delete
+        // whatever clip the preview happened to show. Say why nothing happened instead.
         if (ViewModel.Model.Segments.Count > 0)
         {
-            var (atPlayhead, _) = ViewModel.Model.GetSegmentAtTime(Timeline.PlayheadPosition);
-            if (atPlayhead is not null)
-            {
-                DeletePrimarySegment(atPlayhead.Id);
-                return;
-            }
-
-            // Selected nothing, and the playhead is over nothing. Silent no-ops here read as
-            // "the Delete button is broken", so say so.
             Mixtri.Core.Diagnostics.DiagLog.Write(
-                "Editor",
-                $"delete resolved no target: no selection and no segment at {Timeline.PlayheadPosition}");
+                "Editor", "delete resolved no target: nothing selected");
+            ShowEditorMessage("Select a clip, overlay or zoom on the timeline to delete it.",
+                InfoBarSeverity.Informational);
+            return;
         }
 
         ViewModel.DeleteSelectedCommand.Execute(null);
@@ -174,7 +167,7 @@ public sealed partial class EditorPage
 
     private void CutAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         CutSelection();
         args.Handled = true;
@@ -221,7 +214,7 @@ public sealed partial class EditorPage
 
     private void PlayPauseAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl())
+        if (IsFocusOnInteractiveControl(sender.Key))
         {
             return;
         }
@@ -239,7 +232,7 @@ public sealed partial class EditorPage
 
     private void GoToStartAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         GoToStart();
         args.Handled = true;
@@ -247,7 +240,7 @@ public sealed partial class EditorPage
 
     private void GoToEndAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (IsFocusOnInteractiveControl()) return;
+        if (IsFocusOnInteractiveControl(sender.Key)) return;
 
         GoToEnd();
         args.Handled = true;
@@ -280,9 +273,35 @@ public sealed partial class EditorPage
         _ = UpdatePreviewFrameAsync(target, force: true);
     }
 
-    private bool IsFocusOnInteractiveControl()
+    /// <summary>
+    /// Whether the focused element should keep <paramref name="key"/> for itself instead of
+    /// the page shortcut. Deliberately narrow: treating every button as "interactive" left
+    /// all shortcuts dead after any toolbar click, since the clicked button kept focus.
+    /// <list type="bullet">
+    /// <item>Text entry (TextBox, RichEditBox, PasswordBox, NumberBox, AutoSuggestBox) and
+    /// open flyouts/menus keep every key.</item>
+    /// <item>A ComboBox keeps keys while its dropdown is open, or Space when it was reached
+    /// by keyboard (Space opens it).</item>
+    /// <item>A Slider keeps its navigation keys (arrows, Home/End, PageUp/Down) only when it
+    /// was reached by keyboard; after a mouse drag Home/End still seek the playhead.</item>
+    /// <item>Buttons, toggles and checkboxes keep Space/Enter only when reached by keyboard —
+    /// a user who tabbed to one means to activate it.</item>
+    /// <item>A list (the wallpaper grid) never lets Delete reach the timeline, and keeps its
+    /// navigation keys when reached by keyboard.</item>
+    /// </list>
+    /// </summary>
+    private bool IsFocusOnInteractiveControl(VirtualKey key)
     {
-        DependencyObject? node = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        if (XamlRoot is null) return false;
+        var focused = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
+        var focusState = (focused as Control)?.FocusState ?? FocusState.Unfocused;
+        bool byKeyboard = focusState == FocusState.Keyboard;
+        bool isActivationKey = key is VirtualKey.Space or VirtualKey.Enter;
+        bool isNavigationKey = key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up
+            or VirtualKey.Down or VirtualKey.Home or VirtualKey.End
+            or VirtualKey.PageUp or VirtualKey.PageDown;
+
+        DependencyObject? node = focused;
         while (node is not null)
         {
             switch (node)
@@ -291,15 +310,24 @@ public sealed partial class EditorPage
                 case PasswordBox:
                 case RichEditBox:
                 case AutoSuggestBox:
-                case ComboBox:
                 case NumberBox:
-                case Microsoft.UI.Xaml.Controls.Primitives.ButtonBase:
-                case ToggleSwitch:
-                case Slider:
-                case ColorPicker:
                 case FlyoutPresenter:
                 case MenuFlyoutPresenter:
                     return true;
+                case ComboBox combo:
+                    if (combo.IsDropDownOpen || (byKeyboard && isActivationKey)) return true;
+                    break;
+                case Slider:
+                    if (byKeyboard && isNavigationKey) return true;
+                    break;
+                case ListViewBase:
+                    if (key == VirtualKey.Delete) return true;
+                    if (byKeyboard && (isNavigationKey || isActivationKey)) return true;
+                    break;
+                case Microsoft.UI.Xaml.Controls.Primitives.ButtonBase:
+                case ToggleSwitch:
+                    if (byKeyboard && isActivationKey) return true;
+                    break;
             }
             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
         }
@@ -470,6 +498,9 @@ public sealed partial class EditorPage
         ExportingPanel.Visibility = Visibility.Collapsed;
         ExportedPanel.Visibility = Visibility.Visible;
         ExportErrorPanel.Visibility = Visibility.Collapsed;
+        ExportWarningTextBlock.Visibility = string.IsNullOrEmpty(ExportVM.ExportWarningText)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private void ShowErrorState()
@@ -648,25 +679,36 @@ public sealed partial class EditorPage
     /// </summary>
     private async void ImportVideo_Click(object sender, RoutedEventArgs e)
     {
-        Windows.Storage.StorageFile? file = null;
+        // async void: anything escaping here goes straight to the XAML dispatcher.
         try
         {
-            file = await PickerHelper.PickSingleFileAsync(
-                Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
-                VideoImportService.SupportedExtensions,
-                Windows.Storage.Pickers.PickerViewMode.Thumbnail);
+            if (RejectWhileExporting("import a video")) return;
+
+            Windows.Storage.StorageFile? file = null;
+            try
+            {
+                file = await PickerHelper.PickSingleFileAsync(
+                    Windows.Storage.Pickers.PickerLocationId.VideosLibrary,
+                    VideoImportService.SupportedExtensions,
+                    Windows.Storage.Pickers.PickerViewMode.Thumbnail);
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Import picker failed: {ex.Message}");
+            }
+            if (file is null || _pageUnloaded) return;
+
+            // Captured before the transcode: the playhead can move while a multi-second import
+            // runs, and the imported clip belongs where the user was when they asked for it.
+            var insertAt = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
+
+            await ImportVideoFileAsync(file.Path, insertAt);
         }
         catch (Exception ex)
         {
-            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Import picker failed: {ex.Message}");
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Import video FAILED: {ex}");
+            ShowEditorMessage($"Could not import video: {ex.Message}", InfoBarSeverity.Error);
         }
-        if (file is null) return;
-
-        // Captured before the transcode: the playhead can move while a multi-second import
-        // runs, and the imported clip belongs where the user was when they asked for it.
-        var insertAt = Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition;
-
-        await ImportVideoFileAsync(file.Path, insertAt);
     }
 
     /// <summary>
@@ -677,6 +719,8 @@ public sealed partial class EditorPage
     /// </summary>
     private async Task<VideoSegment?> ImportVideoFileAsync(string path, TimeSpan insertAt)
     {
+        if (RejectWhileExporting("import a video")) return null;
+
         // Import transcodes the whole file, so it can run for many seconds; surface progress
         // and a cancel path rather than freezing the UI on a silent await.
         using var cts = new CancellationTokenSource();
@@ -688,7 +732,18 @@ public sealed partial class EditorPage
             DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
         });
 
-        var showTask = dialog.ShowAsync();
+        Windows.Foundation.IAsyncOperation<ContentDialogResult> showTask;
+        try
+        {
+            showTask = dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            // WinUI refuses a second ContentDialog; do not run an import the user cannot cancel.
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Video import progress dialog failed: {ex.Message}");
+            ShowEditorMessage("Could not import video: another dialog is open.", InfoBarSeverity.Error);
+            return null;
+        }
         string? errorMessage = null;
         VideoSegment? insertedSegment = null;
         try
@@ -760,6 +815,7 @@ public sealed partial class EditorPage
     {
         bool isMusic = kind == AudioTrackKind.Music;
         string label = isMusic ? "music" : "voice over";
+        if (RejectWhileExporting($"insert {label}")) return;
 
         // An audio track has no frames, so unlike a video import it cannot start a project.
         // Checked BEFORE the picker so the user is not made to choose a file first.
@@ -800,6 +856,7 @@ public sealed partial class EditorPage
     {
         bool isMusic = kind == AudioTrackKind.Music;
         string label = isMusic ? "music" : "voice over";
+        if (RejectWhileExporting($"insert {label}")) return;
 
         using var cts = new CancellationTokenSource();
         var (dialog, bar) = DialogHelper.BuildProgressDialog(
@@ -809,7 +866,17 @@ public sealed partial class EditorPage
             DispatcherQueue.TryEnqueue(() => bar.Value = Math.Clamp(p, 0, 1) * 100);
         });
 
-        var showTask = dialog.ShowAsync();
+        Windows.Foundation.IAsyncOperation<ContentDialogResult> showTask;
+        try
+        {
+            showTask = dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"Audio import progress dialog failed: {ex.Message}");
+            ShowEditorMessage($"Could not insert {label}: another dialog is open.", InfoBarSeverity.Error);
+            return;
+        }
         string? errorMessage = null;
         try
         {

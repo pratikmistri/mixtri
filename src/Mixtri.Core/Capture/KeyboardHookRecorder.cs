@@ -125,6 +125,15 @@ public sealed class KeyboardHookRecorder : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetClientRect(nint hWnd, out RECT rect);
 
+    private const int GWL_STYLE = -16;
+    private const int ES_PASSWORD = 0x0020;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong(nint hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetClassName(nint hWnd, [Out] char[] lpClassName, int nMaxCount);
+
     #endregion
 
     private const int DefaultCapacity = 10_000;
@@ -146,6 +155,24 @@ public sealed class KeyboardHookRecorder : IDisposable
     private volatile bool _altDown;
     private volatile bool _shiftDown;
     private volatile bool _winDown;
+
+    // Hook-thread-only cache: whether the last focused HWND is an edit-class control, so
+    // the class-name lookup runs once per focus change rather than once per key.
+    private readonly char[] _classNameBuffer = new char[64];
+    private nint _lastFocusHwnd;
+    private bool _lastFocusIsEditClass;
+
+    /// <summary>
+    /// Key name recorded in place of a key typed into a password field. The event keeps its
+    /// timing so typing detection still sees activity, but never which key it was.
+    /// </summary>
+    internal const string RedactedKeyName = "\u2022";
+
+    /// <summary>
+    /// Virtual-key code recorded for a redacted key. 'A' is used because it is a plain
+    /// letter: typing-activity detection counts it, and it carries no information.
+    /// </summary>
+    internal const int RedactedVirtualKeyCode = 0x41;
 
     public bool IsRecording { get; internal set; }
 
@@ -284,6 +311,11 @@ public sealed class KeyboardHookRecorder : IDisposable
                 long ticks = Stopwatch.GetTimestamp();
                 string keyName = MapVirtualKeyToName(vk);
 
+                // One cheap GUI-thread query per key serves both the caret lookup and the
+                // password check. Low-level hooks have a hard timeout, so nothing here may
+                // block on another process (no SendMessage, no UI Automation).
+                bool haveGuiInfo = TryGetForegroundGuiThreadInfo(out var guiInfo);
+
                 var evt = new KeyPressEvent(
                     TimestampTicks: ticks,
                     VirtualKeyCode: vk,
@@ -293,9 +325,14 @@ public sealed class KeyboardHookRecorder : IDisposable
                     IsAlt: _altDown,
                     IsShift: _shiftDown,
                     IsWin: _winDown,
-                    TextFocus: isDown ? TryGetTextInputFocus() : null);
+                    TextFocus: isDown && haveGuiInfo ? TryGetTextInputFocus(guiInfo) : null);
 
-                TryRecordEvent(evt);
+                KeyPressEvent? recorded = evt;
+                if (haveGuiInfo && IsPasswordControl(guiInfo.hwndFocus))
+                    recorded = RedactSecureKey(evt);
+
+                if (recorded is not null)
+                    TryRecordEvent(recorded);
             }
         }
         catch (Exception ex)
@@ -306,16 +343,128 @@ public sealed class KeyboardHookRecorder : IDisposable
         return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
-    private static TextInputFocus? TryGetTextInputFocus()
+    private static bool TryGetForegroundGuiThreadInfo(out GUITHREADINFO info)
     {
+        info = default;
+
         nint foreground = GetForegroundWindow();
-        if (foreground == nint.Zero) return null;
+        if (foreground == nint.Zero) return false;
 
         uint threadId = GetWindowThreadProcessId(foreground, out _);
-        if (threadId == 0) return null;
+        if (threadId == 0) return false;
 
-        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
-        if (!GetGUIThreadInfo(threadId, ref info) || info.hwndCaret == nint.Zero)
+        info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        return GetGUIThreadInfo(threadId, ref info);
+    }
+
+    /// <summary>
+    /// Best-effort: true when <paramref name="hwndFocus"/> is a classic Win32 edit control
+    /// (Edit, RichEdit, and look-alikes whose class name contains "Edit") with the
+    /// <c>ES_PASSWORD</c> style. Controls without their own HWND — browsers, WinUI/WPF,
+    /// UWP — cannot be detected this way and are recorded as before.
+    /// </summary>
+    private bool IsPasswordControl(nint hwndFocus)
+    {
+        if (hwndFocus == nint.Zero)
+            return false;
+
+        try
+        {
+            if (hwndFocus != _lastFocusHwnd)
+            {
+                _lastFocusHwnd = hwndFocus;
+                int length = GetClassName(hwndFocus, _classNameBuffer, _classNameBuffer.Length);
+                _lastFocusIsEditClass = length > 0
+                    && IsEditClassName(new string(_classNameBuffer, 0, length));
+            }
+
+            // Re-read the style every time: "show password" toggles flip ES_PASSWORD live.
+            return _lastFocusIsEditClass
+                && (GetWindowLong(hwndFocus, GWL_STYLE) & ES_PASSWORD) != 0;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[KeyboardHookRecorder] Password check failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// ES_PASSWORD (0x20) only means "password" on edit controls; on other classes the same
+    /// bit is an unrelated style, so the class must be checked first.
+    /// </summary>
+    internal static bool IsEditClassName(string? className)
+        => !string.IsNullOrEmpty(className)
+           && className.Contains("Edit", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True for a key that would put a character into a text field: letters, digits, space,
+    /// numpad and OEM punctuation, pressed without Ctrl/Alt/Win (which make it a shortcut).
+    /// </summary>
+    internal static bool IsCharacterKey(int vk, bool isCtrl, bool isAlt, bool isWin)
+    {
+        if (isCtrl || isAlt || isWin)
+            return false;
+
+        return vk == 0x20
+            || vk is >= 0x30 and <= 0x39
+            || vk is >= 0x41 and <= 0x5A
+            || vk is >= 0x60 and <= 0x6F
+            || vk is >= 0xBA and <= 0xC0
+            || vk is >= 0xDB and <= 0xDF
+            || vk == 0xE2; // OEM_102 (extra key on ISO layouts)
+    }
+
+    /// <summary>
+    /// Strips the identity of a key typed into a secure field. Character keys become a fixed
+    /// placeholder with no modifiers, and Shift presses are dropped (either would reveal
+    /// case); navigation, editing and shortcut keys reveal nothing about the secret and are
+    /// kept so the timeline still makes sense.
+    /// </summary>
+    /// <returns>The event to record, or null when it must not be recorded at all.</returns>
+    internal static KeyPressEvent? RedactSecureKey(KeyPressEvent evt)
+    {
+        if (evt.VirtualKeyCode is VK_LSHIFT or VK_RSHIFT or VK_SHIFT)
+            return null;
+
+        // AltGr arrives as Ctrl+Alt but inserts a character (e.g. AltGr+Q = '@' on German
+        // layouts), so a Ctrl+Alt chord on a character key is conservatively treated as text.
+        bool altGrChord = evt.IsCtrl && evt.IsAlt && !evt.IsWin
+            && IsCharacterKey(evt.VirtualKeyCode, isCtrl: false, isAlt: false, isWin: false);
+
+        // Alt+numpad codes (Alt held, digits typed on the keypad) also enter characters. With
+        // NumLock off the keypad reports navigation keys instead, and the low-level hook data
+        // recorded here cannot tell those from the dedicated arrow block, so any Alt+keypad-
+        // shaped key in a secure field is redacted; nothing secret is lost by over-redacting.
+        bool altNumpadCode = evt.IsAlt && !evt.IsCtrl && !evt.IsWin
+            && IsAltCodeKey(evt.VirtualKeyCode);
+
+        if (!altGrChord && !altNumpadCode
+            && !IsCharacterKey(evt.VirtualKeyCode, evt.IsCtrl, evt.IsAlt, evt.IsWin))
+            return evt;
+
+        return evt with
+        {
+            VirtualKeyCode = RedactedVirtualKeyCode,
+            KeyName = RedactedKeyName,
+            IsShift = false,
+            IsCtrl = false,
+            IsAlt = false,
+        };
+    }
+
+    /// <summary>
+    /// Keys that can form an Alt+numpad character code: VK_NUMPAD0–9, and the keypad's
+    /// NumLock-off equivalents (Insert, End, Down, PageDown, Left, Clear, Right, Home, Up,
+    /// PageUp).
+    /// </summary>
+    internal static bool IsAltCodeKey(int vk)
+        => vk is >= 0x60 and <= 0x69
+            or 0x2D or 0x23 or 0x28 or 0x22 or 0x25 or 0x0C or 0x27 or 0x24 or 0x26 or 0x21;
+
+    private static TextInputFocus? TryGetTextInputFocus(GUITHREADINFO info)
+    {
+        if (info.hwndCaret == nint.Zero)
             return null;
 
         var caretTopLeft = new POINT { X = info.rcCaret.Left, Y = info.rcCaret.Top };

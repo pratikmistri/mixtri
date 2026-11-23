@@ -53,31 +53,42 @@ public sealed partial class EditorPage
 
     private async void EditorPage_Drop(object sender, DragEventArgs e)
     {
-        DropHintOverlay.Visibility = Visibility.Collapsed;
-
-        if (_dropImportInFlight || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
-
-        // Resolved BEFORE the deferral below: the drop position is only meaningful while the
-        // event is being delivered, and the import that follows is seconds long.
-        var insertAt = ResolveDropInsertTime(e);
-
-        IReadOnlyList<IStorageItem> items;
-        var deferral = e.GetDeferral();
+        // async void: anything escaping here goes straight to the XAML dispatcher.
         try
         {
-            items = await e.DataView.GetStorageItemsAsync();
+            DropHintOverlay.Visibility = Visibility.Collapsed;
+
+            if (_dropImportInFlight || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            if (RejectWhileExporting("add files")) return;
+
+            // Resolved BEFORE the deferral below: the drop position is only meaningful while the
+            // event is being delivered, and the import that follows is seconds long.
+            var insertAt = ResolveDropInsertTime(e);
+
+            IReadOnlyList<IStorageItem> items;
+            var deferral = e.GetDeferral();
+            try
+            {
+                items = await e.DataView.GetStorageItemsAsync();
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"drop: could not read dropped items: {ex.Message}");
+                return;
+            }
+            finally
+            {
+                deferral.Complete();
+            }
+
+            if (_pageUnloaded) return;
+            await ImportDroppedFilesAsync(items.OfType<StorageFile>().ToList(), insertAt);
         }
         catch (Exception ex)
         {
-            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"drop: could not read dropped items: {ex.Message}");
-            return;
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"drop import FAILED: {ex}");
+            ShowEditorMessage($"Could not add the dropped files: {ex.Message}", Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error);
         }
-        finally
-        {
-            deferral.Complete();
-        }
-
-        await ImportDroppedFilesAsync(items.OfType<StorageFile>().ToList(), insertAt);
     }
 
     /// <summary>

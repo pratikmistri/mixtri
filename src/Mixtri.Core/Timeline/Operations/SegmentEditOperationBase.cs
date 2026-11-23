@@ -68,6 +68,29 @@ public abstract class SegmentEditOperationBase : IEditOperation
         return false;
     }
 
+    /// <summary>
+    /// Where the segment an operation acted on lives NOW, looked up by its stable id.
+    /// </summary>
+    /// <remarks>
+    /// An index captured in <c>ExecuteCore</c> goes stale as soon as anything inserts or
+    /// removes a segment ahead of it, and writing an undo through it would overwrite an
+    /// unrelated segment. The id survives every reorder. Returns -1 when the id no longer
+    /// resolves; <paramref name="fallbackIndex"/> is kept for call-site compatibility only.
+    /// </remarks>
+    protected static int ResolveSegmentIndex(TimelineModel model, string segmentId, int fallbackIndex)
+    {
+        var segments = model.Segments;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            if (segments[i].Id == segmentId) return i;
+        }
+
+        // Deliberately no positional fallback: if the segment is gone, whatever now sits at
+        // the old index is an unrelated clip, and restoring onto it would corrupt it.
+        _ = fallbackIndex;
+        return -1;
+    }
+
     /// <returns>
     /// True if the base class must call <see cref="TimelineModel.RecalculateSegmentPositions"/>.
     /// False if positions are already correct — either nothing was changed, or the override

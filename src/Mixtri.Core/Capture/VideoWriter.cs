@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Channels;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Processing;
@@ -47,7 +48,15 @@ public sealed class FrameWriteFailedEventArgs(Exception exception, long frameInd
 /// </remarks>
 public sealed class VideoWriter : IDisposable
 {
-    private static readonly TimeSpan FinalizeTimeout = TimeSpan.FromMinutes(30);
+    /// <summary>Floor of the finalize watchdog; see <see cref="ComputeFinalizeTimeout"/>.</summary>
+    internal static readonly TimeSpan MinFinalizeTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Generous per-frame encode budget for the finalize watchdog. Software H.264 of a
+    /// decoded JPEG normally takes a few tens of milliseconds even at 4K; this is an order of
+    /// magnitude above that so only a genuinely stalled transcode trips it.
+    /// </summary>
+    internal static readonly TimeSpan FinalizeBudgetPerFrame = TimeSpan.FromMilliseconds(250);
 
     /// <summary>How long <see cref="FinalizeAsync"/> waits for a still-running writer to drain.</summary>
     private static readonly TimeSpan FinalizeDrainTimeout = TimeSpan.FromSeconds(30);
@@ -133,6 +142,7 @@ public sealed class VideoWriter : IDisposable
     private long _droppedFrames;
     private long _failedWrites;
     private int _consecutiveFailures;
+    private int _writingAbandoned;
 
     /// <summary>CFR slots owed by dropped frames, applied to the next queued frame.</summary>
     private int _pendingSkippedSlots;
@@ -198,6 +208,24 @@ public sealed class VideoWriter : IDisposable
 
     /// <summary>Raised once, on the writer thread, for the first frame that fails to persist.</summary>
     public event EventHandler<FrameWriteFailedEventArgs>? WriteFailed;
+
+    /// <summary>
+    /// Raised once, on the writer thread, when repeated consecutive write failures made the
+    /// writer stop accepting frames. Everything captured after this point is lost, so the
+    /// session must tell the user rather than let the recording end short in silence.
+    /// </summary>
+    public event EventHandler<FrameWriteFailedEventArgs>? WritingAbandoned;
+
+    /// <summary>
+    /// True once the writer stopped accepting frames because of repeated write failures.
+    /// </summary>
+    public bool IsWritingAbandoned => Volatile.Read(ref _writingAbandoned) != 0;
+
+    /// <summary>
+    /// Fraction (0..1) of frames handed to the encoder during <see cref="FinalizeAsync"/>.
+    /// Raised from encoder threads in steps of at least 1%, and with 1.0 on success.
+    /// </summary>
+    public event EventHandler<double>? FinalizationProgressChanged;
 
     /// <summary>Directory holding the transient captured JPEGs for this recording.</summary>
     public string FramesDirectory => _framesDir;
@@ -684,6 +712,18 @@ public sealed class VideoWriter : IDisposable
             Debug.WriteLine(
                 $"[VideoWriter] Giving up after {consecutive} consecutive write failures; " +
                 $"{Interlocked.Read(ref _frameCount)} frames preserved in {_framesDir}.");
+
+            if (Interlocked.Exchange(ref _writingAbandoned, 1) == 0)
+            {
+                try
+                {
+                    WritingAbandoned?.Invoke(this, new FrameWriteFailedEventArgs(ex, frameIndex, _framesDir));
+                }
+                catch (Exception handlerEx)
+                {
+                    Debug.WriteLine($"[VideoWriter] WritingAbandoned handler threw: {handlerEx.Message}");
+                }
+            }
         }
 
         if (!isFirst)
@@ -858,6 +898,7 @@ public sealed class VideoWriter : IDisposable
         };
 
         long currentFrame = -1;
+        int lastReportedPercent = -1;
         var pendingSamples = new List<Task>();
         var pendingSamplesLock = new object();
         Exception? firstFrameError = null;
@@ -873,6 +914,14 @@ public sealed class VideoWriter : IDisposable
             {
                 args.Request.Sample = null;
                 return;
+            }
+
+            int percent = (int)(frame * 100 / totalFrames);
+            int previousPercent = Volatile.Read(ref lastReportedPercent);
+            if (percent > previousPercent
+                && Interlocked.CompareExchange(ref lastReportedPercent, percent, previousPercent) == previousPercent)
+            {
+                RaiseFinalizationProgress(percent / 100.0);
             }
 
             var deferral = args.Request.GetDeferral();
@@ -947,14 +996,20 @@ public sealed class VideoWriter : IDisposable
                 var transcodeOp = prepResult.TranscodeAsync();
                 using var cancelRegistration = finalizeCts.Token.Register(() => transcodeOp.Cancel());
                 var transcodeTask = transcodeOp.AsTask(finalizeCts.Token);
-                var timeoutTask = Task.Delay(FinalizeTimeout);
+                var finalizeTimeout = ComputeFinalizeTimeout(totalFrames);
+                // The watchdog timer is cancelled as soon as the transcode settles, so a long
+                // (frame-scaled) budget never leaves a timer pending after finalize.
+                using var timeoutCts = new CancellationTokenSource();
+                var timeoutTask = Task.Delay(finalizeTimeout, timeoutCts.Token);
 
-                if (await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false) != transcodeTask)
+                var finished = await Task.WhenAny(transcodeTask, timeoutTask).ConfigureAwait(false);
+                timeoutCts.Cancel();
+                if (finished != transcodeTask)
                 {
                     finalizeCts.Cancel();
                     try { await transcodeTask.ConfigureAwait(false); }
                     catch { /* timeout is reported below */ }
-                    throw new TimeoutException($"MP4 finalization timed out after {FinalizeTimeout}.");
+                    throw new TimeoutException($"MP4 finalization timed out after {finalizeTimeout}.");
                 }
 
                 await transcodeTask.ConfigureAwait(false);
@@ -1001,6 +1056,115 @@ public sealed class VideoWriter : IDisposable
         // The MP4 is now the durable master for this recording, so the captured JPEGs
         // have served their purpose as a write-ahead buffer.
         _finalizeSucceeded = true;
+        RaiseFinalizationProgress(1.0);
+    }
+
+    /// <summary>
+    /// Watchdog budget for encoding <paramref name="frameCount"/> frames: never less than
+    /// <see cref="MinFinalizeTimeout"/>, and growing with the recording so a long capture is
+    /// not killed by a cap sized for a short one.
+    /// </summary>
+    internal static TimeSpan ComputeFinalizeTimeout(long frameCount)
+    {
+        if (frameCount <= 0)
+            return MinFinalizeTimeout;
+
+        // Cap well below TimeSpan/Task.Delay limits (Task.Delay rejects > ~24.8 days).
+        double seconds = Math.Min(
+            frameCount * FinalizeBudgetPerFrame.TotalSeconds,
+            TimeSpan.FromDays(7).TotalSeconds);
+
+        var scaled = TimeSpan.FromSeconds(seconds);
+        return scaled > MinFinalizeTimeout ? scaled : MinFinalizeTimeout;
+    }
+
+    private void RaiseFinalizationProgress(double fraction)
+    {
+        try
+        {
+            FinalizationProgressChanged?.Invoke(this, Math.Clamp(fraction, 0.0, 1.0));
+        }
+        catch (Exception ex)
+        {
+            // A UI subscriber must never fail the encode.
+            Debug.WriteLine($"[VideoWriter] FinalizationProgressChanged handler threw: {ex.Message}");
+        }
+    }
+
+    /// <summary>Size difference below which a frame is scaled to fill rather than letterboxed.</summary>
+    internal const int LetterboxTolerancePixels = 2;
+
+    /// <summary>
+    /// Largest rectangle with the source's aspect ratio that fits inside the destination,
+    /// centered. Used when a frame's size differs from the recording's (a window resized
+    /// mid-recording), so it is letterboxed or pillarboxed instead of stretched.
+    /// </summary>
+    internal static (int X, int Y, int Width, int Height) ComputeLetterboxRect(
+        int sourceWidth, int sourceHeight, int destWidth, int destHeight)
+    {
+        if (destWidth <= 0 || destHeight <= 0)
+            return (0, 0, Math.Max(0, destWidth), Math.Max(0, destHeight));
+
+        if (sourceWidth <= 0 || sourceHeight <= 0
+            || (sourceWidth == destWidth && sourceHeight == destHeight))
+        {
+            return (0, 0, destWidth, destHeight);
+        }
+
+        double scale = Math.Min(
+            destWidth / (double)sourceWidth,
+            destHeight / (double)sourceHeight);
+
+        int width = (int)Math.Clamp(Math.Round(sourceWidth * scale), 1, destWidth);
+        int height = (int)Math.Clamp(Math.Round(sourceHeight * scale), 1, destHeight);
+
+        // A pixel or two of difference is the encoder's even-dimension rounding (an odd-sized
+        // window), not a reshaped source: an imperceptible stretch beats a 1px black seam.
+        if (destWidth - width <= LetterboxTolerancePixels
+            && destHeight - height <= LetterboxTolerancePixels)
+        {
+            return (0, 0, destWidth, destHeight);
+        }
+
+        return ((destWidth - width) / 2, (destHeight - height) / 2, width, height);
+    }
+
+    /// <summary>
+    /// Copies a tightly packed BGRA image into the given rectangle of a tightly packed BGRA
+    /// canvas that is first filled with opaque black.
+    /// </summary>
+    internal static void ComposeLetterboxed(
+        byte[] source, int sourceWidth, int sourceHeight,
+        byte[] dest, int destWidth, int destHeight, int offsetX, int offsetY)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(dest);
+
+        // Opaque black (premultiplied BGRA 0,0,0,255).
+        for (int i = 0; i + 3 < dest.Length; i += 4)
+        {
+            dest[i] = 0;
+            dest[i + 1] = 0;
+            dest[i + 2] = 0;
+            dest[i + 3] = 255;
+        }
+
+        int copyWidth = Math.Min(sourceWidth, destWidth - offsetX);
+        int copyHeight = Math.Min(sourceHeight, destHeight - offsetY);
+        if (copyWidth <= 0 || copyHeight <= 0 || offsetX < 0 || offsetY < 0)
+            return;
+
+        int sourceStride = sourceWidth * 4;
+        int destStride = destWidth * 4;
+        int rowBytes = copyWidth * 4;
+
+        for (int row = 0; row < copyHeight; row++)
+        {
+            System.Buffer.BlockCopy(
+                source, row * sourceStride,
+                dest, (row + offsetY) * destStride + offsetX * 4,
+                rowBytes);
+        }
     }
 
     /// <summary>
@@ -1120,10 +1284,18 @@ public sealed class VideoWriter : IDisposable
             var file = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(framePath));
             using var stream = await file.OpenAsync(FileAccessMode.Read);
             var decoder = await BitmapDecoder.CreateAsync(stream);
+
+            // Frames normally all share the recording's size. A window resized (or a display
+            // mode changed) mid-recording produces frames of another shape; fit those inside
+            // the recording's frame with black bars rather than stretching them.
+            var fit = ComputeLetterboxRect(
+                (int)decoder.PixelWidth, (int)decoder.PixelHeight, width, height);
+            bool fillsFrame = fit.X == 0 && fit.Y == 0 && fit.Width == width && fit.Height == height;
+
             var transform = new BitmapTransform
             {
-                ScaledWidth = (uint)width,
-                ScaledHeight = (uint)height,
+                ScaledWidth = (uint)fit.Width,
+                ScaledHeight = (uint)fit.Height,
                 InterpolationMode = BitmapInterpolationMode.Fant,
 
                 // Media Foundation treats an uncompressed RGB media type with a positive
@@ -1143,8 +1315,24 @@ public sealed class VideoWriter : IDisposable
                 ExifOrientationMode.IgnoreExifOrientation,
                 ColorManagementMode.DoNotColorManage);
 
-            var buffer = new Windows.Storage.Streams.Buffer((uint)((long)width * height * 4));
-            bitmap.CopyToBuffer(buffer);
+            IBuffer buffer;
+            if (fillsFrame)
+            {
+                var full = new Windows.Storage.Streams.Buffer((uint)((long)width * height * 4));
+                bitmap.CopyToBuffer(full);
+                buffer = full;
+            }
+            else
+            {
+                // The flip above already mirrored the fitted image, and the bars are centered,
+                // so composing it top-down here keeps the output orientation correct.
+                var fitted = new byte[(long)fit.Width * fit.Height * 4];
+                bitmap.CopyToBuffer(fitted.AsBuffer());
+
+                var composed = new byte[(long)width * height * 4];
+                ComposeLetterboxed(fitted, fit.Width, fit.Height, composed, width, height, fit.X, fit.Y);
+                buffer = composed.AsBuffer();
+            }
 
             var timestamp = TimeSpan.FromSeconds((double)frameIndex / _fps);
             var sample = MediaStreamSample.CreateFromBuffer(buffer, timestamp);

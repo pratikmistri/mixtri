@@ -89,8 +89,16 @@ public static class MixtriPackage
         // costs significant time for a fraction of a percent.
         return extension.ToLowerInvariant() switch
         {
-            ".mp4" or ".mov" or ".mkv" or ".m4a" or ".mp3" or ".jpg" or ".jpeg" or ".png" or ".gif"
+            ".mp4" or ".mov" or ".mkv" or ".webm" or ".avi" or ".wmv"
+                or ".m4a" or ".mp3" or ".aac" or ".wma"
+                or ".jpg" or ".jpeg" or ".png" or ".gif" or ".webp"
                 => CompressionLevel.NoCompression,
+
+            // Raw PCM does shrink, but recordings run to hundreds of megabytes and Optimal
+            // makes a re-save of them take minutes; Fastest keeps most of the gain.
+            ".wav" => CompressionLevel.Fastest,
+
+            // JSON, cursor/keyboard logs and other small structured data.
             _ => CompressionLevel.Optimal,
         };
     }

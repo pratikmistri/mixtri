@@ -116,7 +116,7 @@ public static class HardwareEncoderDetector
     {
         try
         {
-            // Read the friendly name via IMFAttributes::GetString (index 0 = MF_TRANSFORM_FRIENDLY_NAME_Attribute)
+            // Read the friendly name via IMFAttributes::GetAllocatedString (MFT_FRIENDLY_NAME_Attribute)
             Guid MF_TRANSFORM_FRIENDLY_NAME =
                 new("314FFBAE-5B41-4C95-9C25-A20590EE3830");
 
@@ -160,13 +160,23 @@ public static class HardwareEncoderDetector
 
     #region P/Invoke helpers
 
+    // IMFActivate derives from IMFAttributes, which derives from IUnknown. Vtable slots:
+    // IUnknown 0-2, then GetItem 3, GetItemType 4, CompareItem 5, Compare 6, GetUINT32 7,
+    // GetUINT64 8, GetDouble 9, GetGUID 10, GetStringLength 11, GetString 12,
+    // GetAllocatedString 13, ... Set*/Lock*/GetCount/GetItemByIndex/CopyAllItems 14-32,
+    // and IMFActivate::ActivateObject at 33. Detection reads attributes only — it must
+    // NEVER reach slot 33 (that would instantiate the encoder MFT, which is what the old
+    // GetAllocatedString index of 33 actually called).
+    private const int IMFAttributes_GetGUID_Slot = 10;
+    private const int IMFAttributes_GetAllocatedString_Slot = 13;
+
     private static int GetStringAttribute(IntPtr obj, ref Guid key, out string? value)
     {
         value = null;
         try
         {
             IntPtr vtable = Marshal.ReadIntPtr(obj);
-            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 33 * IntPtr.Size);
+            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, IMFAttributes_GetAllocatedString_Slot * IntPtr.Size);
             var getStr = Marshal.GetDelegateForFunctionPointer<GetAllocatedStringDelegate>(fnPtr);
 
             int hr = getStr(obj, ref key, out IntPtr strPtr, out uint length);
@@ -191,7 +201,7 @@ public static class HardwareEncoderDetector
         try
         {
             IntPtr vtable = Marshal.ReadIntPtr(obj);
-            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, 20 * IntPtr.Size);
+            IntPtr fnPtr = Marshal.ReadIntPtr(vtable, IMFAttributes_GetGUID_Slot * IntPtr.Size);
             var getGuid = Marshal.GetDelegateForFunctionPointer<GetGUIDDelegate>(fnPtr);
             return getGuid(obj, ref key, out value);
         }

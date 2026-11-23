@@ -181,7 +181,45 @@ public partial class RecordingViewModel : ObservableObject
     [ObservableProperty]
     private bool _isRecording;
 
+    /// <summary>
+    /// True from the moment a stop begins until the session is finalized. Observable so
+    /// the recording overlay can switch to its "Stopping…" state whichever route started
+    /// the stop (overlay button, tray Exit, a closed capture target, OS shutdown).
+    /// </summary>
+    [ObservableProperty]
     private bool _isStopping;
+
+    /// <summary>
+    /// Finalization progress (0..1) reported by the session while stopping, or -1 while
+    /// no progress has been reported yet.
+    /// </summary>
+    [ObservableProperty]
+    private double _finalizationProgress = -1;
+
+    /// <summary>
+    /// User-facing description of a fault the running session has recorded, or null while
+    /// the capture is healthy. Shown by the recording overlay as a warning, since the full
+    /// window — where errors normally surface — is off screen for the whole recording.
+    /// </summary>
+    [ObservableProperty]
+    private string? _recordingWarning;
+
+    /// <summary>
+    /// Why the last recording stopped when it was not the user's own Stop (e.g. the
+    /// recorded window closed). Null after a normal stop. Read by the shell once the
+    /// recording has ended, so it can tell the user.
+    /// </summary>
+    public string? LastAutoStopReason { get; private set; }
+
+    /// <summary>The in-flight stop, so every caller that needs it finalized awaits the same one.</summary>
+    private Task? _stopTask;
+
+    /// <summary>
+    /// The background half of the in-flight stop (<see cref="RecordingSession.StopAsync"/>
+    /// on the thread pool). Unlike <see cref="_stopTask"/> it never needs the UI thread to
+    /// complete, so the session-end path can wait on it synchronously.
+    /// </summary>
+    private Task? _sessionStopTask;
 
     [ObservableProperty]
     private string _elapsedTime = "00:00";
@@ -214,11 +252,36 @@ public partial class RecordingViewModel : ObservableObject
         OnPropertyChanged(nameof(IsWindowMode));
     }
 
+    /// <summary>
+    /// Checks that the current selection resolves to something that can be captured,
+    /// surfacing the reason through <see cref="ErrorRaised"/> when it does not. Called by
+    /// the shell BEFORE it hides its windows, so a bad selection never leaves the user
+    /// staring at an empty desktop.
+    /// </summary>
+    public bool ValidateCaptureTarget()
+    {
+        try
+        {
+            return BuildCaptureTarget() is not null;
+        }
+        catch (Exception ex)
+        {
+            SetError($"Could not determine capture target: {ex.Message}");
+            return false;
+        }
+    }
+
     [RelayCommand]
     private async Task StartRecordingAsync()
     {
         if (IsRecording)
             return;
+
+        // A previous take must never be mistaken for this one's result.
+        LastProject = null;
+        LastAutoStopReason = null;
+        RecordingWarning = null;
+        FinalizationProgress = -1;
 
         try
         {
@@ -258,6 +321,8 @@ public partial class RecordingViewModel : ObservableObject
             _session.StatsUpdated += OnStatsUpdated;
             _session.Error += OnSessionError;
             _session.StateChanged += OnSessionStateChanged;
+            _session.CaptureTargetLost += OnCaptureTargetLost;
+            _session.FinalizationProgressChanged += OnFinalizationProgressChanged;
 
             await _session.StartAsync();
 
@@ -284,12 +349,62 @@ public partial class RecordingViewModel : ObservableObject
     public void NotifyStopRequested() => _session?.NotifyStopRequested();
 
     [RelayCommand]
-    private async Task StopRecordingAsync()
+    private Task StopRecordingAsync() => StopAndFinalizeAsync();
+
+    /// <summary>
+    /// Stops the recording and finalizes it. Safe to call from any route and any number of
+    /// times: a stop already in flight is returned rather than started again, so the tray's
+    /// Exit, the shutdown path and the overlay's Stop button all wait on the same one.
+    /// Must be called on the UI thread.
+    /// </summary>
+    public Task StopAndFinalizeAsync()
     {
-        if (!IsRecording || _session is null || _isStopping)
+        if (_stopTask is { IsCompleted: false }) return _stopTask;
+        if (!IsRecording || _session is null || IsStopping) return Task.CompletedTask;
+
+        _stopTask = StopCoreAsync();
+        return _stopTask;
+    }
+
+    /// <summary>
+    /// Blocks for at most <paramref name="timeout"/> while the session finalizes. Only for
+    /// the OS session-end path, which must finish inside the message handler: it waits on
+    /// the thread-pool half of the stop, which needs nothing from the (blocked) UI thread.
+    /// </summary>
+    public bool WaitForSessionStop(TimeSpan timeout)
+    {
+        var task = _sessionStopTask;
+        if (task is null) return true;
+
+        try
+        {
+            return task.Wait(timeout);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingViewModel] Session stop failed during shutdown wait: {ex.Message}");
+            return true;
+        }
+    }
+
+    private async Task StopCoreAsync()
+    {
+        var session = _session;
+        if (!IsRecording || session is null || IsStopping)
             return;
 
-        _isStopping = true;
+        IsStopping = true;
+
+        // Cleared up front: if anything below fails, no stale project from an earlier
+        // take may be handed to the editor as this recording's result.
+        LastProject = null;
+        FinalizationProgress = -1;
+
+        // Stop the elapsed ticker FIRST, so its next tick cannot overwrite "Stopping…" with
+        // a stale "Recording — 00:42 …" line. A callback already in flight is harmless: it
+        // re-checks IsStopping on the UI thread before writing anything.
+        _elapsedTimer?.Dispose();
+        _elapsedTimer = null;
 
         try
         {
@@ -297,29 +412,51 @@ public partial class RecordingViewModel : ObservableObject
 
             // Run heavy stop work on a background thread so the UI stays responsive
             // (overlay spinner/messages keep animating)
-            var session = _session;
-            await Task.Run(async () => await session.StopAsync());
+            var stopWork = Task.Run(async () => await session.StopAsync());
+            _sessionStopTask = stopWork;
+            await stopWork;
 
-            LastProject = _session.GetProject();
-            if (LastProject is not null && !IsAppendMode)
+            LastProject = session.GetProject();
+            if (LastProject is null)
             {
-                // Normal recording: replace the project/timeline. In append mode the
-                // page calls ProjectService.AppendRecording instead, so skip this to
-                // avoid duplicating the new recording as two segments.
-                ProjectService.Instance.SetProject(LastProject);
+                // Nothing usable was captured. The session recorded why; say so rather
+                // than opening an empty editor.
+                var fault = session.Fault;
+                SetError(fault is not null
+                    ? $"Recording failed: {fault}"
+                    : "Recording failed: no video was captured.");
             }
-            RecordingStatus = "Recording saved";
+            else
+            {
+                if (!IsAppendMode)
+                {
+                    // Normal recording: replace the project/timeline. In append mode the
+                    // page calls ProjectService.AppendRecording instead, so skip this to
+                    // avoid duplicating the new recording as two segments.
+                    ProjectService.Instance.SetProject(LastProject);
+                }
+                // A take that finished degraded (lost frames, a dropped audio device) still
+                // opens, but the shell reports why — including faults raised during
+                // finalization, after the overlay's last look.
+                if (session.Fault is { } degraded)
+                    RecordingWarning = degraded.ToString();
+
+                RecordingStatus = "Recording saved";
+            }
         }
         catch (Exception ex)
         {
+            LastProject = null;
             SetError($"Stop error: {ex.Message}");
             Debug.WriteLine($"[RecordingViewModel] Stop error: {ex}");
         }
         finally
         {
             CleanupSession();
+            _sessionStopTask = null;
             IsRecording = false;
-            _isStopping = false;
+            IsStopping = false;
+            FinalizationProgress = -1;
         }
     }
 
@@ -329,8 +466,12 @@ public partial class RecordingViewModel : ObservableObject
         {
             case CaptureMode.FullScreen:
             {
+                // "Full Screen" means the primary display, not whichever monitor the OS
+                // happens to enumerate first. MonitorEnumerator marks it in DisplayName.
                 var monitors = MonitorEnumerator.GetAllMonitors();
-                return monitors.FirstOrDefault();
+                return monitors.FirstOrDefault(m =>
+                           m.DisplayName.EndsWith("(Primary)", StringComparison.Ordinal))
+                       ?? monitors.FirstOrDefault();
             }
             case CaptureMode.Window:
             {
@@ -415,7 +556,14 @@ public partial class RecordingViewModel : ObservableObject
     private void OnSessionError(object? sender, string message)
     {
         Debug.WriteLine($"[RecordingSession] Error: {message}");
-        RunOnUI(() => SetError($"Error: {message}"));
+        RunOnUI(() =>
+        {
+            // The full window is off screen while recording, so the overlay's warning
+            // state is the only place the user will see this before they press Stop.
+            if (IsRecording && !IsStopping)
+                RecordingWarning = message;
+            SetError($"Error: {message}");
+        });
     }
 
     private void OnSessionStateChanged(object? sender, RecordingState state)
@@ -423,19 +571,68 @@ public partial class RecordingViewModel : ObservableObject
         Debug.WriteLine($"[RecordingSession] State → {state}");
     }
 
+    /// <summary>
+    /// The capture target (recorded window or display) went away. Stop and keep what was
+    /// recorded rather than carrying on filming nothing.
+    /// </summary>
+    private void OnCaptureTargetLost(object? sender, EventArgs e)
+    {
+        RunOnUI(() =>
+        {
+            if (!IsRecording || IsStopping || _session is null) return;
+
+            Debug.WriteLine("[RecordingViewModel] Capture target lost; stopping.");
+            LastAutoStopReason = CaptureMode == CaptureMode.Window
+                ? "The recorded window was closed, so the recording was stopped."
+                : "The recorded display was disconnected, so the recording was stopped.";
+            _ = StopAndFinalizeAsync();
+        });
+    }
+
+    private void OnFinalizationProgressChanged(object? sender, double progress)
+    {
+        if (double.IsNaN(progress)) return;
+        var clamped = Math.Clamp(progress, 0.0, 1.0);
+        RunOnUI(() =>
+        {
+            if (IsStopping) FinalizationProgress = clamped;
+        });
+    }
+
     private void UpdateElapsedDisplay()
     {
-        if (_session is null) return;
+        // Runs on a thread-pool timer, racing the stop flow that nulls and disposes the
+        // session. Read the field once, and treat a session torn down mid-read as "done".
+        var session = _session;
+        if (session is null) return;
 
-        var elapsed = _session.Elapsed;
+        TimeSpan elapsed;
+        string? warning;
+        try
+        {
+            elapsed = session.Elapsed;
+            warning = session.Fault?.Message;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingViewModel] Elapsed tick skipped: {ex.Message}");
+            return;
+        }
+
         var timeStr = elapsed.TotalHours >= 1
             ? elapsed.ToString(@"hh\:mm\:ss")
             : elapsed.ToString(@"mm\:ss");
 
         RunOnUI(() =>
         {
+            // A tick queued just before the stop began must not overwrite "Stopping…".
+            if (!IsRecording || IsStopping || !ReferenceEquals(session, _session)) return;
+
             ElapsedTime = timeStr;
             RecordingStatus = $"Recording — {ElapsedTime} · {FramesCaptured} frames · {CurrentFps:F0} fps";
+
+            if (!string.Equals(RecordingWarning, warning, StringComparison.Ordinal) && warning is not null)
+                RecordingWarning = warning;
         });
     }
 
@@ -449,6 +646,8 @@ public partial class RecordingViewModel : ObservableObject
             _session.StatsUpdated -= OnStatsUpdated;
             _session.Error -= OnSessionError;
             _session.StateChanged -= OnSessionStateChanged;
+            _session.CaptureTargetLost -= OnCaptureTargetLost;
+            _session.FinalizationProgressChanged -= OnFinalizationProgressChanged;
             _session.Dispose();
             _session = null;
         }

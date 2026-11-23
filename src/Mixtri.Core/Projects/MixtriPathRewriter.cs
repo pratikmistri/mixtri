@@ -12,8 +12,18 @@ public enum MediaReferenceKind
     /// <summary>A decorative asset (background image, custom cursor image).</summary>
     StyleAsset,
 
-    /// <summary>Captured content: video, audio, webcam, cursor or keyboard data.</summary>
+    /// <summary>
+    /// Irreplaceable primary content: a recording's (or imported clip's) video, or an
+    /// inserted voice-over/music track. A save refuses to proceed without it.
+    /// </summary>
     Recording,
+
+    /// <summary>
+    /// Optional captured data that rides along with a recording — cursor log, keyboard log,
+    /// webcam video, recorded system/mic audio. The project still opens and edits without
+    /// it, so a save skips a missing one (with a warning) instead of refusing outright.
+    /// </summary>
+    RecordingSidecar,
 }
 
 /// <summary>A media file referenced by a project, and what role it plays.</summary>
@@ -106,22 +116,36 @@ public static class MixtriPathRewriter
         ArgumentNullException.ThrowIfNull(project);
 
         var found = new List<MediaReference>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var indexByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // The same file can be reached through more than one role — a detached audio block
+        // reuses the recording's own audio file, first collected as a sidecar. The first
+        // reference keeps its position, but the STRONGEST role wins, so a file something
+        // explicitly needs can never be downgraded to one a save may skip.
         void Add(string? path, MediaReferenceKind kind = MediaReferenceKind.StyleAsset)
         {
-            if (!string.IsNullOrWhiteSpace(path) && seen.Add(path))
-                found.Add(new MediaReference(path, kind));
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            if (indexByPath.TryGetValue(path, out var index))
+            {
+                if (Strength(kind) > Strength(found[index].Kind))
+                    found[index] = found[index] with { Kind = kind };
+                return;
+            }
+
+            indexByPath[path] = found.Count;
+            found.Add(new MediaReference(path, kind));
         }
 
         void AddRecording(
             string video, string cursor, string? webcam, string? keyboard, List<string> audio)
         {
             Add(video, MediaReferenceKind.Recording);
-            Add(cursor, MediaReferenceKind.Recording);
-            Add(webcam, MediaReferenceKind.Recording);
-            Add(keyboard, MediaReferenceKind.Recording);
-            foreach (var a in audio) Add(a, MediaReferenceKind.Recording);
+            Add(cursor, MediaReferenceKind.RecordingSidecar);
+            Add(webcam, MediaReferenceKind.RecordingSidecar);
+            Add(keyboard, MediaReferenceKind.RecordingSidecar);
+            foreach (var a in audio) Add(a, MediaReferenceKind.RecordingSidecar);
         }
 
         AddRecording(
@@ -162,13 +186,13 @@ public static class MixtriPathRewriter
                 case CameraSegment camera:
                     // Captured webcam media, not a decorative asset: dropping it on save
                     // would take the only copy with it.
-                    Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
+                    Add(camera.WebcamFilePath, MediaReferenceKind.RecordingSidecar);
                     break;
             }
         }
 
         foreach (var camera in timeline.CameraSegments)
-            Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
+            Add(camera.WebcamFilePath, MediaReferenceKind.RecordingSidecar);
 
         foreach (var zoom in timeline.ZoomKeyframes)
             Add(zoom.SourceVideoFilePath);
@@ -189,6 +213,17 @@ public static class MixtriPathRewriter
 
         return found;
     }
+
+    /// <summary>
+    /// How strongly a save must keep a reference: a missing style asset is dropped, a
+    /// missing sidecar is skipped with a warning, a missing recording refuses the save.
+    /// </summary>
+    private static int Strength(MediaReferenceKind kind) => kind switch
+    {
+        MediaReferenceKind.Recording => 2,
+        MediaReferenceKind.RecordingSidecar => 1,
+        _ => 0,
+    };
 
     private static void RewriteProject(Project project, Func<string, string?> map)
     {

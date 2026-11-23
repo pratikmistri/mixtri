@@ -105,6 +105,12 @@ public class AudioTrack
     /// (once bound, once detached), and re-attaching could not find the blocks to remove.
     /// The link is deliberately one-way and advisory: a block whose segment has been deleted
     /// is still perfectly playable audio, so nothing cleans it up.
+    /// <para>
+    /// Splitting the segment keeps the link alive by giving the FIRST resulting piece the
+    /// original id (<c>SplitSegmentAtTimeOperation</c> when a link exists,
+    /// <c>AutomaticTypingSpeedOperation</c> always). Re-attach is therefore offered on that
+    /// first piece; later pieces stay muted and can be unmuted individually afterwards.
+    /// </para>
     /// </remarks>
     public string? DetachedFromSegmentId { get; set; }
 
