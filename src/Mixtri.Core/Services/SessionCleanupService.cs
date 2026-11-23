@@ -322,8 +322,9 @@ public static class SessionCleanupService
 
     /// <summary>
     /// Lists <c>session_*</c> folders under <paramref name="outputFolder"/> that hold captured
-    /// JPEGs but no usable <c>video.mp4</c> — recordings interrupted by a crash, a kill or a
-    /// failed encode before finalization. Their frames are the only copy of the recording;
+    /// JPEGs but no proven-complete <c>video.mp4</c> — recordings interrupted by a crash, a
+    /// kill or a failed encode before finalization, including a legacy in-place encode that
+    /// left a non-empty but unfinalized MP4. Their frames are the only copy of the recording;
     /// cleanup never deletes them, and this is how a caller can offer to recover them.
     /// </summary>
     /// <remarks>
@@ -355,13 +356,21 @@ public static class SessionCleanupService
     }
 
     /// <summary>
-    /// True when <paramref name="sessionFolder"/> has captured frames but no valid MP4.
+    /// True when <paramref name="sessionFolder"/> has captured frames and no MP4 proven to
+    /// be a completed encode.
     /// </summary>
+    /// <remarks>
+    /// A non-empty <c>video.mp4</c> alone is not that proof: older builds wrote it in place,
+    /// so an interrupted finalize leaves a non-empty file with no usable header. The test is
+    /// the same encoder-completion marker <see cref="CanReleaseFrames"/> requires, so the two
+    /// stay complementary — every session that still has frames is either releasable or
+    /// offered for recovery, never neither.
+    /// </remarks>
     internal static bool IsRecoverableSession(string sessionFolder)
     {
         try
         {
-            if (HasValidVideo(sessionFolder))
+            if (CanReleaseFrames(sessionFolder))
                 return false;
 
             return RecordingSession.CapturedFramesRemain(Path.Combine(sessionFolder, FramesDir));

@@ -28,7 +28,7 @@ namespace Mixtri.Core.Processing;
 /// instead of a full seek.
 /// </para>
 /// </remarks>
-public sealed class Mp4FrameSource : IFrameSource
+public sealed class Mp4FrameSource : IFrameSource, IConfirmingFrameSource
 {
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(15);
 
@@ -81,6 +81,14 @@ public sealed class Mp4FrameSource : IFrameSource
     private TaskCompletionSource<bool>? _framePending;
     private int _lastDeliveredIndex = -1;
     private bool _needsDrain;
+
+    // Set when the current request accepted a frame without first draining a frame that a
+    // stalled command abandoned (the PreferLatency stall fallback). The decoder's
+    // VideoFrameAvailable carries no identity of the command that produced it, so in that
+    // window the abandoned step's late frame can complete the seek's request: _surface may
+    // hold an EARLIER frame than the one asked for. Such a delivery is never trusted as
+    // the frame at its index — see LoadFrameWithConfirmationAsync.
+    private bool _deliveryUnconfirmed;
     private volatile bool _disposed;
 
     public int FrameCount { get; }
@@ -262,9 +270,24 @@ public sealed class Mp4FrameSource : IFrameSource
     }
 
     public async Task<CanvasBitmap?> LoadFrameAsync(int frameIndex)
+        => (await LoadFrameWithConfirmationAsync(frameIndex).ConfigureAwait(false)).Frame;
+
+    /// <summary>
+    /// Decodes <paramref name="frameIndex"/> and reports whether the returned frame is
+    /// known to be the frame at that index.
+    /// </summary>
+    /// <remarks>
+    /// <c>Confirmed</c> is false only when the frame was accepted through the
+    /// <see cref="FrameSourceOptions.PreferLatency"/> stall fallback, where a late frame
+    /// from the abandoned step may have satisfied the seek. Such a frame is fine to show
+    /// once, but it must not be cached under the index, and this source does not record
+    /// the index as delivered: the next request — including one for the same index —
+    /// drains and re-seeks instead of trusting <c>_surface</c>.
+    /// </remarks>
+    public async Task<(CanvasBitmap? Frame, bool Confirmed)> LoadFrameWithConfirmationAsync(int frameIndex)
     {
         if (_disposed || frameIndex < 0 || frameIndex >= FrameCount)
-            return null;
+            return (null, false);
 
         try
         {
@@ -273,31 +296,46 @@ public sealed class Mp4FrameSource : IFrameSource
         catch (ObjectDisposedException)
         {
             // Disposed while this request was queued.
-            return null;
+            return (null, false);
         }
 
         try
         {
             if (_disposed)
-                return null;
+                return (null, false);
 
             // A frame abandoned by a previous timeout can still land later and would
             // otherwise satisfy this request with stale content — a wrong frame in an
             // export, not just a preview glitch. Let it drain first.
             await DrainIfNeededAsync().ConfigureAwait(false);
             if (_disposed)
-                return null;
+                return (null, false);
 
+            _deliveryUnconfirmed = false;
             if (!await PositionAtAsync(frameIndex).ConfigureAwait(false))
-                return null;
+                return (null, false);
 
-            _lastDeliveredIndex = frameIndex;
+            bool confirmed = !_deliveryUnconfirmed;
+            if (confirmed)
+            {
+                _lastDeliveredIndex = frameIndex;
+            }
+            else
+            {
+                // _surface may hold an earlier frame, and the seek's own frame may still
+                // be in flight. Forget the position (so a repeat request for this index
+                // cannot take PositionAtAsync's gap == 0 shortcut and re-serve the
+                // suspect surface) and let the in-flight frame drain before the next
+                // request, so it cannot complete that request either.
+                _lastDeliveredIndex = -1;
+                _needsDrain = true;
+            }
 
             // _surface is reused across calls, so hand back an independent copy the
             // caller can hold and dispose on its own schedule.
             lock (_surfaceGate)
             {
-                if (_disposed) return null;
+                if (_disposed) return (null, false);
                 using var deviceLock = _device.Lock();
                 var copy = Win2DUtils.CreateRenderTarget(_device, Width, Height, 96, "MP4 frame copy");
                 try
@@ -314,7 +352,7 @@ public sealed class Mp4FrameSource : IFrameSource
 
                         ds.DrawImage(_surface);
                     }
-                    return copy;
+                    return (copy, confirmed);
                 }
                 catch
                 {
@@ -329,7 +367,7 @@ public sealed class Mp4FrameSource : IFrameSource
             _lastDeliveredIndex = -1;
             _needsDrain = true;
             if (GpuContext.IsDeviceLoss(ex)) throw;
-            return null;
+            return (null, false);
         }
         finally
         {
@@ -373,11 +411,16 @@ public sealed class Mp4FrameSource : IFrameSource
                     //
                     // Preview skips that wait: stacking a drain on top of a stall turned one
                     // slow step into a visible freeze, and a stale frame there is a one-frame
-                    // glitch the next request corrects. A successful seek re-arms step mode
-                    // (LoadFrameAsync records the delivered index), so one stall never leaves
-                    // the reader stuck on full seeks.
+                    // glitch the next request corrects. Because the abandoned step's late
+                    // frame can complete the seek below, the delivery is marked unconfirmed:
+                    // it is shown once but never recorded as this index (no gap == 0
+                    // shortcut, no caching in VideoFrameReader), and the next request drains
+                    // and re-seeks, which re-arms step mode.
                     if (_preferLatency)
+                    {
                         _needsDrain = false;
+                        _deliveryUnconfirmed = true;
+                    }
                     else
                         await DrainIfNeededAsync().ConfigureAwait(false);
                     if (_disposed)

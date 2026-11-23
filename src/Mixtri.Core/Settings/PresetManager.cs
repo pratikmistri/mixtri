@@ -59,7 +59,7 @@ public class PresetManager
 
     public void SaveExportPreset(ExportPreset preset)
     {
-        SavePreset(_exportPresetsFolder, preset.Name, preset);
+        SavePreset(_exportPresetsFolder, preset.Name, preset, _legacyExportPresetsFolder);
     }
 
     public List<ExportPreset> LoadExportPresets()
@@ -76,7 +76,7 @@ public class PresetManager
 
     public void SaveBrandPreset(BrandPreset preset)
     {
-        SavePreset(_brandPresetsFolder, preset.Name, preset);
+        SavePreset(_brandPresetsFolder, preset.Name, preset, _legacyBrandPresetsFolder);
     }
 
     public List<BrandPreset> LoadBrandPresets()
@@ -99,10 +99,13 @@ public class PresetManager
     /// Written to a temporary sibling and moved into place, so a crash or full disk mid-write
     /// cannot leave a truncated preset that then fails to load. If an older build stored the
     /// same preset under its un-suffixed name (see <see cref="GetPresetPath"/>), that copy is
-    /// removed so the preset does not appear twice.
+    /// removed so the preset does not appear twice. Every copy of the same preset in
+    /// <paramref name="legacyFolder"/> (matched by its stored <c>Name</c>, whatever its file
+    /// name) is removed too: saving migrates it, and a leftover pre-rename copy under a
+    /// different file name would otherwise load alongside it.
     /// </remarks>
     /// <exception cref="ArgumentException">The name is empty or whitespace.</exception>
-    internal static void SavePreset<T>(string folder, string name, T preset)
+    internal static void SavePreset<T>(string folder, string name, T preset, string? legacyFolder = null)
     {
         var filePath = GetPresetPath(folder, name);
         var json = JsonSerializer.Serialize(preset, JsonOptions);
@@ -123,6 +126,13 @@ public class PresetManager
         }
 
         RemoveLegacyNamedCopy(folder, name, filePath);
+
+        if (!string.IsNullOrEmpty(legacyFolder)
+            && !string.Equals(Path.GetFullPath(legacyFolder), Path.GetFullPath(folder),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            RemoveCopiesNamed(legacyFolder, name);
+        }
     }
 
     /// <summary>
@@ -130,26 +140,34 @@ public class PresetManager
     /// <paramref name="legacyFolder"/> that the current folder does not already provide.
     /// </summary>
     /// <remarks>
-    /// Current folder first, so a preset re-saved after the rename shadows its pre-rename
-    /// copy instead of appearing twice. Saving always writes to the current folder, so
-    /// editing a legacy preset migrates it. <c>internal</c> rather than private purely so
-    /// tests can drive it against temp folders — the constructor picks real machine paths.
+    /// Presets are identified by their stored <c>Name</c>, not their file name: the file a
+    /// name maps to changed when disambiguation was added (<c>A_B.json</c> became
+    /// <c>A_B_&lt;hash&gt;.json</c>), so the same preset can sit under two file names. The
+    /// current folder wins over the legacy one, and within a folder the file
+    /// <see cref="GetPresetPath"/> would write today wins over an older name. File names are
+    /// still honoured as an identity too (a current file shadows a same-named legacy file),
+    /// which covers files whose stored name cannot be read. Saving always writes to the
+    /// current folder, so editing a legacy preset migrates it. <c>internal</c> rather than
+    /// private purely so tests can drive it against temp folders — the constructor picks
+    /// real machine paths.
     /// </remarks>
     internal static List<T> LoadPresets<T>(string folder, string? legacyFolder)
     {
         var presets = new List<T>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var dir in new[] { folder, legacyFolder })
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 continue;
 
-            foreach (var file in Directory.GetFiles(dir, "*.json"))
+            var files = Directory.GetFiles(dir, "*.json");
+            var candidates = new List<(string FilePath, T Preset, string? Name)>();
+
+            foreach (var file in files)
             {
-                // File names come from GetPresetPath, so they are a stable identity for
-                // the preset and are what makes "current wins" work.
-                if (!seen.Add(Path.GetFileName(file)))
+                if (seenFiles.Contains(Path.GetFileName(file)))
                     continue;
 
                 try
@@ -157,16 +175,123 @@ public class PresetManager
                     var json = File.ReadAllText(file);
                     var preset = JsonSerializer.Deserialize<T>(json, JsonOptions);
                     if (preset is not null)
-                        presets.Add(preset);
+                        candidates.Add((file, preset, ReadStoredName(json)));
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"[PresetManager] Failed to load preset '{file}': {ex.Message}");
                 }
             }
+
+            // Pick one file per stored name: the canonical (current-format) file if there is
+            // one, otherwise the first encountered.
+            var chosenByName = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Name is null)
+                    continue;
+
+                if (!chosenByName.TryGetValue(candidate.Name, out var chosen)
+                    || (!IsCanonicalFile(dir, chosen, candidate.Name)
+                        && IsCanonicalFile(dir, candidate.FilePath, candidate.Name)))
+                {
+                    chosenByName[candidate.Name] = candidate.FilePath;
+                }
+            }
+
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Name is not null)
+                {
+                    if (seenNames.Contains(candidate.Name)
+                        || !string.Equals(chosenByName[candidate.Name], candidate.FilePath, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                }
+
+                presets.Add(candidate.Preset);
+            }
+
+            foreach (var name in chosenByName.Keys)
+                seenNames.Add(name);
+
+            // Every file in this folder shadows a same-named file in the next one, including
+            // one that failed to load, as before.
+            foreach (var file in files)
+                seenFiles.Add(Path.GetFileName(file));
         }
 
         return presets;
+    }
+
+    /// <summary>
+    /// The preset's stored <c>Name</c>, or null when it has none or it cannot be read.
+    /// </summary>
+    private static string? ReadStoredName(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("Name", out var stored)
+                && stored.ValueKind == JsonValueKind.String)
+            {
+                var name = stored.GetString();
+                return string.IsNullOrWhiteSpace(name) ? null : name;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="file"/> is the file <see cref="GetPresetPath"/> maps
+    /// <paramref name="name"/> to in <paramref name="dir"/>.
+    /// </summary>
+    private static bool IsCanonicalFile(string dir, string file, string name)
+        => string.Equals(
+            Path.GetFileName(GetPresetPath(dir, name)),
+            Path.GetFileName(file),
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Deletes every preset file in <paramref name="folder"/> whose stored <c>Name</c> is
+    /// exactly <paramref name="name"/>, whatever its file name.
+    /// </summary>
+    private static void RemoveCopiesNamed(string folder, string name)
+    {
+        if (!Directory.Exists(folder))
+            return;
+
+        string[] files;
+        try
+        {
+            files = Directory.GetFiles(folder, "*.json");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[PresetManager] Could not list legacy presets in '{folder}': {ex.Message}");
+            return;
+        }
+
+        foreach (var file in files)
+        {
+            try
+            {
+                if (string.Equals(ReadStoredName(File.ReadAllText(file)), name, StringComparison.Ordinal))
+                    File.Delete(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[PresetManager] Could not remove legacy preset file '{file}': {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -193,6 +318,10 @@ public class PresetManager
                 File.Delete(filePath);
 
             RemoveLegacyNamedCopy(dir, name, filePath);
+
+            // Loading identifies presets by stored name, so any other file holding this
+            // preset would bring it straight back.
+            RemoveCopiesNamed(dir, name);
         }
     }
 

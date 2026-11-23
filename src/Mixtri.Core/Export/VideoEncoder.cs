@@ -79,13 +79,6 @@ public class VideoEncoder : IDisposable
     /// </summary>
     public IReadOnlyList<string> Warnings => _warnings;
 
-    /// <summary>
-    /// File-name pattern of the temp video-only files an export to <paramref name="outputPath"/>
-    /// can leave in its folder if the process is killed before its own cleanup runs.
-    /// </summary>
-    public static string GetTempVideoSearchPattern(string outputPath) =>
-        $"{TempVideoPrefix}{Path.GetFileNameWithoutExtension(outputPath)}_*.mp4";
-
     // Serializes frame compositing so the shared SegmentFrameComposer (and the
     // per-source compositors it owns) is never accessed concurrently by overlapping
     // SampleRequested callbacks from the MediaStreamSource pipeline.
@@ -114,7 +107,8 @@ public class VideoEncoder : IDisposable
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default,
         IVideoSuperResolutionProvider? superResolutionProvider = null,
-        ExportWorkScheduler? scheduler = null)
+        ExportWorkScheduler? scheduler = null,
+        string? tempVideoPath = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(project.VideoFilePath);
@@ -196,18 +190,22 @@ public class VideoEncoder : IDisposable
         double stretchProgressFloor = audioPlacements.Any(p => p.Stretch is not null)
             ? StretchProgressShare
             : 0;
+        // Every stretched WAV this export uses. The stretch cache is pruned only once the
+        // mux has finished with all of them (see the finally block below), so pruning can
+        // never evict a file this export was handed but has not opened yet.
+        var stretchedAudioPaths = new List<string>();
         audioPlacements = await ApplySegmentAudioStretchAsync(
-            audioPlacements, totalFrames, progress, stopwatch, ct);
+            audioPlacements, totalFrames, progress, stopwatch, stretchedAudioPaths, ct);
 
         bool hasAudio = audioPlacements.Count > 0;
         WarnAboutSpeedAdjustedAudio(audioPlacements);
         WarnAboutTransitionFadeAudio(audioPlacements);
 
-        // Video-only output path (audio muxed in second pass if needed). The temp name is
-        // derived from the output name so the app can sweep exactly this export's leftovers
-        // if the worker process is killed (see GetTempVideoSearchPattern).
+        // Video-only output path (audio muxed in second pass if needed). ExportEngine passes
+        // the job-owned name (see ExportJobFiles) so the app can delete exactly this export's
+        // leftovers if the worker process is killed.
         string videoOnlyPath = hasAudio
-            ? Path.Combine(
+            ? tempVideoPath ?? Path.Combine(
                 Path.GetDirectoryName(outputPath)!,
                 $"{TempVideoPrefix}{Path.GetFileNameWithoutExtension(outputPath)}_{Guid.NewGuid():N}.mp4")
             : outputPath;
@@ -419,8 +417,14 @@ public class VideoEncoder : IDisposable
                 catch { /* best-effort */ }
             }
 
-            // Cancellation or failure must not leave a truncated, unplayable file at the
-            // path the user asked for.
+            // The mux is done with this export's stretched WAVs: bound the cache now,
+            // keeping every file of the batch.
+            if (stretchedAudioPaths.Count > 0)
+                SegmentAudioRenderer.PruneCacheAfterBatch(stretchedAudioPaths);
+
+            // Cancellation or failure must not leave a truncated, unplayable file behind.
+            // (ExportEngine points outputPath at the job's staging file, so this never
+            // touches the destination the user chose.)
             if (!succeeded && outputTouched)
             {
                 try { File.Delete(outputPath); }
@@ -864,6 +868,7 @@ public class VideoEncoder : IDisposable
         int totalFrames,
         IProgress<ExportProgress>? progress,
         Stopwatch stopwatch,
+        List<string> renderedPaths,
         CancellationToken ct)
     {
         int pending = placements.Count(p => p.Stretch is not null);
@@ -891,6 +896,7 @@ public class VideoEncoder : IDisposable
                     placement.SourcePath, stretch.SourceStart, stretch.SourceDuration,
                     stretch.Speed, stretch.OutputDuration, ct);
                 renderedByRequest[key] = renderedPath;
+                if (renderedPath is not null) renderedPaths.Add(renderedPath);
             }
 
             result.Add(SubstituteStretchedSource(placement, renderedPath, stretch));

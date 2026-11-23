@@ -475,7 +475,10 @@ public static class MixtriPackageService
                     || !TimestampsMatch(existing.LastWriteTimeUtc, entry.LastWriteTime.UtcDateTime))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                    ExtractEntryAtomically(entry, destination);
+
+                    // The extraction can land somewhere other than the canonical path when
+                    // that file is locked; every reference to this entry must follow it.
+                    destination = ExtractEntryAtomically(entry, destination);
                 }
 
                 pathByEntry[entry.FullName] = destination;
@@ -523,15 +526,22 @@ public static class MixtriPackageService
     /// Extracts <paramref name="entry"/> to a <c>.part</c> sibling and moves it over
     /// <paramref name="destination"/> only once complete.
     /// </summary>
+    /// <returns>
+    /// The path the entry's content now lives at: <paramref name="destination"/>, or a fresh
+    /// path in the same cache folder when the destination could not be replaced.
+    /// </returns>
     /// <remarks>
     /// Extracting straight onto the destination truncated it first, so a failure part-way
     /// (disk full, cancellation, a crash) left a damaged media file that the next open's
     /// reuse check could even accept. And when the destination is locked — another Mixtri
-    /// window, or a preview still holding it open — the overwrite threw and failed the whole
-    /// open. In that case an existing copy is kept and the open proceeds; it is logged,
-    /// because that copy may be from an older save.
+    /// window, or a preview still holding it open — the overwrite throws. This is only
+    /// reached once the existing copy has already failed the identity check, so keeping it
+    /// would open the manifest against media from a different save, and a later save would
+    /// write that stale copy back over the package's correct media. Instead the new content
+    /// is moved to a unique subfolder beside the destination (keeping the original file
+    /// name, so a later save does not rename the entry) and the caller maps the entry there.
     /// </remarks>
-    private static void ExtractEntryAtomically(ZipArchiveEntry entry, string destination)
+    private static string ExtractEntryAtomically(ZipArchiveEntry entry, string destination)
     {
         var partPath = destination + ".part";
         try
@@ -562,19 +572,60 @@ public static class MixtriPackageService
         try
         {
             File.Move(partPath, destination, overwrite: true);
+            return destination;
         }
         catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException)
                                    && File.Exists(destination))
         {
-            // Destination is locked (in use by another window or a preview): keep it.
-            TryDelete(partPath);
+            // Destination is locked (in use by another window or a preview) and holds
+            // different content. Never fall back to it: relocate the fresh copy instead.
+            string relocated;
+            try
+            {
+                relocated = MoveToFreshPath(partPath, destination);
+            }
+            catch
+            {
+                TryDelete(partPath);
+                throw;
+            }
+
             DiagLog.Write("MixtriPackage",
-                $"Open: could not replace '{destination}' ({ex.Message}); keeping the existing copy.");
+                $"Open: could not replace '{destination}' ({ex.Message}); " +
+                $"extracted the current media to '{relocated}' instead.");
+            return relocated;
         }
         catch
         {
             TryDelete(partPath);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Moves <paramref name="partPath"/> into a newly created, uniquely named subfolder of
+    /// <paramref name="destination"/>'s folder, keeping <paramref name="destination"/>'s
+    /// file name, and returns the new path.
+    /// </summary>
+    private static string MoveToFreshPath(string partPath, string destination)
+    {
+        var folder = Path.GetDirectoryName(destination)!;
+        var fileName = Path.GetFileName(destination);
+
+        for (int attempt = 0; ; attempt++)
+        {
+            var freshFolder = Path.Combine(folder, "alt-" + Guid.NewGuid().ToString("N")[..12]);
+            if (Directory.Exists(freshFolder) || File.Exists(freshFolder))
+            {
+                if (attempt >= 4)
+                    throw new IOException($"Could not find a free path to extract '{fileName}' to.");
+                continue;
+            }
+
+            Directory.CreateDirectory(freshFolder);
+            var fresh = Path.Combine(freshFolder, fileName);
+            File.Move(partPath, fresh, overwrite: false);
+            return fresh;
         }
     }
 

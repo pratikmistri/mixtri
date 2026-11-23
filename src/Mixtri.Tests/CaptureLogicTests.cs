@@ -340,11 +340,14 @@ public sealed class CaptureLogicTests
         Directory.CreateDirectory(Path.Combine(crashed, frames));
         File.WriteAllBytes(Path.Combine(crashed, frames, "frame_00000000.jpg"), [1, 2, 3]);
 
-        // Finalized: MP4 present → not recoverable even though frames remain.
+        // Finalized: MP4 plus completion marker → not recoverable even though frames remain.
         var finished = Path.Combine(temp.Path, "session_20260101_000002");
         Directory.CreateDirectory(Path.Combine(finished, frames));
         File.WriteAllBytes(Path.Combine(finished, frames, "frame_00000000.jpg"), [1, 2, 3]);
         File.WriteAllBytes(Path.Combine(finished, "video.mp4"), [1, 2, 3]);
+        File.WriteAllText(
+            Path.Combine(finished, VideoWriter.FinalizedMarkerName),
+            RecordingMarker.BuildContent(VideoWriter.EncoderVersion));
 
         // Empty MP4 from an interrupted encode counts as no video.
         var emptyVideo = Path.Combine(temp.Path, "session_20260101_000003");
@@ -361,13 +364,21 @@ public sealed class CaptureLogicTests
         Directory.CreateDirectory(Path.Combine(other, frames));
         File.WriteAllBytes(Path.Combine(other, frames, "frame_00000000.jpg"), [1, 2, 3]);
 
+        // Interrupted legacy in-place encode: non-empty MP4 but no completion marker. Its
+        // header may never have been finalized, so the JPEGs are still the recording.
+        var unfinalized = Path.Combine(temp.Path, "session_20260101_000005");
+        Directory.CreateDirectory(Path.Combine(unfinalized, frames));
+        File.WriteAllBytes(Path.Combine(unfinalized, frames, "frame_00000000.jpg"), [1, 2, 3]);
+        File.WriteAllBytes(Path.Combine(unfinalized, "video.mp4"), [1, 2, 3]);
+
         var found = SessionCleanupService.FindRecoverableSessions(temp.Path);
 
-        CollectionAssert.AreEqual(new[] { crashed, emptyVideo }, found.ToArray());
+        CollectionAssert.AreEqual(new[] { crashed, emptyVideo, unfinalized }, found.ToArray());
 
         // And cleanup must still leave the recoverable frames alone.
         SessionCleanupService.CleanupExportedSessions(temp.Path);
         Assert.IsTrue(File.Exists(Path.Combine(crashed, frames, "frame_00000000.jpg")));
+        Assert.IsTrue(File.Exists(Path.Combine(unfinalized, frames, "frame_00000000.jpg")));
     }
 
     [TestMethod]

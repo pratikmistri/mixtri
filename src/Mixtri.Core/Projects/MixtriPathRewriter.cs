@@ -116,12 +116,26 @@ public static class MixtriPathRewriter
         ArgumentNullException.ThrowIfNull(project);
 
         var found = new List<MediaReference>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var indexByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // The same file can be reached through more than one role — a detached audio block
+        // reuses the recording's own audio file, first collected as a sidecar. The first
+        // reference keeps its position, but the STRONGEST role wins, so a file something
+        // explicitly needs can never be downgraded to one a save may skip.
         void Add(string? path, MediaReferenceKind kind = MediaReferenceKind.StyleAsset)
         {
-            if (!string.IsNullOrWhiteSpace(path) && seen.Add(path))
-                found.Add(new MediaReference(path, kind));
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            if (indexByPath.TryGetValue(path, out var index))
+            {
+                if (Strength(kind) > Strength(found[index].Kind))
+                    found[index] = found[index] with { Kind = kind };
+                return;
+            }
+
+            indexByPath[path] = found.Count;
+            found.Add(new MediaReference(path, kind));
         }
 
         void AddRecording(
@@ -199,6 +213,17 @@ public static class MixtriPathRewriter
 
         return found;
     }
+
+    /// <summary>
+    /// How strongly a save must keep a reference: a missing style asset is dropped, a
+    /// missing sidecar is skipped with a warning, a missing recording refuses the save.
+    /// </summary>
+    private static int Strength(MediaReferenceKind kind) => kind switch
+    {
+        MediaReferenceKind.Recording => 2,
+        MediaReferenceKind.RecordingSidecar => 1,
+        _ => 0,
+    };
 
     private static void RewriteProject(Project project, Func<string, string?> map)
     {

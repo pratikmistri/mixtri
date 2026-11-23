@@ -88,7 +88,9 @@ public sealed class ExportWorkerClient
         string? outputFilePath, IProgress<ExportProgress>? progress, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        DateTime startedUtc = DateTime.UtcNow;
+        // Names every staging/temp file the worker creates for this job, so cleanup after a
+        // killed worker deletes exactly those files and nothing else.
+        string jobId = ExportJobFiles.NewJobId();
         string? plannedPath = null;
         bool succeeded = false;
         var start = new ProcessStartInfo(_executablePath)
@@ -117,7 +119,7 @@ public sealed class ExportWorkerClient
                 new ExportWorkerMessage(ExportWorkerMessageKind.Start)
                 {
                     Snapshot = snapshot, Settings = settings, OutputFolder = outputFolder,
-                    OutputFilePath = outputFilePath,
+                    OutputFilePath = outputFilePath, JobId = jobId,
                 }, ct).WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
             controls = SendControlsAsync(process, ct, stopControls.Token);
             string? outputPath = null;
@@ -196,51 +198,30 @@ public sealed class ExportWorkerClient
             var errorText = await errors.ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(errorText))
                 DiagLog.Write("Export", $"worker stderr: {errorText}");
-            // The worker deletes its own partial output when it can unwind; a worker that
-            // had to be killed (cancellation grace expired, crash) cannot, so do it here.
+            // The worker deletes its own staging/temp files when it can unwind; a worker
+            // that had to be killed (cancellation grace expired, crash) cannot, so do it here.
+            // The destination itself is never touched: the worker only replaces it on success.
             if (!succeeded && plannedPath is not null)
-                RemovePartialOutput(plannedPath, startedUtc);
+                RemoveJobFiles(plannedPath, jobId);
         }
     }
 
     /// <summary>
-    /// Deletes what a non-successful export left behind: the planned output file (only if
-    /// this export wrote it — an older file the export never touched is kept) and this
-    /// export's hidden video-only temp files next to it.
+    /// Deletes what a non-successful export job left behind: exactly the staging and temp
+    /// files named with <paramref name="jobId"/> (see <see cref="ExportJobFiles"/>). The
+    /// planned output itself is never deleted — the worker writes it only by atomically
+    /// replacing it on success, so whatever is there is either untouched or complete.
     /// </summary>
-    internal static void RemovePartialOutput(string plannedPath, DateTime exportStartedUtc)
+    internal static int RemoveJobFiles(string plannedPath, string jobId)
     {
-        var writtenAfter = exportStartedUtc - TimeSpan.FromSeconds(2);
         try
         {
-            var output = new FileInfo(plannedPath);
-            if (output.Exists && (output.Length == 0 || output.LastWriteTimeUtc >= writtenAfter))
-                output.Delete();
+            return ExportJobFiles.For(plannedPath, jobId).DeleteOwnedTempFiles();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException)
         {
-            DiagLog.Write("Export", $"could not remove partial export output: {ex.Message}");
-        }
-
-        string? folder = Path.GetDirectoryName(plannedPath);
-        if (folder is null || !Directory.Exists(folder)) return;
-        try
-        {
-            foreach (var temp in Directory.EnumerateFiles(folder, VideoEncoder.GetTempVideoSearchPattern(plannedPath)))
-            {
-                try
-                {
-                    if (File.GetLastWriteTimeUtc(temp) >= writtenAfter) File.Delete(temp);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    DiagLog.Write("Export", $"could not remove export temp file: {ex.Message}");
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            DiagLog.Write("Export", $"could not scan for export temp files: {ex.Message}");
+            DiagLog.Write("Export", $"could not resolve export temp files for cleanup: {ex.Message}");
+            return 0;
         }
     }
 

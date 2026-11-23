@@ -78,40 +78,120 @@ public class ExportOutputHandlingTests
     }
 
     [TestMethod]
-    public void RemovePartialOutput_DeletesThisExportsFilesButKeepsOlderOnes()
+    public void RemoveJobFiles_DeletesExactlyThisJobsFiles_NeverTheDestination()
     {
         string folder = NewTempFolder();
         try
         {
+            string jobId = ExportJobFiles.NewJobId();
             string planned = Path.Combine(folder, "Demo.mp4");
+            // A pre-existing file the user chose to overwrite, written moments ago: no
+            // timestamp heuristic may treat it as this export's partial output.
             File.WriteAllBytes(planned, [1, 2, 3]);
-            string temp = Path.Combine(folder, $"{VideoEncoder.TempVideoPrefix}Demo_{Guid.NewGuid():N}.mp4");
-            File.WriteAllBytes(temp, [1]);
-            string otherExportTemp = Path.Combine(folder, $"{VideoEncoder.TempVideoPrefix}Other_{Guid.NewGuid():N}.mp4");
-            File.WriteAllBytes(otherExportTemp, [1]);
+            var files = ExportJobFiles.For(planned, jobId);
+            File.WriteAllBytes(files.StagingOutputPath, [1]);
+            File.WriteAllBytes(files.TempVideoPath, [1]);
 
-            ExportWorkerClient.RemovePartialOutput(planned, DateTime.UtcNow.AddMinutes(-1));
+            // Same stem, other job; a longer stem sharing the prefix; another output entirely.
+            var otherJob = ExportJobFiles.For(planned, ExportJobFiles.NewJobId());
+            File.WriteAllBytes(otherJob.StagingOutputPath, [1]);
+            File.WriteAllBytes(otherJob.TempVideoPath, [1]);
+            var preview = ExportJobFiles.For(Path.Combine(folder, "Demo_preview.mp4"), ExportJobFiles.NewJobId());
+            File.WriteAllBytes(preview.TempVideoPath, [1]);
+            string otherOutputTemp = Path.Combine(folder, $"{VideoEncoder.TempVideoPrefix}Other_{Guid.NewGuid():N}.mp4");
+            File.WriteAllBytes(otherOutputTemp, [1]);
 
-            Assert.IsFalse(File.Exists(planned));
-            Assert.IsFalse(File.Exists(temp));
-            Assert.IsTrue(File.Exists(otherExportTemp), "Another export's temp file must not be swept.");
+            int removed = ExportWorkerClient.RemoveJobFiles(planned, jobId);
+
+            Assert.AreEqual(2, removed);
+            Assert.IsFalse(File.Exists(files.StagingOutputPath));
+            Assert.IsFalse(File.Exists(files.TempVideoPath));
+            CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, File.ReadAllBytes(planned),
+                "The destination is never deleted by cleanup.");
+            Assert.IsTrue(File.Exists(otherJob.StagingOutputPath), "A concurrent export's staging file must survive.");
+            Assert.IsTrue(File.Exists(otherJob.TempVideoPath), "A concurrent export's temp file must survive.");
+            Assert.IsTrue(File.Exists(preview.TempVideoPath), "Demo_preview's temp file must not match Demo.");
+            Assert.IsTrue(File.Exists(otherOutputTemp));
         }
         finally { Directory.Delete(folder, recursive: true); }
     }
 
     [TestMethod]
-    public void RemovePartialOutput_KeepsNonEmptyFileTheExportNeverWrote()
+    public void RemoveJobFiles_InvalidJobId_DeletesNothing()
     {
         string folder = NewTempFolder();
         try
         {
-            string planned = Path.Combine(folder, "Existing.mp4");
-            File.WriteAllBytes(planned, [1, 2, 3]);
-            File.SetLastWriteTimeUtc(planned, DateTime.UtcNow.AddHours(-1));
+            string planned = Path.Combine(folder, "Demo.mp4");
+            string wildcardLike = Path.Combine(folder, $"{VideoEncoder.TempVideoPrefix}Demo_{Guid.NewGuid():N}.mp4");
+            File.WriteAllBytes(wildcardLike, [1]);
 
-            ExportWorkerClient.RemovePartialOutput(planned, DateTime.UtcNow);
+            Assert.AreEqual(0, ExportWorkerClient.RemoveJobFiles(planned, "*"));
+            Assert.AreEqual(0, ExportWorkerClient.RemoveJobFiles(planned, @"..\..\x"));
+            Assert.IsTrue(File.Exists(wildcardLike));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
 
-            Assert.IsTrue(File.Exists(planned));
+    [TestMethod]
+    public void ExportJobFiles_NamesEmbedTheExactStemAndJobId_BesideTheOutput()
+    {
+        string folder = NewTempFolder();
+        try
+        {
+            string jobId = new string('a', 16) + new string('0', 16);
+            var files = ExportJobFiles.For(Path.Combine(folder, "My Demo.gif"), jobId);
+
+            Assert.AreEqual(Path.Combine(folder, "My Demo.gif"), files.OutputPath);
+            Assert.AreEqual(Path.Combine(folder, $".mixtri_out_My Demo_{jobId}.gif"), files.StagingOutputPath);
+            Assert.AreEqual(Path.Combine(folder, $".mixtri_video_My Demo_{jobId}.mp4"), files.TempVideoPath);
+            CollectionAssert.DoesNotContain(files.OwnedTempPaths.ToList(), files.OutputPath);
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [TestMethod]
+    public void ExportJobFiles_JobIdMustBe32LowercaseHexDigits()
+    {
+        Assert.IsTrue(ExportJobFiles.IsValidJobId(ExportJobFiles.NewJobId()));
+        Assert.IsTrue(ExportJobFiles.IsValidJobId(Guid.NewGuid().ToString("N")));
+
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(null));
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(string.Empty));
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(Guid.NewGuid().ToString("D")), "dashes");
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(Guid.NewGuid().ToString("N").ToUpperInvariant()), "uppercase");
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(new string('a', 31)), "too short");
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(new string('a', 33)), "too long");
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(new string('g', 32)), "not hex");
+        Assert.IsFalse(ExportJobFiles.IsValidJobId("*"));
+        Assert.IsFalse(ExportJobFiles.IsValidJobId(@"..\" + new string('a', 29)), "path separators");
+
+        Assert.ThrowsException<ArgumentException>(() =>
+            ExportJobFiles.For(Path.Combine(Path.GetTempPath(), "Demo.mp4"), "*"));
+    }
+
+    [TestMethod]
+    public void ExportJobFiles_PublishReplacesTheDestinationOnlyWithTheFinishedStagingFile()
+    {
+        string folder = NewTempFolder();
+        try
+        {
+            string destination = Path.Combine(folder, "Existing.mp4");
+            File.WriteAllBytes(destination, [9, 9]);
+            var files = ExportJobFiles.For(destination, ExportJobFiles.NewJobId());
+            File.WriteAllBytes(files.StagingOutputPath, [1, 2, 3, 4]);
+
+            // A failed/cancelled job: cleanup leaves the user's existing file untouched.
+            files.DeleteOwnedTempFiles();
+            CollectionAssert.AreEqual(new byte[] { 9, 9 }, File.ReadAllBytes(destination));
+
+            // A successful job: the staging file atomically replaces the destination.
+            File.WriteAllBytes(files.StagingOutputPath, [1, 2, 3, 4]);
+            files.PublishStagedOutput();
+            CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4 }, File.ReadAllBytes(destination));
+            Assert.IsFalse(File.Exists(files.StagingOutputPath));
+            Assert.AreEqual(0, files.DeleteOwnedTempFiles());
+            Assert.IsTrue(File.Exists(destination));
         }
         finally { Directory.Delete(folder, recursive: true); }
     }

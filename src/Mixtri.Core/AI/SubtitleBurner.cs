@@ -38,6 +38,12 @@ public record SubtitleStyle
 /// Called once per composed frame, so the active segment is found by binary search and
 /// its text format/layout are built once per segment (not per frame) and reused until the
 /// segment, canvas size or device changes.
+/// <para>
+/// Overlapping segments resolve by one fixed rule on every lookup: the active segment is
+/// the latest-starting segment that contains the time (ties on start go to the later one
+/// in the input list). The result never depends on which time was looked up before, so
+/// seeking straight to a time and playing up to it render the same subtitle.
+/// </para>
 /// </remarks>
 public class SubtitleBurner : IDisposable
 {
@@ -51,6 +57,9 @@ public class SubtitleBurner : IDisposable
     private readonly CanvasTextFormat _textFormat;
 
     private SubtitleSegment? _cachedSegment;
+    // Index into _segments of the last resolved active segment, or -1. Lets consecutive
+    // frames skip the binary search without changing which segment wins an overlap.
+    private int _lastActiveIndex = -1;
     private int _cachedWidth;
     private int _cachedHeight;
     private CanvasDevice? _cachedDevice;
@@ -144,13 +153,28 @@ public class SubtitleBurner : IDisposable
         return layout;
     }
 
-    private SubtitleSegment? FindActiveSegment(double timeSeconds)
+    /// <summary>
+    /// Returns the latest-starting segment containing <paramref name="timeSeconds"/>
+    /// (<c>Start &lt;= t &lt; End</c>), or null when none does.
+    /// </summary>
+    internal SubtitleSegment? FindActiveSegment(double timeSeconds)
     {
         var ts = TimeSpan.FromSeconds(timeSeconds);
 
-        // Consecutive frames almost always stay on the same segment.
-        if (_cachedSegment is { } cached && ts >= cached.Start && ts < cached.End)
-            return cached;
+        // Consecutive frames almost always stay on the same segment. The shortcut is only
+        // taken when that segment is ALSO what the full search would pick: it still
+        // contains ts and no later-starting segment has begun by ts. Otherwise an earlier
+        // overlapping segment would keep winning merely because playback reached it first.
+        int last = _lastActiveIndex;
+        if (last >= 0 && last < _segments.Length)
+        {
+            var cached = _segments[last];
+            if (ts >= cached.Start && ts < cached.End
+                && (last + 1 >= _segments.Length || _segments[last + 1].Start > ts))
+            {
+                return cached;
+            }
+        }
 
         // Last segment starting at or before ts.
         int lo = 0, hi = _segments.Length - 1, candidate = -1;
@@ -172,7 +196,10 @@ public class SubtitleBurner : IDisposable
         for (int i = candidate; i >= 0 && _maxEnd[i] > ts; i--)
         {
             if (ts < _segments[i].End)
+            {
+                _lastActiveIndex = i;
                 return _segments[i];
+            }
         }
 
         return null;

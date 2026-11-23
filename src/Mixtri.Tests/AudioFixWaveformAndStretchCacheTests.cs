@@ -7,7 +7,7 @@ namespace Mixtri.Tests;
 /// <summary>
 /// Covers the file-based <see cref="AudioWaveformGenerator.GenerateWaveform(string, int, double, double)"/>
 /// bucket arithmetic (ceiling bucket size, tail kept) and its cache, plus
-/// <see cref="SegmentAudioRenderer.PruneCache(string, string?, TimeSpan, long)"/>.
+/// <see cref="SegmentAudioRenderer.PruneCache(string, IEnumerable{string}, TimeSpan, long)"/>.
 /// </summary>
 [TestClass]
 public sealed class AudioFixWaveformAndStretchCacheTests
@@ -92,7 +92,7 @@ public sealed class AudioFixWaveformAndStretchCacheTests
         string unrelated = Make("notes.txt", 10, TimeSpan.FromDays(60));
 
         // Budget fits two 600-byte files: the protected one plus the most recent.
-        int removed = SegmentAudioRenderer.PruneCache(folder, keep, TimeSpan.FromDays(14), 1300);
+        int removed = SegmentAudioRenderer.PruneCache(folder, new[] { keep }, TimeSpan.FromDays(14), 1300);
 
         Assert.AreEqual(2, removed);
         Assert.IsFalse(File.Exists(expired), "expired entry should be removed");
@@ -100,6 +100,82 @@ public sealed class AudioFixWaveformAndStretchCacheTests
         Assert.IsTrue(File.Exists(recent));
         Assert.IsTrue(File.Exists(keep), "the protected file is never deleted, however old");
         Assert.IsTrue(File.Exists(unrelated), "only stretch_*.wav files are cache entries");
+    }
+
+    [TestMethod]
+    public void PruneCache_KeepsEveryFileOfTheBatch_EvenOverBudget()
+    {
+        string folder = Path.Combine(TempDirectory, SegmentAudioRenderer.CacheFolderName);
+        Directory.CreateDirectory(folder);
+
+        string Make(string name, int bytes, TimeSpan age)
+        {
+            string path = Path.Combine(folder, name);
+            File.WriteAllBytes(path, new byte[bytes]);
+            var when = DateTime.UtcNow - age;
+            File.SetLastWriteTimeUtc(path, when);
+            File.SetLastAccessTimeUtc(path, when);
+            return path;
+        }
+
+        // A batch of three: the first two were rendered (or hit) earlier and are the oldest
+        // entries — exactly what an LRU pass picks first — but the batch has not opened them.
+        string batchFirst = Make("stretch_batch1.wav", 600, TimeSpan.FromDays(30));
+        string batchSecond = Make("stretch_batch2.wav", 600, TimeSpan.FromHours(5));
+        string batchNewest = Make("stretch_batch3.wav", 600, TimeSpan.Zero);
+        string stale = Make("stretch_stale.wav", 600, TimeSpan.FromHours(2));
+
+        int removed = SegmentAudioRenderer.PruneCache(
+            folder, new[] { batchFirst, batchSecond, batchNewest }, TimeSpan.FromDays(14), 1000);
+
+        Assert.AreEqual(1, removed);
+        Assert.IsTrue(File.Exists(batchFirst), "a batch file is kept even when expired");
+        Assert.IsTrue(File.Exists(batchSecond), "a batch file is kept even when over budget");
+        Assert.IsTrue(File.Exists(batchNewest));
+        Assert.IsFalse(File.Exists(stale), "only files outside the batch are evicted");
+    }
+
+    [TestMethod]
+    public void PruneCacheAfterBatch_PrunesEachBatchFolder_KeepingTheBatch_IgnoringFailedRenders()
+    {
+        string folder = Path.Combine(TempDirectory, SegmentAudioRenderer.CacheFolderName);
+        Directory.CreateDirectory(folder);
+        string kept = Path.Combine(folder, "stretch_kept.wav");
+        string expired = Path.Combine(folder, "stretch_expired.wav");
+        foreach (var path in new[] { kept, expired })
+        {
+            File.WriteAllBytes(path, new byte[10]);
+            var when = DateTime.UtcNow - TimeSpan.FromDays(30);
+            File.SetLastWriteTimeUtc(path, when);
+            File.SetLastAccessTimeUtc(path, when);
+        }
+
+        int removed = SegmentAudioRenderer.PruneCacheAfterBatch(new string?[] { kept, null, "" });
+
+        Assert.AreEqual(1, removed);
+        Assert.IsTrue(File.Exists(kept));
+        Assert.IsFalse(File.Exists(expired));
+    }
+
+    [TestMethod]
+    public void Render_DoesNotPrune_SoEarlierBatchPathsSurvive()
+    {
+        string source = WriteSilenceWithLoudTail("render_src.wav", 1.0, 0.1);
+        string folder = Path.Combine(TempDirectory, SegmentAudioRenderer.CacheFolderName);
+        Directory.CreateDirectory(folder);
+        string earlier = Path.Combine(folder, "stretch_earlier.wav");
+        File.WriteAllBytes(earlier, new byte[10]);
+        var old = DateTime.UtcNow - TimeSpan.FromDays(30);
+        File.SetLastWriteTimeUtc(earlier, old);
+        File.SetLastAccessTimeUtc(earlier, old);
+
+        string? rendered = new SegmentAudioRenderer().Render(
+            source, TimeSpan.Zero, TimeSpan.FromSeconds(1), speed: 2.0, TimeSpan.FromSeconds(0.5));
+
+        Assert.IsNotNull(rendered);
+        Assert.AreEqual(folder, Path.GetDirectoryName(rendered));
+        Assert.IsTrue(File.Exists(earlier),
+            "Render must not prune: a batch may already hold this path without having opened it");
     }
 
     [TestMethod]

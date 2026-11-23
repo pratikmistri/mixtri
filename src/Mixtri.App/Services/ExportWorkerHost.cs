@@ -27,6 +27,10 @@ internal static class ExportWorkerHost
                 || request.Settings is null
                 || (string.IsNullOrWhiteSpace(request.OutputFolder) && string.IsNullOrWhiteSpace(request.OutputFilePath)))
                 throw new InvalidDataException("The export worker received an incomplete job.");
+            // The job id names this export's staging/temp files; the client deletes exactly
+            // those if it has to kill us, so it must be the one the client chose.
+            if (!ExportJobFiles.IsValidJobId(request.JobId))
+                throw new InvalidDataException("The export worker received an invalid job id.");
             DiagLog.Write("Export", $"worker {Environment.ProcessId} starting {request.Settings.Format} export");
 
             var scheduler = new ExportWorkScheduler();
@@ -42,8 +46,8 @@ internal static class ExportWorkerHost
                 }
             });
             var snapshot = request.Snapshot;
-            // Resolve the output file up front and tell the client, so it can remove a
-            // partial file itself if it ever has to kill this process.
+            // Resolve the output file up front and tell the client, so it can remove this
+            // job's staging/temp files itself if it ever has to kill this process.
             string outputFolder = request.OutputFolder
                 ?? Path.GetDirectoryName(request.OutputFilePath!)
                 ?? throw new InvalidDataException("The export worker received no output location.");
@@ -53,7 +57,7 @@ internal static class ExportWorkerHost
             var export = new ExportEngine().ExportProjectWithResultAsync(
                 snapshot.Project, request.Settings, snapshot.Composition, outputFolder, plannedPath,
                 snapshot.Timeline, progress, cancellation.Token,
-                new WindowsVideoSuperResolutionProvider(), scheduler);
+                new WindowsVideoSuperResolutionProvider(), scheduler, request.JobId);
 
             if (await Task.WhenAny(export, controls) == controls)
             {

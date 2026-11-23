@@ -22,8 +22,10 @@ namespace Mixtri.Core.Audio;
 /// duration — so re-exporting, reopening the project, or previewing the same segment reuses
 /// the rendered file, while editing the segment's speed or trim misses the cache and renders
 /// a new one. Stale entries are never referenced again; they live beside the recording, are
-/// removed with it, and are bounded meanwhile by <see cref="PruneCache(string)"/> (run after
-/// every new render).
+/// removed with it, and are bounded meanwhile by <see cref="PruneCacheAfterBatch"/>, which
+/// each consumer runs once its whole batch of rendered files is open or finished with —
+/// never from <see cref="Render"/> itself, where it could evict a file an in-flight batch
+/// had already been handed but not yet opened.
 /// </para>
 /// <para>
 /// <b>Every failure is soft.</b> An unreadable, missing or exotic source returns
@@ -108,9 +110,8 @@ public sealed class SegmentAudioRenderer
                 RenderCore(sourcePath, sourceStart, sourceDuration, speed, outputDuration, scratch, cancellationToken);
                 File.Move(scratch, destination, overwrite: true);
 
-                // A new entry is the only moment the folder grows, so it is the moment to
-                // bound it. Never deletes the file just produced.
-                PruneCache(cacheDirectory, destination, DefaultMaxCacheAge, DefaultMaxCacheBytes);
+                // No pruning here: the caller may be partway through a batch whose earlier
+                // paths it has not opened yet. It calls PruneCacheAfterBatch when done.
                 return destination;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -161,13 +162,51 @@ public sealed class SegmentAudioRenderer
     /// and the old one is never referenced again.
     /// </remarks>
     public static void PruneCache(string folder)
-        => PruneCache(folder, keepPath: null, DefaultMaxCacheAge, DefaultMaxCacheBytes);
+        => PruneCache(folder, keepPaths: null, DefaultMaxCacheAge, DefaultMaxCacheBytes);
 
     /// <summary>
-    /// <see cref="PruneCache(string)"/> with explicit limits. <paramref name="keepPath"/> is
-    /// never deleted. Returns how many files were removed.
+    /// Prunes every cache folder a batch rendered into, keeping every file of the batch.
+    /// Call it once the batch's consumer has opened (editor preview) or finished with
+    /// (export mux) all of <paramref name="batchPaths"/>; <c>null</c> entries (renders that
+    /// failed) are ignored. Returns how many files were removed.
     /// </summary>
-    public static int PruneCache(string folder, string? keepPath, TimeSpan maxAge, long maxTotalBytes)
+    public static int PruneCacheAfterBatch(IEnumerable<string?> batchPaths)
+    {
+        ArgumentNullException.ThrowIfNull(batchPaths);
+
+        int removed = 0;
+        try
+        {
+            var keep = batchPaths
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => Path.GetFullPath(p!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var folder in keep
+                         .Select(p => Path.GetDirectoryName(p))
+                         .Where(d => !string.IsNullOrEmpty(d))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                removed += PruneCache(folder!, keep, DefaultMaxCacheAge, DefaultMaxCacheBytes);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Called from cleanup paths (an export's finally block): pruning is a bound on
+            // disk use, never a reason to fail or mask the caller's own outcome.
+            Diagnostics.DiagLog.Write("Audio", $"stretch cache prune after batch failed: {ex.Message}");
+        }
+        return removed;
+    }
+
+    /// <summary>
+    /// <see cref="PruneCache(string)"/> with explicit limits. No file in
+    /// <paramref name="keepPaths"/> is ever deleted (their size still counts toward the
+    /// budget). Returns how many files were removed.
+    /// </summary>
+    public static int PruneCache(
+        string folder, IEnumerable<string>? keepPaths, TimeSpan maxAge, long maxTotalBytes)
     {
         if (string.IsNullOrWhiteSpace(folder)) return 0;
 
@@ -177,7 +216,14 @@ public sealed class SegmentAudioRenderer
             if (!Directory.Exists(folder)) return 0;
 
             var now = DateTime.UtcNow;
-            string? keep = keepPath is null ? null : Path.GetFullPath(keepPath);
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (keepPaths is not null)
+            {
+                foreach (var keepPath in keepPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(keepPath)) keep.Add(Path.GetFullPath(keepPath));
+                }
+            }
 
             // Scratch files are only ever live for the duration of one render; a day-old one
             // belongs to a render that crashed or was killed.
@@ -198,8 +244,7 @@ public sealed class SegmentAudioRenderer
                 try
                 {
                     var info = new FileInfo(path);
-                    if (keep is not null
-                        && string.Equals(info.FullName, keep, StringComparison.OrdinalIgnoreCase))
+                    if (keep.Contains(info.FullName))
                         continue;
 
                     var lastUsed = info.LastAccessTimeUtc > info.LastWriteTimeUtc
@@ -213,7 +258,19 @@ public sealed class SegmentAudioRenderer
             // Oldest first, so both passes below remove the least recently used entries.
             entries.Sort((a, b) => a.LastUsed.CompareTo(b.LastUsed));
 
-            long total = keep is not null && File.Exists(keep) ? new FileInfo(keep).Length : 0;
+            // Kept files in this folder still occupy the budget; kept files elsewhere do not.
+            long total = 0;
+            string folderFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            foreach (var kept in keep)
+            {
+                try
+                {
+                    if (string.Equals(Path.GetDirectoryName(kept), folderFull, StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(kept))
+                        total += new FileInfo(kept).Length;
+                }
+                catch { }
+            }
             foreach (var entry in entries) total += entry.File.Length;
 
             foreach (var (file, lastUsed) in entries)

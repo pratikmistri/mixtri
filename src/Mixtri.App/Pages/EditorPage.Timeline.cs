@@ -2042,6 +2042,11 @@ public sealed partial class EditorPage
                 return;
             }
 
+            // The player now holds every file of this batch open, so bound the stretch
+            // cache only now — never between rendering one file and opening the rest —
+            // and keep every path this batch uses.
+            SegmentAudioRenderer.PruneCacheAfterBatch(placements.Select(p => p.FilePath));
+
             var built = player;
             DispatcherQueue.TryEnqueue(() =>
             {

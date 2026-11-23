@@ -4,6 +4,26 @@ using Mixtri.Core.Capture;
 namespace Mixtri.Core.Processing;
 
 /// <summary>
+/// A frame source that can say whether a delivered frame is known to be the frame at the
+/// requested index.
+/// </summary>
+/// <remarks>
+/// <see cref="Mp4FrameSource"/> in preview (latency-first) mode may accept a frame after a
+/// decoder stall without waiting out the stalled command's late frame, so what it returns
+/// may be an earlier frame. That is acceptable to display once, but
+/// <see cref="VideoFrameReader"/> must never cache such a frame under the index, or the
+/// wrong image would be served for that index for as long as it stays cached.
+/// </remarks>
+internal interface IConfirmingFrameSource
+{
+    /// <summary>
+    /// Like <see cref="IFrameSource.LoadFrameAsync"/>, plus whether the frame is confirmed
+    /// to be the one at <paramref name="frameIndex"/>. The caller owns the bitmap.
+    /// </summary>
+    Task<(CanvasBitmap? Frame, bool Confirmed)> LoadFrameWithConfirmationAsync(int frameIndex);
+}
+
+/// <summary>
 /// Provides frame-at-time lookup for the editor preview and the export compositor,
 /// backed by either a session's captured JPEGs or its finalized MP4.
 /// </summary>
@@ -187,9 +207,26 @@ public sealed class VideoFrameReader : IDisposable
             ReleaseCache();
         }
 
-        var decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        CanvasBitmap? decoded;
+        bool confirmed = true;
+        if (_source is IConfirmingFrameSource confirming)
+        {
+            (decoded, confirmed) = await confirming.LoadFrameWithConfirmationAsync(frameIndex)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            decoded = await _source.LoadFrameAsync(frameIndex).ConfigureAwait(false);
+        }
+
         if (decoded is null)
             return null;
+
+        // A frame the source could not confirm is the right index may be a stale earlier
+        // frame. Hand it to the caller (one displayed glitch the next request corrects) but
+        // never cache it or count it as a delivery of this index.
+        if (!confirmed)
+            return decoded;
 
         // A single oversized frame must not be evicted and disposed before it is returned.
         if (_cacheBudgetBytes > 0 && EstimateBytes(decoded) > _cacheBudgetBytes)

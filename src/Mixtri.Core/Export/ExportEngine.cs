@@ -59,6 +59,11 @@ public class ExportEngine
     /// <see cref="ResolveOutputPath"/>); otherwise the file is named after the project
     /// inside <paramref name="outputFolder"/>.
     /// </summary>
+    /// <param name="jobId">
+    /// Names this job's staging/temp files (see <see cref="ExportJobFiles"/>). The export
+    /// worker passes the id its client chose, so the client can delete exactly those files
+    /// if it has to kill the worker; <c>null</c> generates a fresh one.
+    /// </param>
     public Task<ExportResult> ExportProjectWithResultAsync(
         Project project,
         ExportSettings settings,
@@ -69,14 +74,18 @@ public class ExportEngine
         IProgress<ExportProgress>? progress = null,
         CancellationToken ct = default,
         IVideoSuperResolutionProvider? superResolutionProvider = null,
-        ExportWorkScheduler? scheduler = null)
+        ExportWorkScheduler? scheduler = null,
+        string? jobId = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        if (jobId is not null && !ExportJobFiles.IsValidJobId(jobId))
+            throw new ArgumentException("An export job id must be 32 lowercase hex digits.", nameof(jobId));
         ct.ThrowIfCancellationRequested();
         var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
+        string effectiveJobId = jobId ?? ExportJobFiles.NewJobId();
         return Task.Run(() => ExportDetachedAsync(
             snapshot.Project, settings with { }, snapshot.Composition, outputFolder, outputFilePath,
-            snapshot.Timeline, progress, ct, superResolutionProvider, scheduler), ct);
+            snapshot.Timeline, progress, ct, superResolutionProvider, scheduler, effectiveJobId), ct);
     }
 
     /// <summary>The container format actually written for <paramref name="requested"/>.</summary>
@@ -120,7 +129,7 @@ public class ExportEngine
         string outputFolder, string? outputFilePath, TimelineModel? timeline,
         IProgress<ExportProgress>? progress,
         CancellationToken ct, IVideoSuperResolutionProvider? superResolutionProvider,
-        ExportWorkScheduler? scheduler)
+        ExportWorkScheduler? scheduler, string jobId)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(settings);
@@ -190,31 +199,50 @@ public class ExportEngine
 
         var effectiveSettings = exportSettings with { Format = effectiveFormat };
 
-        if (effectiveFormat == VideoFormat.GIF)
+        // The encoders write this job's hidden staging file, never the destination: a
+        // destination that already exists (the user chose to overwrite it) is preserved
+        // until the new file is complete, then replaced in one rename.
+        var jobFiles = ExportJobFiles.For(outputPath, jobId);
+        bool published = false;
+        try
         {
-            await ExportGifAsync(
-                project, mouseData, exportComposition,
-                effectiveSettings, timelineMapper, timeline, outputPath, progress, ct, scheduler);
+            if (effectiveFormat == VideoFormat.GIF)
+            {
+                await ExportGifAsync(
+                    project, mouseData, exportComposition,
+                    effectiveSettings, timelineMapper, timeline, jobFiles.StagingOutputPath, progress, ct, scheduler);
+            }
+            else
+            {
+                using var videoEncoder = new VideoEncoder(effectiveSettings);
+                await videoEncoder.ExportAsync(
+                    project,
+                    mouseData,
+                    exportComposition,
+                    resW, resH,
+                    jobFiles.StagingOutputPath,
+                    timelineMapper,
+                    timeline,
+                    progress,
+                    ct,
+                    superResolutionProvider,
+                    scheduler,
+                    jobFiles.TempVideoPath);
+                warnings.AddRange(videoEncoder.Warnings);
+            }
+
+            ct.ThrowIfCancellationRequested();
+            jobFiles.PublishStagedOutput();
+            published = true;
         }
-        else
+        finally
         {
-            using var videoEncoder = new VideoEncoder(effectiveSettings);
-            await videoEncoder.ExportAsync(
-                project,
-                mouseData,
-                exportComposition,
-                resW, resH,
-                outputPath,
-                timelineMapper,
-                timeline,
-                progress,
-                ct,
-                superResolutionProvider,
-                scheduler);
-            warnings.AddRange(videoEncoder.Warnings);
+            // Success leaves nothing behind (the staging file was renamed away); failure or
+            // cancellation removes only what this job created, never the destination.
+            if (!published) jobFiles.DeleteOwnedTempFiles();
         }
 
-        return new ExportResult(outputPath, warnings);
+        return new ExportResult(jobFiles.OutputPath, warnings);
     }
 
     /// <summary>
