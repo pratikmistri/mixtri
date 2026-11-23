@@ -437,7 +437,12 @@ public static class MixtriPackageService
                     $"{MixtriPackage.CurrentSchemaVersion}).");
             }
 
-            var mediaFolder = Path.Combine(workingRoot, manifest.Project.Id.ToString("N"));
+            var mediaFolderName = manifest.Project.Id.ToString("N");
+            var mediaFolder = Path.Combine(workingRoot, mediaFolderName);
+
+            // Held for the whole extraction: the startup cache prune runs in the background
+            // and must not delete this folder between the stamp below and publication.
+            using var cacheLease = Mixtri.Core.Services.ProjectCacheCleanupService.Lease(mediaFolderName);
             Directory.CreateDirectory(mediaFolder);
 
             // Stamp the folder as "last opened now". Extracted files keep their entries'

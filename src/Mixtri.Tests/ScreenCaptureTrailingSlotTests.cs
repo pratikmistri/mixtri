@@ -35,4 +35,17 @@ public class ScreenCaptureTrailingSlotTests
     public void HugeGap_IsClampedToInt()
         => Assert.AreEqual(int.MaxValue,
             ScreenCaptureEngine.ComputeTrailingOwedSlots(0, long.MaxValue));
+
+    [TestMethod]
+    public void ResumedPause_DoesNotShortenTheTail()
+        // Still for 5 s, pause/resume, still for 10 s more, then stop: no pause is open at
+        // stop (-1), so the tail runs to the stop instant and the last 10 s are kept.
+        => Assert.AreEqual(TimeSpan.FromSeconds(15).Ticks,
+            ScreenCaptureEngine.ResolveTailEndTicks(TimeSpan.FromSeconds(15).Ticks, -1));
+
+    [TestMethod]
+    public void PauseOpenAtStop_EndsTheTailAtThePause()
+        => Assert.AreEqual(TimeSpan.FromSeconds(5).Ticks,
+            ScreenCaptureEngine.ResolveTailEndTicks(
+                TimeSpan.FromSeconds(15).Ticks, TimeSpan.FromSeconds(5).Ticks));
 }

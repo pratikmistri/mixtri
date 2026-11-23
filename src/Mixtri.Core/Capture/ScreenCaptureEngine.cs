@@ -41,9 +41,12 @@ public sealed class ScreenCaptureEngine : IDisposable
     // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
     private long _lastEmittedSlot = -1;
 
-    // Stopwatch ticks at the first pause since the last emitted frame, or -1. Trailing gap
-    // padding at stop must never extend across a pause, so it is capped at this instant.
-    private long _firstPauseSinceEmitTicks = -1;
+    // Stopwatch ticks at which the CURRENT pause began, or -1 while not paused. A pause is
+    // wall-clock continuous in the recording (the first frame after a resume carries the
+    // paused interval as skipped slots, and audio pads it as silence), so the stop tail runs
+    // through any earlier pause/resume. Only a pause still open at stop is excluded, exactly
+    // as AudioCaptureEngine skips its trailing pad when stopped while paused.
+    private long _pauseStartTicks = -1;
 
     public bool IsRecording { get; private set; }
     public int Fps => _fps;
@@ -139,7 +142,7 @@ public sealed class ScreenCaptureEngine : IDisposable
         Interlocked.Exchange(ref _droppedFrames, 0);
         Interlocked.Exchange(ref _throttledFrames, 0);
         _lastEmittedSlot = -1;
-        Interlocked.Exchange(ref _firstPauseSinceEmitTicks, -1);
+        Interlocked.Exchange(ref _pauseStartTicks, -1);
         _isPaused = false;
 
         _stopwatch.Restart();
@@ -203,7 +206,7 @@ public sealed class ScreenCaptureEngine : IDisposable
     {
         if (IsRecording)
         {
-            Interlocked.CompareExchange(ref _firstPauseSinceEmitTicks, _stopwatch.Elapsed.Ticks, -1);
+            Interlocked.CompareExchange(ref _pauseStartTicks, _stopwatch.Elapsed.Ticks, -1);
             _isPaused = true;
         }
     }
@@ -211,12 +214,15 @@ public sealed class ScreenCaptureEngine : IDisposable
     public void ResumeCapture()
     {
         if (IsRecording)
+        {
             _isPaused = false;
+            Interlocked.Exchange(ref _pauseStartTicks, -1);
+        }
     }
 
     /// <summary>
     /// CFR slots owed between the last emitted frame and the moment capture stopped (or the
-    /// first pause after it). Windows Graphics Capture only delivers a frame when the screen
+    /// start of a pause still open at stop). Windows Graphics Capture only delivers a frame when the screen
     /// changes, so a static tail produces no frame to carry the gap; the caller hands the
     /// result to <see cref="VideoWriter.StopAcceptingFrames"/>. Claims those slots, so a
     /// repeat call (or a frame still in flight) cannot count them twice. Call after
@@ -224,10 +230,8 @@ public sealed class ScreenCaptureEngine : IDisposable
     /// </summary>
     public int TakeTrailingOwedSlots()
     {
-        var end = _stopwatch.Elapsed;
-        long pauseTicks = Interlocked.Read(ref _firstPauseSinceEmitTicks);
-        if (pauseTicks >= 0 && pauseTicks < end.Ticks)
-            end = TimeSpan.FromTicks(pauseTicks);
+        var end = TimeSpan.FromTicks(ResolveTailEndTicks(
+            _stopwatch.Elapsed.Ticks, Interlocked.Read(ref _pauseStartTicks)));
 
         long endSlot = (long)(end.TotalSeconds / _frameInterval.TotalSeconds);
         while (true)
@@ -241,6 +245,15 @@ public sealed class ScreenCaptureEngine : IDisposable
                 return owed;
         }
     }
+
+    /// <summary>
+    /// The instant the stop tail runs to: the stop instant itself, or the start of a pause
+    /// that is still open at stop. Earlier, already-resumed pauses do not shorten it.
+    /// </summary>
+    internal static long ResolveTailEndTicks(long stopElapsedTicks, long openPauseStartTicks)
+        => openPauseStartTicks >= 0 && openPauseStartTicks < stopElapsedTicks
+            ? openPauseStartTicks
+            : stopElapsedTicks;
 
     /// <summary>
     /// Slots between the last emitted slot and the slot the stop instant falls in, matching
@@ -306,8 +319,6 @@ public sealed class ScreenCaptureEngine : IDisposable
                 if (Interlocked.CompareExchange(ref _lastEmittedSlot, slot, previousSlot) == previousSlot)
                     break;
             }
-
-            Interlocked.Exchange(ref _firstPauseSinceEmitTicks, -1);
 
             var surface = frame.Surface;
 

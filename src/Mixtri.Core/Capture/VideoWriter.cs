@@ -656,6 +656,11 @@ public sealed class VideoWriter : IDisposable
                     }
 
                     File.Copy(srcPath, dstPath, overwrite: true);
+
+                    // NTFS allows at most 1023 links per file, so linking fails after ~34 s
+                    // of a static 30 fps screen. Re-base on the fresh copy: it starts with a
+                    // single link, so the next ~1000 slots are links again rather than copies.
+                    srcPath = dstPath;
                 }
 
                 // Synthetic timestamp: interpolate between previous and next slot

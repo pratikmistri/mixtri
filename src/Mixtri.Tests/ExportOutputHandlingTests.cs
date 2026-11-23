@@ -321,4 +321,15 @@ public class ExportOutputHandlingTests
         // The destination itself is untouched.
         Assert.AreEqual(Path.GetFullPath(Path.Combine(folder, stem + ".mp4")), files.OutputPath);
     }
+
+    [TestMethod]
+    public void ExportJobFiles_FallbackStem_LeavesRoomForCounterNearNameLimit()
+    {
+        string stem = new string('a', 251); // 251 + ".mp4" = 255: a valid destination name
+        string bounded = ExportJobFiles.BoundFallbackStem(stem, ".mp4");
+        string candidate = $"{bounded} (1000).mp4";
+        Assert.IsTrue(candidate.Length <= ExportJobFiles.MaxFileNameComponent,
+            $"fallback name is {candidate.Length} characters");
+        Assert.AreEqual("short", ExportJobFiles.BoundFallbackStem("short", ".mp4"));
+    }
 }

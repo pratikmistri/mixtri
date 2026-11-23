@@ -151,6 +151,11 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     // already in flight cannot create a VideoWriter that nothing will ever finalize.
     private volatile bool _acceptFrames;
 
+    // CFR slots carried by frames that arrived after StopAsync closed the gate but before
+    // the engine stopped. The engine already advanced its last-emitted slot for them, so
+    // without this their skipped-slot debt (and their own slot) would vanish from the tail.
+    private long _rejectedTailSlots;
+
     // First fault of the session, retained so a degraded recording cannot finish silently.
     private RecordingFault? _fault;
     private readonly object _faultLock = new();
@@ -293,6 +298,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
         try
         {
+            Interlocked.Exchange(ref _rejectedTailSlots, 0);
             _acceptFrames = true;
 
             // Refuse to start onto a nearly full drive: the recording would die mid-way
@@ -508,7 +514,9 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                 // frame and this stop are owed to the writer as one trailing gap marker.
                 try
                 {
-                    writer.StopAcceptingFrames(_screenEngine?.TakeTrailingOwedSlots() ?? 0);
+                    long owed = (_screenEngine?.TakeTrailingOwedSlots() ?? 0)
+                        + Interlocked.Exchange(ref _rejectedTailSlots, 0);
+                    writer.StopAcceptingFrames((int)Math.Min(int.MaxValue, owed));
                 }
                 catch (Exception ex)
                 {
@@ -964,8 +972,17 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         // This eliminates the startup delta (minimize animation,
         // overlay window creation) between capture start and
         // the moment the user sees the recording widget.
-        if (!_captureGateOpen || !_acceptFrames)
+        if (!_captureGateOpen)
             return;
+
+        if (!_acceptFrames)
+        {
+            // Only frames refused by a stop count: before the first frame there is no writer
+            // and nothing owed (start-up frames are discarded on purpose).
+            if (State == RecordingState.Stopping && _videoWriter is not null)
+                Interlocked.Add(ref _rejectedTailSlots, (long)e.SkippedSlots + 1);
+            return;
+        }
 
         try
         {

@@ -133,8 +133,10 @@ public sealed class ExportJobFiles
         }
 
         string folder = Path.GetDirectoryName(OutputPath)!;
-        string stem = Path.GetFileNameWithoutExtension(OutputPath);
         string extension = Path.GetExtension(OutputPath);
+        // Leave room for " (NNNN)" so a valid name near the 255-character component limit
+        // still yields a creatable fallback name.
+        string stem = BoundFallbackStem(Path.GetFileNameWithoutExtension(OutputPath), extension);
         for (int counter = 2; ; counter++)
         {
             string candidate = Path.Combine(folder, $"{stem} ({counter}){extension}");
@@ -148,6 +150,18 @@ public sealed class ExportJobFiles
             catch (IOException) when (File.Exists(candidate)) { /* raced; try the next name */ }
             if (counter > 1000) throw new IOException("Could not find a free file name to publish the export.");
         }
+    }
+
+    /// <summary>
+    /// Trims <paramref name="stem"/> so <c>stem + " (NNNN)" + extension</c> fits in one file-name
+    /// component (the counter is capped well below 10 000 attempts).
+    /// </summary>
+    internal static string BoundFallbackStem(string stem, string extension)
+    {
+        const int counterSuffix = 7; // " (1000)"
+        int budget = MaxFileNameComponent - counterSuffix - extension.Length;
+        if (budget < 1) budget = 1;
+        return stem.Length <= budget ? stem : stem[..budget];
     }
 
     /// <summary>
