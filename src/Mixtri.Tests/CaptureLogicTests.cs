@@ -292,6 +292,21 @@ public sealed class CaptureLogicTests
     }
 
     [TestMethod]
+    public void Redact_AltGrCharacterChord_IsRedactedWithModifiersCleared()
+    {
+        // AltGr reports Ctrl+Alt but types a character (German AltGr+Q = '@').
+        var altGrQ = Key(0x51, "Q", ctrl: true) with { IsAlt = true };
+
+        var redacted = KeyboardHookRecorder.RedactSecureKey(altGrQ);
+
+        Assert.IsNotNull(redacted);
+        Assert.AreEqual(KeyboardHookRecorder.RedactedVirtualKeyCode, redacted!.VirtualKeyCode);
+        Assert.AreEqual(KeyboardHookRecorder.RedactedKeyName, redacted.KeyName);
+        Assert.IsFalse(redacted.IsCtrl);
+        Assert.IsFalse(redacted.IsAlt);
+    }
+
+    [TestMethod]
     public void EditClassNames_AreRecognised()
     {
         Assert.IsTrue(KeyboardHookRecorder.IsEditClassName("Edit"));

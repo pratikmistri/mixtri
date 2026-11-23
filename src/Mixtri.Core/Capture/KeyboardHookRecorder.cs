@@ -427,7 +427,12 @@ public sealed class KeyboardHookRecorder : IDisposable
         if (evt.VirtualKeyCode is VK_LSHIFT or VK_RSHIFT or VK_SHIFT)
             return null;
 
-        if (!IsCharacterKey(evt.VirtualKeyCode, evt.IsCtrl, evt.IsAlt, evt.IsWin))
+        // AltGr arrives as Ctrl+Alt but inserts a character (e.g. AltGr+Q = '@' on German
+        // layouts), so a Ctrl+Alt chord on a character key is conservatively treated as text.
+        bool altGrChord = evt.IsCtrl && evt.IsAlt && !evt.IsWin
+            && IsCharacterKey(evt.VirtualKeyCode, isCtrl: false, isAlt: false, isWin: false);
+
+        if (!altGrChord && !IsCharacterKey(evt.VirtualKeyCode, evt.IsCtrl, evt.IsAlt, evt.IsWin))
             return evt;
 
         return evt with
@@ -435,6 +440,8 @@ public sealed class KeyboardHookRecorder : IDisposable
             VirtualKeyCode = RedactedVirtualKeyCode,
             KeyName = RedactedKeyName,
             IsShift = false,
+            IsCtrl = false,
+            IsAlt = false,
         };
     }
 

@@ -65,13 +65,35 @@ public sealed class ExportJobFiles
         string fullPath = Path.GetFullPath(outputPath);
         string folder = Path.GetDirectoryName(fullPath)
             ?? throw new ArgumentException("The export output has no folder.", nameof(outputPath));
-        string stem = Path.GetFileNameWithoutExtension(fullPath);
         string extension = Path.GetExtension(fullPath);
+        string stem = BoundStem(Path.GetFileNameWithoutExtension(fullPath), extension);
         return new ExportJobFiles(
             fullPath,
             jobId,
             Path.Combine(folder, $"{StagingPrefix}{stem}_{jobId}{extension}"),
             Path.Combine(folder, $"{VideoEncoder.TempVideoPrefix}{stem}_{jobId}.mp4"));
+    }
+
+    /// <summary>
+    /// Longest file-name component most Windows file systems accept. A prefix, the 32-digit
+    /// job id and an extension are added around the stem, so a valid destination name close
+    /// to this limit would otherwise yield staging/temp names that cannot be created.
+    /// </summary>
+    internal const int MaxFileNameComponent = 255;
+
+    /// <summary>
+    /// Truncates <paramref name="stem"/> so every name built from it stays within
+    /// <see cref="MaxFileNameComponent"/>. Deterministic, so the worker and the client's
+    /// cleanup always derive identical paths.
+    /// </summary>
+    internal static string BoundStem(string stem, string extension)
+    {
+        int longestPrefix = Math.Max(StagingPrefix.Length, VideoEncoder.TempVideoPrefix.Length);
+        int longestExtension = Math.Max(extension.Length, ".mp4".Length);
+        // prefix + stem + "_" + 32-digit id + extension
+        int budget = MaxFileNameComponent - longestPrefix - 1 - 32 - longestExtension;
+        if (budget < 1) budget = 1;
+        return stem.Length <= budget ? stem : stem[..budget];
     }
 
     /// <summary>

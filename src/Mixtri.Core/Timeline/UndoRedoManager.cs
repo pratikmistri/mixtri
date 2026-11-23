@@ -133,15 +133,26 @@ public class UndoRedoManager
     /// </summary>
     private void RaiseEventsAfterFailure()
     {
+        // Guarded independently: a failing UI-state handler must never suppress the edit
+        // signal that dirty tracking relies on.
         try
         {
             StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[UndoRedoManager] StateChanged handler failed after an edit operation threw: {ex.Message}");
+        }
+
+        try
+        {
             EditPerformed?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine(
-                $"[UndoRedoManager] Handler failed after an edit operation threw: {ex.Message}");
+                $"[UndoRedoManager] EditPerformed handler failed after an edit operation threw: {ex.Message}");
         }
     }
 

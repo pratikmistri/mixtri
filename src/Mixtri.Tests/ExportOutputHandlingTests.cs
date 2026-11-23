@@ -249,4 +249,24 @@ public class ExportOutputHandlingTests
         eta.TryAdd(TimeSpan.FromSeconds(22), 5);
         Assert.AreEqual(47.5, eta.EstimateRemaining()!.Value.TotalSeconds, 0.5);
     }
+
+    [TestMethod]
+    public void JobFiles_LongDestinationStem_KeepsEveryNameWithinComponentLimit()
+    {
+        string folder = Path.GetTempPath();
+        string stem = new string('a', 220);
+        string jobId = ExportJobFiles.NewJobId();
+
+        var files = ExportJobFiles.For(Path.Combine(folder, stem + ".mp4"), jobId);
+        var again = ExportJobFiles.For(Path.Combine(folder, stem + ".mp4"), jobId);
+
+        foreach (var path in new[] { files.StagingOutputPath, files.TempVideoPath })
+            Assert.IsTrue(Path.GetFileName(path).Length <= ExportJobFiles.MaxFileNameComponent, path);
+
+        // Deterministic: worker and client cleanup must derive the same paths.
+        Assert.AreEqual(files.StagingOutputPath, again.StagingOutputPath);
+        Assert.AreEqual(files.TempVideoPath, again.TempVideoPath);
+        // The destination itself is untouched.
+        Assert.AreEqual(Path.GetFullPath(Path.Combine(folder, stem + ".mp4")), files.OutputPath);
+    }
 }

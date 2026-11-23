@@ -136,7 +136,9 @@ public class SubtitleBurner : IDisposable
             && ReferenceEquals(_cachedSegment, segment)
             && _cachedWidth == canvasWidth
             && _cachedHeight == canvasHeight
-            && ReferenceEquals(_cachedDevice, device))
+            // Win2D equality, not reference equality: session.Device can hand out a new
+            // projection wrapper for the same native device (see GrowOnlyBuffer.Ensure).
+            && _cachedDevice == device)
         {
             return _cachedLayout;
         }

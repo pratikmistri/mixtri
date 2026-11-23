@@ -114,8 +114,8 @@ public class CaptureVideoWriterHardeningTests
         using var writer = CreateWriter("abandoned", 160, 120);
         using var frame = CreateFrame(160, 120);
 
-        bool abandonedEventRaised = false;
-        writer.WritingAbandoned += (_, _) => abandonedEventRaised = true;
+        var abandonedEvent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        writer.WritingAbandoned += (_, _) => abandonedEvent.TrySetResult();
 
         // Replace the frames directory with a file: every write now fails, like a full disk.
         Directory.Delete(writer.FramesDirectory, recursive: true);
@@ -128,7 +128,10 @@ public class CaptureVideoWriterHardeningTests
         }
 
         await WaitForAsync(() => writer.IsWritingAbandoned, "the writer to give up");
-        Assert.IsTrue(abandonedEventRaised, "giving up must be announced, not silent");
+        // The flag is set before the handler runs on the writer thread, so await the event
+        // itself (bounded) rather than treating the flag as proof the callback finished.
+        var announced = await Task.WhenAny(abandonedEvent.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.AreSame(abandonedEvent.Task, announced, "giving up must be announced, not silent");
 
         session.ReportRetainedWriteFailure(writer);
 
