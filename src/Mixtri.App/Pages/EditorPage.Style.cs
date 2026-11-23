@@ -202,7 +202,7 @@ public sealed partial class EditorPage
 
         config = config with { Cursor = newCursor };
         ProjectService.Instance.CurrentComposition = config;
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -377,11 +377,41 @@ public sealed partial class EditorPage
         var img = new Microsoft.UI.Xaml.Controls.Image
         {
             Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
-            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
-            {
-                DecodePixelHeight = 96, // small thumbnails for perf
-            },
         };
+
+        // The decode is deferred until the tile is actually near the viewport. The grid sits
+        // in the (scrolling) property pane without its own scrolling, so every tile is
+        // realized when the panel opens; decoding on Loaded would still decode the whole
+        // recursive Windows\Web\Wallpaper set at once. EffectiveViewportChanged reports how
+        // far the tile is from being brought into view, so only tiles within about one screen
+        // of the visible area decode, and the rest wait until the pane scrolls to them.
+        const double PrefetchDistance = 400;
+        void OnViewport(FrameworkElement sender, EffectiveViewportChangedEventArgs args)
+        {
+            if (sender is not Microsoft.UI.Xaml.Controls.Image image) return;
+            if (image.Source is not null)
+            {
+                image.EffectiveViewportChanged -= OnViewport;
+                return;
+            }
+            if (args.BringIntoViewDistanceX > PrefetchDistance
+                || args.BringIntoViewDistanceY > PrefetchDistance)
+                return;
+
+            image.EffectiveViewportChanged -= OnViewport;
+            try
+            {
+                image.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path))
+                {
+                    DecodePixelHeight = 96, // small thumbnails for perf
+                };
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"wallpaper tile load failed '{path}': {ex.Message}");
+            }
+        }
+        img.EffectiveViewportChanged += OnViewport;
         return new Border
         {
             CornerRadius = new CornerRadius(4),
@@ -723,7 +753,7 @@ public sealed partial class EditorPage
         var config = ProjectService.Instance.CurrentComposition;
         if (config is null) return;
 
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1028,7 +1058,7 @@ public sealed partial class EditorPage
 
         var config = ProjectService.Instance.CurrentComposition with { Background = bg };
         ProjectService.Instance.CurrentComposition = config;
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1059,9 +1089,8 @@ public sealed partial class EditorPage
         {
             if (_segmentPreviews.Remove(seg.Id, out var ctx))
             {
-                DisposeOffUiThread(ctx.Reader);
-                ctx.Reader = null;
-                ctx.Dispose();
+                // Style-only: keep the decoder for the rebuild just below.
+                RetainSegmentReaderAndDispose(seg.Id, ctx.VideoPath, ctx);
             }
             _lastRenderedSegmentId = null;
             _lastRenderedFrameIndex = -1;
@@ -1683,7 +1712,7 @@ public sealed partial class EditorPage
 
         UpdateFitAndAnchorVisibility(ratio);
 
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1699,7 +1728,7 @@ public sealed partial class EditorPage
 
         UpdateFitAndAnchorVisibility(project.AspectRatio);
 
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1714,7 +1743,7 @@ public sealed partial class EditorPage
         config = config with { CropAnchorX = anchorX, CropAnchorY = anchorY };
         ProjectService.Instance.CurrentComposition = config;
 
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 
@@ -1728,7 +1757,7 @@ public sealed partial class EditorPage
         config = config with { ZoomScope = scope };
         ProjectService.Instance.CurrentComposition = config;
 
-        InvalidateSegmentPreviews();
+        InvalidateSegmentPreviewStyles();
         _ = RebuildPreviewRendererAsync(config);
     }
 }

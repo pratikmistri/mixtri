@@ -155,7 +155,12 @@ public static class MixtriPackageService
         {
             // Rendered before the archive is opened so a poster failure cannot abort the
             // save; the poster is presentation only.
-            var poster = await TryRenderPosterAsync(project, ct).ConfigureAwait(false);
+            // An unchanged recording keeps the poster the package already holds; decoding
+            // frames from a multi-GB MP4 on every text edit is the expensive part of a save.
+            // The probe opens the existing package: off the caller's (UI) thread.
+            var poster = await Task.Run(() => TryReuseExistingPoster(packagePath, project, entryByPath), ct)
+                             .ConfigureAwait(false)
+                         ?? await TryRenderPosterAsync(project, ct).ConfigureAwait(false);
 
             await Task.Run(() =>
             {
@@ -234,6 +239,55 @@ public static class MixtriPackageService
         {
             TryDelete(tempPath);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns the poster already stored in the package at <paramref name="packagePath"/>
+    /// when it was rendered from the same video that is about to be saved, else null.
+    /// </summary>
+    /// <remarks>
+    /// "Same video" means the old archive holds an entry of the same name whose length and
+    /// write time (stamped from the source file at save time, 2-second resolution) match the
+    /// current file. Anything doubtful returns null and the poster is re-rendered, so the
+    /// worst case is the old behaviour. The media itself is never reused from the old
+    /// archive: zip entries cannot be copied raw, and reading one back costs the same I/O
+    /// as reading the source file, with an added risk of carrying stale content forward.
+    /// </remarks>
+    private static byte[]? TryReuseExistingPoster(
+        string packagePath, Project project, Dictionary<string, string> entryByPath)
+    {
+        try
+        {
+            var videoPath = project.VideoFilePath;
+            if (string.IsNullOrWhiteSpace(videoPath)
+                || !File.Exists(packagePath)
+                || !File.Exists(videoPath)
+                || !entryByPath.TryGetValue(videoPath, out var entryName))
+                return null;
+
+            var info = new FileInfo(videoPath);
+
+            using var file = new FileStream(
+                packagePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var archive = new ZipArchive(file, ZipArchiveMode.Read);
+
+            var videoEntry = archive.GetEntry(entryName);
+            var posterEntry = archive.GetEntry(MixtriPackage.PosterEntryName);
+            if (videoEntry is null || posterEntry is null || posterEntry.Length <= 0
+                || videoEntry.Length != info.Length
+                || !TimestampsMatch(info.LastWriteTime, videoEntry.LastWriteTime.LocalDateTime))
+                return null;
+
+            using var stream = posterEntry.Open();
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return buffer.Length > 0 ? buffer.ToArray() : null;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MixtriPackage] Could not reuse existing poster: {ex.Message}");
+            return null;
         }
     }
 
@@ -362,6 +416,63 @@ public static class MixtriPackageService
         {
             Debug.WriteLine($"[MixtriPackage] Could not read poster from '{packagePath}': {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads a package's manifest and poster in a single pass over the archive (one open,
+    /// one central-directory read), for listing projects. Either part is null when absent
+    /// or unreadable; a bad poster never hides a good manifest.
+    /// </summary>
+    public static (MixtriManifest? Manifest, byte[]? Poster) ReadManifestAndPoster(string packagePath)
+    {
+        try
+        {
+            if (!File.Exists(packagePath))
+                return (null, null);
+
+            using var file = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var archive = new ZipArchive(file, ZipArchiveMode.Read);
+
+            MixtriManifest? manifest = null;
+            try
+            {
+                var manifestEntry = archive.GetEntry(MixtriPackage.ManifestEntryName);
+                if (manifestEntry is not null)
+                {
+                    using var manifestStream = manifestEntry.Open();
+                    manifest = JsonSerializer.Deserialize<MixtriManifest>(
+                        manifestStream, MixtriPackage.JsonOptions);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MixtriPackage] Could not read manifest from '{packagePath}': {ex.Message}");
+            }
+
+            byte[]? poster = null;
+            try
+            {
+                var posterEntry = archive.GetEntry(MixtriPackage.PosterEntryName);
+                if (posterEntry is not null)
+                {
+                    using var posterStream = posterEntry.Open();
+                    using var buffer = new MemoryStream();
+                    posterStream.CopyTo(buffer);
+                    poster = buffer.ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MixtriPackage] Could not read poster from '{packagePath}': {ex.Message}");
+            }
+
+            return (manifest, poster);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MixtriPackage] Could not read '{packagePath}': {ex.Message}");
+            return (null, null);
         }
     }
 
@@ -757,7 +868,7 @@ public static class MixtriPackageService
     /// </summary>
     private static T Clone<T>(T value) where T : notnull
         => JsonSerializer.Deserialize<T>(
-               JsonSerializer.Serialize(value, MixtriPackage.JsonOptions),
+               JsonSerializer.SerializeToUtf8Bytes(value, MixtriPackage.JsonOptions),
                MixtriPackage.JsonOptions)
            ?? throw new InvalidOperationException($"Failed to clone {typeof(T).Name}.");
 

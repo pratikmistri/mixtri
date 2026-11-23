@@ -1907,6 +1907,11 @@ public class FrameCompositor : IDisposable
             session, transformedPos, activeClicks, timeSeconds, lastMoveTime, motionBlur, cameraVelocity);
     }
 
+    // Reused every frame. The list is consumed synchronously by CursorRenderer.RenderFrame
+    // and never retained; like the rest of this compositor's per-frame scratch state it is
+    // only touched by the thread currently rendering with this instance.
+    private readonly List<ClickEvent> _activeClicksScratch = new();
+
     /// <summary>
     /// Returns click events within ±1.5 seconds of the current time, with positions
     /// transformed from source coordinates to output coordinates.
@@ -1918,10 +1923,11 @@ public class FrameCompositor : IDisposable
         double timeSeconds, Rect viewport,
         float scaleX, float scaleY)
     {
-        if (_mouseData is null) return [];
+        var result = _activeClicksScratch;
+        result.Clear();
+        if (_mouseData is null) return result;
 
         const double windowSeconds = 1.5;
-        var result = new List<ClickEvent>();
         var clicks = _clicks;
         if (clicks.Count == 0) return result;
 

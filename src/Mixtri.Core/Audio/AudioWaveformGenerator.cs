@@ -118,8 +118,10 @@ public static class AudioWaveformGenerator
     /// Decodes in ~1 s blocks rather than one read per bucket, and caches results in memory
     /// keyed by the file's full path, last-write time and length plus the arguments, so
     /// re-opening the editor or rebuilding the timeline does not re-decode an unchanged file.
-    /// The cache is in-memory and bounded (<see cref="PeakCacheCapacity"/> entries) on
-    /// purpose: there is no app cache folder with a pruning policy to put an on-disk sidecar in.
+    /// The in-memory cache is bounded (<see cref="PeakCacheCapacity"/> entries). Behind it sits
+    /// a small best-effort on-disk cache (<see cref="WaveformDiskCache"/>) under LocalAppData,
+    /// keyed by the same inputs, so a relaunch does not re-decode unchanged audio. The disk
+    /// cache is disposable and size-bounded; any failure in it falls back to decoding.
     /// </para>
     /// </remarks>
     public static float[] GenerateWaveform(string wavFilePath, int targetSampleCount,
@@ -142,7 +144,15 @@ public static class AudioWaveformGenerator
             }
         }
 
-        var result = GenerateWaveformCore(wavFilePath, targetSampleCount, startSeconds, maxDurationSeconds);
+        string? diskKey = cacheKey is null ? null : WaveformDiskCache.HashKey(cacheKey);
+        float[]? result = diskKey is null ? null : WaveformDiskCache.TryRead(AppDataPaths.WaveformCacheFolder, diskKey);
+
+        if (result is null)
+        {
+            result = GenerateWaveformCore(wavFilePath, targetSampleCount, startSeconds, maxDurationSeconds);
+            if (diskKey is not null)
+                WaveformDiskCache.TryWrite(AppDataPaths.WaveformCacheFolder, diskKey, result);
+        }
 
         if (cacheKey is not null)
         {
@@ -168,7 +178,7 @@ public static class AudioWaveformGenerator
     /// Cache key covering every input that changes the result, or <c>null</c> when the file
     /// cannot be stat'ed (then nothing is cached and the decode reports the real error).
     /// </summary>
-    private static string? BuildPeakCacheKey(
+    internal static string? BuildPeakCacheKey(
         string wavFilePath, int targetSampleCount, double startSeconds, double maxDurationSeconds)
     {
         try
@@ -322,5 +332,153 @@ public static class AudioWaveformGenerator
             32 => BitConverter.ToInt32(data, offset) / 2147483648f,
             _ => 0f
         };
+    }
+}
+
+/// <summary>
+/// Best-effort on-disk store for waveform peak arrays. Never throws; a miss, a corrupt file
+/// or an unwritable folder all just mean "decode it again".
+/// </summary>
+/// <remarks>
+/// File layout (little-endian): magic "MXWF", int32 format version, int32 peak count, then
+/// that many float32 values. Files are named by a SHA-256 of the full cache key (path, length,
+/// last-write ticks, peak count, range), so an edited file simply never matches its old entry.
+/// </remarks>
+internal static class WaveformDiskCache
+{
+    private const int FormatVersion = 1;
+    private const int HeaderBytes = 12;
+    private const int MaxPeaks = 1 << 24;
+    private const long MaxFolderBytes = 200L * 1024 * 1024;
+    private const int PruneEveryNWrites = 50;
+    private static readonly byte[] Magic = "MXWF"u8.ToArray();
+
+    private static int _writesSincePrune = PruneEveryNWrites; // first write prunes
+
+    /// <summary>Stable file-name-safe hash of a cache key string.</summary>
+    internal static string HashKey(string key)
+    {
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes("wf1|" + key));
+        return Convert.ToHexString(hash, 0, 16);
+    }
+
+    private static string FilePath(string folder, string hashedKey) => Path.Combine(folder, hashedKey + ".wfp");
+
+    /// <summary>Reads cached peaks, or null on a miss or any problem with the file.</summary>
+    internal static float[]? TryRead(string folder, string hashedKey)
+    {
+        try
+        {
+            var path = FilePath(folder, hashedKey);
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length < HeaderBytes) return null;
+
+            var bytes = File.ReadAllBytes(path);
+            if (bytes.Length < HeaderBytes
+                || !bytes.AsSpan(0, 4).SequenceEqual(Magic)
+                || BitConverter.ToInt32(bytes, 4) != FormatVersion)
+                return null;
+
+            int count = BitConverter.ToInt32(bytes, 8);
+            if (count <= 0 || count > MaxPeaks || bytes.Length != HeaderBytes + (long)count * sizeof(float))
+                return null;
+
+            var peaks = new float[count];
+            Buffer.BlockCopy(bytes, HeaderBytes, peaks, 0, count * sizeof(float));
+            return peaks;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Writes peaks atomically (temp file + move). Swallows every failure.</summary>
+    internal static void TryWrite(string folder, string hashedKey, float[] peaks)
+    {
+        if (peaks.Length == 0 || peaks.Length > MaxPeaks) return;
+
+        string? tmp = null;
+        try
+        {
+            Directory.CreateDirectory(folder);
+
+            var bytes = new byte[HeaderBytes + peaks.Length * sizeof(float)];
+            Magic.CopyTo(bytes, 0);
+            BitConverter.TryWriteBytes(bytes.AsSpan(4, 4), FormatVersion);
+            BitConverter.TryWriteBytes(bytes.AsSpan(8, 4), peaks.Length);
+            Buffer.BlockCopy(peaks, 0, bytes, HeaderBytes, peaks.Length * sizeof(float));
+
+            tmp = Path.Combine(folder, hashedKey + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp");
+            File.WriteAllBytes(tmp, bytes);
+            File.Move(tmp, FilePath(folder, hashedKey), overwrite: true);
+            tmp = null;
+
+            if (Interlocked.Increment(ref _writesSincePrune) >= PruneEveryNWrites)
+            {
+                Interlocked.Exchange(ref _writesSincePrune, 0);
+                Prune(folder, MaxFolderBytes);
+            }
+        }
+        catch
+        {
+            // Best effort only.
+        }
+        finally
+        {
+            if (tmp is not null)
+            {
+                try { File.Delete(tmp); } catch { }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Deletes the oldest cache files until the folder is within <paramref name="maxBytes"/>,
+    /// and any orphaned temp file older than an hour. Never throws.
+    /// </summary>
+    internal static void Prune(string folder, long maxBytes)
+    {
+        try
+        {
+            if (!Directory.Exists(folder)) return;
+
+            var files = new List<FileInfo>();
+            var staleTmp = DateTime.UtcNow.AddHours(-1);
+            foreach (var f in new DirectoryInfo(folder).EnumerateFiles())
+            {
+                if (f.Extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (f.LastWriteTimeUtc < staleTmp)
+                    {
+                        try { f.Delete(); } catch { }
+                    }
+                }
+                else if (f.Extension.Equals(".wfp", StringComparison.OrdinalIgnoreCase))
+                {
+                    files.Add(f);
+                }
+            }
+
+            long total = files.Sum(f => f.Length);
+            if (total <= maxBytes) return;
+
+            foreach (var f in files.OrderBy(f => f.LastWriteTimeUtc))
+            {
+                if (total <= maxBytes) break;
+                try
+                {
+                    long len = f.Length;
+                    f.Delete();
+                    total -= len;
+                }
+                catch { }
+            }
+        }
+        catch
+        {
+            // Best effort only.
+        }
     }
 }

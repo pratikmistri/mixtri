@@ -86,6 +86,9 @@ public static class AppDataPaths
     /// </summary>
     public static IReadOnlyList<string> AllRoots => [Root, LegacyRoot];
 
+    /// <summary>Folder for the on-disk waveform peak cache. Disposable: safe to delete.</summary>
+    public static string WaveformCacheFolder => Path.Combine(Root, "Cache", "waveforms");
+
     /// <summary>Builds a path under <see cref="Root"/>. This is where writes go.</summary>
     public static string Resolve(params string[] segments) => Combine(Root, segments);
 

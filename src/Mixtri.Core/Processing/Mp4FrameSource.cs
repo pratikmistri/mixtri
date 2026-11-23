@@ -257,6 +257,8 @@ public sealed class Mp4FrameSource : IFrameSource, IConfirmingFrameSource
         }
     }
 
+    private static readonly double[] AttemptOffsets = [0.5, 0.35, 0.65, 0.2];
+
     private TimeSpan TimeForFrame(int frameIndex, int attempt)
     {
         // Land inside the frame's display interval rather than on its boundary, where
@@ -264,8 +266,7 @@ public sealed class Mp4FrameSource : IFrameSource, IConfirmingFrameSource
         // attempts pick a different instant in the same interval so that re-assigning
         // Position is a real seek and not an ignored no-op, while still decoding the
         // frame that was asked for.
-        double[] offsets = [0.5, 0.35, 0.65, 0.2];
-        double offset = offsets[attempt % offsets.Length];
+        double offset = AttemptOffsets[attempt % AttemptOffsets.Length];
         return TimeSpan.FromSeconds((frameIndex + offset) / _fps);
     }
 
@@ -332,7 +333,11 @@ public sealed class Mp4FrameSource : IFrameSource, IConfirmingFrameSource
             }
 
             // _surface is reused across calls, so hand back an independent copy the
-            // caller can hold and dispose on its own schedule.
+            // caller can hold and dispose on its own schedule. Not pooled: callers across
+            // the editor/exporter own the returned bitmap and Dispose() it (or cache it)
+            // directly, with no lease/return path, so recycling a target here could hand
+            // out a bitmap another holder is still drawing or has already disposed. This
+            // is the only copy (the decoder surface itself is reused), so it is not avoidable.
             lock (_surfaceGate)
             {
                 if (_disposed) return (null, false);

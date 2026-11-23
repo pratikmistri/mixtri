@@ -94,13 +94,19 @@ public static class RecentProjectsStore
     {
         try
         {
+            // Snapshot under the gate, probe the disk outside it: File.Exists on up to
+            // MaxEntries paths (possibly on a slow or disconnected share) must not block
+            // Remember/Forget on another thread.
+            List<RecentProject> raw;
             lock (Gate)
             {
-                return MergedRaw()
-                    .Where(e => !string.IsNullOrWhiteSpace(e.Path) && File.Exists(e.Path))
-                    .OrderByDescending(e => e.LastUsedUtc)
-                    .ToList();
+                raw = MergedRaw();
             }
+
+            return raw
+                .Where(e => !string.IsNullOrWhiteSpace(e.Path) && File.Exists(e.Path))
+                .OrderByDescending(e => e.LastUsedUtc)
+                .ToList();
         }
         catch (Exception ex)
         {
