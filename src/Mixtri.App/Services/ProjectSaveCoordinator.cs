@@ -112,6 +112,22 @@ public static class ProjectSaveCoordinator
             if (targetPath is null) return false;
 
             await SaveWithProgressAsync(root, service, targetPath);
+
+            // An edit made while the package was being written is not in it, and the save
+            // correctly leaves the project dirty (edit revision check in SavePackageAsync).
+            // Callers close on true, so write again until the file holds everything; if edits
+            // keep arriving, refuse to close rather than discard them.
+            for (int attempt = 0; attempt < 2 && service.HasUnsavedChanges; attempt++)
+            {
+                await SaveWithProgressAsync(root, service, service.CurrentPackagePath ?? targetPath);
+            }
+
+            if (service.HasUnsavedChanges)
+            {
+                DiagLog.Write("Shell", "Project changed while saving before close; keeping the window open.");
+                return false;
+            }
+
             return true;
         }
         catch (Exception ex)

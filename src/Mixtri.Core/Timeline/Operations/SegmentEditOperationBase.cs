@@ -69,13 +69,13 @@ public abstract class SegmentEditOperationBase : IEditOperation
     }
 
     /// <summary>
-    /// Where the segment an operation acted on lives NOW: looked up by its stable id, falling
-    /// back to the index recorded at execute time only when the id no longer resolves.
+    /// Where the segment an operation acted on lives NOW, looked up by its stable id.
     /// </summary>
     /// <remarks>
     /// An index captured in <c>ExecuteCore</c> goes stale as soon as anything inserts or
     /// removes a segment ahead of it, and writing an undo through it would overwrite an
-    /// unrelated segment. The id survives every reorder. Returns -1 when neither resolves.
+    /// unrelated segment. The id survives every reorder. Returns -1 when the id no longer
+    /// resolves; <paramref name="fallbackIndex"/> is kept for call-site compatibility only.
     /// </remarks>
     protected static int ResolveSegmentIndex(TimelineModel model, string segmentId, int fallbackIndex)
     {
@@ -85,7 +85,10 @@ public abstract class SegmentEditOperationBase : IEditOperation
             if (segments[i].Id == segmentId) return i;
         }
 
-        return fallbackIndex >= 0 && fallbackIndex < segments.Count ? fallbackIndex : -1;
+        // Deliberately no positional fallback: if the segment is gone, whatever now sits at
+        // the old index is an unrelated clip, and restoring onto it would corrupt it.
+        _ = fallbackIndex;
+        return -1;
     }
 
     /// <returns>

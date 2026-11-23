@@ -186,6 +186,27 @@ public sealed class ModelReviewTimelineFixTests
         Assert.AreEqual(SegmentAudioMode.TimeStretch, a.AudioMode);
     }
 
+    [TestMethod]
+    public void TrimUndo_SegmentGone_LeavesWhateverIsAtTheOldIndexUntouched()
+    {
+        var a = Video(0, 5);
+        var b = Video(5, 5);
+        var model = TestTimelineBuilder.ModelWithPrimaryPath(PrimaryPath, a, b);
+
+        var trim = new TrimSegmentEdgeOperation(b.Id, fromStart: false, TimeSpan.FromSeconds(2));
+        trim.Execute(model);
+
+        // The trimmed segment disappears and an unrelated clip takes its old index.
+        var unrelated = Video(20, 1);
+        model.Segments.RemoveAt(1);
+        model.Segments.Insert(1, unrelated);
+
+        trim.Undo(model);
+
+        Assert.AreSame(unrelated, model.Segments[1], "no positional fallback onto an unrelated clip");
+        Assert.AreSame(a, model.Segments[0]);
+    }
+
     // ── ResizeZoomSegmentOperation clamping ──────────────────────────
 
     [TestMethod]
