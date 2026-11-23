@@ -284,7 +284,10 @@ public sealed partial class EditorPage : Page
                 if (!Preview.IsPlaying)
                 {
                     if (AudioPositionForVideo(Timeline.PlayheadPosition) is { } audioPos)
+                    {
+                        ApplyRecordedSegmentChannelGains(Timeline.PlayheadPosition);
                         _audioPlayer?.ScrubTo(audioPos);
+                    }
 
                     // Inserted tracks scrub in OUTPUT time, so the playhead position IS
                     // their position — no segment mapping to apply.
@@ -294,12 +297,12 @@ public sealed partial class EditorPage : Page
                         inserted.ScrubTo(Timeline.PlayheadPosition);
                     }
 
-                    // Stretched segment audio is likewise placed in OUTPUT time, and is
-                    // gated on live segment state for the same reason
-                    // SyncStretchedAudioToPlayhead is: a scrub must not preview a re-time
+                    // Placed segment audio (stretched, or an appended recording's) is likewise
+                    // placed in OUTPUT time, and is gated on live segment state for the same
+                    // reason SyncStretchedAudioToPlayhead is: a scrub must not preview audio
                     // the segment no longer asks for.
                     if (_stretchedAudioPlayer is { IsLoaded: true } stretched
-                        && HasStretchedAudioAt(Timeline.PlayheadPosition)
+                        && HasPlacedSegmentAudioAt(Timeline.PlayheadPosition)
                         && stretched.HasAudioAt(Timeline.PlayheadPosition))
                     {
                         stretched.ScrubTo(Timeline.PlayheadPosition);
@@ -443,6 +446,7 @@ public sealed partial class EditorPage : Page
         Timeline.SegmentTrimPreviewEnded += OnSegmentTrimPreviewEnded;
         Timeline.SegmentSpeedChangeRequested += OnSegmentSpeedChangeRequested;
         Timeline.SegmentAudioModeChangeRequested += OnSegmentAudioModeChangeRequested;
+        Timeline.SegmentAudioChannelMuteRequested += OnSegmentAudioChannelMuteRequested;
         Timeline.SegmentAudioDetachRequested += OnSegmentAudioDetachRequested;
         Timeline.SegmentAudioReattachRequested += OnSegmentAudioReattachRequested;
         Timeline.SegmentSplitRequested += OnSegmentSplitRequested;
