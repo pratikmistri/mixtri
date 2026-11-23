@@ -64,9 +64,12 @@ public class WebcamCompositor : IDisposable
     // reused scaled to the moving rect instead of being re-rendered every frame — the
     // shadow fades out as the overlay grows, so the approximation is never prominent.
     private CanvasGeometry? _cachedClipGeometry;
-    private (Rect dest, float radius, CanvasDevice? device) _clipKey;
+    // Devices are compared with Win2DUtils.SameDevice beside these keys, never inside them.
+    private (Rect dest, float radius) _clipKey;
+    private CanvasDevice? _clipDevice;
     private CanvasRenderTarget? _cachedShadow;
-    private (float width, float height, float radius, CanvasDevice? device) _shadowKey;
+    private (float width, float height, float radius) _shadowKey;
+    private CanvasDevice? _shadowDevice;
 
     public WebcamCompositor(WebcamOverlayStyle style)
     {
@@ -166,14 +169,16 @@ public class WebcamCompositor : IDisposable
 
     private void EnsureClipGeometry(CanvasDevice device, Rect dest, float radius)
     {
-        var key = (dest, radius, (CanvasDevice?)device);
-        if (_cachedClipGeometry is not null && _clipKey == key)
+        var key = (dest, radius);
+        if (_cachedClipGeometry is not null && _clipKey == key
+            && Win2DUtils.SameDevice(_clipDevice, device))
             return;
 
         _cachedClipGeometry?.Dispose();
         _cachedClipGeometry = null;
         _cachedClipGeometry = CreateClipGeometry(device, dest, radius);
         _clipKey = key;
+        _clipDevice = device;
     }
 
     /// <summary>
@@ -183,8 +188,8 @@ public class WebcamCompositor : IDisposable
     /// </summary>
     private CanvasRenderTarget EnsureShadowSprite(CanvasDevice device, Rect dest, float radius)
     {
-        var key = ((float)dest.Width, (float)dest.Height, radius, (CanvasDevice?)device);
-        if (_cachedShadow is not null && ReferenceEquals(_shadowKey.device, device)
+        var key = ((float)dest.Width, (float)dest.Height, radius);
+        if (_cachedShadow is not null && Win2DUtils.SameDevice(_shadowDevice, device)
             && (_fullscreenFactor > 0f || _shadowKey == key))
         {
             return _cachedShadow;
@@ -231,7 +236,8 @@ public class WebcamCompositor : IDisposable
         }
 
         _cachedShadow = sprite;
-        _shadowKey = (w, h, radius, device);
+        _shadowKey = (w, h, radius);
+        _shadowDevice = device;
         return sprite;
     }
 
@@ -265,9 +271,11 @@ public class WebcamCompositor : IDisposable
         _cachedClipGeometry?.Dispose();
         _cachedClipGeometry = null;
         _clipKey = default;
+        _clipDevice = null;
         _cachedShadow?.Dispose();
         _cachedShadow = null;
         _shadowKey = default;
+        _shadowDevice = null;
     }
 
     /// <summary>

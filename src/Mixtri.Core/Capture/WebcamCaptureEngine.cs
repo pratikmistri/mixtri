@@ -94,6 +94,11 @@ public sealed class WebcamCaptureEngine : IDisposable
 
         _mediaCapture = new MediaCapture();
 
+        // Only the file THIS attempt creates may be removed on failure: OutputFilePath can
+        // still name a previous, successful recording if the engine is started again.
+        string? createdThisAttempt = null;
+        OutputFilePath = null;
+
         try
         {
             var settings = new MediaCaptureInitializationSettings
@@ -109,6 +114,7 @@ public sealed class WebcamCaptureEngine : IDisposable
             var folder = await StorageFolder.GetFolderFromPathAsync(outputFolder);
             var file = await folder.CreateFileAsync(fileName, CreationCollisionOption.GenerateUniqueName);
 
+            createdThisAttempt = file.Path;
             OutputFilePath = file.Path;
 
             var profile = MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD720p);
@@ -119,7 +125,7 @@ public sealed class WebcamCaptureEngine : IDisposable
             DisposeMediaCapture();
 
             // Never advertise a webcam file that a failed start left empty or absent.
-            var abandoned = OutputFilePath;
+            var abandoned = createdThisAttempt;
             OutputFilePath = null;
             if (abandoned is not null)
             {

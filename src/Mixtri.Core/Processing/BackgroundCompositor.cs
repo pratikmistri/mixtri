@@ -98,12 +98,15 @@ public sealed class BackgroundCompositor : IDisposable
     // and a ShadowEffect (and the content clip its own geometry) on every frame. Keyed on
     // everything that shapes the resource plus the device, so a device change or any style
     // edit rebuilds. Touched only from the render path, which a compositor serializes.
+    // The device is tracked beside each key, not inside it: record equality would compare
+    // projection wrappers, which can differ for the same native device (Win2DUtils.SameDevice).
     private readonly record struct ShadowKey(
-        CanvasDevice Device, float X, float Y, float W, float H, float Radius,
-        Color Color, float Blur);
+        float X, float Y, float W, float H, float Radius, Color Color, float Blur);
 
-    private readonly record struct ClipKey(
-        CanvasDevice Device, float X, float Y, float W, float H, float Radius);
+    private readonly record struct ClipKey(float X, float Y, float W, float H, float Radius);
+
+    private CanvasDevice? _shadowDevice;
+    private CanvasDevice? _clipDevice;
 
     private ShadowKey? _shadowKey;
     private CanvasGeometry? _shadowGeometry;
@@ -721,9 +724,9 @@ public sealed class BackgroundCompositor : IDisposable
         var device = session.Device;
         var shadowColor = ColorHelper.WithOpacity(
             ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity);
-        var key = new ShadowKey(device, x, y, w, h, radius, shadowColor, style.ShadowBlur);
+        var key = new ShadowKey(x, y, w, h, radius, shadowColor, style.ShadowBlur);
 
-        if (_shadowEffect is null || _shadowKey != key)
+        if (_shadowEffect is null || _shadowKey != key || !Win2DUtils.SameDevice(_shadowDevice, device))
         {
             ReleaseShadowCache();
 
@@ -753,6 +756,7 @@ public sealed class BackgroundCompositor : IDisposable
                 ShadowColor = shadowColor,
             };
             _shadowKey = key;
+            _shadowDevice = device;
         }
 
         session.DrawImage(_shadowEffect, new Vector2(style.ShadowOffsetX, style.ShadowOffsetY));
@@ -768,13 +772,15 @@ public sealed class BackgroundCompositor : IDisposable
 
         if (radius > 0)
         {
-            var key = new ClipKey(session.Device, x, y, w, h, radius);
-            if (_clipGeometry is null || _clipKey != key)
+            var device = session.Device;
+            var key = new ClipKey(x, y, w, h, radius);
+            if (_clipGeometry is null || _clipKey != key || !Win2DUtils.SameDevice(_clipDevice, device))
             {
                 ReleaseClipCache();
                 _clipGeometry = CanvasGeometry.CreateRoundedRectangle(
-                    session.Device, x, y, w, h, radius, radius);
+                    device, x, y, w, h, radius, radius);
                 _clipKey = key;
+                _clipDevice = device;
             }
 
             using var layer = session.CreateLayer(1.0f, _clipGeometry);
@@ -795,6 +801,7 @@ public sealed class BackgroundCompositor : IDisposable
         _shadowCommandList = null;
         _shadowGeometry = null;
         _shadowKey = null;
+        _shadowDevice = null;
     }
 
     private void ReleaseClipCache()
@@ -802,6 +809,7 @@ public sealed class BackgroundCompositor : IDisposable
         SafeDisposeResource(_clipGeometry);
         _clipGeometry = null;
         _clipKey = null;
+        _clipDevice = null;
     }
 
     private static void SafeDisposeResource(IDisposable? resource)

@@ -114,6 +114,11 @@ public sealed class AudioCaptureEngine : IDisposable
             Directory.CreateDirectory(outputFolder);
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 
+            // A restarted engine must not carry the previous recording's paths into this
+            // attempt: a start failure abandons (deletes) whatever path is current.
+            _systemAudioFilePath = null;
+            _micAudioFilePath = null;
+
             using var enumerator = new MMDeviceEnumerator();
 
             // System audio (WASAPI loopback). A device that cannot start is reported and

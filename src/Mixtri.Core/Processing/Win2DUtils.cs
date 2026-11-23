@@ -13,6 +13,17 @@ namespace Mixtri.Core.Processing;
 public static class Win2DUtils
 {
     /// <summary>
+    /// Whether two references denote the same Win2D device. Uses Win2D's own equality, not
+    /// <see cref="object.ReferenceEquals"/>: reading a device back (e.g. from
+    /// <c>CanvasDrawingSession.Device</c>) can return a different projection wrapper around the
+    /// same native device, so reference identity makes per-frame caches miss every frame
+    /// (see <see cref="GrowOnlyBuffer.Ensure"/>). Do not put devices inside tuple/record cache
+    /// keys either; compare them separately with this.
+    /// </summary>
+    public static bool SameDevice(CanvasDevice? a, CanvasDevice? b)
+        => a is null ? b is null : b is not null && a == b;
+
+    /// <summary>
     /// Allocates a <see cref="CanvasRenderTarget"/>, wrapping an <see cref="OutOfMemoryException"/>
     /// or <see cref="COMException"/> raised during allocation into a logged, user-friendly
     /// <see cref="InvalidOperationException"/>. <paramref name="purpose"/> is a short
