@@ -451,7 +451,11 @@ public class TransitionRenderer : IDisposable
 
             var srcRect = new Rect(0, 0,
                 outgoing.SizeInPixels.Width, outgoing.SizeInPixels.Height);
-            ds.DrawImage(blur, destRect, srcRect, (float)(1.0 - t));
+            // Opaque, with the incoming dissolved over it — see RenderCrossFade. Drawing both
+            // sides at partial opacity over the black clear dipped the whip dark mid-transition.
+            // The clear stays: it is the fade-from-black base when there is no outgoing frame,
+            // and backs the Soft-border blur's feathered edges.
+            ds.DrawImage(blur, destRect, srcRect, 1f);
         }
 
         {

@@ -52,10 +52,21 @@ public class WebcamCompositor : IDisposable
     private float _overlayOpacity = 1f;
     private bool _disposed;
 
-    // Cached GPU resources — invalidated when style or canvas size changes
+    /// <summary>Shadows fainter than this (after the overlay fade) are not drawn at all.</summary>
+    private const float MinVisibleShadowAlpha = 1f / 255f;
+
+    /// <summary>Margin around the shadow sprite's shape: covers ~3σ of the blur.</summary>
+    private const float ShadowSpritePad = ShadowBlurAmount * 3f + 1f;
+
+    // Cached GPU resources. Both keys carry the device, so a device change rebuilds.
+    // The clip geometry is cheap and tracks the exact destination. The shadow is a sprite
+    // sized to the shape (not the canvas) and, while the fullscreen animation runs, is
+    // reused scaled to the moving rect instead of being re-rendered every frame — the
+    // shadow fades out as the overlay grows, so the approximation is never prominent.
     private CanvasGeometry? _cachedClipGeometry;
+    private (Rect dest, float radius, CanvasDevice? device) _clipKey;
     private CanvasRenderTarget? _cachedShadow;
-    private (Rect dest, float radius, int canvasW, int canvasH, bool shadow) _cacheKey;
+    private (float width, float height, float radius, CanvasDevice? device) _shadowKey;
 
     public WebcamCompositor(WebcamOverlayStyle style)
     {
@@ -77,12 +88,9 @@ public class WebcamCompositor : IDisposable
     /// </summary>
     public void SetFullscreenFactor(float factor)
     {
-        factor = Math.Clamp(factor, 0f, 1f);
-        if (Math.Abs(factor - _fullscreenFactor) > float.Epsilon)
-        {
-            _fullscreenFactor = factor;
-            InvalidateCache();
-        }
+        // No invalidation: the clip cache is keyed on the resolved destination, and the
+        // shadow sprite is deliberately reused (scaled) while the animation runs.
+        _fullscreenFactor = Math.Clamp(factor, 0f, 1f);
     }
 
     /// <summary>
@@ -114,23 +122,19 @@ public class WebcamCompositor : IDisposable
         var destRect = layout.Destination;
         var sourceRect = layout.SourceCrop;
 
-        // Ensure cached resources are valid for current layout
-        var key = (destRect, layout.CornerRadius, canvasWidth, canvasHeight, layout.ShadowAlpha > 0f);
-        if (_cachedClipGeometry is null || _cacheKey != key)
-        {
-            RebuildCache(session.Device, destRect, layout.CornerRadius, layout.ShadowAlpha > 0f);
-            _cacheKey = key;
-        }
-
-        // Fully faded out — nothing to draw.
+        // Fully faded out — nothing to draw, so nothing to (re)build either.
         if (_overlayOpacity <= 0f)
             return;
 
+        var device = session.Device;
+        EnsureClipGeometry(device, destRect, layout.CornerRadius);
+
         // Optional shadow behind the overlay (drawn from cache, faded out as it grows)
-        if (layout.ShadowAlpha > 0f && _cachedShadow is not null)
+        float shadowAlpha = layout.ShadowAlpha * _overlayOpacity;
+        if (shadowAlpha >= MinVisibleShadowAlpha)
         {
-            session.DrawImage(_cachedShadow, new Vector2(0, ShadowOffsetY),
-                _cachedShadow.Bounds, layout.ShadowAlpha * _overlayOpacity);
+            var shadow = EnsureShadowSprite(device, destRect, layout.CornerRadius);
+            DrawShadowSprite(session, shadow, destRect, shadowAlpha);
         }
 
         // Clip webcam frame to the configured shape (layer opacity fades the camera in/out)
@@ -160,25 +164,45 @@ public class WebcamCompositor : IDisposable
         }
     }
 
-    /// <summary>
-    /// Rebuilds cached clip geometry and shadow render target for the current layout.
-    /// </summary>
-    private void RebuildCache(CanvasDevice device, Rect dest, float radius, bool shadowEnabled)
+    private void EnsureClipGeometry(CanvasDevice device, Rect dest, float radius)
     {
-        InvalidateCache();
+        var key = (dest, radius, (CanvasDevice?)device);
+        if (_cachedClipGeometry is not null && _clipKey == key)
+            return;
+
+        _cachedClipGeometry?.Dispose();
+        _cachedClipGeometry = null;
         _cachedClipGeometry = CreateClipGeometry(device, dest, radius);
+        _clipKey = key;
+    }
 
-        if (shadowEnabled)
+    /// <summary>
+    /// Returns the shadow sprite for the shape, rebuilding it only when the device or the
+    /// resting shape changes. During the fullscreen animation the existing sprite is kept
+    /// and drawn scaled (see <see cref="DrawShadowSprite"/>).
+    /// </summary>
+    private CanvasRenderTarget EnsureShadowSprite(CanvasDevice device, Rect dest, float radius)
+    {
+        var key = ((float)dest.Width, (float)dest.Height, radius, (CanvasDevice?)device);
+        if (_cachedShadow is not null && ReferenceEquals(_shadowKey.device, device)
+            && (_fullscreenFactor > 0f || _shadowKey == key))
         {
-            // Pad all edges so the shadow blur is never clipped near a canvas edge.
-            float pad = ShadowBlurAmount + 1;
-            float rtW = (float)dest.X + (float)dest.Width + pad + Math.Max(pad, ShadowBlurAmount * 2);
-            float rtH = (float)dest.Y + (float)dest.Height + pad + Math.Max(pad, ShadowBlurAmount * 2 + ShadowOffsetY);
-            rtW = Math.Max(rtW, (float)dest.Width + pad * 2);
-            rtH = Math.Max(rtH, (float)dest.Height + pad * 2 + ShadowOffsetY);
-            _cachedShadow = Win2DUtils.CreateRenderTarget(device, rtW, rtH, 96, "webcam shadow");
+            return _cachedShadow;
+        }
 
-            using var clipGeometry = CreateClipGeometry(device, dest, radius);
+        _cachedShadow?.Dispose();
+        _cachedShadow = null;
+
+        float w = Math.Max(1f, (float)dest.Width);
+        float h = Math.Max(1f, (float)dest.Height);
+        // Whole-pixel sprite so its DIP size (96 DPI) is exactly what DrawShadowSprite maps.
+        var sprite = Win2DUtils.CreateRenderTarget(
+            device, MathF.Ceiling(w + ShadowSpritePad * 2), MathF.Ceiling(h + ShadowSpritePad * 2),
+            96, "webcam shadow");
+        try
+        {
+            var local = new Rect(ShadowSpritePad, ShadowSpritePad, w, h);
+            using var clipGeometry = CreateClipGeometry(device, local, radius);
             using var commandList = new CanvasCommandList(device);
             using (var maskSession = commandList.CreateDrawingSession())
             {
@@ -193,21 +217,57 @@ public class WebcamCompositor : IDisposable
                 ShadowColor = Windows.UI.Color.FromArgb(100, 0, 0, 0),
             };
 
-            // Render the shadow without offset — offset is applied when drawing the cache
-            using (var ds = _cachedShadow.CreateDrawingSession())
+            // Render the shadow without offset — offset is applied when drawing the sprite
+            using (var ds = sprite.CreateDrawingSession())
             {
                 ds.Clear(Windows.UI.Color.FromArgb(0, 0, 0, 0));
                 ds.DrawImage(shadowEffect);
             }
         }
+        catch
+        {
+            sprite.Dispose();
+            throw;
+        }
+
+        _cachedShadow = sprite;
+        _shadowKey = (w, h, radius, device);
+        return sprite;
+    }
+
+    /// <summary>
+    /// Draws the shadow sprite so its shape lands on <paramref name="dest"/> (shifted down by
+    /// the shadow offset). At rest the sprite matches the rect exactly and this is a 1:1 blit;
+    /// while animating it is stretched to the current rect.
+    /// </summary>
+    private void DrawShadowSprite(
+        CanvasDrawingSession session, CanvasRenderTarget sprite, Rect dest, float alpha)
+    {
+        // Scale from the shape the sprite was rendered for to the current destination.
+        double shapeW = _shadowKey.width;
+        double shapeH = _shadowKey.height;
+        if (shapeW <= 0 || shapeH <= 0) return;
+
+        var spriteSize = sprite.Size;
+        double sx = dest.Width / shapeW;
+        double sy = dest.Height / shapeH;
+        var target = new Rect(
+            dest.X - ShadowSpritePad * sx,
+            dest.Y - ShadowSpritePad * sy + ShadowOffsetY,
+            spriteSize.Width * sx,
+            spriteSize.Height * sy);
+
+        session.DrawImage(sprite, target, sprite.Bounds, alpha);
     }
 
     private void InvalidateCache()
     {
         _cachedClipGeometry?.Dispose();
         _cachedClipGeometry = null;
+        _clipKey = default;
         _cachedShadow?.Dispose();
         _cachedShadow = null;
+        _shadowKey = default;
     }
 
     /// <summary>

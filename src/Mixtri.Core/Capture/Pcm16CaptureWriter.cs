@@ -136,6 +136,34 @@ internal sealed class Pcm16CaptureWriter : IDisposable
             _scratch = new byte[required];
     }
 
+    /// <summary>
+    /// Appends <paramref name="frames"/> audio frames (one sample per channel each) of
+    /// digital silence. The output is always signed 16-bit PCM, so silence is all zeros.
+    /// </summary>
+    public void WriteSilence(long frames)
+    {
+        if (frames <= 0)
+            return;
+
+        int blockAlign = OutputFormat.BlockAlign;
+        if (blockAlign <= 0)
+            return;
+
+        long remaining = frames * blockAlign;
+        const int ChunkBytes = 64 * 1024;
+        int chunk = (int)Math.Min(remaining, ChunkBytes - (ChunkBytes % blockAlign));
+        if (chunk <= 0)
+            return;
+
+        var zeros = new byte[chunk];
+        while (remaining > 0)
+        {
+            int n = (int)Math.Min(remaining, zeros.Length);
+            _writer.Write(zeros, 0, n);
+            remaining -= n;
+        }
+    }
+
     public void Flush() => _writer.Flush();
 
     public void Dispose() => _writer.Dispose();

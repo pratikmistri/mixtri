@@ -134,24 +134,33 @@ public static class TransitionResolver
         bool ignoreExplicitConfig,
         TimeSpan? legacyDuration)
     {
-        var segments = timeline.BaseSegments.ToList();
-
-        int index = -1;
-        for (int i = 0; i < segments.Count; i++)
+        // One pass over the raw list in BaseSegments order, remembering the previous base
+        // segment. This runs every preview/export frame, so it must not materialise the base
+        // chain (BaseSegments.ToList()) per call; a cached copy is not safe either, because
+        // operations and the editor mutate Segments directly with no change notification.
+        TimelineSegment? incoming = null;
+        TimelineSegment? outgoing = null;
+        TimelineSegment? previousBase = null;
+        var all = timeline.Segments;
+        for (int i = 0; i < all.Count; i++)
         {
-            if (outputTime >= segments[i].Start && outputTime < segments[i].End)
+            var segment = all[i];
+            if (segment.TrackIndex != TimelineModel.BaseTrackIndex)
+                continue;
+
+            if (outputTime >= segment.Start && outputTime < segment.End)
             {
-                index = i;
+                incoming = segment;
+                outgoing = previousBase;
                 break;
             }
+
+            previousBase = segment;
         }
 
         // No current segment, or it's the very first one (nothing to dissolve from).
-        if (index <= 0)
+        if (incoming is null || outgoing is null)
             return TransitionResolution.None;
-
-        var incoming = segments[index];
-        var outgoing = segments[index - 1];
 
         TransitionConfig config;
         bool isLegacyFallback;

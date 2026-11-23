@@ -63,7 +63,7 @@ public sealed partial class EditorPage
     /// its pane controls (or hides the pane entirely if the overlay no longer exists), then
     /// reveals the pane. Mirrors <see cref="SyncCameraSegmentUI"/>/<see cref="ShowTextSlidePanel"/>.
     /// </summary>
-    private void SyncTextOverlayUI(string? overlayId)
+    private void SyncTextOverlayUI(string? overlayId, bool reveal = true)
     {
         if (OverlayTextBox is null) return;
 
@@ -80,107 +80,115 @@ public sealed partial class EditorPage
         BuildOverlayPresetsIfNeeded();
 
         _suppressOverlayEvents = true;
-
-        // Presets are a one-shot action, not a persisted field — clear any lingering tile
-        // selection so switching overlays (or editing controls directly) never leaves a
-        // stale preset looking selected. Guarded above/below by _suppressOverlayEvents since
-        // this re-raises OverlayPreset_SelectionChanged.
-        OverlayPresets.SelectedItem = null;
-
-        OverlayTextBox.Text = overlay.Text;
-        OverlayDurationBox.Value = overlay.Duration.TotalSeconds;
-        OverlayFontSizeBox.Value = overlay.FontSize;
-
-        OverlayBoldToggle.IsChecked = overlay.IsBold;
-        OverlayItalicToggle.IsChecked = overlay.IsItalic;
-        OverlayAlignSegmented.SelectedIndex = overlay.TextAlignment switch
+        try
         {
-            SlideTextAlignment.Left => 0,
-            SlideTextAlignment.Right => 2,
-            _ => 1,
-        };
+            // Presets are a one-shot action, not a persisted field — clear any lingering tile
+            // selection so switching overlays (or editing controls directly) never leaves a
+            // stale preset looking selected. Guarded above/below by _suppressOverlayEvents since
+            // this re-raises OverlayPreset_SelectionChanged.
+            OverlayPresets.SelectedItem = null;
 
-        SetOverlayFontSelection(overlay.FontFamily);
+            // Assigned only when different: rewriting identical text resets the caret, and
+            // a burst's own resync must never fight the keystroke that triggered it.
+            if (OverlayTextBox.Text != overlay.Text)
+                OverlayTextBox.Text = overlay.Text;
+            OverlayDurationBox.Value = overlay.Duration.TotalSeconds;
+            OverlayFontSizeBox.Value = overlay.FontSize;
 
-        var animName = overlay.Animation.ToString();
-        for (int i = 0; i < OverlayAnimationCombo.Items.Count; i++)
-        {
-            if (OverlayAnimationCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == animName)
+            OverlayBoldToggle.IsChecked = overlay.IsBold;
+            OverlayItalicToggle.IsChecked = overlay.IsItalic;
+            OverlayAlignSegmented.SelectedIndex = overlay.TextAlignment switch
             {
-                OverlayAnimationCombo.SelectedIndex = i;
-                break;
-            }
-        }
+                SlideTextAlignment.Left => 0,
+                SlideTextAlignment.Right => 2,
+                _ => 1,
+            };
 
-        UpdateSlideColorSwatch(OverlayTextColorSwatch, OverlayTextColorText, OverlayTextColorPicker, overlay.TextColor);
-        UpdateSlideColorSwatch(OverlayBgColorSwatch, OverlayBgColorText, OverlayBgColorPicker, overlay.BackgroundColor);
-        UpdateSlideColorSwatch(OverlayOutlineColorSwatch, OverlayOutlineColorText, OverlayOutlineColorPicker, overlay.OutlineColor);
-        UpdateSlideColorSwatch(OverlayAccentColorSwatch, OverlayAccentColorText, OverlayAccentColorPicker, overlay.AccentColor);
+            SetOverlayFontSelection(overlay.FontFamily);
 
-        // Anchor radios (nine-point grid) + the custom-position hint
-        bool isCustom = overlay.Anchor == TextOverlayAnchor.Custom;
-        var anchorName = overlay.Anchor.ToString();
-        foreach (var child in OverlayAnchorGrid.Children)
-        {
-            if (child is RadioButton rb)
-                rb.IsChecked = !isCustom && rb.Tag as string == anchorName;
-        }
-        OverlayCustomPositionHint.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
-
-        OverlayWidthSlider.Value = overlay.WidthFraction * 100.0;
-        PropertiesPanel.TextOverlay.OverlayHeightSlider.Value = overlay.HeightFraction * 100.0;
-        OverlayMarginSlider.Value = overlay.MarginFraction * 100.0;
-
-        var bgTypeName = overlay.Background.ToString();
-        for (int i = 0; i < OverlayBgTypeCombo.Items.Count; i++)
-        {
-            if (OverlayBgTypeCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == bgTypeName)
+            var animName = overlay.Animation.ToString();
+            for (int i = 0; i < OverlayAnimationCombo.Items.Count; i++)
             {
-                OverlayBgTypeCombo.SelectedIndex = i;
-                break;
+                if (OverlayAnimationCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == animName)
+                {
+                    OverlayAnimationCombo.SelectedIndex = i;
+                    break;
+                }
             }
-        }
 
-        OverlayBgOpacitySlider.Value = overlay.BackgroundOpacity * 100.0;
-        OverlayCornerRadiusSlider.Value = overlay.CornerRadius;
-        OverlayPaddingSlider.Value = overlay.PaddingScale * 100.0;
+            UpdateSlideColorSwatch(OverlayTextColorSwatch, OverlayTextColorText, OverlayTextColorPicker, overlay.TextColor);
+            UpdateSlideColorSwatch(OverlayBgColorSwatch, OverlayBgColorText, OverlayBgColorPicker, overlay.BackgroundColor);
+            UpdateSlideColorSwatch(OverlayOutlineColorSwatch, OverlayOutlineColorText, OverlayOutlineColorPicker, overlay.OutlineColor);
+            UpdateSlideColorSwatch(OverlayAccentColorSwatch, OverlayAccentColorText, OverlayAccentColorPicker, overlay.AccentColor);
 
-        OverlayBlurAmountSlider.Value = overlay.BlurAmount;
-        OverlayBlurTintSlider.Value = overlay.BlurTintOpacity * 100.0;
-
-        var scrimDirName = overlay.ScrimDirection.ToString();
-        for (int i = 0; i < OverlayScrimDirectionCombo.Items.Count; i++)
-        {
-            if (OverlayScrimDirectionCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == scrimDirName)
+            // Anchor radios (nine-point grid) + the custom-position hint
+            bool isCustom = overlay.Anchor == TextOverlayAnchor.Custom;
+            var anchorName = overlay.Anchor.ToString();
+            foreach (var child in OverlayAnchorGrid.Children)
             {
-                OverlayScrimDirectionCombo.SelectedIndex = i;
-                break;
+                if (child is RadioButton rb)
+                    rb.IsChecked = !isCustom && rb.Tag as string == anchorName;
             }
-        }
-        OverlayScrimStrengthSlider.Value = overlay.ScrimStrength * 100.0;
+            OverlayCustomPositionHint.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
 
-        OverlayOutlineWidthSlider.Value = overlay.OutlineWidth;
-        OverlayShadowStrengthSlider.Value = overlay.ShadowStrength * 100.0;
+            OverlayWidthSlider.Value = overlay.WidthFraction * 100.0;
+            PropertiesPanel.TextOverlay.OverlayHeightSlider.Value = overlay.HeightFraction * 100.0;
+            OverlayMarginSlider.Value = overlay.MarginFraction * 100.0;
 
-        OverlayAccentThicknessSlider.Value = overlay.AccentThickness;
-        var accentSideName = overlay.AccentSide.ToString();
-        for (int i = 0; i < OverlayAccentSideCombo.Items.Count; i++)
-        {
-            if (OverlayAccentSideCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == accentSideName)
+            var bgTypeName = overlay.Background.ToString();
+            for (int i = 0; i < OverlayBgTypeCombo.Items.Count; i++)
             {
-                OverlayAccentSideCombo.SelectedIndex = i;
-                break;
+                if (OverlayBgTypeCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == bgTypeName)
+                {
+                    OverlayBgTypeCombo.SelectedIndex = i;
+                    break;
+                }
             }
+
+            OverlayBgOpacitySlider.Value = overlay.BackgroundOpacity * 100.0;
+            OverlayCornerRadiusSlider.Value = overlay.CornerRadius;
+            OverlayPaddingSlider.Value = overlay.PaddingScale * 100.0;
+
+            OverlayBlurAmountSlider.Value = overlay.BlurAmount;
+            OverlayBlurTintSlider.Value = overlay.BlurTintOpacity * 100.0;
+
+            var scrimDirName = overlay.ScrimDirection.ToString();
+            for (int i = 0; i < OverlayScrimDirectionCombo.Items.Count; i++)
+            {
+                if (OverlayScrimDirectionCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == scrimDirName)
+                {
+                    OverlayScrimDirectionCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+            OverlayScrimStrengthSlider.Value = overlay.ScrimStrength * 100.0;
+
+            OverlayOutlineWidthSlider.Value = overlay.OutlineWidth;
+            OverlayShadowStrengthSlider.Value = overlay.ShadowStrength * 100.0;
+
+            OverlayAccentThicknessSlider.Value = overlay.AccentThickness;
+            var accentSideName = overlay.AccentSide.ToString();
+            for (int i = 0; i < OverlayAccentSideCombo.Items.Count; i++)
+            {
+                if (OverlayAccentSideCombo.Items[i] is ComboBoxItem item && item.Tag?.ToString() == accentSideName)
+                {
+                    OverlayAccentSideCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+
+            OverlayEnabledToggle.IsOn = overlay.Enabled;
+
+            UpdateOverlayBackgroundPanels(overlay.Background);
         }
-
-        OverlayEnabledToggle.IsOn = overlay.Enabled;
-
-        UpdateOverlayBackgroundPanels(overlay.Background);
-
-        _suppressOverlayEvents = false;
+        finally
+        {
+            _suppressOverlayEvents = false;
+        }
 
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.TextOverlay, true);
-        PropertiesPanel.ShowPane(PropertyPaneKind.TextOverlay);
+        if (reveal)
+            PropertiesPanel.ShowPane(PropertyPaneKind.TextOverlay);
     }
 
     /// <summary>
@@ -388,62 +396,66 @@ public sealed partial class EditorPage
         }
 
         _suppressTransitionEvents = true;
-
-        var config = incoming.InTransition;
-        string familyTag = config is null ? "Unset" : TransitionFamilyTagFor(config.Type);
-        bool hasEffect = familyTag is not ("Unset" or "None");
-
-        SelectComboItemByTag(TransitionFamilyCombo, familyTag);
-        TransitionAutomaticHint.Visibility = familyTag == "Unset" ? Visibility.Visible : Visibility.Collapsed;
-
-        TransitionVariantCombo.Visibility = hasEffect ? Visibility.Visible : Visibility.Collapsed;
-        if (hasEffect)
-            PopulateTransitionVariantCombo(familyTag, config!.Type);
-
-        // Clamp the usable maximum LIVE to half of each neighbour's current duration, exactly
-        // as TransitionResolver will clamp the actual dissolve — so the slider can never be
-        // dragged to a value that would visibly lie about what will actually play.
-        double halfIncoming = incoming.Duration.TotalSeconds / 2.0;
-        double halfOutgoing = outgoing.Duration.TotalSeconds / 2.0;
-        double clampSeconds = Math.Min(halfIncoming, halfOutgoing);
-        double effectiveMax = Math.Min(2.0, clampSeconds);
-
-        // A very short neighbouring segment (TrimSegmentEdgeOperation's own 100ms floor halves
-        // to 50ms) can push effectiveMax below what the slider's Minimum can even express.
-        // Raising Slider.Maximum back up to Minimum in that case would let the user drag to,
-        // and persist, a value the resolver will silently shorten anyway — exactly the
-        // "dial lies about what will play" bug the clamp exists to prevent. Disable the
-        // slider instead and always state the true effectiveMax in the hint, never a
-        // substituted slider maximum.
-        bool tooShortForSlider = effectiveMax < TransitionDurationSlider.Minimum;
-        double sliderMax = tooShortForSlider ? TransitionDurationSlider.Minimum : effectiveMax;
-
-        TransitionDurationSlider.Maximum = sliderMax;
-        bool isClamped = effectiveMax < 2.0;
-        TransitionDurationClampHint.Visibility = isClamped ? Visibility.Visible : Visibility.Collapsed;
-        if (tooShortForSlider)
+        try
         {
-            TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
-                "This boundary is too short for an adjustable transition — a neighbouring segment limits it to {0:0.00}s, and it will render at exactly that length regardless of the value shown above.",
-                effectiveMax);
+            var config = incoming.InTransition;
+            string familyTag = config is null ? "Unset" : TransitionFamilyTagFor(config.Type);
+            bool hasEffect = familyTag is not ("Unset" or "None");
+
+            SelectComboItemByTag(TransitionFamilyCombo, familyTag);
+            TransitionAutomaticHint.Visibility = familyTag == "Unset" ? Visibility.Visible : Visibility.Collapsed;
+
+            TransitionVariantCombo.Visibility = hasEffect ? Visibility.Visible : Visibility.Collapsed;
+            if (hasEffect)
+                PopulateTransitionVariantCombo(familyTag, config!.Type);
+
+            // Clamp the usable maximum LIVE to half of each neighbour's current duration, exactly
+            // as TransitionResolver will clamp the actual dissolve — so the slider can never be
+            // dragged to a value that would visibly lie about what will actually play.
+            double halfIncoming = incoming.Duration.TotalSeconds / 2.0;
+            double halfOutgoing = outgoing.Duration.TotalSeconds / 2.0;
+            double clampSeconds = Math.Min(halfIncoming, halfOutgoing);
+            double effectiveMax = Math.Min(2.0, clampSeconds);
+
+            // A very short neighbouring segment (TrimSegmentEdgeOperation's own 100ms floor halves
+            // to 50ms) can push effectiveMax below what the slider's Minimum can even express.
+            // Raising Slider.Maximum back up to Minimum in that case would let the user drag to,
+            // and persist, a value the resolver will silently shorten anyway — exactly the
+            // "dial lies about what will play" bug the clamp exists to prevent. Disable the
+            // slider instead and always state the true effectiveMax in the hint, never a
+            // substituted slider maximum.
+            bool tooShortForSlider = effectiveMax < TransitionDurationSlider.Minimum;
+            double sliderMax = tooShortForSlider ? TransitionDurationSlider.Minimum : effectiveMax;
+
+            TransitionDurationSlider.Maximum = sliderMax;
+            bool isClamped = effectiveMax < 2.0;
+            TransitionDurationClampHint.Visibility = isClamped ? Visibility.Visible : Visibility.Collapsed;
+            if (tooShortForSlider)
+            {
+                TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
+                    "This boundary is too short for an adjustable transition — a neighbouring segment limits it to {0:0.00}s, and it will render at exactly that length regardless of the value shown above.",
+                    effectiveMax);
+            }
+            else if (isClamped)
+            {
+                TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
+                    "Limited to {0:0.00}s by a neighbouring segment's length — dragging further will not make the dissolve any longer.",
+                    effectiveMax);
+            }
+
+            double durationSeconds = config?.Duration.TotalSeconds ?? 0.5;
+            TransitionDurationSlider.Value = Math.Clamp(durationSeconds, TransitionDurationSlider.Minimum, sliderMax);
+            TransitionDurationSlider.IsEnabled = hasEffect && !tooShortForSlider;
+
+            SelectComboItemByTag(TransitionEasingCombo, (config?.Easing ?? TransitionEasing.EaseInOut).ToString());
+            TransitionEasingCombo.IsEnabled = hasEffect;
+
+            RemoveTransitionButton.IsEnabled = config is not null;
         }
-        else if (isClamped)
+        finally
         {
-            TransitionDurationClampHint.Text = string.Format(CultureInfo.InvariantCulture,
-                "Limited to {0:0.00}s by a neighbouring segment's length — dragging further will not make the dissolve any longer.",
-                effectiveMax);
+            _suppressTransitionEvents = false;
         }
-
-        double durationSeconds = config?.Duration.TotalSeconds ?? 0.5;
-        TransitionDurationSlider.Value = Math.Clamp(durationSeconds, TransitionDurationSlider.Minimum, sliderMax);
-        TransitionDurationSlider.IsEnabled = hasEffect && !tooShortForSlider;
-
-        SelectComboItemByTag(TransitionEasingCombo, (config?.Easing ?? TransitionEasing.EaseInOut).ToString());
-        TransitionEasingCombo.IsEnabled = hasEffect;
-
-        RemoveTransitionButton.IsEnabled = config is not null;
-
-        _suppressTransitionEvents = false;
 
         PropertiesPanel.SetPaneAvailable(PropertyPaneKind.Transition, true);
         PropertiesPanel.ShowPane(PropertyPaneKind.Transition);
@@ -629,17 +641,95 @@ public sealed partial class EditorPage
         RefreshOverlayPreviewAndTimeline();
     }
 
+    // Typing burst in OverlayTextBox: the first keystroke executes ONE undoable operation
+    // (snapshotting the pre-burst overlay), whose apply reads _overlayTextBurstText so a redo
+    // lands on the burst's final text. Later keystrokes in the burst update that box and the
+    // live overlay directly — no new undo entry and no OnUndoRedoStateChanged pass per key.
+    // The burst ends after a typing pause, on focus loss / Enter, and whenever any other
+    // undo-stack change happens (see OnUndoRedoStateChanged), so no other operation's
+    // snapshot can ever interleave with a burst's live mutations.
+    private string? _overlayTextBurstId;
+    private System.Runtime.CompilerServices.StrongBox<string>? _overlayTextBurstText;
+    private bool _executingOverlayTextBurst;
+    private Debouncer? _overlayTextBurstDebouncer;
+    private const int OverlayTextBurstPauseMs = 300;
+
     private void OverlayTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_suppressOverlayEvents) return;
         if (_selectedTextOverlayId is not { } id) return;
 
         var text = OverlayTextBox.Text;
-        ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.Text = text, "Change Overlay Text"));
+        var overlay = SelectedTextOverlay();
+        if (overlay is null) return;
 
-        Timeline.InvalidateAllCanvases();
+        if (_overlayTextBurstId == id && _overlayTextBurstText is { } box)
+        {
+            if (overlay.Text == text) return;
+            box.Value = text;
+            overlay.Text = text;
+
+            // Bypasses UndoRedoManager, so the edit signal must be raised by hand (a save
+            // mid-burst would otherwise leave this keystroke looking saved).
+            ProjectService.Instance.MarkDirty();
+        }
+        else
+        {
+            EndOverlayTextBurst();
+            if (overlay.Text == text) return;
+
+            var newBox = new System.Runtime.CompilerServices.StrongBox<string>(text);
+            _executingOverlayTextBurst = true;
+            try
+            {
+                ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
+                    id, o => o.Text = newBox.Value ?? string.Empty, "Change Overlay Text"));
+            }
+            finally
+            {
+                _executingOverlayTextBurst = false;
+            }
+            _overlayTextBurstId = id;
+            _overlayTextBurstText = newBox;
+        }
+
+        _overlayTextBurstDebouncer ??= new Debouncer(EndOverlayTextBurst, OverlayTextBurstPauseMs);
+        _overlayTextBurstDebouncer.Schedule();
+        ScheduleTimelineInvalidate();
         ScheduleOverlayPreviewRefresh();
+    }
+
+    /// <summary>
+    /// Closes the current overlay typing burst, so the next keystroke opens a new undo entry.
+    /// The text is already committed (live) — nothing is lost by ending a burst.
+    /// </summary>
+    private void EndOverlayTextBurst()
+    {
+        _overlayTextBurstDebouncer?.Stop();
+        if (_overlayTextBurstId is null) return;
+        _overlayTextBurstId = null;
+        _overlayTextBurstText = null;
+    }
+
+    private void OverlayTextBox_LostFocus(object sender, RoutedEventArgs e) => EndOverlayTextBurst();
+
+    private void OverlayTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+            EndOverlayTextBurst();
+    }
+
+    // Timeline canvases repaint labels from the model text; repainting all of them on every
+    // keystroke of any text box is wasted UI-thread work, so text edits coalesce it.
+    private Debouncer? _textTimelineInvalidateDebouncer;
+
+    private void ScheduleTimelineInvalidate()
+    {
+        _textTimelineInvalidateDebouncer ??= new Debouncer(() =>
+        {
+            if (!_pageUnloaded) Timeline.InvalidateAllCanvases();
+        });
+        _textTimelineInvalidateDebouncer.Schedule();
     }
 
     private void OverlayAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1102,7 +1192,12 @@ public sealed partial class EditorPage
             .FirstOrDefault(s => s.Id == _selectedTextSlideId);
         if (slide is null) return;
         slide.Text = SlideTextBox.Text;
-        RefreshSlidePreview();
+
+        // RefreshSlidePreview's work minus the per-keystroke full timeline repaint, which is
+        // coalesced: the preview stays live, the track labels catch up after a pause.
+        ProjectService.Instance.MarkDirty();
+        ScheduleTimelineInvalidate();
+        _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }
 
     private void SlideAnimationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -2259,6 +2354,7 @@ public sealed partial class EditorPage
         SetHandleVisibility(TextEditHandleB, Visibility.Collapsed);
         SetHandleVisibility(TextEditHandleBR, Visibility.Collapsed);
         TextEditBox.Visibility = Visibility.Visible;
+        _textEditOriginalText = target.Text;
         TextEditBox.Text = target.Text;
         TextEditBox.Focus(FocusState.Programmatic);
         TextEditBox.SelectAll();
@@ -2266,10 +2362,14 @@ public sealed partial class EditorPage
         target.BeginTextEdit();
     }
 
+    // Text the in-place editor opened with, restored by CancelTextEdit (Escape).
+    private string? _textEditOriginalText;
+
     private void CommitTextEdit()
     {
         if (_editingTextId is null) return;
         _editingTextId = null;
+        _textEditOriginalText = null;
         var target = _editTarget;
         _editTarget = null;
 
@@ -2308,21 +2408,67 @@ public sealed partial class EditorPage
         // instead of staying at the height it had when editing started.
         PositionTextEditControls(target);
         target.OnLiveTextChanged();
-        Timeline.InvalidateAllCanvases();
+        ScheduleTimelineInvalidate();
     }
 
     private void TextEditBox_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        // Enter commits (Shift+Enter inserts a newline); Esc commits too.
+        // Enter commits (Shift+Enter inserts a newline); Esc discards the edit session.
         var shift = (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
             Windows.System.VirtualKey.Shift) & Windows.UI.Core.CoreVirtualKeyStates.Down)
             == Windows.UI.Core.CoreVirtualKeyStates.Down;
 
-        if ((e.Key == Windows.System.VirtualKey.Enter && !shift)
-            || e.Key == Windows.System.VirtualKey.Escape)
+        if (e.Key == Windows.System.VirtualKey.Enter && !shift)
         {
             CommitTextEdit();
             e.Handled = true;
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            CancelTextEdit();
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// Ends the in-place edit session WITHOUT committing: restores the text captured in
+    /// <see cref="EnterTextEdit"/> through the target's live (non-undoable) setter, so no
+    /// undo entry is recorded for an edit the user threw away.
+    /// </summary>
+    private void CancelTextEdit()
+    {
+        if (_editingTextId is null) return;
+        _editingTextId = null;
+        var target = _editTarget;
+        _editTarget = null;
+        var original = _textEditOriginalText ?? string.Empty;
+        _textEditOriginalText = null;
+
+        // Cleared above first: collapsing the box raises LostFocus, which must not commit.
+        TextEditBox.Visibility = Visibility.Collapsed;
+        TextEditRegion.Visibility = Visibility.Visible;
+
+        if (target is null) return;
+        target.Text = original;
+
+        if (target is SlideTextEditTarget)
+        {
+            if (SlideTextBox is not null && SlideTextBox.Text != original)
+            {
+                using (SuppressScope.Enter(ref _suppressSlideEvents))
+                    SlideTextBox.Text = original;
+            }
+            RefreshSlidePreview(); // switches drawText back on for the restored text
+        }
+        else if (target is OverlayTextEditTarget)
+        {
+            if (OverlayTextBox is not null && OverlayTextBox.Text != original)
+            {
+                using (SuppressScope.Enter(ref _suppressOverlayEvents))
+                    OverlayTextBox.Text = original;
+            }
+            Timeline.InvalidateAllCanvases();
+            RefreshOverlayPreview();
         }
     }
 

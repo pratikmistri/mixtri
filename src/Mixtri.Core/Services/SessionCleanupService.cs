@@ -321,6 +321,58 @@ public static class SessionCleanupService
     }
 
     /// <summary>
+    /// Lists <c>session_*</c> folders under <paramref name="outputFolder"/> that hold captured
+    /// JPEGs but no usable <c>video.mp4</c> — recordings interrupted by a crash, a kill or a
+    /// failed encode before finalization. Their frames are the only copy of the recording;
+    /// cleanup never deletes them, and this is how a caller can offer to recover them.
+    /// </summary>
+    /// <remarks>
+    /// Read-only. Call it when no recording is in progress: a live session also has frames
+    /// and no MP4 until it stops.
+    /// </remarks>
+    /// <returns>Full paths of recoverable session folders, oldest name first; empty on error.</returns>
+    public static IReadOnlyList<string> FindRecoverableSessions(string outputFolder)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(outputFolder) || !Directory.Exists(outputFolder))
+            return results;
+
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(outputFolder, "session_*"))
+            {
+                if (IsRecoverableSession(dir))
+                    results.Add(dir);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[SessionCleanup] Error scanning for recoverable sessions: {ex.Message}");
+        }
+
+        results.Sort(StringComparer.OrdinalIgnoreCase);
+        return results;
+    }
+
+    /// <summary>
+    /// True when <paramref name="sessionFolder"/> has captured frames but no valid MP4.
+    /// </summary>
+    internal static bool IsRecoverableSession(string sessionFolder)
+    {
+        try
+        {
+            if (HasValidVideo(sessionFolder))
+                return false;
+
+            return RecordingSession.CapturedFramesRemain(Path.Combine(sessionFolder, FramesDir));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Calculates total reclaimable space from sessions that still have a <c>.frames/</c>
     /// directory alongside a finalized MP4.
     /// </summary>

@@ -24,8 +24,12 @@ public class TextSlideRenderer : IDisposable
     private bool _disposed;
 
     // Image background cache
+    // Guarded by _bgLock, including the draw: a warm/preload finishing on the thread pool
+    // swaps the bitmap under the lock and disposes the old one only after releasing it.
+    private readonly object _bgLock = new();
     private CanvasBitmap? _bgImage;
     private string? _bgImagePath;
+    private string? _bgWarmPath;
     private CanvasRenderTarget? _flowNoiseA;
     private CanvasRenderTarget? _flowNoiseB;
 
@@ -34,6 +38,11 @@ public class TextSlideRenderer : IDisposable
     // (size, colours, angle) and reused across every frame of the slide.
     private CanvasRenderTarget? _gradientCache;
     private (int W, int H, string Start, string End, double Angle) _gradientKey;
+
+    // OrganicWave noise fields, cached per output size (see EnsureWaveNoise).
+    private CanvasRenderTarget? _waveNoiseA;
+    private CanvasRenderTarget? _waveNoiseB;
+    private (int W, int H) _waveNoiseKey;
 
     public TextSlideRenderer(CanvasDevice? device = null)
     {
@@ -220,23 +229,11 @@ public class TextSlideRenderer : IDisposable
             ExtendY = CanvasEdgeBehavior.Clamp,
         };
 
-        // Two fractal-noise fields at different frequencies/seeds.
-        using var noiseA = new TurbulenceEffect
-        {
-            Frequency = new Vector2(0.006f, 0.009f),
-            Octaves = 3,
-            Size = new Vector2(width, height),
-            Seed = 1,
-            Noise = TurbulenceEffectNoise.FractalSum,
-        };
-        using var noiseB = new TurbulenceEffect
-        {
-            Frequency = new Vector2(0.010f, 0.007f),
-            Octaves = 3,
-            Size = new Vector2(width, height),
-            Seed = 37,
-            Noise = TurbulenceEffectNoise.FractalSum,
-        };
+        // Two fractal-noise fields at different frequencies/seeds, materialized once per
+        // output size into bounded textures (see EnsureWaveNoise) instead of evaluating two
+        // full-resolution 3-octave turbulences on every frame.
+        var (noiseA, noiseB, noiseScale) = EnsureWaveNoise(width, height);
+        var unscale = Matrix3x2.CreateScale(1f / noiseScale);
 
         // Drift each field along an opposing circular path at a different rate. The
         // circular (sin/cos) paths never settle into a constant direction, so the
@@ -244,14 +241,16 @@ public class TextSlideRenderer : IDisposable
         using var driftA = new Transform2DEffect
         {
             Source = noiseA,
-            TransformMatrix = Matrix3x2.CreateTranslation(
+            TransformMatrix = unscale * Matrix3x2.CreateTranslation(
                 MathF.Sin(t * 0.55f) * 110f, MathF.Cos(t * 0.42f) * 110f),
+            BorderMode = EffectBorderMode.Hard,
         };
         using var driftB = new Transform2DEffect
         {
             Source = noiseB,
-            TransformMatrix = Matrix3x2.CreateTranslation(
+            TransformMatrix = unscale * Matrix3x2.CreateTranslation(
                 MathF.Cos(t * 0.37f) * -95f, MathF.Sin(t * 0.48f) * 95f),
+            BorderMode = EffectBorderMode.Hard,
         };
 
         // Average the two fields → an evolving, turbulent displacement map centered
@@ -280,39 +279,206 @@ public class TextSlideRenderer : IDisposable
         ds.DrawImage(displaced, new Rect(0, 0, width, height), new Rect(0, 0, width, height));
     }
 
+    /// <summary>Longest side of the cached OrganicWave noise textures.</summary>
+    private const int WaveNoiseMaxSide = 768;
+
+    /// <summary>
+    /// Returns the two OrganicWave noise fields for a <paramref name="width"/>×
+    /// <paramref name="height"/> slide, rendered once and cached until the size or device
+    /// changes, plus the texture-to-output scale they were rendered at.
+    /// </summary>
+    /// <remarks>
+    /// The fields are exactly the turbulences the per-frame path used to evaluate
+    /// (same frequencies in OUTPUT pixels, same seeds, same Size) downsampled into a
+    /// texture whose long side is at most <see cref="WaveNoiseMaxSide"/>. They are smooth
+    /// (shortest octave period ≈40 output px), so the bounded texture keeps the shape of
+    /// the wave; the per-frame cost drops to two scaled texture reads.
+    /// </remarks>
+    private (CanvasRenderTarget A, CanvasRenderTarget B, float Scale) EnsureWaveNoise(int width, int height)
+    {
+        float scale = Math.Min(1f, (float)WaveNoiseMaxSide / Math.Max(width, height));
+        var key = (width, height);
+        if (_waveNoiseA is not null && _waveNoiseB is not null
+            && _waveNoiseA.Device == _device && _waveNoiseKey == key)
+        {
+            return (_waveNoiseA, _waveNoiseB, scale);
+        }
+
+        CanvasRenderTarget? nextA = null, nextB = null;
+        try
+        {
+            nextA = CreateWaveNoise(new Vector2(0.006f, 0.009f), 1, width, height, scale);
+            nextB = CreateWaveNoise(new Vector2(0.010f, 0.007f), 37, width, height, scale);
+        }
+        catch
+        {
+            nextA?.Dispose(); nextB?.Dispose();
+            throw;
+        }
+
+        _waveNoiseA?.Dispose();
+        _waveNoiseB?.Dispose();
+        _waveNoiseA = nextA;
+        _waveNoiseB = nextB;
+        _waveNoiseKey = key;
+        return (nextA, nextB, scale);
+    }
+
+    private CanvasRenderTarget CreateWaveNoise(
+        Vector2 frequency, int seed, int width, int height, float scale)
+    {
+        var target = Win2DUtils.CreateRenderTarget(
+            _device,
+            Math.Max(1, (int)MathF.Ceiling(width * scale)),
+            Math.Max(1, (int)MathF.Ceiling(height * scale)),
+            96, "text slide wave field");
+        try
+        {
+            using var ds = target.CreateDrawingSession();
+            ds.Clear(Color.FromArgb(0, 0, 0, 0));
+            using var noise = new TurbulenceEffect
+            {
+                Frequency = frequency,
+                Octaves = 3,
+                Size = new Vector2(width, height),
+                Seed = seed,
+                Noise = TurbulenceEffectNoise.FractalSum,
+            };
+            using var downscale = new Transform2DEffect
+            {
+                Source = noise,
+                TransformMatrix = Matrix3x2.CreateScale(scale),
+                InterpolationMode = CanvasImageInterpolation.HighQualityCubic,
+                BorderMode = EffectBorderMode.Hard,
+            };
+            ds.DrawImage(downscale);
+            return target;
+        }
+        catch { target.Dispose(); throw; }
+    }
+
     private void DrawImageBackground(
         CanvasDrawingSession ds, TextSlideSegment slide, double progress, int width, int height)
     {
         var path = TitleSlideImages.Resolve(slide.BackgroundImagePath);
-        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        if (string.IsNullOrEmpty(path))
         {
             ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
             return;
         }
 
-        if (_bgImage is null || _bgImagePath != path || _bgImage.Device != ds.Device)
+        // Draw under the lock so a warm completing on the thread pool can never dispose
+        // the bitmap out from under this frame (the swap takes the same lock and disposes
+        // the old bitmap only after releasing it).
+        lock (_bgLock)
         {
-            _bgImage?.Dispose();
-            _bgImage = null;
-            _bgImagePath = null;
-            try
+            if (_bgImage is not null && _bgImagePath == path && _bgImage.Device == ds.Device)
             {
-                // Synchronous fallback. The UI/preview path pre-warms this cache via
-                // EnsureBackgroundLoadedAsync so this branch is only reached on the
-                // off-UI export thread (where blocking is acceptable).
-                _bgImage = CanvasBitmap.LoadAsync(ds.Device, path)
-                    .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
-                _bgImagePath = path;
-            }
-            catch (Exception ex)
-            {
-                if (_device.IsDeviceLost(ex.HResult)) throw;
-                ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+                DrawFlowingImage(ds, _bgImage, slide, progress, width, height);
                 return;
             }
         }
 
-        DrawFlowingImage(ds, _bgImage!, slide, progress, width, height);
+        if (!File.Exists(path))
+        {
+            ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+            return;
+        }
+
+        // A thread with a SynchronizationContext may be the UI dispatcher: never block it
+        // on file I/O + GPU decode. Draw the solid fallback and warm the cache so a later
+        // frame picks the image up. The preview path normally pre-warms through
+        // EnsureBackgroundLoadedAsync, so this is only a cold-cache safety net.
+        if (SynchronizationContext.Current is not null)
+        {
+            ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+            RequestBackgroundWarm(path);
+            return;
+        }
+
+        // Synchronous load, reached only off the UI thread (export), where blocking is
+        // acceptable and the frame must show the image deterministically.
+        CanvasBitmap loaded;
+        try
+        {
+            loaded = CanvasBitmap.LoadAsync(ds.Device, path)
+                .AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            if (_device.IsDeviceLost(ex.HResult)) throw;
+            ds.Clear(AnimatedTextEngine.ParseColor(slide.BackgroundColor));
+            return;
+        }
+
+        CanvasBitmap? stale;
+        lock (_bgLock)
+        {
+            if (_disposed)
+            {
+                stale = loaded;
+            }
+            else
+            {
+                stale = SwapBackground(loaded, path);
+                DrawFlowingImage(ds, loaded, slide, progress, width, height);
+            }
+        }
+        stale?.Dispose();
+    }
+
+    /// <summary>
+    /// Publishes <paramref name="loaded"/> as the cached background and returns the bitmap
+    /// it replaced, which the caller disposes AFTER releasing <see cref="_bgLock"/>.
+    /// Must be called under <see cref="_bgLock"/>.
+    /// </summary>
+    private CanvasBitmap? SwapBackground(CanvasBitmap loaded, string path)
+    {
+        var stale = _bgImage;
+        _bgImage = loaded;
+        _bgImagePath = path;
+        return ReferenceEquals(stale, loaded) ? null : stale;
+    }
+
+    /// <summary>
+    /// Fire-and-forget warm after a render-path cache miss, deduplicated per path so a
+    /// cold cache does not start one decode per frame.
+    /// </summary>
+    private void RequestBackgroundWarm(string path)
+    {
+        lock (_bgLock)
+        {
+            if (_disposed || _bgWarmPath == path) return;
+            _bgWarmPath = path;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var loaded = await CanvasBitmap.LoadAsync(_device, path).AsTask().ConfigureAwait(false);
+                CanvasBitmap? stale;
+                lock (_bgLock)
+                {
+                    stale = _disposed ? loaded : SwapBackground(loaded, path);
+                }
+                stale?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: the solid fallback already covers the frame. A lost device is
+                // surfaced by the next render's own GPU work rather than an unobserved task.
+                Mixtri.Core.Diagnostics.DiagLog.Write(
+                    "TextSlideRenderer", $"background warm failed for '{path}': {ex.Message}");
+            }
+            finally
+            {
+                lock (_bgLock)
+                {
+                    if (_bgWarmPath == path) _bgWarmPath = null;
+                }
+            }
+        });
     }
 
     /// <summary>
@@ -334,15 +500,21 @@ public class TextSlideRenderer : IDisposable
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
             return;
 
-        if (_bgImage is not null && _bgImagePath == path && _bgImage.Device == _device)
-            return;
+        lock (_bgLock)
+        {
+            if (_bgImage is not null && _bgImagePath == path && _bgImage.Device == _device)
+                return;
+        }
 
         try
         {
             var loaded = await CanvasBitmap.LoadAsync(_device, path).AsTask().ConfigureAwait(false);
-            _bgImage?.Dispose();
-            _bgImage = loaded;
-            _bgImagePath = path;
+            CanvasBitmap? stale;
+            lock (_bgLock)
+            {
+                stale = _disposed ? loaded : SwapBackground(loaded, path);
+            }
+            stale?.Dispose();
         }
         catch (Exception ex)
         {
@@ -469,11 +641,20 @@ public class TextSlideRenderer : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
-        _bgImage?.Dispose();
+        CanvasBitmap? bgImage;
+        lock (_bgLock)
+        {
+            _disposed = true;
+            bgImage = _bgImage;
+            _bgImage = null;
+            _bgImagePath = null;
+        }
+        bgImage?.Dispose();
         _flowNoiseA?.Dispose();
         _flowNoiseB?.Dispose();
         _gradientCache?.Dispose();
+        _waveNoiseA?.Dispose();
+        _waveNoiseB?.Dispose();
         // The engine owns a cached scratch render target for its blurred-text passes,
         // so it has to be released with the renderer that created it.
         _textEngine.Dispose();

@@ -104,6 +104,7 @@
                  gets the same stacked layout as the rest of the rail. -->
             <NavigationView.FooterMenuItems>
                 <NavigationViewItem
+                    x:Name="SettingsNavItem"
                     Tag="settings"
                     Content="Settings"
                     ToolTipService.ToolTip="App settings">

@@ -192,8 +192,8 @@ public class DetachSegmentAudioOperation : SegmentEditOperationBase
         foreach (var track in _created)
             model.AudioTracks.RemoveAll(t => t.Id == track.Id);
 
-        if (_index >= 0 && _index < model.Segments.Count
-            && model.Segments[_index] is VideoSegment video)
+        int index = ResolveSegmentIndex(model, _segmentId, _index);
+        if (index >= 0 && model.Segments[index] is VideoSegment video)
         {
             video.AudioMode = _previousMode;
         }
@@ -263,8 +263,8 @@ public class ReattachSegmentAudioOperation : SegmentEditOperationBase
         model.AudioTracks.AddRange(_removed);
         AudioTrackEditing.Sort(model.AudioTracks);
 
-        if (_index >= 0 && _index < model.Segments.Count
-            && model.Segments[_index] is VideoSegment video)
+        int index = ResolveSegmentIndex(model, _segmentId, _index);
+        if (index >= 0 && model.Segments[index] is VideoSegment video)
         {
             video.AudioMode = _previousMode;
         }

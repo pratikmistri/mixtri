@@ -369,6 +369,10 @@ public sealed partial class TimelineControl : UserControl
         Loaded += (_, _) => UpdatePlayheadVisual();
         TimeRulerCanvas.SizeChanged += (_, _) => UpdatePlayheadVisual();
 
+        // Frame nudging while the timeline has focus. Home/End/Space/Delete are page-level
+        // KeyboardAccelerators (EditorPage.Shortcuts) and are deliberately NOT handled here.
+        KeyDown += TimelineControl_KeyDown;
+
         // The chip hover machinery owns a DispatcherTimer and a native text format; neither is
         // tied to a canvas's own lifetime, so they are released explicitly when the control
         // leaves the tree (e.g. navigating away from the editor mid-hover) rather than left
@@ -390,8 +394,25 @@ public sealed partial class TimelineControl : UserControl
             _hintLaneArmed = false;
             _hintLaneLatched = false;
 
+            // A gesture cannot survive the control leaving the tree: drop every drag family's
+            // transient state and any capture still held, so a reload starts from rest instead
+            // of a latched drag (or a hint-lane height) with no pointer behind it.
+            ResetDragState();
+            ReleaseAllPointerCaptures();
+            UpdateVideoTrackHeight();
+
             // Holds one float[] per visible segment; nothing else releases it.
             _cursorRibbonCache.Clear();
+
+            // Device-independent DirectWrite formats and the per-model layout caches; both
+            // are rebuilt lazily if the control is loaded again.
+            DisposeCachedTextFormats();
+            InvalidateLayoutCaches();
+
+            // NOTE: CanvasControl.RemoveFromVisualTree() is deliberately NOT called here.
+            // Unloaded does not prove the control is gone for good (it can be re-parented or
+            // its page re-shown), and a canvas that has been removed from the visual tree can
+            // never draw again.
         };
     }
 
@@ -633,6 +654,12 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     public void InvalidateAllCanvases()
     {
+        // Every model edit reaches the tracks through here (Refresh, the gesture ends, the
+        // host's direct calls), so this is where the derived layout caches are retired and
+        // selections / drags pointing at ids the edit removed are dropped.
+        _modelRevision++;
+        PruneStaleSelectionsAndDrags();
+
         UpdateTrackVisibility();
 
         TimeRulerCanvas?.Invalidate();
@@ -1271,7 +1298,20 @@ public sealed partial class TimelineControl : UserControl
     private static void OnModelChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TimelineControl control)
+        {
+            // A drag measured against the previous model's geometry cannot be committed
+            // against a different one — abandon it outright rather than waiting for the
+            // per-id prune to notice.
+            if (!ReferenceEquals(e.OldValue, e.NewValue) && control._dragMode != DragMode.None)
+            {
+                control.ResetDragState();
+                control.ReleaseAllPointerCaptures();
+                control.SyncHintLaneReveal(animate: false);
+            }
+
+            control.InvalidateLayoutCaches();
             control.InvalidateAll();
+        }
     }
 
     private static void OnPlayheadPositionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -1286,8 +1326,51 @@ public sealed partial class TimelineControl : UserControl
             // Repainting every CanvasControl here re-rendered filmstrips, waveforms and the
             // cursor path on every frame. Track redraws stay wired to their real triggers
             // (model, zoom/scroll, selection, thumbnails, waveforms, theme and edits).
-            control.UpdatePlayheadVisual();
+            // The one exception is a page flip when the playhead runs off the zoomed viewport.
+            if (!control.FollowPlayhead((TimeSpan)e.NewValue))
+                control.UpdatePlayheadVisual();
         }
+    }
+
+    /// <summary>
+    /// Pages the horizontal scroll so <paramref name="playhead"/> stays on screen when it is
+    /// moved programmatically (playback, seeks, keyboard nudges) beyond the zoomed viewport.
+    /// Returns true when it scrolled (and therefore already repainted and re-placed the
+    /// playhead overlay).
+    /// </summary>
+    /// <remarks>
+    /// Never while a pointer gesture is in flight: a scrub or drag owns the viewport, and
+    /// paging under a live pointer would move everything it is measuring against. Visibility
+    /// is judged in pixels against the ruler canvas rather than in seconds, so a click in the
+    /// few-pixel content inset at either edge (which XToTime maps just outside the scroll
+    /// window) does not count as "off screen".
+    /// </remarks>
+    private bool FollowPlayhead(TimeSpan playhead)
+    {
+        if (_dragMode != DragMode.None) return false;
+        var model = Model;
+        if (model is null || TimeRulerCanvas is null) return false;
+
+        double viewportWidth = TimeRulerCanvas.ActualWidth;
+        if (viewportWidth <= 0) return false;
+
+        double maxScroll = TimeCoordinateConverter.MaxScrollOffset(model);
+        if (maxScroll <= 0) return false; // fit-to-width or zoomed out: everything is visible
+
+        double x = TimeToX(playhead);
+        if (double.IsNaN(x) || (x >= 0 && x <= viewportWidth)) return false;
+
+        double span = TimeCoordinateConverter.VisibleSpanSeconds(model);
+        double t = playhead.TotalSeconds;
+        // Forward runs (playback) land the playhead at the left edge of the next page; a jump
+        // backwards lands it near the right edge so the context leading up to it is visible.
+        double target = x > viewportWidth ? t : t - span * 0.9;
+        double clamped = TimeCoordinateConverter.ClampScrollOffset(model, target);
+        if (Math.Abs(clamped - model.ScrollOffset) < 1e-9) return false;
+
+        model.ScrollOffset = clamped;
+        InvalidateAll();
+        return true;
     }
 
     // --- Coordinate helpers ---
@@ -1386,7 +1469,10 @@ public sealed partial class TimelineControl : UserControl
         if (double.IsNaN(_playheadVisualX) || Math.Abs(_playheadVisualX - offsetX) >= PlayheadOffsetEpsilon)
         {
             _playheadVisualX = offsetX;
-            PlayheadLine.Margin = new Thickness(offsetX, 0, 0, 0);
+            // A render-only translation rather than a Margin: moving the Margin on every
+            // playback tick invalidated layout (measure/arrange of the whole grid) each frame.
+            // The Margin stays at its XAML value of 0, so the translation IS the offset.
+            PlayheadLine.Translation = new Vector3((float)offsetX, 0, 0);
         }
 
         if (PlayheadLine.Visibility != Visibility.Visible)
@@ -1450,13 +1536,76 @@ public sealed partial class TimelineControl : UserControl
             ds.DrawLine(x, h * 0.4f, x, h, RulerTickColor);
 
             string label = FormatTime(TimeSpan.FromSeconds(t));
-            ds.DrawText(label, x + 3, 1, RulerTextColor,
-                new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 11,
-                    FontFamily = "Segoe UI"
-                });
+            ds.DrawText(label, x + 3, 1, RulerTextColor, Regular11TextFormat);
         }
+    }
+
+    // ── Cached text formats ──
+    // CanvasTextFormat is a DirectWrite object, independent of the Win2D device, so one
+    // instance per style can be reused for every draw (and survives a device loss). They used
+    // to be allocated per label per draw and never disposed. Released in Unloaded and
+    // recreated lazily on next use.
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _regular11TextFormat;
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _semiBold11TextFormat;
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _semiBold12TextFormat;
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _semiBold10TextFormat;
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _speedBadgeTextFormat;
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat Regular11TextFormat =>
+        _regular11TextFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 11,
+            FontFamily = "Segoe UI",
+        };
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat SemiBold11TextFormat =>
+        _semiBold11TextFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 11,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat SemiBold12TextFormat =>
+        _semiBold12TextFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 12,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat SemiBold10TextFormat =>
+        _semiBold10TextFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 10,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat SpeedBadgeTextFormat =>
+        _speedBadgeTextFormat ??= new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = 10,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
+            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+        };
+
+    private void DisposeCachedTextFormats()
+    {
+        _regular11TextFormat?.Dispose();
+        _regular11TextFormat = null;
+        _semiBold11TextFormat?.Dispose();
+        _semiBold11TextFormat = null;
+        _semiBold12TextFormat?.Dispose();
+        _semiBold12TextFormat = null;
+        _semiBold10TextFormat?.Dispose();
+        _semiBold10TextFormat = null;
+        _speedBadgeTextFormat?.Dispose();
+        _speedBadgeTextFormat = null;
     }
 
     private static double ChooseTickInterval(double pixelsPerSecond)
@@ -1762,13 +1911,7 @@ public sealed partial class TimelineControl : UserControl
                 }
 
                 string speedLabel = $"{clip.SpeedFactor:0.##}x";
-                ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 12,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-                    });
+                ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor, SemiBold12TextFormat);
             }
         }
 
@@ -1815,13 +1958,7 @@ public sealed partial class TimelineControl : UserControl
             ds.FillGeometry(segGeom, segColor);
 
             string speedLabel = $"{seg.Speed:0.##}x";
-            ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor,
-                new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 12,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-                });
+            ds.DrawText(speedLabel, x1 + 4, h / 2 - 7, SpeedLabelTextColor, SemiBold12TextFormat);
         }
 
         // Trim handles
@@ -1914,12 +2051,7 @@ public sealed partial class TimelineControl : UserControl
                     $"V{track}",
                     6, rowY + 3,
                     TrackHintTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 10,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                    SemiBold10TextFormat);
             }
         }
 
@@ -2079,15 +2211,7 @@ public sealed partial class TimelineControl : UserControl
             label,
             new Rect(badgeX + 6f + iconSize, badgeY, textW, badgeH),
             SpeedBadgeForegroundColor,
-            new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-            {
-                FontSize = 10,
-                FontFamily = "Segoe UI",
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Left,
-                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-            });
+            SpeedBadgeTextFormat);
     }
 
     /// <summary>
@@ -2317,6 +2441,9 @@ public sealed partial class TimelineControl : UserControl
         DragMode.ZoomSegmentRightEdge or
         DragMode.ZoomSegmentCreate;
 
+    /// <summary>The three bands of a track group, top to bottom; shared so hover hit-tests don't allocate.</summary>
+    private static readonly TrackBand[] TrackBandsTopDown = [TrackBand.Video, TrackBand.Zoom, TrackBand.Cursor];
+
     /// <summary>
     /// Resolves which band of which track the pointer is over. Returns null for the hint lane,
     /// which has no zoom or cursor band to address.
@@ -2329,7 +2456,7 @@ public sealed partial class TimelineControl : UserControl
         if (HintLaneVisible && y < HintLaneBandHeight)
             return null;
 
-        foreach (var band in new[] { TrackBand.Video, TrackBand.Zoom, TrackBand.Cursor })
+        foreach (var band in TrackBandsTopDown)
         {
             var (bandY, bandH) = TrackBandBounds(track, trackCount, band);
             if (bandH > 0 && y >= bandY && y < bandY + bandH)
@@ -2949,6 +3076,7 @@ public sealed partial class TimelineControl : UserControl
     {
         _hoveredTransitionChipId = null;
         HideTransitionChipToolTip();
+        Track_PointerExited(sender, e);
     }
 
 
@@ -3314,6 +3442,175 @@ public sealed partial class TimelineControl : UserControl
         return map;
     }
 
+    // ── Per-model derived layout caches ──
+    //
+    // The video canvas repaints on every hover, selection change and drag sample, and each
+    // repaint used to re-sort every zoom keyframe, rebuild the keyframe → band map
+    // (O(keyframes × segments)), re-run TimelineModel.CoveredRanges for every segment and
+    // re-project every cursor anchor — all pure functions of the model. They are cached here
+    // and retired whenever the model could have changed:
+    //   • _modelRevision is bumped by InvalidateAllCanvases (Refresh, every gesture end, and
+    //     every host call after an edit) and by OnModelChanged;
+    //   • as a backstop against a host path that mutates the model and only repaints, the
+    //     cache also keeps a cheap structural snapshot (segment refs + Start/Duration/Track,
+    //     keyframe and anchor refs — those records are init-only, so an edit replaces the
+    //     instance) and rebuilds when it no longer matches.
+    // Anything X-dependent (anchor positions) is additionally keyed on zoom/scroll/width.
+
+    private int _modelRevision;
+    private int _layoutGeneration;
+    private TimelineModel? _layoutSnapshotModel;
+    private int _layoutSnapshotRevision = -1;
+    private string? _layoutSnapshotPrimaryPath;
+    private (TimelineSegment Segment, TimeSpan Start, TimeSpan Duration, int TrackIndex)[] _layoutSnapshotSegments = [];
+    private ZoomKeyframe[] _layoutSnapshotKeyframes = [];
+    private CursorAnchor[] _layoutSnapshotAnchors = [];
+
+    private List<ZoomKeyframe>? _sortedZoomKeyframesCache;
+    private Dictionary<int, List<ZoomKeyframe>>? _zoomKeyframesByBandCache;
+    private List<(string SegmentId, int TrackIndex, IReadOnlyList<(TimeSpan Start, TimeSpan End)> Ranges)>? _coveredRangesCache;
+    private List<(CursorAnchor Anchor, int TrackIndex, string? SegmentId, double X)>? _anchorPositionsCache;
+    private (int Generation, double Zoom, double Scroll, double RulerWidth, double ControlWidth) _anchorPositionsKey;
+
+    /// <summary>Drops every derived layout cache; the next draw / hit-test rebuilds them.</summary>
+    private void InvalidateLayoutCaches()
+    {
+        _layoutSnapshotModel = null;
+        _layoutSnapshotRevision = -1;
+        _layoutSnapshotPrimaryPath = null;
+        _layoutSnapshotSegments = [];
+        _layoutSnapshotKeyframes = [];
+        _layoutSnapshotAnchors = [];
+        _sortedZoomKeyframesCache = null;
+        _zoomKeyframesByBandCache = null;
+        _coveredRangesCache = null;
+        _anchorPositionsCache = null;
+        _layoutGeneration++;
+    }
+
+    private bool LayoutSnapshotMatches(TimelineModel model)
+    {
+        if (!ReferenceEquals(_layoutSnapshotModel, model) || _layoutSnapshotRevision != _modelRevision)
+            return false;
+        if (!string.Equals(_layoutSnapshotPrimaryPath, model.PrimaryVideoFilePath, StringComparison.Ordinal))
+            return false;
+
+        var segments = model.Segments;
+        if (segments.Count != _layoutSnapshotSegments.Length) return false;
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            var snap = _layoutSnapshotSegments[i];
+            if (!ReferenceEquals(seg, snap.Segment) || seg.Start != snap.Start ||
+                seg.Duration != snap.Duration || seg.TrackIndex != snap.TrackIndex)
+                return false;
+        }
+
+        var keyframes = model.ZoomKeyframes;
+        if (keyframes.Count != _layoutSnapshotKeyframes.Length) return false;
+        for (int i = 0; i < keyframes.Count; i++)
+            if (!ReferenceEquals(keyframes[i], _layoutSnapshotKeyframes[i])) return false;
+
+        var anchors = model.CursorAnchors;
+        if (anchors.Count != _layoutSnapshotAnchors.Length) return false;
+        for (int i = 0; i < anchors.Count; i++)
+            if (!ReferenceEquals(anchors[i], _layoutSnapshotAnchors[i])) return false;
+
+        return true;
+    }
+
+    private void EnsureLayoutCachesCurrent(TimelineModel model)
+    {
+        if (LayoutSnapshotMatches(model)) return;
+
+        InvalidateLayoutCaches();
+        _layoutSnapshotModel = model;
+        _layoutSnapshotRevision = _modelRevision;
+        _layoutSnapshotPrimaryPath = model.PrimaryVideoFilePath;
+
+        var segments = new (TimelineSegment, TimeSpan, TimeSpan, int)[model.Segments.Count];
+        for (int i = 0; i < segments.Length; i++)
+        {
+            var seg = model.Segments[i];
+            segments[i] = (seg, seg.Start, seg.Duration, seg.TrackIndex);
+        }
+        _layoutSnapshotSegments = segments;
+        _layoutSnapshotKeyframes = [.. model.ZoomKeyframes];
+        _layoutSnapshotAnchors = [.. model.CursorAnchors];
+    }
+
+    /// <summary>Every zoom keyframe in draw order (Timestamp, then Start). Do not mutate.</summary>
+    private List<ZoomKeyframe> SortedZoomKeyframes(TimelineModel model)
+    {
+        EnsureLayoutCachesCurrent(model);
+        return _sortedZoomKeyframesCache ??= model.ZoomKeyframes
+            .OrderBy(k => k.Timestamp)
+            .ThenBy(k => k.Start)
+            .ToList();
+    }
+
+    private static readonly List<ZoomKeyframe> NoZoomKeyframes = [];
+
+    /// <summary>
+    /// The keyframes drawn in <paramref name="trackIndex"/>'s zoom band, in draw order.
+    /// Do not mutate.
+    /// </summary>
+    private List<ZoomKeyframe> ZoomKeyframesForBand(TimelineModel model, int trackIndex)
+    {
+        EnsureLayoutCachesCurrent(model);
+        if (_zoomKeyframesByBandCache is null)
+        {
+            var sorted = SortedZoomKeyframes(model);
+            var bandByKeyframe = BuildZoomBandTrackMap(sorted);
+            var byBand = new Dictionary<int, List<ZoomKeyframe>>();
+            foreach (var kf in sorted)
+            {
+                if (!bandByKeyframe.TryGetValue(kf.Id, out int band)) continue;
+                if (!byBand.TryGetValue(band, out var list))
+                    byBand[band] = list = [];
+                list.Add(kf);
+            }
+            _zoomKeyframesByBandCache = byBand;
+        }
+
+        return _zoomKeyframesByBandCache.TryGetValue(trackIndex, out var mine) ? mine : NoZoomKeyframes;
+    }
+
+    /// <summary>Covered ranges of every segment that has any, from <see cref="TimelineModel.CoveredRanges"/>.</summary>
+    private List<(string SegmentId, int TrackIndex, IReadOnlyList<(TimeSpan Start, TimeSpan End)> Ranges)> CoveredRangesBySegment(TimelineModel model)
+    {
+        EnsureLayoutCachesCurrent(model);
+        if (_coveredRangesCache is null)
+        {
+            var list = new List<(string, int, IReadOnlyList<(TimeSpan Start, TimeSpan End)>)>();
+            foreach (var segment in model.Segments)
+            {
+                var covered = model.CoveredRanges(segment);
+                if (covered.Count > 0)
+                    list.Add((segment.Id, segment.TrackIndex, covered));
+            }
+            _coveredRangesCache = list;
+        }
+        return _coveredRangesCache;
+    }
+
+    /// <summary>
+    /// Cached <see cref="EnumerateCursorAnchorPositions"/>, keyed additionally on the X mapping
+    /// (zoom, scroll and widths) since the positions are pixels.
+    /// </summary>
+    private List<(CursorAnchor Anchor, int TrackIndex, string? SegmentId, double X)> CursorAnchorPositions(TimelineModel model)
+    {
+        EnsureLayoutCachesCurrent(model);
+        var key = (_layoutGeneration, model.ZoomLevel, model.ScrollOffset,
+            TimeRulerCanvas?.ActualWidth ?? 0, ActualWidth);
+        if (_anchorPositionsCache is null || _anchorPositionsKey != key)
+        {
+            _anchorPositionsCache = EnumerateCursorAnchorPositions(model).ToList();
+            _anchorPositionsKey = key;
+        }
+        return _anchorPositionsCache;
+    }
+
     /// <summary>
     /// Dims the stretches of each track group that a higher track covers. The top-most track
     /// at any instant is the one the finished video shows, so a covered stretch of a lower
@@ -3338,16 +3635,13 @@ public sealed partial class TimelineControl : UserControl
 
         int trackCount = VideoDisplayTrackCount(model);
 
-        foreach (var segment in model.Segments)
+        foreach (var (segmentId, segmentTrack, covered) in CoveredRangesBySegment(model))
         {
             // A segment being dragged is drawn at the pointer, not at its committed time, so a
             // scrim computed from the model would sit somewhere the block no longer is.
-            if (segment.Id == _draggedSegmentId) continue;
+            if (segmentId == _draggedSegmentId) continue;
 
-            var covered = model.CoveredRanges(segment);
-            if (covered.Count == 0) continue;
-
-            var (groupY, groupH) = TrackGroupBounds(segment.TrackIndex, trackCount);
+            var (groupY, groupH) = TrackGroupBounds(segmentTrack, trackCount);
             if (groupH <= 0) continue;
 
             foreach (var (start, end) in covered)
@@ -3371,13 +3665,6 @@ public sealed partial class TimelineControl : UserControl
         int trackCount = VideoDisplayTrackCount(model);
         int realCount = Math.Max(1, HintLaneVisible ? trackCount - 1 : trackCount);
 
-        var sorted = model.ZoomKeyframes
-            .OrderBy(k => k.Timestamp)
-            .ThenBy(k => k.Start)
-            .ToList();
-
-        var bandByKeyframe = BuildZoomBandTrackMap(sorted);
-
         for (int track = 0; track < realCount; track++)
         {
             var (bandY, bandH) = TrackBandBounds(track, trackCount, TrackBand.Zoom);
@@ -3385,7 +3672,8 @@ public sealed partial class TimelineControl : UserControl
 
             ds.FillRectangle(0, bandY, w, bandH, ZoomTrackBackground);
 
-            var mine = sorted.Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track).ToList();
+            // Sorted + band-resolved once per model change (ZoomKeyframesForBand), not per draw.
+            var mine = ZoomKeyframesForBand(model, track);
             DrawZoomBand(ds, model, mine, track, bandY, bandH, w);
         }
 
@@ -3491,12 +3779,7 @@ public sealed partial class TimelineControl : UserControl
                 string label = $"{kf.ZoomLevel:0.#}x";
                 ds.DrawText(label, x1 + 6, segY + segH / 2 - 8,
                     muted ? MutedZoomColor(ZoomSegmentTextColor) : ZoomSegmentTextColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 11,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                    SemiBold11TextFormat);
             }
 
             // Resize handles (visible when selected)
@@ -3733,12 +4016,8 @@ public sealed partial class TimelineControl : UserControl
             return (null, ZoomHitTarget.None);
 
         // Check segments in reverse order (last drawn = on top)
-        var bandByKeyframe = BuildZoomBandTrackMap(model.ZoomKeyframes);
-        var sorted = model.ZoomKeyframes
-            .Where(k => bandByKeyframe.TryGetValue(k.Id, out int t) && t == track)
-            .OrderBy(k => k.Timestamp)
-            .ThenBy(k => k.Start)
-            .ToList();
+        // Same cached, band-resolved list the draw pass paints, so hit order == paint order.
+        var sorted = ZoomKeyframesForBand(model, track);
 
         // The selected segment's EDGES win over everything else, because it is painted on top
         // and its resize handles are drawn there — without this, an overlapping neighbour's body
@@ -3998,7 +4277,8 @@ public sealed partial class TimelineControl : UserControl
                     _zoomDragCurrentX = clampedX;
                 }
                 SetCursor(InputSystemCursorShape.SizeAll);
-                InvalidateAll();
+                // The zoom bands live on the video canvas; nothing else changes mid-drag.
+                VideoTrackCanvas?.Invalidate();
                 break;
             }
 
@@ -4006,7 +4286,7 @@ public sealed partial class TimelineControl : UserControl
             case DragMode.ZoomSegmentRightEdge:
                 _zoomDragCurrentX = SnapZoomX(model, clampedX, _selectedZoomKeyframeId, SelectedZoomKeyframeFile, snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
-                InvalidateAll();
+                VideoTrackCanvas?.Invalidate();
                 break;
 
             case DragMode.ZoomSegmentCreate:
@@ -4024,7 +4304,7 @@ public sealed partial class TimelineControl : UserControl
                     {
                         _zoomCreateActive = true;
                         _zoomCreateEnd = end.Value;
-                        InvalidateAll();
+                        VideoTrackCanvas?.Invalidate();
                     }
                     // else: pointer is outside every segment for _zoomCreateFile with
                     // none to clamp to — keep the previous _zoomCreateEnd rather than
@@ -4061,73 +4341,74 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas || TimeRulerCanvas is null)
         {
-            _segmentSnapGuideX = double.NaN;
-            _dragMode = DragMode.None;
+            ResetDragState();
             return;
         }
 
-        switch (_dragMode)
+        try
         {
-            case DragMode.ZoomSegmentBody when _selectedZoomKeyframeId is not null:
+            switch (_dragMode)
             {
-                double deltaX = _zoomDragCurrentX - _zoomDragStartX;
-                // Only fire move event if the segment actually moved
-                if (Math.Abs(deltaX) > 1)
+                case DragMode.ZoomSegmentBody when _selectedZoomKeyframeId is not null:
                 {
-                    var file = SelectedZoomKeyframeFile;
-                    var startTime = XToKeyframeFileTime(_zoomDragStartX, file);
-                    var movedTime = XToKeyframeFileTime(_zoomDragStartX + deltaX, file);
-                    if (startTime is not null && movedTime is not null)
+                    double deltaX = _zoomDragCurrentX - _zoomDragStartX;
+                    // Only fire move event if the segment actually moved
+                    if (Math.Abs(deltaX) > 1)
                     {
-                        var newTimestamp = _zoomDragOriginalTimestamp + (movedTime.Value - startTime.Value);
-                        ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp, _zoomDragOwningSegmentId));
+                        var file = SelectedZoomKeyframeFile;
+                        var startTime = XToKeyframeFileTime(_zoomDragStartX, file);
+                        var movedTime = XToKeyframeFileTime(_zoomDragStartX + deltaX, file);
+                        if (startTime is not null && movedTime is not null)
+                        {
+                            var newTimestamp = _zoomDragOriginalTimestamp + (movedTime.Value - startTime.Value);
+                            ZoomSegmentMoved?.Invoke(this, (_selectedZoomKeyframeId, newTimestamp, _zoomDragOwningSegmentId));
+                        }
+                        // else: unmappable in this file's time domain — reject the move,
+                        // leaving the keyframe at its original position.
                     }
-                    // else: unmappable in this file's time domain — reject the move,
-                    // leaving the keyframe at its original position.
+                    break;
                 }
-                break;
-            }
 
-            case DragMode.ZoomSegmentLeftEdge when _selectedZoomKeyframeId is not null:
-            {
-                var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
-                if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalStart)
+                case DragMode.ZoomSegmentLeftEdge when _selectedZoomKeyframeId is not null:
                 {
-                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime.Value));
+                    var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
+                    if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalStart)
+                    {
+                        ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, true, newEdgeTime.Value));
+                    }
+                    break;
                 }
-                break;
-            }
 
-            case DragMode.ZoomSegmentRightEdge when _selectedZoomKeyframeId is not null:
-            {
-                var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
-                if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalEnd)
+                case DragMode.ZoomSegmentRightEdge when _selectedZoomKeyframeId is not null:
                 {
-                    ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime.Value));
+                    var newEdgeTime = XToKeyframeFileTime(Math.Clamp(_zoomDragCurrentX, 0, canvas.ActualWidth), SelectedZoomKeyframeFile);
+                    if (newEdgeTime is not null && newEdgeTime.Value != _zoomDragOriginalEnd)
+                    {
+                        ZoomSegmentResized?.Invoke(this, (_selectedZoomKeyframeId, false, newEdgeTime.Value));
+                    }
+                    break;
                 }
-                break;
-            }
 
-            case DragMode.ZoomSegmentCreate when _zoomCreateActive:
-            {
-                var start = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd;
-                var end = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart;
-                if ((end - start) >= ZoomKeyframe.MinSegmentDuration)
+                case DragMode.ZoomSegmentCreate when _zoomCreateActive:
                 {
-                    ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile, _zoomCreateSegmentId));
+                    var start = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateStart : _zoomCreateEnd;
+                    var end = _zoomCreateStart < _zoomCreateEnd ? _zoomCreateEnd : _zoomCreateStart;
+                    if ((end - start) >= ZoomKeyframe.MinSegmentDuration)
+                    {
+                        ZoomSegmentCreated?.Invoke(this, (start, end, _zoomCreateFile, _zoomCreateSegmentId));
+                    }
+                    _zoomCreateActive = false;
+                    break;
                 }
-                _zoomCreateActive = false;
-                break;
             }
         }
-
-        _zoomDragStartX = double.NaN;
-        _zoomDragCurrentX = double.NaN;
-        _segmentSnapGuideX = double.NaN;
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        InvalidateAll();
+        finally
+        {
+            // A throwing host handler must never leave the zoom drag latched.
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            InvalidateAll();
+        }
     }
 
     private void ZoomTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -4303,6 +4584,9 @@ public sealed partial class TimelineControl : UserControl
             Value = Math.Round(Math.Clamp(Model.GetVolume(channel), 0, 1) * 100),
             IsEnabled = !Model.IsMuted(channel),
         };
+        // Neither control has visible text of its own (an icon, a bare fader), so a screen
+        // reader would announce them as "button" / "slider" without these.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(slider, $"{ChannelDisplayName(channel)} volume");
 
         void RefreshMuteVisual()
         {
@@ -4313,6 +4597,8 @@ public sealed partial class TimelineControl : UserControl
             muteIcon.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources[
                 muted ? "TextFillColorDisabledBrush" : "TextFillColorPrimaryBrush"];
             ToolTipService.SetToolTip(muteButton, muted ? "Unmute" : "Mute");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                muteButton, $"{(muted ? "Unmute" : "Mute")} {ChannelDisplayName(channel)}");
             volumeLabel.Text = muted ? "Muted" : $"Volume  {slider.Value:F0}%";
         }
 
@@ -4571,6 +4857,15 @@ public sealed partial class TimelineControl : UserControl
                 _selectedInsertedAudioTrackId = null;
             }
 
+            // A block dragged while the host removed it (undo, delete) must not stay latched
+            // to the pointer or commit against a missing id on release.
+            if (_dragMode is DragMode.InsertedAudioBody or DragMode.InsertedAudioLeftEdge or DragMode.InsertedAudioRightEdge
+                && !DragTargetStillExists(Model))
+            {
+                ResetDragState();
+                ReleaseAllPointerCaptures();
+            }
+
             // Before UpdateTrackVisibility: the lane heights are derived from the row counts.
             LayoutInsertedAudioRows();
 
@@ -4754,6 +5049,8 @@ public sealed partial class TimelineControl : UserControl
     private void AudioTrackLane_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not CanvasControl canvas) return;
+        if (!IsPrimaryPointerPress(canvas, e)) return;
+        FocusForKeyboard();
         var pos = e.GetCurrentPoint(canvas).Position;
         var (hitId, target) = HitTestInsertedAudio(canvas, pos.X, pos.Y);
 
@@ -4812,13 +5109,20 @@ public sealed partial class TimelineControl : UserControl
         switch (_dragMode)
         {
             case DragMode.InsertedAudioBody:
-                _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+            {
+                // Snap the block's projected left edge (output time, so TimeToX directly).
+                double clampedX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                double originalStartX = TimeToX(_audioTrackDragOriginalStart);
+                double leftX = originalStartX + (clampedX - _audioTrackDragStartX);
+                double snappedLeftX = SnapDragX(Model, leftX, !IsAltDown());
+                _audioTrackDragCurrentX = _audioTrackDragStartX + (snappedLeftX - originalStartX);
                 SetCursor(InputSystemCursorShape.SizeAll);
                 InvalidateInsertedAudioLanes();
                 break;
+            }
             case DragMode.InsertedAudioLeftEdge:
             case DragMode.InsertedAudioRightEdge:
-                _audioTrackDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                _audioTrackDragCurrentX = SnapDragX(Model, Math.Clamp(pos.X, 0, canvas.ActualWidth), !IsAltDown());
                 SetCursor(InputSystemCursorShape.SizeWestEast);
                 InvalidateInsertedAudioLanes();
                 break;
@@ -4838,45 +5142,49 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas) return;
 
-        switch (_dragMode)
+        try
         {
-            case DragMode.InsertedAudioBody when _selectedInsertedAudioTrackId is not null:
+            switch (_dragMode)
             {
-                double deltaX = _audioTrackDragCurrentX - _audioTrackDragStartX;
-                if (Math.Abs(deltaX) > 1)
+                case DragMode.InsertedAudioBody when _selectedInsertedAudioTrackId is not null:
                 {
-                    // Both endpoints go through XToTime so the delta is measured in the
-                    // same (zoom/scroll-dependent) mapping the block was drawn with.
-                    var grabbed = XToTime(_audioTrackDragStartX);
-                    var dropped = XToTime(_audioTrackDragStartX + deltaX);
-                    var newStart = _audioTrackDragOriginalStart + (dropped - grabbed);
-                    if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
-                    InsertedAudioTrackMoved?.Invoke(this, (_selectedInsertedAudioTrackId, newStart));
+                    double deltaX = _audioTrackDragCurrentX - _audioTrackDragStartX;
+                    if (Math.Abs(deltaX) > 1)
+                    {
+                        // Both endpoints go through XToTime so the delta is measured in the
+                        // same (zoom/scroll-dependent) mapping the block was drawn with.
+                        var grabbed = XToTime(_audioTrackDragStartX);
+                        var dropped = XToTime(_audioTrackDragStartX + deltaX);
+                        var newStart = _audioTrackDragOriginalStart + (dropped - grabbed);
+                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                        InsertedAudioTrackMoved?.Invoke(this, (_selectedInsertedAudioTrackId, newStart));
+                    }
+                    break;
                 }
-                break;
-            }
-            case DragMode.InsertedAudioLeftEdge when _selectedInsertedAudioTrackId is not null:
-            {
-                var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge != _audioTrackDragOriginalStart)
-                    InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, true, newEdge));
-                break;
-            }
-            case DragMode.InsertedAudioRightEdge when _selectedInsertedAudioTrackId is not null:
-            {
-                var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge != _audioTrackDragOriginalEnd)
-                    InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, false, newEdge));
-                break;
+                case DragMode.InsertedAudioLeftEdge when _selectedInsertedAudioTrackId is not null:
+                {
+                    var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
+                    if (newEdge != _audioTrackDragOriginalStart)
+                        InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, true, newEdge));
+                    break;
+                }
+                case DragMode.InsertedAudioRightEdge when _selectedInsertedAudioTrackId is not null:
+                {
+                    var newEdge = XToTime(Math.Clamp(_audioTrackDragCurrentX, 0, canvas.ActualWidth));
+                    if (newEdge != _audioTrackDragOriginalEnd)
+                        InsertedAudioTrackResized?.Invoke(this, (_selectedInsertedAudioTrackId, false, newEdge));
+                    break;
+                }
             }
         }
-
-        _audioTrackDragStartX = double.NaN;
-        _audioTrackDragCurrentX = double.NaN;
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        InvalidateInsertedAudioLanes();
+        finally
+        {
+            // A throwing host handler must never leave the audio drag latched. (ResetDragState
+            // also repaints the video canvas if a snap guide was showing.)
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            InvalidateInsertedAudioLanes();
+        }
     }
 
     private void AudioTrackLane_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -6004,7 +6312,7 @@ public sealed partial class TimelineControl : UserControl
     private void DrawCursorAnchors(
         CanvasDrawingSession ds, TimelineModel model, int trackIndex, float bandY, float bandH, float w)
     {
-        foreach (var (anchor, anchorTrack, segmentId, rawX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, rawX) in CursorAnchorPositions(model))
         {
             if (anchorTrack != trackIndex) continue;
 
@@ -6184,46 +6492,49 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas)
         {
-            _dragMode = DragMode.None;
+            ResetDragState();
             return;
         }
 
-        if (_dragMode == DragMode.CursorAnchorBody && _selectedCursorAnchorId is { } anchorId)
+        try
         {
-            var anchor = Model?.CursorAnchors.FirstOrDefault(a => a.Id == anchorId);
+            if (_dragMode == DragMode.CursorAnchorBody && _selectedCursorAnchorId is { } anchorId)
+            {
+                var anchor = Model?.CursorAnchors.FirstOrDefault(a => a.Id == anchorId);
 
-            if (anchor is null)
-            {
-                // The anchor went away mid-gesture (undo on another thread, project reload):
-                // drop the drag rather than committing a move against a stale id.
-            }
-            else if (_cursorAnchorDragMoved)
-            {
-                // Map the pointer straight through the anchor's OWN file-time domain rather
-                // than applying a pixel delta: a marker is a point, so the ≤8px grab offset is
-                // not worth preserving, and a direct mapping always lands on a time some
-                // segment of that file actually shows (XToKeyframeFileTime clamps to the
-                // nearest segment edge), so the marker can never be dragged out of sight.
-                var newTimestamp = XToKeyframeFileTime(
-                    Math.Clamp(_cursorAnchorDragCurrentX, 0, canvas.ActualWidth),
-                    anchor.SourceVideoFilePath);
+                if (anchor is null)
+                {
+                    // The anchor went away mid-gesture (undo on another thread, project reload):
+                    // drop the drag rather than committing a move against a stale id.
+                }
+                else if (_cursorAnchorDragMoved)
+                {
+                    // Map the pointer straight through the anchor's OWN file-time domain rather
+                    // than applying a pixel delta: a marker is a point, so the ≤8px grab offset is
+                    // not worth preserving, and a direct mapping always lands on a time some
+                    // segment of that file actually shows (XToKeyframeFileTime clamps to the
+                    // nearest segment edge), so the marker can never be dragged out of sight.
+                    var newTimestamp = XToKeyframeFileTime(
+                        Math.Clamp(_cursorAnchorDragCurrentX, 0, canvas.ActualWidth),
+                        anchor.SourceVideoFilePath);
 
-                if (newTimestamp is not null && newTimestamp.Value != anchor.Timestamp)
-                    CursorAnchorMoved?.Invoke(this, (anchorId, newTimestamp.Value));
-                // else: unmappable in this file's time domain — reject the move and leave the
-                // anchor where it was.
-            }
-            else
-            {
-                CursorAnchorClicked?.Invoke(this, anchor);
+                    if (newTimestamp is not null && newTimestamp.Value != anchor.Timestamp)
+                        CursorAnchorMoved?.Invoke(this, (anchorId, newTimestamp.Value));
+                    // else: unmappable in this file's time domain — reject the move and leave the
+                    // anchor where it was.
+                }
+                else
+                {
+                    CursorAnchorClicked?.Invoke(this, anchor);
+                }
             }
         }
-
-        ResetCursorAnchorDrag();
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        canvas.Invalidate();
+        finally
+        {
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            canvas.Invalidate();
+        }
     }
 
     private void ResetCursorAnchorDrag()
@@ -6308,7 +6619,7 @@ public sealed partial class TimelineControl : UserControl
         (CursorAnchor Anchor, string? SegmentId)? best = null;
         double bestDistance = double.MaxValue;
 
-        foreach (var (anchor, anchorTrack, segmentId, markerX) in EnumerateCursorAnchorPositions(model))
+        foreach (var (anchor, anchorTrack, segmentId, markerX) in CursorAnchorPositions(model))
         {
             if (anchorTrack != trackIndex) continue;
 
@@ -6373,6 +6684,9 @@ public sealed partial class TimelineControl : UserControl
         // Click on ruler, zoom, or audio track → move playhead
         if (sender is CanvasControl canvas)
         {
+            if (!IsPrimaryPointerPress(canvas, e)) return;
+            FocusForKeyboard();
+
             var pos = e.GetCurrentPoint(canvas).Position;
             PlayheadPosition = XToTime(pos.X);
             _dragMode = DragMode.Playhead;
@@ -6386,6 +6700,25 @@ public sealed partial class TimelineControl : UserControl
         if (model is null || sender is not CanvasControl canvas) return;
 
         var pos = e.GetCurrentPoint(canvas).Position;
+
+        if (!IsPrimaryPointerPress(canvas, e))
+        {
+            // A right-press starts no gesture (RightTapped opens the menus). It still moves the
+            // playhead onto the segment body it lands on, as the old press-starts-a-drag path
+            // did, because that menu's "Split at Playhead" has always split where the user
+            // right-clicked.
+            if (model.Segments.Count > 0 &&
+                e.GetCurrentPoint(canvas).Properties.IsRightButtonPressed &&
+                TrackBandFromY(model, pos.Y)?.Band == TrackBand.Video &&
+                !HitTestTransitionChip(pos.X, pos.Y).Hit &&
+                HitTestSegment(model, pos.X, pos.Y, out _) == SegmentHitTarget.Body)
+            {
+                PlayheadPosition = XToTime(pos.X);
+            }
+            return;
+        }
+
+        FocusForKeyboard();
 
         switch (TrackBandFromY(model, pos.Y)?.Band)
         {
@@ -6566,10 +6899,15 @@ public sealed partial class TimelineControl : UserControl
         {
             switch (TrackBandFromY(model, pos.Y)?.Band)
             {
+                // Leaving the base video band for a zoom/cursor band must end any chip hover:
+                // otherwise the linger timer fires (or an open tooltip stays) over a band the
+                // chip does not live in.
                 case TrackBand.Zoom:
+                    UpdateTransitionChipHover(null, default);
                     ZoomTrack_PointerMoved(sender, e);
                     return;
                 case TrackBand.Cursor:
+                    UpdateTransitionChipHover(null, default);
                     CursorTrack_PointerMoved(sender, e);
                     return;
             }
@@ -6634,14 +6972,16 @@ public sealed partial class TimelineControl : UserControl
                 _segmentDragCurrentX = SnapX(model, clampedX, _draggedSegmentId, snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
                 RaiseTrimPreview();
-                InvalidateAll();
+                // Only the video canvas draws the edge preview / snap guide; the full
+                // InvalidateAll (and the layout pass in UpdateTrackVisibility) runs on release.
+                VideoTrackCanvas?.Invalidate();
                 break;
 
             case DragMode.TextSlideWindowInEdge:
             case DragMode.TextSlideWindowOutEdge:
                 _textSlideWindowDragCurrentX = Math.Clamp(x, 0, canvas.ActualWidth);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
-                InvalidateAll();
+                VideoTrackCanvas?.Invalidate();
                 break;
 
             case DragMode.SegmentBody:
@@ -6724,14 +7064,51 @@ public sealed partial class TimelineControl : UserControl
     /// gesture behind it; leaving <see cref="DragMode.Playhead"/> set would make every later
     /// hover over the group scrub the playhead.
     /// </remarks>
-    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => AbortDrag();
+
+    /// <summary>
+    /// Capture-lost / cancel handler for every other track canvas (ruler, camera, text,
+    /// recorded and inserted audio). Same contract as <see cref="VideoTrack_PointerCaptureLost"/>:
+    /// a gesture taken away without a release must not leave its drag family latched — a
+    /// stale <see cref="DragMode.Playhead"/> made every later hover scrub the playhead, and a
+    /// stale camera/text/audio drag kept a block following a pointer nobody was pressing.
+    /// </summary>
+    private void Track_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => AbortDrag();
+
+    /// <summary>Abandons whatever gesture is in flight and repaints from the committed model.</summary>
+    private void AbortDrag()
     {
-        if (_dragMode == DragMode.None) return;
+        if (_dragMode == DragMode.None && !_trimPreviewActive) return;
+
+        ResetDragState();
+        SyncHintLaneReveal();
+        UpdateVideoTrackHeight();
+        InvalidateAll();
+    }
+
+    /// <summary>
+    /// The single reset for EVERY drag family — segment/trim/text-window, zoom, cursor anchor,
+    /// camera, text overlay and inserted audio — used by every release, capture-lost, cancel,
+    /// model-change and unload path, so no path can forget a family's fields.
+    /// </summary>
+    /// <remarks>
+    /// State only: it does not release pointer capture (the caller owns the pointer) and does
+    /// not repaint (callers know which canvases changed). The live trim preview is closed out
+    /// LAST, after every field is already at rest, because it raises a host event — a host
+    /// handler that throws must not leave half the drag state behind.
+    /// <para>
+    /// <see cref="_hintLaneArmed"/> is deliberately NOT cleared: it keeps the outline's
+    /// highlight for the fold-away animation the caller's SyncHintLaneReveal starts.
+    /// </para>
+    /// </remarks>
+    private void ResetDragState()
+    {
+        bool hadSnapGuide = !double.IsNaN(_segmentSnapGuideX);
 
         ResetCursorAnchorDrag();
         ResetZoomDrag();
 
-        EndTrimPreview();
+        // Segment / trim / text-slide window
         _draggedSegmentId = null;
         _segmentDragStartX = double.NaN;
         _segmentDragStartY = double.NaN;
@@ -6742,16 +7119,280 @@ public sealed partial class TimelineControl : UserControl
         _segmentSnapGuideX = double.NaN;
         _segmentDropIndicatorX = double.NaN;
         _textSlideWindowDragCurrentX = double.NaN;
-        _dragMode = DragMode.None;
 
-        // _hintLaneArmed is deliberately NOT cleared: it keeps the outline's highlight for the
-        // fold-away animation that SyncHintLaneReveal is about to start.
+        // Camera
+        _cameraDragStartX = double.NaN;
+        _cameraDragCurrentX = double.NaN;
+        _cameraCreateActive = false;
+
+        // Text overlay
+        _textOverlayDragStartX = double.NaN;
+        _textOverlayDragCurrentX = double.NaN;
+        _textOverlayCreateActive = false;
+        _textOverlayCreateFile = null;
+
+        // Inserted audio
+        _audioTrackDragStartX = double.NaN;
+        _audioTrackDragCurrentX = double.NaN;
+
+        _dragMode = DragMode.None;
         _hintLaneLatched = false;
 
         SetCursor(InputSystemCursorShape.Arrow);
-        SyncHintLaneReveal();
-        UpdateVideoTrackHeight();
-        InvalidateAll();
+
+        // The snap guide is painted on the video canvas even when a camera/text/audio drag
+        // produced it, so that canvas must repaint to drop it.
+        if (hadSnapGuide)
+            VideoTrackCanvas?.Invalidate();
+
+        EndTrimPreview();
+    }
+
+    /// <summary>
+    /// Releases any pointer capture a track canvas still holds. Called only AFTER
+    /// <see cref="ResetDragState"/>, so the PointerCaptureLost this raises finds no drag and
+    /// returns immediately.
+    /// </summary>
+    private void ReleaseAllPointerCaptures()
+    {
+        foreach (var canvas in TrackCanvases())
+        {
+            try { canvas?.ReleasePointerCaptures(); }
+            catch { /* the canvas may already be torn down */ }
+        }
+    }
+
+    /// <summary>
+    /// Whether a press should start a gesture: the LEFT button for a mouse, a contact without
+    /// the barrel/right button for pen and touch. A right-press must not start a drag or a
+    /// scrub — RightTapped still fires on its own and opens the context menus.
+    /// </summary>
+    private static bool IsPrimaryPointerPress(UIElement relativeTo, PointerRoutedEventArgs e)
+    {
+        var point = e.GetCurrentPoint(relativeTo);
+        if (e.Pointer.PointerDeviceType == PointerDeviceType.Mouse)
+            return point.Properties.IsLeftButtonPressed;
+        return point.IsInContact
+            && !point.Properties.IsRightButtonPressed
+            && !point.Properties.IsBarrelButtonPressed;
+    }
+
+    /// <summary>
+    /// Takes keyboard focus on a pointer press, so the frame-nudge keys act on the timeline
+    /// the user just clicked. Pointer focus shows no focus rectangle.
+    /// </summary>
+    private void FocusForKeyboard()
+    {
+        if (FocusState == FocusState.Unfocused)
+            Focus(FocusState.Pointer);
+    }
+
+    /// <summary>Re-entrancy guard: the cleared-selection events can call back into Refresh.</summary>
+    private bool _isPruningSelections;
+
+    /// <summary>
+    /// Drops selections whose ids the last model edit removed (undo, delete, split, project
+    /// swap…), raising the same null "selected" events a user deselect raises so the host's
+    /// property panes close, and aborts a drag whose target no longer exists — releasing on a
+    /// vanished id would otherwise commit an edit against nothing, or leave the drag latched.
+    /// </summary>
+    private void PruneStaleSelectionsAndDrags()
+    {
+        if (_isPruningSelections) return;
+        _isPruningSelections = true;
+        try
+        {
+            var model = Model;
+
+            if (_dragMode != DragMode.None && !DragTargetStillExists(model))
+            {
+                ResetDragState();
+                ReleaseAllPointerCaptures();
+                SyncHintLaneReveal(animate: false);
+            }
+
+            if (model is null) return;
+
+            if (_selectedClipIndex is { } clipIndex && (clipIndex < 0 || clipIndex >= model.Clips.Count))
+                ClearClipSelection();
+
+            if (_selectedSegmentId is { } segmentId && !model.Segments.Any(s => s.Id == segmentId))
+                ClearSegmentSelection();
+
+            if (_selectedTransitionId is { } transitionId && !model.Segments.Any(s => s.Id == transitionId))
+                ClearTransitionSelection();
+
+            if (_selectedZoomKeyframeId is { } zoomId && !model.ZoomKeyframes.Any(k => k.Id == zoomId))
+                ClearZoomSelection();
+
+            if (_selectedCameraSegmentId is { } cameraId && !model.CameraSegments.Any(c => c.Id == cameraId))
+                ClearCameraSelection();
+
+            if (_selectedTextOverlayId is { } overlayId && !model.TextOverlays.Any(o => o.Id == overlayId))
+                ClearTextOverlaySelection();
+
+            if (_selectedCursorAnchorId is { } anchorId &&
+                (!model.CursorAnchors.Any(a => a.Id == anchorId) ||
+                 (_selectedCursorAnchorSegmentId is { } anchorSegmentId && !model.Segments.Any(s => s.Id == anchorSegmentId))))
+            {
+                ClearCursorAnchorSelection();
+            }
+
+            if (_selectedClick is { } selectedClick && selectedClick.SegmentId is { } clickSegmentId &&
+                !model.Segments.Any(s => s.Id == clickSegmentId))
+            {
+                ClearClickSelection();
+            }
+        }
+        finally
+        {
+            _isPruningSelections = false;
+        }
+    }
+
+    /// <summary>Whether the object the in-flight drag acts on still exists.</summary>
+    private bool DragTargetStillExists(TimelineModel? model)
+    {
+        if (model is null) return false;
+
+        return _dragMode switch
+        {
+            DragMode.SegmentBody or DragMode.SegmentLeftEdge or DragMode.SegmentRightEdge or
+            DragMode.TextSlideWindowInEdge or DragMode.TextSlideWindowOutEdge
+                => _draggedSegmentId is { } segmentId && model.Segments.Any(s => s.Id == segmentId),
+
+            DragMode.ZoomSegmentBody or DragMode.ZoomSegmentLeftEdge or DragMode.ZoomSegmentRightEdge
+                => _selectedZoomKeyframeId is { } zoomId && model.ZoomKeyframes.Any(k => k.Id == zoomId),
+
+            DragMode.CameraSegmentBody or DragMode.CameraSegmentLeftEdge or DragMode.CameraSegmentRightEdge
+                => _selectedCameraSegmentId is { } cameraId && model.CameraSegments.Any(c => c.Id == cameraId),
+
+            DragMode.TextOverlayBody or DragMode.TextOverlayLeftEdge or DragMode.TextOverlayRightEdge
+                => _selectedTextOverlayId is { } overlayId && model.TextOverlays.Any(o => o.Id == overlayId),
+
+            DragMode.CursorAnchorBody
+                => _selectedCursorAnchorId is { } anchorId && model.CursorAnchors.Any(a => a.Id == anchorId),
+
+            DragMode.InsertedAudioBody or DragMode.InsertedAudioLeftEdge or DragMode.InsertedAudioRightEdge
+                => _selectedInsertedAudioTrackId is { } audioId && _insertedAudioTracks.Any(t => t.Id == audioId),
+
+            // Playhead scrubs, legacy trims and drag-to-create have no target id to lose.
+            _ => true,
+        };
+    }
+
+    // ── Ruler / recorded-audio lanes: press-and-drag scrubs the playhead ──
+
+    private void Track_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        if (_dragMode == DragMode.Playhead)
+        {
+            PlayheadPosition = XToTime(e.GetCurrentPoint(canvas).Position.X);
+            return;
+        }
+
+        // These lanes have no hover targets; make sure a shape left over from another lane
+        // (a resize arrow, say) doesn't stick.
+        if (_dragMode == DragMode.None)
+            SetCursor(InputSystemCursorShape.Arrow);
+    }
+
+    private void Track_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not CanvasControl canvas) return;
+
+        bool wasDragging = _dragMode != DragMode.None;
+        ResetDragState();
+        canvas.ReleasePointerCapture(e.Pointer);
+        if (wasDragging)
+            InvalidateAll();
+    }
+
+    /// <summary>
+    /// Leaving a lane drops its hover cursor (the cursor is set on the whole control, so it
+    /// would otherwise stick over the labels or outside the timeline). A drag in flight keeps
+    /// its cursor — the pointer is captured and the shape describes the gesture.
+    /// </summary>
+    private void Track_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragMode == DragMode.None)
+            SetCursor(InputSystemCursorShape.Arrow);
+    }
+
+    /// <summary>
+    /// Snaps a camera / text-overlay / inserted-audio drag X to the same targets segment drags
+    /// use (playhead and segment boundaries), honouring Alt to disable. The guide line lives on
+    /// the video canvas, so that one canvas is repainted only when the guide actually moves.
+    /// </summary>
+    private double SnapDragX(TimelineModel? model, double x, bool enabled)
+    {
+        double previousGuide = _segmentSnapGuideX;
+        double snapped = model is null ? x : SnapX(model, x, excludeSegmentId: null, enabled);
+        bool guideChanged = double.IsNaN(previousGuide)
+            ? !double.IsNaN(_segmentSnapGuideX)
+            : double.IsNaN(_segmentSnapGuideX) || Math.Abs(previousGuide - _segmentSnapGuideX) > 0.01;
+        if (guideChanged)
+            VideoTrackCanvas?.Invalidate();
+        return snapped;
+    }
+
+    /// <summary>
+    /// Trim-edge grab width for a block <paramref name="blockWidth"/> pixels wide: the usual
+    /// <see cref="SegmentEdgeHitWidth"/>, narrowed on short blocks so the two edge zones can
+    /// never meet and swallow the body (which made a short block impossible to MOVE).
+    /// Mirrors <see cref="EdgeHitWidthFor"/> for the inserted-audio lanes.
+    /// </summary>
+    private static double SegmentEdgeHitWidthFor(double blockWidth)
+        => Math.Clamp(blockWidth / 3.0, 3.0, SegmentEdgeHitWidth);
+
+    /// <summary>
+    /// Left/Right nudge the playhead one frame (Shift: one second) while the timeline has
+    /// focus. Every other key is left unhandled so the page's accelerators (Space, Home, End,
+    /// Delete, Ctrl+Z…) keep working with the timeline focused.
+    /// </summary>
+    private void TimelineControl_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key is not (Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)) return;
+
+        // Only when the timeline itself has focus — not one of the mute buttons in the label
+        // column, where arrows are focus navigation.
+        if (!ReferenceEquals(e.OriginalSource, this)) return;
+        if (_dragMode != DragMode.None) return;
+
+        var model = Model;
+        if (model is null || model.DisplayDuration <= TimeSpan.Zero) return;
+
+        if (IsKeyDown(Windows.System.VirtualKey.Control) || IsKeyDown(Windows.System.VirtualKey.Menu))
+            return;
+
+        int fps = model.Fps > 0 ? model.Fps : 30;
+        var step = IsKeyDown(Windows.System.VirtualKey.Shift)
+            ? TimeSpan.FromSeconds(1)
+            : TimeSpan.FromSeconds(1.0 / fps);
+
+        var target = e.Key == Windows.System.VirtualKey.Left
+            ? PlayheadPosition - step
+            : PlayheadPosition + step;
+        if (target < TimeSpan.Zero) target = TimeSpan.Zero;
+        if (target > model.DisplayDuration) target = model.DisplayDuration;
+
+        PlayheadPosition = target;
+        e.Handled = true;
+    }
+
+    private static bool IsKeyDown(Windows.System.VirtualKey key)
+    {
+        try
+        {
+            return InputKeyboardSource.GetKeyStateForCurrentThread(key)
+                .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void VideoTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
@@ -6759,8 +7400,7 @@ public sealed partial class TimelineControl : UserControl
         var model = Model;
         if (sender is not CanvasControl canvas)
         {
-            _dragMode = DragMode.None;
-            EndTrimPreview();
+            ResetDragState();
             return;
         }
 
@@ -6771,35 +7411,29 @@ public sealed partial class TimelineControl : UserControl
         // Captured before the commit, which may itself add the lane the hint was offering.
         int usedTracksBeforeDrop = Math.Max(1, model?.VideoTrackCount ?? 1);
 
-        if (model is not null && model.Segments.Count > 0 && _draggedSegmentId is { } draggedId)
+        try
         {
-            VideoTrack_SegmentReleased(model, draggedId);
+            if (model is not null && model.Segments.Count > 0 && _draggedSegmentId is { } draggedId)
+            {
+                VideoTrack_SegmentReleased(model, draggedId);
+            }
         }
-
-        // After the commit above, so the host restores the preview from the TRIMMED model.
-        EndTrimPreview();
-
-        _draggedSegmentId = null;
-        _segmentDragStartX = double.NaN;
-        _segmentDragCurrentX = double.NaN;
-        _segmentDragMoved = false;
-        _segmentDragOriginalTrackIndex = TimelineModel.BaseTrackIndex;
-        _segmentDragCurrentTrackIndex = TimelineModel.BaseTrackIndex;
-        _segmentSnapGuideX = double.NaN;
-        _segmentDropIndicatorX = double.NaN;
-        _textSlideWindowDragCurrentX = double.NaN;
-        _dragMode = DragMode.None;
-        _hintLaneLatched = false;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        // _dragMode is cleared above, so the hint lane is gone. Fold it away with the same
-        // eased animation it opened with — UNLESS the drop just turned it into a real lane,
-        // in which case the real row takes over the identical height and the hint must be
-        // dropped in the same frame or the track band would visibly bulge and settle.
-        bool laneBecameReal = Math.Max(1, model?.VideoTrackCount ?? 1) > usedTracksBeforeDrop;
-        SyncHintLaneReveal(animate: !laneBecameReal);
-        UpdateVideoTrackHeight();
-        InvalidateAll();
+        finally
+        {
+            // In a finally so a throwing host handler can never leave the drag latched. The
+            // reset closes the trim preview AFTER the commit above, so the host restores the
+            // preview from the TRIMMED model.
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            // _dragMode is cleared above, so the hint lane is gone. Fold it away with the same
+            // eased animation it opened with — UNLESS the drop just turned it into a real lane,
+            // in which case the real row takes over the identical height and the hint must be
+            // dropped in the same frame or the track band would visibly bulge and settle.
+            bool laneBecameReal = Math.Max(1, model?.VideoTrackCount ?? 1) > usedTracksBeforeDrop;
+            SyncHintLaneReveal(animate: !laneBecameReal);
+            UpdateVideoTrackHeight();
+            InvalidateAll();
+        }
     }
 
     /// <summary>Commits the segment move / trim gesture by raising the appropriate event.</summary>
@@ -7192,8 +7826,9 @@ public sealed partial class TimelineControl : UserControl
             if (x < x1 || x > x2) continue;
 
             segmentId = seg.Id;
-            if (x - x1 <= SegmentEdgeHitWidth) return SegmentHitTarget.LeftEdge;
-            if (x2 - x <= SegmentEdgeHitWidth) return SegmentHitTarget.RightEdge;
+            double edge = SegmentEdgeHitWidthFor(x2 - x1);
+            if (x - x1 <= edge) return SegmentHitTarget.LeftEdge;
+            if (x2 - x <= edge) return SegmentHitTarget.RightEdge;
             return SegmentHitTarget.Body;
         }
         return SegmentHitTarget.None;
@@ -7427,11 +8062,7 @@ public sealed partial class TimelineControl : UserControl
                 ds.DrawGeometry(pr, presenceBorder, 1f);
                 if (sw > 44)
                     ds.DrawText("Camera", sx1 + 6, py + ph / 2 - 7, Color.FromArgb(200, 255, 255, 255),
-                        new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                        {
-                            FontSize = 11,
-                            FontFamily = "Segoe UI",
-                        });
+                        Regular11TextFormat);
             }
         }
 
@@ -7453,13 +8084,7 @@ public sealed partial class TimelineControl : UserControl
             if (segW > 36)
             {
                 string label = seg.Enabled ? "Camera" : "Camera (off)";
-                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, textColor,
-                    new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = 11,
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    });
+                ds.DrawText(label, x1 + 6, segY + segH / 2 - 7, textColor, SemiBold11TextFormat);
             }
 
             if (isSelected)
@@ -7525,8 +8150,9 @@ public sealed partial class TimelineControl : UserControl
             float x2 = (float)SourceTimeToX(seg.End);
             if (posX < x1 || posX > x2) continue;
 
-            if (posX - x1 <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.LeftEdge);
-            if (x2 - posX <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.RightEdge);
+            double edge = SegmentEdgeHitWidthFor(x2 - x1);
+            if (posX - x1 <= edge) return (seg.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= edge) return (seg.Id, SegmentHitTarget.RightEdge);
             return (seg.Id, SegmentHitTarget.Body);
         }
         return (null, SegmentHitTarget.None);
@@ -7535,6 +8161,8 @@ public sealed partial class TimelineControl : UserControl
     private void CameraTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not CanvasControl canvas) return;
+        if (!IsPrimaryPointerPress(canvas, e)) return;
+        FocusForKeyboard();
         var pos = e.GetCurrentPoint(canvas).Position;
         var (hitId, target) = HitTestCameraSegment(pos.X, pos.Y);
 
@@ -7590,18 +8218,30 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
+        bool snap = !IsAltDown();
+
+        // Mid-drag only the camera canvas changes (plus the video canvas's snap guide, which
+        // SnapDragX repaints itself); the full InvalidateAll runs once on release.
         switch (_dragMode)
         {
             case DragMode.CameraSegmentBody:
-                _cameraDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+            {
+                // Snap the block's projected LEFT edge, then carry the same correction onto the
+                // pointer X the preview and the release both measure from.
+                double clampedX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                double originalStartX = SourceTimeToX(_cameraDragOriginalStart);
+                double leftX = originalStartX + (clampedX - _cameraDragStartX);
+                double snappedLeftX = SnapDragX(Model, leftX, snap);
+                _cameraDragCurrentX = _cameraDragStartX + (snappedLeftX - originalStartX);
                 SetCursor(InputSystemCursorShape.SizeAll);
-                InvalidateAll();
+                CameraTrackCanvas?.Invalidate();
                 break;
+            }
             case DragMode.CameraSegmentLeftEdge:
             case DragMode.CameraSegmentRightEdge:
-                _cameraDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                _cameraDragCurrentX = SnapDragX(Model, Math.Clamp(pos.X, 0, canvas.ActualWidth), snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
-                InvalidateAll();
+                CameraTrackCanvas?.Invalidate();
                 break;
             case DragMode.CameraSegmentCreate:
                 if (Math.Abs(pos.X - _cameraDragStartX) >= ZoomCreateDragThreshold)
@@ -7611,7 +8251,7 @@ public sealed partial class TimelineControl : UserControl
                     {
                         _cameraCreateActive = true;
                         _cameraCreateEnd = end.Value;
-                        InvalidateAll();
+                        CameraTrackCanvas?.Invalidate();
                     }
                 }
                 else
@@ -7635,56 +8275,59 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas) return;
 
-        switch (_dragMode)
+        try
         {
-            case DragMode.CameraSegmentBody when _selectedCameraSegmentId is not null:
+            switch (_dragMode)
             {
-                double deltaX = _cameraDragCurrentX - _cameraDragStartX;
-                if (Math.Abs(deltaX) > 1)
+                case DragMode.CameraSegmentBody when _selectedCameraSegmentId is not null:
                 {
-                    var startTime = XToPrimarySourceTime(_cameraDragStartX);
-                    var movedTime = XToPrimarySourceTime(_cameraDragStartX + deltaX);
-                    if (startTime is not null && movedTime is not null)
+                    double deltaX = _cameraDragCurrentX - _cameraDragStartX;
+                    if (Math.Abs(deltaX) > 1)
                     {
-                        var newStart = _cameraDragOriginalStart + (movedTime.Value - startTime.Value);
-                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
-                        CameraSegmentMoved?.Invoke(this, (_selectedCameraSegmentId, newStart));
+                        var startTime = XToPrimarySourceTime(_cameraDragStartX);
+                        var movedTime = XToPrimarySourceTime(_cameraDragStartX + deltaX);
+                        if (startTime is not null && movedTime is not null)
+                        {
+                            var newStart = _cameraDragOriginalStart + (movedTime.Value - startTime.Value);
+                            if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                            CameraSegmentMoved?.Invoke(this, (_selectedCameraSegmentId, newStart));
+                        }
+                        // else: unmappable — reject the move, leave the segment in place.
                     }
-                    // else: unmappable — reject the move, leave the segment in place.
+                    break;
                 }
-                break;
-            }
-            case DragMode.CameraSegmentLeftEdge when _selectedCameraSegmentId is not null:
-            {
-                var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge is not null && newEdge.Value != _cameraDragOriginalStart)
-                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, true, newEdge.Value));
-                break;
-            }
-            case DragMode.CameraSegmentRightEdge when _selectedCameraSegmentId is not null:
-            {
-                var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
-                if (newEdge is not null && newEdge.Value != _cameraDragOriginalEnd)
-                    CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, false, newEdge.Value));
-                break;
-            }
-            case DragMode.CameraSegmentCreate when _cameraCreateActive:
-            {
-                var start = _cameraCreateStart < _cameraCreateEnd ? _cameraCreateStart : _cameraCreateEnd;
-                var end = _cameraCreateStart < _cameraCreateEnd ? _cameraCreateEnd : _cameraCreateStart;
-                if ((end - start) >= TrimCameraSegmentOperation.MinDuration)
-                    CameraSegmentCreated?.Invoke(this, (start, end));
-                _cameraCreateActive = false;
-                break;
+                case DragMode.CameraSegmentLeftEdge when _selectedCameraSegmentId is not null:
+                {
+                    var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
+                    if (newEdge is not null && newEdge.Value != _cameraDragOriginalStart)
+                        CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, true, newEdge.Value));
+                    break;
+                }
+                case DragMode.CameraSegmentRightEdge when _selectedCameraSegmentId is not null:
+                {
+                    var newEdge = XToPrimarySourceTime(Math.Clamp(_cameraDragCurrentX, 0, canvas.ActualWidth));
+                    if (newEdge is not null && newEdge.Value != _cameraDragOriginalEnd)
+                        CameraSegmentResized?.Invoke(this, (_selectedCameraSegmentId, false, newEdge.Value));
+                    break;
+                }
+                case DragMode.CameraSegmentCreate when _cameraCreateActive:
+                {
+                    var start = _cameraCreateStart < _cameraCreateEnd ? _cameraCreateStart : _cameraCreateEnd;
+                    var end = _cameraCreateStart < _cameraCreateEnd ? _cameraCreateEnd : _cameraCreateStart;
+                    if ((end - start) >= TrimCameraSegmentOperation.MinDuration)
+                        CameraSegmentCreated?.Invoke(this, (start, end));
+                    _cameraCreateActive = false;
+                    break;
+                }
             }
         }
-
-        _cameraDragStartX = double.NaN;
-        _cameraDragCurrentX = double.NaN;
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        InvalidateAll();
+        finally
+        {
+            // A throwing host handler must never leave the camera drag latched.
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            InvalidateAll();
+        }
     }
 
     private void CameraTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -7692,13 +8335,31 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetPosition(canvas);
         var (hitId, _) = HitTestCameraSegment(pos.X, pos.Y);
-        if (hitId is not null)
+        if (hitId is null) return;
+
+        ClearOtherSelections(SelectionKind.Camera);
+        SelectedCameraSegmentId = hitId;
+        CameraSegmentSelected?.Invoke(this, hitId);
+
+        // A menu rather than an instant delete: a stray right-click used to remove the clip
+        // outright. Built in code, like the zoom chip's menu (see the flyout playbook).
+        ShowRemoveMenu(canvas, pos, "Remove Camera Segment",
+            () => CameraSegmentRemoveRequested?.Invoke(this, hitId));
+        e.Handled = true;
+    }
+
+    /// <summary>Opens a one-item "Remove" context menu at <paramref name="pos"/>.</summary>
+    private static void ShowRemoveMenu(FrameworkElement target, Point pos, string text, Action onRemove)
+    {
+        var menu = new MenuFlyout();
+        var removeItem = new MenuFlyoutItem
         {
-            ClearOtherSelections(SelectionKind.Camera);
-            SelectedCameraSegmentId = hitId;
-            CameraSegmentSelected?.Invoke(this, hitId);
-            CameraSegmentRemoveRequested?.Invoke(this, hitId);
-        }
+            Text = text,
+            Icon = new FontIcon { Glyph = "\uE74D" },
+        };
+        removeItem.Click += (_, _) => onRemove();
+        menu.Items.Add(removeItem);
+        menu.ShowAt(target, pos);
     }
 
     // ─────────────────────────── Text Overlay Track ───────────────────────────
@@ -7954,8 +8615,9 @@ public sealed partial class TimelineControl : UserControl
             if (float.IsNaN(x1) || float.IsNaN(x2)) continue; // overlay's recording isn't on the timeline
             if (posX < x1 || posX > x2) continue;
 
-            if (posX - x1 <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.LeftEdge);
-            if (x2 - posX <= SegmentEdgeHitWidth) return (seg.Id, SegmentHitTarget.RightEdge);
+            double edge = SegmentEdgeHitWidthFor(x2 - x1);
+            if (posX - x1 <= edge) return (seg.Id, SegmentHitTarget.LeftEdge);
+            if (x2 - posX <= edge) return (seg.Id, SegmentHitTarget.RightEdge);
             return (seg.Id, SegmentHitTarget.Body);
         }
         return (null, SegmentHitTarget.None);
@@ -7964,6 +8626,8 @@ public sealed partial class TimelineControl : UserControl
     private void TextTrack_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not CanvasControl canvas) return;
+        if (!IsPrimaryPointerPress(canvas, e)) return;
+        FocusForKeyboard();
         var pos = e.GetCurrentPoint(canvas).Position;
         var (hitId, target) = HitTestTextOverlay(pos.X, pos.Y);
 
@@ -8023,18 +8687,38 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
+        bool snap = !IsAltDown();
+
+        // Mid-drag only the text canvas changes (plus the video canvas's snap guide, which
+        // SnapDragX repaints itself); the full InvalidateAll runs once on release.
         switch (_dragMode)
         {
             case DragMode.TextOverlayBody:
-                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+            {
+                double clampedX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                var overlay = Model?.TextOverlays.FirstOrDefault(o => o.Id == _selectedTextOverlayId);
+                double originalStartX = overlay is not null
+                    ? TextOverlayTimeToX(overlay, _textOverlayDragOriginalStart)
+                    : double.NaN;
+                if (!double.IsNaN(originalStartX))
+                {
+                    double leftX = originalStartX + (clampedX - _textOverlayDragStartX);
+                    double snappedLeftX = SnapDragX(Model, leftX, snap);
+                    _textOverlayDragCurrentX = _textOverlayDragStartX + (snappedLeftX - originalStartX);
+                }
+                else
+                {
+                    _textOverlayDragCurrentX = clampedX;
+                }
                 SetCursor(InputSystemCursorShape.SizeAll);
-                InvalidateAll();
+                TextTrackCanvas?.Invalidate();
                 break;
+            }
             case DragMode.TextOverlayLeftEdge:
             case DragMode.TextOverlayRightEdge:
-                _textOverlayDragCurrentX = Math.Clamp(pos.X, 0, canvas.ActualWidth);
+                _textOverlayDragCurrentX = SnapDragX(Model, Math.Clamp(pos.X, 0, canvas.ActualWidth), snap);
                 SetCursor(InputSystemCursorShape.SizeWestEast);
-                InvalidateAll();
+                TextTrackCanvas?.Invalidate();
                 break;
             case DragMode.TextOverlayCreate:
                 if (Math.Abs(pos.X - _textOverlayDragStartX) >= ZoomCreateDragThreshold)
@@ -8049,7 +8733,7 @@ public sealed partial class TimelineControl : UserControl
                     {
                         _textOverlayCreateActive = true;
                         _textOverlayCreateEnd = end.Value;
-                        InvalidateAll();
+                        TextTrackCanvas?.Invalidate();
                     }
                     // else: pointer is outside every segment for _textOverlayCreateFile
                     // with none to clamp to — keep the previous _textOverlayCreateEnd.
@@ -8075,65 +8759,68 @@ public sealed partial class TimelineControl : UserControl
     {
         if (sender is not CanvasControl canvas) return;
 
-        switch (_dragMode)
+        try
         {
-            case DragMode.TextOverlayBody when _selectedTextOverlayId is not null:
+            switch (_dragMode)
             {
-                double deltaX = _textOverlayDragCurrentX - _textOverlayDragStartX;
-                if (Math.Abs(deltaX) > 1)
+                case DragMode.TextOverlayBody when _selectedTextOverlayId is not null:
                 {
-                    // Convert the dragged X back to a source time in the OWNING
-                    // overlay's own recording's domain, not the primary's — mirrors the
-                    // zoom track's ZoomSegmentBody case exactly.
-                    var file = SelectedTextOverlaySourceFile;
-                    var startTime = XToKeyframeFileTime(_textOverlayDragStartX, file);
-                    var movedTime = XToKeyframeFileTime(_textOverlayDragStartX + deltaX, file);
-                    if (startTime is not null && movedTime is not null)
+                    double deltaX = _textOverlayDragCurrentX - _textOverlayDragStartX;
+                    if (Math.Abs(deltaX) > 1)
                     {
-                        var newStart = _textOverlayDragOriginalStart + (movedTime.Value - startTime.Value);
-                        if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
-                        TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
+                        // Convert the dragged X back to a source time in the OWNING
+                        // overlay's own recording's domain, not the primary's — mirrors the
+                        // zoom track's ZoomSegmentBody case exactly.
+                        var file = SelectedTextOverlaySourceFile;
+                        var startTime = XToKeyframeFileTime(_textOverlayDragStartX, file);
+                        var movedTime = XToKeyframeFileTime(_textOverlayDragStartX + deltaX, file);
+                        if (startTime is not null && movedTime is not null)
+                        {
+                            var newStart = _textOverlayDragOriginalStart + (movedTime.Value - startTime.Value);
+                            if (newStart < TimeSpan.Zero) newStart = TimeSpan.Zero;
+                            TextOverlayMoved?.Invoke(this, (_selectedTextOverlayId, newStart));
+                        }
+                        // else: this overlay's recording has no segment on the timeline at all
+                        // — reject the move rather than writing a time from another
+                        // recording's domain into it. (When the pointer merely strays over a
+                        // different clip or a text slide, XToKeyframeFileTime clamps to the
+                        // nearest edge of THIS overlay's own recording, so the move pins to
+                        // the clip boundary instead of jumping sources — same as zoom.)
                     }
-                    // else: this overlay's recording has no segment on the timeline at all
-                    // — reject the move rather than writing a time from another
-                    // recording's domain into it. (When the pointer merely strays over a
-                    // different clip or a text slide, XToKeyframeFileTime clamps to the
-                    // nearest edge of THIS overlay's own recording, so the move pins to
-                    // the clip boundary instead of jumping sources — same as zoom.)
+                    break;
                 }
-                break;
-            }
-            case DragMode.TextOverlayLeftEdge when _selectedTextOverlayId is not null:
-            {
-                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
-                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalStart)
-                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, true, newEdge.Value));
-                break;
-            }
-            case DragMode.TextOverlayRightEdge when _selectedTextOverlayId is not null:
-            {
-                var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
-                if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalEnd)
-                    TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, false, newEdge.Value));
-                break;
-            }
-            case DragMode.TextOverlayCreate when _textOverlayCreateActive:
-            {
-                var start = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd;
-                var end = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart;
-                if ((end - start) >= TrimTextOverlayOperation.MinDuration)
-                    TextOverlayCreated?.Invoke(this, (start, end, _textOverlayCreateFile));
-                _textOverlayCreateActive = false;
-                break;
+                case DragMode.TextOverlayLeftEdge when _selectedTextOverlayId is not null:
+                {
+                    var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
+                    if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalStart)
+                        TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, true, newEdge.Value));
+                    break;
+                }
+                case DragMode.TextOverlayRightEdge when _selectedTextOverlayId is not null:
+                {
+                    var newEdge = XToKeyframeFileTime(Math.Clamp(_textOverlayDragCurrentX, 0, canvas.ActualWidth), SelectedTextOverlaySourceFile);
+                    if (newEdge is not null && newEdge.Value != _textOverlayDragOriginalEnd)
+                        TextOverlayResized?.Invoke(this, (_selectedTextOverlayId, false, newEdge.Value));
+                    break;
+                }
+                case DragMode.TextOverlayCreate when _textOverlayCreateActive:
+                {
+                    var start = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateStart : _textOverlayCreateEnd;
+                    var end = _textOverlayCreateStart < _textOverlayCreateEnd ? _textOverlayCreateEnd : _textOverlayCreateStart;
+                    if ((end - start) >= TrimTextOverlayOperation.MinDuration)
+                        TextOverlayCreated?.Invoke(this, (start, end, _textOverlayCreateFile));
+                    _textOverlayCreateActive = false;
+                    break;
+                }
             }
         }
-
-        _textOverlayDragStartX = double.NaN;
-        _textOverlayDragCurrentX = double.NaN;
-        _dragMode = DragMode.None;
-        SetCursor(InputSystemCursorShape.Arrow);
-        canvas.ReleasePointerCapture(e.Pointer);
-        InvalidateAll();
+        finally
+        {
+            // A throwing host handler must never leave the text-overlay drag latched.
+            ResetDragState();
+            canvas.ReleasePointerCapture(e.Pointer);
+            InvalidateAll();
+        }
     }
 
     private void TextTrack_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -8141,13 +8828,16 @@ public sealed partial class TimelineControl : UserControl
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetPosition(canvas);
         var (hitId, _) = HitTestTextOverlay(pos.X, pos.Y);
-        if (hitId is not null)
-        {
-            ClearOtherSelections(SelectionKind.TextOverlay);
-            SelectedTextOverlayId = hitId;
-            TextOverlaySelected?.Invoke(this, hitId);
-            TextOverlayRemoveRequested?.Invoke(this, hitId);
-        }
+        if (hitId is null) return;
+
+        ClearOtherSelections(SelectionKind.TextOverlay);
+        SelectedTextOverlayId = hitId;
+        TextOverlaySelected?.Invoke(this, hitId);
+
+        // A menu rather than an instant delete — see CameraTrack_RightTapped.
+        ShowRemoveMenu(canvas, pos, "Remove Text Overlay",
+            () => TextOverlayRemoveRequested?.Invoke(this, hitId));
+        e.Handled = true;
     }
 
     /// <summary>
@@ -8194,25 +8884,61 @@ public sealed partial class TimelineControl : UserControl
         var props = e.GetCurrentPoint(this).Properties;
         int delta = props.MouseWheelDelta;
 
+        // A zero delta (some precision touchpads emit them between real samples) must not be
+        // read as a zoom-out notch, which the old "delta > 0 ? in : out" did.
+        if (delta == 0) return;
+
+        // Fractional notches: a precision touchpad reports small deltas many times a second,
+        // and treating each as a full 120-unit notch made pinch/scroll zoom wildly too fast.
+        double notches = Math.Clamp(Math.Abs(delta) / 120.0, 0, MaxWheelNotchesPerEvent);
+
         if (e.KeyModifiers.HasFlag(Windows.System.VirtualKeyModifiers.Control))
         {
-            // Ctrl+Scroll → zoom
-            double factor = delta > 0 ? 1.15 : 1.0 / 1.15;
-            model.ZoomLevel = Math.Clamp(model.ZoomLevel * factor, 0.1, 50.0);
+            // Ctrl+Scroll → zoom, anchored on the time under the pointer.
+            double oldZoom = model.ZoomLevel;
+            double factor = Math.Pow(WheelZoomStepFactor, delta > 0 ? notches : -notches);
+            double newZoom = Math.Clamp(oldZoom * factor, MinTimelineZoom, MaxTimelineZoom);
+            if (Math.Abs(newZoom - oldZoom) < 1e-9)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            double rulerWidth = TimeRulerCanvas?.ActualWidth ?? 0;
+            double anchorX = TimeRulerCanvas is not null
+                ? e.GetCurrentPoint(TimeRulerCanvas).Position.X
+                : TrackContentInset;
+            // Over the label gutter (or past the right edge) anchor on the nearest visible edge.
+            if (rulerWidth > TrackContentInset * 2)
+                anchorX = Math.Clamp(anchorX, TrackContentInset, rulerWidth - TrackContentInset);
+
+            double anchoredScroll = TimeCoordinateConverter.ScrollOffsetForZoomAnchor(
+                model, anchorX, newZoom, rulerWidth, ActualWidth);
+
+            model.ZoomLevel = newZoom;
+            // Re-clamped against the NEW zoom: zooming out shrinks the scrollable range, and an
+            // offset left past it would show empty space after the end of the timeline.
+            model.ScrollOffset = TimeCoordinateConverter.ClampScrollOffset(model, anchoredScroll);
         }
         else
         {
-            // Scroll → horizontal scroll
-            double scrollDelta = -delta / 120.0 * 0.5; // 0.5 seconds per notch
-            model.ScrollOffset = Math.Clamp(
-                model.ScrollOffset + scrollDelta,
-                0,
-                Math.Max(0, model.Duration.TotalSeconds - 1));
+            // Scroll → horizontal scroll, 0.5 seconds per notch.
+            double scrollDelta = (delta > 0 ? -notches : notches) * 0.5;
+            model.ScrollOffset = TimeCoordinateConverter.ClampScrollOffset(model, model.ScrollOffset + scrollDelta);
         }
 
         InvalidateAll();
         e.Handled = true;
     }
+
+    /// <summary>Zoom multiplier for one 120-unit wheel notch.</summary>
+    private const double WheelZoomStepFactor = 1.15;
+
+    /// <summary>Caps a single wheel event so a fast flick cannot jump the zoom by orders of magnitude.</summary>
+    private const double MaxWheelNotchesPerEvent = 4.0;
+
+    private const double MinTimelineZoom = 0.1;
+    private const double MaxTimelineZoom = 50.0;
 
     private void SetCursor(InputSystemCursorShape shape)
     {

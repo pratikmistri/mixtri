@@ -168,8 +168,8 @@ public sealed partial class EditorPage : Page
 
     // Text overlay editing state — separate debounce timer so a text-box keystroke never
     // interacts with the background-style / motion / cursor debounces above. The model is
-    // still committed (through UndoRedoManager, for undo) on every keystroke; only the
-    // (expensive) preview re-render is debounced.
+    // still updated on every keystroke (one undo entry per typing burst — see
+    // OverlayTextBox_TextChanged); only the (expensive) preview re-render is debounced.
     private Debouncer? _overlayPreviewDebouncer;
 
     // Text-slide animation-window sliders — its own timer so a window drag is never coalesced
@@ -305,6 +305,13 @@ public sealed partial class EditorPage : Page
                         stretched.ScrubTo(Timeline.PlayheadPosition);
                     }
                 }
+                else if (HasPreviewAudio)
+                {
+                    // A seek during playback: PreviewCanvas rebases its clock on the new
+                    // position, and the audio engines are re-seeked to it right away rather
+                    // than waiting for the next tick's drift check.
+                    SyncAudioToPlayhead(Timeline.PlayheadPosition);
+                }
             });
 
         // Sync playhead: when preview plays, update timeline
@@ -383,6 +390,11 @@ public sealed partial class EditorPage : Page
                 // cannot cost the preview as well.
                 try
                 {
+                    // A typing burst belongs to the model being replaced.
+                    EndOverlayTextBurst();
+                    // The project (and its cursor log) may have changed.
+                    _primaryCursorDataCache = null;
+
                     // Assigned explicitly as well as bound: the timeline must never keep
                     // rendering a model the project has moved on from.
                     Timeline.Model = ViewModel.Model;
@@ -484,7 +496,23 @@ public sealed partial class EditorPage : Page
         {
             _pageUnloaded = true;
             _graphicsDeviceManager.Detach();
-            _styleDebouncer?.Stop();
+
+            // Commit pending edits BEFORE any teardown, never drop them: the style, cursor and
+            // slide-window debouncers defer a MODEL write. _pageUnloaded is already set, so the
+            // preview rebuilds those writes would normally start bail out immediately.
+            // The motion and overlay-preview debouncers only repaint (their model writes are
+            // immediate), so stopping them loses nothing.
+            try
+            {
+                CommitPendingSceneStyleWithoutRebuild();
+                _cursorDebouncer?.Flush();
+                _slideTextWindowDebouncer?.Flush();
+            }
+            catch (Exception ex)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"flushing pending edits on unload failed: {ex}");
+            }
+            EndOverlayTextBurst();
             _styleDebouncer = null;
             _cursorDebouncer?.Stop();
             _cursorDebouncer = null;
@@ -492,6 +520,10 @@ public sealed partial class EditorPage : Page
             _motionDebouncer = null;
             _overlayPreviewDebouncer?.Stop();
             _overlayPreviewDebouncer = null;
+            _slideTextWindowDebouncer?.Stop();
+            _slideTextWindowDebouncer = null;
+            _textTimelineInvalidateDebouncer?.Stop();
+            _textTimelineInvalidateDebouncer = null;
 
             // Stop playback to halt timer ticks
             Preview.Pause();
@@ -1414,6 +1446,27 @@ public sealed partial class EditorPage : Page
     }
 
     /// <summary>
+    /// A drag interrupted by capture loss (Alt+Tab, a dialog, touch cancel) ends exactly like a
+    /// release, so the next PointerMoved never resumes a gesture the button is no longer down for.
+    /// </summary>
+    private void ZoomRegionCanvas_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDraggingZoomRegion) return;
+        _isDraggingZoomRegion = false;
+        _zoomDragMode = ZoomDragMode.None;
+        UpdateSnapGuides(false, false);
+    }
+
+    private void ZoomRegionCanvas_PointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_isDraggingZoomRegion) return;
+        _isDraggingZoomRegion = false;
+        _zoomDragMode = ZoomDragMode.None;
+        ZoomRegionCanvas.ReleasePointerCapture(e.Pointer);
+        UpdateSnapGuides(false, false);
+    }
+
+    /// <summary>
     /// Pushes a zoom level onto the panel's slider and its readout without letting the
     /// round-trip look like a user edit. Used by the region-edit drag paths, which are
     /// already the authority on the level being shown.
@@ -1705,6 +1758,109 @@ public sealed partial class EditorPage : Page
         if (SavedFlyoutText is not null)
             SavedFlyoutText.Text = System.IO.Path.GetFileName(path);
         SavedFlyout?.ShowAt(SaveProjectButton);
+    }
+
+    /// <summary>Surfaces a non-modal message on the editor's InfoBar.</summary>
+    private void ShowEditorMessage(string message, InfoBarSeverity severity)
+    {
+        if (_pageUnloaded || EditorInfoBar is null) return;
+        EditorInfoBar.Message = message;
+        EditorInfoBar.Severity = severity;
+        EditorInfoBar.IsOpen = true;
+    }
+
+    /// <summary>
+    /// Refuses <paramref name="action"/> while an export is running (imports, drops) and says
+    /// why. Returns true when the caller must abandon the action.
+    /// </summary>
+    private bool RejectWhileExporting(string action)
+    {
+        if (!ExportVM.IsExporting) return false;
+        Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"{action} rejected: export in progress");
+        ShowEditorMessage(
+            $"Can't {action} while an export is running. Wait for it to finish or cancel it first.",
+            InfoBarSeverity.Warning);
+        return true;
+    }
+
+    // Set only while re-issuing a navigation the user confirmed should cancel the export.
+    private bool _leaveConfirmedDuringExport;
+    private bool _leaveDuringExportPromptOpen;
+
+    /// <summary>
+    /// Leaving the page runs the Unloaded teardown, which cancels any in-flight export
+    /// (<see cref="ExportViewModel.Cleanup"/>). Ask first instead of silently discarding it.
+    /// Fails closed: if the question cannot be put, the user stays on the editor.
+    /// </summary>
+    protected override void OnNavigatingFrom(Microsoft.UI.Xaml.Navigation.NavigatingCancelEventArgs e)
+    {
+        base.OnNavigatingFrom(e);
+        if (e.Cancel || _leaveConfirmedDuringExport || !ExportVM.IsExporting) return;
+
+        e.Cancel = true;
+        if (_leaveDuringExportPromptOpen) return;
+        _ = ConfirmLeaveDuringExportAsync(e.SourcePageType, e.Parameter, e.NavigationMode);
+    }
+
+    private async Task ConfirmLeaveDuringExportAsync(
+        Type targetPage, object? parameter, Microsoft.UI.Xaml.Navigation.NavigationMode mode)
+    {
+        if (XamlRoot is null)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", "leave-during-export prompt skipped: no XamlRoot; staying");
+            return;
+        }
+
+        bool leave;
+        _leaveDuringExportPromptOpen = true;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "Export in progress",
+                Content = "An export is in progress. Cancel export and leave?",
+                PrimaryButtonText = "Cancel export and leave",
+                CloseButtonText = "Stay",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = XamlRoot,
+            };
+            leave = await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception ex)
+        {
+            // WinUI refuses a second ContentDialog. Stay rather than cancel the export unasked.
+            Mixtri.Core.Diagnostics.DiagLog.Write(
+                "Editor", $"leave-during-export prompt failed; staying: {ex.Message}");
+            return;
+        }
+        finally
+        {
+            _leaveDuringExportPromptOpen = false;
+        }
+
+        if (!leave || _pageUnloaded || Frame is null) return;
+
+        if (ExportVM.IsExporting && ExportVM.CancelExportCommand.CanExecute(null))
+            ExportVM.CancelExportCommand.Execute(null);
+
+        _leaveConfirmedDuringExport = true;
+        try
+        {
+            if (mode == Microsoft.UI.Xaml.Navigation.NavigationMode.Back && Frame.CanGoBack)
+                Frame.GoBack();
+            else if (mode == Microsoft.UI.Xaml.Navigation.NavigationMode.Forward && Frame.CanGoForward)
+                Frame.GoForward();
+            else
+                Frame.Navigate(targetPage, parameter);
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor", $"navigation after export cancel failed: {ex}");
+        }
+        finally
+        {
+            _leaveConfirmedDuringExport = false;
+        }
     }
 
     private async Task ShowProjectDialogAsync(string title, string message)

@@ -171,7 +171,9 @@ public sealed partial class EditorPage
         // available head can make a head-trim shorter than what the pointer asked for, and a
         // badge contradicting the edit that lands is worse than no badge.
         var (effectiveDuration, sourceTime) =
-            TrimSegmentEdgeOperation.ResolveEdgePreview(seg, fromStart, newDuration);
+            TrimSegmentEdgeOperation.ResolveEdgePreview(
+                seg, fromStart, newDuration,
+                TrimSegmentEdgeOperation.KnownSourceEnd(ViewModel.Model, seg));
         Preview.ShowTrimIndicator(fromStart, effectiveDuration);
 
         if (_frameReader is null)
@@ -408,7 +410,10 @@ public sealed partial class EditorPage
         DisposeOffUiThread(_frameReader);
         _previewRenderer?.Dispose();
         _audioPlayer?.Dispose();
-        _styleDebouncer?.Stop();
+        // A pending scene edit is committed to the model (the rebuild below then picks it
+        // up), never dropped; its own renderer rebuild is skipped since this re-init builds
+        // one. The motion debounce only rebuilds the preview — its model write is immediate.
+        CommitPendingSceneStyleWithoutRebuild();
         _motionDebouncer?.Stop();
         _frameReader = null;
         _previewRenderer = null;
@@ -781,7 +786,9 @@ public sealed partial class EditorPage
                 // decode, composition and UI contention all reduce preview headroom.
                 long renderStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 _decodeMissed = false;
+                _previewRenderFailure = null;
                 await RenderFrameAtAsync(currentPos, currentForce);
+                TrackPreviewRenderOutcome();
                 ExportVM.ReportPreviewFrame(
                     System.Diagnostics.Stopwatch.GetElapsedTime(renderStarted));
 
@@ -834,12 +841,63 @@ public sealed partial class EditorPage
             _lastRenderedFrameIndex = -1;
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"preview render failed at {position}: {ex}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
+            TrackPreviewRenderOutcome();
         }
         finally
         {
             _isRendering = false;
         }
+    }
+
+    // ── Repeated non-device-loss render failures ──
+    // Device loss is handed to recovery. Anything else (a corrupt frame, an unsupported
+    // effect, an out-of-memory target) recovery cannot fix, and since the preview re-renders
+    // every tick it used to fail the same way 30 times a second with nothing on screen but a
+    // stale frame. Count consecutive failed frames; past the threshold pause playback once
+    // and say so, then stay quiet until a frame renders again.
+    private const int PreviewRenderFailureThreshold = 10;
+    private Exception? _previewRenderFailure;
+    private int _consecutivePreviewRenderFailures;
+    private bool _previewRenderFailureShown;
+
+    /// <summary>Routes a caught render error to device recovery, and records it for
+    /// <see cref="TrackPreviewRenderOutcome"/> when it is not a device loss.</summary>
+    private void ReportPreviewRenderFailure(Exception ex)
+    {
+        if (_graphicsDeviceManager.RecoverFromRenderFailure(ex)) return;
+        _previewRenderFailure ??= ex;
+    }
+
+    /// <summary>Called once per rendered frame request.</summary>
+    private void TrackPreviewRenderOutcome()
+    {
+        var failure = _previewRenderFailure;
+        _previewRenderFailure = null;
+
+        if (failure is null)
+        {
+            // A decode miss is retried separately and proves nothing either way.
+            if (!_decodeMissed)
+            {
+                _consecutivePreviewRenderFailures = 0;
+                _previewRenderFailureShown = false;
+            }
+            return;
+        }
+
+        _consecutivePreviewRenderFailures++;
+        if (_consecutivePreviewRenderFailures < PreviewRenderFailureThreshold
+            || _previewRenderFailureShown || _pageUnloaded)
+        {
+            return;
+        }
+
+        _previewRenderFailureShown = true;
+        Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
+            $"preview failed {_consecutivePreviewRenderFailures} frames in a row; pausing playback: {failure}");
+        if (Preview.IsPlaying) Preview.Pause();
+        ShowEditorMessage($"Preview failed: {failure.Message}", InfoBarSeverity.Error);
     }
 
     /// <summary>
@@ -1072,7 +1130,7 @@ public sealed partial class EditorPage
                 {
                     Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
                         $"slide crossfade preview error at {position}: {ex.Message}");
-                    _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+                    ReportPreviewRenderFailure(ex);
                 }
                 finally
                 {
@@ -1453,12 +1511,8 @@ public sealed partial class EditorPage
         int stateGen = _primaryPreviewStateGeneration;
         TrimPrimaryStyleRendererCache();
 
-        MouseRecordingData? mouseData = null;
-        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
-        {
-            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
-            catch { /* no cursor data */ }
-        }
+        // stateGen is re-checked after the renderer build below, which also covers this await.
+        var mouseData = await LoadPrimaryCursorDataCachedAsync(project.CursorDataFilePath);
         mouseData ??= new MouseRecordingData();
 
         // Same style-layering RebuildPreviewRendererCoreAsync uses for the singleton, just
@@ -1558,7 +1612,7 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"title background preload failed: {ex}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
             return;
         }
         if (!IsPreviewCurrent(generation) || !ReferenceEquals(renderer, _textSlideRenderer))
@@ -1589,7 +1643,7 @@ public sealed partial class EditorPage
                 $"[EditorPage] Text slide preview error: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"text slide render failed (0x{ex.HResult:X8}): {ex}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
         }
 
         ShowTextEditOverlay();
@@ -1626,7 +1680,7 @@ public sealed partial class EditorPage
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"empty-gap frame render failed: {ex.GetType().Name}: {ex.Message}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
         }
         finally
         {
@@ -1746,7 +1800,7 @@ public sealed partial class EditorPage
                 $"[EditorPage] Preview frame error at {sourcePosition}: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"frame render failed at {sourcePosition}: {ex.GetType().Name}: {ex.Message}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
         }
     }
 
@@ -1840,7 +1894,7 @@ public sealed partial class EditorPage
             System.Diagnostics.Debug.WriteLine($"[EditorPage] Appended segment render error: {ex.Message}");
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview",
                 $"appended segment render failed: {ex.GetType().Name}: {ex.Message}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
         }
     }
 
@@ -2151,33 +2205,48 @@ public sealed partial class EditorPage
         _previewRenderer.SetWebcamFullscreenFactor(fullscreenFactor);
         _previewRenderer.SetWebcamOverlayOpacity(overlayOpacity);
 
+        var clamped = position;
+        if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
+            clamped = _webcamComposition.Duration;
+
+        // Cap extraction size for preview — full native resolution is
+        // unnecessarily heavy for a ~300px overlay during editor scrubbing.
+        // When animating toward fullscreen, raise the cap so the enlarged
+        // webcam isn't blurry as it covers the screen.
+        float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
+        if (fullscreenFactor > 0f)
+        {
+            float outMax = Math.Max(_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
+            previewCap = Math.Max(previewCap, fullscreenFactor * outMax);
+        }
+        int extractW = _webcamWidth;
+        int extractH = _webcamHeight;
+        float minDim = Math.Min(_webcamWidth, _webcamHeight);
+        if (minDim > previewCap)
+        {
+            float scale = previewCap / minDim;
+            extractW = Math.Max((int)Math.Ceiling(_webcamWidth * scale), 1);
+            extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
+        }
+
+        // The preview ticks (and re-renders on every style edit) far more often than the
+        // webcam frame actually changes. Re-use the last extraction when it is the same
+        // quantized webcam frame at the same size from the same composition; just hand it
+        // to the renderer again, since a rebuilt renderer or a camera-segment gap clears it.
+        long webcamFrameIndex = (long)(clamped.TotalSeconds * WebcamPreviewFps);
+        if (_lastWebcamFrame is not null
+            && _lastWebcamFrameKey is { } lastKey
+            && ReferenceEquals(lastKey.Composition, composition)
+            && lastKey.FrameIndex == webcamFrameIndex
+            && lastKey.Width == extractW && lastKey.Height == extractH)
+        {
+            renderer.SetWebcamFrame(_lastWebcamFrame);
+            return;
+        }
+
         CanvasBitmap? webcamFrame = null;
         try
         {
-            var clamped = position;
-            if (_webcamComposition.Duration > TimeSpan.Zero && position > _webcamComposition.Duration)
-                clamped = _webcamComposition.Duration;
-
-            // Cap extraction size for preview — full native resolution is
-            // unnecessarily heavy for a ~300px overlay during editor scrubbing.
-            // When animating toward fullscreen, raise the cap so the enlarged
-            // webcam isn't blurry as it covers the screen.
-            float previewCap = (ProjectService.Instance.CurrentComposition?.WebcamStyle?.Size ?? 300f) * 1.5f;
-            if (fullscreenFactor > 0f)
-            {
-                float outMax = Math.Max(_previewRenderer.OutputWidth, _previewRenderer.OutputHeight);
-                previewCap = Math.Max(previewCap, fullscreenFactor * outMax);
-            }
-            int extractW = _webcamWidth;
-            int extractH = _webcamHeight;
-            float minDim = Math.Min(_webcamWidth, _webcamHeight);
-            if (minDim > previewCap)
-            {
-                float scale = previewCap / minDim;
-                extractW = Math.Max((int)Math.Ceiling(_webcamWidth * scale), 1);
-                extractH = Math.Max((int)Math.Ceiling(_webcamHeight * scale), 1);
-            }
-
             using var thumbnail = await composition.GetThumbnailAsync(
                 clamped, extractW, extractH,
                 Windows.Media.Editing.VideoFramePrecision.NearestFrame);
@@ -2190,7 +2259,7 @@ public sealed partial class EditorPage
         catch (Exception ex)
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"webcam frame extraction failed: {ex}");
-            _graphicsDeviceManager.RecoverFromRenderFailure(ex);
+            ReportPreviewRenderFailure(ex);
         }
 
         if (webcamFrame is not null)
@@ -2204,9 +2273,18 @@ public sealed partial class EditorPage
             }
             _lastWebcamFrame?.Dispose();
             _lastWebcamFrame = webcamFrame;
+            _lastWebcamFrameKey = (composition, webcamFrameIndex, extractW, extractH);
             renderer.SetWebcamFrame(_lastWebcamFrame);
         }
     }
+
+    // Webcam recordings are captured at 30 fps; quantizing the request to that grid is what
+    // lets consecutive preview ticks inside one webcam frame share a single extraction.
+    private const int WebcamPreviewFps = 30;
+
+    // Identity of _lastWebcamFrame. Only trusted while _lastWebcamFrame is non-null, so every
+    // site that disposes the frame also invalidates the key without touching it.
+    private (object Composition, long FrameIndex, int Width, int Height)? _lastWebcamFrameKey;
 
     /// <summary>
     /// Maps an output (playhead) time to source time using the current timeline mapper.

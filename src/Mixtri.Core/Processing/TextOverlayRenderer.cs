@@ -58,6 +58,7 @@ public class TextOverlayRenderer : IDisposable
     // partially-built effect was never captured by the `using` and never disposed. Because
     // these are now renderer-owned fields built in a separate step (not inline in a `using`
     // initializer) and disposed unconditionally in Dispose(), there is no such exception path.
+    private CropEffect? _blurCropEffect;
     private BorderEffect? _blurBorderEffect;
     private GaussianBlurEffect? _blurGaussianEffect;
 
@@ -308,8 +309,14 @@ public class TextOverlayRenderer : IDisposable
         GaussianBlurEffect? blurEffect = null;
         if (overlay.Background == TextOverlayBackground.Blur)
         {
-            var scratch = CopyFrameIntoBlurScratch(target, width, height);
-            blurEffect = EnsureBlurEffectGraph(scratch, (float)scaledBlurAmount);
+            // Only the pixels the blurred box can sample matter: the animated box plus
+            // ~3σ of blur reach. Copying and blurring the whole frame cost a full-frame
+            // blit + blur per overlay per frame for a box that is usually a small fraction
+            // of it. The region is clamped to the frame, so near frame edges the graph's
+            // Clamp border behaves exactly as it did on the full frame.
+            var region = ComputeBlurSampleRegion(box, scale, boxCenter, tx, ty, scaledBlurAmount, width, height);
+            var scratch = CopyFrameIntoBlurScratch(target, region, width, height);
+            blurEffect = EnsureBlurEffectGraph(scratch, region, (float)scaledBlurAmount);
         }
 
         using var ds = target.CreateDrawingSession();
@@ -365,15 +372,41 @@ public class TextOverlayRenderer : IDisposable
     /// to be wrapped in the blur effect graph. Must be called while no drawing session is
     /// open on <paramref name="target"/>.
     /// </summary>
-    private CanvasRenderTarget CopyFrameIntoBlurScratch(CanvasRenderTarget target, int width, int height)
+    private CanvasRenderTarget CopyFrameIntoBlurScratch(
+        CanvasRenderTarget target, Rect region, int width, int height)
     {
         var scratch = EnsureBlurScratch(width, height);
         using (var scratchDs = scratch.CreateDrawingSession())
         {
-            scratchDs.Clear(Color.FromArgb(0, 0, 0, 0));
-            scratchDs.DrawImage(target);
+            // Copy (not source-over) so the region is replaced outright without a clear;
+            // pixels outside it are never read — the graph crops to the region.
+            scratchDs.Blend = CanvasBlend.Copy;
+            scratchDs.DrawImage(target, region, region);
         }
         return scratch;
+    }
+
+    /// <summary>
+    /// The frame region the frosted-glass box can sample this frame: the box under the
+    /// animation envelope, grown by the blur's reach (3σ) and clamped to the frame, in
+    /// whole pixels. Never empty, so the effect graph always has a valid input.
+    /// </summary>
+    internal static Rect ComputeBlurSampleRegion(
+        Rect box, float scale, Vector2 boxCenter, float tx, float ty, double blurAmount,
+        int width, int height)
+    {
+        double s = Math.Abs(scale);
+        double halfW = box.Width / 2 * s;
+        double halfH = box.Height / 2 * s;
+        double cx = boxCenter.X + (box.X + box.Width / 2 - boxCenter.X) * scale + tx;
+        double cy = boxCenter.Y + (box.Y + box.Height / 2 - boxCenter.Y) * scale + ty;
+        double margin = Math.Ceiling(Math.Max(0.0, blurAmount) * 3.0) + 2.0;
+
+        double left = Math.Clamp(Math.Floor(cx - halfW - margin), 0, Math.Max(0, width - 1));
+        double top = Math.Clamp(Math.Floor(cy - halfH - margin), 0, Math.Max(0, height - 1));
+        double right = Math.Clamp(Math.Ceiling(cx + halfW + margin), left + 1, Math.Max(left + 1, width));
+        double bottom = Math.Clamp(Math.Ceiling(cy + halfH + margin), top + 1, Math.Max(top + 1, height));
+        return new Rect(left, top, right - left, bottom - top);
     }
 
     private CanvasRenderTarget EnsureBlurScratch(int width, int height)
@@ -387,20 +420,23 @@ public class TextOverlayRenderer : IDisposable
     /// per-frame case reuses the same graph and just updates <see cref="GaussianBlurEffect.BlurAmount"/>,
     /// a cheap property set, instead of rebuilding two effect objects every frame.
     /// </summary>
-    private GaussianBlurEffect EnsureBlurEffectGraph(CanvasRenderTarget scratch, float blurAmount)
+    private GaussianBlurEffect EnsureBlurEffectGraph(CanvasRenderTarget scratch, Rect region, float blurAmount)
     {
-        if (_blurBorderEffect is null || _blurGaussianEffect is null || !ReferenceEquals(_blurBorderEffect.Source, scratch))
+        if (_blurCropEffect is null || _blurBorderEffect is null || _blurGaussianEffect is null
+            || !ReferenceEquals(_blurCropEffect.Source, scratch))
         {
             // Build both candidates before touching the fields, and dispose whichever one
             // was already constructed if the other throws — otherwise a failure part-way
             // through leaks the first effect, which is never reachable to dispose again.
+            CropEffect? nextCrop = null;
             BorderEffect? nextBorder = null;
             GaussianBlurEffect? nextGaussian = null;
             try
             {
+                nextCrop = new CropEffect { Source = scratch, SourceRectangle = region };
                 nextBorder = new BorderEffect
                 {
-                    Source = scratch,
+                    Source = nextCrop,
                     ExtendX = CanvasEdgeBehavior.Clamp,
                     ExtendY = CanvasEdgeBehavior.Clamp,
                 };
@@ -410,16 +446,20 @@ public class TextOverlayRenderer : IDisposable
             {
                 nextGaussian?.Dispose();
                 nextBorder?.Dispose();
+                nextCrop?.Dispose();
                 throw;
             }
 
             _blurGaussianEffect?.Dispose();
             _blurBorderEffect?.Dispose();
+            _blurCropEffect?.Dispose();
+            _blurCropEffect = nextCrop;
             _blurBorderEffect = nextBorder;
             _blurGaussianEffect = nextGaussian;
         }
         else
         {
+            _blurCropEffect.SourceRectangle = region;
             _blurGaussianEffect.BlurAmount = blurAmount;
         }
 
@@ -594,6 +634,7 @@ public class TextOverlayRenderer : IDisposable
         _blurScratchHolder.Dispose();
         _blurGaussianEffect?.Dispose();
         _blurBorderEffect?.Dispose();
+        _blurCropEffect?.Dispose();
         foreach (var entry in _overlayCache.Values)
             entry.Dispose();
         _overlayCache.Clear();

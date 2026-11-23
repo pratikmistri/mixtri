@@ -49,7 +49,12 @@ public sealed class SegmentFrameComposer : IDisposable
     private TransitionRenderer? _transitionRenderer;
     private bool _disposed;
     private long _contextUse;
-    internal const int MaxSourceContexts = 3;
+    // Use stamp at the start of the frame being composed. Contexts stamped after it are
+    // needed by the current frame (both sides of a transition) and are never evicted.
+    private long _frameUseStart;
+    // Primary + up to four other sources/style variants: enough for a transition between
+    // two appended recordings plus the next segment without rebuilding decoders every frame.
+    internal const int MaxSourceContexts = 5;
     internal int CachedContextCount => _contexts.Count;
 
     /// <summary>Width of every frame returned by <see cref="ComposeFrameAsync"/>.</summary>
@@ -164,6 +169,7 @@ public sealed class SegmentFrameComposer : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfNegative(frameIndex);
+        _frameUseStart = _contextUse;
 
         var frame = await ComposeSegmentFrameAsync(frameIndex, ct);
 
@@ -835,13 +841,22 @@ public sealed class SegmentFrameComposer : IDisposable
         }
 
         // Returned frames are independently owned, so an inactive source can be evicted
-        // even while a transition retains its last composed picture.
+        // even while a transition retains its last composed picture. Contexts already used
+        // by the frame being composed are pinned: evicting one would rebuild it (decoder,
+        // compositor, webcam) on the very next frame of the transition. If every candidate
+        // is pinned the cache temporarily exceeds the cap rather than thrashing.
         if (_contexts.Count >= MaxSourceContexts)
         {
-            var oldest = _contexts.Where(pair => !ReferenceEquals(pair.Value, _primaryContext))
-                .MinBy(pair => pair.Value.LastUsed);
-            _contexts.Remove(oldest.Key);
-            oldest.Value.Dispose();
+            var evictable = _contexts
+                .Where(pair => !ReferenceEquals(pair.Value, _primaryContext)
+                    && pair.Value.LastUsed <= _frameUseStart)
+                .ToList();
+            if (evictable.Count > 0)
+            {
+                var oldest = evictable.MinBy(pair => pair.Value.LastUsed);
+                _contexts.Remove(oldest.Key);
+                oldest.Value.Dispose();
+            }
         }
 
         bool isPrimary = IsPrimarySource(segment.VideoFilePath);

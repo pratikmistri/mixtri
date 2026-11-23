@@ -39,6 +39,17 @@ public static class Win2DUtils
             DiagLog.Write(
                 "Win2DUtils",
                 $"Failed to allocate {purpose} render target ({width}x{height}): {ex.Message}");
+
+            // A removed/reset device is not a size problem: advising a lower resolution would
+            // send the user after the wrong fix. The COM error stays the inner exception, so
+            // GpuContext.IsDeviceLoss still classifies this as recoverable device loss.
+            if (GpuContext.IsDeviceLossHResult(ex.HResult))
+            {
+                throw new InvalidOperationException(
+                    $"Failed to allocate {purpose} render target ({width}x{height}): the graphics " +
+                    "device was lost or reset and must be recreated.", ex);
+            }
+
             throw new InvalidOperationException(
                 $"Failed to allocate {purpose} render target ({width}x{height}). " +
                 "Try a lower resolution or close other GPU-heavy applications.", ex);

@@ -111,7 +111,7 @@ public static class ProjectSaveCoordinator
 
             if (targetPath is null) return false;
 
-            await service.SavePackageAsync(targetPath);
+            await SaveWithProgressAsync(root, service, targetPath);
             return true;
         }
         catch (Exception ex)
@@ -126,6 +126,82 @@ public static class ProjectSaveCoordinator
                 // The window may already be tearing down; the failure is logged either way.
             }
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Runs the save behind a non-dismissable progress dialog. Packing a long recording can
+    /// take many seconds, and without visible progress the close prompt simply vanished and
+    /// the app looked hung — inviting a second click on X or a kill from Task Manager while
+    /// the package was half-written.
+    /// </summary>
+    /// <remarks>
+    /// Best-effort UI: if the dialog cannot be shown (WinUI allows one ContentDialog at a
+    /// time), the save still runs; only the progress display is lost. The dialog is always
+    /// hidden before this returns or throws, so the caller's error dialog can open.
+    /// </remarks>
+    private static async Task SaveWithProgressAsync(XamlRoot root, ProjectService service, string targetPath)
+    {
+        var bar = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 1,
+            IsIndeterminate = true,
+            MinWidth = 280,
+        };
+        var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"Saving to {Path.GetFileName(targetPath)}…",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(bar);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Saving project",
+            Content = panel,
+            XamlRoot = root,
+        };
+
+        // No buttons, and Esc / programmatic-close attempts are refused until the save is
+        // done: abandoning the dialog would not abandon the save, it would only hide it.
+        bool allowClose = false;
+        dialog.Closing += (_, args) =>
+        {
+            if (!allowClose) args.Cancel = true;
+        };
+
+        bool shown = false;
+        try
+        {
+            _ = dialog.ShowAsync();
+            shown = true;
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Shell", $"Save progress dialog could not be shown: {ex.Message}");
+        }
+
+        // Created on the UI thread, so reports are marshalled back to it.
+        var progress = new Progress<double>(value =>
+        {
+            bar.IsIndeterminate = false;
+            bar.Value = Math.Clamp(value, 0.0, 1.0);
+        });
+
+        try
+        {
+            await service.SavePackageAsync(targetPath, progress);
+        }
+        finally
+        {
+            if (shown)
+            {
+                allowClose = true;
+                try { dialog.Hide(); }
+                catch (Exception ex) { DiagLog.Write("Shell", $"Save progress dialog could not be hidden: {ex.Message}"); }
+            }
         }
     }
 

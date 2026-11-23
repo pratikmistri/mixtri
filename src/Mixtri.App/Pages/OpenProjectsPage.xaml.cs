@@ -24,6 +24,12 @@ public sealed class ProjectCard
     public DateTime ModifiedAt { get; init; }
 
     public BitmapImage? Poster { get; init; }
+
+    /// <summary>
+    /// What a screen reader announces for the card's container: the GridViewItem's
+    /// automation name falls back to the item's ToString, not to the template root.
+    /// </summary>
+    public override string ToString() => string.IsNullOrEmpty(Subtitle) ? Name : $"{Name}, {Subtitle}";
 }
 
 /// <summary>
@@ -46,6 +52,9 @@ public sealed class ProjectGroup
 public sealed partial class OpenProjectsPage : Page
 {
     private bool _isLoading;
+
+    /// <summary>Set while a project is opening, so a second click cannot start another.</summary>
+    private bool _isOpening;
 
     public OpenProjectsPage()
     {
@@ -335,6 +344,35 @@ public sealed partial class OpenProjectsPage : Page
 
     private async Task OpenAsync(string packagePath)
     {
+        // One open at a time: a double-click, or a second card clicked while the first was
+        // still unpacking, used to start an overlapping open that raced the first one.
+        if (_isOpening || ProjectService.Instance.OpenInFlightPath is not null) return;
+        _isOpening = true;
+        try
+        {
+            await OpenCoreAsync(packagePath);
+        }
+        finally
+        {
+            _isOpening = false;
+            SetOpeningUi(false);
+        }
+    }
+
+    /// <summary>Disables the gallery and shows the progress ring while a project opens.</summary>
+    private void SetOpeningUi(bool opening)
+    {
+        if (ProjectsGrid is not null) ProjectsGrid.IsEnabled = !opening;
+        if (OpenButton is not null) OpenButton.IsEnabled = !opening;
+        if (LoadingRing is not null && !_isLoading)
+        {
+            LoadingRing.IsActive = opening;
+            LoadingRing.Visibility = opening ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private async Task OpenCoreAsync(string packagePath)
+    {
         // Opening REPLACES whatever this window is holding. A never-saved recording is the
         // dangerous case — it is clean, so the dirty flag says nothing, yet there is no file
         // to reopen it from. The cross-process route (App.ServeRedirectedOpen) already
@@ -345,6 +383,7 @@ public sealed partial class OpenProjectsPage : Page
             return;
         }
 
+        SetOpeningUi(true);
         try
         {
             await ProjectService.Instance.OpenPackageAsync(packagePath);

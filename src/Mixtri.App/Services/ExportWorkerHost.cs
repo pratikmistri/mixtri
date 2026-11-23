@@ -24,7 +24,8 @@ internal static class ExportWorkerHost
             var request = ExportWorkerProtocol.Deserialize(
                 line ?? throw new InvalidDataException("The export worker received no job."));
             if (request.Kind != ExportWorkerMessageKind.Start || request.Snapshot is null
-                || request.Settings is null || string.IsNullOrWhiteSpace(request.OutputFolder))
+                || request.Settings is null
+                || (string.IsNullOrWhiteSpace(request.OutputFolder) && string.IsNullOrWhiteSpace(request.OutputFilePath)))
                 throw new InvalidDataException("The export worker received an incomplete job.");
             DiagLog.Write("Export", $"worker {Environment.ProcessId} starting {request.Settings.Format} export");
 
@@ -41,8 +42,16 @@ internal static class ExportWorkerHost
                 }
             });
             var snapshot = request.Snapshot;
-            var export = new ExportEngine().ExportProjectAsync(
-                snapshot.Project, request.Settings, snapshot.Composition, request.OutputFolder,
+            // Resolve the output file up front and tell the client, so it can remove a
+            // partial file itself if it ever has to kill this process.
+            string outputFolder = request.OutputFolder
+                ?? Path.GetDirectoryName(request.OutputFilePath!)
+                ?? throw new InvalidDataException("The export worker received no output location.");
+            string plannedPath = ExportEngine.ResolveOutputPath(
+                outputFolder, request.OutputFilePath, snapshot.Project.Name, request.Settings.Format);
+            Send(new ExportWorkerMessage(ExportWorkerMessageKind.OutputPlanned) { OutputPath = plannedPath });
+            var export = new ExportEngine().ExportProjectWithResultAsync(
+                snapshot.Project, request.Settings, snapshot.Composition, outputFolder, plannedPath,
                 snapshot.Timeline, progress, cancellation.Token,
                 new WindowsVideoSuperResolutionProvider(), scheduler);
 
@@ -51,9 +60,13 @@ internal static class ExportWorkerHost
                 cancellation.Cancel();
                 await controls;
             }
-            var path = await export;
+            var result = await export;
             DiagLog.Write("Export", $"worker {Environment.ProcessId} completed export");
-            Send(new ExportWorkerMessage(ExportWorkerMessageKind.Completed) { OutputPath = path });
+            Send(new ExportWorkerMessage(ExportWorkerMessageKind.Completed)
+            {
+                OutputPath = result.OutputPath,
+                Warnings = result.Warnings.Count > 0 ? result.Warnings.ToArray() : null,
+            });
             return 0;
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)

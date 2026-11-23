@@ -31,7 +31,8 @@ namespace Mixtri_App;
 /// The seen flag is written when the user DISMISSES the notice, never when it is shown, so a
 /// launch that is killed or crashes before they read it shows the notice again rather than
 /// burning it silently. Dismissal is deliberately available three ways — the button, Escape,
-/// and the window's own close — and all route through <see cref="MarkSeen"/>.
+/// and the window's own close — and all route through <see cref="MarkSeen"/>. A close caused by
+/// the app itself shutting down is NOT a dismissal and leaves the notice unseen.
 /// </para>
 /// </remarks>
 public sealed partial class WhatsNewWindow : Window
@@ -70,7 +71,15 @@ public sealed partial class WhatsNewWindow : Window
         // SizeChanged as well as Loaded: the ItemsControl realises its paragraphs after the
         // first layout pass, so measuring only on Loaded produces a window too short for its
         // own content and visibly clips the dismiss button.
-        RootGrid.Loaded += (_, _) => MeasureAndCentre();
+        RootGrid.Loaded += (_, _) =>
+        {
+            MeasureAndCentre();
+
+            // Escape is handled by RootGrid.KeyDown, which only sees keys while something
+            // inside the window has focus. Nothing does by default, so without this Escape
+            // did nothing until the user first clicked into the notice.
+            DismissButton.Focus(FocusState.Programmatic);
+        };
         RootGrid.SizeChanged += (_, _) => MeasureAndCentre();
         RootGrid.KeyDown += OnRootKeyDown;
 
@@ -176,9 +185,14 @@ public sealed partial class WhatsNewWindow : Window
         else
             SystemBackdrop = new MicaBackdrop();
 
-        // Closing by any route (X, Alt+F4, shell teardown) counts as dismissal, so the notice
-        // cannot reappear after the user has visibly acknowledged it.
-        AppWindow.Closing += (_, _) => MarkSeen();
+        // Closing by the user (Alt+F4 and the like) counts as dismissal, so the notice cannot
+        // reappear after they have visibly acknowledged it. Closing because the APP is going
+        // away (tray Exit, OS shutdown/quiesce) does not: the user may never have read it.
+        AppWindow.Closing += (_, _) =>
+        {
+            if (!App.Current.IsExiting)
+                MarkSeen();
+        };
     }
 
     /// <summary>

@@ -13,6 +13,12 @@ using Windows.Storage;
 namespace Mixtri.Core.Export;
 
 /// <summary>
+/// Outcome of a successful export: where the file was written and any non-fatal problems,
+/// each phrased to complete the sentence "Exported, but …".
+/// </summary>
+public sealed record ExportResult(string OutputPath, IReadOnlyList<string> Warnings);
+
+/// <summary>
 /// High-level orchestrator for the full export pipeline.
 /// Coordinates encoder detection, video encoding, and output delivery.
 /// The app invokes this in its export worker, never in the interactive editor process.
@@ -20,11 +26,17 @@ namespace Mixtri.Core.Export;
 public class ExportEngine
 {
     /// <summary>
+    /// Highest output frame rate the exporter renders. Cursor/click animation timing is
+    /// authored against the 30 fps compositor, so higher requests are clamped to this.
+    /// </summary>
+    public const int MaxSupportedFps = 30;
+
+    /// <summary>
     /// Runs the full export pipeline: detects hardware encoders, composites frames,
     /// and writes the final video to <paramref name="outputFolder"/>.
     /// </summary>
     /// <returns>The full path to the exported file.</returns>
-    public Task<string> ExportProjectAsync(
+    public async Task<string> ExportProjectAsync(
         Project project,
         ExportSettings settings,
         CompositionConfig composition,
@@ -35,26 +47,88 @@ public class ExportEngine
         IVideoSuperResolutionProvider? superResolutionProvider = null,
         ExportWorkScheduler? scheduler = null)
     {
+        var result = await ExportProjectWithResultAsync(
+            project, settings, composition, outputFolder, outputFilePath: null, timeline,
+            progress, ct, superResolutionProvider, scheduler).ConfigureAwait(false);
+        return result.OutputPath;
+    }
+
+    /// <summary>
+    /// Runs the export and returns the written path plus non-fatal warnings. When
+    /// <paramref name="outputFilePath"/> is given it is used as the output (see
+    /// <see cref="ResolveOutputPath"/>); otherwise the file is named after the project
+    /// inside <paramref name="outputFolder"/>.
+    /// </summary>
+    public Task<ExportResult> ExportProjectWithResultAsync(
+        Project project,
+        ExportSettings settings,
+        CompositionConfig composition,
+        string outputFolder,
+        string? outputFilePath,
+        TimelineModel? timeline = null,
+        IProgress<ExportProgress>? progress = null,
+        CancellationToken ct = default,
+        IVideoSuperResolutionProvider? superResolutionProvider = null,
+        ExportWorkScheduler? scheduler = null)
+    {
         ArgumentNullException.ThrowIfNull(settings);
         ct.ThrowIfCancellationRequested();
         var snapshot = ProjectStateSnapshot.Capture(project, composition, timeline);
         return Task.Run(() => ExportDetachedAsync(
-            snapshot.Project, settings with { }, snapshot.Composition, outputFolder,
+            snapshot.Project, settings with { }, snapshot.Composition, outputFolder, outputFilePath,
             snapshot.Timeline, progress, ct, superResolutionProvider, scheduler), ct);
     }
 
-    private async Task<string> ExportDetachedAsync(
+    /// <summary>The container format actually written for <paramref name="requested"/>.</summary>
+    /// <remarks>WebM is not natively supported by the Windows media APIs, so it is written as MP4.</remarks>
+    public static VideoFormat GetEffectiveFormat(VideoFormat requested) =>
+        requested == VideoFormat.WebM ? VideoFormat.MP4 : requested;
+
+    /// <summary>
+    /// Resolves the file an export writes.
+    /// <list type="bullet">
+    /// <item>A requested file path whose extension matches the effective format is used
+    /// verbatim and overwritten: the user (or the save picker, which already confirmed the
+    /// overwrite and may have pre-created an empty file there) chose that exact file.</item>
+    /// <item>A requested path with a different extension gets the format's extension and a
+    /// unique name — the user never approved overwriting that other file.</item>
+    /// <item>With no requested file, the project name inside <paramref name="outputFolder"/>,
+    /// made unique.</item>
+    /// </list>
+    /// Idempotent: resolving an already-resolved path returns it unchanged.
+    /// </summary>
+    public static string ResolveOutputPath(
+        string outputFolder, string? requestedFilePath, string? projectName, VideoFormat format)
+    {
+        string extension = GetFileExtension(GetEffectiveFormat(format));
+        if (!string.IsNullOrWhiteSpace(requestedFilePath)
+            && !string.IsNullOrWhiteSpace(Path.GetFileNameWithoutExtension(requestedFilePath)))
+        {
+            string fullPath = Path.GetFullPath(requestedFilePath);
+            if (string.Equals(Path.GetExtension(fullPath), extension, StringComparison.OrdinalIgnoreCase))
+                return fullPath;
+            return EnsureUniqueFilePath(Path.ChangeExtension(fullPath, extension));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
+        string sanitizedName = SanitizeFileName(projectName ?? string.Empty);
+        return EnsureUniqueFilePath(Path.Combine(outputFolder, $"{sanitizedName}{extension}"));
+    }
+
+    private async Task<ExportResult> ExportDetachedAsync(
         Project project, ExportSettings settings, CompositionConfig composition,
-        string outputFolder, TimelineModel? timeline, IProgress<ExportProgress>? progress,
+        string outputFolder, string? outputFilePath, TimelineModel? timeline,
+        IProgress<ExportProgress>? progress,
         CancellationToken ct, IVideoSuperResolutionProvider? superResolutionProvider,
         ExportWorkScheduler? scheduler)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(composition);
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
+        if (string.IsNullOrWhiteSpace(outputFilePath))
+            ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
 
-        Directory.CreateDirectory(outputFolder);
+        var warnings = new List<string>();
 
         // Detect best encoder (informational for now; MediaComposition uses system defaults)
         var encoder = HardwareEncoderDetector.DetectBestEncoder();
@@ -77,7 +151,7 @@ public class ExportEngine
         // The export video FPS must match the compositor FPS to keep cursor/click
         // animations perfectly aligned with source frames. The preview runs at 30fps
         // and so should the export.
-        int exportFps = Math.Min(settings.Fps, 30);
+        int exportFps = Math.Min(settings.Fps, MaxSupportedFps);
         var exportComposition = enrichedComposition with
         {
             OutputFps = exportFps,
@@ -104,17 +178,15 @@ public class ExportEngine
 
         // Build output file path
         // WebM is not natively supported by Windows Media APIs — fall back to MP4
-        var effectiveFormat = settings.Format;
-        if (effectiveFormat == VideoFormat.WebM)
+        var effectiveFormat = GetEffectiveFormat(settings.Format);
+        if (effectiveFormat != settings.Format)
         {
             Debug.WriteLine("[ExportEngine] WebM is not natively supported; falling back to MP4 container.");
-            effectiveFormat = VideoFormat.MP4;
+            warnings.Add("WebM is not supported on Windows, so it was saved as MP4");
         }
 
-        string extension = GetFileExtension(effectiveFormat);
-        string sanitizedName = SanitizeFileName(project.Name);
-        string outputPath = Path.Combine(outputFolder, $"{sanitizedName}{extension}");
-        outputPath = EnsureUniqueFilePath(outputPath);
+        string outputPath = ResolveOutputPath(outputFolder, outputFilePath, project.Name, settings.Format);
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
         var effectiveSettings = exportSettings with { Format = effectiveFormat };
 
@@ -139,9 +211,10 @@ public class ExportEngine
                 ct,
                 superResolutionProvider,
                 scheduler);
+            warnings.AddRange(videoEncoder.Warnings);
         }
 
-        return outputPath;
+        return new ExportResult(outputPath, warnings);
     }
 
     /// <summary>

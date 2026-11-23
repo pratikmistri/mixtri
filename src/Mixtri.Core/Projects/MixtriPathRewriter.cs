@@ -12,8 +12,18 @@ public enum MediaReferenceKind
     /// <summary>A decorative asset (background image, custom cursor image).</summary>
     StyleAsset,
 
-    /// <summary>Captured content: video, audio, webcam, cursor or keyboard data.</summary>
+    /// <summary>
+    /// Irreplaceable primary content: a recording's (or imported clip's) video, or an
+    /// inserted voice-over/music track. A save refuses to proceed without it.
+    /// </summary>
     Recording,
+
+    /// <summary>
+    /// Optional captured data that rides along with a recording — cursor log, keyboard log,
+    /// webcam video, recorded system/mic audio. The project still opens and edits without
+    /// it, so a save skips a missing one (with a warning) instead of refusing outright.
+    /// </summary>
+    RecordingSidecar,
 }
 
 /// <summary>A media file referenced by a project, and what role it plays.</summary>
@@ -118,10 +128,10 @@ public static class MixtriPathRewriter
             string video, string cursor, string? webcam, string? keyboard, List<string> audio)
         {
             Add(video, MediaReferenceKind.Recording);
-            Add(cursor, MediaReferenceKind.Recording);
-            Add(webcam, MediaReferenceKind.Recording);
-            Add(keyboard, MediaReferenceKind.Recording);
-            foreach (var a in audio) Add(a, MediaReferenceKind.Recording);
+            Add(cursor, MediaReferenceKind.RecordingSidecar);
+            Add(webcam, MediaReferenceKind.RecordingSidecar);
+            Add(keyboard, MediaReferenceKind.RecordingSidecar);
+            foreach (var a in audio) Add(a, MediaReferenceKind.RecordingSidecar);
         }
 
         AddRecording(
@@ -162,13 +172,13 @@ public static class MixtriPathRewriter
                 case CameraSegment camera:
                     // Captured webcam media, not a decorative asset: dropping it on save
                     // would take the only copy with it.
-                    Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
+                    Add(camera.WebcamFilePath, MediaReferenceKind.RecordingSidecar);
                     break;
             }
         }
 
         foreach (var camera in timeline.CameraSegments)
-            Add(camera.WebcamFilePath, MediaReferenceKind.Recording);
+            Add(camera.WebcamFilePath, MediaReferenceKind.RecordingSidecar);
 
         foreach (var zoom in timeline.ZoomKeyframes)
             Add(zoom.SourceVideoFilePath);

@@ -4,6 +4,28 @@ using System.Text;
 namespace Mixtri.Core.AI;
 
 /// <summary>
+/// A single subtitle segment with start/end timestamps and text.
+/// </summary>
+public record SubtitleSegment(TimeSpan Start, TimeSpan End, string Text);
+
+/// <summary>
+/// Holds the full result of a transcription: timestamped segments ready for
+/// <see cref="SubtitleGenerator"/> and <see cref="SubtitleBurner"/>.
+/// </summary>
+/// <remarks>
+/// These types used to live in <c>SpeechToText.cs</c>. That class was removed: nothing called
+/// it, and it transcribed the LIVE microphone (not the audio file it was given) with
+/// wall-clock timestamps. The data types survive here because the subtitle pipeline uses them.
+/// </remarks>
+public class TranscriptionResult
+{
+    public List<SubtitleSegment> Segments { get; init; } = [];
+
+    public string FullText =>
+        string.Join(" ", Segments.Select(s => s.Text));
+}
+
+/// <summary>
 /// Generates subtitle files in SRT and WebVTT formats from a <see cref="TranscriptionResult"/>.
 /// </summary>
 public static class SubtitleGenerator

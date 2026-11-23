@@ -819,7 +819,18 @@ public class TimelineModel
     {
         ArgumentNullException.ThrowIfNull(owner);
 
-        int ownerIndex = Segments.FindIndex(s => s.Id == owner.Id);
+        // Plain loop rather than FindIndex(s => s.Id == owner.Id): the lambda captures `owner`
+        // and allocates a closure on every call of a per-frame mapping.
+        int ownerIndex = -1;
+        for (int i = 0; i < Segments.Count; i++)
+        {
+            if (Segments[i].Id == owner.Id)
+            {
+                ownerIndex = i;
+                break;
+            }
+        }
+
         if (ownerIndex < 0)
             return MapWithin(owner, sourceTime);
 
@@ -930,9 +941,12 @@ public class TimelineModel
     /// </summary>
     public bool IsZoomKeyframeShown(ZoomKeyframe keyframe)
     {
-        foreach (var segment in Segments.OfType<VideoSegment>())
+        // Indexed loop + type test rather than OfType: this runs once per keyframe per
+        // repaint, and OfType allocates an enumerator each time.
+        for (int i = 0; i < Segments.Count; i++)
         {
-            if (ZoomKeyframeIntersects(keyframe, segment)) return true;
+            if (Segments[i] is VideoSegment segment && ZoomKeyframeIntersects(keyframe, segment))
+                return true;
         }
         return false;
     }
@@ -1047,7 +1061,12 @@ public record TimelineClip(TimeSpan Start, TimeSpan End, string Label)
             double ticks = (End - Start).Ticks * SpeedFactor;
             if (double.IsNaN(ticks) || double.IsInfinity(ticks))
                 return End - Start;
-            ticks = Math.Clamp(ticks, long.MinValue, long.MaxValue);
+
+            // (double)long.MaxValue rounds UP to 2^63, which is outside long's range, so
+            // clamping to it and casting is not safe. Saturate explicitly instead.
+            const double LongRangeLimit = 9.2e18; // comfortably inside +/-2^63
+            if (ticks >= LongRangeLimit) return TimeSpan.MaxValue;
+            if (ticks <= -LongRangeLimit) return TimeSpan.MinValue;
             return TimeSpan.FromTicks((long)ticks);
         }
     }

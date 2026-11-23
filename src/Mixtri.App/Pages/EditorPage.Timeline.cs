@@ -535,8 +535,16 @@ public sealed partial class EditorPage
 
     private void OnUndoRedoStateChanged(object? sender, EventArgs e)
     {
+        // Synchronous, before the deferred resync: any undo-stack change other than the
+        // overlay text box opening its own burst ends that burst, so its later keystrokes
+        // can never mutate the model under another operation's snapshot.
+        if (!_executingOverlayTextBurst)
+            EndOverlayTextBurst();
+
         DispatcherQueue.TryEnqueue(() =>
         {
+            if (_pageUnloaded) return;
+
             if (_zoomRegionEditMode)
                 ExitZoomRegionEditMode();
 
@@ -589,6 +597,35 @@ public sealed partial class EditorPage
 
             if (SelectedSlide() is { } selectedSlide)
                 SyncTextSlideControls(selectedSlide);
+
+            // Same for the text overlay and camera panes: undo/redo does not change their
+            // selection, so nothing else pushes the reverted values back onto them, and a
+            // selection naming a removed item is cleared rather than left editing nothing.
+            // Skipped while the overlay text box is mid-burst: the box is the source of truth
+            // then, and rewriting it would fight the user's typing.
+            if (_selectedTextOverlayId is { } overlayId)
+            {
+                if (!ViewModel.Model.TextOverlays.Any(o => o.Id == overlayId))
+                {
+                    Timeline.ClearTextOverlaySelection();
+                    _selectedTextOverlayId = null;
+                    SyncTextOverlayUI(null);
+                }
+                else if (_overlayTextBurstId != overlayId)
+                {
+                    SyncTextOverlayUI(overlayId, reveal: false);
+                }
+            }
+
+            if (_selectedCameraSegmentId is { } cameraId)
+            {
+                if (!ViewModel.Model.CameraSegments.Any(c => c.Id == cameraId))
+                {
+                    Timeline.ClearCameraSelection();
+                    _selectedCameraSegmentId = null;
+                }
+                SyncCameraSegmentUI(_selectedCameraSegmentId, reveal: false);
+            }
 
             // Undo/redo and every undoable edit funnel through here, which makes this the one
             // place that reliably sees the timeline gain its first segment or lose its last.
@@ -973,7 +1010,7 @@ public sealed partial class EditorPage
         SyncCameraSegmentUI(segmentId);
     }
 
-    private void SyncCameraSegmentUI(string? segmentId)
+    private void SyncCameraSegmentUI(string? segmentId, bool reveal = true)
     {
         if (CameraFullscreenPanel is null) return;
 
@@ -987,15 +1024,17 @@ public sealed partial class EditorPage
             return;
         }
 
-        _suppressWebcamEvents = true;
-        CameraFullscreenToggle.IsOn = seg.FullscreenEnabled;
-        CameraFullscreenModeCombo.SelectedIndex = seg.FullscreenMode == CameraFullscreenMode.Reveal ? 1 : 0;
-        _suppressWebcamEvents = false;
+        using (SuppressScope.Enter(ref _suppressWebcamEvents))
+        {
+            CameraFullscreenToggle.IsOn = seg.FullscreenEnabled;
+            CameraFullscreenModeCombo.SelectedIndex = seg.FullscreenMode == CameraFullscreenMode.Reveal ? 1 : 0;
+        }
         CameraFullscreenPanel.Visibility = Visibility.Visible;
         UpdateCameraFullscreenModeUI(seg.FullscreenEnabled, seg.FullscreenMode);
 
         // Surface the video panel so the segment's settings are immediately editable.
-        PropertiesPanel.ShowPane(PropertyPaneKind.Video);
+        if (reveal)
+            PropertiesPanel.ShowPane(PropertyPaneKind.Video);
     }
 
     private void UpdateCameraFullscreenModeUI(bool fullscreenEnabled, CameraFullscreenMode mode)
@@ -1959,9 +1998,22 @@ public sealed partial class EditorPage
                 if (generation != _stretchedAudioGeneration) return;
 
                 var stretch = request.Stretch!.Value;
-                string? rendered = await renderer.RenderAsync(
-                    request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
-                    stretch.Speed, stretch.OutputDuration);
+                string? rendered;
+                try
+                {
+                    rendered = await renderer.RenderAsync(
+                        request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
+                        stretch.Speed, stretch.OutputDuration);
+                }
+                catch (Exception ex)
+                {
+                    // Fire-and-forget task: an escaping exception would be unobserved and the
+                    // segment would just be silent with no trace. Log and treat it like any
+                    // other source that cannot be stretched.
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+                        $"stretched audio render failed for '{request.SourcePath}': {ex}");
+                    continue;
+                }
 
                 // A source that cannot be stretched stays silent in preview rather than
                 // reverting to a drifting native-rate pass: export falls back to native for

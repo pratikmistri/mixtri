@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.Graphics.Canvas;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
@@ -103,8 +104,6 @@ public class GifEncoder
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
 
         var stopwatch = Stopwatch.StartNew();
-        int frameDelayMs = 1000 / fps;
-        ushort delayHundredths = (ushort)Math.Max(1, frameDelayMs / 10);
 
         var dir = Path.GetDirectoryName(outputPath)!;
         Directory.CreateDirectory(dir);
@@ -113,43 +112,89 @@ public class GifEncoder
         var file = await folder.CreateFileAsync(
             Path.GetFileName(outputPath), CreationCollisionOption.ReplaceExisting);
 
-        using var stream = await file.OpenAsync(FileAccessMode.ReadWrite);
-        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
-
-        for (int i = 0; i < totalFrames; i++)
+        bool succeeded = false;
+        try
         {
-            ct.ThrowIfCancellationRequested();
-
-            using var composedFrame = await composeFrame(i);
-
-            var pixelBytes = composedFrame.GetPixelBytes();
-            uint width = (uint)composedFrame.SizeInPixels.Width;
-            uint height = (uint)composedFrame.SizeInPixels.Height;
-
-            encoder.SetPixelData(
-                BitmapPixelFormat.Bgra8,
-                BitmapAlphaMode.Premultiplied,
-                width,
-                height,
-                96, 96,
-                pixelBytes);
-
-            var properties = new BitmapPropertySet
+            using (var stream = await file.OpenAsync(FileAccessMode.ReadWrite))
             {
-                { "/grctlext/Delay", new BitmapTypedValue(delayHundredths, PropertyType.UInt16) }
-            };
+                var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
 
-            await encoder.BitmapProperties.SetPropertiesAsync(properties);
+                // One CPU staging buffer for the whole export: every frame has the same
+                // size, and SetPixelData copies the pixels into the encoder.
+                byte[]? pixelBytes = null;
 
-            if (i < totalFrames - 1)
-            {
-                await encoder.GoToNextFrameAsync();
+                for (int i = 0; i < totalFrames; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    using var composedFrame = await composeFrame(i);
+
+                    uint width = (uint)composedFrame.SizeInPixels.Width;
+                    uint height = (uint)composedFrame.SizeInPixels.Height;
+                    int byteCount = checked((int)(width * height * 4));
+                    if (pixelBytes is null || pixelBytes.Length != byteCount)
+                        pixelBytes = new byte[byteCount];
+                    composedFrame.GetPixelBytes(pixelBytes.AsBuffer());
+
+                    encoder.SetPixelData(
+                        BitmapPixelFormat.Bgra8,
+                        BitmapAlphaMode.Premultiplied,
+                        width,
+                        height,
+                        96, 96,
+                        pixelBytes);
+
+                    var properties = new BitmapPropertySet
+                    {
+                        {
+                            "/grctlext/Delay",
+                            new BitmapTypedValue(GetFrameDelayCentiseconds(i, fps), PropertyType.UInt16)
+                        }
+                    };
+
+                    await encoder.BitmapProperties.SetPropertiesAsync(properties);
+
+                    if (i < totalFrames - 1)
+                    {
+                        await encoder.GoToNextFrameAsync();
+                    }
+
+                    ReportProgress(progress, i + 1, totalFrames, stopwatch);
+                }
+
+                await encoder.FlushAsync();
             }
-
-            ReportProgress(progress, i + 1, totalFrames, stopwatch);
+            succeeded = true;
         }
+        finally
+        {
+            // Never leave a truncated GIF behind on cancellation or failure.
+            if (!succeeded)
+            {
+                try { File.Delete(outputPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Debug.WriteLine($"[GifEncoder] Could not delete partial output: {ex.Message}");
+                }
+            }
+        }
+    }
 
-        await encoder.FlushAsync();
+    /// <summary>
+    /// GIF frame delay (centiseconds) for <paramref name="frameIndex"/> at
+    /// <paramref name="fps"/>. GIF delays are whole centiseconds, so a fixed
+    /// <c>100 / fps</c> truncates (30 fps → 3 cs → plays at 33.3 fps and drifts). The
+    /// delay is instead the difference of the rounded-down cumulative presentation times,
+    /// which carries the rounding error forward: 30 fps yields 3, 3, 4, 3, 3, 4, … and
+    /// every <paramref name="fps"/> frames sum to exactly 100 cs.
+    /// </summary>
+    public static ushort GetFrameDelayCentiseconds(int frameIndex, int fps)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(frameIndex);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fps);
+        long start = (long)frameIndex * 100 / fps;
+        long end = ((long)frameIndex + 1) * 100 / fps;
+        return (ushort)Math.Clamp(end - start, 1, ushort.MaxValue);
     }
 
     private static void ReportProgress(

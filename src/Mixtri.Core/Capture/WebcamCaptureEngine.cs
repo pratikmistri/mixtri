@@ -52,6 +52,12 @@ public sealed class WebcamCaptureEngine : IDisposable
     public bool IsRecording { get; private set; }
     public string? OutputFilePath { get; private set; }
 
+    /// <summary>
+    /// <see cref="Stopwatch"/> timestamp taken when recording to <see cref="OutputFilePath"/>
+    /// started (0 until then). Approximates the webcam file's position 0.
+    /// </summary>
+    public long StartedTicks { get; private set; }
+
     /// <summary>Outcome of the last stop attempt (diagnostic).</summary>
     public WebcamStopOutcome LastStopOutcome { get; private set; } = WebcamStopOutcome.NotRecording;
 
@@ -111,10 +117,21 @@ public sealed class WebcamCaptureEngine : IDisposable
         catch
         {
             DisposeMediaCapture();
+
+            // Never advertise a webcam file that a failed start left empty or absent.
+            var abandoned = OutputFilePath;
+            OutputFilePath = null;
+            if (abandoned is not null)
+            {
+                try { File.Delete(abandoned); }
+                catch (Exception ex) { Debug.WriteLine($"[WebcamCaptureEngine] Could not remove '{abandoned}': {ex.Message}"); }
+            }
+
             throw;
         }
 
         IsRecording = true;
+        StartedTicks = Stopwatch.GetTimestamp();
     }
 
     /// <summary>

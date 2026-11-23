@@ -24,20 +24,25 @@ public record ExportSettings
     public int Fps { get; init; } = 30;
     public VideoFormat Format { get; init; } = VideoFormat.MP4;
     public VideoQuality Quality { get; init; } = VideoQuality.High;
-    public AspectRatio AspectRatio { get; init; } = AspectRatio.Auto;
+    // No AspectRatio here: the export always renders at the project's own aspect ratio
+    // (Project.AspectRatio, the one the editor previews). A per-export override used to be
+    // carried in this record but was never read, so it silently did nothing.
     /// <summary>Use WARP for environments without a reliable hardware graphics adapter.</summary>
     public bool ForceSoftwareRendering { get; init; }
 }
 
 /// <summary>
-/// Progress information for an ongoing export operation.
+/// Progress information for an ongoing export operation. <c>Status</c> names
+/// a phase that is not plain frame encoding (e.g. "Preparing AI upscaler…",
+/// "Adding audio…"); <c>null</c> while frames are being encoded.
 /// </summary>
 public record ExportProgress(
     int CurrentFrame,
     int TotalFrames,
     double PercentComplete,
     TimeSpan Elapsed,
-    TimeSpan EstimatedRemaining);
+    TimeSpan EstimatedRemaining,
+    string? Status = null);
 
 /// <summary>
 /// Exports composited video frames directly to an MP4 file using
@@ -54,7 +59,32 @@ public class VideoEncoder : IDisposable
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
     private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
     private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan MuxNoProgressTimeout = TimeSpan.FromSeconds(60);
     private long _lastProgressTimestamp;
+    private long _frameLoopStartTimestamp;
+    private readonly List<string> _warnings = [];
+
+    /// <summary>Prefix of the hidden video-only file written next to the output before the audio mux.</summary>
+    public const string TempVideoPrefix = ".mixtri_video_";
+
+    /// <summary>
+    /// Share of the progress bar reserved for the audio mux pass when the export has audio.
+    /// The mux re-renders the whole file through MediaComposition, so it is not instant.
+    /// </summary>
+    private const double MuxProgressShare = 10.0;
+
+    /// <summary>
+    /// Non-fatal problems from the last <see cref="ExportAsync"/> (e.g. an audio track that
+    /// could not be included). Each entry completes the sentence "Exported, but …".
+    /// </summary>
+    public IReadOnlyList<string> Warnings => _warnings;
+
+    /// <summary>
+    /// File-name pattern of the temp video-only files an export to <paramref name="outputPath"/>
+    /// can leave in its folder if the process is killed before its own cleanup runs.
+    /// </summary>
+    public static string GetTempVideoSearchPattern(string outputPath) =>
+        $"{TempVideoPrefix}{Path.GetFileNameWithoutExtension(outputPath)}_*.mp4";
 
     // Serializes frame compositing so the shared SegmentFrameComposer (and the
     // per-source compositors it owns) is never accessed concurrently by overlapping
@@ -96,6 +126,8 @@ public class VideoEncoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var stopwatch = Stopwatch.StartNew();
+        _warnings.Clear();
+        Volatile.Write(ref _frameLoopStartTimestamp, 0);
         using var device = GpuContext.CreateExportDevice(_settings.ForceSoftwareRendering);
         _deviceLostGuard = new DeviceLostGuard(
             device,
@@ -129,6 +161,8 @@ public class VideoEncoder : IDisposable
         IVideoSuperResolutionSession? superResolution = null;
         if (requiresUpscaling && superResolutionProvider is not null)
         {
+            progress?.Report(new ExportProgress(
+                0, totalFrames, 0, stopwatch.Elapsed, TimeSpan.Zero, "Preparing AI upscaler…"));
             superResolution = await superResolutionProvider.TryCreateAsync(
                 compositorWidth, compositorHeight, upscaledWidth, upscaledHeight, ct);
         }
@@ -169,10 +203,20 @@ public class VideoEncoder : IDisposable
         WarnAboutSpeedAdjustedAudio(audioPlacements);
         WarnAboutTransitionFadeAudio(audioPlacements);
 
-        // Video-only output path (audio muxed in second pass if needed)
+        // Video-only output path (audio muxed in second pass if needed). The temp name is
+        // derived from the output name so the app can sweep exactly this export's leftovers
+        // if the worker process is killed (see GetTempVideoSearchPattern).
         string videoOnlyPath = hasAudio
-            ? Path.Combine(Path.GetDirectoryName(outputPath)!, $".mixtri_video_{Guid.NewGuid():N}.mp4")
+            ? Path.Combine(
+                Path.GetDirectoryName(outputPath)!,
+                $"{TempVideoPrefix}{Path.GetFileNameWithoutExtension(outputPath)}_{Guid.NewGuid():N}.mp4")
             : outputPath;
+        // The frame loop stops short of 100% when a mux pass follows, so the bar keeps
+        // moving (with real mux progress) instead of freezing at 99%.
+        double frameProgressCeiling = hasAudio ? 100.0 - MuxProgressShare : 100.0;
+        // Set once this export may have written to outputPath; a non-success exit deletes it.
+        bool outputTouched = false;
+        bool succeeded = false;
 
         // Tracks in-flight frame tasks so the finally block can guarantee none is still
         // using the composer when it is disposed (including on the failure path).
@@ -233,6 +277,7 @@ public class VideoEncoder : IDisposable
                         inFlight, scheduler,
                         progress, stopwatch, frameToken,
                         progressFloor: stretchProgressFloor,
+                        progressCeiling: frameProgressCeiling,
                         onError: (ex, frameIdx) =>
                         {
                             lock (frameErrorLock)
@@ -262,19 +307,25 @@ public class VideoEncoder : IDisposable
             // Remove audio from first-pass profile
             profile.Audio = null;
 
+            if (!hasAudio) outputTouched = true;
             var outputFile = await CreateOutputFileAsync(videoOnlyPath);
-            using var outputStream = await outputFile.OpenAsync(Windows.Storage.FileAccessMode.ReadWrite);
+            // Scoped so the video-only file is closed as soon as the transcode finishes —
+            // the mux pass below reopens it, and a still-open write handle can make
+            // MediaClip.CreateFromFileAsync fail with a sharing violation.
+            using (var outputStream = await outputFile.OpenAsync(Windows.Storage.FileAccessMode.ReadWrite))
+            {
+                var prepResult = await transcoder.PrepareMediaStreamSourceTranscodeAsync(
+                    streamSource, outputStream, profile);
 
-            var prepResult = await transcoder.PrepareMediaStreamSourceTranscodeAsync(
-                streamSource, outputStream, profile);
+                if (!prepResult.CanTranscode)
+                    throw new InvalidOperationException(
+                        $"Transcoder cannot encode: {prepResult.FailureReason}");
 
-            if (!prepResult.CanTranscode)
-                throw new InvalidOperationException(
-                    $"Transcoder cannot encode: {prepResult.FailureReason}");
-
-            Mixtri.Core.Diagnostics.DiagLog.Write("Export",
-                $"process {Environment.ProcessId}: starting {totalFrames} frames");
-            await TranscodeWithTimeoutAsync(prepResult, ct);
+                Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                    $"process {Environment.ProcessId}: starting {totalFrames} frames");
+                Volatile.Write(ref _frameLoopStartTimestamp, Stopwatch.GetTimestamp());
+                await TranscodeWithTimeoutAsync(prepResult, ct);
+            }
 
             // Drain any still-running sample tasks before disposing shared state
             Task[] snapshot;
@@ -311,10 +362,29 @@ public class VideoEncoder : IDisposable
             if (hasAudio)
             {
                 progress?.Report(new ExportProgress(
-                    totalFrames, totalFrames, 99, stopwatch.Elapsed, TimeSpan.FromSeconds(2)));
+                    totalFrames, totalFrames, frameProgressCeiling, stopwatch.Elapsed,
+                    TimeSpan.Zero, "Adding audio…"));
 
-                await MuxAudioAsync(videoOnlyPath, outputPath, audioPlacements, ct);
+                outputTouched = true;
+                try
+                {
+                    await MuxAudioAsync(
+                        videoOnlyPath, outputPath, audioPlacements, totalFrames,
+                        frameProgressCeiling, progress, stopwatch, ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested && File.Exists(videoOnlyPath))
+                {
+                    // The video itself is complete; losing it because the audio pass failed
+                    // would throw away the whole (possibly hour-long) encode. Keep it silent
+                    // and say so, rather than failing the export.
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                        $"process {Environment.ProcessId}: audio mux failed, keeping video-only output: {ex}");
+                    File.Move(videoOnlyPath, outputPath, overwrite: true);
+                    _warnings.Add($"the audio could not be added ({ex.Message}), so the video was saved without sound");
+                }
             }
+
+            succeeded = true;
         }
         finally
         {
@@ -342,11 +412,23 @@ public class VideoEncoder : IDisposable
                 }
             }
 
-            // Clean up temp video-only file
+            // Clean up temp video-only file (already moved away if the mux fell back to it)
             if (hasAudio)
             {
                 try { File.Delete(videoOnlyPath); }
                 catch { /* best-effort */ }
+            }
+
+            // Cancellation or failure must not leave a truncated, unplayable file at the
+            // path the user asked for.
+            if (!succeeded && outputTouched)
+            {
+                try { File.Delete(outputPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                        $"process {Environment.ProcessId}: could not delete partial output: {ex.Message}");
+                }
             }
         }
         }
@@ -378,6 +460,7 @@ public class VideoEncoder : IDisposable
         Stopwatch stopwatch,
         CancellationToken ct,
         double progressFloor = 0,
+        double progressCeiling = 100,
         Action<Exception, int>? onError = null)
     {
         CanvasRenderTarget? outputSurface = null;
@@ -443,9 +526,14 @@ public class VideoEncoder : IDisposable
             {
                 // Media Foundation's surface path expects a hardware D3D device.
                 // WARP uses owned CPU pixels instead, with MF's bottom-up RGB layout.
-                softwarePixels = outputSurface.GetPixelBytes();
-                FlipEncoderRows(softwarePixels, targetWidth, targetHeight);
-                sample = MediaStreamSample.CreateFromBuffer(softwarePixels.AsBuffer(), timestamp);
+                // The staging array is pooled: the slot returns it once the encoder reports
+                // Processed, so steady-state WARP exports stop allocating a frame per sample.
+                int byteCount = checked(targetWidth * targetHeight * 4);
+                softwarePixels = ArrayPool<byte>.Shared.Rent(byteCount);
+                var pixelBuffer = softwarePixels.AsBuffer(0, byteCount);
+                outputSurface.GetPixelBytes(pixelBuffer);
+                FlipEncoderRows(softwarePixels.AsSpan(0, byteCount), targetWidth, targetHeight);
+                sample = MediaStreamSample.CreateFromBuffer(pixelBuffer, timestamp);
                 outputSurface.Dispose();
                 outputSurface = null;
             }
@@ -457,8 +545,9 @@ public class VideoEncoder : IDisposable
 
             // Dispose the GPU surface after the encoder has consumed it.
             // Capture in a local to avoid double-dispose if the catch block also disposes.
-            slot.Attach(outputSurface, sample, softwarePixels);
+            slot.Attach(outputSurface, sample, softwarePixels, returnPixelsToPool: softwarePixels is not null);
             outputSurface = null;
+            softwarePixels = null;
 
             request.Sample = sample;
             slot = null;
@@ -478,9 +567,13 @@ public class VideoEncoder : IDisposable
             if (progress is not null)
             {
                 double frameFraction = (double)(frameIndex + 1) / totalFrames;
-                double percent = progressFloor + (frameFraction * (100.0 - progressFloor));
+                double percent = progressFloor + (frameFraction * (progressCeiling - progressFloor));
                 var elapsed = stopwatch.Elapsed;
-                var perFrame = elapsed / (frameIndex + 1);
+                // Rate from the frame loop only: the stretch pre-pass and AI-upscaler setup
+                // happen before it and would otherwise inflate every per-frame estimate.
+                long loopStart = Volatile.Read(ref _frameLoopStartTimestamp);
+                var loopElapsed = loopStart != 0 ? Stopwatch.GetElapsedTime(loopStart) : elapsed;
+                var perFrame = loopElapsed / (frameIndex + 1);
                 var remaining = perFrame * (totalFrames - frameIndex - 1);
                 progress.Report(new ExportProgress(frameIndex + 1, totalFrames, percent, elapsed, remaining));
             }
@@ -498,6 +591,8 @@ public class VideoEncoder : IDisposable
             // into outputSurface or handed off (it is nulled at those handoff points).
             composedFrame?.Dispose();
             slot?.Dispose();
+            // Not handed to a slot yet, so nothing native references it.
+            if (softwarePixels is not null) ArrayPool<byte>.Shared.Return(softwarePixels);
             request.Sample = null;
         }
         finally
@@ -506,22 +601,28 @@ public class VideoEncoder : IDisposable
         }
     }
 
-    internal static void FlipEncoderRows(byte[] pixels, int width, int height)
+    internal static void FlipEncoderRows(byte[] pixels, int width, int height) =>
+        FlipEncoderRows(pixels.AsSpan(), width, height);
+
+    internal static void FlipEncoderRows(Span<byte> pixels, int width, int height)
     {
         int stride = checked(width * 4);
         if (width <= 0 || height <= 0 || pixels.Length != checked(stride * height))
             throw new ArgumentException("Encoder pixels do not match the frame dimensions.", nameof(pixels));
-        var row = ArrayPool<byte>.Shared.Rent(stride);
+        var rented = ArrayPool<byte>.Shared.Rent(stride);
         try
         {
+            var row = rented.AsSpan(0, stride);
             for (int top = 0, bottom = (height - 1) * stride; top < bottom; top += stride, bottom -= stride)
             {
-                Buffer.BlockCopy(pixels, top, row, 0, stride);
-                Buffer.BlockCopy(pixels, bottom, pixels, top, stride);
-                Buffer.BlockCopy(row, 0, pixels, bottom, stride);
+                var topRow = pixels.Slice(top, stride);
+                var bottomRow = pixels.Slice(bottom, stride);
+                topRow.CopyTo(row);
+                bottomRow.CopyTo(topRow);
+                row.CopyTo(bottomRow);
             }
         }
-        finally { ArrayPool<byte>.Shared.Return(row); }
+        finally { ArrayPool<byte>.Shared.Return(rented); }
     }
 
     /// <summary>
@@ -803,7 +904,7 @@ public class VideoEncoder : IDisposable
             var perPlacement = stopwatch.Elapsed / done;
             progress?.Report(new ExportProgress(
                 0, totalFrames, done / (double)pending * StretchProgressShare,
-                stopwatch.Elapsed, perPlacement * (pending - done)));
+                stopwatch.Elapsed, perPlacement * (pending - done), "Preparing audio…"));
         }
 
         return result;
@@ -1014,89 +1115,128 @@ public class VideoEncoder : IDisposable
     /// Muxes the planned audio placements into the video-only MP4.
     /// Uses <see cref="MediaComposition"/> for reliable audio handling.
     /// </summary>
+    /// <remarks>
+    /// Guarded by a no-progress watchdog (<see cref="MuxNoProgressTimeout"/>) rather than a
+    /// fixed deadline: the render re-encodes the whole file, so a long export legitimately
+    /// takes longer than any fixed limit, while a hung render stops reporting progress.
+    /// Tracks that cannot be opened are skipped and recorded in <see cref="Warnings"/>.
+    /// </remarks>
     private async Task MuxAudioAsync(
         string videoOnlyPath, string finalOutputPath,
-        IReadOnlyList<AudioPlacement> placements, CancellationToken ct)
+        IReadOnlyList<AudioPlacement> placements, int totalFrames,
+        double progressFloor, IProgress<ExportProgress>? progress, Stopwatch stopwatch,
+        CancellationToken ct)
     {
         var muxComp = new MediaComposition();
-
-        // Add the video-only file as the video track
-        var videoFile = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoOnlyPath));
-        var videoClip = await MediaClip.CreateFromFileAsync(videoFile);
-        muxComp.Clips.Add(videoClip);
-
         // One clip per source file, reused by every placement cut from it.
         var sourceClips = new Dictionary<string, MediaClip>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var placement in placements)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            try
-            {
-                BackgroundAudioTrack track;
-                if (placement.Kind == AudioSourceKind.EmbeddedVideoTrack)
-                {
-                    if (!sourceClips.TryGetValue(placement.SourcePath, out var clip))
-                    {
-                        var file = await StorageFile.GetFileFromPathAsync(
-                            Path.GetFullPath(placement.SourcePath));
-                        clip = await MediaClip.CreateFromFileAsync(file);
-                        sourceClips[placement.SourcePath] = clip;
-                    }
-
-                    if (clip.EmbeddedAudioTracks.Count == 0)
-                        continue;
-
-                    track = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(clip.EmbeddedAudioTracks[0]);
-                }
-                else
-                {
-                    var audioFile = await StorageFile.GetFileFromPathAsync(
-                        Path.GetFullPath(placement.SourcePath));
-                    track = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
-                }
-
-                ApplyPlacement(track, placement);
-                muxComp.BackgroundAudioTracks.Add(track);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // A single unreadable track must not discard an otherwise complete
-                // export; the remaining tracks still mux at their planned positions.
-                Debug.WriteLine(
-                    $"[VideoEncoder] Failed to add audio track '{placement.SourcePath}': {ex.Message}");
-            }
-        }
-
-        // Render final output with audio
-        var profile = CreateEncodingProfile(
-            (int)videoClip.GetVideoEncodingProperties().Width,
-            (int)videoClip.GetVideoEncodingProperties().Height);
-        var outputFile = await CreateOutputFileAsync(finalOutputPath);
-
-        var renderOp = muxComp.RenderToFileAsync(outputFile, MediaTrimmingPreference.Fast, profile);
-        var tcs = new TaskCompletionSource<object?>();
-        using var reg = ct.Register(() => renderOp.Cancel());
-        renderOp.Completed = (info, status) =>
-        {
-            if (status == Windows.Foundation.AsyncStatus.Completed)
-                tcs.TrySetResult(null);
-            else if (status == Windows.Foundation.AsyncStatus.Canceled)
-                tcs.TrySetCanceled();
-            else
-                tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Audio mux failed."));
-        };
-        var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5));
-        if (await Task.WhenAny(tcs.Task, timeoutTask) != tcs.Task)
-        {
-            ct.ThrowIfCancellationRequested();
-            renderOp.Cancel();
-            throw new TimeoutException("Audio mux operation timed out after 5 minutes.");
-        }
+        var failedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
+            // Add the video-only file as the video track
+            var videoFile = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(videoOnlyPath));
+            var videoClip = await MediaClip.CreateFromFileAsync(videoFile);
+            muxComp.Clips.Add(videoClip);
+
+            foreach (var placement in placements)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                try
+                {
+                    BackgroundAudioTrack track;
+                    if (placement.Kind == AudioSourceKind.EmbeddedVideoTrack)
+                    {
+                        if (!sourceClips.TryGetValue(placement.SourcePath, out var clip))
+                        {
+                            var file = await StorageFile.GetFileFromPathAsync(
+                                Path.GetFullPath(placement.SourcePath));
+                            clip = await MediaClip.CreateFromFileAsync(file);
+                            sourceClips[placement.SourcePath] = clip;
+                        }
+
+                        if (clip.EmbeddedAudioTracks.Count == 0)
+                            continue;
+
+                        track = BackgroundAudioTrack.CreateFromEmbeddedAudioTrack(clip.EmbeddedAudioTracks[0]);
+                    }
+                    else
+                    {
+                        var audioFile = await StorageFile.GetFileFromPathAsync(
+                            Path.GetFullPath(placement.SourcePath));
+                        track = await BackgroundAudioTrack.CreateFromFileAsync(audioFile);
+                    }
+
+                    ApplyPlacement(track, placement);
+                    muxComp.BackgroundAudioTracks.Add(track);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // A single unreadable track must not discard an otherwise complete
+                    // export; the remaining tracks still mux at their planned positions.
+                    // The user is told which source is missing instead of finding out later.
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                        $"process {Environment.ProcessId}: failed to add audio track '{placement.SourcePath}': {ex.Message}");
+                    if (failedSources.Add(placement.SourcePath))
+                        _warnings.Add($"audio from {Path.GetFileName(placement.SourcePath)} could not be included");
+                }
+            }
+
+            // Render final output with audio
+            var videoProperties = videoClip.GetVideoEncodingProperties();
+            var profile = CreateEncodingProfile((int)videoProperties.Width, (int)videoProperties.Height);
+            var outputFile = await CreateOutputFileAsync(finalOutputPath);
+
+            var renderOp = muxComp.RenderToFileAsync(outputFile, MediaTrimmingPreference.Fast, profile);
+            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            long lastProgress = Stopwatch.GetTimestamp();
+            long muxStarted = lastProgress;
+            double lastNativeProgress = -1;
+            var progressLock = new object();
+            renderOp.Progress = (_, value) =>
+            {
+                double clamped = Math.Clamp(value, 0, 100);
+                lock (progressLock)
+                {
+                    if (clamped <= lastNativeProgress) return;
+                    lastNativeProgress = clamped;
+                    Volatile.Write(ref lastProgress, Stopwatch.GetTimestamp());
+                }
+                if (progress is null) return;
+                double fraction = clamped / 100.0;
+                var muxElapsed = Stopwatch.GetElapsedTime(muxStarted);
+                var remaining = fraction > 0.01
+                    ? TimeSpan.FromTicks((long)(muxElapsed.Ticks * (1 - fraction) / fraction))
+                    : TimeSpan.Zero;
+                progress.Report(new ExportProgress(
+                    totalFrames, totalFrames, progressFloor + (fraction * (100.0 - progressFloor)),
+                    stopwatch.Elapsed, remaining, "Adding audio…"));
+            };
+            using var reg = ct.Register(() => renderOp.Cancel());
+            renderOp.Completed = (info, status) =>
+            {
+                if (status == Windows.Foundation.AsyncStatus.Completed)
+                    tcs.TrySetResult(null);
+                else if (status == Windows.Foundation.AsyncStatus.Canceled)
+                    tcs.TrySetCanceled();
+                else
+                    tcs.TrySetException(info.ErrorCode ?? new InvalidOperationException("Audio mux failed."));
+            };
+
+            while (!tcs.Task.IsCompleted)
+            {
+                if (Stopwatch.GetElapsedTime(Volatile.Read(ref lastProgress)) >= MuxNoProgressTimeout)
+                {
+                    renderOp.Cancel();
+                    await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+                    ct.ThrowIfCancellationRequested();
+                    throw new TimeoutException(
+                        $"Adding audio made no progress for {MuxNoProgressTimeout.TotalSeconds:0} seconds.");
+                }
+                await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(1))).ConfigureAwait(false);
+            }
+
             await tcs.Task; // propagate any exception
         }
         finally

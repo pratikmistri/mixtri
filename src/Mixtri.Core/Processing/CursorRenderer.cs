@@ -572,8 +572,10 @@ public class CursorRenderer : IDisposable
         Vector2 end = start + step * (sampleCount - 1);
         float footprint = GetCursorFootprintRadius(scale) + 4f; // small margin
 
-        float left = Math.Min(start.X, end.X) - footprint;
-        float top = Math.Min(start.Y, end.Y) - footprint;
+        // Whole-pixel origin: a fractional left/top made the 1:1 scratch blit below resample
+        // the sprite (a sub-pixel soften that differed from the unblurred cursor).
+        float left = MathF.Floor(Math.Min(start.X, end.X) - footprint);
+        float top = MathF.Floor(Math.Min(start.Y, end.Y) - footprint);
         float right = Math.Max(start.X, end.X) + footprint;
         float bottom = Math.Max(start.Y, end.Y) + footprint;
 
@@ -595,12 +597,16 @@ public class CursorRenderer : IDisposable
             return false;
         }
 
-        uint bufferWidth = shutterBlurScratch!.SizeInPixels.Width;
-        uint bufferHeight = shutterBlurScratch.SizeInPixels.Height;
+        // The scratch only ever grows, so it is usually larger than this frame needs. Clear
+        // and draw back just the targetWidth x targetHeight region the samples occupy rather
+        // than the whole allocation: the rest is never written this frame.
+        var usedRect = new Rect(0, 0, targetWidth, targetHeight);
 
-        using (var scratchSession = shutterBlurScratch.CreateDrawingSession())
+        using (var scratchSession = shutterBlurScratch!.CreateDrawingSession())
         {
-            scratchSession.Clear(Color.FromArgb(0, 0, 0, 0));
+            // Copy-blend a transparent fill = a clear limited to the used region.
+            scratchSession.Blend = CanvasBlend.Copy;
+            scratchSession.FillRectangle(usedRect, Color.FromArgb(0, 0, 0, 0));
 
             // Additive blending, each sample at 1/N, accumulates exactly (1/N) * sum(sample_i)
             // in premultiplied space — a true per-pixel mean, which is what a shutter
@@ -622,8 +628,8 @@ public class CursorRenderer : IDisposable
 
         session.DrawImage(
             shutterBlurScratch,
-            new Rect(left, top, bufferWidth, bufferHeight),
-            new Rect(0, 0, bufferWidth, bufferHeight),
+            new Rect(left, top, targetWidth, targetHeight),
+            usedRect,
             opacity);
 
         return true;

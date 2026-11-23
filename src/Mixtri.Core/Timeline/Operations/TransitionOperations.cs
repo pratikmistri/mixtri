@@ -46,16 +46,19 @@ public class UpdateTransitionOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
-        // Index <= 0 has no incoming boundary — matches TransitionResolver's and
-        // ApplyTransitionToAllBoundariesOperation's own "index <= 0 -> no transition" rule.
-        // Without this guard a config written to segment 0 lies dormant on InTransition and
-        // can activate later if that segment is ever reordered away from index 0.
-        var index = IndexOf(model, _incomingSegmentId);
-        if (index <= 0)
+        // Only a base-track segment with a base-track predecessor owns a boundary — the
+        // exact chain TransitionResolver dissolves across (BaseSegments, in list order).
+        // Index <= 0 IN THAT CHAIN has no incoming boundary; an overlay has none at all.
+        // Indexing the raw Segments list instead let a config land on an overlay, or on a
+        // first base segment that merely sits after an overlay in the list, where it lies
+        // dormant on InTransition and can activate later if the segment is ever moved.
+        if (BaseChainIndexOf(model, _incomingSegmentId) <= 0)
         {
             _found = false;
             return;
         }
+
+        var index = IndexOf(model, _incomingSegmentId);
 
         var segment = model.Segments[index];
         _found = true;
@@ -88,6 +91,29 @@ public class UpdateTransitionOperation : IEditOperation
 
         return -1;
     }
+
+    /// <summary>
+    /// Position of <paramref name="segmentId"/> within the base-track chain
+    /// (<see cref="TimelineModel.BaseSegments"/> order), or -1 when it is missing or lives on
+    /// an overlay track.
+    /// </summary>
+    internal static int BaseChainIndexOf(TimelineModel model, string segmentId)
+    {
+        int baseIndex = 0;
+        foreach (var segment in model.Segments)
+        {
+            if (segment.TrackIndex != TimelineModel.BaseTrackIndex)
+            {
+                if (segment.Id == segmentId) return -1;
+                continue;
+            }
+
+            if (segment.Id == segmentId) return baseIndex;
+            baseIndex++;
+        }
+
+        return -1;
+    }
 }
 
 /// <summary>
@@ -96,9 +122,9 @@ public class UpdateTransitionOperation : IEditOperation
 /// boundaries" action, which must not push one undo entry per boundary.
 /// </summary>
 /// <remarks>
-/// The first segment (index 0) has no leading boundary — <see cref="TimelineSegment.InTransition"/>
+/// The first base-track segment has no leading boundary, and overlay segments have none at all — <see cref="TimelineSegment.InTransition"/>
 /// describes the boundary between a segment and its predecessor, and the first segment has none
-/// — so it is always skipped, matching <see cref="Mixtri.Core.Timeline.TransitionResolver"/>'s own
+/// — so they are always skipped, matching <see cref="Mixtri.Core.Timeline.TransitionResolver"/>'s own
 /// "index &lt;= 0 -&gt; no transition" rule.
 /// <para>
 /// Each boundary's own prior value is snapshotted individually (not one shared "previous"), so
@@ -124,10 +150,19 @@ public class ApplyTransitionToAllBoundariesOperation : IEditOperation
 
     public void Execute(TimelineModel model)
     {
+        // Boundaries exist only along the base-track chain (TransitionResolver's BaseSegments),
+        // so overlays are skipped and "first" means the first BASE segment, not list index 0.
         var snapshot = new List<(string, TransitionConfig?)>();
-        for (int i = 1; i < model.Segments.Count; i++)
+        bool isFirstBase = true;
+        foreach (var segment in model.Segments)
         {
-            var segment = model.Segments[i];
+            if (segment.TrackIndex != TimelineModel.BaseTrackIndex) continue;
+            if (isFirstBase)
+            {
+                isFirstBase = false;
+                continue;
+            }
+
             snapshot.Add((segment.Id, segment.InTransition));
             segment.InTransition = _newConfig;
         }

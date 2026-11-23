@@ -36,7 +36,9 @@
                 Foreground="{ThemeResource OverlayForegroundBrush}" />
         </Border>
 
-        <!-- Playback controls overlay at bottom -->
+        <!-- Playback controls overlay at bottom. The buttons do not take focus on click, so a
+             mouse click never leaves Space bound to the clicked button (the page's Space
+             shortcut toggles playback); keyboard Tab still reaches them. -->
         <StackPanel
             x:Name="PlaybackChrome"
             VerticalAlignment="Bottom"
@@ -52,6 +54,7 @@
             LostFocus="PlaybackChrome_LostFocus">
             <Button
                 x:Name="GoToStartButton"
+                AllowFocusOnInteraction="False"
                 Click="GoToStart_Click"
                 Width="40"
                 Height="40"
@@ -68,6 +71,7 @@
             </Button>
             <Button
                 x:Name="PlayPauseButton"
+                AllowFocusOnInteraction="False"
                 Click="PlayPause_Click"
                 Width="40"
                 Height="40"
@@ -83,6 +87,7 @@
             </Button>
             <Button
                 x:Name="GoToEndButton"
+                AllowFocusOnInteraction="False"
                 Click="GoToEnd_Click"
                 Width="40"
                 Height="40"

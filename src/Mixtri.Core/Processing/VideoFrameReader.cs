@@ -36,6 +36,14 @@ public sealed class VideoFrameReader : IDisposable
 
     private readonly Dictionary<int, CanvasBitmap> _cache = [];
     private readonly LinkedList<int> _cacheOrder = new();
+
+    // Indices delivered once without being cached. A frame is only worth a cache slot (and
+    // the extra copy that costs) once it has been asked for twice: sequential playback
+    // requests every index exactly once, so caching on first delivery cost a second
+    // full-frame allocation and blit per frame for a cache that never hit.
+    private const int SeenHistoryCapacity = 64;
+    private readonly HashSet<int> _seenOnce = [];
+    private readonly Queue<int> _seenOrder = new();
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     private long _cachedBytes;
 
@@ -202,6 +210,16 @@ public sealed class VideoFrameReader : IDisposable
                 return Clone(raced);
             }
 
+            // First delivery of this index: hand the decoded bitmap straight to the caller
+            // (it owns it, exactly as before) and only remember that it was seen.
+            if (!_seenOnce.Contains(frameIndex))
+            {
+                RememberSeen(frameIndex);
+                return decoded;
+            }
+
+            // A repeat request (playhead re-render, scrubbing back over a range): now the
+            // frame earns a cache slot. The cache keeps `decoded`; the caller gets a copy.
             _cache[frameIndex] = decoded;
             _cachedBytes += EstimateBytes(decoded);
             _cacheOrder.AddFirst(frameIndex);
@@ -259,6 +277,17 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public Task<CanvasBitmap?> LoadFrameAtTimeAsync(TimeSpan time)
         => LoadFrameAsync(GetFrameIndex(time));
+
+    /// <summary>Records a first, uncached delivery. Must be called under the cache lock.</summary>
+    private void RememberSeen(int frameIndex)
+    {
+        if (!_seenOnce.Add(frameIndex))
+            return;
+
+        _seenOrder.Enqueue(frameIndex);
+        while (_seenOrder.Count > SeenHistoryCapacity)
+            _seenOnce.Remove(_seenOrder.Dequeue());
+    }
 
     private void Touch(int frameIndex)
     {
@@ -320,21 +349,52 @@ public sealed class VideoFrameReader : IDisposable
         _disposed = true;
 
         // Wait for any in-flight clone to finish before disposing the bitmaps it is
-        // reading from. The gate is only ever held for GPU blits, so this is brief.
+        // reading from. The gate is only ever held for GPU blits, so it is normally free
+        // at once. If it is not and this is a UI/dispatcher thread, finish the teardown
+        // on the thread pool rather than blocking the UI for up to the 5 s bound.
         bool held = false;
         try
         {
-            held = _cacheGate.Wait(TimeSpan.FromSeconds(5));
+            held = _cacheGate.Wait(0);
         }
         catch (ObjectDisposedException) { }
 
+        if (!held && SynchronizationContext.Current is not null)
+        {
+            _ = Task.Run(() => DisposeCore(WaitForCacheGate()));
+            return;
+        }
+
+        DisposeCore(held || WaitForCacheGate());
+    }
+
+    private bool WaitForCacheGate()
+    {
+        try
+        {
+            return _cacheGate.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    private void DisposeCore(bool held)
+    {
         try
         {
             foreach (var bitmap in _cache.Values)
                 bitmap.Dispose();
             _cache.Clear();
             _cacheOrder.Clear();
+            _seenOnce.Clear();
+            _seenOrder.Clear();
             _cachedBytes = 0;
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"frame cache disposal failed: {ex}");
         }
         finally
         {

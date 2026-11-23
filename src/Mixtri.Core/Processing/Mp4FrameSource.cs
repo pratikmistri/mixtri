@@ -60,6 +60,9 @@ public sealed class Mp4FrameSource : IFrameSource
     /// </summary>
     private static readonly TimeSpan DrainDelay = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>Drain wait for <see cref="FrameSourceOptions.PreferLatency"/> readers.</summary>
+    private static readonly TimeSpan PreviewDrainDelay = TimeSpan.FromMilliseconds(60);
+
     /// <summary>How long disposal waits for an in-flight request to finish.</summary>
     private static readonly TimeSpan DisposeGateTimeout = TimeSpan.FromSeconds(5);
 
@@ -73,6 +76,7 @@ public sealed class Mp4FrameSource : IFrameSource
     private readonly int _seekAttempts;
     private readonly TimeSpan _seekAttemptTimeout;
     private readonly bool _enableSeekRecovery;
+    private readonly bool _preferLatency;
 
     private TaskCompletionSource<bool>? _framePending;
     private int _lastDeliveredIndex = -1;
@@ -97,6 +101,7 @@ public sealed class Mp4FrameSource : IFrameSource
             ? options.SeekAttemptTimeout
             : TimeSpan.FromMilliseconds(600);
         _enableSeekRecovery = options.EnableSeekRecovery;
+        _preferLatency = options.PreferLatency;
         Width = width;
         Height = height;
         FrameCount = frameCount;
@@ -365,7 +370,16 @@ public sealed class Mp4FrameSource : IFrameSource
                     // target, so its late frame must be drained before seeking or it can
                     // satisfy the seek's request and silently yield the wrong frame —
                     // an off-by-N that would be invisible in an export.
-                    await DrainIfNeededAsync().ConfigureAwait(false);
+                    //
+                    // Preview skips that wait: stacking a drain on top of a stall turned one
+                    // slow step into a visible freeze, and a stale frame there is a one-frame
+                    // glitch the next request corrects. A successful seek re-arms step mode
+                    // (LoadFrameAsync records the delivered index), so one stall never leaves
+                    // the reader stuck on full seeks.
+                    if (_preferLatency)
+                        _needsDrain = false;
+                    else
+                        await DrainIfNeededAsync().ConfigureAwait(false);
                     if (_disposed)
                         return false;
 
@@ -389,7 +403,7 @@ public sealed class Mp4FrameSource : IFrameSource
             return;
 
         _needsDrain = false;
-        await Task.Delay(DrainDelay).ConfigureAwait(false);
+        await Task.Delay(_preferLatency ? PreviewDrainDelay : DrainDelay).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -571,14 +585,41 @@ public sealed class Mp4FrameSource : IFrameSource
         Interlocked.Exchange(ref _framePending, null)?.TrySetResult(false);
 
         // Wait for any in-flight request to leave the critical section before tearing
-        // down the player and surface it is reading from.
+        // down the player and surface it is reading from. The common case (nothing in
+        // flight) takes the gate immediately. When a request IS in flight and this is a
+        // UI/dispatcher thread (it has a SynchronizationContext), the wait — up to
+        // DisposeGateTimeout behind a stalled seek — moves to the thread pool instead of
+        // freezing the editor; the in-flight request sees _disposed and returns null.
         bool held = false;
         try
         {
-            held = _gate.Wait(DisposeGateTimeout);
+            held = _gate.Wait(0);
         }
         catch (ObjectDisposedException) { }
 
+        if (!held && SynchronizationContext.Current is not null)
+        {
+            _ = Task.Run(() => DisposeCore(WaitForGate()));
+            return;
+        }
+
+        DisposeCore(held || WaitForGate());
+    }
+
+    private bool WaitForGate()
+    {
+        try
+        {
+            return _gate.Wait(DisposeGateTimeout);
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    private void DisposeCore(bool held)
+    {
         try
         {
             _player.VideoFrameAvailable -= OnVideoFrameAvailable;

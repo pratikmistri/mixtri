@@ -237,6 +237,7 @@ public sealed class ShellCoordinator : IDisposable
     private MiniWindow CreateMiniWindow()
     {
         var window = new MiniWindow();
+        window.ApplyTheme(App.Current.RequestedElementTheme);
         window.RecordRequested += (_, _) => _ = StartRecordingAsync();
         window.ExpandRequested += (_, _) => ExpandToFull();
         window.HideRequested += (_, _) => HideToTray();
@@ -267,9 +268,24 @@ public sealed class ShellCoordinator : IDisposable
         NativeMethods.ShowWindow(hwnd, SW_MINIMIZE);
     }
 
+    /// <summary>Applies the user's theme choice to the surfaces the shell owns.</summary>
+    public void ApplyTheme(ElementTheme theme) => _miniWindow?.ApplyTheme(theme);
+
     #endregion
 
     #region Recording
+
+    /// <summary>
+    /// Raised on the UI thread once a recording has fully ended and the shell has
+    /// rewound or handed off to the editor — whether the take succeeded or not.
+    /// </summary>
+    public event EventHandler? RecordingSessionEnded;
+
+    /// <summary>
+    /// Set while a start is being prepared (validation, the save prompt, the hide
+    /// delay), so a second Record press from another surface cannot start twice.
+    /// </summary>
+    private bool _isStartPending;
 
     /// <summary>
     /// Clears the shell off screen, waits for the hide/minimize animation to
@@ -277,23 +293,83 @@ public sealed class ShellCoordinator : IDisposable
     /// </summary>
     public async Task StartRecordingAsync()
     {
-        if (_viewModel.IsRecording) return;
+        if (_viewModel.IsRecording || _isStartPending) return;
+        _isStartPending = true;
 
+        bool enteredRecording = false;
         try
         {
+            // Refuse a bad selection while the windows are still on screen. Hiding first
+            // and failing afterwards left the user looking at a bare desktop with the
+            // error routed to a window they could no longer see.
+            if (!_viewModel.ValidateCaptureTarget()) return;
+
+            // A non-append recording REPLACES the current project when it stops, so ask
+            // about unsaved work now — while there is still a window to ask on, and before
+            // anything is hidden. Append mode adds to the project instead, so it is exempt.
+            if (!_viewModel.IsAppendMode && !await ConfirmReplaceCurrentProjectAsync())
+                return;
+
+            if (_viewModel.IsRecording) return;
+
             // Enter Recording up front: the windows have to be gone *before* the
             // capture starts, and a failed start rewinds via RecordingFailed.
-            Apply(AppShellTrigger.RecordingStarted);
+            enteredRecording = Apply(AppShellTrigger.RecordingStarted);
 
             await Task.Delay(WindowHideSettleMs);
 
-            _viewModel.StartRecordingCommand.Execute(null);
+            // Awaited so the pending latch spans the whole start, not just its first step.
+            await _viewModel.StartRecordingCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[ShellCoordinator] Start failed: {ex.Message}");
-            Apply(AppShellTrigger.RecordingFailed);
+            if (enteredRecording && !_viewModel.IsRecording)
+                Apply(AppShellTrigger.RecordingFailed);
         }
+        finally
+        {
+            _isStartPending = false;
+        }
+    }
+
+    /// <summary>
+    /// Asks before a new recording replaces work that cannot be got back. Fails CLOSED:
+    /// if the question cannot be put, the recording does not start.
+    /// </summary>
+    /// <remarks>
+    /// The prompt is a <c>ContentDialog</c>, which renders inside the full window, so the
+    /// full window is brought up first when the Mini pill is the visible surface — a dialog
+    /// on a hidden window renders nowhere and would wait forever for an answer.
+    /// </remarks>
+    private async Task<bool> ConfirmReplaceCurrentProjectAsync()
+    {
+        if (!ProjectService.Instance.HasUnrecoverableWork) return true;
+
+        var window = _mainWindow;
+        if (window is null) return false;
+
+        ShowFullWindow();
+        var root = await WaitForXamlRootAsync(window);
+
+        return await ProjectSaveCoordinator.ConfirmDiscardCurrentProjectAsync(
+            root, window, "before starting a new recording?");
+    }
+
+    /// <summary>
+    /// A window that has never been shown may not have a <see cref="XamlRoot"/> until its
+    /// first layout pass, so give it a moment rather than failing the prompt outright.
+    /// </summary>
+    private static async Task<XamlRoot?> WaitForXamlRootAsync(Window window)
+    {
+        for (int i = 0; i < 20; i++)
+        {
+            var root = window.Content?.XamlRoot;
+            if (root is not null) return root;
+            await Task.Delay(50);
+        }
+
+        return window.Content?.XamlRoot;
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -349,8 +425,12 @@ public sealed class ShellCoordinator : IDisposable
         var project = _viewModel.LastProject;
         if (project is null)
         {
-            // Stop failed or produced nothing — put the user back where they were.
+            // Stop failed or produced nothing — put the user back where they were. The
+            // view model has already raised the reason through ErrorRaised; the editor is
+            // deliberately NOT opened, since there is nothing new to edit.
+            _viewModel.IsAppendMode = false;
             Apply(AppShellTrigger.RecordingFailed);
+            RecordingSessionEnded?.Invoke(this, EventArgs.Empty);
             return;
         }
 
@@ -367,6 +447,22 @@ public sealed class ShellCoordinator : IDisposable
         // the editor, even when they recorded from the Mini pill.
         Apply(AppShellTrigger.RecordingStopped);
         _mainWindow?.ShowEditor();
+
+        // A stop the user did not ask for, or a take that finished degraded, must be
+        // explained — otherwise the editor simply appears, or the recording is quietly
+        // shorter than they expected.
+        if (_viewModel.LastAutoStopReason is { } reason)
+        {
+            _mainWindow?.ShowShellMessage(reason, Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+        }
+        else if (_viewModel.RecordingWarning is { } warning)
+        {
+            _mainWindow?.ShowShellMessage(
+                $"The recording finished with a problem: {warning}",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+        }
+
+        RecordingSessionEnded?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnOverlayStopRequested(object? sender, EventArgs e)
@@ -409,7 +505,14 @@ public sealed class ShellCoordinator : IDisposable
 
     private void SurfaceError(string message)
     {
-        if (_stateMachine.CurrentState == AppShellState.Mini)
+        // While recording, nothing is on screen but the overlay, and the shell rewinds to
+        // wherever the recording began — so report on THAT surface, where the user will
+        // land, rather than on whichever one happens to be hidden least.
+        var surface = _stateMachine.CurrentState == AppShellState.Recording
+            ? _stateMachine.RecordingOrigin ?? AppShellState.Full
+            : _stateMachine.CurrentState;
+
+        if (surface == AppShellState.Mini)
             _miniWindow?.ShowStatus(message, isTransient: false);
         else
             _mainWindow?.ShowRecordingError(message);

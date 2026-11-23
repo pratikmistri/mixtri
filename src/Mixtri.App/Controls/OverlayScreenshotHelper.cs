@@ -23,6 +23,12 @@ internal readonly struct OverlayScreenshotResult
     public byte[]? Pixels { get; init; }
     public int Width { get; init; }
     public int Height { get; init; }
+
+    /// <summary>
+    /// Why <see cref="Source"/> is null, or null on success. Callers surface this rather than
+    /// presenting an unexplained empty overlay.
+    /// </summary>
+    public string? FailureReason { get; init; }
 }
 
 /// <summary>
@@ -31,12 +37,72 @@ internal readonly struct OverlayScreenshotResult
 /// in <c>RegionSelectorOverlay</c> and <c>WindowSelectorOverlay</c> (see the W4-1
 /// UI consolidation report).
 /// </summary>
+/// <remarks>
+/// The GDI capture, the pixel read-back and the alpha fix-up run on the thread pool: on a
+/// multi-monitor desktop they move hundreds of megabytes and used to freeze the UI thread
+/// for a visible beat before the picker appeared. Only
+/// <see cref="SoftwareBitmapSource.SetBitmapAsync"/>, which needs the UI thread, runs there —
+/// so this must be called from the UI thread.
+/// </remarks>
 internal static class OverlayScreenshotHelper
 {
     public const long MaxScreenshotBytes = 1_073_741_824L; // 1 GB
     private const uint SRCCOPY = 0x00CC0020;
 
     public static async Task<OverlayScreenshotResult> CaptureDesktopScreenshotAsync(bool includePixels)
+    {
+        var capture = await Task.Run(CapturePixels);
+
+        if (capture.Pixels is null)
+            return Fail(capture.Width, capture.Height, capture.FailureReason ?? "unknown failure");
+
+        try
+        {
+            using var softwareBitmap = await Task.Run(() =>
+            {
+                var bitmap = new SoftwareBitmap(
+                    BitmapPixelFormat.Bgra8, capture.Width, capture.Height, BitmapAlphaMode.Premultiplied);
+                bitmap.CopyFromBuffer(capture.Pixels.AsBuffer());
+                return bitmap;
+            });
+
+            var source = new SoftwareBitmapSource();
+            await source.SetBitmapAsync(softwareBitmap);
+
+            return new OverlayScreenshotResult
+            {
+                Source = source,
+                Pixels = includePixels ? capture.Pixels : null,
+                Width = capture.Width,
+                Height = capture.Height,
+            };
+        }
+        catch (Exception ex)
+        {
+            return Fail(capture.Width, capture.Height, $"bitmap conversion failed: {ex.Message}");
+        }
+    }
+
+    private static OverlayScreenshotResult Fail(int width, int height, string reason)
+    {
+        Mixtri.Core.Diagnostics.DiagLog.Write(
+            "Overlay", $"Desktop screenshot unavailable ({width}x{height}): {reason}");
+
+        return new OverlayScreenshotResult
+        {
+            Width = Math.Max(0, width),
+            Height = Math.Max(0, height),
+            FailureReason = reason,
+        };
+    }
+
+    private readonly record struct PixelCapture(byte[]? Pixels, int Width, int Height, string? FailureReason);
+
+    /// <summary>
+    /// Thread-pool half: GDI capture of the virtual desktop into an opaque BGRA buffer. All
+    /// GDI handles are created and released on the calling thread.
+    /// </summary>
+    private static PixelCapture CapturePixels()
     {
         IntPtr hdcScreen = IntPtr.Zero;
         IntPtr hdcMem = IntPtr.Zero;
@@ -53,9 +119,9 @@ internal static class OverlayScreenshotHelper
             height = VirtualDesktopInfo.GetSystemMetrics(VirtualDesktopInfo.SM_CYVIRTUALSCREEN);
 
             if (width <= 0 || height <= 0)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "virtual desktop has no size");
             if (width > 16384 || height > 16384)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "virtual desktop exceeds 16384px");
 
             long byteCount;
             try
@@ -64,34 +130,34 @@ internal static class OverlayScreenshotHelper
             }
             catch (OverflowException)
             {
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "pixel buffer size overflows");
             }
 
             if (byteCount > MaxScreenshotBytes)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "pixel buffer exceeds 1 GB");
 
             hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
             if (hdcScreen == IntPtr.Zero)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "GetDC failed");
 
             hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
             if (hdcMem == IntPtr.Zero)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "CreateCompatibleDC failed");
 
             hBitmap = NativeMethods.CreateCompatibleBitmap(hdcScreen, width, height);
             if (hBitmap == IntPtr.Zero)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "CreateCompatibleBitmap failed");
 
             oldObj = NativeMethods.SelectObject(hdcMem, hBitmap);
             if (oldObj == IntPtr.Zero || oldObj == new IntPtr(-1))
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "SelectObject failed");
 
             if (!NativeMethods.BitBlt(hdcMem, 0, 0, width, height, hdcScreen, left, top, SRCCOPY))
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "BitBlt failed");
 
             IntPtr restoredObj = NativeMethods.SelectObject(hdcMem, oldObj);
             if (restoredObj == IntPtr.Zero || restoredObj == new IntPtr(-1))
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, "SelectObject restore failed");
             oldObj = IntPtr.Zero;
 
             // Read pixel data from the HBITMAP
@@ -108,7 +174,7 @@ internal static class OverlayScreenshotHelper
             var pixelData = new byte[(int)byteCount];
             int scanLines = NativeMethods.GetDIBits(hdcMem, hBitmap, 0, (uint)height, pixelData, ref bmi, 0);
             if (scanLines != height)
-                return new OverlayScreenshotResult { Width = width, Height = height };
+                return new PixelCapture(null, width, height, $"GetDIBits returned {scanLines} of {height} lines");
 
             // GetDIBits with BI_RGB fills the 4th byte of each pixel with an UNDEFINED value
             // (commonly 0). SoftwareBitmapSource requires Bgra8/Premultiplied, so an alpha of 0
@@ -119,26 +185,11 @@ internal static class OverlayScreenshotHelper
             for (int i = 3; i < span.Length; i += 4)
                 span[i] = 0xFF;
 
-            // Convert BGRA pixel data to SoftwareBitmap
-            using var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
-            softwareBitmap.CopyFromBuffer(pixelData.AsBuffer());
-
-            var source = new SoftwareBitmapSource();
-            await source.SetBitmapAsync(softwareBitmap);
-
-            return new OverlayScreenshotResult
-            {
-                Source = source,
-                Pixels = includePixels ? pixelData : null,
-                Width = width,
-                Height = height,
-            };
+            return new PixelCapture(pixelData, width, height, null);
         }
-        catch
+        catch (Exception ex)
         {
-            return width > 0 && height > 0
-                ? new OverlayScreenshotResult { Width = width, Height = height }
-                : new OverlayScreenshotResult();
+            return new PixelCapture(null, width, height, $"capture threw: {ex.Message}");
         }
         finally
         {

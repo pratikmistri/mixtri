@@ -2,6 +2,21 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <!-- Unselected rail items are dimmed in the normal themes, but NOT under High Contrast:
+         a 0.6 opacity blends the system's high-contrast text colour toward the background
+         and breaks the contrast the user asked the OS for. -->
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Default">
+            <x:Double x:Key="NavRailUnselectedOpacity">0.6</x:Double>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Light">
+            <x:Double x:Key="NavRailUnselectedOpacity">0.6</x:Double>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+            <x:Double x:Key="NavRailUnselectedOpacity">1.0</x:Double>
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+
     <!--
         Store-style navigation rail item: icon stacked over label, centred across the full
         rail width. Selecting an item drops its label so the icon centres on its own.
@@ -71,7 +86,7 @@
                                     Padding="0,10"
                                     HorizontalAlignment="Stretch"
                                     VerticalAlignment="Center"
-                                    Opacity="0.6">
+                                    Opacity="{ThemeResource NavRailUnselectedOpacity}">
                             <ContentPresenter x:Name="IconHost"
                                               Content="{TemplateBinding Icon}"
                                               Foreground="{TemplateBinding Foreground}"
@@ -105,6 +120,13 @@
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup x:Name="CommonStates">
                                 <VisualState x:Name="Normal">
+                                    <!-- A Setter, not an animation: storyboard values cannot
+                                         follow a ThemeResource, and the dim level differs
+                                         under High Contrast. -->
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentStack.Opacity"
+                                                Value="{ThemeResource NavRailUnselectedOpacity}" />
+                                    </VisualState.Setters>
                                     <Storyboard>
                                         <DoubleAnimation
                                             Storyboard.TargetName="RailSelectionBar"
@@ -133,10 +155,6 @@
                                                 <CubicEase EasingMode="EaseOut" />
                                             </DoubleAnimation.EasingFunction>
                                         </DoubleAnimation>
-                                        <DoubleAnimation
-                                            Storyboard.TargetName="ContentStack"
-                                            Storyboard.TargetProperty="Opacity"
-                                            To="0.6" Duration="0:0:0.18" />
                                     </Storyboard>
                                 </VisualState>
                                 <VisualState x:Name="PointerOver">
@@ -151,7 +169,7 @@
                                         <Setter Target="ItemBackground.Background"
                                                 Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
                                         <!-- Without this, pressing a hovered item drops it back
-                                             to the base 0.6 opacity for the duration of the
+                                             to the base unselected opacity for the duration of the
                                              press — a visible flicker on every navigation. -->
                                         <Setter Target="ContentStack.Opacity" Value="1" />
                                     </VisualState.Setters>

@@ -77,7 +77,15 @@ public sealed record RecordingFault(
 /// </summary>
 public class RecordingSession : IDisposable, IAsyncDisposable
 {
-    private static readonly TimeSpan StopFinalizeTimeout = TimeSpan.FromMinutes(30);
+    /// <summary>
+    /// Free space below which a recording will not start, and below which a running one
+    /// warns. Frames are buffered as JPEGs and then encoded to MP4 beside them, so the
+    /// session drive needs headroom for both.
+    /// </summary>
+    internal const long MinFreeDiskBytes = 1L << 30;
+
+    /// <summary>The stats timer checks free disk space every this many ticks (500 ms each).</summary>
+    private const int DiskCheckEveryStatsTicks = 20;
     private static readonly TimeSpan DisposeStopTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>How long the queued frame writes get to drain before stop moves on.</summary>
@@ -147,6 +155,10 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     private RecordingFault? _fault;
     private readonly object _faultLock = new();
     private int _writeFailureReported;
+    private int _writingAbandonedReported;
+    private int _captureTargetLostRaised;
+    private int _lowDiskReported;
+    private int _statsTicks;
 
     // Survives writer teardown so a fault can still point at the preserved frames. Cleared
     // by the post-finalization reconciliation when the frames were released, so neither this
@@ -178,6 +190,14 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     /// MP4 finalization has released them.
     /// </summary>
     public string? CapturedFramesPath => _capturedFramesPath;
+
+    /// <summary>
+    /// Offset in seconds between the webcam file's start and video frame 0, with the same
+    /// sign convention as <see cref="Project.AudioToVideoOffsetSeconds"/>: positive means the
+    /// webcam started before the video (skip that much of the webcam file). Null when no
+    /// webcam was recorded. Available once <see cref="StopAsync"/> completes.
+    /// </summary>
+    public double? WebcamToVideoOffsetSeconds { get; private set; }
 
     /// <summary>
     /// Opens the capture gate so frames and audio begin recording.
@@ -233,6 +253,20 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     public event EventHandler<RecordingStatsEventArgs>? StatsUpdated;
     public event EventHandler<string>? Error;
 
+    /// <summary>
+    /// Raised once when the recorded window was closed or the recorded display went away.
+    /// Capture has already stopped producing frames, and a fault has been recorded; the
+    /// owner should stop the session to keep what was captured. Raised on a capture thread —
+    /// handlers must marshal to the UI thread and must not block on <see cref="StopAsync"/>.
+    /// </summary>
+    public event EventHandler? CaptureTargetLost;
+
+    /// <summary>
+    /// Progress (0..1) of the MP4 encode that runs during <see cref="StopAsync"/>. Raised on
+    /// encoder threads in steps of at least 1%, with 1.0 when the encode succeeds.
+    /// </summary>
+    public event EventHandler<double>? FinalizationProgressChanged;
+
     // ── Constructor ─────────────────────────────────────────────────
 
     public RecordingSession(RecordingSessionConfig config)
@@ -261,6 +295,10 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         {
             _acceptFrames = true;
 
+            // Refuse to start onto a nearly full drive: the recording would die mid-way
+            // with frames it can no longer write and no room left to encode the MP4.
+            EnsureFreeDiskSpace(_config.OutputFolder);
+
             // Create session output folder
             var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             _sessionFolder = Path.Combine(_config.OutputFolder, $"session_{timestamp}");
@@ -282,6 +320,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
             _screenEngine.FrameCaptured += OnFrameCaptured;
             _screenEngine.Error += OnEngineError;
+            _screenEngine.CaptureItemClosed += OnCaptureItemClosed;
 
             // Initialize mouse hook recorder
             _mouseRecorder = new MouseHookRecorder();
@@ -293,9 +332,28 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             if (_config.IsWebcamEnabled)
             {
                 var webcamDeviceId = _config.WebcamDeviceId;
-                var devices = await WebcamCaptureEngine.GetDevicesAsync();
+                List<WebcamDeviceInfo> devices;
+                bool enumerationFailed = false;
+                try
+                {
+                    devices = await WebcamCaptureEngine.GetDevicesAsync();
+                }
+                catch (Exception ex)
+                {
+                    // The camera is optional: a failed enumeration costs the webcam overlay,
+                    // never the screen recording.
+                    RecordFault(new RecordingFault(
+                        $"Cameras could not be listed, so the webcam was not recorded: {ex.Message}",
+                        Exception: ex));
+                    devices = [];
+                    enumerationFailed = true;
+                }
 
-                if (string.IsNullOrWhiteSpace(webcamDeviceId))
+                if (enumerationFailed)
+                {
+                    webcamDeviceId = null;
+                }
+                else if (string.IsNullOrWhiteSpace(webcamDeviceId))
                 {
                     // Auto-select first available webcam
                     webcamDeviceId = devices.FirstOrDefault()?.Id;
@@ -311,7 +369,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                     _webcamEngine = new WebcamCaptureEngine();
                     _resolvedWebcamDeviceId = webcamDeviceId;
                 }
-                else
+                else if (!enumerationFailed)
                 {
                     Error?.Invoke(this, "Webcam enabled but no camera device found");
                 }
@@ -325,6 +383,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                     IsSystemAudioEnabled = _config.SystemAudioEnabled,
                     IsMicEnabled = _config.MicEnabled,
                 };
+                _audioEngine.DeviceFailed += OnAudioDeviceFailed;
             }
 
             // Record a shared reference timestamp BEFORE starting any engine.
@@ -346,10 +405,43 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             _videoStartTicks = Stopwatch.GetTimestamp();
 
             _audioStartTicks = Stopwatch.GetTimestamp();
-            _audioEngine?.StartRecording(_sessionFolder);
+            if (_audioEngine is not null)
+            {
+                try
+                {
+                    // Per-device failures arrive through DeviceFailed; this only catches the
+                    // audio subsystem itself being unavailable. Either way the screen
+                    // recording goes ahead without the missing audio.
+                    _audioEngine.StartRecording(_sessionFolder);
+                }
+                catch (Exception ex)
+                {
+                    RecordFault(new RecordingFault(
+                        $"Audio could not be recorded: {ex.Message}", Exception: ex));
+                    DisposeAudioEngine();
+                }
+            }
 
             if (_webcamEngine is not null)
-                await _webcamEngine.StartAsync(_resolvedWebcamDeviceId!, _sessionFolder);
+            {
+                try
+                {
+                    await _webcamEngine.StartAsync(_resolvedWebcamDeviceId!, _sessionFolder);
+                }
+                catch (Exception ex)
+                {
+                    // A busy or failing camera must not abort the screen recording.
+                    RecordFault(new RecordingFault(
+                        $"The webcam could not be started, so it was not recorded: {ex.Message}",
+                        Exception: ex));
+                    try { _webcamEngine.Dispose(); }
+                    catch (Exception disposeEx)
+                    {
+                        Debug.WriteLine($"[RecordingSession] Webcam dispose failed: {disposeEx.Message}");
+                    }
+                    _webcamEngine = null;
+                }
+            }
 
             // Start elapsed timer
             _elapsedWatch.Restart();
@@ -403,8 +495,12 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             // Stop elapsed timer
             _elapsedWatch.Stop();
 
+            // Every step below is guarded: a throw from any one engine must never skip MP4
+            // finalization, or the captured frames are stranded with no project pointing at
+            // them. Each failure is a fault on an otherwise completed recording.
+
             // Stop screen capture first, then drain in-flight frame writes before finalizing.
-            _screenEngine?.StopCapture();
+            RunStopStep("stop screen capture", () => _screenEngine?.StopCapture());
 
             if (writer is not null)
             {
@@ -414,16 +510,25 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                 ReportRetainedWriteFailure(writer);
             }
 
-            _mouseRecorder?.StopRecording();
-            _keyboardRecorder?.StopRecording();
-            _audioEngine?.StopRecording();
+            RunStopStep("stop mouse recording", () => _mouseRecorder?.StopRecording());
+            RunStopStep("stop keyboard recording", () => _keyboardRecorder?.StopRecording());
+            RunStopStep("stop audio recording", () => _audioEngine?.StopRecording());
 
             // A wedged camera driver must not strand the session in Stopping: the wait is
             // bounded, and the rest of finalization continues either way.
             if (_webcamEngine is not null)
             {
-                var outcome = await _webcamEngine
-                    .StopAsync(WebcamStopTimeout, ct).ConfigureAwait(false);
+                WebcamStopOutcome outcome;
+                try
+                {
+                    outcome = await _webcamEngine
+                        .StopAsync(WebcamStopTimeout, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[RecordingSession] Webcam stop threw: {ex.Message}");
+                    outcome = WebcamStopOutcome.Failed;
+                }
 
                 if (outcome is WebcamStopOutcome.TimedOut or WebcamStopOutcome.Canceled
                     or WebcamStopOutcome.Failed)
@@ -437,11 +542,20 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
             // Save mouse cursor data
             if (_mouseRecorder is not null)
-                _mouseRecorder.SaveToFile(_cursorDataFilePath);
+            {
+                var mouseRecorder = _mouseRecorder;
+                RunStopStep("save cursor data", () => mouseRecorder.SaveToFile(_cursorDataFilePath),
+                    "Cursor movement could not be saved, so cursor effects will be missing");
+            }
 
             // Save keyboard data
             if (_keyboardRecorder is not null)
-                SaveKeyboardData(_keyboardDataFilePath, _keyboardRecorder.GetRecordedEvents());
+            {
+                var keyboardRecorder = _keyboardRecorder;
+                RunStopStep("save keyboard data",
+                    () => SaveKeyboardData(_keyboardDataFilePath, keyboardRecorder.GetRecordedEvents()),
+                    "Keystrokes could not be saved, so keyboard overlays will be missing");
+            }
 
             // Finalize video writer (encode MP4 from frames).
             // The captured JPEGs are a write-ahead buffer, not an archive: once the MP4
@@ -450,6 +564,18 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             // recording and are deliberately kept — and the user is told where they are.
             if (writer is not null)
                 await FinalizeCaptureAsync(writer, ct).ConfigureAwait(false);
+
+            // Nothing was captured (the target closed at once, the capture gate never
+            // opened, or every frame write failed): there is no recording to open, and a
+            // project with no video and zero dimensions would only fail later in the editor.
+            if (writer is null || writer.FrameCount == 0)
+            {
+                RecordFault(new RecordingFault(
+                    "No frames were captured, so there is no recording to open."));
+                _project = null;
+                State = RecordingState.Stopped;
+                return;
+            }
 
             // Collect audio file paths
             var audioFilePaths = new List<string>();
@@ -479,6 +605,13 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             Debug.WriteLine(
                 $"[RecordingSession] Audio offset: {audioToVideoOffset:F4}s " +
                 $"(positive=pre-roll, negative=audio started late)");
+
+            // Same convention for the webcam file. Project has no field for it yet, so it is
+            // exposed on the session for the caller to carry.
+            WebcamToVideoOffsetSeconds = _webcamEngine is { StartedTicks: > 0 } webcam
+                && !string.IsNullOrEmpty(webcam.OutputFilePath)
+                ? (double)(videoOriginTicks - webcam.StartedTicks) / Stopwatch.Frequency
+                : null;
 
             // Compute mouse→video time offset from the first ACTUAL frame,
             // not from when StartCapture() was called. Capture APIs often have
@@ -621,10 +754,14 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     /// </remarks>
     internal async Task FinalizeCaptureAsync(VideoWriter writer, CancellationToken ct)
     {
+        writer.FinalizationProgressChanged += OnWriterFinalizationProgress;
         try
         {
             using var finalizationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            finalizationCts.CancelAfter(StopFinalizeTimeout);
+
+            // Scales with the recording: a fixed cap sized for short clips would kill the
+            // encode of a long one and leave it as loose JPEGs.
+            finalizationCts.CancelAfter(VideoWriter.ComputeFinalizeTimeout(writer.FrameCount));
             await writer.FinalizeAsync(finalizationCts.Token).ConfigureAwait(false);
         }
         catch (Exception finEx)
@@ -635,6 +772,10 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             RecordFault(new RecordingFault(
                 $"The recording could not be encoded to MP4: {finEx.Message}",
                 Exception: finEx));
+        }
+        finally
+        {
+            writer.FinalizationProgressChanged -= OnWriterFinalizationProgress;
         }
 
         if (writer.FinalizeSucceeded)
@@ -712,6 +853,55 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// The writer gave up after repeated consecutive write failures (full disk, lost device):
+    /// everything from here on is being discarded, which the user must hear about now.
+    /// </summary>
+    private void OnVideoWritingAbandoned(object? sender, FrameWriteFailedEventArgs e)
+    {
+        if (Interlocked.Exchange(ref _writingAbandonedReported, 1) != 0)
+            return;
+
+        RecordFault(new RecordingFault(
+            "Recording stopped saving frames after repeated disk write failures " +
+            $"({e.Exception.Message}). Everything after that point was lost; stop the " +
+            "recording and free up disk space.",
+            Exception: e.Exception));
+    }
+
+    private void OnWriterFinalizationProgress(object? sender, double progress)
+    {
+        try
+        {
+            FinalizationProgressChanged?.Invoke(this, progress);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingSession] FinalizationProgressChanged handler threw: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Runs one teardown step of the stop flow, converting a throw into a fault so the
+    /// remaining steps — and above all MP4 finalization — still run.
+    /// </summary>
+    private void RunStopStep(string step, Action action, string? userMessage = null)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingSession] Stop step '{step}' failed: {ex}");
+            RecordFault(new RecordingFault(
+                userMessage is null
+                    ? $"Could not {step} cleanly: {ex.Message}"
+                    : $"{userMessage}: {ex.Message}",
+                Exception: ex));
+        }
+    }
+
+    /// <summary>
     /// Belt-and-braces for the frame-write failure: the stop flow reports the writer's
     /// retained failure directly, so surfacing it never depends on event delivery timing.
     /// </summary>
@@ -720,6 +910,12 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         var error = writer.FirstWriteError;
         if (error is null)
             return;
+
+        if (writer.IsWritingAbandoned)
+        {
+            OnVideoWritingAbandoned(writer, new FrameWriteFailedEventArgs(
+                error, writer.FirstWriteErrorFrameIndex, writer.FramesDirectory));
+        }
 
         OnVideoWriteFailed(writer, new FrameWriteFailedEventArgs(
             error, writer.FirstWriteErrorFrameIndex, writer.FramesDirectory));
@@ -872,12 +1068,14 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                 _screenEngine?.Device, _physicalCropRect, _config.CaptureQuality);
 
             writer.WriteFailed += OnVideoWriteFailed;
+            writer.WritingAbandoned += OnVideoWritingAbandoned;
 
             // The stop flow may have closed the gate while this first frame was being set
             // up; a writer nothing will ever finalize must not be left running.
             if (!_acceptFrames)
             {
                 writer.WriteFailed -= OnVideoWriteFailed;
+                writer.WritingAbandoned -= OnVideoWritingAbandoned;
                 writer.Dispose();
                 return null;
             }
@@ -893,12 +1091,120 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         Error?.Invoke(this, $"Capture engine error: {message}");
     }
 
+    /// <summary>
+    /// The recorded window closed or the display went away. Capture stops by itself; the
+    /// session records why and asks its owner to stop so the captured part is kept.
+    /// </summary>
+    private void OnCaptureItemClosed(object? sender, EventArgs e)
+    {
+        if (State is not (RecordingState.Starting or RecordingState.Recording or RecordingState.Paused))
+            return;
+
+        if (Interlocked.Exchange(ref _captureTargetLostRaised, 1) != 0)
+            return;
+
+        RecordFault(new RecordingFault(
+            "The recorded window/display was closed, so the recording ends at that point."));
+
+        try
+        {
+            CaptureTargetLost?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingSession] CaptureTargetLost handler threw: {ex.Message}");
+        }
+    }
+
+    /// <summary>An audio device failed to start or died mid-recording.</summary>
+    private void OnAudioDeviceFailed(object? sender, string message)
+    {
+        RecordFault(new RecordingFault(message));
+    }
+
+    private void DisposeAudioEngine()
+    {
+        var engine = _audioEngine;
+        _audioEngine = null;
+        if (engine is null)
+            return;
+
+        engine.DeviceFailed -= OnAudioDeviceFailed;
+        try { engine.Dispose(); }
+        catch (Exception ex) { Debug.WriteLine($"[RecordingSession] Audio dispose failed: {ex.Message}"); }
+    }
+
+    // ── Disk space ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Free bytes available to this user on the drive holding <paramref name="path"/>, or
+    /// null when it cannot be determined (network share, missing drive). Never throws.
+    /// </summary>
+    internal static long? TryGetAvailableFreeSpace(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+
+            var root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(root))
+                return null;
+
+            var drive = new DriveInfo(root);
+            return drive.IsReady ? drive.AvailableFreeSpace : null;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingSession] Could not read free space for '{path}': {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>True when the known free space is below <see cref="MinFreeDiskBytes"/>.</summary>
+    internal static bool IsLowOnDiskSpace(long? availableBytes)
+        => availableBytes is { } bytes && bytes < MinFreeDiskBytes;
+
+    private static string FormatMegabytes(long bytes) => $"{bytes / (1024.0 * 1024.0):F0} MB";
+
+    private static void EnsureFreeDiskSpace(string folder)
+    {
+        var available = TryGetAvailableFreeSpace(folder);
+        if (IsLowOnDiskSpace(available))
+        {
+            throw new IOException(
+                $"Not enough free disk space to record: only {FormatMegabytes(available!.Value)} " +
+                $"free on the drive holding {folder}. Free up at least " +
+                $"{FormatMegabytes(MinFreeDiskBytes)} or choose another save folder.");
+        }
+    }
+
+    private void CheckDiskSpaceDuringRecording()
+    {
+        if (Volatile.Read(ref _lowDiskReported) != 0 || string.IsNullOrEmpty(_sessionFolder))
+            return;
+
+        var available = TryGetAvailableFreeSpace(_sessionFolder);
+        if (!IsLowOnDiskSpace(available))
+            return;
+
+        if (Interlocked.Exchange(ref _lowDiskReported, 1) != 0)
+            return;
+
+        RecordFault(new RecordingFault(
+            $"Disk space is running low ({FormatMegabytes(available!.Value)} left). Stop the " +
+            "recording soon: it needs room to save frames and to encode the final video."));
+    }
+
     // ── Stats timer ─────────────────────────────────────────────────
 
     private void OnStatsTimer(object? state)
     {
         if (State is not (RecordingState.Recording or RecordingState.Paused))
             return;
+
+        if (Interlocked.Increment(ref _statsTicks) % DiskCheckEveryStatsTicks == 0)
+            CheckDiskSpaceDuringRecording();
 
         var now = Stopwatch.GetTimestamp();
         var currentFrames = FramesCaptured;
@@ -929,6 +1235,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         {
             _screenEngine.FrameCaptured -= OnFrameCaptured;
             _screenEngine.Error -= OnEngineError;
+            _screenEngine.CaptureItemClosed -= OnCaptureItemClosed;
             _screenEngine.Dispose();
             _screenEngine = null;
         }
@@ -942,8 +1249,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         _webcamEngine?.Dispose();
         _webcamEngine = null;
 
-        _audioEngine?.Dispose();
-        _audioEngine = null;
+        DisposeAudioEngine();
 
         VideoWriter? writer;
         lock (_lock)
@@ -955,6 +1261,8 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         if (writer is not null)
         {
             writer.WriteFailed -= OnVideoWriteFailed;
+            writer.WritingAbandoned -= OnVideoWritingAbandoned;
+            writer.FinalizationProgressChanged -= OnWriterFinalizationProgress;
             writer.Dispose();
         }
     }

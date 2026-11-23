@@ -48,23 +48,18 @@
                         <ComboBoxItem Content="Mini mode (compact toolbar)" Tag="Mini" />
                         <ComboBoxItem Content="Full app window" Tag="Full" />
                     </ComboBox>
+                    <!-- No SelectedIndex here: a XAML default fires SelectionChanged during
+                         InitializeComponent. The saved choice is selected on Loaded. -->
                     <ComboBox
                         x:Name="ThemeSelector"
                         Header="Theme"
                         HorizontalAlignment="Stretch"
-                        SelectedIndex="2"
                         SelectionChanged="ThemeSelector_SelectionChanged"
                         ToolTipService.ToolTip="Choose app color theme">
-                        <ComboBoxItem Content="Light" />
-                        <ComboBoxItem Content="Dark" />
-                        <ComboBoxItem Content="System default" />
+                        <ComboBoxItem Content="Light" Tag="Light" />
+                        <ComboBoxItem Content="Dark" Tag="Dark" />
+                        <ComboBoxItem Content="System default" Tag="System" />
                     </ComboBox>
-                    <TextBox
-                        Header="Default save location"
-                        HorizontalAlignment="Stretch"
-                        PlaceholderText="C:\Users\Videos\Mixtri"
-                        IsReadOnly="True"
-                        ToolTipService.ToolTip="Default folder for saved recordings" />
                 </StackPanel>
             </Border>
 
@@ -82,23 +77,6 @@
                 BorderThickness="1"
                 CornerRadius="{StaticResource SectionCardCornerRadius}">
                 <StackPanel Spacing="16">
-                    <ComboBox
-                        Header="Default FPS"
-                        HorizontalAlignment="Stretch"
-                        SelectedIndex="0"
-                        ToolTipService.ToolTip="Default frame rate for new recordings">
-                        <ComboBoxItem Content="30 fps" />
-                        <ComboBoxItem Content="60 fps" />
-                    </ComboBox>
-                    <ComboBox
-                        Header="Default capture mode"
-                        HorizontalAlignment="Stretch"
-                        SelectedIndex="0"
-                        ToolTipService.ToolTip="Default screen capture mode">
-                        <ComboBoxItem Content="Full Screen" />
-                        <ComboBoxItem Content="Window" />
-                        <ComboBoxItem Content="Custom Region" />
-                    </ComboBox>
                     <ComboBox
                         x:Name="CaptureQualityCombo"
                         Header="Capture quality"
@@ -168,24 +146,13 @@
                     <ToggleSwitch
                         x:Name="SystemAudioToggle"
                         Header="System Audio"
-                        IsOn="True"
                         Toggled="SystemAudioToggle_Toggled"
                         ToolTipService.ToolTip="Capture desktop audio output" />
-                    <ComboBox
-                        Header="System Audio Device"
-                        HorizontalAlignment="Stretch"
-                        PlaceholderText="Default output"
-                        ToolTipService.ToolTip="Select audio output device" />
                     <ToggleSwitch
                         x:Name="MicToggle"
                         Header="Microphone"
                         Toggled="MicToggle_Toggled"
                         ToolTipService.ToolTip="Record microphone input" />
-                    <ComboBox
-                        Header="Microphone Device"
-                        HorizontalAlignment="Stretch"
-                        PlaceholderText="Default microphone"
-                        ToolTipService.ToolTip="Select microphone input device" />
                 </StackPanel>
             </Border>
 

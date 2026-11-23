@@ -93,6 +93,26 @@ public sealed class BackgroundCompositor : IDisposable
     // surface an ObjectDisposedException instead of a clean cancellation.
     private readonly CancellationTokenSource _shutdownCts = new();
 
+    // Per-frame geometry caches. The source rect, corner radius and shadow style are
+    // constant for a whole clip, yet the shadow used to rebuild a geometry, a command list
+    // and a ShadowEffect (and the content clip its own geometry) on every frame. Keyed on
+    // everything that shapes the resource plus the device, so a device change or any style
+    // edit rebuilds. Touched only from the render path, which a compositor serializes.
+    private readonly record struct ShadowKey(
+        CanvasDevice Device, float X, float Y, float W, float H, float Radius,
+        Color Color, float Blur);
+
+    private readonly record struct ClipKey(
+        CanvasDevice Device, float X, float Y, float W, float H, float Radius);
+
+    private ShadowKey? _shadowKey;
+    private CanvasGeometry? _shadowGeometry;
+    private CanvasCommandList? _shadowCommandList;
+    private ShadowEffect? _shadowEffect;
+
+    private ClipKey? _clipKey;
+    private CanvasGeometry? _clipGeometry;
+
     private bool _disposed;
 
     /// <summary>
@@ -632,57 +652,113 @@ public sealed class BackgroundCompositor : IDisposable
         float contentX, float contentY,
         BackgroundStyle style)
     {
-        // Scale screen frame to fill entire output, then blur it
+        // Scale screen frame to fill entire output (centered, like DrawScaledToFill), then
+        // blur it.
         float scaleX = w / contentW;
         float scaleY = h / contentH;
         float scale = Math.Max(scaleX, scaleY);
-
-        using var scaleEffect = new Transform2DEffect
-        {
-            Source = screenFrame,
-            TransformMatrix = Matrix3x2.CreateScale(scale)
-        };
-
-        using var blurEffect = new GaussianBlurEffect
-        {
-            Source = scaleEffect,
-            BlurAmount = 30f,
-            BorderMode = EffectBorderMode.Hard
-        };
-
-        session.DrawImage(blurEffect, new Vector2(0, 0));
+        DrawDownsampledBlur(session, screenFrame, contentW, contentH, scale, w, h);
     }
 
-    private static void DrawShadow(
+    /// <summary>Gaussian deviation of the blurred backgrounds, in output pixels.</summary>
+    private const float BackgroundBlurAmount = 30f;
+
+    /// <summary>
+    /// Draws <paramref name="source"/> scaled by <paramref name="scale"/>, centred on a
+    /// <paramref name="w"/>×<paramref name="h"/> canvas, under a heavy Gaussian blur.
+    /// </summary>
+    /// <remarks>
+    /// A σ=30 blur removes all detail a quarter-resolution image can hold, so the blur runs
+    /// at ¼ scale with σ/4 and the result is scaled back up — visually the same, a fraction
+    /// of the fill cost of blurring a full-resolution canvas every frame. Small canvases
+    /// (where ¼ would leave too few pixels) blur at full scale. Both transforms use Hard
+    /// borders so the upscaled edge stays opaque, as the Hard-bordered blur always did.
+    /// The scaled image is centred: anchoring it at (0,0) pushed all of the overflow to the
+    /// right/bottom, so the blurred backdrop sat visibly off-centre behind the content.
+    /// </remarks>
+    private static void DrawDownsampledBlur(
+        CanvasDrawingSession session, CanvasBitmap source,
+        float sourceW, float sourceH, float scale, float w, float h)
+    {
+        float offsetX = (w - sourceW * scale) / 2f;
+        float offsetY = (h - sourceH * scale) / 2f;
+        float quality = Math.Min(w, h) >= 256f ? 0.25f : 1f;
+
+        using var downscale = new Transform2DEffect
+        {
+            Source = source,
+            TransformMatrix = Matrix3x2.CreateScale(scale * quality),
+            // HighQualityCubic prefilters a downscale; Linear would alias and shimmer on
+            // moving content. At quality 1 this is a plain fill-scale as before.
+            InterpolationMode = quality < 1f
+                ? CanvasImageInterpolation.HighQualityCubic
+                : CanvasImageInterpolation.Linear,
+            BorderMode = EffectBorderMode.Hard,
+        };
+        using var blurEffect = new GaussianBlurEffect
+        {
+            Source = downscale,
+            BlurAmount = BackgroundBlurAmount * quality,
+            BorderMode = EffectBorderMode.Hard
+        };
+        using var upscale = new Transform2DEffect
+        {
+            Source = blurEffect,
+            TransformMatrix = Matrix3x2.CreateScale(1f / quality)
+                * Matrix3x2.CreateTranslation(offsetX, offsetY),
+            InterpolationMode = CanvasImageInterpolation.Linear,
+            BorderMode = EffectBorderMode.Hard,
+        };
+
+        session.DrawImage(upscale, new Vector2(0, 0));
+    }
+
+    private void DrawShadow(
         CanvasDrawingSession session,
         float x, float y, float w, float h,
         float radius, BackgroundStyle style)
     {
         var device = session.Device;
+        var shadowColor = ColorHelper.WithOpacity(
+            ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity);
+        var key = new ShadowKey(device, x, y, w, h, radius, shadowColor, style.ShadowBlur);
 
-        // Create a rounded rectangle mask as the shadow source
-        using var geometry = CanvasGeometry.CreateRoundedRectangle(device, x, y, w, h, radius, radius);
-
-        using var commandList = new CanvasCommandList(device);
-        using (var maskSession = commandList.CreateDrawingSession())
+        if (_shadowEffect is null || _shadowKey != key)
         {
-            var shadowBaseColor = ColorHelper.ParseColor(style.ShadowColor);
-            var shadowColor = ColorHelper.WithOpacity(shadowBaseColor, style.ShadowOpacity);
-            maskSession.FillGeometry(geometry, shadowColor);
+            ReleaseShadowCache();
+
+            // Rounded rectangle mask as the shadow source.
+            var geometry = CanvasGeometry.CreateRoundedRectangle(device, x, y, w, h, radius, radius);
+            var commandList = new CanvasCommandList(device);
+            try
+            {
+                using (var maskSession = commandList.CreateDrawingSession())
+                {
+                    maskSession.FillGeometry(geometry, shadowColor);
+                }
+            }
+            catch
+            {
+                commandList.Dispose();
+                geometry.Dispose();
+                throw;
+            }
+
+            _shadowGeometry = geometry;
+            _shadowCommandList = commandList;
+            _shadowEffect = new ShadowEffect
+            {
+                Source = commandList,
+                BlurAmount = style.ShadowBlur,
+                ShadowColor = shadowColor,
+            };
+            _shadowKey = key;
         }
 
-        using var shadowEffect = new ShadowEffect
-        {
-            Source = commandList,
-            BlurAmount = style.ShadowBlur,
-            ShadowColor = ColorHelper.WithOpacity(
-                ColorHelper.ParseColor(style.ShadowColor), style.ShadowOpacity)
-        };
-
-        session.DrawImage(shadowEffect, new Vector2(style.ShadowOffsetX, style.ShadowOffsetY));
+        session.DrawImage(_shadowEffect, new Vector2(style.ShadowOffsetX, style.ShadowOffsetY));
     }
 
-    private static void DrawContent(
+    private void DrawContent(
         CanvasDrawingSession session,
         CanvasBitmap screenFrame,
         float x, float y, float w, float h,
@@ -692,15 +768,47 @@ public sealed class BackgroundCompositor : IDisposable
 
         if (radius > 0)
         {
-            using var clipGeometry = CanvasGeometry.CreateRoundedRectangle(
-                session.Device, x, y, w, h, radius, radius);
-            using var layer = session.CreateLayer(1.0f, clipGeometry);
+            var key = new ClipKey(session.Device, x, y, w, h, radius);
+            if (_clipGeometry is null || _clipKey != key)
+            {
+                ReleaseClipCache();
+                _clipGeometry = CanvasGeometry.CreateRoundedRectangle(
+                    session.Device, x, y, w, h, radius, radius);
+                _clipKey = key;
+            }
+
+            using var layer = session.CreateLayer(1.0f, _clipGeometry);
             session.DrawImage(screenFrame, destRect);
         }
         else
         {
             session.DrawImage(screenFrame, destRect);
         }
+    }
+
+    private void ReleaseShadowCache()
+    {
+        SafeDisposeResource(_shadowEffect);
+        SafeDisposeResource(_shadowCommandList);
+        SafeDisposeResource(_shadowGeometry);
+        _shadowEffect = null;
+        _shadowCommandList = null;
+        _shadowGeometry = null;
+        _shadowKey = null;
+    }
+
+    private void ReleaseClipCache()
+    {
+        SafeDisposeResource(_clipGeometry);
+        _clipGeometry = null;
+        _clipKey = null;
+    }
+
+    private static void SafeDisposeResource(IDisposable? resource)
+    {
+        if (resource is null) return;
+        try { resource.Dispose(); }
+        catch { /* device already lost — nothing to release */ }
     }
 
     private static void DrawBorder(
@@ -781,19 +889,7 @@ public sealed class BackgroundCompositor : IDisposable
         float scaleX = w / src.Width;
         float scaleY = h / src.Height;
         float scale = Math.Max(scaleX, scaleY);
-
-        using var scaleEffect = new Transform2DEffect
-        {
-            Source = screenFrame,
-            TransformMatrix = Matrix3x2.CreateScale(scale)
-        };
-        using var blurEffect = new GaussianBlurEffect
-        {
-            Source = scaleEffect,
-            BlurAmount = 30f,
-            BorderMode = EffectBorderMode.Hard
-        };
-        session.DrawImage(blurEffect, new Vector2(0, 0));
+        DrawDownsampledBlur(session, screenFrame, src.Width, src.Height, scale, w, h);
     }
 
     public void Dispose()
@@ -822,5 +918,7 @@ public sealed class BackgroundCompositor : IDisposable
         catch (ObjectDisposedException) { /* already torn down */ }
 
         SafeDispose(stale);
+        ReleaseShadowCache();
+        ReleaseClipCache();
     }
 }

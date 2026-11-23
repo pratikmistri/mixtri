@@ -34,22 +34,53 @@ public record SubtitleStyle
 /// Renders subtitle text onto Win2D <see cref="CanvasDrawingSession"/> frames
 /// during video composition.
 /// </summary>
-public class SubtitleBurner
+/// <remarks>
+/// Called once per composed frame, so the active segment is found by binary search and
+/// its text format/layout are built once per segment (not per frame) and reused until the
+/// segment, canvas size or device changes.
+/// </remarks>
+public class SubtitleBurner : IDisposable
 {
-    private readonly List<SubtitleSegment> _segments;
+    private readonly SubtitleSegment[] _segments;
+    // _maxEnd[i] = latest End among _segments[0..i]; bounds the backwards scan for
+    // overlapping segments.
+    private readonly TimeSpan[] _maxEnd;
     private readonly SubtitleStyle _style;
     private readonly Color _textColor;
     private readonly Color _bgColor;
+    private readonly CanvasTextFormat _textFormat;
+
+    private SubtitleSegment? _cachedSegment;
+    private int _cachedWidth;
+    private int _cachedHeight;
+    private CanvasDevice? _cachedDevice;
+    private CanvasTextLayout? _cachedLayout;
+    private bool _disposed;
 
     public SubtitleBurner(List<SubtitleSegment> segments, SubtitleStyle style)
     {
         ArgumentNullException.ThrowIfNull(segments);
         ArgumentNullException.ThrowIfNull(style);
 
-        _segments = segments;
+        _segments = segments.OrderBy(s => s.Start).ToArray();
+        _maxEnd = new TimeSpan[_segments.Length];
+        var maxEnd = TimeSpan.MinValue;
+        for (int i = 0; i < _segments.Length; i++)
+        {
+            if (_segments[i].End > maxEnd) maxEnd = _segments[i].End;
+            _maxEnd[i] = maxEnd;
+        }
+
         _style = style;
         _textColor = ParseColor(style.TextColor);
         _bgColor = ParseColor(style.BackgroundColor);
+        _textFormat = new CanvasTextFormat
+        {
+            FontFamily = _style.FontFamily,
+            FontSize = _style.FontSize,
+            HorizontalAlignment = CanvasHorizontalAlignment.Center,
+            WordWrapping = CanvasWordWrapping.Wrap
+        };
     }
 
     /// <summary>
@@ -63,23 +94,13 @@ public class SubtitleBurner
         int canvasHeight)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ObjectDisposedException.ThrowIf(_disposed, this);
 
         var current = FindActiveSegment(timeSeconds);
         if (current is null)
             return;
 
-        using var textFormat = new CanvasTextFormat
-        {
-            FontFamily = _style.FontFamily,
-            FontSize = _style.FontSize,
-            HorizontalAlignment = CanvasHorizontalAlignment.Center,
-            WordWrapping = CanvasWordWrapping.Wrap
-        };
-
-        // Measure the text to size the background rectangle
-        var maxTextWidth = canvasWidth - (_style.PaddingHorizontal * 4);
-        using var textLayout = new CanvasTextLayout(
-            session, current.Text, textFormat, maxTextWidth, canvasHeight);
+        var textLayout = GetLayout(session, current, canvasWidth, canvasHeight);
 
         var textWidth = (float)textLayout.LayoutBounds.Width;
         var textHeight = (float)textLayout.LayoutBounds.Height;
@@ -98,10 +119,74 @@ public class SubtitleBurner
         session.DrawTextLayout(textLayout, new Vector2(textX, textY), _textColor);
     }
 
+    private CanvasTextLayout GetLayout(
+        CanvasDrawingSession session, SubtitleSegment segment, int canvasWidth, int canvasHeight)
+    {
+        var device = session.Device;
+        if (_cachedLayout is not null
+            && ReferenceEquals(_cachedSegment, segment)
+            && _cachedWidth == canvasWidth
+            && _cachedHeight == canvasHeight
+            && ReferenceEquals(_cachedDevice, device))
+        {
+            return _cachedLayout;
+        }
+
+        // Measure the text to size the background rectangle
+        var maxTextWidth = canvasWidth - (_style.PaddingHorizontal * 4);
+        var layout = new CanvasTextLayout(device, segment.Text, _textFormat, maxTextWidth, canvasHeight);
+        _cachedLayout?.Dispose();
+        _cachedLayout = layout;
+        _cachedSegment = segment;
+        _cachedWidth = canvasWidth;
+        _cachedHeight = canvasHeight;
+        _cachedDevice = device;
+        return layout;
+    }
+
     private SubtitleSegment? FindActiveSegment(double timeSeconds)
     {
         var ts = TimeSpan.FromSeconds(timeSeconds);
-        return _segments.FirstOrDefault(s => ts >= s.Start && ts < s.End);
+
+        // Consecutive frames almost always stay on the same segment.
+        if (_cachedSegment is { } cached && ts >= cached.Start && ts < cached.End)
+            return cached;
+
+        // Last segment starting at or before ts.
+        int lo = 0, hi = _segments.Length - 1, candidate = -1;
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) / 2);
+            if (_segments[mid].Start <= ts)
+            {
+                candidate = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+
+        // Walk back only while an earlier segment could still cover ts (overlaps).
+        for (int i = candidate; i >= 0 && _maxEnd[i] > ts; i--)
+        {
+            if (ts < _segments[i].End)
+                return _segments[i];
+        }
+
+        return null;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _cachedLayout?.Dispose();
+        _cachedLayout = null;
+        _cachedDevice = null;
+        _textFormat.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     private float CalculateY(int canvasHeight, float bgHeight) => _style.Position switch
