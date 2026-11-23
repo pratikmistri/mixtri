@@ -432,7 +432,15 @@ public sealed class KeyboardHookRecorder : IDisposable
         bool altGrChord = evt.IsCtrl && evt.IsAlt && !evt.IsWin
             && IsCharacterKey(evt.VirtualKeyCode, isCtrl: false, isAlt: false, isWin: false);
 
-        if (!altGrChord && !IsCharacterKey(evt.VirtualKeyCode, evt.IsCtrl, evt.IsAlt, evt.IsWin))
+        // Alt+numpad codes (Alt held, digits typed on the keypad) also enter characters. With
+        // NumLock off the keypad reports navigation keys instead, and the low-level hook data
+        // recorded here cannot tell those from the dedicated arrow block, so any Alt+keypad-
+        // shaped key in a secure field is redacted; nothing secret is lost by over-redacting.
+        bool altNumpadCode = evt.IsAlt && !evt.IsCtrl && !evt.IsWin
+            && IsAltCodeKey(evt.VirtualKeyCode);
+
+        if (!altGrChord && !altNumpadCode
+            && !IsCharacterKey(evt.VirtualKeyCode, evt.IsCtrl, evt.IsAlt, evt.IsWin))
             return evt;
 
         return evt with
@@ -444,6 +452,15 @@ public sealed class KeyboardHookRecorder : IDisposable
             IsAlt = false,
         };
     }
+
+    /// <summary>
+    /// Keys that can form an Alt+numpad character code: VK_NUMPAD0–9, and the keypad's
+    /// NumLock-off equivalents (Insert, End, Down, PageDown, Left, Clear, Right, Home, Up,
+    /// PageUp).
+    /// </summary>
+    internal static bool IsAltCodeKey(int vk)
+        => vk is >= 0x60 and <= 0x69
+            or 0x2D or 0x23 or 0x28 or 0x22 or 0x25 or 0x0C or 0x27 or 0x24 or 0x26 or 0x21;
 
     private static TextInputFocus? TryGetTextInputFocus(GUITHREADINFO info)
     {

@@ -307,6 +307,25 @@ public sealed class CaptureLogicTests
     }
 
     [TestMethod]
+    public void Redact_AltNumpadCode_IsRedactedWithModifiersCleared()
+    {
+        foreach (int vk in new[] { 0x60, 0x64, 0x69, 0x23, 0x0C, 0x21 })
+        {
+            var altCode = Key(vk, $"VK_{vk:X2}") with { IsAlt = true };
+
+            var redacted = KeyboardHookRecorder.RedactSecureKey(altCode);
+
+            Assert.AreEqual(KeyboardHookRecorder.RedactedVirtualKeyCode, redacted!.VirtualKeyCode,
+                $"Alt+VK 0x{vk:X2} can enter a character and must be redacted");
+            Assert.IsFalse(redacted.IsAlt);
+        }
+
+        // Plain navigation without Alt stays visible.
+        var home = Key(0x24, "Home");
+        Assert.AreEqual(home, KeyboardHookRecorder.RedactSecureKey(home));
+    }
+
+    [TestMethod]
     public void EditClassNames_AreRecognised()
     {
         Assert.IsTrue(KeyboardHookRecorder.IsEditClassName("Edit"));
