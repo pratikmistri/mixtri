@@ -124,6 +124,8 @@ public class ExportEngine
         return EnsureUniqueFilePath(Path.Combine(outputFolder, $"{sanitizedName}{extension}"));
     }
 
+    private static readonly TimeSpan StaleStagingAge = TimeSpan.FromHours(6);
+
     private async Task<ExportResult> ExportDetachedAsync(
         Project project, ExportSettings settings, CompositionConfig composition,
         string outputFolder, string? outputFilePath, TimelineModel? timeline,
@@ -196,6 +198,9 @@ public class ExportEngine
 
         string outputPath = ResolveOutputPath(outputFolder, outputFilePath, project.Name, settings.Format);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        // Reclaim multi-GB staging files orphaned by a crashed app/worker pair. The age
+        // threshold keeps this job's (and any concurrent job's) files safe.
+        ExportJobFiles.SweepStale(Path.GetDirectoryName(outputPath)!, StaleStagingAge);
 
         var effectiveSettings = exportSettings with { Format = effectiveFormat };
 
@@ -204,6 +209,7 @@ public class ExportEngine
         // until the new file is complete, then replaced in one rename.
         var jobFiles = ExportJobFiles.For(outputPath, jobId);
         bool published = false;
+        string publishedPath = outputPath;
         try
         {
             if (effectiveFormat == VideoFormat.GIF)
@@ -232,8 +238,12 @@ public class ExportEngine
             }
 
             ct.ThrowIfCancellationRequested();
-            jobFiles.PublishStagedOutput();
+            publishedPath = jobFiles.PublishStagedOutput();
             published = true;
+            if (!string.Equals(publishedPath, jobFiles.OutputPath, StringComparison.OrdinalIgnoreCase))
+                warnings.Add(
+                    $"\"{Path.GetFileName(jobFiles.OutputPath)}\" could not be replaced (it may be open in another program), " +
+                    $"so the export was saved as \"{Path.GetFileName(publishedPath)}\" instead.");
         }
         finally
         {
@@ -242,7 +252,7 @@ public class ExportEngine
             if (!published) jobFiles.DeleteOwnedTempFiles();
         }
 
-        return new ExportResult(jobFiles.OutputPath, warnings);
+        return new ExportResult(publishedPath, warnings);
     }
 
     /// <summary>

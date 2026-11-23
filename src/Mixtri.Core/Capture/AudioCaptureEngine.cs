@@ -22,6 +22,13 @@ public sealed class AudioCaptureEngine : IDisposable
     private int _systemBlockAlign;
     private int _micBlockAlign;
 
+    // Periodic header flush so a crash/kill/power loss leaves readable WAVs (NAudio only
+    // writes the RIFF/data sizes on Flush/Dispose). Stopwatch timestamps; 0 = not started.
+    // Guarded by _lock.
+    private static readonly long FlushIntervalTicks = Stopwatch.Frequency * 5;
+    private long _systemLastFlush;
+    private long _micLastFlush;
+
     private bool _isPaused;
     private bool _disposed;
     private long _firstDataTicks;
@@ -364,7 +371,7 @@ public sealed class AudioCaptureEngine : IDisposable
             {
                 // Loopback goes quiet (no packets at all) while nothing plays; fill the hole
                 // so everything after it stays aligned with the video.
-                WriteAligned(_systemWriter, _systemAligner, _systemBlockAlign, e);
+                WriteAligned(_systemWriter, _systemAligner, _systemBlockAlign, e, ref _systemLastFlush);
             }
             catch (Exception ex)
             {
@@ -385,7 +392,7 @@ public sealed class AudioCaptureEngine : IDisposable
             {
                 // A live mic delivers continuously, so this only pads after a pause or a
                 // late device start — the same wall-clock holes the loopback stream has.
-                WriteAligned(_micWriter, _micAligner, _micBlockAlign, e);
+                WriteAligned(_micWriter, _micAligner, _micBlockAlign, e, ref _micLastFlush);
             }
             catch (Exception ex)
             {
@@ -399,11 +406,13 @@ public sealed class AudioCaptureEngine : IDisposable
     /// wall clock. Caller holds <see cref="_lock"/>.
     /// </summary>
     private void WriteAligned(
-        Pcm16CaptureWriter writer, AudioClockAligner? aligner, int blockAlign, WaveInEventArgs e)
+        Pcm16CaptureWriter writer, AudioClockAligner? aligner, int blockAlign, WaveInEventArgs e,
+        ref long lastFlush)
     {
         if (aligner is null || blockAlign <= 0)
         {
             writer.Write(e.Buffer, e.BytesRecorded);
+            FlushIfDue(writer, ref lastFlush);
             return;
         }
 
@@ -421,6 +430,27 @@ public sealed class AudioCaptureEngine : IDisposable
 
         writer.Write(e.Buffer, e.BytesRecorded);
         aligner.Commit(pad, incomingFrames, now);
+        FlushIfDue(writer, ref lastFlush);
+    }
+
+    /// <summary>
+    /// Flushes the writer (updating the WAV header sizes) at most every ~5 s. Never throws:
+    /// a flush failure must not kill the WASAPI callback. Caller holds <see cref="_lock"/>.
+    /// </summary>
+    private static void FlushIfDue(Pcm16CaptureWriter writer, ref long lastFlush)
+    {
+        long now = Stopwatch.GetTimestamp();
+        if (lastFlush == 0)
+        {
+            lastFlush = now;
+            return;
+        }
+        if (now - lastFlush < FlushIntervalTicks)
+            return;
+
+        lastFlush = now;
+        try { writer.Flush(); }
+        catch (Exception ex) { Debug.WriteLine($"[AudioCaptureEngine] Periodic WAV flush failed: {ex.Message}"); }
     }
 
     // RecordingStopped fires on the WASAPI thread during Dispose —

@@ -96,11 +96,94 @@ public sealed class ExportJobFiles
         return stem.Length <= budget ? stem : stem[..budget];
     }
 
+    /// <summary>Attempts made to move the staged file onto the destination before falling back.</summary>
+    internal const int PublishAttempts = 4;
+
+    /// <summary>Delay between publish attempts.</summary>
+    internal static readonly TimeSpan PublishRetryDelay = TimeSpan.FromMilliseconds(250);
+
     /// <summary>
     /// Replaces the destination with the finished staging file in one rename on the same
-    /// volume, so the destination is either the old file or the complete new one.
+    /// volume, so the destination is either the old file or the complete new one. If the
+    /// destination is locked (open in a player or sync client) the move is retried briefly,
+    /// then the finished file is moved to a unique sibling name instead of being discarded.
+    /// Returns the path the output actually lives at (<see cref="OutputPath"/> unless the
+    /// fallback was used). Throws only if even the fallback move fails.
     /// </summary>
-    public void PublishStagedOutput() => File.Move(StagingOutputPath, OutputPath, overwrite: true);
+    public string PublishStagedOutput()
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(StagingOutputPath, OutputPath, overwrite: true);
+                return OutputPath;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (!File.Exists(StagingOutputPath)) throw;
+                if (attempt >= PublishAttempts)
+                {
+                    Mixtri.Core.Diagnostics.DiagLog.Write("Export",
+                        $"destination locked, publishing to a sibling name: {ex.Message}");
+                    break;
+                }
+                Thread.Sleep(PublishRetryDelay);
+            }
+        }
+
+        string folder = Path.GetDirectoryName(OutputPath)!;
+        string stem = Path.GetFileNameWithoutExtension(OutputPath);
+        string extension = Path.GetExtension(OutputPath);
+        for (int counter = 2; ; counter++)
+        {
+            string candidate = Path.Combine(folder, $"{stem} ({counter}){extension}");
+            if (File.Exists(candidate)) continue;
+            try
+            {
+                // No overwrite: never replace a file that appeared since the check.
+                File.Move(StagingOutputPath, candidate, overwrite: false);
+                return candidate;
+            }
+            catch (IOException) when (File.Exists(candidate)) { /* raced; try the next name */ }
+            if (counter > 1000) throw new IOException("Could not find a free file name to publish the export.");
+        }
+    }
+
+    /// <summary>
+    /// Best-effort removal of orphaned staging/temp files in <paramref name="folder"/>
+    /// left by an app and worker that died together. Only files with this class's
+    /// hidden prefixes whose last write is older than <paramref name="olderThan"/> are
+    /// deleted, so a running job's files are never touched. Never throws.
+    /// Returns how many files were removed.
+    /// </summary>
+    public static int SweepStale(string folder, TimeSpan olderThan)
+    {
+        int removed = 0;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return 0;
+            var cutoff = DateTime.UtcNow - olderThan;
+            foreach (string prefix in new[] { StagingPrefix, VideoEncoder.TempVideoPrefix })
+            {
+                foreach (string path in Directory.EnumerateFiles(folder, prefix + "*"))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(path) > cutoff) continue;
+                        File.Delete(path);
+                        removed++;
+                    }
+                    catch (Exception) { /* locked or vanished: best effort */ }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Export", $"stale staging sweep failed: {ex.Message}");
+        }
+        return removed;
+    }
 
     /// <summary>
     /// Best-effort deletion of this job's temp/staging files. Never touches

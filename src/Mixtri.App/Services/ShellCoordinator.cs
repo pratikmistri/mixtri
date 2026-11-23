@@ -288,12 +288,30 @@ public sealed class ShellCoordinator : IDisposable
     private bool _isStartPending;
 
     /// <summary>
+    /// True while a recording start is being prepared or run. <see cref="IsRecording"/> on the
+    /// view model stays false for part of that window, so shutdown paths must ask this too.
+    /// </summary>
+    public bool IsStartPending => _isStartPending;
+
+    /// <summary>
     /// Clears the shell off screen, waits for the hide/minimize animation to
     /// finish so it can't be captured, then starts the recording.
     /// </summary>
     public async Task StartRecordingAsync()
     {
         if (_viewModel.IsRecording || _isStartPending) return;
+
+        // An open that is still extracting publishes its project when it finishes, which
+        // would overwrite the take this recording is about to produce. Refuse up front.
+        if (ProjectService.Instance.OpenInFlightPath is not null)
+        {
+            ShowFullWindow();
+            _mainWindow?.ShowShellMessage(
+                "Wait for the project to finish opening before recording.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning);
+            return;
+        }
+
         _isStartPending = true;
 
         bool enteredRecording = false;

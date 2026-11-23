@@ -504,6 +504,17 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
             if (writer is not null)
             {
+                // A static screen delivers no frames, so the slots between the last emitted
+                // frame and this stop are owed to the writer as one trailing gap marker.
+                try
+                {
+                    writer.StopAcceptingFrames(_screenEngine?.TakeTrailingOwedSlots() ?? 0);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[RecordingSession] Trailing gap fill failed: {ex.Message}");
+                }
+
                 await DrainFrameWritesAsync(writer, ct).ConfigureAwait(false);
 
                 // A lost frame must reach the user even if the writer's event was missed.

@@ -12,6 +12,9 @@ public static class NativeMethods
 {
     public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
     [DllImport("user32.dll")]
     public static extern bool DestroyWindow(IntPtr hwnd);
 

@@ -41,6 +41,10 @@ public sealed class ScreenCaptureEngine : IDisposable
     // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
     private long _lastEmittedSlot = -1;
 
+    // Stopwatch ticks at the first pause since the last emitted frame, or -1. Trailing gap
+    // padding at stop must never extend across a pause, so it is capped at this instant.
+    private long _firstPauseSinceEmitTicks = -1;
+
     public bool IsRecording { get; private set; }
     public int Fps => _fps;
     public long FramesCaptured => Interlocked.Read(ref _framesCaptured);
@@ -135,6 +139,7 @@ public sealed class ScreenCaptureEngine : IDisposable
         Interlocked.Exchange(ref _droppedFrames, 0);
         Interlocked.Exchange(ref _throttledFrames, 0);
         _lastEmittedSlot = -1;
+        Interlocked.Exchange(ref _firstPauseSinceEmitTicks, -1);
         _isPaused = false;
 
         _stopwatch.Restart();
@@ -197,13 +202,57 @@ public sealed class ScreenCaptureEngine : IDisposable
     public void PauseCapture()
     {
         if (IsRecording)
+        {
+            Interlocked.CompareExchange(ref _firstPauseSinceEmitTicks, _stopwatch.Elapsed.Ticks, -1);
             _isPaused = true;
+        }
     }
 
     public void ResumeCapture()
     {
         if (IsRecording)
             _isPaused = false;
+    }
+
+    /// <summary>
+    /// CFR slots owed between the last emitted frame and the moment capture stopped (or the
+    /// first pause after it). Windows Graphics Capture only delivers a frame when the screen
+    /// changes, so a static tail produces no frame to carry the gap; the caller hands the
+    /// result to <see cref="VideoWriter.StopAcceptingFrames"/>. Claims those slots, so a
+    /// repeat call (or a frame still in flight) cannot count them twice. Call after
+    /// <see cref="StopCapture"/>, when the stopwatch is frozen at the stop instant.
+    /// </summary>
+    public int TakeTrailingOwedSlots()
+    {
+        var end = _stopwatch.Elapsed;
+        long pauseTicks = Interlocked.Read(ref _firstPauseSinceEmitTicks);
+        if (pauseTicks >= 0 && pauseTicks < end.Ticks)
+            end = TimeSpan.FromTicks(pauseTicks);
+
+        long endSlot = (long)(end.TotalSeconds / _frameInterval.TotalSeconds);
+        while (true)
+        {
+            long last = Interlocked.Read(ref _lastEmittedSlot);
+            int owed = ComputeTrailingOwedSlots(last, endSlot);
+            if (owed == 0)
+                return 0;
+
+            if (Interlocked.CompareExchange(ref _lastEmittedSlot, endSlot, last) == last)
+                return owed;
+        }
+    }
+
+    /// <summary>
+    /// Slots between the last emitted slot and the slot the stop instant falls in, matching
+    /// how a frame arriving at that instant would have counted its own skipped slots.
+    /// Zero before the first frame (startup latency is not gap-filled).
+    /// </summary>
+    internal static int ComputeTrailingOwedSlots(long lastEmittedSlot, long endSlot)
+    {
+        if (lastEmittedSlot < 0 || endSlot <= lastEmittedSlot + 1)
+            return 0;
+
+        return (int)Math.Min(int.MaxValue, endSlot - lastEmittedSlot - 1);
     }
 
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
@@ -257,6 +306,8 @@ public sealed class ScreenCaptureEngine : IDisposable
                 if (Interlocked.CompareExchange(ref _lastEmittedSlot, slot, previousSlot) == previousSlot)
                     break;
             }
+
+            Interlocked.Exchange(ref _firstPauseSinceEmitTicks, -1);
 
             var surface = frame.Surface;
 

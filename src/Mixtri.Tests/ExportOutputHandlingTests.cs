@@ -197,6 +197,58 @@ public class ExportOutputHandlingTests
     }
 
     [TestMethod]
+    public void ExportJobFiles_PublishToLockedDestinationFallsBackToSiblingName()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Inconclusive("Only Windows blocks replacing an open file.");
+        string folder = NewTempFolder();
+        try
+        {
+            string destination = Path.Combine(folder, "Locked.mp4");
+            File.WriteAllBytes(destination, [9, 9]);
+            var files = ExportJobFiles.For(destination, ExportJobFiles.NewJobId());
+            File.WriteAllBytes(files.StagingOutputPath, [1, 2, 3, 4]);
+
+            string published;
+            using (new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.None))
+                published = files.PublishStagedOutput();
+
+            Assert.AreEqual(Path.Combine(folder, "Locked (2).mp4"), published);
+            CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4 }, File.ReadAllBytes(published));
+            CollectionAssert.AreEqual(new byte[] { 9, 9 }, File.ReadAllBytes(destination));
+            Assert.IsFalse(File.Exists(files.StagingOutputPath));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [TestMethod]
+    public void ExportJobFiles_SweepStale_RemovesOnlyOldStagingFiles()
+    {
+        string folder = NewTempFolder();
+        try
+        {
+            string oldStaging = Path.Combine(folder, ".mixtri_out_a_" + new string('a', 32) + ".mp4");
+            string oldVideo = Path.Combine(folder, ".mixtri_video_a_" + new string('a', 32) + ".mp4");
+            string freshStaging = Path.Combine(folder, ".mixtri_out_b_" + new string('b', 32) + ".mp4");
+            string userFile = Path.Combine(folder, "keep.mp4");
+            foreach (var path in new[] { oldStaging, oldVideo, freshStaging, userFile })
+                File.WriteAllBytes(path, [1]);
+            File.SetLastWriteTimeUtc(oldStaging, DateTime.UtcNow.AddHours(-10));
+            File.SetLastWriteTimeUtc(oldVideo, DateTime.UtcNow.AddHours(-10));
+            File.SetLastWriteTimeUtc(userFile, DateTime.UtcNow.AddHours(-10));
+
+            int removed = ExportJobFiles.SweepStale(folder, TimeSpan.FromHours(6));
+
+            Assert.AreEqual(2, removed);
+            Assert.IsFalse(File.Exists(oldStaging));
+            Assert.IsFalse(File.Exists(oldVideo));
+            Assert.IsTrue(File.Exists(freshStaging));
+            Assert.IsTrue(File.Exists(userFile));
+            Assert.AreEqual(0, ExportJobFiles.SweepStale(Path.Combine(folder, "missing"), TimeSpan.Zero));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [TestMethod]
     public void GifFrameDelays_AccumulateErrorSoAverageIsExact()
     {
         var delays = Enumerable.Range(0, 30).Select(i => (int)GifEncoder.GetFrameDelayCentiseconds(i, 30)).ToArray();

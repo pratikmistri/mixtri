@@ -440,6 +440,14 @@ public static class MixtriPackageService
             var mediaFolder = Path.Combine(workingRoot, manifest.Project.Id.ToString("N"));
             Directory.CreateDirectory(mediaFolder);
 
+            // Stamp the folder as "last opened now". Extracted files keep their entries'
+            // original timestamps (see ExtractEntryAtomically), and a reused extraction writes
+            // nothing, so without this the startup cache prune would judge a project opened
+            // yesterday by the day it was recorded and throw its extraction away.
+            try { Directory.SetLastWriteTimeUtc(mediaFolder, DateTime.UtcNow); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
             var pathByEntry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var allEntries = archive.Entries
                 .Where(e => e.FullName.StartsWith(MixtriPackage.MediaEntryPrefix, StringComparison.Ordinal))

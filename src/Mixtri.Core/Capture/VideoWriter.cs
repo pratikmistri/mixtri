@@ -633,6 +633,10 @@ public sealed class VideoWriter : IDisposable
         string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
         if (!File.Exists(srcPath)) return;
 
+        // Hard links share the source's data blocks, so a long idle period costs directory
+        // entries instead of gigabytes. Only the copy fallback consumes real space.
+        int copiesSinceSpaceCheck = 0;
+
         for (int i = 0; i < count; i++)
         {
             long gapIndex = Interlocked.Read(ref _frameCount);
@@ -640,7 +644,19 @@ public sealed class VideoWriter : IDisposable
 
             try
             {
-                File.Copy(srcPath, dstPath, overwrite: true);
+                if (!TryLinkFrame(srcPath, dstPath))
+                {
+                    if (copiesSinceSpaceCheck++ % GapCopySpaceCheckInterval == 0
+                        && RecordingSession.TryGetAvailableFreeSpace(_framesDir) is { } free
+                        && free < CriticalFreeDiskBytes)
+                    {
+                        throw new IOException(
+                            $"Disk space critically low ({free / (1024 * 1024)} MB free) " +
+                            "while filling idle frames.");
+                    }
+
+                    File.Copy(srcPath, dstPath, overwrite: true);
+                }
 
                 // Synthetic timestamp: interpolate between previous and next slot
                 lock (_tsLock)
@@ -661,6 +677,33 @@ public sealed class VideoWriter : IDisposable
                 RecordWriteFailure(ex, gapIndex);
                 return;
             }
+        }
+    }
+
+    /// <summary>Free space below which gap filling by copy aborts instead of filling the disk.</summary>
+    private const long CriticalFreeDiskBytes = 256L * 1024 * 1024;
+
+    /// <summary>Copies between free-space reads (a drive query per slot would be wasteful).</summary>
+    private const int GapCopySpaceCheckInterval = 32;
+
+    /// <summary>
+    /// Creates <paramref name="dstPath"/> as an NTFS hard link to <paramref name="srcPath"/>.
+    /// Frame JPEGs are write-once and only ever read afterwards, so sharing one inode is safe.
+    /// False when the filesystem refuses (FAT/exFAT, network share): the caller copies instead.
+    /// </summary>
+    private static bool TryLinkFrame(string srcPath, string dstPath)
+    {
+        try
+        {
+            if (File.Exists(dstPath))
+                File.Delete(dstPath);
+
+            return Mixtri.Core.Interop.NativeMethods.CreateHardLink(dstPath, srcPath, IntPtr.Zero);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoWriter] Hard link unavailable, copying: {ex.Message}");
+            return false;
         }
     }
 
@@ -746,7 +789,12 @@ public sealed class VideoWriter : IDisposable
     /// Closes the frame gate. Already-queued frames are still written; anything the capture
     /// engine hands over afterwards is ignored. Idempotent.
     /// </summary>
-    public void StopAcceptingFrames()
+    /// <param name="trailingOwedSlots">
+    /// CFR slots owed between the last emitted frame and the stop instant (static-screen
+    /// tail). Folded into the single final gap-only marker with any slots owed by drops.
+    /// Ignored if the gate was already closed by an earlier call.
+    /// </param>
+    public void StopAcceptingFrames(int trailingOwedSlots = 0)
     {
         _stopAccepting = true;
 
@@ -756,6 +804,8 @@ public sealed class VideoWriter : IDisposable
         // Flush the CFR slots owed by dropped frames so a recording whose tail was dropped
         // still ends at the right wall-clock time.
         int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+        if (trailingOwedSlots > 0)
+            owed = (int)Math.Min(int.MaxValue, (long)owed + trailingOwedSlots);
         if (owed > 0)
         {
             Interlocked.Increment(ref _queueDepth);

@@ -678,8 +678,22 @@ public partial class App : Application
         // recorded as Musio are never moved and would otherwise leak disk forever), and the
         // user's save folder, which holds sessions recorded before they moved out of it.
         var savePath = AppSettings.Instance.DefaultSavePath;
+        // The extracted-project cache is shared by every Mixtri process, and a reused
+        // extraction is never touched, so it is pruned only by a lone, non-document instance:
+        // an activation open races the sweep, and another instance may hold an old extraction.
+        var pruneProjectCache = activationPath is null && IsOnlyMixtriInstance();
+        var projectCacheRoot = ProjectService.PackageCacheRoot;
+        var openProjectFolder = ProjectService.Instance.CurrentProject?.Id.ToString("N");
         _ = System.Threading.Tasks.Task.Run(() =>
         {
+            if (pruneProjectCache)
+            {
+                ProjectCacheCleanupService.PruneStaleProjects(
+                    projectCacheRoot,
+                    ProjectCacheCleanupService.DefaultMaxAge,
+                    openProjectFolder is null ? null : new[] { openProjectFolder });
+            }
+
             foreach (var root in Mixtri.Core.Capture.SessionPaths.AllSessionsRoots)
                 SessionCleanupService.CleanupExportedSessions(root);
 
@@ -1110,6 +1124,21 @@ public partial class App : Application
         });
     }
 
+    private static bool IsOnlyMixtriInstance()
+    {
+        try
+        {
+            using var self = System.Diagnostics.Process.GetCurrentProcess();
+            var others = System.Diagnostics.Process.GetProcessesByName(self.ProcessName);
+            try { return others.Count(p => p.Id != self.Id) == 0; }
+            finally { foreach (var p in others) p.Dispose(); }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void OnExitRequested(object? sender, EventArgs e)
     {
         if (_isExiting) return;
@@ -1143,6 +1172,22 @@ public partial class App : Application
     {
         // Never block an OS- or user-initiated exit.
         if (_isExiting || _window is null) return;
+
+        // A live (or starting) recording must not be torn down by a close: the take would be
+        // lost. With a tray the window is normally hidden during a recording, so just refuse;
+        // without one this is the only way out, so finalize the take and then exit through the
+        // ordinary Exit path (which asks about saving it).
+        if (Mixtri_App.ViewModels.RecordingViewModel.Shared.IsRecording
+            || _shell?.IsStartPending == true
+            || _shell?.CurrentState == AppShellState.Recording)
+        {
+            args.Cancel = true;
+            // A start that has not yet reached IsRecording has nothing to finalize; the user can
+            // close again once it either records or rewinds.
+            if (_trayService is null && Mixtri_App.ViewModels.RecordingViewModel.Shared.IsRecording)
+                OnExitRequested(this, EventArgs.Empty);
+            return;
+        }
 
         // A save prompt is on screen and still owns the decision. The X stays clickable
         // behind a ContentDialog, so dismissing here would park the window WITH the dialog

@@ -57,7 +57,6 @@ public class VideoEncoder : IDisposable
     private DeviceLostGuard? _deviceLostGuard;
 
     private const long MaxEstimatedRenderTargetBytes = 1_610_612_736L;
-    private static readonly TimeSpan MainTranscodeTimeout = TimeSpan.FromHours(2);
     private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MuxNoProgressTimeout = TimeSpan.FromSeconds(60);
     private long _lastProgressTimestamp;
@@ -1285,16 +1284,15 @@ public class VideoEncoder : IDisposable
 
         while (!tcs.Task.IsCompleted)
         {
-            bool elapsed = Stopwatch.GetElapsedTime(started) >= MainTranscodeTimeout;
             bool stalled = Stopwatch.GetElapsedTime(Volatile.Read(ref _lastProgressTimestamp)) >= NoProgressTimeout;
-            if (elapsed || stalled)
+            // No absolute wall-clock ceiling: long software 4K exports legitimately exceed hours.
+            // Only a stall (no native progress) fails the transcode.
+            if (stalled)
             {
                 transcodeOp.Cancel();
                 await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
-                throw new TimeoutException(stalled
-                    ? "Video export made no progress for two minutes. Cancel the export and retry."
-                    : $"Video transcode operation timed out after {MainTranscodeTimeout.TotalHours:0.#} hours.");
+                throw new TimeoutException("Video export made no progress for two minutes. Cancel the export and retry.");
             }
             await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
         }
