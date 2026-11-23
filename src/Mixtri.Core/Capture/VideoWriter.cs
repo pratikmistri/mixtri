@@ -633,14 +633,46 @@ public sealed class VideoWriter : IDisposable
         string srcPath = Path.Combine(_framesDir, $"frame_{prevIndex:D8}.jpg");
         if (!File.Exists(srcPath)) return;
 
+        // Hard links share the source's data blocks, so a long idle period costs directory
+        // entries instead of gigabytes. Only the copy fallback consumes real space, so that
+        // path tracks an estimate of the free space it is consuming and re-queries the drive
+        // before any copy could cross the reserve.
+        long? estimatedFree = null;
+
         for (int i = 0; i < count; i++)
         {
+            // An aborted writer (stop timed out / cancelled) must stop promptly so finalization
+            // never reads a sequence that is still growing. Stopping between slots leaves no hole.
+            if (_writerCts.IsCancellationRequested) return;
+
             long gapIndex = Interlocked.Read(ref _frameCount);
             string dstPath = Path.Combine(_framesDir, $"frame_{gapIndex:D8}.jpg");
 
             try
             {
-                File.Copy(srcPath, dstPath, overwrite: true);
+                if (!TryLinkFrame(srcPath, dstPath))
+                {
+                    long copyBytes = new FileInfo(srcPath).Length;
+                    if (estimatedFree is not { } est || est - copyBytes < CriticalFreeDiskBytes)
+                    {
+                        estimatedFree = RecordingSession.TryGetAvailableFreeSpace(_framesDir);
+                        if (estimatedFree is { } free && free - copyBytes < CriticalFreeDiskBytes)
+                        {
+                            throw new IOException(
+                                $"Disk space critically low ({free / (1024 * 1024)} MB free) " +
+                                "while filling idle frames.");
+                        }
+                    }
+
+                    File.Copy(srcPath, dstPath, overwrite: true);
+                    if (estimatedFree is { } remaining)
+                        estimatedFree = remaining - copyBytes;
+
+                    // NTFS allows at most 1023 links per file, so linking fails after ~34 s
+                    // of a static 30 fps screen. Re-base on the fresh copy: it starts with a
+                    // single link, so the next ~1000 slots are links again rather than copies.
+                    srcPath = dstPath;
+                }
 
                 // Synthetic timestamp: interpolate between previous and next slot
                 lock (_tsLock)
@@ -661,6 +693,30 @@ public sealed class VideoWriter : IDisposable
                 RecordWriteFailure(ex, gapIndex);
                 return;
             }
+        }
+    }
+
+    /// <summary>Free space below which gap filling by copy aborts instead of filling the disk.</summary>
+    private const long CriticalFreeDiskBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Creates <paramref name="dstPath"/> as an NTFS hard link to <paramref name="srcPath"/>.
+    /// Frame JPEGs are write-once and only ever read afterwards, so sharing one inode is safe.
+    /// False when the filesystem refuses (FAT/exFAT, network share): the caller copies instead.
+    /// </summary>
+    private static bool TryLinkFrame(string srcPath, string dstPath)
+    {
+        try
+        {
+            if (File.Exists(dstPath))
+                File.Delete(dstPath);
+
+            return Mixtri.Core.Interop.NativeMethods.CreateHardLink(dstPath, srcPath, IntPtr.Zero);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[VideoWriter] Hard link unavailable, copying: {ex.Message}");
+            return false;
         }
     }
 
@@ -746,7 +802,12 @@ public sealed class VideoWriter : IDisposable
     /// Closes the frame gate. Already-queued frames are still written; anything the capture
     /// engine hands over afterwards is ignored. Idempotent.
     /// </summary>
-    public void StopAcceptingFrames()
+    /// <param name="trailingOwedSlots">
+    /// CFR slots owed between the last emitted frame and the stop instant (static-screen
+    /// tail). Folded into the single final gap-only marker with any slots owed by drops.
+    /// Ignored if the gate was already closed by an earlier call.
+    /// </param>
+    public void StopAcceptingFrames(int trailingOwedSlots = 0)
     {
         _stopAccepting = true;
 
@@ -756,6 +817,8 @@ public sealed class VideoWriter : IDisposable
         // Flush the CFR slots owed by dropped frames so a recording whose tail was dropped
         // still ends at the right wall-clock time.
         int owed = Interlocked.Exchange(ref _pendingSkippedSlots, 0);
+        if (trailingOwedSlots > 0)
+            owed = (int)Math.Min(int.MaxValue, (long)owed + trailingOwedSlots);
         if (owed > 0)
         {
             Interlocked.Increment(ref _queueDepth);
@@ -775,19 +838,35 @@ public sealed class VideoWriter : IDisposable
     {
         StopAcceptingFrames();
 
-        try
+        // The timeout bounds a STALL, not the total: expanding a long static tail into
+        // thousands of gap frames can legitimately take longer than one window, and cutting
+        // it off would finalize a recording missing its end. Keep waiting while frames are
+        // still being produced; give up only after a whole window with no progress.
+        long lastCount = Interlocked.Read(ref _frameCount);
+        while (true)
         {
-            await _writerLoop.WaitAsync(timeout, ct).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            await AbortWriterAsync().ConfigureAwait(false);
-            throw new TimeoutException($"Timed out waiting {timeout} for frame writes to finish.");
-        }
-        catch (OperationCanceledException)
-        {
-            await AbortWriterAsync().ConfigureAwait(false);
-            throw;
+            try
+            {
+                await _writerLoop.WaitAsync(timeout, ct).ConfigureAwait(false);
+                return;
+            }
+            catch (TimeoutException)
+            {
+                long count = Interlocked.Read(ref _frameCount);
+                if (count != lastCount)
+                {
+                    lastCount = count;
+                    continue;
+                }
+
+                await AbortWriterAsync().ConfigureAwait(false);
+                throw new TimeoutException($"Frame writes made no progress for {timeout}.");
+            }
+            catch (OperationCanceledException)
+            {
+                await AbortWriterAsync().ConfigureAwait(false);
+                throw;
+            }
         }
     }
 

@@ -437,8 +437,21 @@ public static class MixtriPackageService
                     $"{MixtriPackage.CurrentSchemaVersion}).");
             }
 
-            var mediaFolder = Path.Combine(workingRoot, manifest.Project.Id.ToString("N"));
+            var mediaFolderName = manifest.Project.Id.ToString("N");
+            var mediaFolder = Path.Combine(workingRoot, mediaFolderName);
+
+            // Held for the whole extraction: the startup cache prune runs in the background
+            // and must not delete this folder between the stamp below and publication.
+            using var cacheLease = Mixtri.Core.Services.ProjectCacheCleanupService.Lease(mediaFolderName);
             Directory.CreateDirectory(mediaFolder);
+
+            // Stamp the folder as "last opened now". Extracted files keep their entries'
+            // original timestamps (see ExtractEntryAtomically), and a reused extraction writes
+            // nothing, so without this the startup cache prune would judge a project opened
+            // yesterday by the day it was recorded and throw its extraction away.
+            try { Directory.SetLastWriteTimeUtc(mediaFolder, DateTime.UtcNow); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
 
             var pathByEntry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var allEntries = archive.Entries

@@ -41,6 +41,13 @@ public sealed class ScreenCaptureEngine : IDisposable
     // Frame-slot gating: accept at most one frame per time slot to enforce CFR pacing
     private long _lastEmittedSlot = -1;
 
+    // Stopwatch ticks at which the CURRENT pause began, or -1 while not paused. A pause is
+    // wall-clock continuous in the recording (the first frame after a resume carries the
+    // paused interval as skipped slots, and audio pads it as silence), so the stop tail runs
+    // through any earlier pause/resume. Only a pause still open at stop is excluded, exactly
+    // as AudioCaptureEngine skips its trailing pad when stopped while paused.
+    private long _pauseStartTicks = -1;
+
     public bool IsRecording { get; private set; }
     public int Fps => _fps;
     public long FramesCaptured => Interlocked.Read(ref _framesCaptured);
@@ -135,6 +142,7 @@ public sealed class ScreenCaptureEngine : IDisposable
         Interlocked.Exchange(ref _droppedFrames, 0);
         Interlocked.Exchange(ref _throttledFrames, 0);
         _lastEmittedSlot = -1;
+        Interlocked.Exchange(ref _pauseStartTicks, -1);
         _isPaused = false;
 
         _stopwatch.Restart();
@@ -197,13 +205,67 @@ public sealed class ScreenCaptureEngine : IDisposable
     public void PauseCapture()
     {
         if (IsRecording)
+        {
+            Interlocked.CompareExchange(ref _pauseStartTicks, _stopwatch.Elapsed.Ticks, -1);
             _isPaused = true;
+        }
     }
 
     public void ResumeCapture()
     {
         if (IsRecording)
+        {
             _isPaused = false;
+            Interlocked.Exchange(ref _pauseStartTicks, -1);
+        }
+    }
+
+    /// <summary>
+    /// CFR slots owed between the last emitted frame and the moment capture stopped (or the
+    /// start of a pause still open at stop). Windows Graphics Capture only delivers a frame when the screen
+    /// changes, so a static tail produces no frame to carry the gap; the caller hands the
+    /// result to <see cref="VideoWriter.StopAcceptingFrames"/>. Claims those slots, so a
+    /// repeat call (or a frame still in flight) cannot count them twice. Call after
+    /// <see cref="StopCapture"/>, when the stopwatch is frozen at the stop instant.
+    /// </summary>
+    public int TakeTrailingOwedSlots()
+    {
+        var end = TimeSpan.FromTicks(ResolveTailEndTicks(
+            _stopwatch.Elapsed.Ticks, Interlocked.Read(ref _pauseStartTicks)));
+
+        long endSlot = (long)(end.TotalSeconds / _frameInterval.TotalSeconds);
+        while (true)
+        {
+            long last = Interlocked.Read(ref _lastEmittedSlot);
+            int owed = ComputeTrailingOwedSlots(last, endSlot);
+            if (owed == 0)
+                return 0;
+
+            if (Interlocked.CompareExchange(ref _lastEmittedSlot, endSlot, last) == last)
+                return owed;
+        }
+    }
+
+    /// <summary>
+    /// The instant the stop tail runs to: the stop instant itself, or the start of a pause
+    /// that is still open at stop. Earlier, already-resumed pauses do not shorten it.
+    /// </summary>
+    internal static long ResolveTailEndTicks(long stopElapsedTicks, long openPauseStartTicks)
+        => openPauseStartTicks >= 0 && openPauseStartTicks < stopElapsedTicks
+            ? openPauseStartTicks
+            : stopElapsedTicks;
+
+    /// <summary>
+    /// Slots between the last emitted slot and the slot the stop instant falls in, matching
+    /// how a frame arriving at that instant would have counted its own skipped slots.
+    /// Zero before the first frame (startup latency is not gap-filled).
+    /// </summary>
+    internal static int ComputeTrailingOwedSlots(long lastEmittedSlot, long endSlot)
+    {
+        if (lastEmittedSlot < 0 || endSlot <= lastEmittedSlot + 1)
+            return 0;
+
+        return (int)Math.Min(int.MaxValue, endSlot - lastEmittedSlot - 1);
     }
 
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)

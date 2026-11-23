@@ -204,6 +204,10 @@ public class RemoveSegmentOperation : SegmentEditOperationBase
 
     protected override bool ExecuteCore(TimelineModel model)
     {
+        // Undo state belongs to THIS run: a no-op redo must not leave the previous run's
+        // removed segment behind for UndoCore to re-insert at index -1.
+        _removedSegment = null;
+        _orphanedKeyframes.Clear();
         _removedIndex = model.Segments.FindIndex(s => s.Id == _segmentId);
         if (_removedIndex < 0) return NothingToDo();
         _removedSegment = model.Segments[_removedIndex];
@@ -598,6 +602,11 @@ public class SplitAndInsertTextSlideOperation : SegmentEditOperationBase
     private readonly TextSlideSegment _slide;
     private SegmentListSnapshot? _snapshot;
 
+    // Minted once and reused on redo, so later operations on the stack that target a half by
+    // id (trim, speed, remove, transitions) still find it after an undo/redo round trip.
+    private string? _firstHalfId;
+    private string? _secondHalfId;
+
     public override string Description => "Insert Text Slide";
 
     public SplitAndInsertTextSlideOperation(TimeSpan splitTime, TextSlideSegment slide)
@@ -631,14 +640,14 @@ public class SplitAndInsertTextSlideOperation : SegmentEditOperationBase
 
             var firstHalf = video with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = _firstHalfId ??= Guid.NewGuid().ToString("N"),
                 Duration = localOffset,
                 SourceDuration = sourceOffset,
             };
 
             var secondHalf = video with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = _secondHalfId ??= Guid.NewGuid().ToString("N"),
                 SourceStart = video.SourceStart + sourceOffset,
                 Duration = video.Duration - localOffset,
                 SourceDuration = video.SourceDuration - sourceOffset,
@@ -692,6 +701,11 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
     private readonly TimeSpan _splitTime;
     private SegmentListSnapshot? _snapshot;
     private bool _didSplit;
+
+    // Minted once and reused on redo, so later operations on the stack that target a half by
+    // id (trim, speed, remove, transitions) still find it after an undo/redo round trip.
+    private string? _firstHalfId;
+    private string? _secondHalfId;
 
     public override string Description => "Split";
 
@@ -747,7 +761,7 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
                 // AutomaticTypingSpeedOperation applies to its first piece. The second half
                 // stays muted (copied AudioMode), which is correct while the blocks play its
                 // audio; after a re-attach it can be unmuted on its own.
-                Id = ReattachSegmentAudioOperation.HasDetachedAudio(model, video.Id)
+                Id = _firstHalfId ??= ReattachSegmentAudioOperation.HasDetachedAudio(model, video.Id)
                     ? video.Id
                     : Guid.NewGuid().ToString("N"),
                 Duration = localOffset,
@@ -755,7 +769,7 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
             };
             secondHalf = video with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = _secondHalfId ??= Guid.NewGuid().ToString("N"),
                 SourceStart = video.SourceStart + sourceOffset,
                 Duration = video.Duration - localOffset,
                 SourceDuration = video.SourceDuration - sourceOffset,
@@ -773,12 +787,12 @@ public class SplitSegmentAtTimeOperation : SegmentEditOperationBase
         {
             firstHalf = slide with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = _firstHalfId ??= Guid.NewGuid().ToString("N"),
                 Duration = localOffset,
             };
             secondHalf = slide with
             {
-                Id = Guid.NewGuid().ToString("N"),
+                Id = _secondHalfId ??= Guid.NewGuid().ToString("N"),
                 Duration = slide.Duration - localOffset,
                 // Same reasoning as the VideoSegment branch above: this is a new, unconfigured
                 // boundary, not the original one.

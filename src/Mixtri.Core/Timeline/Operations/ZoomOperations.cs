@@ -92,6 +92,7 @@ public class RemoveZoomKeyframeOperation : IEditOperation
     public void Execute(TimelineModel model)
     {
         _changed = true;
+        _removedKeyframe = null; // undo state belongs to this run only (see RemoveSegmentOperation)
         _removedIndex = model.ZoomKeyframes.FindIndex(k => k.Id == _keyframeId);
         if (_removedIndex < 0) { _changed = false; return; }
         _removedKeyframe = model.ZoomKeyframes[_removedIndex];

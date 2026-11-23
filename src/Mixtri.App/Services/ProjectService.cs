@@ -309,10 +309,24 @@ public class ProjectService
         // Marked here rather than at the call sites so every open path is covered —
         // file activation, the Open dialog and the recents list alike.
         OpenInFlightPath = packagePath;
+        var projectAtOpenStart = CurrentProject;
         try
         {
             var result = await MixtriPackageService.OpenAsync(
                 packagePath, PackageCacheRoot, progress, ct);
+
+            // The open is slow, and the user can finish a recording meanwhile. Publishing this
+            // project now would silently replace that never-saved take, so refuse instead; the
+            // extraction stays in the cache and the open can simply be retried.
+            if (!ReferenceEquals(CurrentProject, projectAtOpenStart)
+                && CurrentProject is not null && HasUnrecoverableWork)
+            {
+                Mixtri.Core.Diagnostics.DiagLog.Write("Shell",
+                    $"Open of '{packagePath}' abandoned: the current project changed while it was opening.");
+                throw new InvalidOperationException(
+                    "A recording finished while the project was opening, so it was not opened. " +
+                    "Save the new recording, then open the project again.");
+            }
 
             CurrentProject = result.Project;
             CurrentComposition = result.Composition;

@@ -108,6 +108,18 @@ public class UndoRedoManager
         }
 
         _redoStack.RemoveFirst();
+
+        // A redo whose target no longer exists is a no-op, exactly like the same case in
+        // Execute. Pushing it anyway would put an operation on the undo stack whose undo state
+        // is left over from its ORIGINAL run (a stale removed record, an index of -1); the next
+        // Ctrl+Z would then act on that state — and if it throws, the operation stays on top
+        // and every earlier entry becomes unreachable. Drop it instead.
+        if (!operation.ChangedModel)
+        {
+            StateChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         Push(_undoStack, operation);
         StateChanged?.Invoke(this, EventArgs.Empty);
         EditPerformed?.Invoke(this, EventArgs.Empty);

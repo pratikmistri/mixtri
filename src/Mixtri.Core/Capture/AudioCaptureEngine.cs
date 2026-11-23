@@ -22,6 +22,13 @@ public sealed class AudioCaptureEngine : IDisposable
     private int _systemBlockAlign;
     private int _micBlockAlign;
 
+    // Periodic header flush so a crash/kill/power loss leaves readable WAVs (NAudio only
+    // writes the RIFF/data sizes on Flush/Dispose). Timer-driven, not packet-driven:
+    // loopback delivers no packets at all while nothing plays, so a flush tied to
+    // DataAvailable could go minutes without running. Guarded by _lock.
+    private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
+    private System.Threading.Timer? _flushTimer;
+
     private bool _isPaused;
     private bool _disposed;
     private long _firstDataTicks;
@@ -192,6 +199,10 @@ public sealed class AudioCaptureEngine : IDisposable
 
             _isPaused = false;
             IsRecording = true;
+
+            _flushTimer?.Dispose();
+            _flushTimer = new System.Threading.Timer(
+                _ => FlushWriters(), null, FlushInterval, FlushInterval);
         }
 
         foreach (var failure in failures)
@@ -294,6 +305,10 @@ public sealed class AudioCaptureEngine : IDisposable
             }
 
             _isPaused = false;
+
+            // A tick already waiting on _lock finds the writers null below and does nothing.
+            _flushTimer?.Dispose();
+            _flushTimer = null;
 
             sysCapture = _systemCapture; _systemCapture = null;
             micCapture = _micCapture;    _micCapture = null;
@@ -423,6 +438,27 @@ public sealed class AudioCaptureEngine : IDisposable
         aligner.Commit(pad, incomingFrames, now);
     }
 
+    /// <summary>
+    /// Timer tick: rewrites both WAV headers so the bytes already on disk stay readable if the
+    /// process dies. Never throws — a flush failure must not take down a thread-pool thread.
+    /// </summary>
+    private void FlushWriters()
+    {
+        lock (_lock)
+        {
+            if (!IsRecording) return;
+            FlushLocked(_systemWriter, "System");
+            FlushLocked(_micWriter, "Mic");
+        }
+    }
+
+    private static void FlushLocked(Pcm16CaptureWriter? writer, string label)
+    {
+        if (writer is null) return;
+        try { writer.Flush(); }
+        catch (Exception ex) { Debug.WriteLine($"[AudioCaptureEngine] {label} WAV flush failed: {ex.Message}"); }
+    }
+
     // RecordingStopped fires on the WASAPI thread during Dispose —
     // no lock needed since writers are already detached in StopRecording.
     // A non-null exception means the device failed (unplugged, invalidated, exclusive-mode
@@ -502,6 +538,10 @@ public sealed class AudioCaptureEngine : IDisposable
             }
 
             _isPaused = false;
+
+            // A tick already waiting on _lock finds the writers null below and does nothing.
+            _flushTimer?.Dispose();
+            _flushTimer = null;
 
             sysCapture = _systemCapture; _systemCapture = null;
             micCapture = _micCapture;    _micCapture = null;
