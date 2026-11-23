@@ -168,6 +168,17 @@ public sealed class ExportWorkerClient
             succeeded = true;
             return new ExportResult(outputPath, warnings ?? []);
         }
+        catch (IOException ex) when (!ct.IsCancellationRequested)
+        {
+            // The worker died (crash or kill) while a pipe write or read was in flight — for
+            // example before the Start message finished writing. Report it like any other
+            // worker that exited without completing, not as a raw pipe error.
+            try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+            catch (TimeoutException) { }
+            string exit = process.HasExited ? $"exit {process.ExitCode}" : "still running";
+            throw new InvalidOperationException(
+                $"The export worker exited without completing the export ({exit}): {ex.Message}", ex);
+        }
         finally
         {
             stopControls.Cancel();
