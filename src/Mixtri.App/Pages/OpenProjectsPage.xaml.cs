@@ -178,34 +178,42 @@ public sealed partial class OpenProjectsPage : Page
         var lastPublish = DateTime.UtcNow;
         var published = 0;
 
-        await foreach (var (entry, data) in channel.Reader.ReadAllAsync(ct))
+        try
         {
-            BitmapImage? image = null;
-            if (data.Poster is { Length: > 0 })
-                image = await CreateBitmapAsync(data.Poster);
-
-            ct.ThrowIfCancellationRequested();
-
-            cards.Add(new ProjectCard
+            await foreach (var (entry, data) in channel.Reader.ReadAllAsync(ct))
             {
-                Path = entry.Path,
-                Name = data.Name,
-                Subtitle = data.Subtitle,
-                ModifiedAt = data.Modified,
-                Poster = image,
-            });
+                BitmapImage? image = null;
+                if (data.Poster is { Length: > 0 })
+                    image = await CreateBitmapAsync(data.Poster);
 
-            // First card immediately, then at most ~4 republishes a second: the grouped
-            // source is rebuilt on each publish, so it is batched rather than per card.
-            if (published == 0 || (DateTime.UtcNow - lastPublish).TotalMilliseconds >= 250)
-            {
-                Publish(cards);
-                published = cards.Count;
-                lastPublish = DateTime.UtcNow;
+                ct.ThrowIfCancellationRequested();
+
+                cards.Add(new ProjectCard
+                {
+                    Path = entry.Path,
+                    Name = data.Name,
+                    Subtitle = data.Subtitle,
+                    ModifiedAt = data.Modified,
+                    Poster = image,
+                });
+
+                // First card immediately, then at most ~4 republishes a second: the grouped
+                // source is rebuilt on each publish, so it is batched rather than per card.
+                if (published == 0 || (DateTime.UtcNow - lastPublish).TotalMilliseconds >= 250)
+                {
+                    Publish(cards);
+                    published = cards.Count;
+                    lastPublish = DateTime.UtcNow;
+                }
             }
         }
-
-        await producer;
+        finally
+        {
+            // Even when this refresh is cancelled mid-consumption, its producer may still have
+            // up to ReadParallelism synchronous ReadCardData calls on slow storage. Wait them
+            // out so a replacement refresh never overlaps them (the producer never throws).
+            try { await producer; } catch { }
+        }
         ct.ThrowIfCancellationRequested();
 
         if (cards.Count != published || cards.Count == 0)

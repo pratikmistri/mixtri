@@ -2487,6 +2487,7 @@ public sealed partial class EditorPage
             // rebuild still in flight (e.g. a mute that this unmute just reverted) is stale:
             // retire it before it can publish the old set over this engine.
             _recordedAudioGeneration++;
+            _pendingRecordedPaths = null;
 
             var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             foreach (var path in audible)
@@ -2897,11 +2898,23 @@ public sealed partial class EditorPage
             if (silence.Count > 0) old.SetVolumesByPath(silence);
         }
 
+        // A build for exactly this audible set is already in flight (e.g. every tick of a
+        // volume drag up from zero): let it finish. It applies the model's CURRENT gains when
+        // it publishes, so restarting it would only keep the channel silent for longer.
+        if (_pendingRecordedPaths is { } pending
+            && _pendingRecordedInitGeneration == _previewInitGeneration
+            && pending.SequenceEqual(paths, StringComparer.OrdinalIgnoreCase))
+            return;
+
         _ = SwapRecordedAudioPlayerAsync(paths, volumes, _previewInitGeneration);
     }
 
     /// <summary>Invalidates in-flight recorded-audio engine builds.</summary>
     private int _recordedAudioGeneration;
+
+    /// <summary>The audible set the newest in-flight engine build is loading, or null.</summary>
+    private List<string>? _pendingRecordedPaths;
+    private int _pendingRecordedInitGeneration;
 
     /// <summary>
     /// Builds the recorded-audio engine on a background thread (<c>Load</c> opens every WAV
@@ -2917,11 +2930,15 @@ public sealed partial class EditorPage
         if (paths.Count == 0)
         {
             // Nothing audible: no file to open, so no need to leave the UI thread.
+            _pendingRecordedPaths = null;
             _audioPlayer?.Dispose();
             _audioPlayer = new AudioPlaybackEngine();
             _appliedRecordedChannelMutes = null;
             return;
         }
+
+        _pendingRecordedPaths = paths;
+        _pendingRecordedInitGeneration = initGeneration;
 
         AudioPlaybackEngine? built = null;
         try
@@ -2945,8 +2962,12 @@ public sealed partial class EditorPage
         {
             Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
                 $"recorded audio engine failed to load: {ex.Message}");
+            if (generation == _recordedAudioGeneration) _pendingRecordedPaths = null;
             return;
         }
+
+        // Only the newest build owns the "in flight" marker.
+        if (generation == _recordedAudioGeneration) _pendingRecordedPaths = null;
 
         // Back on the UI thread (the awaiting context). Publishing a stale engine would play
         // the pre-edit set and leak the one that superseded it.
