@@ -200,7 +200,7 @@ public class ExportEngine
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         // Reclaim multi-GB staging files orphaned by a crashed app/worker pair. The age
         // threshold keeps this job's (and any concurrent job's) files safe.
-        ExportJobFiles.SweepStale(Path.GetDirectoryName(outputPath)!, StaleStagingAge);
+        ExportJobFiles.SweepStale(Path.GetDirectoryName(outputPath)!, StaleStagingAge, keepPath: outputPath);
 
         var effectiveSettings = exportSettings with { Format = effectiveFormat };
 

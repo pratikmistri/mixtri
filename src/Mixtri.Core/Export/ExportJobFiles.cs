@@ -152,6 +152,17 @@ public sealed class ExportJobFiles
         }
     }
 
+    private static readonly System.Text.RegularExpressions.Regex GeneratedTempName = new(
+        @"^\.mixtri_(out|video)_.*_[0-9a-f]{32}\.[A-Za-z0-9]{1,8}$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>True for a staging/temp file name in the exact shape <see cref="For"/> and
+    /// <see cref="VideoEncoder"/> generate.</summary>
+    internal static bool IsGeneratedTempName(string fileName)
+        => (fileName.StartsWith(StagingPrefix, StringComparison.Ordinal)
+            || fileName.StartsWith(VideoEncoder.TempVideoPrefix, StringComparison.Ordinal))
+           && GeneratedTempName.IsMatch(fileName);
+
     /// <summary>
     /// Trims <paramref name="stem"/> so <c>stem + " (NNNN)" + extension</c> fits in one file-name
     /// component (the counter is capped well below 10 000 attempts).
@@ -171,7 +182,7 @@ public sealed class ExportJobFiles
     /// deleted, so a running job's files are never touched. Never throws.
     /// Returns how many files were removed.
     /// </summary>
-    public static int SweepStale(string folder, TimeSpan olderThan)
+    public static int SweepStale(string folder, TimeSpan olderThan, string? keepPath = null)
     {
         int removed = 0;
         try
@@ -184,6 +195,13 @@ public sealed class ExportJobFiles
                 {
                     try
                     {
+                        // Only names this class actually generates (prefix, stem, "_", a
+                        // 32-hex job id, extension) — a user's own file that merely starts
+                        // with the prefix is never swept — and never the requested output.
+                        if (!IsGeneratedTempName(Path.GetFileName(path))) continue;
+                        if (keepPath is not null && string.Equals(
+                                Path.GetFullPath(path), Path.GetFullPath(keepPath),
+                                StringComparison.OrdinalIgnoreCase)) continue;
                         if (File.GetLastWriteTimeUtc(path) > cutoff) continue;
                         File.Delete(path);
                         removed++;

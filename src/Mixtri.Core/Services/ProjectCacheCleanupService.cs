@@ -96,7 +96,14 @@ public static class ProjectCacheCleanupService
 
                     if (NewestWriteUtc(folder) >= projectCutoff)
                     {
-                        DeleteStaleParts(folder, partCutoff);
+                        // A live extraction writes .part files stamped with the zip entry's
+                        // ORIGINAL time before renaming them, so they can look stale: never
+                        // touch a leased folder's parts, and decide under the gate.
+                        lock (CacheGate)
+                        {
+                            if (!Leases.ContainsKey(name))
+                                DeleteStaleParts(folder, partCutoff);
+                        }
                         continue;
                     }
 
