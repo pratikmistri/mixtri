@@ -9,7 +9,8 @@
     mc:Ignorable="d"
     IsTabStop="True"
     UseSystemFocusVisuals="True"
-    AutomationProperties.Name="Timeline">
+    AutomationProperties.Name="Timeline"
+    AutomationProperties.HelpText="Left and Right arrows move the playhead one frame, with Shift one second. Alt plus Left or Right selects the previous or next clip. Home and End jump to the start or end. Delete removes the selected clip.">
 
     <Grid
         PointerWheelChanged="Grid_PointerWheelChanged">
@@ -41,7 +42,14 @@
         </Grid.RowDefinitions>
 
         <!-- Track labels -->
-        <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+        <Border Grid.Row="0" Grid.Column="0" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" >
+            <!-- Polite live region for keyboard announcements (clip selection, playhead jumps). Kept
+                 in the tree but invisible and non-interactive; Narrator reads text changes. -->
+            <TextBlock x:Name="LiveAnnouncer"
+                       AutomationProperties.LiveSetting="Polite"
+                       Opacity="0" Width="1" Height="1"
+                       IsHitTestVisible="False" />
+        </Border>
         <!-- The video row is a STACK of bands (video / zoom / cursor per track), so its label
              cannot be a single static TextBlock. The captions are plain XAML positioned from
              the same band geometry the canvas next to it draws with — deliberately NOT a

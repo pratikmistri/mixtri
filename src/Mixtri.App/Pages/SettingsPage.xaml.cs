@@ -16,6 +16,7 @@ public sealed partial class SettingsPage : Page
     private bool _suppressCaptureQualityEvents;
     private bool _suppressAudioEvents;
     private bool _suppressThemeEvents;
+    private bool _suppressTypedTextEvents;
 
     public SettingsPage()
     {
@@ -34,6 +35,11 @@ public sealed partial class SettingsPage : Page
         {
             SystemAudioToggle.IsOn = recording.IsSystemAudioEnabled;
             MicToggle.IsOn = recording.IsMicEnabled;
+        }
+
+        using (SuppressScope.Enter(ref _suppressTypedTextEvents))
+        {
+            RecordTypedTextToggle.IsOn = AppSettings.Instance.RecordTypedText;
         }
 
         using (SuppressScope.Enter(ref _suppressThemeEvents))
@@ -171,6 +177,12 @@ public sealed partial class SettingsPage : Page
     {
         if (_suppressAudioEvents || MicToggle is null) return;
         RecordingViewModel.Shared.IsMicEnabled = MicToggle.IsOn;
+    }
+
+    private void RecordTypedTextToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressTypedTextEvents || RecordTypedTextToggle is null) return;
+        AppSettings.Instance.RecordTypedText = RecordTypedTextToggle.IsOn;
     }
 
     private void WebcamToggle_Toggled(object sender, RoutedEventArgs e)

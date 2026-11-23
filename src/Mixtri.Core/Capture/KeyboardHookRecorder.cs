@@ -148,6 +148,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     private volatile bool _paused;
     private Thread? _hookThread;
     private uint _hookThreadId;
+    private volatile bool _abortHookThread;
     private readonly ManualResetEventSlim _hookReady = new(false);
 
     // Modifier state tracked across callbacks
@@ -176,6 +177,13 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     public bool IsRecording { get; internal set; }
 
+    /// <summary>
+    /// When false, plain character keys are never recorded (not even as redacted placeholders):
+    /// only modifier keys, shortcut combos and non-text keys survive. Set before
+    /// <see cref="StartRecording"/>. Defaults to true (record everything).
+    /// </summary>
+    public bool RecordTypedText { get; set; } = true;
+
     // ── Recording lifecycle ─────────────────────────────────────────
 
     public void StartRecording()
@@ -189,6 +197,8 @@ public sealed class KeyboardHookRecorder : IDisposable
             _events.Clear();
         }
 
+        // No hook thread is running yet, so this cannot race the callback.
+        _recordedDownKeys.Clear();
         _ctrlDown = false;
         _altDown = false;
         _shiftDown = false;
@@ -196,7 +206,10 @@ public sealed class KeyboardHookRecorder : IDisposable
         _paused = false;
 
         _hookReady.Reset();
+        _abortHookThread = false;
 
+        // A previous session's id must never be the target of an abort for this one.
+        _hookThreadId = 0;
         _hookThread = new Thread(HookThreadProc)
         {
             Name = "KeyboardHookRecorder",
@@ -205,11 +218,17 @@ public sealed class KeyboardHookRecorder : IDisposable
         _hookThread.Start();
 
         if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+        {
+            AbortHookThread();
             throw new InvalidOperationException("Keyboard hook thread failed to start within 5 seconds.");
+        }
 
         if (_hookId == nint.Zero)
-            throw new InvalidOperationException(
-                $"Failed to install keyboard hook. Win32 error: {Marshal.GetLastWin32Error()}");
+        {
+            int error = Marshal.GetLastWin32Error();
+            AbortHookThread();
+            throw new InvalidOperationException($"Failed to install keyboard hook. Win32 error: {error}");
+        }
 
         IsRecording = true;
     }
@@ -223,6 +242,32 @@ public sealed class KeyboardHookRecorder : IDisposable
         HookInterop.PostThreadMessage(_hookThreadId, HookInterop.WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
+    }
+
+    /// <summary>
+    /// Tears down a hook thread that may still be starting up or running. Used when a start
+    /// fails (e.g. the install timed out) and from Dispose, so a late-installing thread can
+    /// never keep its low-level hook and message loop alive forever.
+    /// </summary>
+    private void AbortHookThread()
+    {
+        _abortHookThread = true;
+
+        var thread = _hookThread;
+        _hookThread = null;
+        if (thread is null) return;
+
+        // The thread's message queue may not exist yet, so keep re-posting WM_QUIT until it
+        // exits; the _abortHookThread check in HookThreadProc covers the not-yet-installed case.
+        var deadline = Stopwatch.GetTimestamp() + 2 * Stopwatch.Frequency;
+        while (thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        {
+            uint id = Volatile.Read(ref _hookThreadId);
+            if (id != 0)
+                HookInterop.PostThreadMessage(id, HookInterop.WM_QUIT, 0, 0);
+            if (thread.Join(TimeSpan.FromMilliseconds(100)))
+                break;
+        }
     }
 
     public void PauseRecording()
@@ -282,6 +327,14 @@ public sealed class KeyboardHookRecorder : IDisposable
         if (_hookId == nint.Zero)
             return;
 
+        // Start was abandoned (timeout) before the hook came up: do not pump messages.
+        if (_abortHookThread)
+        {
+            UnhookWindowsHookEx(_hookId);
+            _hookId = nint.Zero;
+            return;
+        }
+
         while (HookInterop.GetMessage(out HookInterop.MSG msg, nint.Zero, 0, 0))
         {
             HookInterop.TranslateMessage(ref msg);
@@ -307,6 +360,24 @@ public sealed class KeyboardHookRecorder : IDisposable
                 bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
 
                 UpdateModifierState(vk, isDown);
+
+                // Filter on the press; a release is recorded exactly when its press was, so
+                // presses and releases stay balanced (Ctrl+C released after Ctrl would
+                // otherwise leave a recorded "C" down with no up, and a dropped "c" press
+                // would otherwise surface as a lone release).
+                bool record;
+                if (RecordTypedText)
+                    record = true;
+                else if (isDown)
+                {
+                    record = ShouldRecordKey(vk, _ctrlDown, _altDown, _winDown, recordTypedText: false);
+                    if (record) _recordedDownKeys.Add(vk);
+                }
+                else
+                    record = _recordedDownKeys.Remove(vk);
+
+                if (!record)
+                    return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
 
                 long ticks = Stopwatch.GetTimestamp();
                 string keyName = MapVirtualKeyToName(vk);
@@ -413,6 +484,33 @@ public sealed class KeyboardHookRecorder : IDisposable
             || vk is >= 0xBA and <= 0xC0
             || vk is >= 0xDB and <= 0xDF
             || vk == 0xE2; // OEM_102 (extra key on ISO layouts)
+    }
+
+    // Keys whose press was recorded while typed text is excluded. Touched only on the hook
+    // thread (the low-level hook callback), so it needs no lock.
+    private readonly HashSet<int> _recordedDownKeys = new();
+
+    /// <summary>
+    /// Filtering rule for the "Record typed text" setting. With <paramref name="recordTypedText"/>
+    /// true everything is recorded. With it false, any key that can insert text is dropped:
+    /// plain character keys (letters, digits, space, numpad, OEM punctuation; Shift does not
+    /// make one a shortcut), AltGr chords (Ctrl+Alt + character) and Alt+numpad codes.
+    /// Modifier keys, Ctrl/Alt/Win shortcut combos, and non-text keys (function, navigation,
+    /// Enter, Tab, Esc, Backspace, Delete) are kept.
+    /// </summary>
+    internal static bool ShouldRecordKey(int vk, bool isCtrl, bool isAlt, bool isWin, bool recordTypedText)
+    {
+        if (recordTypedText)
+            return true;
+
+        if (IsCharacterKey(vk, isCtrl, isAlt, isWin))
+            return false;
+
+        bool altGrChord = isCtrl && isAlt && !isWin
+            && IsCharacterKey(vk, isCtrl: false, isAlt: false, isWin: false);
+        bool altNumpadCode = isAlt && !isCtrl && !isWin && IsAltCodeKey(vk);
+
+        return !altGrChord && !altNumpadCode;
     }
 
     /// <summary>
@@ -596,6 +694,9 @@ public sealed class KeyboardHookRecorder : IDisposable
 
         if (IsRecording)
             StopRecording();
+
+        // A failed or timed-out start can leave a hook thread behind with IsRecording false.
+        AbortHookThread();
 
         _hookReady.Dispose();
     }

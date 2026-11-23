@@ -413,6 +413,8 @@ public sealed partial class TimelineControl : UserControl
             _hintLaneRevealTimer?.Stop();
             _hintLaneRevealTimer = null;
             _hintLaneReveal = 0;
+            _announceTimer?.Stop();
+            _pendingAnnouncement = null;
             _hintLaneRevealTarget = 0;
             _hintLaneArmed = false;
             _hintLaneLatched = false;
@@ -7625,18 +7627,54 @@ public sealed partial class TimelineControl : UserControl
             return;
         }
 
-        if (e.Key is not (Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)) return;
-
         // Only when the timeline itself has focus — not one of the mute buttons in the label
         // column, where arrows are focus navigation.
         if (!ReferenceEquals(e.OriginalSource, this)) return;
         if (_dragMode != DragMode.None) return;
 
         var model = Model;
-        if (model is null || model.DisplayDuration <= TimeSpan.Zero) return;
+        if (model is null) return;
 
-        if (IsKeyDown(Windows.System.VirtualKey.Control) || IsKeyDown(Windows.System.VirtualKey.Menu))
+        bool ctrl = IsKeyDown(Windows.System.VirtualKey.Control);
+        bool alt = IsKeyDown(Windows.System.VirtualKey.Menu);
+
+        // Alt+Left / Alt+Right: previous / next clip on the base track.
+        if (alt && !ctrl && (e.Key is Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right))
+        {
+            SelectAdjacentBaseSegment(model, e.Key == Windows.System.VirtualKey.Right ? 1 : -1);
+            e.Handled = true;
             return;
+        }
+
+        // Backspace on a keyboard-selected clip: same request the context menu raises. Delete
+        // is left to the page's Delete accelerator, which already removes the selection
+        // (keyboard selection raises the same SegmentSelected as a click) — handling it here
+        // too could delete twice, depending on accelerator/KeyDown ordering.
+        if (e.Key is Windows.System.VirtualKey.Back)
+        {
+            if (ctrl || alt) return;
+            if (_selectedSegmentId is { } selectedId && model.Segments.Any(s => s.Id == selectedId))
+            {
+                SegmentDeleteRequested?.Invoke(this, selectedId);
+                e.Handled = true;
+            }
+            return;
+        }
+
+        // Home / End are performed by the page's accelerators (left unhandled here so the
+        // preview seeks too); this only announces the position they are about to reach.
+        if (e.Key is Windows.System.VirtualKey.Home or Windows.System.VirtualKey.End)
+        {
+            if (ctrl || alt) return;
+            var edge = e.Key == Windows.System.VirtualKey.Home ? TimeSpan.Zero : model.DisplayDuration;
+            AnnounceTimeline((e.Key == Windows.System.VirtualKey.Home ? "Start, " : "End, ") + FormatSpokenTime(edge));
+            return;
+        }
+
+        if (e.Key is not (Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)) return;
+        if (model.DisplayDuration <= TimeSpan.Zero) return;
+
+        if (ctrl || alt) return;
 
         int fps = model.Fps > 0 ? model.Fps : 30;
         var step = IsKeyDown(Windows.System.VirtualKey.Shift)
@@ -7650,7 +7688,136 @@ public sealed partial class TimelineControl : UserControl
         if (target > model.DisplayDuration) target = model.DisplayDuration;
 
         PlayheadPosition = target;
+        AnnounceTimeline(FormatSpokenTime(target), throttle: true);
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// Keyboard selection on the base video track: moves the selection to the previous
+    /// (<paramref name="direction"/> -1) or next (+1) clip, parks the playhead on its start and
+    /// announces it. Routes through <see cref="SelectSegment"/> so <see cref="SegmentSelected"/>
+    /// fires exactly as for a click and the editor's property panels follow.
+    /// </summary>
+    private void SelectAdjacentBaseSegment(TimelineModel model, int direction)
+    {
+        var clips = model.Segments.OfType<VideoSegment>()
+            .Where(s => s.TrackIndex == 0)
+            .OrderBy(s => s.Start)
+            .ToList();
+        if (clips.Count == 0)
+        {
+            AnnounceTimeline("No clips on the timeline");
+            return;
+        }
+
+        int current = _selectedSegmentId is { } id ? clips.FindIndex(s => s.Id == id) : -1;
+        int next;
+        if (current >= 0)
+        {
+            next = Math.Clamp(current + direction, 0, clips.Count - 1);
+        }
+        else
+        {
+            // Nothing (on this track) selected: start from the playhead.
+            var playhead = PlayheadPosition;
+            if (direction > 0)
+            {
+                next = clips.FindIndex(s => s.Start > playhead + TimeSpan.FromMilliseconds(1));
+                if (next < 0) next = clips.Count - 1;
+            }
+            else
+            {
+                next = clips.FindLastIndex(s => s.Start < playhead - TimeSpan.FromMilliseconds(1));
+                if (next < 0) next = 0;
+            }
+        }
+
+        var clip = clips[next];
+        SelectSegment(clip.Id);
+        PlayheadPosition = clip.Start;
+
+        var text = $"Clip {next + 1} of {clips.Count}, {FormatSpokenTime(clip.Start)} to {FormatSpokenTime(clip.End)}, {FormatSpokenDuration(clip.Duration)}";
+        if (clip.AudioMode == SegmentAudioMode.Muted) text += ", muted";
+        if (clip.SpeedFactor > 0 && Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
+            text += $", speed {clip.SpeedFactor:0.##} times";
+        AnnounceTimeline(text);
+    }
+
+    private static string FormatSpokenTime(TimeSpan t)
+    {
+        if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+        int totalSeconds = (int)Math.Floor(t.TotalSeconds);
+        return $"{totalSeconds / 60}:{totalSeconds % 60:00}";
+    }
+
+    private static string FormatSpokenDuration(TimeSpan d)
+    {
+        double seconds = Math.Max(0, d.TotalSeconds);
+        if (seconds < 10)
+        {
+            double rounded = Math.Round(seconds, 1);
+            return rounded == 1 ? "1 second" : $"{rounded:0.#} seconds";
+        }
+        return $"{(int)Math.Round(seconds)} seconds";
+    }
+
+    // Keyboard announcements go through the polite live region in the XAML; nudges are
+    // coalesced to one per interval (the latest wins) so holding an arrow does not queue speech.
+    private const int AnnounceThrottleMs = 300;
+    private DispatcherTimer? _announceTimer;
+    private string? _pendingAnnouncement;
+
+    private void AnnounceTimeline(string text, bool throttle = false)
+    {
+        if (!throttle)
+        {
+            _pendingAnnouncement = null;
+            SetAnnouncement(text);
+            RestartAnnounceTimer();
+            return;
+        }
+
+        if (_announceTimer is { IsEnabled: true })
+        {
+            _pendingAnnouncement = text; // spoken when the interval elapses
+            return;
+        }
+
+        SetAnnouncement(text);
+        RestartAnnounceTimer();
+    }
+
+    private void RestartAnnounceTimer()
+    {
+        if (_announceTimer is null)
+        {
+            _announceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(AnnounceThrottleMs) };
+            _announceTimer.Tick += (_, _) =>
+            {
+                if (_pendingAnnouncement is { } pending)
+                {
+                    _pendingAnnouncement = null;
+                    SetAnnouncement(pending);
+                }
+                else
+                {
+                    _announceTimer?.Stop();
+                }
+            };
+        }
+        _announceTimer.Stop();
+        _announceTimer.Start();
+    }
+
+    private string _lastAnnouncement = string.Empty;
+
+    private void SetAnnouncement(string text)
+    {
+        // A live region only speaks on a CHANGE, so a repeat (Alt+Right at the last clip,
+        // Left at 0:00) gets an invisible suffix to make the text differ and be re-read.
+        if (text == _lastAnnouncement) text += "\u200B";
+        _lastAnnouncement = text;
+        if (LiveAnnouncer is { } live) live.Text = text;
     }
 
     private static bool IsKeyDown(Windows.System.VirtualKey key)
