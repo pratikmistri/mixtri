@@ -776,7 +776,7 @@ public sealed partial class EditorPage
         if (double.IsNaN(args.NewValue)) return;
 
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.FontSize = args.NewValue, "Change Overlay Font Size"));
+            id, o => o.FontSize = args.NewValue, "Change Overlay Font Size", mergeKey: "Change Overlay Font Size"));
         RefreshOverlayPreview();
     }
 
@@ -787,7 +787,7 @@ public sealed partial class EditorPage
 
         var hex = ColorToHex(args.NewColor);
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.TextColor = hex, "Change Overlay Text Color"));
+            id, o => o.TextColor = hex, "Change Overlay Text Color", mergeKey: "Change Overlay Text Color"));
 
         OverlayTextColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         OverlayTextColorText.Text = hex;
@@ -864,7 +864,7 @@ public sealed partial class EditorPage
 
         double fraction = e.NewValue / 100.0;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.WidthFraction = fraction, "Change Overlay Width"));
+            id, o => o.WidthFraction = fraction, "Change Overlay Width", mergeKey: "Change Overlay Width"));
         RefreshOverlayPreview();
     }
 
@@ -875,7 +875,7 @@ public sealed partial class EditorPage
 
         double fraction = e.NewValue / 100.0;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.HeightFraction = fraction, "Change Overlay Height"));
+            id, o => o.HeightFraction = fraction, "Change Overlay Height", mergeKey: "Change Overlay Height"));
         RefreshOverlayPreview();
     }
 
@@ -886,7 +886,7 @@ public sealed partial class EditorPage
 
         double fraction = e.NewValue / 100.0;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.MarginFraction = fraction, "Change Overlay Margin"));
+            id, o => o.MarginFraction = fraction, "Change Overlay Margin", mergeKey: "Change Overlay Margin"));
         RefreshOverlayPreview();
     }
 
@@ -911,7 +911,7 @@ public sealed partial class EditorPage
 
         var hex = ColorToHex(args.NewColor);
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.BackgroundColor = hex, "Change Overlay Background Color"));
+            id, o => o.BackgroundColor = hex, "Change Overlay Background Color", mergeKey: "Change Overlay Background Color"));
 
         OverlayBgColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         OverlayBgColorText.Text = hex;
@@ -934,18 +934,18 @@ public sealed partial class EditorPage
         {
             double opacity = value / 100.0;
             ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-                id, o => o.BackgroundOpacity = opacity, "Change Overlay Background Opacity"));
+                id, o => o.BackgroundOpacity = opacity, "Change Overlay Background Opacity", mergeKey: "Change Overlay Background Opacity"));
         }
         else if (ReferenceEquals(sender, OverlayCornerRadiusSlider))
         {
             ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-                id, o => o.CornerRadius = value, "Change Overlay Corner Radius"));
+                id, o => o.CornerRadius = value, "Change Overlay Corner Radius", mergeKey: "Change Overlay Corner Radius"));
         }
         else if (ReferenceEquals(sender, OverlayPaddingSlider))
         {
             double padding = value / 100.0;
             ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-                id, o => o.PaddingScale = padding, "Change Overlay Padding"));
+                id, o => o.PaddingScale = padding, "Change Overlay Padding", mergeKey: "Change Overlay Padding"));
         }
         else
         {
@@ -965,13 +965,13 @@ public sealed partial class EditorPage
         if (ReferenceEquals(sender, OverlayBlurAmountSlider))
         {
             ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-                id, o => o.BlurAmount = value, "Change Overlay Blur Amount"));
+                id, o => o.BlurAmount = value, "Change Overlay Blur Amount", mergeKey: "Change Overlay Blur Amount"));
         }
         else if (ReferenceEquals(sender, OverlayBlurTintSlider))
         {
             double tint = value / 100.0;
             ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-                id, o => o.BlurTintOpacity = tint, "Change Overlay Blur Tint"));
+                id, o => o.BlurTintOpacity = tint, "Change Overlay Blur Tint", mergeKey: "Change Overlay Blur Tint"));
         }
         else
         {
@@ -1000,7 +1000,7 @@ public sealed partial class EditorPage
 
         double strength = e.NewValue / 100.0;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.ScrimStrength = strength, "Change Overlay Scrim Strength"));
+            id, o => o.ScrimStrength = strength, "Change Overlay Scrim Strength", mergeKey: "Change Overlay Scrim Strength"));
         RefreshOverlayPreview();
     }
 
@@ -1011,7 +1011,7 @@ public sealed partial class EditorPage
 
         double width = e.NewValue;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.OutlineWidth = width, "Change Overlay Outline Width"));
+            id, o => o.OutlineWidth = width, "Change Overlay Outline Width", mergeKey: "Change Overlay Outline Width"));
         RefreshOverlayPreview();
     }
 
@@ -1022,7 +1022,7 @@ public sealed partial class EditorPage
 
         var hex = ColorToHex(args.NewColor);
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.OutlineColor = hex, "Change Overlay Outline Color"));
+            id, o => o.OutlineColor = hex, "Change Overlay Outline Color", mergeKey: "Change Overlay Outline Color"));
 
         OverlayOutlineColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         OverlayOutlineColorText.Text = hex;
@@ -1036,7 +1036,7 @@ public sealed partial class EditorPage
 
         double strength = e.NewValue / 100.0;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.ShadowStrength = strength, "Change Overlay Shadow Strength"));
+            id, o => o.ShadowStrength = strength, "Change Overlay Shadow Strength", mergeKey: "Change Overlay Shadow Strength"));
         RefreshOverlayPreview();
     }
 
@@ -1047,7 +1047,7 @@ public sealed partial class EditorPage
 
         var hex = ColorToHex(args.NewColor);
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.AccentColor = hex, "Change Overlay Accent Color"));
+            id, o => o.AccentColor = hex, "Change Overlay Accent Color", mergeKey: "Change Overlay Accent Color"));
 
         OverlayAccentColorSwatch.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(args.NewColor);
         OverlayAccentColorText.Text = hex;
@@ -1061,7 +1061,7 @@ public sealed partial class EditorPage
 
         double thickness = e.NewValue;
         ViewModel.UndoRedoManager.Execute(new UpdateTextOverlayPropertiesOperation(
-            id, o => o.AccentThickness = thickness, "Change Overlay Accent Thickness"));
+            id, o => o.AccentThickness = thickness, "Change Overlay Accent Thickness", mergeKey: "Change Overlay Accent Thickness"));
         RefreshOverlayPreview();
     }
 
@@ -1247,8 +1247,34 @@ public sealed partial class EditorPage
     private void ScheduleSlideTextWindowCommit()
     {
         _slideTextWindowDebouncer ??= new Debouncer(CommitSlideTextWindowFromControls);
+
+        // A pending commit for a different slide must land on THAT slide before this one's
+        // values replace it.
+        if (_slideTextWindowPending is { } pending && pending.SlideId != _selectedTextSlideId)
+            _slideTextWindowDebouncer.Flush();
+
+        if (_selectedTextSlideId is { } slideId &&
+            PropertiesPanel?.TextSlide is { } pane &&
+            pane.SlideTextInAtSlider is not null && pane.SlideTextOutBySlider is not null &&
+            pane.SlideTextInRampSlider is not null && pane.SlideTextOutRampSlider is not null)
+        {
+            // Captured NOW (slide id and values) rather than at fire time: a selection change
+            // between the last tick and the timer would otherwise apply the previous slide's
+            // edit to the newly selected slide, with that slide's control values.
+            _slideTextWindowPending = new SlideTextWindowPending(
+                slideId,
+                TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInAtSlider.Value)),
+                TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutBySlider.Value)),
+                TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInRampSlider.Value)),
+                TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutRampSlider.Value)));
+        }
         _slideTextWindowDebouncer.Schedule();
     }
+
+    private readonly record struct SlideTextWindowPending(
+        string SlideId, TimeSpan InStart, TimeSpan OutEnd, TimeSpan InDuration, TimeSpan OutDuration);
+
+    private SlideTextWindowPending? _slideTextWindowPending;
 
     private void SlideTextWindowSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs args)
     {
@@ -1267,29 +1293,18 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// Reads all four animation-window sliders and commits them as ONE undoable edit. Values
-    /// are re-read here rather than captured at schedule time so a burst of ticks that
-    /// coalesced into a single commit always reflects the newest thumb positions.
+    /// Commits the animation-window values captured by the newest tick as ONE undoable edit,
+    /// on the slide that was being edited when that tick happened.
     /// </summary>
     private void CommitSlideTextWindowFromControls()
     {
-        if (_suppressSlideEvents || _selectedTextSlideId is null) return;
-        if (PropertiesPanel is null || PropertiesPanel.TextSlide is null) return;
+        if (_slideTextWindowPending is not { } pending) return;
+        _slideTextWindowPending = null;
 
-        var slide = SelectedSlide();
+        var slide = ViewModel.Model.Segments
+            .OfType<TextSlideSegment>()
+            .FirstOrDefault(s => s.Id == pending.SlideId);
         if (slide is null) return;
-
-        var pane = PropertiesPanel.TextSlide;
-        if (pane.SlideTextInAtSlider is null || pane.SlideTextOutBySlider is null ||
-            pane.SlideTextInRampSlider is null || pane.SlideTextOutRampSlider is null)
-        {
-            return;
-        }
-
-        var inStart = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInAtSlider.Value));
-        var outEnd = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutBySlider.Value));
-        var inDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextInRampSlider.Value));
-        var outDuration = TimeSpan.FromSeconds(Math.Max(0, pane.SlideTextOutRampSlider.Value));
 
         // One operation carries both the window and the ramps, so a drag that touched either
         // is a single undo step.
@@ -1299,10 +1314,12 @@ public sealed partial class EditorPage
             slide.IsBold, slide.IsItalic,
             slide.TextColor, slide.BackgroundColor,
             slide.Duration, slide.Animation,
-            inStart, inDuration,
-            outEnd, outDuration));
+            pending.InStart, pending.InDuration,
+            pending.OutEnd, pending.OutDuration));
 
-        SyncTextSlideWindowControls(slide);
+        // Controls and preview only belong to the slide still being edited.
+        if (_selectedTextSlideId == slide.Id)
+            SyncTextSlideWindowControls(slide);
         RefreshSlidePreview();
     }
 

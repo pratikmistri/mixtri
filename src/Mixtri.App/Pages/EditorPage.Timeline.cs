@@ -1628,10 +1628,10 @@ public sealed partial class EditorPage
             if (validPaths.Count == 0) return;
 
             // Identify system vs mic files by naming convention
-            var systemPath = validPaths.FirstOrDefault(p =>
-                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
-            var micPath = validPaths.FirstOrDefault(p =>
-                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+            // Shared classifier, so an imported clip's `audio.wav` (and a packaged
+            // `<index>_mic_0.wav`) lands on the lane its mute and volume apply to.
+            var systemPath = validPaths.FirstOrDefault(p => !RecordedAudio.IsMic(p));
+            var micPath = validPaths.FirstOrDefault(p => RecordedAudio.IsMic(p));
 
             double videoDuration = project.Duration.TotalSeconds;
             // A restored project whose top-level Duration was never written would make every
@@ -2102,8 +2102,18 @@ public sealed partial class EditorPage
     /// </remarks>
     private void ReloadStretchedAudioPlayer()
     {
-        _stretchedAudioPlayer?.Dispose();
-        _stretchedAudioPlayer = null;
+        // A newer reload supersedes any render still running: cancel it so a burst of speed
+        // edits does not queue minutes of obsolete stretching. (Cancelled only, never
+        // disposed: the superseded task may still be registering on its token.)
+        try { _stretchedAudioCts?.Cancel(); } catch { }
+        var cts = new CancellationTokenSource();
+        _stretchedAudioCts = cts;
+        var token = cts.Token;
+
+        // The previous engine is deliberately left playing until its replacement is ready
+        // (see the swap below), so a speed edit does not silence every placed segment for
+        // the length of the re-render. Its layout no longer matches the new requests, so
+        // in-place re-levelling is off until the swap.
         _placedAudioBuiltIndices = null;
 
         int generation = ++_stretchedAudioGeneration;
@@ -2111,7 +2121,13 @@ public sealed partial class EditorPage
         var requests = SelectPlacedSegmentAudio();
         _stretchedAudioSignature = PlacedSegmentAudio.Signature(requests);
         _placedAudioLayoutSignature = PlacedSegmentAudio.Signature(requests, includeVolume: false);
-        if (requests.Count == 0) return;
+        if (requests.Count == 0)
+        {
+            // Nothing to place any more: no replacement is coming, so retire the old engine.
+            _stretchedAudioPlayer?.Dispose();
+            _stretchedAudioPlayer = null;
+            return;
+        }
 
         Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
             $"placed segment audio: {requests.Count(r => r.Stretch is not null)} stretched, " +
@@ -2128,7 +2144,7 @@ public sealed partial class EditorPage
 
             for (int i = 0; i < requests.Count; i++)
             {
-                if (generation != _stretchedAudioGeneration) return;
+                if (generation != _stretchedAudioGeneration || token.IsCancellationRequested) return;
 
                 var request = requests[i];
                 if (request.Stretch is not { } stretch)
@@ -2148,7 +2164,12 @@ public sealed partial class EditorPage
                 {
                     rendered = await renderer.RenderAsync(
                         request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
-                        stretch.Speed, stretch.OutputDuration);
+                        stretch.Speed, stretch.OutputDuration, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Superseded by a newer reload; it owns the engine swap now.
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -2172,7 +2193,19 @@ public sealed partial class EditorPage
                 builtIndices.Add(i);
             }
 
-            if (placements.Count == 0) return;
+            if (generation != _stretchedAudioGeneration || token.IsCancellationRequested) return;
+
+            if (placements.Count == 0)
+            {
+                // Everything is unrenderable/muted: retire the old engine (it is stale).
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (generation != _stretchedAudioGeneration || _pageUnloaded) return;
+                    _stretchedAudioPlayer?.Dispose();
+                    _stretchedAudioPlayer = null;
+                });
+                return;
+            }
 
             AudioPlaybackEngine? player = null;
             try
@@ -2228,6 +2261,9 @@ public sealed partial class EditorPage
 
     /// <summary>Invalidates in-flight builds; see <see cref="ReloadStretchedAudioPlayer"/>.</summary>
     private int _stretchedAudioGeneration;
+
+    /// <summary>Cancels the render of the latest <see cref="ReloadStretchedAudioPlayer"/> when a newer one starts.</summary>
+    private CancellationTokenSource? _stretchedAudioCts;
 
     /// <summary>
     /// State of the placed segment audio as of the last rebuild, so an unrelated edit (or an

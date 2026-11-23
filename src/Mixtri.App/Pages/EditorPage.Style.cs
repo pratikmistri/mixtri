@@ -878,7 +878,14 @@ public sealed partial class EditorPage
             }
         }
 
-        return new BackgroundStyle
+        // Start from the style currently in effect for the active target so the fields these
+        // controls do not own (shadow blur/opacity/colour/offset, border width/colour) keep
+        // their preset values instead of snapping back to hard-coded defaults.
+        var baseStyle = _sceneStyleControlsTarget?.FrameStyleOverride
+            ?? ProjectService.Instance.CurrentComposition?.Background
+            ?? new BackgroundStyle();
+
+        return baseStyle with
         {
             Type = bgType,
             Color = BgColorText.Text,
@@ -888,12 +895,7 @@ public sealed partial class EditorPage
             Padding = (int)PaddingSlider.Value,
             CornerRadius = (int)CornerRadiusSlider.Value,
             ShadowEnabled = ShadowToggle.IsOn,
-            ShadowBlur = 24,
-            ShadowOpacity = 0.5,
-            ShadowColor = "#000000",
             BorderEnabled = BorderToggle.IsOn,
-            BorderWidth = 1,
-            BorderColor = "#333333",
         };
 
     }
@@ -1382,9 +1384,29 @@ public sealed partial class EditorPage
     {
         if (!_webcamDragging) return;
 
-        _webcamDragging = false;
-        ((UIElement)sender).ReleasePointerCapture(e.Pointer);
         e.Handled = true;
+        EndWebcamDrag((UIElement)sender, e.Pointer);
+    }
+
+    // Capture can be lost (alt-tab, touch cancel, element collapsed mid-drag) without a Released;
+    // without these the drag stays "live" and the moved position is never committed.
+    private void WebcamOverlay_PointerCaptureLost(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging) return;
+        EndWebcamDrag((UIElement)sender, null);
+    }
+
+    private void WebcamOverlay_PointerCanceled(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (!_webcamDragging) return;
+        EndWebcamDrag((UIElement)sender, e.Pointer);
+    }
+
+    private void EndWebcamDrag(UIElement overlay, Pointer? pointer)
+    {
+        _webcamDragging = false;
+        if (pointer is not null)
+            overlay.ReleasePointerCapture(pointer);
 
         ApplyWebcamOverlayChange();
     }

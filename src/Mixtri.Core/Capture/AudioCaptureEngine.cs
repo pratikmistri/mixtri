@@ -139,6 +139,7 @@ public sealed class AudioCaptureEngine : IDisposable
                     {
                         _systemAudioFilePath = Path.Combine(outputFolder, $"system_{timestamp}.wav");
                         SystemAudioDeviceName = device.FriendlyName;
+                        _systemBoundDeviceId = device.ID;
 
                         _systemCapture = new WasapiLoopbackCapture(device);
                         _systemWriter = new Pcm16CaptureWriter(_systemAudioFilePath, _systemCapture.WaveFormat);
@@ -173,6 +174,7 @@ public sealed class AudioCaptureEngine : IDisposable
                     {
                         _micAudioFilePath = Path.Combine(outputFolder, $"mic_{timestamp}.wav");
                         MicDeviceName = device.FriendlyName;
+                        _micBoundDeviceId = device.ID;
 
                         _micCapture = new WasapiCapture(device);
                         _micWriter = new Pcm16CaptureWriter(_micAudioFilePath, _micCapture.WaveFormat);
@@ -196,6 +198,10 @@ public sealed class AudioCaptureEngine : IDisposable
                     failures.Add($"The microphone could not be recorded: {ex.Message}");
                 }
             }
+
+            _watchSystemDevice = _systemCapture is not null;
+            _watchMicDevice = _micCapture is not null;
+            StartDefaultDeviceWatchLocked();
 
             _isPaused = false;
             IsRecording = true;
@@ -265,6 +271,120 @@ public sealed class AudioCaptureEngine : IDisposable
         catch (Exception ex) { Debug.WriteLine($"[AudioCaptureEngine] Could not remove '{path}': {ex.Message}"); }
     }
 
+    // ── Default-device change watch ─────────────────────────────────
+
+    // The captures bind to the default endpoint at start and never follow it, so a default
+    // change mid-recording leaves that track silent. There is no live re-binding: the user is
+    // told instead. Callbacks arrive on an arbitrary COM thread and must not take _lock
+    // (unregistering can wait on in-flight callbacks while the caller holds it).
+    private MMDeviceEnumerator? _notifyEnumerator;
+    private DefaultDeviceWatcher? _deviceWatcher;
+    private volatile bool _watchSystemDevice;
+    private volatile bool _watchMicDevice;
+    private volatile string? _systemBoundDeviceId;
+    private volatile string? _micBoundDeviceId;
+    private int _systemChangeReported;
+    private int _micChangeReported;
+
+    private void StartDefaultDeviceWatchLocked()
+    {
+        _systemChangeReported = 0;
+        _micChangeReported = 0;
+
+        if (!_watchSystemDevice && !_watchMicDevice)
+            return;
+
+        try
+        {
+            var watcher = new DefaultDeviceWatcher(this);
+            var enumerator = new MMDeviceEnumerator();
+            try
+            {
+                enumerator.RegisterEndpointNotificationCallback(watcher);
+            }
+            catch
+            {
+                enumerator.Dispose();
+                throw;
+            }
+
+            _deviceWatcher = watcher;
+            _notifyEnumerator = enumerator;
+        }
+        catch (Exception ex)
+        {
+            // Losing the warning must never cost the recording.
+            Debug.WriteLine($"[AudioCaptureEngine] Default-device watch unavailable: {ex.Message}");
+        }
+    }
+
+    /// <summary>Unregisters the watcher. Call outside <see cref="_lock"/>.</summary>
+    private void StopDefaultDeviceWatch()
+    {
+        _watchSystemDevice = false;
+        _watchMicDevice = false;
+
+        var watcher = Interlocked.Exchange(ref _deviceWatcher, null);
+        var enumerator = Interlocked.Exchange(ref _notifyEnumerator, null);
+        if (enumerator is null)
+            return;
+
+        try
+        {
+            if (watcher is not null)
+                enumerator.UnregisterEndpointNotificationCallback(watcher);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AudioCaptureEngine] Unregister device watch failed: {ex.Message}");
+        }
+
+        try { enumerator.Dispose(); } catch { /* best-effort */ }
+    }
+
+    private void OnDefaultDeviceChanged(DataFlow flow, Role role, string? newDeviceId)
+    {
+        try
+        {
+            if (!IsRecording || role != Role.Multimedia)
+                return;
+
+            if (flow == DataFlow.Render && _watchSystemDevice
+                && !string.Equals(newDeviceId, _systemBoundDeviceId, StringComparison.OrdinalIgnoreCase)
+                && Interlocked.Exchange(ref _systemChangeReported, 1) == 0)
+            {
+                RaiseDeviceFailed(
+                    "The default speaker changed during recording; the system audio track may be silent from here.");
+            }
+            else if (flow == DataFlow.Capture && _watchMicDevice
+                && !string.Equals(newDeviceId, _micBoundDeviceId, StringComparison.OrdinalIgnoreCase)
+                && Interlocked.Exchange(ref _micChangeReported, 1) == 0)
+            {
+                RaiseDeviceFailed(
+                    "The default microphone changed during recording; the microphone track may be silent from here.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[AudioCaptureEngine] Default-device callback failed: {ex.Message}");
+        }
+    }
+
+    private sealed class DefaultDeviceWatcher : NAudio.CoreAudioApi.Interfaces.IMMNotificationClient
+    {
+        private readonly AudioCaptureEngine _owner;
+
+        public DefaultDeviceWatcher(AudioCaptureEngine owner) => _owner = owner;
+
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+            => _owner.OnDefaultDeviceChanged(flow, role, defaultDeviceId);
+
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) { }
+        public void OnDeviceAdded(string pwstrDeviceId) { }
+        public void OnDeviceRemoved(string deviceId) { }
+        public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
+    }
+
     private void RaiseDeviceFailed(string message)
     {
         Debug.WriteLine($"[AudioCaptureEngine] Device failure: {message}");
@@ -316,6 +436,7 @@ public sealed class AudioCaptureEngine : IDisposable
             micWriter = _micWriter;      _micWriter = null;
         }
 
+        StopDefaultDeviceWatch();
         StopAndDisposeCapture(sysCapture, sysWriter);
         StopAndDisposeCapture(micCapture, micWriter);
     }
@@ -549,6 +670,7 @@ public sealed class AudioCaptureEngine : IDisposable
             micWriter = _micWriter;      _micWriter = null;
         }
 
+        StopDefaultDeviceWatch();
         StopAndDisposeCapture(sysCapture, sysWriter);
         StopAndDisposeCapture(micCapture, micWriter);
     }

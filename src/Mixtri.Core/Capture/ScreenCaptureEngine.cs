@@ -379,12 +379,12 @@ public sealed class ScreenCaptureEngine : IDisposable
         catch (COMException ex)
         {
             if (!_disposed)
-                Error?.Invoke(this, ex.Message);
+                RaiseError(ex.Message);
         }
         catch (Exception ex)
         {
             if (!_disposed)
-                Error?.Invoke(this, ex.Message);
+                RaiseError(ex.Message);
         }
     }
 
@@ -393,7 +393,23 @@ public sealed class ScreenCaptureEngine : IDisposable
         if (_disposed || _itemClosed || !IsRecording)
             return;
 
-        Error?.Invoke(this, ex.Message);
+        // A broken device fails every frame; one report per distinct message is enough.
+        if (string.Equals(Interlocked.Exchange(ref _lastFrameErrorMessage, ex.Message), ex.Message, StringComparison.Ordinal))
+            return;
+
+        RaiseError(ex.Message);
+    }
+
+    private string? _lastFrameErrorMessage;
+
+    /// <summary>Raises <see cref="Error"/> without letting a subscriber fault a capture thread.</summary>
+    private void RaiseError(string message)
+    {
+        try { Error?.Invoke(this, message); }
+        catch (Exception handlerEx)
+        {
+            Debug.WriteLine($"[ScreenCaptureEngine] Error handler threw: {handlerEx.Message}");
+        }
     }
 
     private void UnsubscribeCaptureItemClosed()

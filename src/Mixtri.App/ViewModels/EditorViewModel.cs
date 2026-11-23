@@ -136,16 +136,23 @@ public partial class EditorViewModel : ObservableObject
         var timeline = ProjectService.Instance.CurrentTimeline;
         if (timeline is null) return;
 
-        _undoRedoManager.StateChanged -= OnUndoRedoStateChanged;
-        _undoRedoManager.EditPerformed -= OnEditPerformed;
+        // Import / append mutate the SAME timeline instance in place and only raise
+        // ProjectChanged so the page rebuilds its preview. The undo history is still valid for
+        // that instance, so keep it; only a genuinely different timeline (open, new, close
+        // project) gets a fresh manager.
+        if (!ReferenceEquals(timeline, _model))
+        {
+            _undoRedoManager.StateChanged -= OnUndoRedoStateChanged;
+            _undoRedoManager.EditPerformed -= OnEditPerformed;
 
-        _model = timeline;
-        _undoRedoManager = new UndoRedoManager(_model);
-        _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
-        _undoRedoManager.EditPerformed += OnEditPerformed;
+            _model = timeline;
+            _undoRedoManager = new UndoRedoManager(_model);
+            _undoRedoManager.StateChanged += OnUndoRedoStateChanged;
+            _undoRedoManager.EditPerformed += OnEditPerformed;
 
-        OnPropertyChanged(nameof(Model));
-        OnPropertyChanged(nameof(UndoRedoManager));
+            OnPropertyChanged(nameof(Model));
+            OnPropertyChanged(nameof(UndoRedoManager));
+        }
         OnUndoRedoStateChanged(this, EventArgs.Empty);
         ModelReloaded?.Invoke(this, EventArgs.Empty);
     }

@@ -619,22 +619,38 @@ public class SplitAndInsertTextSlideOperation : SegmentEditOperationBase
     {
         _snapshot = SegmentListSnapshot.Capture(model);
 
-        // Find the segment at the split time
-        int splitIndex = -1;
-        for (int i = 0; i < model.Segments.Count; i++)
+        // Resolve what is at the split time the same way SplitSegmentAtTimeOperation does
+        // (topmost covering segment). The slide itself goes onto the BASE chain, so when that
+        // is an overlay the base-chain segment underneath is the one to divide instead.
+        var target = model.GetSegmentAtTime(_splitTime).Segment;
+        if (target is null || target.TrackIndex != TimelineModel.BaseTrackIndex ||
+            !(_splitTime > target.Start && _splitTime < target.End))
         {
-            var seg = model.Segments[i];
-            if (_splitTime > seg.Start && _splitTime < seg.End)
-            {
-                splitIndex = i;
-                break;
-            }
+            target = model.Segments.FirstOrDefault(s =>
+                s.TrackIndex == TimelineModel.BaseTrackIndex &&
+                _splitTime > s.Start && _splitTime < s.End);
         }
+
+        int splitIndex = target is null ? -1 : model.Segments.FindIndex(s => ReferenceEquals(s, target));
 
         if (splitIndex >= 0 && model.Segments[splitIndex] is VideoSegment video)
         {
-            // Split the video segment into two halves
             var localOffset = _splitTime - video.Start;
+
+            // A split that would leave a degenerate half (see SplitSegmentAtTimeOperation.MinHalf)
+            // snaps the slide to the nearer boundary instead of creating a sliver.
+            if (localOffset < SplitSegmentAtTimeOperation.MinHalf)
+            {
+                model.Segments.Insert(splitIndex, _slide);
+                return true;
+            }
+
+            if (video.Duration - localOffset < SplitSegmentAtTimeOperation.MinHalf)
+            {
+                model.Segments.Insert(splitIndex + 1, _slide);
+                return true;
+            }
+
             var sourceOffset = TimeSpan.FromTicks(
                 (long)(localOffset.Ticks * video.SpeedFactor));
 
@@ -662,15 +678,31 @@ public class SplitAndInsertTextSlideOperation : SegmentEditOperationBase
             model.Segments.Insert(splitIndex + 1, _slide);
             model.Segments.Insert(splitIndex + 2, secondHalf);
         }
+        else if (splitIndex >= 0)
+        {
+            // Inside a base slide (or another non-video base segment): insert before it.
+            model.Segments.Insert(splitIndex, _slide);
+        }
         else
         {
-            // Not on a video segment — just insert at the right position
-            int insertAt = 0;
+            // Not inside any base segment: place after the last base segment that ends at or
+            // before the split time. Counting overlay lanes here (as before) could land the
+            // slide among overlays, whose positions are authored rather than re-flowed.
+            int insertAt = -1;
             for (int i = 0; i < model.Segments.Count; i++)
             {
-                if (_splitTime >= model.Segments[i].End)
-                    insertAt = i + 1;
+                var seg = model.Segments[i];
+                if (seg.TrackIndex != TimelineModel.BaseTrackIndex) continue;
+                if (_splitTime >= seg.End) insertAt = i + 1;
             }
+
+            if (insertAt < 0)
+            {
+                // Before every base segment: in front of the first one (or at the start).
+                insertAt = model.Segments.FindIndex(s => s.TrackIndex == TimelineModel.BaseTrackIndex);
+                if (insertAt < 0) insertAt = 0;
+            }
+
             model.Segments.Insert(insertAt, _slide);
         }
 
@@ -922,19 +954,26 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
 
         _previous = model.Segments[_index];
 
+        // An overlay lives on a lane of mutually exclusive segments: a trim may not grow it
+        // into a lane-mate (tail) or back over the previous one (head, whose out-point stays
+        // put). Base-track segments ripple instead, so they need no clamp.
+        var requestedDuration = _previous.IsOverlayTrack
+            ? OverlayLaneLimits.ClampTrimDuration(model, _previous, _fromStart, _requestedDuration)
+            : _requestedDuration;
+
         switch (_previous)
         {
             case VideoSegment video:
                 model.Segments[_index] = TrimVideo(
-                    video, _fromStart, _requestedDuration, KnownSourceEnd(model, video));
+                    video, _fromStart, requestedDuration, KnownSourceEnd(model, video));
                 break;
             case TextSlideSegment slide:
-                model.Segments[_index] = slide with { Duration = ClampDuration(_requestedDuration) };
+                model.Segments[_index] = slide with { Duration = ClampDuration(requestedDuration) };
                 break;
             default:
                 // Produce a new record rather than mutating _previous in place — _previous
                 // is the snapshot Undo restores, so writing through it would make undo a no-op.
-                model.Segments[_index] = _previous with { Duration = ClampDuration(_requestedDuration) };
+                model.Segments[_index] = _previous with { Duration = ClampDuration(requestedDuration) };
                 break;
         }
 
@@ -1051,20 +1090,26 @@ public class TrimSegmentEdgeOperation : SegmentEditOperationBase
     /// </para>
     /// <para>
     /// The out-point a trim produces is EXCLUSIVE, so previewing it verbatim would show the
-    /// first frame the trim throws away. Stepping back a single TICK (not a frame) is what
-    /// makes this exact at any frame rate: every decoder in the app resolves a timestamp to
-    /// <c>floor(seconds x fps)</c>, so one tick inside the out-point always lands on the last
-    /// frame that begins before it — the last frame the trimmed segment plays — whatever fps
-    /// the source happens to have.
+    /// first frame the trim throws away. Stepping back <see cref="OutPointPreviewInset"/>
+    /// (1 ms — less than one frame at any real frame rate, but more than the tick-truncation
+    /// tolerance <see cref="Mixtri.Core.Processing.FrameTimeConverter.FrameBoundaryTolerance"/>
+    /// that frame lookup now applies) always lands on the last frame that begins before the
+    /// out-point — the last frame the trimmed segment plays — whatever fps the source has. A
+    /// single tick is no longer enough: the tolerance snaps a time one tick short of a frame
+    /// boundary onto that boundary, which is exactly the frame the trim discards.
     /// </para>
     /// </remarks>
+    /// <summary>How far inside an exclusive out-point the right-edge trim preview samples.</summary>
+    public static readonly TimeSpan OutPointPreviewInset =
+        Mixtri.Core.Processing.FrameTimeConverter.InsideBoundaryInset;
+
     public static (TimeSpan EffectiveDuration, TimeSpan SourceTime) ResolveEdgePreview(
         VideoSegment video, bool fromStart, TimeSpan requestedDuration, TimeSpan? sourceEnd = null)
     {
         var trimmed = TrimVideo(video, fromStart, requestedDuration, sourceEnd);
         if (fromStart) return (trimmed.Duration, trimmed.SourceStart);
 
-        var lastKept = trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1);
+        var lastKept = trimmed.SourceStart + trimmed.SourceDuration - OutPointPreviewInset;
         return (trimmed.Duration, lastKept < trimmed.SourceStart ? trimmed.SourceStart : lastKept);
     }
 
@@ -1168,6 +1213,24 @@ public class ChangeSegmentSpeedOperation : SegmentEditOperationBase
         if (Math.Abs(newSpeed - oldSpeed) < SpeedEpsilon) return NothingToDo();
 
         var newDuration = TimeSpan.FromTicks((long)(sourceDuration.Ticks / newSpeed));
+
+        // Slowing an overlay lengthens it, which must not run it into the next lane-mate:
+        // speed up the request just enough to fit the free gap (never past the current length).
+        if (video.IsOverlayTrack)
+        {
+            var maxDuration = OverlayLaneLimits.MaxTailDuration(model, video);
+            if (maxDuration is { } limit && newDuration > limit)
+            {
+                if (limit < video.Duration) limit = video.Duration;
+                if (newDuration > limit)
+                {
+                    newSpeed = Math.Min(MaxSpeed, sourceDuration.Ticks / (double)limit.Ticks);
+                    if (Math.Abs(newSpeed - oldSpeed) < SpeedEpsilon) return NothingToDo();
+                    newDuration = TimeSpan.FromTicks((long)(sourceDuration.Ticks / newSpeed));
+                    if (newDuration > limit) newDuration = limit;
+                }
+            }
+        }
 
         _previous = video;
         model.Segments[_index] = video with
@@ -1331,5 +1394,61 @@ public class SetSegmentAudioChannelMuteOperation : SegmentEditOperationBase
 
         video.MutedAudioChannels = _previous;
         return false;
+    }
+}
+
+
+/// <summary>
+/// Free-gap arithmetic for resizing a segment that sits on an overlay lane, where lane-mates
+/// may never overlap (see <see cref="TimelineModel.TrackRangeIsFree"/>).
+/// </summary>
+internal static class OverlayLaneLimits
+{
+    /// <summary>
+    /// The longest <paramref name="segment"/> can be with its start fixed before it would
+    /// reach the next lane-mate, or null when nothing follows it on the lane.
+    /// </summary>
+    public static TimeSpan? MaxTailDuration(TimelineModel model, TimelineSegment segment)
+    {
+        TimeSpan? nextStart = null;
+        foreach (var other in model.Segments)
+        {
+            if (ReferenceEquals(other, segment) || other.TrackIndex != segment.TrackIndex) continue;
+            if (other.Start < segment.Start) continue;
+            if (nextStart is null || other.Start < nextStart) nextStart = other.Start;
+        }
+
+        return nextStart is { } n ? n - segment.Start : null;
+    }
+
+    /// <summary>
+    /// Clamps a requested trim duration to the free gap. A segment that ALREADY exceeds its gap
+    /// (legacy project) is never forced shorter than it is now by the clamp itself.
+    /// </summary>
+    public static TimeSpan ClampTrimDuration(
+        TimelineModel model, TimelineSegment segment, bool fromStart, TimeSpan requested)
+    {
+        TimeSpan? maxDuration;
+        if (!fromStart)
+        {
+            maxDuration = MaxTailDuration(model, segment);
+        }
+        else
+        {
+            // Head trim keeps the out-point, so growth reaches back toward the previous mate.
+            TimeSpan? prevEnd = null;
+            foreach (var other in model.Segments)
+            {
+                if (ReferenceEquals(other, segment) || other.TrackIndex != segment.TrackIndex) continue;
+                if (other.Start >= segment.Start) continue;
+                if (prevEnd is null || other.End > prevEnd) prevEnd = other.End;
+            }
+
+            maxDuration = prevEnd is { } p ? segment.End - p : null;
+        }
+
+        if (maxDuration is not { } limit) return requested;
+        if (limit < segment.Duration) limit = segment.Duration;
+        return requested > limit ? limit : requested;
     }
 }

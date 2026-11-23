@@ -5,6 +5,7 @@ using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
 using Windows.Storage.Streams;
+using Mixtri.Core.Diagnostics;
 
 namespace Mixtri.Core.Export;
 
@@ -46,6 +47,7 @@ public class GifEncoder
 
         using var stream = await file.OpenAsync(FileAccessMode.ReadWrite);
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
+        await SetLoopForeverAsync(encoder);
 
         for (int i = 0; i < totalFrames; i++)
         {
@@ -84,6 +86,36 @@ public class GifEncoder
     }
 
     /// <summary>
+    /// Writes the NETSCAPE2.0 application extension (loop count 0 = forever) so the GIF
+    /// repeats instead of stopping after one pass. Must run before the first frame. Failure
+    /// is non-fatal: the GIF is still valid, it just plays once.
+    /// </summary>
+    private static async Task SetLoopForeverAsync(BitmapEncoder encoder)
+    {
+        try
+        {
+            var properties = new BitmapPropertySet
+            {
+                {
+                    "/appext/Application",
+                    new BitmapTypedValue(
+                        System.Text.Encoding.ASCII.GetBytes("NETSCAPE2.0"), PropertyType.UInt8Array)
+                },
+                {
+                    // Sub-block: length 3, id 1, loop count 0 (little-endian) = infinite.
+                    "/appext/Data",
+                    new BitmapTypedValue(new byte[] { 3, 1, 0, 0, 0 }, PropertyType.UInt8Array)
+                },
+            };
+            await encoder.BitmapContainerProperties.SetPropertiesAsync(properties);
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write("Export", $"GIF loop extension could not be set; the GIF will play once: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Encodes an animated GIF from frames composed on demand, one at a time.
     /// The composer produces each output frame (segments, text slides, transitions and
     /// all), and this method takes ownership of — and disposes — every frame it receives.
@@ -118,6 +150,7 @@ public class GifEncoder
             using (var stream = await file.OpenAsync(FileAccessMode.ReadWrite))
             {
                 var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.GifEncoderId, stream);
+                await SetLoopForeverAsync(encoder);
 
                 // One CPU staging buffer for the whole export: every frame has the same
                 // size, and SetPixelData copies the pixels into the encoder.

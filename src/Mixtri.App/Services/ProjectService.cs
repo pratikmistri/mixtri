@@ -210,8 +210,12 @@ public class ProjectService
         // this the project keeps its auto-generated "Recording <timestamp>" name, which
         // then shows on the Projects card and in the export prefill instead of the name
         // they actually picked.
+        // The package stores the name, so it must be set before the write; it is restored if
+        // the write fails so a failed save does not rename the project.
+        var previousName = project.Name;
         var chosenName = Path.GetFileNameWithoutExtension(packagePath);
-        if (!string.IsNullOrWhiteSpace(chosenName))
+        bool renamed = !string.IsNullOrWhiteSpace(chosenName);
+        if (renamed)
             project.Name = chosenName;
 
         // Taken before the first await: everything up to here ran synchronously on the UI
@@ -244,6 +248,12 @@ public class ProjectService
             }
 
             RecentProjectsStore.Remember(packagePath, project.Name, project.Duration);
+        }
+        catch
+        {
+            if (renamed && string.Equals(project.Name, chosenName, StringComparison.Ordinal))
+                project.Name = previousName;
+            throw;
         }
         finally
         {
@@ -576,6 +586,13 @@ public class ProjectService
     }
 
     /// <summary>
+    /// Warning from the most recent <see cref="ImportVideo"/> (for example audio that could
+    /// not be extracted), or <c>null</c>. The import UI should read it right after the call
+    /// and show it to the user.
+    /// </summary>
+    public string? LastImportWarning { get; private set; }
+
+    /// <summary>
     /// Turns an external video file (already normalised by <see cref="VideoImportService"/>
     /// into a constant-frame-rate H.264 clip plus extracted audio) into a project source and
     /// inserts it on an overlay track at the requested output time.
@@ -591,6 +608,7 @@ public class ProjectService
     /// </remarks>
     public VideoSegment? ImportVideo(VideoImportResult result, TimeSpan? insertAt = null)
     {
+        LastImportWarning = result.AudioWarning;
         var project = new Project
         {
             Name = ProjectNameFromImport(result),

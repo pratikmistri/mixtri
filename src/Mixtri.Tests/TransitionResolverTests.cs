@@ -138,7 +138,7 @@ public sealed class TransitionResolverTests
         // footage the user had deliberately trimmed away — changing how already-saved
         // projects render. Handles are opt-in: you get them by choosing a transition.
         var model = ModelWith(Slide(5), Video(4));
-        var frozen = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+        var frozen = TimeSpan.FromSeconds(5) - Mixtri.Core.Processing.FrameTimeConverter.InsideBoundaryInset;
 
         var atStart = TransitionResolver.Resolve(model, TimeSpan.FromSeconds(5));
         Assert.IsTrue(atStart.Active);

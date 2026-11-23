@@ -60,13 +60,24 @@ public sealed partial class SettingsPage : Page
                 AppSettings.Instance.CaptureQuality.ToString());
         }
 
-        _suppressWebcamEvents = true;
-        WebcamToggle.IsOn = recording.IsWebcamEnabled;
+        using (SuppressScope.Enter(ref _suppressWebcamEvents))
+        {
+            WebcamToggle.IsOn = recording.IsWebcamEnabled;
+        }
         UpdateMiniHotkeyStatus();
 
+        // Enumeration is awaited with events live: a toggle the user flips meanwhile must
+        // not be swallowed. Only the synchronous assignments below are suppressed.
+        List<WebcamDeviceInfo> devices;
         try
         {
-            _webcamDevices = await WebcamCaptureEngine.GetDevicesAsync();
+            devices = await WebcamCaptureEngine.GetDevicesAsync();
+        }
+        catch { return; /* no webcam devices available */ }
+
+        using (SuppressScope.Enter(ref _suppressWebcamEvents))
+        {
+            _webcamDevices = devices;
             WebcamDeviceCombo.ItemsSource = _webcamDevices;
 
             var savedId = AppSettings.Instance.WebcamDeviceId;
@@ -85,11 +96,6 @@ public sealed partial class SettingsPage : Page
             }
             // No saved choice: leave the "Default camera" placeholder; recording uses the
             // system default until the user picks one.
-        }
-        catch { /* no webcam devices available */ }
-        finally
-        {
-            _suppressWebcamEvents = false;
         }
     }
 

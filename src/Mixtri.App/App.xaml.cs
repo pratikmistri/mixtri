@@ -533,6 +533,17 @@ public partial class App : Application
             return;
         }
 
+        // A running export reads the live project (and its frame/audio files) for minutes;
+        // swapping the project underneath it would corrupt or mis-attribute the output.
+        if (IsExportInProgress())
+        {
+            window.ShowShellMessage(
+                "An export is running, so the project you just opened was not loaded here. "
+                + "Wait for the export to finish, then open the file again.",
+                Microsoft.UI.Xaml.Controls.InfoBarSeverity.Informational);
+            return;
+        }
+
         // Work that was never saved has no package path to compare against — a fresh
         // recording is the usual case, since ProjectService.SetProject clears
         // CurrentPackagePath. Opening over it would discard it with no prompt, on a
@@ -1313,6 +1324,7 @@ public partial class App : Application
                 CloseButtonText = "Keep exporting",
                 DefaultButton = ContentDialogButton.Close,
                 XamlRoot = root,
+            RequestedTheme = Mixtri_App.Helpers.DialogHelper.ThemeOf(root),
             };
 
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;

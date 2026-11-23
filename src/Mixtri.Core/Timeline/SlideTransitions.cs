@@ -73,7 +73,7 @@ public static class SlideTransitions
         // Legacy semantics: hold the outgoing segment at its final instant for the whole
         // dissolve, rather than TransitionResolver's newer "roll past the cut" offset. The two
         // call sites still relying on this shim have not migrated to the rolling semantics yet.
-        var outgoingTime = incoming.Start - TimeSpan.FromTicks(1);
+        var outgoingTime = incoming.Start - Mixtri.Core.Processing.FrameTimeConverter.InsideBoundaryInset;
         if (outgoingTime < outgoing.Start)
             outgoingTime = outgoing.Start;
 

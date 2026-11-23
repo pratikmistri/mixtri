@@ -248,7 +248,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             if (_cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, path)
-                && ReferenceEquals(_cachedDevice, session.Device))
+                && Win2DUtils.SameDevice(_cachedDevice, session.Device))
             {
                 DrawScaledToFill(session, _cachedBackgroundImage, w, h);
                 return;
@@ -355,7 +355,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             return _cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, style.BackgroundImagePath)
-                && ReferenceEquals(_cachedDevice, device);
+                && Win2DUtils.SameDevice(_cachedDevice, device);
         }
     }
 
@@ -394,14 +394,14 @@ public sealed class BackgroundCompositor : IDisposable
 
             if (_cachedBackgroundImage is not null
                 && PathMatches(_cachedBackgroundPath, path)
-                && ReferenceEquals(_cachedDevice, device))
+                && Win2DUtils.SameDevice(_cachedDevice, device))
             {
                 return Task.CompletedTask;
             }
 
             if (_inflightLoad is not null
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && Win2DUtils.SameDevice(_inflightDevice, device))
             {
                 inflight = _inflightLoad;
             }
@@ -429,7 +429,7 @@ public sealed class BackgroundCompositor : IDisposable
                 // cleared the in-flight key; only record it while it is genuinely current.
                 if (_currentLoadId == loadId
                     && PathMatches(_inflightPath, path)
-                    && ReferenceEquals(_inflightDevice, device))
+                    && Win2DUtils.SameDevice(_inflightDevice, device))
                 {
                     _inflightLoad = inflight;
                 }
@@ -461,7 +461,7 @@ public sealed class BackgroundCompositor : IDisposable
             if (!CanAttempt(path, device)) return;
             if (_inflightLoad is not null
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && Win2DUtils.SameDevice(_inflightDevice, device))
             {
                 return;
             }
@@ -484,7 +484,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// </summary>
     private bool CanAttempt(string path, CanvasDevice device)
     {
-        if (!PathMatches(_failedPath, path) || !ReferenceEquals(_failedDevice, device))
+        if (!PathMatches(_failedPath, path) || !Win2DUtils.SameDevice(_failedDevice, device))
             return true;
         if (_failedAttempts >= MaxLoadAttempts)
             return false;
@@ -504,7 +504,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// <summary>Must be called under <see cref="_cacheLock"/>.</summary>
     private void ClearFailureFor(string path, CanvasDevice device)
     {
-        if (PathMatches(_failedPath, path) && ReferenceEquals(_failedDevice, device))
+        if (PathMatches(_failedPath, path) && Win2DUtils.SameDevice(_failedDevice, device))
             ClearFailure();
     }
 
@@ -514,7 +514,7 @@ public sealed class BackgroundCompositor : IDisposable
     /// </summary>
     private int MarkFailed(string path, CanvasDevice device, string reason)
     {
-        if (!PathMatches(_failedPath, path) || !ReferenceEquals(_failedDevice, device))
+        if (!PathMatches(_failedPath, path) || !Win2DUtils.SameDevice(_failedDevice, device))
         {
             _failedPath = path;
             _failedDevice = device;
@@ -587,7 +587,7 @@ public sealed class BackgroundCompositor : IDisposable
         {
             if (_currentLoadId == loadId
                 && PathMatches(_inflightPath, path)
-                && ReferenceEquals(_inflightDevice, device))
+                && Win2DUtils.SameDevice(_inflightDevice, device))
             {
                 _inflightLoad = null;
                 _inflightPath = null;

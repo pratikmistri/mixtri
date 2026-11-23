@@ -67,6 +67,7 @@ public static class ProjectSaveCoordinator
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = root,
+            RequestedTheme = DialogHelper.ThemeOf(root),
         };
 
         ContentDialogResult choice;
@@ -178,6 +179,7 @@ public static class ProjectSaveCoordinator
             Title = "Saving project",
             Content = panel,
             XamlRoot = root,
+            RequestedTheme = DialogHelper.ThemeOf(root),
         };
 
         // No buttons, and Esc / programmatic-close attempts are refused until the save is

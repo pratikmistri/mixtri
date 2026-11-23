@@ -751,8 +751,26 @@ public static class ExportAudioPlan
             foreach (var path in project.AudioFilePaths)
             {
                 if (string.IsNullOrWhiteSpace(path)) continue;
+
+                // Same alignment as BuildPlacement: audio time = video time + offset. A
+                // negative result clamps to the file start and the audio enters later on the
+                // output instead (delay), losing that much of the take.
+                var offset = TimeSpan.FromSeconds(project.AudioToVideoOffsetSeconds);
+                var audioStart = trimStart + offset;
+                var delay = TimeSpan.Zero;
+                var audioTake = take;
+                if (audioStart < TimeSpan.Zero)
+                {
+                    delay = -audioStart;
+                    audioStart = TimeSpan.Zero;
+                    if (audioTake is { } t)
+                    {
+                        audioTake = t - delay;
+                        if (audioTake <= TimeSpan.Zero) continue;
+                    }
+                }
                 placements.Add(new AudioPlacement(
-                    path, AudioSourceKind.AudioFile, trimStart, take, TimeSpan.Zero));
+                    path, AudioSourceKind.AudioFile, audioStart, audioTake, delay));
             }
         }
 

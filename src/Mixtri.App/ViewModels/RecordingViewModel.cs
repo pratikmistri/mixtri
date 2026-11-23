@@ -285,17 +285,26 @@ public partial class RecordingViewModel : ObservableObject
 
         try
         {
+            // A minimized window renders nothing (and reports off-screen bounds), so restore
+            // it and bring it to the front BEFORE the capture target is derived from it.
+            if (CaptureMode == CaptureMode.Window && SelectedWindow is not null)
+            {
+                var hwnd = SelectedWindow.Handle;
+                if (IsIconic(hwnd))
+                {
+                    ShowWindow(hwnd, SW_RESTORE);
+                    // Give DWM a moment to finish the restore animation and publish real bounds.
+                    await Task.Delay(300);
+                }
+
+                SetForegroundWindow(hwnd);
+            }
+
             var target = BuildCaptureTarget();
             if (target is null)
             {
                 SetError("Could not determine capture target");
                 return;
-            }
-
-            // Bring the selected window to the front so it's fully visible for capture
-            if (CaptureMode == CaptureMode.Window && SelectedWindow is not null)
-            {
-                SetForegroundWindow(SelectedWindow.Handle);
             }
 
             // Recordings are working state, not deliverables: they go to LocalAppData so
@@ -658,6 +667,14 @@ public partial class RecordingViewModel : ObservableObject
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);

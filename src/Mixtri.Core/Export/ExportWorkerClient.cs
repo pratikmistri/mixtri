@@ -125,7 +125,8 @@ public sealed class ExportWorkerClient
             string? outputPath = null;
             string[]? warnings = null;
             string? failure = null;
-            while (true)
+            bool completedReceived = false;
+            while (!completedReceived)
             {
                 var nextLine = process.StandardOutput.ReadLineAsync();
                 if (await Task.WhenAny(nextLine, controls).ConfigureAwait(false) == controls)
@@ -146,6 +147,7 @@ public sealed class ExportWorkerClient
                     case ExportWorkerMessageKind.Completed:
                         outputPath = message.OutputPath;
                         warnings = message.Warnings;
+                        completedReceived = true;
                         break;
                     case ExportWorkerMessageKind.Failed:
                         failure = message.Error ?? "The export worker failed.";
@@ -158,11 +160,16 @@ public sealed class ExportWorkerClient
                 }
             }
             await process.WaitForExitAsync().ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
+            // A Completed message means the destination was already published; honor it even
+            // if cancellation raced in at the very end, otherwise the user sees "cancelled"
+            // over a file that was overwritten.
+            bool publishedDespiteCancel = completedReceived && failure is null
+                && !string.IsNullOrWhiteSpace(outputPath) && File.Exists(outputPath);
+            if (!publishedDespiteCancel) ct.ThrowIfCancellationRequested();
             var errorText = await errors.ConfigureAwait(false);
             if (failure is not null)
                 throw new InvalidOperationException(failure);
-            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(outputPath) || !File.Exists(outputPath))
+            if ((process.ExitCode != 0 && !publishedDespiteCancel) || string.IsNullOrWhiteSpace(outputPath) || !File.Exists(outputPath))
                 throw new InvalidOperationException(
                     $"The export worker exited without completing the export (exit {process.ExitCode}). {errorText}");
             succeeded = true;

@@ -52,6 +52,13 @@ public sealed record VideoImportResult
 
     /// <summary>True when an <c>audio.wav</c> was extracted.</summary>
     public bool HasAudio { get; init; }
+
+    /// <summary>
+    /// Set when the source reports an audio track but extracting it failed or timed out, so
+    /// the import is video-only. The UI should surface this to the user instead of letting
+    /// the audio vanish silently. <c>null</c> when nothing went wrong.
+    /// </summary>
+    public string? AudioWarning { get; init; }
 }
 
 /// <summary>
@@ -256,9 +263,15 @@ public static class VideoImportService
             // only, and re-decoding the untouched original avoids a needless second generation
             // of audio loss. A source with no audio is not an error — extraction simply yields
             // nothing and import continues.
-            bool hasAudio = await TryExtractAudioAsync(
+            var (hasAudio, audioFailure) = await TryExtractAudioAsync(
                 sourceFile, importFolder, audioPartial, audioPath,
                 p => progress?.Report(0.86 + (p * 0.13)), ct);
+            string? audioWarning = !hasAudio && probe.HasAudio
+                ? "The video was imported, but its audio could not be extracted, so it has no sound."
+                  + (string.IsNullOrWhiteSpace(audioFailure) ? "" : $" ({audioFailure})")
+                : null;
+            if (audioWarning is not null)
+                Debug.WriteLine($"[VideoImportService] {audioWarning}");
 
             progress?.Report(1.0);
 
@@ -274,6 +287,7 @@ public static class VideoImportService
                 SourceFileName = Path.GetFileName(fullSource),
                 WasTranscoded = true,
                 HasAudio = hasAudio,
+                AudioWarning = audioWarning,
             };
 
             Debug.WriteLine(
@@ -531,7 +545,7 @@ public static class VideoImportService
     /// Extracts the source's audio to a WAV side-car. Returns <c>false</c> — without throwing —
     /// when the source has no audio, so a silent clip imports as video-only rather than failing.
     /// </summary>
-    private static async Task<bool> TryExtractAudioAsync(
+    private static async Task<(bool Extracted, string? Failure)> TryExtractAudioAsync(
         StorageFile sourceFile,
         string importFolder,
         string partialPath,
@@ -561,7 +575,7 @@ public static class VideoImportService
             // No audio stream (or one the transcoder rejects): not fatal, import stays video-only.
             Debug.WriteLine($"[VideoImportService] Audio prepare failed, treating as no audio: {ex.Message}");
             await SafeDeleteAsync(destFile);
-            return false;
+            return (false, ex.Message);
         }
 
         if (!prep.CanTranscode)
@@ -569,7 +583,7 @@ public static class VideoImportService
             Debug.WriteLine(
                 $"[VideoImportService] No extractable audio ({prep.FailureReason}); importing video-only.");
             await SafeDeleteAsync(destFile);
-            return false;
+            return (false, prep.FailureReason.ToString());
         }
 
         try
@@ -581,17 +595,18 @@ public static class VideoImportService
         {
             Debug.WriteLine($"[VideoImportService] Audio extraction failed, importing video-only: {ex.Message}");
             await SafeDeleteAsync(destFile);
-            return false;
+            return (false, ex.Message);
         }
 
-        if (new FileInfo(partialPath).Length == 0)
+        // A bare WAV header (44 bytes) holds no samples: treat it as no audio.
+        if (new FileInfo(partialPath).Length <= 44)
         {
             await SafeDeleteAsync(destFile);
-            return false;
+            return (false, "the extracted audio was empty");
         }
 
         File.Move(partialPath, finalPath, overwrite: true);
-        return true;
+        return (true, null);
     }
 
     /// <summary>

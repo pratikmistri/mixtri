@@ -151,6 +151,15 @@ public sealed class AudioPlaybackEngine : IDisposable
     /// </summary>
     private static readonly TimeSpan MinDeviceRecoveryInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// How far the readers run ahead of the speaker: the device queues ~<see cref="OutputLatencyMs"/>
+    /// of audio between a reader producing a sample and it being heard. <see cref="Seek"/> and
+    /// <see cref="SyncTo"/> aim the readers this far ahead of the requested (video) position and
+    /// <see cref="CurrentPosition"/> reports the reader position minus it, so the editor
+    /// compares and seeks in the AUDIBLE clock and every caller agrees with every other.
+    /// </summary>
+    public static TimeSpan OutputLatency { get; } = TimeSpan.FromMilliseconds(OutputLatencyMs);
+
     private WaveOutEvent? _outputDevice;
 
     /// <summary>
@@ -160,6 +169,13 @@ public sealed class AudioPlaybackEngine : IDisposable
     private TransportFadeSampleProvider? _transport;
 
     private readonly List<AudioFileReader> _readers = [];
+
+    /// <summary>
+    /// Per-input gain stage of each entry in <see cref="_readers"/>, by index. Levels are set
+    /// here (glided over ~5 ms) rather than on <see cref="AudioFileReader.Volume"/>, whose
+    /// instant step clicks. The readers themselves always stay at unity.
+    /// </summary>
+    private readonly List<GainRampSampleProvider> _gains = [];
 
     /// <summary>
     /// Resampler of each entry in <see cref="_readers"/>, by index; <c>null</c> where the file
@@ -280,18 +296,21 @@ public sealed class AudioPlaybackEngine : IDisposable
                         ReadFully = true
                     };
 
-                    // AudioFileReader applies this to the samples it returns, so it survives
-                    // every Seek/ScrubTo without a separate provider in the chain.
-                    if (volumes is not null && volumes.TryGetValue(path, out float volume))
-                        reader.Volume = Math.Clamp(volume, 0f, 1f);
+                    // Applied by a per-input gain stage (see BuildInput), which survives every
+                    // Seek/ScrubTo and glides on later changes instead of stepping.
+                    float initialGain = volumes is not null && volumes.TryGetValue(path, out float volume)
+                        ? Math.Clamp(volume, 0f, 1f)
+                        : 1f;
 
                     IReadOnlyList<AudioFadeWindow>? windows = null;
                     if (fadeWindows is not null && fadeWindows.TryGetValue(path, out var found) && found.Count > 0)
                         windows = found;
 
-                    mixer.AddMixerInput(BuildInput(reader, windows, mixer.WaveFormat, out var resampler));
+                    mixer.AddMixerInput(BuildInput(reader, windows, initialGain, mixer.WaveFormat,
+                        out var resampler, out var gainStage));
                     _readers.Add(reader);
                     _resamplers.Add(resampler);
+                    _gains.Add(gainStage);
                 }
                 catch (Exception ex)
                 {
@@ -350,16 +369,15 @@ public sealed class AudioPlaybackEngine : IDisposable
                         ReadFully = true
                     };
 
-                    // AudioFileReader has its own Volume, applied to the samples it returns —
-                    // no extra provider needed, and it survives every Seek/ScrubTo.
-                    reader.Volume = Math.Clamp(placement.Volume, 0f, 1f);
-
-                    mixer.AddMixerInput(BuildInput(reader, windows: null, mixer.WaveFormat, out var resampler));
+                    mixer.AddMixerInput(BuildInput(reader, windows: null,
+                        Math.Clamp(placement.Volume, 0f, 1f), mixer.WaveFormat,
+                        out var resampler, out var gainStage));
 
                     // All three lists are indexed in lockstep, so commit them together only
                     // once nothing else can fail for this file.
                     _readers.Add(reader);
                     _resamplers.Add(resampler);
+                    _gains.Add(gainStage);
                     _placements.Add(placement);
                 }
                 catch (Exception ex)
@@ -410,8 +428,10 @@ public sealed class AudioPlaybackEngine : IDisposable
     private static ISampleProvider BuildInput(
         AudioFileReader reader,
         IReadOnlyList<AudioFadeWindow>? windows,
+        float initialGain,
         WaveFormat mixFormat,
-        out ResettableResampler? resampler)
+        out ResettableResampler? resampler,
+        out GainRampSampleProvider gainStage)
     {
         // `reader` doubles as both the sample source AND the position reference when applying
         // the fade: its CurrentTime reflects real elapsed file time, staying correct across
@@ -420,7 +440,10 @@ public sealed class AudioPlaybackEngine : IDisposable
             ? new EqualPowerFadeSampleProvider(reader, reader, windows)
             : reader;
 
-        provider = new SilencePaddedSampleProvider(provider);
+        // Level control, glided over ~5 ms so a mute/segment-crossing change never clicks.
+        // Upstream of the padding so it only ever sees real samples.
+        gainStage = new GainRampSampleProvider(provider, initialGain);
+        provider = new SilencePaddedSampleProvider(gainStage);
 
         if (provider.WaveFormat.Channels != mixFormat.Channels)
             provider = new ChannelMatchingSampleProvider(provider, mixFormat.Channels);
@@ -580,33 +603,88 @@ public sealed class AudioPlaybackEngine : IDisposable
         {
             bool audible = false;
             bool needsMove = false;
+            bool needsQuietMove = false;
+
+            // Readers run one output latency ahead of the speaker (see OutputLatency), so
+            // they are placed and compared at the shifted position. Audibility, though, is
+            // judged at the unshifted one: a track whose reader has already reached its end
+            // is still sounding its last ~latency from the device queue.
+            var readerPosition = outputPosition + OutputLatency;
 
             for (int i = 0; i < _readers.Count && i < _placements.Count; i++)
             {
                 var reader = _readers[i];
-                var target = _placements[i].FilePositionFor(outputPosition);
+                var placement = _placements[i];
+                var target = placement.FilePositionFor(readerPosition);
 
                 try
                 {
+                    if (placement.FilePositionFor(outputPosition) is not null)
+                        audible = true;
+
                     if (target is not { } filePosition)
                     {
-                        if (reader.Position < reader.Length)
+                        // Inside its final latency the reader is allowed to run on to its end.
+                        if (placement.FilePositionFor(outputPosition) is null
+                            && reader.Position < reader.Length)
                             needsMove = true;
                         continue;
                     }
 
                     audible = true;
                     if ((reader.CurrentTime - filePosition).Duration() > tolerance)
-                        needsMove = true;
+                    {
+                        // A reader parked at EOF is silent, so bringing it to its start is not
+                        // a discontinuity in anything the listener hears. It must not drag
+                        // every other track through a ramp-out/in dip.
+                        if (reader.Position >= reader.Length) needsQuietMove = true;
+                        else needsMove = true;
+                    }
                 }
                 catch { }
             }
 
             if (needsMove)
-                SeekCore(outputPosition, tolerance);
+                SeekCore(readerPosition, tolerance);
+            else if (needsQuietMove)
+                QuietMoveParkedCore(readerPosition, tolerance);
 
             return audible;
         }
+    }
+
+    /// <summary>
+    /// Moves only the readers currently parked at EOF (silent) to their start, WITHOUT the
+    /// transport ramp the whole mix would get from <see cref="SeekCore"/>. Runs on the audio
+    /// thread between two reads when the device is playing, so it never races a read.
+    /// Caller holds <see cref="_transportLock"/>.
+    /// </summary>
+    private void QuietMoveParkedCore(TimeSpan position, TimeSpan tolerance)
+    {
+        if (_transport is { } transport && _outputDevice?.PlaybackState == PlaybackState.Playing)
+        {
+            int generation = _loadGeneration;
+            long queuedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            transport.QueueQuietMove(fromAudioThread =>
+            {
+                lock (_transportLock)
+                {
+                    if (_disposed || generation != _loadGeneration) return;
+
+                    var target = position;
+                    if (fromAudioThread)
+                    {
+                        var late = System.Diagnostics.Stopwatch.GetElapsedTime(queuedAt);
+                        target += late < MaxSeekLatencyCompensation ? late : MaxSeekLatencyCompensation;
+                    }
+
+                    MoveReaders(target, tolerance, parkedOnly: true);
+                }
+            });
+            return;
+        }
+
+        MoveReaders(position, tolerance, parkedOnly: true);
     }
 
     /// <summary>
@@ -649,10 +727,10 @@ public sealed class AudioPlaybackEngine : IDisposable
 
         lock (_transportLock)
         {
-            foreach (var reader in _readers)
+            for (int i = 0; i < _readers.Count && i < _gains.Count; i++)
             {
-                if (volumes.TryGetValue(reader.FileName, out float volume))
-                    reader.Volume = Math.Clamp(volume, 0f, 1f);
+                if (volumes.TryGetValue(_readers[i].FileName, out float volume))
+                    _gains[i].SetTarget(volume);
             }
         }
     }
@@ -678,10 +756,11 @@ public sealed class AudioPlaybackEngine : IDisposable
 
         lock (_transportLock)
         {
-            if (_readers.Count == 0 || volumes.Count != _readers.Count) return false;
+            if (_readers.Count == 0 || volumes.Count != _readers.Count
+                || _gains.Count != _readers.Count) return false;
 
             for (int i = 0; i < _readers.Count; i++)
-                _readers[i].Volume = Math.Clamp(volumes[i], 0f, 1f);
+                _gains[i].SetTarget(volumes[i]);
 
             return true;
         }
@@ -737,7 +816,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         lock (_transportLock)
         {
-            SeekCore(position, tolerance: null);
+            SeekCore(position + OutputLatency, tolerance: null);
         }
     }
 
@@ -759,7 +838,11 @@ public sealed class AudioPlaybackEngine : IDisposable
         {
             lock (_transportLock)
             {
-                return _readers.Count > 0 ? _readers[0].CurrentTime : null;
+                if (_readers.Count == 0) return null;
+
+                // The reader is ahead of the speaker by the output latency (see Seek).
+                var audible = _readers[0].CurrentTime - OutputLatency;
+                return audible < TimeSpan.Zero ? TimeSpan.Zero : audible;
             }
         }
     }
@@ -981,7 +1064,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     /// each one that moved. With a <paramref name="tolerance"/>, readers already within it are
     /// left alone. Caller holds <see cref="_transportLock"/>.
     /// </summary>
-    private void MoveReaders(TimeSpan position, TimeSpan? tolerance)
+    private void MoveReaders(TimeSpan position, TimeSpan? tolerance, bool parkedOnly = false)
     {
         // Placement mode: `position` is an OUTPUT-timeline instant, and each reader maps it
         // through its own offset (or parks at EOF where that track is silent). Plain mode:
@@ -993,6 +1076,8 @@ public sealed class AudioPlaybackEngine : IDisposable
             var reader = _readers[i];
             try
             {
+                if (parkedOnly && reader.Position < reader.Length) continue;
+
                 TimeSpan? target = !placed
                     ? position
                     : i < _placements.Count ? _placements[i].FilePositionFor(position) : null;
@@ -1116,6 +1201,7 @@ public sealed class AudioPlaybackEngine : IDisposable
     {
         // The resamplers are managed and hold no native resources; they die with the chain.
         _resamplers.Clear();
+        _gains.Clear();
 
         foreach (var reader in _readers)
         {
@@ -1159,6 +1245,7 @@ public sealed class AudioPlaybackEngine : IDisposable
         private float _gain;
         private float _target = 1f;
         private Action<bool>? _pendingSeek;
+        private Action<bool>? _pendingQuietMove;
         private bool _loggedReadFailure;
 
         public TransportFadeSampleProvider(ISampleProvider source, double rampSeconds)
@@ -1192,6 +1279,15 @@ public sealed class AudioPlaybackEngine : IDisposable
             lock (_sync) { _pendingSeek = seek; }
         }
 
+        /// <summary>
+        /// Queues a move that needs no ramp (it only touches silent readers): it runs between
+        /// reads at the start of the next one, without gain change. Replaces any not yet taken.
+        /// </summary>
+        public void QueueQuietMove(Action<bool> move)
+        {
+            lock (_sync) { _pendingQuietMove = move; }
+        }
+
         /// <summary>Removes and returns the queued seek, if any, for the caller to run itself.</summary>
         public Action<bool>? TakePendingSeek()
         {
@@ -1205,14 +1301,23 @@ public sealed class AudioPlaybackEngine : IDisposable
 
         public int Read(float[] buffer, int offset, int count)
         {
-            Action<bool>? seek;
+            Action<bool>? seek, quiet;
             float gain, target;
             lock (_sync)
             {
                 seek = _pendingSeek;
                 _pendingSeek = null;
+                quiet = _pendingQuietMove;
+                _pendingQuietMove = null;
                 gain = _gain;
                 target = _target;
+            }
+
+            // Silent-reader moves run first, between reads and with no ramp. (If a ramped
+            // seek is also pending it repositions everything again, which is harmless.)
+            if (quiet is not null)
+            {
+                try { quiet(true); } catch { }
             }
 
             int done = 0;

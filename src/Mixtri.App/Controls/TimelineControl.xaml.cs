@@ -41,6 +41,23 @@ public sealed partial class TimelineControl : UserControl
     private enum DragMode { None, Playhead, TrimStart, TrimEnd, ZoomSegmentBody, ZoomSegmentLeftEdge, ZoomSegmentRightEdge, ZoomSegmentCreate, SegmentBody, SegmentLeftEdge, SegmentRightEdge, TextSlideWindowInEdge, TextSlideWindowOutEdge, CameraSegmentBody, CameraSegmentLeftEdge, CameraSegmentRightEdge, CameraSegmentCreate, TextOverlayBody, TextOverlayLeftEdge, TextOverlayRightEdge, TextOverlayCreate, InsertedAudioBody, InsertedAudioLeftEdge, InsertedAudioRightEdge, CursorAnchorBody }
     private DragMode _dragMode = DragMode.None;
 
+    // ── Gesture ownership + edge auto-scroll ──
+    // The pointer that started the active drag. Every other pointer is ignored until it ends,
+    // so a second finger / a hovering mouse cannot overwrite or end the gesture.
+    private uint _dragPointerId;
+    private DispatcherTimer? _dragAutoScrollTimer;
+    private CanvasControl? _dragAutoScrollCanvas;
+    private double _dragLastPointerX = double.NaN;
+    private double _dragLastPointerY = double.NaN;
+    private const double DragAutoScrollEdgePx = 24.0;
+    private const double DragAutoScrollIntervalMs = 30.0;
+    private const double DragAutoScrollMinPxPerSec = 150.0;
+    private const double DragAutoScrollMaxPxPerSec = 800.0;
+
+    /// <summary>True when a drag is active and <paramref name="e"/> belongs to a different pointer.</summary>
+    private bool IsForeignPointer(PointerRoutedEventArgs e)
+        => _dragMode != DragMode.None && e.Pointer.PointerId != _dragPointerId;
+
     // ── Primary-track (video / text slide) segment drag state ──
     private const double SegmentEdgeHitWidth = 8.0;     // px hit zone for trim edges
     private const double SegmentMoveThreshold = 5.0;    // px before a body press becomes a move
@@ -405,6 +422,12 @@ public sealed partial class TimelineControl : UserControl
             // of a latched drag (or a hint-lane height) with no pointer behind it.
             ResetDragState();
             ReleaseAllPointerCaptures();
+            StopDragAutoScroll();
+            if (_dragAutoScrollTimer is not null)
+            {
+                _dragAutoScrollTimer.Tick -= DragAutoScroll_Tick;
+                _dragAutoScrollTimer = null;
+            }
             UpdateVideoTrackHeight();
 
             // Holds one float[] per visible segment; nothing else releases it.
@@ -1502,9 +1525,23 @@ public sealed partial class TimelineControl : UserControl
         return (Math.Clamp(x, 0, maxOffset), true);
     }
 
+    // A throwing Draw handler surfaces as an unhandled exception on the UI thread and takes the
+    // app down; one bad frame (stale model, disposed bitmap, device loss mid-draw) must not.
+    private static void LogDrawFailure(string canvas, Exception ex)
+    {
+        try { Mixtri.Core.Diagnostics.DiagLog.Write("TimelineDraw", $"{canvas} draw failed: {ex}"); }
+        catch { /* logging must never throw out of a draw handler */ }
+    }
+
     // --- Time Ruler ---
 
     private void TimeRulerCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        try { TimeRulerCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("TimeRulerCanvas", ex); }
+    }
+
+    private void TimeRulerCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
     {
         var ds = args.DrawingSession;
         var model = Model;
@@ -1600,8 +1637,63 @@ public sealed partial class TimelineControl : UserControl
             WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
         };
 
+    private CanvasStrokeStyle? _dashedStrokeStyle;
+    private CanvasStrokeStyle? _roundCapStrokeStyle;
+
+    // Stroke styles are device-independent, so one instance each serves every draw.
+    private CanvasStrokeStyle DashedStrokeStyle =>
+        _dashedStrokeStyle ??= new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+
+    private CanvasStrokeStyle RoundCapStrokeStyle =>
+        _roundCapStrokeStyle ??= new CanvasStrokeStyle
+        {
+            StartCap = CanvasCapStyle.Round,
+            EndCap = CanvasCapStyle.Round,
+        };
+
+    // Per-item label formats keyed by (size, centered). Sizes are snapped to 0.5 so a continuously
+    // varying clip height cannot grow the cache without bound.
+    private readonly Dictionary<(float Size, bool Centered), Microsoft.Graphics.Canvas.Text.CanvasTextFormat>
+        _labelFormatCache = new();
+
+    private Microsoft.Graphics.Canvas.Text.CanvasTextFormat GetCachedLabelFormat(float size, bool centered)
+    {
+        size = MathF.Round(size * 2f) / 2f;
+        var key = (size, centered);
+        if (_labelFormatCache.TryGetValue(key, out var cached))
+            return cached;
+
+        var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+        {
+            FontSize = size,
+            FontFamily = "Segoe UI",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
+            WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
+            TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
+        };
+        if (centered)
+            fmt.HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center;
+        else
+            fmt.TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis;
+
+        if (_labelFormatCache.Count > 64)
+        {
+            foreach (var v in _labelFormatCache.Values) v.Dispose();
+            _labelFormatCache.Clear();
+        }
+        _labelFormatCache[key] = fmt;
+        return fmt;
+    }
+
     private void DisposeCachedTextFormats()
     {
+        _dashedStrokeStyle?.Dispose();
+        _dashedStrokeStyle = null;
+        _roundCapStrokeStyle?.Dispose();
+        _roundCapStrokeStyle = null;
+        foreach (var v in _labelFormatCache.Values) v.Dispose();
+        _labelFormatCache.Clear();
         _regular11TextFormat?.Dispose();
         _regular11TextFormat = null;
         _semiBold11TextFormat?.Dispose();
@@ -1639,6 +1731,12 @@ public sealed partial class TimelineControl : UserControl
     private const float OverlayVideoTrackVerticalPadding = 6f;
 
     private void VideoTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        try { VideoTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("VideoTrackCanvas", ex); }
+    }
+
+    private void VideoTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
     {
         var ds = args.DrawingSession;
         var model = Model;
@@ -2000,7 +2098,7 @@ public sealed partial class TimelineControl : UserControl
 
         using var geom = CanvasGeometry.CreateRoundedRectangle(
             ds, x1, pad, blockW, blockH, VideoClipCornerRadius, VideoClipCornerRadius);
-        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
+        var dashed = DashedStrokeStyle;
 
         ds.FillGeometry(geom, EmptyPlaceholderFill);
         ds.DrawGeometry(geom, EmptyPlaceholderStroke, 1.2f, dashed);
@@ -2117,16 +2215,7 @@ public sealed partial class TimelineControl : UserControl
                 if (segW > 20)
                 {
                     var labelText = slide.Text.Length > 24 ? slide.Text[..24] + "…" : slide.Text;
-                    using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                    {
-                        FontSize = Math.Min(15, clipH * 0.35f),
-                        FontFamily = "Segoe UI",
-                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                        HorizontalAlignment = Microsoft.Graphics.Canvas.Text.CanvasHorizontalAlignment.Center,
-                        VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                        WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                        TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    };
+                    var fmt = GetCachedLabelFormat(Math.Min(15, clipH * 0.35f), centered: true);
                     ds.DrawText(labelText, new Rect(x1 + 4, clipY, segW - 8, clipH), textLabelColor, fmt);
                 }
 
@@ -2262,13 +2351,8 @@ public sealed partial class TimelineControl : UserControl
         float hintH = Math.Max(1f, rowH - rowPad * 2);
         float hintW = Math.Max(2f, w - 2);
 
-        using var dashed = new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash };
-        using var label = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-        {
-            FontSize = 10,
-            FontFamily = "Segoe UI",
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        };
+        var dashed = DashedStrokeStyle;
+        var label = SemiBold10TextFormat;
 
         using (ds.CreateLayer(reveal, new Rect(0, rowY, w, rowH)))
         {
@@ -3699,7 +3783,7 @@ public sealed partial class TimelineControl : UserControl
                 using var previewRect = CanvasGeometry.CreateRoundedRectangle(ds, cx1, py, cw, ph, ZoomSegmentCornerRadius, ZoomSegmentCornerRadius);
                 ds.FillGeometry(previewRect, ZoomSegmentCreatePreview);
                 ds.DrawGeometry(previewRect, ZoomSegmentBorder, 1f,
-                    new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+                    DashedStrokeStyle);
             }
         }
     }
@@ -3858,11 +3942,7 @@ public sealed partial class TimelineControl : UserControl
             if (right <= left)
                 continue;
 
-            using var stroke = new CanvasStrokeStyle
-            {
-                StartCap = CanvasCapStyle.Round,
-                EndCap = CanvasCapStyle.Round,
-            };
+            var stroke = RoundCapStrokeStyle;
             ds.DrawLine(left, bridgeY, right, bridgeY, ZoomSegmentLinkedConnector, 3f, stroke);
         }
     }
@@ -4257,6 +4337,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         var model = Model;
         if (sender is not CanvasControl canvas || TimeRulerCanvas is null || model is null) return;
         var pos = e.GetCurrentPoint(canvas).Position;
@@ -4345,6 +4426,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void ZoomTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas || TimeRulerCanvas is null)
         {
             ResetDragState();
@@ -4647,11 +4729,23 @@ public sealed partial class TimelineControl : UserControl
 
     private void AudioTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        try { AudioTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("AudioTrackCanvas", ex); }
+    }
+
+    private void AudioTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
+    {
         DrawWaveformTrack(sender, args, isMic: false, AudioWaveformColor, AudioEnvelopeColor,
             Model?.EffectiveVolume(AudioMixChannel.System) <= 0);
     }
 
     private void MicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        try { MicTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("MicTrackCanvas", ex); }
+    }
+
+    private void MicTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
     {
         DrawWaveformTrack(sender, args, isMic: true, MicWaveformColor, MicEnvelopeColor,
             Model?.EffectiveVolume(AudioMixChannel.Mic) <= 0);
@@ -5071,6 +5165,10 @@ public sealed partial class TimelineControl : UserControl
             // Empty lane space behaves like every other read-only track: move the playhead.
             ClearOtherSelections(SelectionKind.None);
             PlayheadPosition = XToTime(pos.X);
+            // ...and keep scrubbing while the pointer is held, exactly like the ruler and the
+            // recorded-audio lanes (Track_PointerPressed).
+            _dragMode = DragMode.Playhead;
+            canvas.CapturePointer(e.Pointer);
             return;
         }
 
@@ -5115,11 +5213,16 @@ public sealed partial class TimelineControl : UserControl
 
     private void AudioTrackLane_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
         switch (_dragMode)
         {
+            case DragMode.Playhead:
+                PlayheadPosition = XToTime(pos.X);
+                NoteDragPointer(canvas, pos);
+                break;
             case DragMode.InsertedAudioBody:
             {
                 // Snap the block's projected left edge (output time, so TimeToX directly).
@@ -5152,6 +5255,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void AudioTrackLane_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
 
         try
@@ -5217,6 +5321,12 @@ public sealed partial class TimelineControl : UserControl
     }
 
     private void VoiceOverTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        try { VoiceOverTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("VoiceOverTrackCanvas", ex); }
+    }
+
+    private void VoiceOverTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
         => DrawInsertedAudioLane(sender, args, music: false);
 
     /// <summary>
@@ -5240,6 +5350,12 @@ public sealed partial class TimelineControl : UserControl
     }
 
     private void MusicTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        try { MusicTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("MusicTrackCanvas", ex); }
+    }
+
+    private void MusicTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
         => DrawInsertedAudioLane(sender, args, music: true);
 
     private void DrawInsertedAudioLane(CanvasControl sender, CanvasDrawEventArgs args, bool music)
@@ -5347,16 +5463,7 @@ public sealed partial class TimelineControl : UserControl
 
             if (blockW > 40)
             {
-                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 10,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-                };
+                var fmt = GetCachedLabelFormat(10f, centered: false);
                 string label = item.IsMuted ? item.Name + " (muted)" : item.Name;
                 // Inset past both handles so the label never sits under a grab target.
                 float textInset = InsertedAudioHandleWidth + 4;
@@ -5662,16 +5769,7 @@ public sealed partial class TimelineControl : UserControl
 
         if (muted && blockW > 46)
         {
-            using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-            {
-                FontSize = 10,
-                FontFamily = "Segoe UI",
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-            };
+            var fmt = GetCachedLabelFormat(10f, centered: false);
 
             ds.DrawText(
                 "muted",
@@ -6466,6 +6564,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void CursorTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
@@ -6505,6 +6604,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void CursorTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas)
         {
             ResetDragState();
@@ -6713,6 +6813,7 @@ public sealed partial class TimelineControl : UserControl
     {
         var model = Model;
         if (model is null || sender is not CanvasControl canvas) return;
+        if (_dragMode != DragMode.None) return;
 
         var pos = e.GetCurrentPoint(canvas).Position;
 
@@ -6899,10 +7000,12 @@ public sealed partial class TimelineControl : UserControl
 
     private void VideoTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         var model = Model;
         if (model is null || sender is not CanvasControl canvas) return;
 
         var pos = e.GetCurrentPoint(canvas).Position;
+        if (_dragMode != DragMode.None) NoteDragPointer(canvas, pos);
 
         // A gesture in flight stays with the handler that started it — the pointer routinely
         // leaves the band it was pressed in while dragging, and re-resolving by Y mid-drag
@@ -7079,7 +7182,11 @@ public sealed partial class TimelineControl : UserControl
     /// gesture behind it; leaving <see cref="DragMode.Playhead"/> set would make every later
     /// hover over the group scrub the playhead.
     /// </remarks>
-    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => AbortDrag();
+    private void VideoTrack_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (IsForeignPointer(e)) return;
+        AbortDrag();
+    }
 
     /// <summary>
     /// Capture-lost / cancel handler for every other track canvas (ruler, camera, text,
@@ -7088,7 +7195,131 @@ public sealed partial class TimelineControl : UserControl
     /// stale <see cref="DragMode.Playhead"/> made every later hover scrub the playhead, and a
     /// stale camera/text/audio drag kept a block following a pointer nobody was pressing.
     /// </summary>
-    private void Track_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => AbortDrag();
+    private void Track_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (IsForeignPointer(e)) return;
+        AbortDrag();
+    }
+
+    // ── Edge auto-scroll while dragging ──
+    // Covers playhead scrubs and segment move / edge-trim / text-window drags on the primary
+    // track. Camera, text-overlay, zoom, cursor and inserted-audio drags do not auto-scroll.
+
+    private bool IsAutoScrollDragMode() => _dragMode switch
+    {
+        DragMode.Playhead => true,
+        DragMode.SegmentLeftEdge or DragMode.SegmentRightEdge => true,
+        DragMode.TextSlideWindowInEdge or DragMode.TextSlideWindowOutEdge => true,
+        DragMode.SegmentBody => _segmentDragMoved,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Remembers the live pointer position of the active drag and starts / stops the edge
+    /// auto-scroll timer depending on whether the pointer sits in the edge zone.
+    /// </summary>
+    private void NoteDragPointer(CanvasControl canvas, Point pos)
+    {
+        _dragLastPointerX = pos.X;
+        _dragLastPointerY = pos.Y;
+        _dragAutoScrollCanvas = canvas;
+
+        bool inEdge = IsAutoScrollDragMode()
+            && Model is { } model
+            && TimeCoordinateConverter.MaxScrollOffset(model) > 0
+            && (pos.X < DragAutoScrollEdgePx || pos.X > canvas.ActualWidth - DragAutoScrollEdgePx);
+        if (!inEdge)
+        {
+            _dragAutoScrollTimer?.Stop();
+            return;
+        }
+
+        if (_dragAutoScrollTimer is null)
+        {
+            _dragAutoScrollTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(DragAutoScrollIntervalMs),
+            };
+            _dragAutoScrollTimer.Tick += DragAutoScroll_Tick;
+        }
+        if (!_dragAutoScrollTimer.IsEnabled)
+            _dragAutoScrollTimer.Start();
+    }
+
+    private void StopDragAutoScroll()
+    {
+        _dragAutoScrollTimer?.Stop();
+        _dragAutoScrollCanvas = null;
+        _dragLastPointerX = double.NaN;
+        _dragLastPointerY = double.NaN;
+    }
+
+    private void DragAutoScroll_Tick(object? sender, object e)
+    {
+        try
+        {
+            var model = Model;
+            var canvas = _dragAutoScrollCanvas;
+            if (model is null || canvas is null || double.IsNaN(_dragLastPointerX)
+                || !IsAutoScrollDragMode())
+            {
+                StopDragAutoScroll();
+                return;
+            }
+
+            double x = _dragLastPointerX;
+            double width = canvas.ActualWidth;
+            double direction;
+            double depth;
+            if (x < DragAutoScrollEdgePx)
+            {
+                direction = -1;
+                depth = (DragAutoScrollEdgePx - x) / DragAutoScrollEdgePx;
+            }
+            else if (x > width - DragAutoScrollEdgePx)
+            {
+                direction = 1;
+                depth = (x - (width - DragAutoScrollEdgePx)) / DragAutoScrollEdgePx;
+            }
+            else
+            {
+                _dragAutoScrollTimer?.Stop();
+                return;
+            }
+            depth = Math.Clamp(depth, 0, 1);
+
+            double pps = TimeToX(TimeSpan.FromSeconds(1)) - TimeToX(TimeSpan.Zero);
+            if (pps <= 0 || double.IsNaN(pps)) return;
+
+            double pxPerSec = DragAutoScrollMinPxPerSec
+                + (DragAutoScrollMaxPxPerSec - DragAutoScrollMinPxPerSec) * depth;
+            double stepSeconds = pxPerSec * (DragAutoScrollIntervalMs / 1000.0) / pps;
+
+            double oldOffset = model.ScrollOffset;
+            double newOffset = TimeCoordinateConverter.ClampScrollOffset(model, oldOffset + direction * stepSeconds);
+            if (Math.Abs(newOffset - oldOffset) < 1e-9) return; // pinned at the scroll limit
+
+            model.ScrollOffset = newOffset;
+
+            // The content slid under the stationary pointer. A body drag stores its press point
+            // as pixel X, so move that anchor with the content or the drop would be measured in
+            // the old mapping. Edge drags and the playhead use absolute positions.
+            if (_dragMode == DragMode.SegmentBody)
+                _segmentDragStartX -= (newOffset - oldOffset) * pps;
+
+            if (_dragMode == DragMode.Playhead)
+                PlayheadPosition = XToTime(x);
+            else
+                VideoTrack_SegmentMoved(model, canvas, x, _dragLastPointerY);
+
+            InvalidateAll();
+        }
+        catch (Exception ex)
+        {
+            StopDragAutoScroll();
+            LogDrawFailure("DragAutoScroll", ex);
+        }
+    }
 
     /// <summary>Abandons whatever gesture is in flight and repaints from the committed model.</summary>
     private void AbortDrag()
@@ -7120,6 +7351,7 @@ public sealed partial class TimelineControl : UserControl
     {
         bool hadSnapGuide = !double.IsNaN(_segmentSnapGuideX);
 
+        StopDragAutoScroll();
         ResetCursorAnchorDrag();
         ResetZoomDrag();
 
@@ -7182,14 +7414,22 @@ public sealed partial class TimelineControl : UserControl
     /// the barrel/right button for pen and touch. A right-press must not start a drag or a
     /// scrub — RightTapped still fires on its own and opens the context menus.
     /// </summary>
-    private static bool IsPrimaryPointerPress(UIElement relativeTo, PointerRoutedEventArgs e)
+    private bool IsPrimaryPointerPress(UIElement relativeTo, PointerRoutedEventArgs e)
     {
+        // A press while a gesture is in flight belongs to a second pointer; it must not start
+        // (or overwrite) a drag.
+        if (_dragMode != DragMode.None) return false;
+
         var point = e.GetCurrentPoint(relativeTo);
-        if (e.Pointer.PointerDeviceType == PointerDeviceType.Mouse)
-            return point.Properties.IsLeftButtonPressed;
-        return point.IsInContact
-            && !point.Properties.IsRightButtonPressed
-            && !point.Properties.IsBarrelButtonPressed;
+        bool primary = e.Pointer.PointerDeviceType == PointerDeviceType.Mouse
+            ? point.Properties.IsLeftButtonPressed
+            : point.IsInContact
+                && !point.Properties.IsRightButtonPressed
+                && !point.Properties.IsBarrelButtonPressed;
+        // Recorded on every accepted press; it only matters once a drag actually starts
+        // (_dragMode != None), which is when IsForeignPointer consults it.
+        if (primary) _dragPointerId = e.Pointer.PointerId;
+        return primary;
     }
 
     /// <summary>
@@ -7300,11 +7540,14 @@ public sealed partial class TimelineControl : UserControl
 
     private void Track_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
 
         if (_dragMode == DragMode.Playhead)
         {
-            PlayheadPosition = XToTime(e.GetCurrentPoint(canvas).Position.X);
+            var scrubPos = e.GetCurrentPoint(canvas).Position;
+            PlayheadPosition = XToTime(scrubPos.X);
+            NoteDragPointer(canvas, scrubPos);
             return;
         }
 
@@ -7316,12 +7559,15 @@ public sealed partial class TimelineControl : UserControl
 
     private void Track_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
 
-        bool wasDragging = _dragMode != DragMode.None;
+        // A pure playhead scrub changes nothing the tracks paint (the playhead overlay is moved
+        // by the PlayheadPosition change itself), so only other drag families repaint fully.
+        bool needsFullRepaint = _dragMode != DragMode.None && _dragMode != DragMode.Playhead;
         ResetDragState();
         canvas.ReleasePointerCapture(e.Pointer);
-        if (wasDragging)
+        if (needsFullRepaint)
             InvalidateAll();
     }
 
@@ -7369,6 +7615,16 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private void TimelineControl_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // Escape cancels the gesture in flight without committing it: AbortDrag resets state and
+        // closes the trim preview, it never raises a Moved/Resized/TrimRequested event.
+        if (e.Key == Windows.System.VirtualKey.Escape && _dragMode != DragMode.None)
+        {
+            AbortDrag();
+            ReleaseAllPointerCaptures(); // the resulting CaptureLost finds no drag and returns
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key is not (Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)) return;
 
         // Only when the timeline itself has focus — not one of the mute buttons in the label
@@ -7412,6 +7668,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void VideoTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         var model = Model;
         if (sender is not CanvasControl canvas)
         {
@@ -8054,6 +8311,12 @@ public sealed partial class TimelineControl : UserControl
 
     private void CameraTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        try { CameraTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("CameraTrackCanvas", ex); }
+    }
+
+    private void CameraTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
+    {
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -8140,7 +8403,7 @@ public sealed partial class TimelineControl : UserControl
             float ch = h - CameraSegmentVerticalPadding * 2;
             using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
             ds.FillGeometry(preview, Color.FromArgb(120, 76, 175, 80));
-            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+            ds.DrawGeometry(preview, border, 1f, DashedStrokeStyle);
         }
     }
 
@@ -8250,6 +8513,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void CameraTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
@@ -8308,6 +8572,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void CameraTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
 
         try
@@ -8473,6 +8738,12 @@ public sealed partial class TimelineControl : UserControl
 
     private void TextTrackCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        try { TextTrackCanvas_DrawCore(sender, args); }
+        catch (Exception ex) { LogDrawFailure("TextTrackCanvas", ex); }
+    }
+
+    private void TextTrackCanvas_DrawCore(CanvasControl sender, CanvasDrawEventArgs args)
+    {
         var ds = args.DrawingSession;
         var model = Model;
         float w = (float)sender.ActualWidth;
@@ -8516,16 +8787,7 @@ public sealed partial class TimelineControl : UserControl
                 // property pane for every block, falling back to "Text" when empty.
                 string baseText = string.IsNullOrWhiteSpace(seg.Text) ? "Text" : seg.Text;
                 string label = seg.Enabled ? baseText : baseText + " (off)";
-                using var fmt = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
-                {
-                    FontSize = 11,
-                    FontFamily = "Segoe UI",
-                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                    VerticalAlignment = Microsoft.Graphics.Canvas.Text.CanvasVerticalAlignment.Center,
-                    WordWrapping = Microsoft.Graphics.Canvas.Text.CanvasWordWrapping.NoWrap,
-                    TrimmingGranularity = Microsoft.Graphics.Canvas.Text.CanvasTextTrimmingGranularity.Character,
-                    TrimmingSign = Microsoft.Graphics.Canvas.Text.CanvasTrimmingSign.Ellipsis,
-                };
+                var fmt = GetCachedLabelFormat(11f, centered: false);
                 ds.DrawText(label, new Rect(x1 + 6, segY, segW - 12, segH), textColor, fmt);
             }
 
@@ -8547,7 +8809,7 @@ public sealed partial class TimelineControl : UserControl
             float ch = h - TextOverlayVerticalPadding * 2;
             using var preview = CanvasGeometry.CreateRoundedRectangle(ds, cx1, cy, cw, ch, 4, 4);
             ds.FillGeometry(preview, Color.FromArgb(120, 245, 166, 35));
-            ds.DrawGeometry(preview, border, 1f, new CanvasStrokeStyle { DashStyle = CanvasDashStyle.Dash });
+            ds.DrawGeometry(preview, border, 1f, DashedStrokeStyle);
         }
     }
 
@@ -8719,6 +8981,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void TextTrack_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
         var pos = e.GetCurrentPoint(canvas).Position;
 
@@ -8792,6 +9055,7 @@ public sealed partial class TimelineControl : UserControl
 
     private void TextTrack_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (IsForeignPointer(e)) return;
         if (sender is not CanvasControl canvas) return;
 
         try
@@ -8909,6 +9173,14 @@ public sealed partial class TimelineControl : UserControl
         var model = Model;
         if (model is null) return;
 
+        // Drags store their start positions as pixel X; changing zoom/scroll mid-gesture would
+        // change the pixel<->time mapping under them and the drop would land elsewhere.
+        if (_dragMode != DragMode.None)
+        {
+            e.Handled = true;
+            return;
+        }
+
         // Zooming or scrolling moves every chip out from under the pointer. Both the pending
         // linger timer and any already-open tooltip are anchored to a rectangle that is about to
         // be wrong, so drop the hover entirely — the next PointerMoved re-hit-tests and starts a
@@ -8950,16 +9222,24 @@ public sealed partial class TimelineControl : UserControl
             double anchoredScroll = TimeCoordinateConverter.ScrollOffsetForZoomAnchor(
                 model, anchorX, newZoom, rulerWidth, ActualWidth);
 
+            double newScroll = TimeCoordinateConverter.ClampScrollOffset(model, anchoredScroll);
             model.ZoomLevel = newZoom;
             // Re-clamped against the NEW zoom: zooming out shrinks the scrollable range, and an
             // offset left past it would show empty space after the end of the timeline.
-            model.ScrollOffset = TimeCoordinateConverter.ClampScrollOffset(model, anchoredScroll);
+            model.ScrollOffset = newScroll;
         }
         else
         {
             // Scroll → horizontal scroll, 0.5 seconds per notch.
             double scrollDelta = (delta > 0 ? -notches : notches) * 0.5;
-            model.ScrollOffset = TimeCoordinateConverter.ClampScrollOffset(model, model.ScrollOffset + scrollDelta);
+            double clampedScroll = TimeCoordinateConverter.ClampScrollOffset(model, model.ScrollOffset + scrollDelta);
+            if (Math.Abs(clampedScroll - model.ScrollOffset) < 1e-9)
+            {
+                // Already at the scroll limit: nothing changed, so skip the full repaint.
+                e.Handled = true;
+                return;
+            }
+            model.ScrollOffset = clampedScroll;
         }
 
         InvalidateAll();

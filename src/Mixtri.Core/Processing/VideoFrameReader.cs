@@ -174,7 +174,9 @@ public sealed class VideoFrameReader : IDisposable
     /// </summary>
     public int GetFrameIndex(TimeSpan time)
     {
-        int index = (int)(time.TotalSeconds * _fps);
+        // Same tick-truncation tolerance as FrameTimeConverter.TimeToFrameFloor: a TimeSpan
+        // built from n / fps is a few ticks short of frame n and must still resolve to it.
+        int index = FrameTimeConverter.TimeToFrameFloor(time.TotalSeconds, _fps);
         return Math.Clamp(index, 0, Math.Max(0, _source.FrameCount - 1));
     }
 

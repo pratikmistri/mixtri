@@ -361,5 +361,46 @@ public sealed class ExportAudioPlanTests
         Assert.IsTrue(plan.All(p => p.TrimFromStart == TimeSpan.Zero));
     }
 
+    [TestMethod]
+    public void LegacyTimeline_AppliesPositiveAudioOffsetToAudioFilesOnly()
+    {
+        var project = NewProject(PrimaryMic);
+        project.AudioToVideoOffsetSeconds = 0.5;
+        var model = new TimelineModel
+        {
+            Duration = TimeSpan.FromSeconds(10),
+            TrimStart = TimeSpan.FromSeconds(2),
+            TrimEnd = TimeSpan.FromSeconds(8),
+        };
+
+        var plan = ExportAudioPlan.Build(project, model, new TimelineMapper(model, 30));
+
+        var embedded = plan.Single(p => p.Kind == AudioSourceKind.EmbeddedVideoTrack);
+        var mic = plan.Single(p => p.Kind == AudioSourceKind.AudioFile);
+        AssertSeconds(2, embedded.TrimFromStart, "Embedded audio needs no offset");
+        AssertSeconds(2.5, mic.TrimFromStart, "Separate audio is read at video time + offset");
+        AssertSeconds(0, mic.Delay, "No delay for a positive offset");
+    }
+
+    [TestMethod]
+    public void LegacyTimeline_NegativeOffsetBeyondStart_DelaysAudioAndShortensTake()
+    {
+        var project = NewProject(PrimaryMic);
+        project.AudioToVideoOffsetSeconds = -1.5;
+        var model = new TimelineModel
+        {
+            Duration = TimeSpan.FromSeconds(10),
+            TrimStart = TimeSpan.FromSeconds(1),
+            TrimEnd = TimeSpan.FromSeconds(7),
+        };
+
+        var plan = ExportAudioPlan.Build(project, model, new TimelineMapper(model, 30));
+
+        var mic = plan.Single(p => p.Kind == AudioSourceKind.AudioFile);
+        AssertSeconds(0, mic.TrimFromStart, "Clamped to the start of the file");
+        AssertSeconds(0.5, mic.Delay, "Audio enters late on the output");
+        AssertSeconds(5.5, mic.TakeDuration!.Value, "Take shrinks by the delay");
+    }
+
     #endregion
 }
