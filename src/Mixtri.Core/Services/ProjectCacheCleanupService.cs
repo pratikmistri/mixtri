@@ -23,19 +23,38 @@ public static class ProjectCacheCleanupService
     public static readonly TimeSpan StalePartAge = TimeSpan.FromHours(24);
 
     // Serialises "decide a folder is stale and delete it" against a project open claiming
-    // that folder. An open takes a lease (under the gate) before it stamps or extracts into
-    // the folder; the prune re-checks both the lease and the age under the same gate right
-    // before deleting, so a folder an open has touched is never removed under it.
+    // that folder. An open takes a lease before it stamps or extracts into the folder and
+    // holds it through extraction; the prune re-checks both the lease and the age under the
+    // same gate right before deleting, so a folder an open has touched is never removed
+    // under it. The cache is shared by every Mixtri process, so the outer gate is a named
+    // (per-session) mutex; CacheGate only guards the in-process lease table. Lock order is
+    // always mutex, then CacheGate.
+    private static readonly Mutex CrossProcessGate = new(false, @"Local\Mixtri.ProjectCacheGate");
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, int> Leases = new(StringComparer.OrdinalIgnoreCase);
 
+    private static void EnterGate()
+    {
+        try { CrossProcessGate.WaitOne(); }
+        catch (AbandonedMutexException) { /* previous owner died; we own it now */ }
+    }
+
+    private static void ExitGate()
+    {
+        try { CrossProcessGate.ReleaseMutex(); }
+        catch (ApplicationException) { /* not owned: nothing to release */ }
+    }
+
     /// <summary>
     /// Marks the cache folder <paramref name="folderName"/> (the project id in "N" format) as
-    /// in use until the returned handle is disposed. Blocks while a prune is deleting it, so
-    /// the caller then simply re-creates and re-extracts.
+    /// in use until the returned handle is disposed. Blocks while a prune (in any Mixtri
+    /// process) is deciding on a folder, so the caller then simply re-creates and re-extracts.
+    /// The gate is a mutex and therefore thread-affine: dispose the handle on the thread that
+    /// took it (the synchronous extraction body in <c>MixtriPackageService.OpenAsync</c>).
     /// </summary>
     public static IDisposable Lease(string folderName)
     {
+        EnterGate();
         lock (CacheGate)
         {
             Leases[folderName] = Leases.TryGetValue(folderName, out int n) ? n + 1 : 1;
@@ -57,6 +76,7 @@ public static class ProjectCacheCleanupService
                 else
                     Leases.Remove(folderName);
             }
+            ExitGate();
         }
     }
 
@@ -99,23 +119,33 @@ public static class ProjectCacheCleanupService
                         // A live extraction writes .part files stamped with the zip entry's
                         // ORIGINAL time before renaming them, so they can look stale: never
                         // touch a leased folder's parts, and decide under the gate.
-                        lock (CacheGate)
+                        EnterGate();
+                        try
                         {
-                            if (!Leases.ContainsKey(name))
-                                DeleteStaleParts(folder, partCutoff);
+                            lock (CacheGate)
+                            {
+                                if (!Leases.ContainsKey(name))
+                                    DeleteStaleParts(folder, partCutoff);
+                            }
                         }
+                        finally { ExitGate(); }
                         continue;
                     }
 
-                    lock (CacheGate)
+                    EnterGate();
+                    try
                     {
-                        // Re-check under the gate: an open may have leased or stamped the
-                        // folder since the scan above.
-                        if (Leases.ContainsKey(name) || NewestWriteUtc(folder) >= projectCutoff)
-                            continue;
+                        lock (CacheGate)
+                        {
+                            // Re-check under the gate: an open (here or in another process)
+                            // may have leased or stamped the folder since the scan above.
+                            if (Leases.ContainsKey(name) || NewestWriteUtc(folder) >= projectCutoff)
+                                continue;
 
-                        Directory.Delete(folder, recursive: true);
+                            Directory.Delete(folder, recursive: true);
+                        }
                     }
+                    finally { ExitGate(); }
                     removed++;
                     DiagLog.Write("ProjectCache", $"Pruned stale project cache '{name}'.");
                 }
