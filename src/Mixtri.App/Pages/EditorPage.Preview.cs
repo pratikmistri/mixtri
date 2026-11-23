@@ -29,6 +29,7 @@ public sealed partial class EditorPage
     private sealed class SegmentPreview : IDisposable
     {
         public VideoFrameReader? Reader;
+        public string? VideoPath;
         public PreviewRenderer? Renderer;
         public bool Ready;
         public long LastUsed;
@@ -114,6 +115,106 @@ public sealed partial class EditorPage
         }
 
         _segmentPreviews.Clear();
+        DisposeRetainedSegmentReaders();
+    }
+
+    // Decoders parked by a style-only invalidation so the next build can reuse them
+    // instead of reopening the file. Keyed by segment id; the path guards against the
+    // segment having been re-pointed at different media in the meantime.
+    private readonly Dictionary<string, (string Path, VideoFrameReader Reader)> _retainedSegmentReaders = new();
+    private const int MaxRetainedSegmentReaders = 4;
+
+    private void DisposeRetainedSegmentReaders()
+    {
+        foreach (var entry in _retainedSegmentReaders.Values)
+            DisposeOffUiThread(entry.Reader);
+        _retainedSegmentReaders.Clear();
+    }
+
+    /// <summary>
+    /// Disposes <paramref name="ctx"/>'s compositor and webcam state but parks its decoder
+    /// for reuse by the next <see cref="GetOrBuildSegmentPreviewAsync"/> of the same segment.
+    /// Only for style/config changes — the media is unchanged, so the decoder stays valid.
+    /// </summary>
+    private void RetainSegmentReaderAndDispose(string segmentId, string? videoPath, SegmentPreview ctx)
+    {
+        var reader = ctx.Reader;
+        ctx.Reader = null;
+        if (reader is not null && !string.IsNullOrEmpty(videoPath))
+        {
+            if (_retainedSegmentReaders.Remove(segmentId, out var previous)
+                && !ReferenceEquals(previous.Reader, reader))
+                DisposeOffUiThread(previous.Reader);
+
+            if (_retainedSegmentReaders.Count >= MaxRetainedSegmentReaders)
+                DisposeRetainedSegmentReaders();
+
+            _retainedSegmentReaders[segmentId] = (videoPath, reader);
+        }
+        else
+        {
+            DisposeOffUiThread(reader);
+        }
+
+        ctx.Dispose();
+    }
+
+    /// <summary>
+    /// Style-only counterpart of <see cref="DisposeSegmentPreviews"/>: drops every appended
+    /// segment's compositor (so it rebuilds with the new global/per-segment config on next
+    /// render) but keeps the decoders alive. Use for style, cursor, motion and aspect edits;
+    /// use <see cref="DisposeSegmentPreviews"/> whenever the media or the graphics device changes.
+    /// </summary>
+    private void InvalidateSegmentPreviewStyles()
+    {
+        _segmentPreviewGeneration++;
+
+        foreach (var (id, ctx) in _segmentPreviews)
+        {
+            var path = ctx.VideoPath;
+            RetainSegmentReaderAndDispose(id, path, ctx);
+        }
+
+        _segmentPreviews.Clear();
+        _lastRenderedSegmentId = null;
+    }
+
+    // Parsed cursor logs for appended clips, keyed by path + write time (see
+    // LoadPrimaryCursorDataCachedAsync). Consumers never mutate the data.
+    private readonly Dictionary<string, (DateTime WriteTimeUtc, MouseRecordingData Data)> _segmentCursorDataCache
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    private async Task<MouseRecordingData?> LoadSegmentCursorDataCachedAsync(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+
+        DateTime stamp;
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) return null;
+            stamp = info.LastWriteTimeUtc;
+        }
+        catch { return null; }
+
+        if (_segmentCursorDataCache.TryGetValue(path, out var cached) && cached.WriteTimeUtc == stamp)
+            return cached.Data;
+
+        try
+        {
+            var data = await Task.Run(() => MouseHookRecorder.LoadFromFile(path));
+            if (data is not null)
+            {
+                if (_segmentCursorDataCache.Count >= 8) _segmentCursorDataCache.Clear();
+                _segmentCursorDataCache[path] = (stamp, data);
+            }
+            return data;
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Preview", $"segment cursor load FAILED '{path}': {ex.Message}");
+            return null;
+        }
     }
 
     private void TrimSegmentPreviewCache()
@@ -547,16 +648,11 @@ public sealed partial class EditorPage
         if (initGeneration != _previewInitGeneration) return;
 
         // Load mouse data for cursor smoothing + click animations
-        MouseRecordingData? mouseData = null;
-        if (!string.IsNullOrEmpty(project.CursorDataFilePath) && File.Exists(project.CursorDataFilePath))
-        {
-            try { mouseData = MouseHookRecorder.LoadFromFile(project.CursorDataFilePath); }
-            catch (Exception ex)
-            {
-                Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
-                    $"cursor load FAILED '{project.CursorDataFilePath}': {ex.Message}");
-            }
-        }
+        // Cached per file + write time and parsed off the UI thread (this re-runs on every
+        // ModelReloaded). The generation is re-checked after the await so a superseded run
+        // never publishes cursor data onto the shared model.
+        MouseRecordingData? mouseData = await LoadPrimaryCursorDataCachedAsync(project.CursorDataFilePath);
+        if (initGeneration != _previewInitGeneration) return;
 
         // A primary source with no cursor recording — an imported video, or a recording whose
         // cursor log is missing — is NOT a reason to abandon the rest of this method. Returning
@@ -1968,7 +2064,7 @@ public sealed partial class EditorPage
         }
 
         TrimSegmentPreviewCache();
-        var ctx = new SegmentPreview { LastUsed = ++_segmentPreviewUseCounter };
+        var ctx = new SegmentPreview { LastUsed = ++_segmentPreviewUseCounter, VideoPath = seg.VideoFilePath };
         _segmentPreviews[seg.Id] = ctx; // insert early to avoid duplicate builds
         int generation = _segmentPreviewGeneration;
 
@@ -1994,7 +2090,18 @@ public sealed partial class EditorPage
         try
         {
             int fps = seg.Fps > 0 ? seg.Fps : 30;
-            var reader = await VideoFrameReader.OpenPreviewFromVideoPathAsync(
+            // A style-only invalidation parks the decoder; reuse it when it still points at
+            // this segment's media instead of reopening the file.
+            VideoFrameReader? reader = null;
+            if (_retainedSegmentReaders.Remove(seg.Id, out var retained))
+            {
+                if (string.Equals(retained.Path, seg.VideoFilePath, StringComparison.OrdinalIgnoreCase))
+                    reader = retained.Reader;
+                else
+                    DisposeOffUiThread(retained.Reader);
+            }
+
+            reader ??= await VideoFrameReader.OpenPreviewFromVideoPathAsync(
                 seg.VideoFilePath,
                 fps,
                 _previewResolution.MaxWidth,
@@ -2015,12 +2122,11 @@ public sealed partial class EditorPage
                 return Abandon();
             }
 
-            MouseRecordingData? mouseData = null;
-            if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath))
-            {
-                try { mouseData = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath); }
-                catch { }
-            }
+            // Cached + parsed off the UI thread; re-check abandonment since the await can
+            // outlive a cache clear.
+            MouseRecordingData? mouseData = await LoadSegmentCursorDataCachedAsync(seg.CursorDataFilePath);
+            if (Abandoned())
+                return Abandon();
 
             // An imported video has no cursor recording. Rather than skip the compositor for it
             // (which would drop background styling and, more importantly, any manual zoom the

@@ -81,7 +81,11 @@ public class WebcamCompositor : IDisposable
     /// </summary>
     public void UpdateStyle(WebcamOverlayStyle style)
     {
-        _style = style ?? throw new ArgumentNullException(nameof(style));
+        ArgumentNullException.ThrowIfNull(style);
+        // The editor pushes the style every preview tick; value-equal records (all members
+        // are value types or string) must not rebuild the shadow sprite and clip geometry.
+        if (_style.Equals(style)) return;
+        _style = style;
         InvalidateCache();
     }
 

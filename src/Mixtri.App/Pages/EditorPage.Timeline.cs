@@ -64,8 +64,10 @@ public sealed partial class EditorPage
                 // Cursor + click data
                 if (!string.IsNullOrEmpty(seg.CursorDataFilePath) && File.Exists(seg.CursorDataFilePath!))
                 {
-                    try { visual.Cursor = MouseHookRecorder.LoadFromFile(seg.CursorDataFilePath!); }
+                    try { visual.Cursor = await LoadCursorLogCachedAsync(seg.CursorDataFilePath!); }
                     catch { /* no cursor data for this recording */ }
+                    if (_pageUnloaded || generation != _previewInitGeneration
+                        || !ReferenceEquals(model, ViewModel.Model)) return;
                 }
 
                 // Auto-zoom keyframes from this recording's clicks, tagged with its file so
@@ -92,6 +94,30 @@ public sealed partial class EditorPage
             }
         }
         Timeline.Refresh();
+    }
+
+    private static readonly Dictionary<string, (DateTime WriteUtc, MouseRecordingData Data)> s_cursorLogCache
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parses a cursor log off the UI thread, caching per path + last-write time so
+    /// repeated editor (re)constructions don't re-parse unchanged logs.
+    /// </summary>
+    private static async Task<MouseRecordingData?> LoadCursorLogCachedAsync(string path)
+    {
+        DateTime stamp = File.GetLastWriteTimeUtc(path);
+        lock (s_cursorLogCache)
+        {
+            if (s_cursorLogCache.TryGetValue(path, out var hit) && hit.WriteUtc == stamp)
+                return hit.Data;
+        }
+        var data = await Task.Run(() => MouseHookRecorder.LoadFromFile(path));
+        if (data is not null)
+        {
+            lock (s_cursorLogCache)
+                s_cursorLogCache[path] = (stamp, data);
+        }
+        return data;
     }
 
     /// <summary>
@@ -588,8 +614,16 @@ public sealed partial class EditorPage
         if (!_executingOverlayTextBurst)
             EndOverlayTextBurst();
 
-        DispatcherQueue.TryEnqueue(() =>
+        // Coalesced: a slider drag raises one StateChanged per tick, and this pass redraws the
+        // whole timeline and preview and re-syncs every pane. One pass at idle priority reads
+        // the final model state, so the ticks collapsed into it lose nothing. The flag is
+        // cleared as the pass STARTS, so a change arriving mid-pass schedules another.
+        if (_undoResyncPending) return;
+        _undoResyncPending = true;
+
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
+            _undoResyncPending = false;
             if (_pageUnloaded) return;
 
             if (_zoomRegionEditMode)
@@ -703,8 +737,14 @@ public sealed partial class EditorPage
             // position from a compositor still holding the anchors that were just undone, and
             // park the handle where the undone drag left it.
             SyncCursorAnchorUI();
-        });
+        }))
+        {
+            _undoResyncPending = false;
+        }
     }
+
+    /// <summary>True while a coalesced post-undo/redo resync is queued (UI thread only).</summary>
+    private bool _undoResyncPending;
 
     private void OnVideoClipSelected(object? sender, int? clipIndex)
     {
@@ -1695,9 +1735,6 @@ public sealed partial class EditorPage
 
             // At video time T, the audio file position is T + audioOffset
             _audioOffsetSeconds = audioOffset;
-            _audioPlayer?.Dispose();
-            _audioPlayer = new AudioPlaybackEngine();
-            _appliedRecordedChannelMutes = null;
 
             // Filtered by the PERSISTED mute state, not loaded wholesale. Loading
             // `validPaths` here ignored IsSystemAudioMuted/IsMicAudioMuted entirely, so a
@@ -1717,8 +1754,9 @@ public sealed partial class EditorPage
             // No fade windows: T9 confirmed transition crossfades can't be wired here
             // without drifting once the timeline has real cuts — see
             // AudioPlaybackEngine's class remarks for the full reasoning.
-            if (unmuted.Count > 0)
-                _audioPlayer.Load(unmuted, volumes);
+            // Opening the WAVs and the output device is done off the UI thread (mirrors
+            // ReloadInsertedAudioPlayer); the swap is generation-checked.
+            await SwapRecordedAudioPlayerAsync(unmuted, volumes, initGeneration);
 
             // The mute BUTTONS are drawn from the model too, and are likewise only updated
             // by their own click handlers — so a restored project showed unmuted icons over
@@ -2829,21 +2867,95 @@ public sealed partial class EditorPage
         var project = ProjectService.Instance.CurrentProject;
         if (project is null) return;
 
-        _audioPlayer?.Dispose();
-        _audioPlayer = new AudioPlaybackEngine();
-        _appliedRecordedChannelMutes = null;
-
         var paths = GetUnmutedAudioPaths(project);
-        if (paths.Count > 0)
-        {
-            var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
-            foreach (var path in paths)
-                volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+        var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths)
+            volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
 
-            // No fade windows here either, for the same reason as the initial Load
-            // above — see AudioPlaybackEngine's class remarks (T9).
-            _audioPlayer.Load(paths, volumes);
+        // The current engine keeps playing until the new one is ready, but a track that was
+        // just muted must go quiet immediately rather than after the rebuild.
+        if (_audioPlayer is { IsLoaded: true } old)
+        {
+            var silence = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var loaded in old.LoadedPaths)
+            {
+                if (!volumes.ContainsKey(loaded)) silence[loaded] = 0f;
+            }
+            if (silence.Count > 0) old.SetVolumesByPath(silence);
         }
+
+        _ = SwapRecordedAudioPlayerAsync(paths, volumes, _previewInitGeneration);
+    }
+
+    /// <summary>Invalidates in-flight recorded-audio engine builds.</summary>
+    private int _recordedAudioGeneration;
+
+    /// <summary>
+    /// Builds the recorded-audio engine on a background thread (<c>Load</c> opens every WAV
+    /// and creates the output device) and swaps it in on the UI thread, disposing the old one
+    /// only after the swap. A newer rebuild, a newer preview init or page unload discards
+    /// the result. Never throws.
+    /// </summary>
+    private async Task SwapRecordedAudioPlayerAsync(
+        List<string> paths, Dictionary<string, float> volumes, int initGeneration)
+    {
+        int generation = ++_recordedAudioGeneration;
+
+        if (paths.Count == 0)
+        {
+            // Nothing audible: no file to open, so no need to leave the UI thread.
+            _audioPlayer?.Dispose();
+            _audioPlayer = new AudioPlaybackEngine();
+            _appliedRecordedChannelMutes = null;
+            return;
+        }
+
+        AudioPlaybackEngine? built = null;
+        try
+        {
+            built = await Task.Run(() =>
+            {
+                var engine = new AudioPlaybackEngine();
+                try
+                {
+                    engine.Load(paths, volumes);
+                    return engine;
+                }
+                catch
+                {
+                    engine.Dispose();
+                    throw;
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+                $"recorded audio engine failed to load: {ex.Message}");
+            return;
+        }
+
+        // Back on the UI thread (the awaiting context). Publishing a stale engine would play
+        // the pre-edit set and leak the one that superseded it.
+        if (generation != _recordedAudioGeneration
+            || initGeneration != _previewInitGeneration
+            || _pageUnloaded)
+        {
+            built.Dispose();
+            return;
+        }
+
+        var previous = _audioPlayer;
+        _audioPlayer = built;
+        _appliedRecordedChannelMutes = null;
+        previous?.Dispose();
+
+        // The mix may have moved while the files were opening; the next playhead sync
+        // re-applies per-segment channel mutes on top of these plain gains.
+        var fresh = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in built.LoadedPaths)
+            fresh[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+        built.SetVolumesByPath(fresh);
     }
 
     /// <summary>

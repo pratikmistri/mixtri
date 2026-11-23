@@ -53,6 +53,18 @@ public sealed partial class OpenProjectsPage : Page
 {
     private bool _isLoading;
 
+    /// <summary>Set when a refresh was requested while one was running; it reruns afterwards.</summary>
+    private bool _refreshPending;
+
+    /// <summary>Cancels the running refresh when a newer one is requested or the page unloads.</summary>
+    private CancellationTokenSource? _refreshCts;
+
+    /// <summary>Upper bound on projects listed, newest first, so discovery stays bounded.</summary>
+    private const int MaxProjects = 200;
+
+    /// <summary>How many packages are read concurrently.</summary>
+    private const int ReadParallelism = 4;
+
     /// <summary>Set while a project is opening, so a second click cannot start another.</summary>
     private bool _isOpening;
 
@@ -60,13 +72,21 @@ public sealed partial class OpenProjectsPage : Page
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += (_, _) => _refreshCts?.Cancel();
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e) => await RefreshAsync();
 
     private async Task RefreshAsync()
     {
-        if (_isLoading) return;
+        // Re-entry guard: only one refresh runs. A request that arrives meanwhile
+        // supersedes it — the running one is cancelled and rerun from scratch.
+        if (_isLoading)
+        {
+            _refreshPending = true;
+            _refreshCts?.Cancel();
+            return;
+        }
         _isLoading = true;
 
         LoadingRing.IsActive = true;
@@ -75,37 +95,30 @@ public sealed partial class OpenProjectsPage : Page
 
         try
         {
-            var entries = await Task.Run(DiscoverProjects);
-
-            var cards = new List<ProjectCard>(entries.Count);
-            foreach (var entry in entries)
+            do
             {
-                // Manifest and poster are read off the UI thread; the BitmapImage itself
-                // must be created on it.
-                var (name, subtitle, modified, poster) = await Task.Run(() => ReadCardData(entry));
-
-                BitmapImage? image = null;
-                if (poster is { Length: > 0 })
-                    image = await CreateBitmapAsync(poster);
-
-                cards.Add(new ProjectCard
+                _refreshPending = false;
+                using var cts = new CancellationTokenSource();
+                _refreshCts = cts;
+                try
                 {
-                    Path = entry.Path,
-                    Name = name,
-                    Subtitle = subtitle,
-                    ModifiedAt = modified,
-                    Poster = image,
-                });
+                    await RefreshCoreAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Superseded (or the page went away); the loop reruns if requested.
+                }
+                catch (Exception ex)
+                {
+                    Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Refresh failed: {ex}");
+                    EmptyState.Visibility = Visibility.Visible;
+                }
+                finally
+                {
+                    if (ReferenceEquals(_refreshCts, cts)) _refreshCts = null;
+                }
             }
-
-            ProjectsSource.Source = GroupByDay(cards);
-            ProjectsGrid.ItemsSource = ProjectsSource.View;
-            EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        catch (Exception ex)
-        {
-            Mixtri.Core.Diagnostics.DiagLog.Write("OpenProjects", $"Refresh failed: {ex}");
-            EmptyState.Visibility = Visibility.Visible;
+            while (_refreshPending);
         }
         finally
         {
@@ -113,6 +126,98 @@ public sealed partial class OpenProjectsPage : Page
             LoadingRing.Visibility = Visibility.Collapsed;
             _isLoading = false;
         }
+    }
+
+    private async Task RefreshCoreAsync(CancellationToken ct)
+    {
+        // Discovery (including RecentProjectsStore.Load's File.Exists probes) runs off the
+        // UI thread.
+        var entries = await Task.Run(DiscoverProjects, ct);
+        ct.ThrowIfCancellationRequested();
+
+        // Readers run on the thread pool with bounded parallelism and hand finished cards
+        // over through a channel; this method (on the UI thread) builds the BitmapImage and
+        // publishes, so the first cards appear without waiting for the last.
+        var channel = System.Threading.Channels.Channel.CreateUnbounded<(RecentProject Entry,
+            (string Name, string Subtitle, DateTime Modified, byte[]? Poster) Data)>();
+
+        var producer = Task.Run(async () =>
+        {
+            try
+            {
+                await Parallel.ForEachAsync(
+                    entries,
+                    new ParallelOptions { MaxDegreeOfParallelism = ReadParallelism, CancellationToken = ct },
+                    (entry, token) =>
+                    {
+                        (string, string, DateTime, byte[]?) data;
+                        try
+                        {
+                            data = ReadCardData(entry);
+                        }
+                        catch (Exception ex)
+                        {
+                            // One unreadable package must not blank the whole gallery.
+                            Mixtri.Core.Diagnostics.DiagLog.Write(
+                                "OpenProjects", $"Card '{entry.Path}' unreadable: {ex.Message}");
+                            return ValueTask.CompletedTask;
+                        }
+
+                        channel.Writer.TryWrite((entry, data));
+                        return ValueTask.CompletedTask;
+                    });
+                channel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                channel.Writer.TryComplete(ex);
+            }
+        }, CancellationToken.None);
+
+        var cards = new List<ProjectCard>(entries.Count);
+        var lastPublish = DateTime.UtcNow;
+        var published = 0;
+
+        await foreach (var (entry, data) in channel.Reader.ReadAllAsync(ct))
+        {
+            BitmapImage? image = null;
+            if (data.Poster is { Length: > 0 })
+                image = await CreateBitmapAsync(data.Poster);
+
+            ct.ThrowIfCancellationRequested();
+
+            cards.Add(new ProjectCard
+            {
+                Path = entry.Path,
+                Name = data.Name,
+                Subtitle = data.Subtitle,
+                ModifiedAt = data.Modified,
+                Poster = image,
+            });
+
+            // First card immediately, then at most ~4 republishes a second: the grouped
+            // source is rebuilt on each publish, so it is batched rather than per card.
+            if (published == 0 || (DateTime.UtcNow - lastPublish).TotalMilliseconds >= 250)
+            {
+                Publish(cards);
+                published = cards.Count;
+                lastPublish = DateTime.UtcNow;
+            }
+        }
+
+        await producer;
+        ct.ThrowIfCancellationRequested();
+
+        if (cards.Count != published || cards.Count == 0)
+            Publish(cards);
+
+        EmptyState.Visibility = cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Publish(List<ProjectCard> cards)
+    {
+        ProjectsSource.Source = GroupByDay(cards);
+        ProjectsGrid.ItemsSource = ProjectsSource.View;
     }
 
     /// <summary>
@@ -165,8 +270,13 @@ public sealed partial class OpenProjectsPage : Page
             }
         }
 
-        // Ordering is left to GroupByDay, which re-sorts everything on ModifiedAt.
-        return byPath.Values.ToList();
+        // Newest first, capped: the gallery shows what the user touched lately, and an
+        // unbounded scan of a big Videos folder would otherwise open every package. Display
+        // order within the page is still decided by GroupByDay on ModifiedAt.
+        return byPath.Values
+            .OrderByDescending(e => e.LastUsedUtc)
+            .Take(MaxProjects)
+            .ToList();
     }
 
     private static IEnumerable<string> SaveFolders()
@@ -223,8 +333,7 @@ public sealed partial class OpenProjectsPage : Page
     private static (string Name, string Subtitle, DateTime Modified, byte[]? Poster) ReadCardData(
         RecentProject entry)
     {
-        var manifest = MixtriPackageService.ReadManifest(entry.Path);
-        var poster = MixtriPackageService.ReadPoster(entry.Path);
+        var (manifest, poster) = MixtriPackageService.ReadManifestAndPoster(entry.Path);
 
         // The file name wins: it is what the user chose, what Explorer shows, and it stays
         // right even if the file is renamed outside the app. The stored project name is

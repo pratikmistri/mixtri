@@ -1571,7 +1571,10 @@ public sealed partial class EditorPage
         // for them. This is the one call they all share.
         ProjectService.Instance.MarkDirty();
 
-        Timeline.InvalidateAllCanvases();
+        // Coalesced: colour-picker, font-size and gradient-angle handlers call this every
+        // tick, and repainting every timeline canvas each time is wasted UI-thread work. The
+        // preview render below stays immediate; the track thumbnails catch up after a pause.
+        ScheduleTimelineInvalidate();
         _ = UpdatePreviewFrameAsync(ViewModel.Model.PlayheadPosition, force: true);
     }
 

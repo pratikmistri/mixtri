@@ -228,6 +228,9 @@ public class CursorRenderer : IDisposable
     private const float TouchTapScale = 0.6f;            // scale down to 60% on tap
     private const float TouchRadiusUnscaled = 12f;       // circle radius at scale = 1
 
+    // Per-frame scratch, consumed within RenderTouchClicks only (one render thread per renderer).
+    private readonly List<(ClickEvent Click, double ClickTime)> _downClicksScratch = new();
+
     /// <summary>
     /// Renders touch indicators at click-down positions. Consecutive clicks whose
     /// animations would overlap are merged into a single "chain" so that only one
@@ -245,7 +248,8 @@ public class CursorRenderer : IDisposable
         float baseScale = Math.Clamp(_style.Scale, 1.0f, 6.0f);
 
         // Collect click-down events with computed click times (already sorted by timestamp)
-        var downClicks = new List<(ClickEvent Click, double ClickTime)>();
+        var downClicks = _downClicksScratch;
+        downClicks.Clear();
         foreach (var click in activeClicks)
         {
             if (!click.IsDown) continue;

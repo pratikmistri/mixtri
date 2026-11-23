@@ -72,6 +72,7 @@ public sealed partial class EditorPage : Page
     // keyed by VideoSegment.Id. The primary recording uses _frameReader/_previewRenderer.
     private readonly Dictionary<string, SegmentPreview> _segmentPreviews = new();
     private string? _lastRenderedSegmentId;
+    private (Rect Rect, float NormX, float NormY, float NormSize)? _lastWebcamLayoutKey;
 
     /// <summary>
     /// Cache generation for <see cref="_segmentPreviews"/>. A build awaits a multi-second
@@ -228,8 +229,22 @@ public sealed partial class EditorPage : Page
         // Keep webcam overlay in sync with preview frame layout
         Preview.FrameLayoutChanged += (_, _) =>
         {
+            // The overlay position is a pure function of the layout rect and the webcam's
+            // normalised placement, so skip the Canvas/size writes (each a layout invalidation)
+            // on the many frames where neither moved.
             if (_hasWebcamOverlay)
-                UpdateWebcamOverlayPosition();
+            {
+                var webcamKey = (Preview.FrameLayoutRect, _webcamNormX, _webcamNormY, _webcamNormSize);
+                if (!_lastWebcamLayoutKey.HasValue || !_lastWebcamLayoutKey.Value.Equals(webcamKey))
+                {
+                    _lastWebcamLayoutKey = webcamKey;
+                    UpdateWebcamOverlayPosition();
+                }
+            }
+            else
+            {
+                _lastWebcamLayoutKey = null;
+            }
 
             // The zoom-region picker maps through the composed frame's layout, so it has to
             // follow every redraw that can move or resize it.
