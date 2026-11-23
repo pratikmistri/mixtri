@@ -165,7 +165,8 @@ public readonly record struct AudioPlacement(
 /// <see cref="AudioPlacement.PlaysAtNativeRateOnSpeedAdjustedSegment"/> so the exporter can
 /// report the limitation rather than imply full A/V sync — instead of losing the export.
 /// A segment set to <see cref="SegmentAudioMode.Muted"/> emits no placement at all, at any
-/// speed.</para>
+/// speed, and a channel listed in <see cref="VideoSegment.MutedAudioChannels"/> emits none
+/// for that segment's files of that channel.</para>
 ///
 /// <para><b>Transition crossfades (T7) and why export still hard-cuts.</b> Every boundary
 /// <see cref="TransitionResolver"/> reports as active gets an outgoing placement
@@ -266,6 +267,39 @@ public static class ExportAudioPlan
     public static IReadOnlyList<AudioPlacement> Build(
         Project project, TimelineModel? timeline, TimelineMapper? mapper)
     {
+        var recorded = BuildRecordedCore(project, timeline, mapper);
+
+        // Inserted tracks are built into a SEPARATE list and concatenated only on the way
+        // out, so they can never reach ApplyRecordedMix. That separation is load-bearing, not
+        // stylistic: an inserted clip is also an AudioSourceKind.AudioFile, so the classifier
+        // would read its file name (typically `audio.wav`) as system capture and REPLACE its
+        // carefully computed clip×lane gain with the system channel's — or drop it entirely
+        // when system audio is muted. Keeping them in one list would leave that correctness
+        // resting on nothing but the order of two statements; two guard tests pin it.
+        var inserted = timeline is not null ? BuildInsertedTracks(timeline) : [];
+
+        recorded.AddRange(inserted);
+        return recorded;
+    }
+
+    /// <summary>
+    /// Only the placements cut from recordings (embedded tracks and the recorder's own
+    /// system/mic files), with the per-channel mix already applied — everything
+    /// <see cref="Build"/> returns except the inserted voice-over/music tracks.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the editor preview, which plays inserted tracks through their own engine
+    /// but must place recorded audio exactly where export muxes it (see
+    /// <see cref="PlacedSegmentAudio"/>). Detached audio blocks are inserted tracks, so they
+    /// are deliberately NOT in this list even though they read recorded files.
+    /// </remarks>
+    public static IReadOnlyList<AudioPlacement> BuildRecorded(
+        Project project, TimelineModel? timeline, TimelineMapper? mapper)
+        => BuildRecordedCore(project, timeline, mapper);
+
+    private static List<AudioPlacement> BuildRecordedCore(
+        Project project, TimelineModel? timeline, TimelineMapper? mapper)
+    {
         ArgumentNullException.ThrowIfNull(project);
 
         var videoSegments = timeline?.Segments
@@ -285,16 +319,6 @@ public static class ExportAudioPlan
         if (timeline is not null)
             recorded = ApplyRecordedMix(recorded, timeline);
 
-        // Inserted tracks are built into a SEPARATE list and concatenated only on the way
-        // out, so they can never reach ApplyRecordedMix. That separation is load-bearing, not
-        // stylistic: an inserted clip is also an AudioSourceKind.AudioFile, so the classifier
-        // would read its file name (typically `audio.wav`) as system capture and REPLACE its
-        // carefully computed clip×lane gain with the system channel's — or drop it entirely
-        // when system audio is muted. Keeping them in one list would leave that correctness
-        // resting on nothing but the order of two statements; two guard tests pin it.
-        var inserted = timeline is not null ? BuildInsertedTracks(timeline) : [];
-
-        recorded.AddRange(inserted);
         return recorded;
     }
 
@@ -479,6 +503,11 @@ public static class ExportAudioPlan
 
                 foreach (var path in audioPaths)
                 {
+                    // One channel silenced on just this segment (the user muted one block
+                    // on the system or mic lane). A whole-segment mute is handled inside
+                    // BuildPlacement, for the embedded track too.
+                    if (RecordedAudio.IsMutedOnSegment(segment, path)) continue;
+
                     var placement = BuildPlacement(
                         path, AudioSourceKind.AudioFile, segment, offsetSeconds, fadeOut);
                     if (placement is { } audioPlacement)

@@ -1258,3 +1258,64 @@ public class ChangeSegmentAudioModeOperation : SegmentEditOperationBase
         return false;
     }
 }
+
+/// <summary>
+/// Mutes or unmutes ONE recorded channel (system or microphone) of a single video segment —
+/// the "individual sound segment" the user sees as one block on the system or mic lane.
+/// </summary>
+/// <remarks>
+/// Distinct from <see cref="ChangeSegmentAudioModeOperation"/>, which silences every channel
+/// of the segment at once. Touches no positions, so it never asks for a re-flow.
+/// </remarks>
+public class SetSegmentAudioChannelMuteOperation : SegmentEditOperationBase
+{
+    private readonly string _segmentId;
+    private readonly SegmentAudioChannels _channels;
+    private readonly bool _muted;
+
+    private int _index = -1;
+    private bool _applied;
+    private SegmentAudioChannels _previous;
+
+    public override string Description => _muted ? "Mute Segment Audio" : "Unmute Segment Audio";
+
+    /// <param name="segmentId">Id of the video segment to change.</param>
+    /// <param name="channels">Which recorded channel(s) to change.</param>
+    /// <param name="muted"><c>true</c> to silence them on this segment, <c>false</c> to restore them.</param>
+    public SetSegmentAudioChannelMuteOperation(string segmentId, SegmentAudioChannels channels, bool muted)
+    {
+        _segmentId = segmentId ?? throw new ArgumentNullException(nameof(segmentId));
+        _channels = channels;
+        _muted = muted;
+    }
+
+    protected override bool ExecuteCore(TimelineModel model)
+    {
+        _applied = false;
+        if (_channels == SegmentAudioChannels.None) return NothingToDo();
+
+        _index = model.Segments.FindIndex(s => s.Id == _segmentId);
+        if (_index < 0) return NothingToDo();
+        if (model.Segments[_index] is not VideoSegment video) return NothingToDo();
+
+        var next = _muted
+            ? video.MutedAudioChannels | _channels
+            : video.MutedAudioChannels & ~_channels;
+        if (next == video.MutedAudioChannels) return NothingToDo();
+
+        _previous = video.MutedAudioChannels;
+        video.MutedAudioChannels = next;
+        _applied = true;
+        return false;
+    }
+
+    protected override bool UndoCore(TimelineModel model)
+    {
+        if (!_applied) return false;
+        if (_index < 0 || _index >= model.Segments.Count) return false;
+        if (model.Segments[_index] is not VideoSegment video || video.Id != _segmentId) return false;
+
+        video.MutedAudioChannels = _previous;
+        return false;
+    }
+}

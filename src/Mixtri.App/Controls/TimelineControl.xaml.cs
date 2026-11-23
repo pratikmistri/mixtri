@@ -118,6 +118,12 @@ public sealed partial class TimelineControl : UserControl
     public event EventHandler<(string Id, SegmentAudioMode Mode)>? SegmentAudioModeChangeRequested;
 
     /// <summary>
+    /// Raised when ONE recorded channel of a segment is muted or unmuted from its block on the
+    /// system or mic lane (see <see cref="VideoSegment.MutedAudioChannels"/>).
+    /// </summary>
+    public event EventHandler<(string Id, SegmentAudioChannels Channels, bool Muted)>? SegmentAudioChannelMuteRequested;
+
+    /// <summary>
     /// Raised when "Detach audio" is chosen for a video segment: its recorded captures should
     /// become free-standing, movable timeline blocks and the segment itself should go silent.
     /// </summary>
@@ -4697,7 +4703,13 @@ public sealed partial class TimelineControl : UserControl
 
         var menu = new MenuFlyout();
         double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
-        AppendSegmentAudioSection(menu, segment, speed, includeLeadingSeparator: false);
+
+        // The block the user aimed at belongs to ONE channel, so the menu can offer to mute
+        // just that block as well as the whole segment.
+        var lane = ReferenceEquals(canvas, MicTrackCanvas)
+            ? SegmentAudioChannels.Mic
+            : SegmentAudioChannels.System;
+        AppendSegmentAudioSection(menu, segment, speed, includeLeadingSeparator: false, lane: lane);
 
         menu.ShowAt(canvas, pos);
 
@@ -5514,7 +5526,8 @@ public sealed partial class TimelineControl : UserControl
 
                 DrawRecordedAudioBlock(
                     ds, seg, hasWaveform ? wf : null, visual?.WaveformDurationSeconds ?? 0,
-                    waveformColor, envelopeColor, w, h);
+                    waveformColor, envelopeColor, w, h,
+                    isMic ? SegmentAudioChannels.Mic : SegmentAudioChannels.System);
             }
 
             ds.DrawLine(0, centerY, w, centerY, TrackCenterLineColor, 0.5f);
@@ -5602,7 +5615,7 @@ public sealed partial class TimelineControl : UserControl
     /// </remarks>
     private void DrawRecordedAudioBlock(
         CanvasDrawingSession ds, VideoSegment seg, float[]? wf, double waveformDurationSeconds,
-        Color waveformColor, Color envelopeColor, float w, float h)
+        Color waveformColor, Color envelopeColor, float w, float h, SegmentAudioChannels lane)
     {
         double rawX1 = TimeToX(seg.Start);
         double rawX2 = TimeToX(seg.End);
@@ -5615,7 +5628,9 @@ public sealed partial class TimelineControl : UserControl
         float blockH = Math.Max(4f, h - (RecordedAudioBlockPadding * 2));
         float centerY = blockY + (blockH / 2f);
 
-        bool muted = seg.AudioMode == SegmentAudioMode.Muted;
+        // Whole-segment mute, or just this lane's channel muted on this segment.
+        bool muted = seg.AudioMode == SegmentAudioMode.Muted
+            || (seg.MutedAudioChannels & lane) != 0;
         bool isSelected = seg.Id == _selectedSegmentId;
 
         // Tinted from the lane's own waveform colour, so system and mic blocks stay as
@@ -7743,7 +7758,8 @@ public sealed partial class TimelineControl : UserControl
     /// </para>
     /// </remarks>
     private void AppendSegmentAudioSection(
-        MenuFlyout menu, VideoSegment video, double currentSpeed, bool includeLeadingSeparator = true)
+        MenuFlyout menu, VideoSegment video, double currentSpeed, bool includeLeadingSeparator = true,
+        SegmentAudioChannels lane = SegmentAudioChannels.None)
     {
         if (includeLeadingSeparator)
             menu.Items.Add(new MenuFlyoutSeparator());
@@ -7781,6 +7797,25 @@ public sealed partial class TimelineControl : UserControl
         toggle.Click += (_, _) => SegmentAudioModeChangeRequested?.Invoke(
             this, (video.Id, muted ? SegmentAudioMode.TimeStretch : SegmentAudioMode.Muted));
         menu.Items.Add(toggle);
+
+        // Opened from one block on a recorded lane: that block alone can be silenced, leaving
+        // the segment's other channel playing. Hidden while the whole segment is muted — the
+        // segment-wide toggle above is the one that brings its audio back.
+        if (lane != SegmentAudioChannels.None && !muted)
+        {
+            bool laneMuted = (video.MutedAudioChannels & lane) != 0;
+            string laneName = lane == SegmentAudioChannels.Mic ? "microphone" : "system audio";
+            var laneToggle = new MenuFlyoutItem
+            {
+                Text = laneMuted
+                    ? $"Unmute {laneName} in this segment"
+                    : $"Mute only {laneName} in this segment",
+                Icon = new FontIcon { Glyph = laneMuted ? "\uE767" : "\uE74F" },
+            };
+            laneToggle.Click += (_, _) => SegmentAudioChannelMuteRequested?.Invoke(
+                this, (video.Id, lane, !laneMuted));
+            menu.Items.Add(laneToggle);
+        }
 
         var detach = new MenuFlyoutItem
         {

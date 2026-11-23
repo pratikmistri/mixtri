@@ -185,7 +185,11 @@ public sealed class SegmentAudioRenderer
 
             foreach (var folder in keep
                          .Select(p => Path.GetDirectoryName(p))
-                         .Where(d => !string.IsNullOrEmpty(d))
+                         .Where(d => !string.IsNullOrEmpty(d)
+                             // Batches can mix rendered stretch files with native source
+                             // files (appended recordings); only ever prune the cache folder.
+                             && string.Equals(Path.GetFileName(d), CacheFolderName,
+                                 StringComparison.OrdinalIgnoreCase))
                          .Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 removed += PruneCache(folder!, keep, DefaultMaxCacheAge, DefaultMaxCacheBytes);
