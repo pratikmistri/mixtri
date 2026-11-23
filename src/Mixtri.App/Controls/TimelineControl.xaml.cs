@@ -7700,8 +7700,9 @@ public sealed partial class TimelineControl : UserControl
     /// </summary>
     private void SelectAdjacentBaseSegment(TimelineModel model, int direction)
     {
-        var clips = model.Segments.OfType<VideoSegment>()
-            .Where(s => s.TrackIndex == 0)
+        // Every base-track item — videos AND full-frame text slides — so title cards between
+        // videos are reachable too (SelectSegment handles both).
+        var clips = model.BaseSegments
             .OrderBy(s => s.Start)
             .ToList();
         if (clips.Count == 0)
@@ -7736,10 +7737,14 @@ public sealed partial class TimelineControl : UserControl
         SelectSegment(clip.Id);
         PlayheadPosition = clip.Start;
 
-        var text = $"Clip {next + 1} of {clips.Count}, {FormatSpokenTime(clip.Start)} to {FormatSpokenTime(clip.End)}, {FormatSpokenDuration(clip.Duration)}";
-        if (clip.AudioMode == SegmentAudioMode.Muted) text += ", muted";
-        if (clip.SpeedFactor > 0 && Math.Abs(clip.SpeedFactor - 1.0) > 0.001)
-            text += $", speed {clip.SpeedFactor:0.##} times";
+        string kind = clip is TextSlideSegment ? "Title slide" : "Clip";
+        var text = $"{kind} {next + 1} of {clips.Count}, {FormatSpokenTime(clip.Start)} to {FormatSpokenTime(clip.End)}, {FormatSpokenDuration(clip.Duration)}";
+        if (clip is VideoSegment video)
+        {
+            if (video.AudioMode == SegmentAudioMode.Muted) text += ", muted";
+            if (video.SpeedFactor > 0 && Math.Abs(video.SpeedFactor - 1.0) > 0.001)
+                text += $", speed {video.SpeedFactor:0.##} times";
+        }
         AnnounceTimeline(text);
     }
 
@@ -7817,7 +7822,21 @@ public sealed partial class TimelineControl : UserControl
         // Left at 0:00) gets an invisible suffix to make the text differ and be re-read.
         if (text == _lastAnnouncement) text += "\u200B";
         _lastAnnouncement = text;
-        if (LiveAnnouncer is { } live) live.Text = text;
+        if (LiveAnnouncer is not { } live) return;
+        live.Text = text;
+
+        // Setting Text alone does not notify assistive technology: LiveSetting only says HOW
+        // a LiveRegionChanged event is announced, so the event has to be raised explicitly.
+        try
+        {
+            var peer = Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.FromElement(live)
+                ?? Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(live);
+            peer?.RaiseAutomationEvent(Microsoft.UI.Xaml.Automation.Peers.AutomationEvents.LiveRegionChanged);
+        }
+        catch (Exception ex)
+        {
+            Mixtri.Core.Diagnostics.DiagLog.Write("Timeline", $"live region notify failed: {ex.Message}");
+        }
     }
 
     private static bool IsKeyDown(Windows.System.VirtualKey key)

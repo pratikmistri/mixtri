@@ -15,7 +15,7 @@ public sealed class KeyboardTypedTextFilterTests
     [TestMethod]
     public void RecordTypedTextOff_DropsPlainCharacterKeys()
     {
-        foreach (int vk in new[] { 0x41, 0x5A, 0x30, 0x39, 0x20, 0x60, 0xBA, 0xDE, 0xE2 })
+        foreach (int vk in new[] { 0x41, 0x5A, 0x30, 0x39, 0x20, 0x60, 0xBA, 0xDE, 0xE2, 0xC1, 0xC2 })
             Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(vk, false, false, false, false), $"vk {vk:X}");
     }
 
@@ -39,5 +39,7 @@ public sealed class KeyboardTypedTextFilterTests
     {
         Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0x51, true, true, false, false)); // AltGr+Q
         Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0x61, false, true, false, false)); // Alt+Numpad1
+        Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0xC1, true, true, false, false)); // AltGr+ABNT_C1
+        Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0xC2, true, true, false, false)); // AltGr+ABNT_C2
     }
 }

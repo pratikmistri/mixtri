@@ -482,6 +482,7 @@ public sealed class KeyboardHookRecorder : IDisposable
             || vk is >= 0x41 and <= 0x5A
             || vk is >= 0x60 and <= 0x6F
             || vk is >= 0xBA and <= 0xC0
+            || vk is 0xC1 or 0xC2            // ABNT_C1 / ABNT_C2 (Brazilian layout: '/' and '.')
             || vk is >= 0xDB and <= 0xDF
             || vk == 0xE2; // OEM_102 (extra key on ISO layouts)
     }
