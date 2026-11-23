@@ -1,4 +1,5 @@
 using Mixtri.Core.Models;
+using Mixtri.Core.Timeline;
 
 namespace Mixtri.Core.Audio;
 
@@ -69,6 +70,24 @@ public static class RecordedAudio
     /// <summary>Which recorded channel <paramref name="path"/> belongs to.</summary>
     public static AudioMixChannel Classify(string? path)
         => IsMic(path) ? AudioMixChannel.Mic : AudioMixChannel.System;
+
+    /// <summary>
+    /// The per-segment mute flag that governs <paramref name="path"/>
+    /// (see <see cref="VideoSegment.MutedAudioChannels"/>).
+    /// </summary>
+    public static SegmentAudioChannels SegmentChannelFor(string? path)
+        => IsMic(path) ? SegmentAudioChannels.Mic : SegmentAudioChannels.System;
+
+    /// <summary>
+    /// Whether <paramref name="segment"/> silences the recorded file <paramref name="path"/> —
+    /// because the whole segment is muted, or because that file's channel is.
+    /// </summary>
+    public static bool IsMutedOnSegment(VideoSegment segment, string? path)
+    {
+        ArgumentNullException.ThrowIfNull(segment);
+        return segment.AudioMode == SegmentAudioMode.Muted
+            || (segment.MutedAudioChannels & SegmentChannelFor(path)) != 0;
+    }
 
     /// <summary>The mixer channel an inserted track's lane corresponds to.</summary>
     public static AudioMixChannel ChannelFor(AudioTrackKind kind)

@@ -127,6 +127,35 @@ public record VideoSegment : TimelineSegment
     /// speed; the other two only differ once <see cref="SpeedFactor"/> is not 1.0.
     /// </summary>
     public SegmentAudioMode AudioMode { get; set; } = SegmentAudioMode.TimeStretch;
+
+    /// <summary>
+    /// Recorded channels silenced on THIS segment only, independently of each other — the
+    /// timeline draws a segment's system and microphone audio as two separate blocks, and
+    /// each can be muted on its own. <see cref="SegmentAudioMode.Muted"/> still silences
+    /// both. <see cref="SegmentAudioChannels.None"/> (the zero value) keeps projects saved
+    /// before this existed fully audible.
+    /// </summary>
+    public SegmentAudioChannels MutedAudioChannels { get; set; }
+}
+
+/// <summary>
+/// The recorded audio channels a <see cref="VideoSegment"/> can mute individually
+/// (see <see cref="VideoSegment.MutedAudioChannels"/>).
+/// </summary>
+/// <remarks>
+/// Serialized by name like <see cref="SegmentAudioMode"/>, so members must not be renamed.
+/// </remarks>
+[Flags]
+public enum SegmentAudioChannels
+{
+    /// <summary>Nothing muted.</summary>
+    None = 0,
+
+    /// <summary>Captured system/desktop audio (anything that is not a <c>mic_*</c> file).</summary>
+    System = 1,
+
+    /// <summary>Captured microphone audio (<c>mic_*</c> files).</summary>
+    Mic = 2,
 }
 
 /// <summary>

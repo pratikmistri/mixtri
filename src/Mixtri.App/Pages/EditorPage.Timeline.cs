@@ -72,15 +72,16 @@ public sealed partial class EditorPage
                 // they render on its segment and are available like the primary's.
                 GenerateAppendedZoomKeyframes(seg, visual.Cursor);
 
-                // Audio waveforms (system + mic), spanning the file's audio duration
-                var (sys, mic, durSec) = await GenerateFileWaveformsAsync(seg.AudioFilePaths);
+                // Audio waveforms (system + mic), aligned to this recording's VIDEO time through
+                // its own audio offset, spanning every part of the source any segment shows.
+                double sourceSeconds = SourceExtentSeconds(model, seg);
+                var (sys, mic) = await GenerateFileWaveformsAsync(
+                    seg.AudioFilePaths, seg.AudioToVideoOffsetSeconds, sourceSeconds);
                 if (_pageUnloaded || generation != _previewInitGeneration
                     || !ReferenceEquals(model, ViewModel.Model)) return;
                 visual.SystemWaveform = sys;
                 visual.MicWaveform = mic;
-                visual.WaveformDurationSeconds = durSec > 0
-                    ? durSec
-                    : (seg.SourceDuration.TotalSeconds > 0 ? seg.SourceDuration.TotalSeconds : seg.Duration.TotalSeconds);
+                visual.WaveformDurationSeconds = sourceSeconds;
 
                 Timeline.SetSegmentTrackVisual(seg.VideoFilePath!, visual);
             }
@@ -169,39 +170,85 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// Generates system + mic waveform peak arrays for a recording's audio files,
-    /// each spanning the full audio file, plus the (max) audio duration in seconds.
+    /// Generates system + mic waveform peak arrays for a recording's audio files, ALIGNED TO
+    /// THAT RECORDING'S VIDEO TIME: each array spans <c>[0, videoDurationSeconds)</c> of source
+    /// video, exactly like the primary recording's model-level waveforms.
     /// </summary>
-    private static async Task<(float[]? Sys, float[]? Mic, double DurationSec)> GenerateFileWaveformsAsync(
-        IReadOnlyList<string> audioFilePaths)
+    /// <remarks>
+    /// These used to span each raw audio FILE and share one duration (the longer of the two
+    /// files), which drew an appended recording's sound out of step with its picture twice
+    /// over: the recording's own audio→video offset (capture start-up latency, or a mic that
+    /// opened late) was never applied, and a capture shorter than its sibling was stretched
+    /// across the sibling's length. Export and preview both apply the offset per recording
+    /// (<c>ExportAudioPlan.BuildPlacement</c>), so the lane now does too.
+    /// </remarks>
+    private static async Task<(float[]? Sys, float[]? Mic)> GenerateFileWaveformsAsync(
+        IReadOnlyList<string> audioFilePaths, double audioToVideoOffsetSeconds, double videoDurationSeconds)
     {
         const int peaks = 1000;
         return await Task.Run(() =>
         {
             float[]? sys = null, mic = null;
-            double dur = 0;
+            if (videoDurationSeconds <= 0) return (sys, mic);
 
             var valid = audioFilePaths.Where(File.Exists).ToList();
-            if (valid.Count == 0) return (sys, mic, dur);
+            if (valid.Count == 0) return (sys, mic);
 
-            var systemPath = valid.FirstOrDefault(p =>
-                Path.GetFileName(p).StartsWith("system_", StringComparison.OrdinalIgnoreCase));
-            var micPath = valid.FirstOrDefault(p =>
-                Path.GetFileName(p).StartsWith("mic_", StringComparison.OrdinalIgnoreCase));
+            // The shared classifier, so a packaged `<index>_mic_0.wav` (or an imported clip's
+            // `audio.wav`) lands on the same lane its mute and volume apply to.
+            var systemPath = valid.FirstOrDefault(p => !RecordedAudio.IsMic(p));
+            var micPath = valid.FirstOrDefault(p => RecordedAudio.IsMic(p));
 
-            if (systemPath is not null)
-            {
-                try { using var r = new NAudio.Wave.AudioFileReader(systemPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
-                try { sys = AudioWaveformGenerator.GenerateWaveform(systemPath, peaks); } catch { }
-            }
-            if (micPath is not null)
-            {
-                try { using var r = new NAudio.Wave.AudioFileReader(micPath); dur = Math.Max(dur, r.TotalTime.TotalSeconds); } catch { }
-                try { mic = AudioWaveformGenerator.GenerateWaveform(micPath, peaks); } catch { }
-            }
+            // Positive offset: audio pre-roll to skip. Negative: audio started after the
+            // first frame, so the waveform starts with a silent lead.
+            double skipSeconds = Math.Max(0, audioToVideoOffsetSeconds);
+            double leadTime = Math.Max(0, -audioToVideoOffsetSeconds);
 
-            return (sys, mic, dur);
+            sys = BuildAlignedWaveform(
+                systemPath, ProbeAudioSeconds(systemPath), skipSeconds, leadTime, videoDurationSeconds, peaks);
+            mic = BuildAlignedWaveform(
+                micPath, ProbeAudioSeconds(micPath), skipSeconds, leadTime, videoDurationSeconds, peaks);
+
+            return (sys, mic);
         });
+    }
+
+    /// <summary>
+    /// How much of <paramref name="seg"/>'s source video the timeline can show: the
+    /// recording's own length when the project knows it, and never less than the furthest
+    /// source instant any segment cut from that file reaches.
+    /// </summary>
+    private static double SourceExtentSeconds(TimelineModel model, VideoSegment seg)
+    {
+        double extent = 0;
+        foreach (var other in model.Segments.OfType<VideoSegment>())
+        {
+            if (!string.Equals(other.VideoFilePath, seg.VideoFilePath, StringComparison.OrdinalIgnoreCase))
+                continue;
+            extent = Math.Max(extent, (other.SourceStart + other.SourceDuration).TotalSeconds);
+        }
+
+        var source = ProjectService.Instance.CurrentProject?.Sources.FirstOrDefault(s =>
+            string.Equals(s.VideoFilePath, seg.VideoFilePath, StringComparison.OrdinalIgnoreCase));
+        if (source is not null)
+            extent = Math.Max(extent, source.Duration.TotalSeconds);
+
+        return extent > 0 ? extent : seg.Duration.TotalSeconds;
+    }
+
+    /// <summary>Length of an audio file in seconds, or 0 when it cannot be opened.</summary>
+    private static double ProbeAudioSeconds(string? path)
+    {
+        if (path is null) return 0;
+        try
+        {
+            using var reader = new NAudio.Wave.AudioFileReader(path);
+            return reader.TotalTime.TotalSeconds;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     /// <summary>
@@ -685,6 +732,29 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
+    /// Mutes or unmutes one recorded channel (one block on the system or mic lane) of a single
+    /// segment, as an undoable edit.
+    /// </summary>
+    private void OnSegmentAudioChannelMuteRequested(
+        object? sender, (string Id, SegmentAudioChannels Channels, bool Muted) e)
+    {
+        ViewModel.UndoRedoManager.Execute(
+            new SetSegmentAudioChannelMuteOperation(e.Id, e.Channels, e.Muted));
+        Timeline.SelectSegment(e.Id);
+
+        Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+            $"segment {e.Id} {(e.Muted ? "muted" : "unmuted")} {e.Channels} audio");
+
+        // The placed engine bakes its placements in, and the continuous engine re-applies the
+        // segment's channel gains when the playhead next syncs — force both now so a paused
+        // preview is already right when playback resumes.
+        RefreshStretchedAudioIfChanged();
+        _appliedRecordedChannelMutes = null;
+        ApplyRecordedSegmentChannelGains(Timeline.PlayheadPosition);
+        Timeline.Refresh();
+    }
+
+    /// <summary>
     /// Lifts a segment's recorded captures onto the inserted-audio lane as free-standing
     /// blocks, and silences the segment so nothing is heard twice.
     /// </summary>
@@ -716,6 +786,10 @@ public sealed partial class EditorPage
         foreach (var path in paths ?? [])
         {
             if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path)) continue;
+
+            // A channel the user muted on just this segment stays silent: detaching it would
+            // resurrect it as an audible block.
+            if (RecordedAudio.IsMutedOnSegment(video, path)) continue;
 
             sources.Add(new DetachedAudioSource(
                 path,
@@ -1584,6 +1658,7 @@ public sealed partial class EditorPage
             _audioOffsetSeconds = audioOffset;
             _audioPlayer?.Dispose();
             _audioPlayer = new AudioPlaybackEngine();
+            _appliedRecordedChannelMutes = null;
 
             // Filtered by the PERSISTED mute state, not loaded wholesale. Loading
             // `validPaths` here ignored IsSystemAudioMuted/IsMicAudioMuted entirely, so a
@@ -1645,8 +1720,9 @@ public sealed partial class EditorPage
     /// </para>
     /// <para>
     /// Returns <c>null</c> for anything with no primary-recording audio behind it: a text
-    /// slide, a gap, an appended clip (only the primary recording's files are loaded into the
-    /// preview engine), or a position that lands before the audio recording started. Callers
+    /// slide, a gap, an appended clip (only the primary recording's files are loaded into this
+    /// engine — appended audio is placed in output time by <c>ReloadStretchedAudioPlayer</c>),
+    /// or a position that lands before the audio recording started. Callers
     /// treat <c>null</c> as "silence" and pause.
     /// </para>
     /// <para>
@@ -1675,9 +1751,10 @@ public sealed partial class EditorPage
         if (segment is not VideoSegment video)
             return null;
 
-        // Appended recordings carry their own audio files, which the preview engine never
-        // loads (it only opens the primary recording's tracks) — so there is nothing to
-        // position for them, and playing the primary's audio there would be plainly wrong.
+        // Appended recordings carry their own audio files, which this engine never loads (it
+        // only opens the primary recording's tracks); they are placed by the output-time
+        // engine instead (ReloadStretchedAudioPlayer / PlacedSegmentAudio). Playing the
+        // primary's audio here would be plainly wrong.
         if (!string.Equals(video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase))
             return null;
 
@@ -1745,11 +1822,50 @@ public sealed partial class EditorPage
             return;
         }
 
+        ApplyRecordedSegmentChannelGains(videoPosition);
+
         var actual = player.CurrentPosition;
         bool drifted = actual is null || (actual.Value - target).Duration() > AudioDriftTolerance;
 
         if (drifted) player.Seek(target);
         if (!player.IsPlaying) player.Play();
+    }
+
+    /// <summary>
+    /// The per-segment channel mutes last pushed onto the continuous engine's readers, or
+    /// null when its gains are the plain channel mix (a fresh engine, or a mixer change).
+    /// </summary>
+    private SegmentAudioChannels? _appliedRecordedChannelMutes;
+
+    /// <summary>
+    /// Silences, on the continuous primary-recording engine, whichever channel the segment
+    /// under the playhead has muted on its own (one block on the system or mic lane).
+    /// </summary>
+    /// <remarks>
+    /// That engine plays every primary file through one mixer, so a per-segment, per-channel
+    /// mute cannot be expressed by pausing it — the other channel must keep playing. It is a
+    /// gain instead, re-applied only when the playhead crosses into a segment whose mutes
+    /// differ, so steady playback costs one comparison per tick.
+    /// </remarks>
+    private void ApplyRecordedSegmentChannelGains(TimeSpan videoPosition)
+    {
+        if (_audioPlayer is not { IsLoaded: true } player) return;
+
+        var (segment, _) = ViewModel.Model.GetSegmentAtTime(videoPosition);
+        var mutes = segment is VideoSegment video ? video.MutedAudioChannels : SegmentAudioChannels.None;
+        if (_appliedRecordedChannelMutes == mutes) return;
+
+        var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in player.LoadedPaths)
+        {
+            bool muted = (mutes & RecordedAudio.SegmentChannelFor(path)) != 0;
+            volumes[path] = muted
+                ? 0f
+                : (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
+        }
+
+        player.SetVolumesByPath(volumes);
+        _appliedRecordedChannelMutes = mutes;
     }
 
     /// <summary>
@@ -1866,9 +1982,10 @@ public sealed partial class EditorPage
     private int _insertedAudioGeneration;
 
     /// <summary>
-    /// Re-aligns the stretched-segment engine. Like the inserted engine it is positioned in
-    /// OUTPUT time — a rendered segment file starts exactly where its segment starts and
-    /// lasts exactly as long — so the playhead is its clock directly.
+    /// Re-aligns the placed segment-audio engine (time-stretched segments, and every
+    /// native-rate segment of an appended or imported recording). Like the inserted engine it
+    /// is positioned in OUTPUT time — each placement starts exactly where export delays it to
+    /// — so the playhead is its clock directly.
     /// </summary>
     private void SyncStretchedAudioToPlayhead(TimeSpan videoPosition)
     {
@@ -1877,8 +1994,8 @@ public sealed partial class EditorPage
         // The engine's placements are a snapshot taken when it was built; the segment's state
         // is the live truth. Gating here (as well as rebuilding on change) means a rebuild
         // that has not run yet — or one that raced an in-flight render — can never leave the
-        // user hearing re-timed audio over a segment they just muted or detached.
-        if (!HasStretchedAudioAt(videoPosition))
+        // user hearing audio over a segment they just muted or detached.
+        if (!HasPlacedSegmentAudioAt(videoPosition))
         {
             if (player.IsPlaying) player.Pause();
             return;
@@ -1896,31 +2013,46 @@ public sealed partial class EditorPage
     }
 
     /// <summary>
-    /// Whether the segment under <paramref name="videoPosition"/> is one whose audio is
-    /// re-timed: speed-adjusted, and not muted.
+    /// Whether the segment under <paramref name="videoPosition"/> is one whose audio the
+    /// placed engine plays, and is still audible: speed-adjusted (re-timed audio) or cut
+    /// from an appended/imported recording, and not wholly muted.
     /// </summary>
-    private bool HasStretchedAudioAt(TimeSpan videoPosition)
+    private bool HasPlacedSegmentAudioAt(TimeSpan videoPosition)
     {
         var (segment, _) = ViewModel.Model.GetSegmentAtTime(videoPosition);
         if (segment is not VideoSegment video) return false;
         if (video.AudioMode == SegmentAudioMode.Muted) return false;
+        if ((video.MutedAudioChannels & AllRecordedChannels) == AllRecordedChannels) return false;
+
+        bool isPrimary = string.Equals(
+            video.VideoFilePath, PrimaryVideoPath, StringComparison.OrdinalIgnoreCase);
+        if (!isPrimary) return true;
 
         double speed = video.SpeedFactor > 0 ? video.SpeedFactor : 1.0;
         return Math.Abs(speed - 1.0) > SegmentSpeedEpsilon;
     }
 
+    private const SegmentAudioChannels AllRecordedChannels =
+        SegmentAudioChannels.System | SegmentAudioChannels.Mic;
+
     /// <summary>
-    /// (Re)builds the engine that plays time-stretched audio for speed-adjusted segments
-    /// set to <see cref="SegmentAudioMode.TimeStretch"/>.
+    /// (Re)builds the engine that plays recorded audio placed in OUTPUT time: time-stretched
+    /// speed-adjusted segments, and every native-rate segment of an appended or imported
+    /// recording (see <see cref="PlacedSegmentAudio"/>).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>The placements come from <see cref="ExportAudioPlan.Build"/> itself</b>, not from a
-    /// parallel preview-only mapping, and the audio files come from the same
+    /// <b>The placements come from <see cref="ExportAudioPlan"/> itself</b>, not from a
+    /// parallel preview-only mapping, and stretched audio comes from the same
     /// <see cref="SegmentAudioRenderer"/> cache the exporter renders into. Preview therefore
-    /// plays literally the file export muxes, at the position export delays it to — the two
+    /// plays literally the audio export muxes, at the position export delays it to — the two
     /// cannot drift apart, which is the failure mode every other preview/export audio
     /// divergence in this file was caused by.
+    /// </para>
+    /// <para>
+    /// Appended recordings had no preview path at all before this engine took them: the
+    /// continuous engine only loads the primary recording's files, so a recording with sound
+    /// appended to a project whose first clip had none played silent in the editor.
     /// </para>
     /// <para>
     /// Rendering is a background pass (a minutes-long segment takes seconds), and until it
@@ -1933,32 +2065,45 @@ public sealed partial class EditorPage
     {
         _stretchedAudioPlayer?.Dispose();
         _stretchedAudioPlayer = null;
+        _placedAudioBuiltIndices = null;
 
         int generation = ++_stretchedAudioGeneration;
-        _stretchedAudioSignature = BuildStretchedAudioSignature();
 
-        var project = ProjectService.Instance.CurrentProject;
-        var model = ViewModel.Model;
-        if (project is null || model.Segments.Count == 0) return;
-
-        var requests = ExportAudioPlan.Build(project, model, null)
-            .Where(p => p.Stretch is not null)
-            .ToList();
+        var requests = SelectPlacedSegmentAudio();
+        _stretchedAudioSignature = PlacedSegmentAudio.Signature(requests);
+        _placedAudioLayoutSignature = PlacedSegmentAudio.Signature(requests, includeVolume: false);
         if (requests.Count == 0) return;
 
         Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
-            $"stretched audio: rendering {requests.Count} placement(s)");
+            $"placed segment audio: {requests.Count(r => r.Stretch is not null)} stretched, " +
+            $"{requests.Count(r => r.Stretch is null)} native placement(s)");
 
         _ = Task.Run(async () =>
         {
             var renderer = new SegmentAudioRenderer();
             var placements = new List<AudioTimelinePlacement>();
 
-            foreach (var request in requests)
+            // Which request each loaded placement came from, so a fader move can re-level the
+            // engine in place instead of rebuilding it (see RefreshStretchedAudioIfChanged).
+            var builtIndices = new List<int>();
+
+            for (int i = 0; i < requests.Count; i++)
             {
                 if (generation != _stretchedAudioGeneration) return;
 
-                var stretch = request.Stretch!.Value;
+                var request = requests[i];
+                if (request.Stretch is not { } stretch)
+                {
+                    // Native-rate audio of an appended/imported recording: no render needed,
+                    // the source file is played straight from the planned trim.
+                    if (PlacedSegmentAudio.ToTimelinePlacement(request) is { } native)
+                    {
+                        placements.Add(native);
+                        builtIndices.Add(i);
+                    }
+                    continue;
+                }
+
                 string? rendered = await renderer.RenderAsync(
                     request.SourcePath, stretch.SourceStart, stretch.SourceDuration,
                     stretch.Speed, stretch.OutputDuration);
@@ -1972,6 +2117,7 @@ public sealed partial class EditorPage
                 placements.Add(new AudioTimelinePlacement(
                     rendered, request.Delay, TimeSpan.Zero, stretch.OutputDuration,
                     (float)Math.Clamp(request.Volume, 0.0, 1.0)));
+                builtIndices.Add(i);
             }
 
             if (placements.Count == 0) return;
@@ -1985,7 +2131,7 @@ public sealed partial class EditorPage
             catch (Exception ex)
             {
                 Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
-                    $"stretched audio engine failed to load: {ex.Message}");
+                    $"placed segment audio engine failed to load: {ex.Message}");
                 player?.Dispose();
                 return;
             }
@@ -2001,59 +2147,99 @@ public sealed partial class EditorPage
 
                 _stretchedAudioPlayer?.Dispose();
                 _stretchedAudioPlayer = built;
+
+                // LoadPlacements drops placements whose file is missing, so the in-place
+                // re-level is only safe when every built placement actually loaded.
+                _placedAudioBuiltIndices = built.PlacementCount == builtIndices.Count
+                    ? builtIndices
+                    : null;
             });
         });
+    }
+
+    /// <summary>
+    /// The placements the placed engine plays, from the current project and timeline — empty
+    /// when there is nothing to place.
+    /// </summary>
+    private IReadOnlyList<AudioPlacement> SelectPlacedSegmentAudio()
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        var model = ViewModel.Model;
+        if (project is null || model.Segments.Count == 0) return [];
+        return PlacedSegmentAudio.Select(project, model);
     }
 
     /// <summary>Invalidates in-flight builds; see <see cref="ReloadStretchedAudioPlayer"/>.</summary>
     private int _stretchedAudioGeneration;
 
     /// <summary>
-    /// State of the stretched-segment placements as of the last rebuild, so an unrelated edit
-    /// (or an undo of one) does not re-render every speed-adjusted segment.
+    /// State of the placed segment audio as of the last rebuild, so an unrelated edit (or an
+    /// undo of one) does not re-render every speed-adjusted segment.
     /// </summary>
     private string? _stretchedAudioSignature;
 
+    /// <summary>The same as <see cref="_stretchedAudioSignature"/> with every gain left out.</summary>
+    private string? _placedAudioLayoutSignature;
+
     /// <summary>
-    /// Everything the stretched placements are derived from: which segments are stretched,
-    /// where they sit, what source range they cut and how fast they run — plus the recorded
-    /// channel faders, which scale every placement without touching a segment.
+    /// For each placement the live engine loaded, the index of the request it came from; null
+    /// while no engine is published (or when one silently dropped a placement).
     /// </summary>
-    private string BuildStretchedAudioSignature()
-    {
-        var model = ViewModel.Model;
-        var sb = new System.Text.StringBuilder();
+    private List<int>? _placedAudioBuiltIndices;
 
-        sb.Append(model.EffectiveVolume(AudioMixChannel.System)).Append('/')
-          .Append(model.EffectiveVolume(AudioMixChannel.Mic)).Append(';');
-
-        foreach (var segment in model.Segments.OfType<VideoSegment>())
-        {
-            double speed = segment.SpeedFactor > 0 ? segment.SpeedFactor : 1.0;
-            if (Math.Abs(speed - 1.0) <= SegmentSpeedEpsilon) continue;
-
-            // Every audible speed-adjusted segment is re-timed — the mode only decides
-            // whether it sounds at all. Filtering on TimeStretch here would leave a legacy
-            // Native segment out of the signature while ExportAudioPlan still builds a
-            // stretch for it, so its re-renders would never be picked up.
-            if (segment.AudioMode == SegmentAudioMode.Muted) continue;
-
-            sb.Append(segment.Id).Append('|')
-              .Append(segment.Start.Ticks).Append('|')
-              .Append(segment.Duration.Ticks).Append('|')
-              .Append(segment.SourceStart.Ticks).Append('|')
-              .Append(segment.SourceDuration.Ticks).Append('|')
-              .Append(speed).Append(';');
-        }
-
-        return sb.ToString();
-    }
-
-    /// <summary>Re-renders the stretched-segment engine only when its inputs actually changed.</summary>
+    /// <summary>
+    /// Rebuilds the placed segment-audio engine only when its inputs actually changed, and
+    /// re-levels it in place when only gains moved.
+    /// </summary>
+    /// <remarks>
+    /// The recorded-channel faders write straight onto the model and call this on every
+    /// slider tick. Rebuilding for a level change would reopen every WAV roughly thirty times
+    /// a second while dragging — the regression the mix flyout once shipped with — so a change
+    /// that leaves the layout identical only pushes the new gains.
+    /// </remarks>
     private void RefreshStretchedAudioIfChanged()
     {
-        if (BuildStretchedAudioSignature() == _stretchedAudioSignature) return;
+        IReadOnlyList<AudioPlacement> requests;
+        try
+        {
+            requests = SelectPlacedSegmentAudio();
+        }
+        catch (Exception ex)
+        {
+            // Strictly additive to the editor, like the reload below: never let planning
+            // failure escape into the undo/redo or mixer handler that asked for this.
+            Mixtri.Core.Diagnostics.DiagLog.Write("Editor",
+                $"placed segment audio planning failed: {ex.Message}");
+            return;
+        }
+
+        var signature = PlacedSegmentAudio.Signature(requests);
+        if (signature == _stretchedAudioSignature) return;
+
+        if (TryRelevelPlacedAudio(requests))
+        {
+            _stretchedAudioSignature = signature;
+            return;
+        }
+
         TryReloadStretchedAudioPlayer();
+    }
+
+    private bool TryRelevelPlacedAudio(IReadOnlyList<AudioPlacement> requests)
+    {
+        if (_stretchedAudioPlayer is not { IsLoaded: true } player) return false;
+        if (_placedAudioBuiltIndices is not { } indices) return false;
+        if (PlacedSegmentAudio.Signature(requests, includeVolume: false) != _placedAudioLayoutSignature)
+            return false;
+
+        var volumes = new List<float>(indices.Count);
+        foreach (int index in indices)
+        {
+            if (index < 0 || index >= requests.Count) return false;
+            volumes.Add((float)Math.Clamp(requests[index].Volume, 0.0, 1.0));
+        }
+
+        return player.TrySetPlacementVolumes(volumes);
     }
 
     /// <summary>
@@ -2163,6 +2349,11 @@ public sealed partial class EditorPage
                 volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
 
             _audioPlayer!.SetVolumesByPath(volumes);
+
+            // Those are the plain channel gains, so any per-segment channel mute under the
+            // playhead has just been overwritten; let the next sync put it back.
+            _appliedRecordedChannelMutes = null;
+            ApplyRecordedSegmentChannelGains(Timeline?.PlayheadPosition ?? ViewModel.Model.PlayheadPosition);
             return false;
         }
 
@@ -2547,6 +2738,7 @@ public sealed partial class EditorPage
 
         _audioPlayer?.Dispose();
         _audioPlayer = new AudioPlaybackEngine();
+        _appliedRecordedChannelMutes = null;
 
         var paths = GetUnmutedAudioPaths(project);
         if (paths.Count > 0)
