@@ -48,6 +48,13 @@ public sealed class WebcamCaptureEngine : IDisposable
 
     private MediaCapture? _mediaCapture;
     private bool _disposed;
+    private int _failedRaised;
+
+    /// <summary>
+    /// Raised once when the camera fails while recording (unplugged, driver error, record
+    /// limit). The argument is a human-readable reason. May arrive on any thread.
+    /// </summary>
+    public event EventHandler<string>? Failed;
 
     public bool IsRecording { get; private set; }
     public string? OutputFilePath { get; private set; }
@@ -93,6 +100,9 @@ public sealed class WebcamCaptureEngine : IDisposable
         Directory.CreateDirectory(outputFolder);
 
         _mediaCapture = new MediaCapture();
+        _failedRaised = 0;
+        _mediaCapture.Failed += OnMediaCaptureFailed;
+        _mediaCapture.RecordLimitationExceeded += OnRecordLimitationExceeded;
 
         // Only the file THIS attempt creates may be removed on failure: OutputFilePath can
         // still name a previous, successful recording if the engine is started again.
@@ -160,6 +170,7 @@ public sealed class WebcamCaptureEngine : IDisposable
         // must not be asked to stop a second time.
         IsRecording = false;
         LastStopError = null;
+        UnsubscribeFailureEvents(capture);
 
         Task stopTask;
         try
@@ -270,6 +281,7 @@ public sealed class WebcamCaptureEngine : IDisposable
         if (IsRecording && capture is not null)
         {
             IsRecording = false;
+            UnsubscribeFailureEvents(capture);
 
             try
             {
@@ -291,8 +303,35 @@ public sealed class WebcamCaptureEngine : IDisposable
         DisposeMediaCapture();
     }
 
+    private void OnMediaCaptureFailed(MediaCapture sender, MediaCaptureFailedEventArgs e)
+        => RaiseFailed(string.IsNullOrWhiteSpace(e.Message) ? "the camera reported an error" : e.Message);
+
+    private void OnRecordLimitationExceeded(MediaCapture sender)
+        => RaiseFailed("the camera hit its recording limit");
+
+    private void RaiseFailed(string message)
+    {
+        if (!IsRecording || Interlocked.Exchange(ref _failedRaised, 1) != 0)
+            return;
+
+        try { Failed?.Invoke(this, message); }
+        catch (Exception ex) { Debug.WriteLine($"[WebcamCaptureEngine] Failed handler threw: {ex.Message}"); }
+    }
+
+    private void UnsubscribeFailureEvents(MediaCapture? capture)
+    {
+        if (capture is null) return;
+        try
+        {
+            capture.Failed -= OnMediaCaptureFailed;
+            capture.RecordLimitationExceeded -= OnRecordLimitationExceeded;
+        }
+        catch (Exception ex) { Debug.WriteLine($"[WebcamCaptureEngine] Unsubscribe failed: {ex.Message}"); }
+    }
+
     private void DisposeMediaCapture()
     {
+        UnsubscribeFailureEvents(_mediaCapture);
         try { _mediaCapture?.Dispose(); }
         catch (Exception ex) { Debug.WriteLine($"[WebcamCaptureEngine] Dispose failed: {ex.Message}"); }
 

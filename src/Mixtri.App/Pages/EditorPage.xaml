@@ -113,7 +113,9 @@
                         Visibility="Collapsed"
                         PointerPressed="WebcamOverlay_PointerPressed"
                         PointerMoved="WebcamOverlay_PointerMoved"
-                        PointerReleased="WebcamOverlay_PointerReleased" />
+                        PointerReleased="WebcamOverlay_PointerReleased"
+                        PointerCaptureLost="WebcamOverlay_PointerCaptureLost"
+                        PointerCanceled="WebcamOverlay_PointerCanceled" />
             </Canvas>
 
             <!-- Zoom region edit overlay -->

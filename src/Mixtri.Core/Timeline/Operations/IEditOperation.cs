@@ -27,3 +27,19 @@ public interface IEditOperation
     bool ChangedModel => true;
 }
 
+
+/// <summary>
+/// Optional capability for an operation that can absorb a later, closely related operation so a
+/// continuous gesture (a slider drag, a colour-picker sweep) collapses into ONE undo entry.
+/// </summary>
+/// <remarks>
+/// <see cref="UndoRedoManager.Execute"/> executes the new operation first, then — if the top of
+/// the undo stack is mergeable, the redo stack is empty and the new operation changed the model —
+/// offers it to <see cref="TryMergeWith"/>. On <c>true</c> the new operation is NOT pushed:
+/// the receiver must have folded it in so that a single Undo restores the state from before the
+/// first operation and a Redo re-applies the final state.
+/// </remarks>
+public interface IMergeableEditOperation : IEditOperation
+{
+    bool TryMergeWith(IEditOperation next);
+}

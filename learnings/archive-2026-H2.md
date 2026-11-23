@@ -3309,3 +3309,15 @@ the cross-path case. **For motion bugs, print the curve before theorising.**
   - Export: publish retries briefly then falls back to "name (2).ext" instead of deleting a finished file; no absolute transcode deadline, only the no-progress watchdog; staging files older than 6 h are swept at export start.
   - Cache prune: extracted files keep the zip entry's ORIGINAL timestamp, so age must come from the project folder, which `OpenAsync` now stamps on every open; prune only from a lone, non-activation instance.
 - **What didn't work / deferred**: Autosave + crash recovery and single-instance for plain launches were left out — they are features needing UI decisions, not bug fixes. Copying a JPEG per idle slot (the old behaviour) cost GBs for a long still screen.
+
+### 2026-11-23: Tier 2 fixes (visible glitches) from the second full review
+- **Feature/area**: Tier 2 of `docs/CODE_REVIEW_2026-11-23.md` across audio playback, editor, TimelineControl, capture, export/shell and rendering. Stacked on `fix/tier1-data-safety`.
+- **Approaches tried**: Five Sonnet agents with disjoint file ownership (audio / editor / timeline / capture / export+shell) plus render fixes inline, then a read-only compile-check pass. No local build (macOS).
+- **What worked**:
+  - Frame index: `TimeSpan.FromSeconds` truncates to ticks, so `n/fps` lands a hair under frame n and a bare `(int)` cast picks n-1 (~2/3 of export frames duplicated). Floor with a 1e-3-frame tolerance in ONE place (`FrameTimeConverter.TimeToFrameFloor`) and route `VideoFrameReader.GetFrameIndex` through it.
+  - Undo coalescing: generic `IMergeableEditOperation` checked in `UndoRedoManager.Execute` (only when the redo stack is empty and the op changed the model), opt-in per op via a merge key + time window; keep the first op's "before", apply first-then-next on redo.
+  - Audio: compensate output latency inside the engine only (seek target + latency, CurrentPosition - latency) so seek and drift compare can't disagree; move readers parked at EOF quietly instead of ramping the whole mix; per-input 5 ms gain ramp instead of setting `AudioFileReader.Volume`.
+  - Timeline: swallow wheel during drags; track the owning PointerId; Escape aborts; draw handlers are thin try/catch wrappers; cached stroke styles/text formats are recreated lazily after Unloaded disposes them.
+  - Editor: style controls must build from the CURRENT style (`with`), never a fresh record with hard-coded shadow/border; reset paths must CANCEL an in-progress text edit, not commit it into a cleared model.
+  - Keep the undo manager when the timeline instance is unchanged (import/append) — and unsubscribe before re-subscribing `StateChanged` on reload.
+- **What didn't work / deferred**: Window-move cursor offset (needs a cursor sidecar format change), subtitle burn-in (product decision), transition-duration slider merging, per-tick resync in `OnUndoRedoStateChanged`, edge auto-scroll for camera/text/zoom/audio-block drags, blur/OrganicWave edge modes and shadow-opacity double application (need visual verification on Windows).

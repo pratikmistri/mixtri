@@ -293,7 +293,8 @@ public static class AudioImportService
             }
         }
 
-        if (new FileInfo(partialPath).Length == 0)
+        // 44 bytes is a bare WAV header with no samples.
+        if (new FileInfo(partialPath).Length <= 44)
             throw new AudioImportException("Importing the audio produced an empty file.");
     }
 

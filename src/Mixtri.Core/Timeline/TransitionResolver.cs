@@ -247,7 +247,9 @@ public static class TransitionResolver
     /// </summary>
     private static TimeSpan FrozenOutgoingOffset(TimelineSegment outgoing)
     {
-        var offset = outgoing.Duration - TimeSpan.FromTicks(1);
+        // Not one tick: frame lookup tolerates tick truncation, which would snap a one-tick
+        // inset onto the boundary — the first frame AFTER the outgoing segment.
+        var offset = outgoing.Duration - Mixtri.Core.Processing.FrameTimeConverter.InsideBoundaryInset;
         return offset < TimeSpan.Zero ? TimeSpan.Zero : offset;
     }
 

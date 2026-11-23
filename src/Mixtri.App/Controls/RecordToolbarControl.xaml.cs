@@ -217,7 +217,7 @@ public sealed partial class RecordToolbarControl : UserControl
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[RecordToolbar] Picker launch failed: {ex.Message}");
+            ReportPickerFailure(ViewModel.CaptureMode == CaptureMode.Window ? "window" : "region", ex);
         }
     }
 
@@ -288,10 +288,38 @@ public sealed partial class RecordToolbarControl : UserControl
     }
 
     private async void SelectRegionButton_Click(object sender, RoutedEventArgs e)
-        => await LaunchRegionPickerAsync();
+    {
+        try
+        {
+            await LaunchRegionPickerAsync();
+        }
+        catch (Exception ex)
+        {
+            ReportPickerFailure("region", ex);
+        }
+    }
 
     private async void SelectWindowButton_Click(object sender, RoutedEventArgs e)
-        => await LaunchWindowPickerAsync();
+    {
+        try
+        {
+            await LaunchWindowPickerAsync();
+        }
+        catch (Exception ex)
+        {
+            ReportPickerFailure("window", ex);
+        }
+    }
+
+    private void ReportPickerFailure(string kind, Exception ex)
+    {
+        System.Diagnostics.Debug.WriteLine($"[RecordToolbar] {kind} picker failed: {ex.Message}");
+        try { Mixtri.Core.Diagnostics.DiagLog.Write("RecordToolbar", $"{kind} picker failed: {ex}"); }
+        catch { /* logging must never fault a UI handler */ }
+
+        try { InfoMessage?.Invoke(this, $"Could not open the {kind} picker: {ex.Message}"); }
+        catch { /* a subscriber must not fault an async void handler */ }
+    }
 
     private async Task LaunchWindowPickerAsync()
     {

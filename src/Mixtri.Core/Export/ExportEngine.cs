@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Graphics.Canvas;
 using Mixtri.Core.Capture;
+using Mixtri.Core.Diagnostics;
 using Mixtri.Core.Models;
 using Mixtri.Core.Processing;
 using Mixtri.Core.Projects;
@@ -212,29 +213,54 @@ public class ExportEngine
         string publishedPath = outputPath;
         try
         {
-            if (effectiveFormat == VideoFormat.GIF)
+            // Win2D device creation (or an early device loss) can fail on machines without a
+            // usable GPU/driver. Before the first frame has been produced it is safe to retry
+            // once on the WARP software renderer; after frames flowed, a loss is a real failure.
+            var frameWatch = new FrameWatchProgress(progress);
+            try
             {
-                await ExportGifAsync(
-                    project, mouseData, exportComposition,
-                    effectiveSettings, timelineMapper, timeline, jobFiles.StagingOutputPath, progress, ct, scheduler);
+                await RunEncodeAsync(effectiveSettings, frameWatch);
             }
-            else
+            catch (Exception ex) when (!effectiveSettings.ForceSoftwareRendering
+                && !ct.IsCancellationRequested
+                && !frameWatch.FramesProduced
+                && (GpuContext.IsDeviceLoss(ex) || ex is System.Runtime.InteropServices.COMException))
             {
-                using var videoEncoder = new VideoEncoder(effectiveSettings);
-                await videoEncoder.ExportAsync(
-                    project,
-                    mouseData,
-                    exportComposition,
-                    resW, resH,
-                    jobFiles.StagingOutputPath,
-                    timelineMapper,
-                    timeline,
-                    progress,
-                    ct,
-                    superResolutionProvider,
-                    scheduler,
-                    jobFiles.TempVideoPath);
-                warnings.AddRange(videoEncoder.Warnings);
+                DiagLog.Write("Export", $"GPU device unavailable before first frame; retrying with software rendering: {ex.Message}");
+                jobFiles.DeleteOwnedTempFiles();
+                warnings.Clear();
+                if (effectiveFormat != settings.Format)
+                    warnings.Add("WebM is not supported on Windows, so it was saved as MP4");
+                await RunEncodeAsync(effectiveSettings with { ForceSoftwareRendering = true }, progress);
+                warnings.Add("Exported with software rendering");
+            }
+
+            async Task RunEncodeAsync(ExportSettings runSettings, IProgress<ExportProgress>? runProgress)
+            {
+                if (effectiveFormat == VideoFormat.GIF)
+                {
+                    await ExportGifAsync(
+                        project, mouseData, exportComposition,
+                        runSettings, timelineMapper, timeline, jobFiles.StagingOutputPath, runProgress, ct, scheduler);
+                }
+                else
+                {
+                    using var videoEncoder = new VideoEncoder(runSettings);
+                    await videoEncoder.ExportAsync(
+                        project,
+                        mouseData,
+                        exportComposition,
+                        resW, resH,
+                        jobFiles.StagingOutputPath,
+                        timelineMapper,
+                        timeline,
+                        runProgress,
+                        ct,
+                        superResolutionProvider,
+                        scheduler,
+                        jobFiles.TempVideoPath);
+                    warnings.AddRange(videoEncoder.Warnings);
+                }
             }
 
             ct.ThrowIfCancellationRequested();
@@ -253,6 +279,18 @@ public class ExportEngine
         }
 
         return new ExportResult(publishedPath, warnings);
+    }
+
+    /// <summary>Forwards progress and remembers whether any frame was produced yet.</summary>
+    private sealed class FrameWatchProgress(IProgress<ExportProgress>? inner) : IProgress<ExportProgress>
+    {
+        private volatile bool _framesProduced;
+        public bool FramesProduced => _framesProduced;
+        public void Report(ExportProgress value)
+        {
+            if (value.CurrentFrame > 0) _framesProduced = true;
+            inner?.Report(value);
+        }
     }
 
     /// <summary>

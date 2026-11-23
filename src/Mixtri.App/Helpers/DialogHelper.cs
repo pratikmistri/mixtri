@@ -5,6 +5,22 @@ namespace Mixtri_App.Helpers;
 
 public static class DialogHelper
 {
+    /// <summary>
+    /// The theme the app is showing, taken from the root element of the window that owns
+    /// <paramref name="root"/>. A ContentDialog does not inherit the window's
+    /// <c>RequestedTheme</c>, so without this it renders in the system theme even when the
+    /// user picked the opposite one in Settings.
+    /// </summary>
+    public static ElementTheme ThemeOf(XamlRoot? root)
+        => root?.Content is FrameworkElement element ? element.RequestedTheme : ElementTheme.Default;
+
+    /// <summary>Applies the app theme to a dialog whose <c>XamlRoot</c> is already set.</summary>
+    public static ContentDialog WithAppTheme(this ContentDialog dialog)
+    {
+        dialog.RequestedTheme = ThemeOf(dialog.XamlRoot);
+        return dialog;
+    }
+
     public static async Task<bool> ShowConfirmAsync(XamlRoot root, string title, string message)
     {
         var dialog = new ContentDialog
@@ -14,7 +30,8 @@ public static class DialogHelper
             PrimaryButtonText = "Yes",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
-            XamlRoot = root
+            XamlRoot = root,
+            RequestedTheme = ThemeOf(root)
         };
 
         var result = await dialog.ShowAsync();
@@ -28,7 +45,8 @@ public static class DialogHelper
             Title = title,
             Content = message,
             CloseButtonText = "OK",
-            XamlRoot = root
+            XamlRoot = root,
+            RequestedTheme = ThemeOf(root)
         };
 
         await dialog.ShowAsync();
@@ -41,7 +59,8 @@ public static class DialogHelper
             Title = title,
             Content = message,
             CloseButtonText = "OK",
-            XamlRoot = root
+            XamlRoot = root,
+            RequestedTheme = ThemeOf(root)
         };
 
         await dialog.ShowAsync();
@@ -79,6 +98,7 @@ public static class DialogHelper
             Content = panel,
             CloseButtonText = "Cancel",
             XamlRoot = root,
+            RequestedTheme = ThemeOf(root),
         };
         // Closing (via the Cancel button or Esc) requests cancellation; the caller's awaited
         // operation observes the token and is expected to throw OperationCanceledException.

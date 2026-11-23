@@ -418,6 +418,9 @@ public sealed partial class EditorPage : Page
                     Preview.Duration = GetMappedDuration();
                     Timeline.Refresh();
                     UpdateEmptyStateVisibility();
+                    // -= first: the VM now keeps its UndoRedoManager across an import/append
+                    // (same timeline instance), so this may already be subscribed.
+                    ViewModel.UndoRedoManager.StateChanged -= OnUndoRedoStateChanged;
                     ViewModel.UndoRedoManager.StateChanged += OnUndoRedoStateChanged;
                 }
                 catch (Exception ex)
@@ -1821,6 +1824,7 @@ public sealed partial class EditorPage : Page
         {
             var dialog = new ContentDialog
             {
+                RequestedTheme = Mixtri_App.Helpers.DialogHelper.ThemeOf(XamlRoot),
                 Title = "Export in progress",
                 Content = "An export is in progress. Cancel export and leave?",
                 PrimaryButtonText = "Cancel export and leave",

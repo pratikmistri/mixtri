@@ -59,8 +59,18 @@ public class UndoRedoManager
 
         if (!operation.ChangedModel) return;
 
-        Push(_undoStack, operation);
-        _redoStack.Clear();
+        // Coalesce into the previous entry (slider drags etc.). Only when nothing is pending
+        // redo: after an Undo the top of the undo stack is an older edit that the new operation
+        // does not follow directly.
+        bool merged = _redoStack.Count == 0 &&
+            _undoStack.First?.Value is IMergeableEditOperation mergeable &&
+            mergeable.TryMergeWith(operation);
+
+        if (!merged)
+        {
+            Push(_undoStack, operation);
+            _redoStack.Clear();
+        }
         StateChanged?.Invoke(this, EventArgs.Empty);
         EditPerformed?.Invoke(this, EventArgs.Empty);
     }

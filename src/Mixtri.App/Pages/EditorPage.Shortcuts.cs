@@ -763,6 +763,11 @@ public sealed partial class EditorPage
                 HideTextSlidePanel();
                 InvalidatePreview();
             }
+
+            // The source had an audio track but it could not be extracted: say so instead of
+            // leaving the user with a silently mute clip.
+            if (result.AudioWarning is { Length: > 0 } audioWarning)
+                ShowEditorMessage(audioWarning, InfoBarSeverity.Warning);
         }
         catch (OperationCanceledException)
         {

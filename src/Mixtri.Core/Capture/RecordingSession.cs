@@ -128,6 +128,27 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     private Rect? _physicalCropRect;
     private float _recordingDpiScale;
     private volatile bool _captureGateOpen;
+    private volatile bool _firstFrameSeen;
+    private long _gateOpenedTimestamp;
+    private int _noFrameReported;
+    private int _engineErrorReported;
+    private int _webcamFailedReported;
+
+    /// <summary>How long after the gate opens a silent capture is reported to the user.</summary>
+    internal static readonly TimeSpan NoFirstFrameTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// True when the capture gate has been open for at least <paramref name="timeout"/>
+    /// without a single frame arriving (minimized, protected or otherwise non-rendering target).
+    /// </summary>
+    internal static bool IsFirstFrameOverdue(
+        long gateOpenedTimestamp, long nowTimestamp, bool firstFrameSeen, TimeSpan timeout)
+    {
+        if (firstFrameSeen || gateOpenedTimestamp == 0)
+            return false;
+        var elapsed = TimeSpan.FromSeconds((double)(nowTimestamp - gateOpenedTimestamp) / Stopwatch.Frequency);
+        return elapsed >= timeout;
+    }
 
     // Screen-absolute cursor offset: the physical pixel position of the
     // captured frame's top-left corner on the virtual desktop. Used to
@@ -213,6 +234,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
     {
         _audioEngine?.OpenGate();
         _captureGateOpen = true;
+        Volatile.Write(ref _gateOpenedTimestamp, Stopwatch.GetTimestamp());
 
         // Reset timing origins so offsets are measured from when
         // actual recording content begins, not from engine start.
@@ -432,6 +454,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             {
                 try
                 {
+                    _webcamEngine.Failed += OnWebcamFailed;
                     await _webcamEngine.StartAsync(_resolvedWebcamDeviceId!, _sessionFolder);
                 }
                 catch (Exception ex)
@@ -440,6 +463,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
                     RecordFault(new RecordingFault(
                         $"The webcam could not be started, so it was not recorded: {ex.Message}",
                         Exception: ex));
+                    _webcamEngine.Failed -= OnWebcamFailed;
                     try { _webcamEngine.Dispose(); }
                     catch (Exception disposeEx)
                     {
@@ -538,6 +562,7 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             if (_webcamEngine is not null)
             {
                 WebcamStopOutcome outcome;
+                _webcamEngine.Failed -= OnWebcamFailed;
                 try
                 {
                     outcome = await _webcamEngine
@@ -983,6 +1008,8 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         if (!_captureGateOpen)
             return;
 
+        _firstFrameSeen = true;
+
         if (!_acceptFrames)
         {
             // Only frames refused by a stop count: before the first frame there is no writer
@@ -1124,7 +1151,11 @@ public class RecordingSession : IDisposable, IAsyncDisposable
 
     private void OnEngineError(object? sender, string message)
     {
-        Error?.Invoke(this, $"Capture engine error: {message}");
+        // The engine raises this once per failing frame; surface only the first.
+        if (Interlocked.Exchange(ref _engineErrorReported, 1) != 0)
+            return;
+
+        RecordFault(new RecordingFault($"Capture engine error: {message}"));
     }
 
     /// <summary>
@@ -1150,6 +1181,16 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         {
             Debug.WriteLine($"[RecordingSession] CaptureTargetLost handler threw: {ex.Message}");
         }
+    }
+
+    /// <summary>The camera failed or was unplugged mid-recording.</summary>
+    private void OnWebcamFailed(object? sender, string message)
+    {
+        if (Interlocked.Exchange(ref _webcamFailedReported, 1) != 0)
+            return;
+
+        RecordFault(new RecordingFault(
+            $"The camera stopped recording: {message}; the screen recording continues."));
     }
 
     /// <summary>An audio device failed to start or died mid-recording.</summary>
@@ -1242,6 +1283,16 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         if (Interlocked.Increment(ref _statsTicks) % DiskCheckEveryStatsTicks == 0)
             CheckDiskSpaceDuringRecording();
 
+        if (State == RecordingState.Recording
+            && IsFirstFrameOverdue(Volatile.Read(ref _gateOpenedTimestamp), Stopwatch.GetTimestamp(),
+                _firstFrameSeen, NoFirstFrameTimeout)
+            && Interlocked.Exchange(ref _noFrameReported, 1) == 0)
+        {
+            RecordFault(new RecordingFault(
+                "No video frames have been captured yet. The target may be minimized, " +
+                "protected or not drawing; bring it to the front or stop and pick another target."));
+        }
+
         var now = Stopwatch.GetTimestamp();
         var currentFrames = FramesCaptured;
         var deltaFrames = currentFrames - _lastStatsFrameCount;
@@ -1252,13 +1303,20 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         _lastStatsFrameCount = currentFrames;
         _lastStatsTimestamp = now;
 
-        StatsUpdated?.Invoke(this, new RecordingStatsEventArgs
+        try
         {
-            Elapsed = _elapsedWatch.Elapsed,
-            FramesCaptured = currentFrames,
-            DroppedFrames = DroppedFrames,
-            CurrentFps = Math.Round(currentFps, 1),
-        });
+            StatsUpdated?.Invoke(this, new RecordingStatsEventArgs
+            {
+                Elapsed = _elapsedWatch.Elapsed,
+                FramesCaptured = currentFrames,
+                DroppedFrames = DroppedFrames,
+                CurrentFps = Math.Round(currentFps, 1),
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RecordingSession] StatsUpdated handler threw: {ex.Message}");
+        }
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────
@@ -1282,6 +1340,8 @@ public class RecordingSession : IDisposable, IAsyncDisposable
         _keyboardRecorder?.Dispose();
         _keyboardRecorder = null;
 
+        if (_webcamEngine is not null)
+            _webcamEngine.Failed -= OnWebcamFailed;
         _webcamEngine?.Dispose();
         _webcamEngine = null;
 

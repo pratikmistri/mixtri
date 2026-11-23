@@ -225,7 +225,7 @@ public sealed class SegmentEditOperationsTests
 
         var trimmed = (VideoSegment)model.Segments[0];
         var exclusiveOut = trimmed.SourceStart + trimmed.SourceDuration;
-        Assert.AreEqual(exclusiveOut - TimeSpan.FromTicks(1), sourceTime);
+        Assert.AreEqual(exclusiveOut - TrimSegmentEdgeOperation.OutPointPreviewInset, sourceTime);
         Assert.IsTrue(sourceTime < exclusiveOut,
             "The out-point is exclusive, so the previewed frame must fall inside the kept range");
         Assert.AreEqual(trimmed.Duration, duration);
@@ -262,8 +262,8 @@ public sealed class SegmentEditOperationsTests
         new TrimSegmentEdgeOperation(a.Id, fromStart: false, requested).Execute(model);
 
         var trimmed = (VideoSegment)model.Segments[0];
-        Assert.AreEqual(TimeSpan.FromSeconds(13) - TimeSpan.FromTicks(1), sourceTime);
-        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1), sourceTime);
+        Assert.AreEqual(TimeSpan.FromSeconds(13) - TrimSegmentEdgeOperation.OutPointPreviewInset, sourceTime);
+        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TrimSegmentEdgeOperation.OutPointPreviewInset, sourceTime);
         Assert.AreEqual(TimeSpan.FromSeconds(6), duration);
     }
 
@@ -281,7 +281,7 @@ public sealed class SegmentEditOperationsTests
         var trimmed = (VideoSegment)model.Segments[0];
         Assert.AreEqual(TrimSegmentEdgeOperation.MinDuration, duration);
         Assert.AreEqual(trimmed.Duration, duration);
-        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TimeSpan.FromTicks(1), sourceTime);
+        Assert.AreEqual(trimmed.SourceStart + trimmed.SourceDuration - TrimSegmentEdgeOperation.OutPointPreviewInset, sourceTime);
         Assert.IsTrue(sourceTime > trimmed.SourceStart);
     }
 

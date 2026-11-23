@@ -359,6 +359,20 @@ public sealed partial class EditorPage
         _trimEdgePreview = null;
         Preview.HideTrimIndicator();
 
+        // Interactive overlays and edit modes that only make sense with a project loaded.
+        _webcamDragging = false;
+        _hasWebcamOverlay = false;
+        WebcamOverlayRect.Visibility = Visibility.Collapsed;
+        if (_zoomRegionEditMode) ExitZoomRegionEditMode();
+        if (_cursorAnchorEditMode) ExitCursorAnchorEditMode();
+        // Cancel, don't commit: the overlay being edited belongs to the project just cleared,
+        // so HideTextEditOverlay's commit would write into a model that no longer has it.
+        CancelTextEdit();
+        HideTextEditOverlay();
+        _selectedTextOverlayId = null;
+        _selectedCameraSegmentId = null;
+        _selectedTransitionId = null;
+
         Mixtri.Core.Diagnostics.DiagLog.Write("Editor", "timeline emptied; editor reset to zero state");
     }
 

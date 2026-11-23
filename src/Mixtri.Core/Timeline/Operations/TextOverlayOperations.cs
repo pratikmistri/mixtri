@@ -186,11 +186,17 @@ public class RemoveTextOverlayOperation : IEditOperation
 /// sets whatever it needs; a full snapshot of the segment is taken before <paramref name="apply"/>
 /// runs so Undo can restore every field regardless of which ones changed.
 /// </summary>
-public class UpdateTextOverlayPropertiesOperation : IEditOperation
+public class UpdateTextOverlayPropertiesOperation : IMergeableEditOperation
 {
+    /// <summary>Default window within which consecutive same-key edits fold into one undo entry.</summary>
+    public static readonly TimeSpan DefaultMergeWindow = TimeSpan.FromMilliseconds(800);
+
     private readonly string _overlayId;
-    private readonly Action<TextOverlaySegment> _apply;
+    private Action<TextOverlaySegment> _apply;
     private readonly string? _description;
+    private readonly string? _mergeKey;
+    private readonly TimeSpan _mergeWindow;
+    private long _lastTouchedTicks;
 
     private TextOverlaySegment? _previous;
 
@@ -203,12 +209,42 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
     /// <param name="overlayId">Overlay to update.</param>
     /// <param name="apply">Callback that mutates the live segment's properties.</param>
     /// <param name="description">Optional undo-stack label; defaults to "Update Text Overlay".</param>
+    /// <param name="mergeKey">
+    /// Opt-in coalescing: consecutive operations on the same overlay with the same non-null key,
+    /// executed within <paramref name="mergeWindow"/> of each other, share one undo entry.
+    /// </param>
+    /// <param name="mergeWindow">Defaults to <see cref="DefaultMergeWindow"/>.</param>
     public UpdateTextOverlayPropertiesOperation(string overlayId, Action<TextOverlaySegment> apply,
-        string? description = null)
+        string? description = null, string? mergeKey = null, TimeSpan? mergeWindow = null)
     {
         _overlayId = overlayId ?? throw new ArgumentNullException(nameof(overlayId));
         _apply = apply ?? throw new ArgumentNullException(nameof(apply));
         _description = description;
+        _mergeKey = mergeKey;
+        _mergeWindow = mergeWindow ?? DefaultMergeWindow;
+    }
+
+    /// <summary>
+    /// Folds <paramref name="next"/> (already executed) into this entry: this operation keeps its
+    /// own "before" snapshot, and its apply becomes "mine, then next's" so a redo after undo lands
+    /// on the final value.
+    /// </summary>
+    public bool TryMergeWith(IEditOperation next)
+    {
+        if (next is not UpdateTextOverlayPropertiesOperation other) return false;
+        if (_mergeKey is null || other._mergeKey != _mergeKey) return false;
+        if (other._overlayId != _overlayId) return false;
+        if (_previous is null || other._previous is null) return false;
+
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var elapsed = TimeSpan.FromSeconds((now - _lastTouchedTicks) / (double)System.Diagnostics.Stopwatch.Frequency);
+        if (elapsed >= _mergeWindow) return false;
+
+        var first = _apply;
+        var second = other._apply;
+        _apply = o => { first(o); second(o); };
+        _lastTouchedTicks = now;
+        return true;
     }
 
     /// <summary>Convenience for the common case of updating just the overlay's text.</summary>
@@ -225,6 +261,7 @@ public class UpdateTextOverlayPropertiesOperation : IEditOperation
         // before apply() mutates the live segment in place.
         _previous = overlay with { };
         _apply(overlay);
+        _lastTouchedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 
         if (overlay.Start != _previous.Start || overlay.Duration != _previous.Duration)
             model.TextOverlays.Sort((a, b) => a.Start.CompareTo(b.Start));
