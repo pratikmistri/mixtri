@@ -157,7 +157,9 @@ public static class MixtriPackageService
             // save; the poster is presentation only.
             // An unchanged recording keeps the poster the package already holds; decoding
             // frames from a multi-GB MP4 on every text edit is the expensive part of a save.
-            var poster = TryReuseExistingPoster(packagePath, project, entryByPath)
+            // The probe opens the existing package: off the caller's (UI) thread.
+            var poster = await Task.Run(() => TryReuseExistingPoster(packagePath, project, entryByPath), ct)
+                             .ConfigureAwait(false)
                          ?? await TryRenderPosterAsync(project, ct).ConfigureAwait(false);
 
             await Task.Run(() =>

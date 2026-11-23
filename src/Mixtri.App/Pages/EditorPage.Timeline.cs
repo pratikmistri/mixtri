@@ -99,6 +99,10 @@ public sealed partial class EditorPage
     private static readonly Dictionary<string, (DateTime WriteUtc, MouseRecordingData Data)> s_cursorLogCache
         = new(StringComparer.OrdinalIgnoreCase);
 
+    // A cursor log holds every sample and click of a recording; keep only a handful so a long
+    // session does not retain every recording it has ever visited.
+    private const int CursorLogCacheCapacity = 8;
+
     /// <summary>
     /// Parses a cursor log off the UI thread, caching per path + last-write time so
     /// repeated editor (re)constructions don't re-parse unchanged logs.
@@ -115,7 +119,11 @@ public sealed partial class EditorPage
         if (data is not null)
         {
             lock (s_cursorLogCache)
+            {
+                if (!s_cursorLogCache.ContainsKey(path) && s_cursorLogCache.Count >= CursorLogCacheCapacity)
+                    s_cursorLogCache.Remove(s_cursorLogCache.Keys.First());
                 s_cursorLogCache[path] = (stamp, data);
+            }
         }
         return data;
     }
@@ -2475,6 +2483,11 @@ public sealed partial class EditorPage
                 return true;
             }
 
+            // The current engine already holds exactly the audible set, so any background
+            // rebuild still in flight (e.g. a mute that this unmute just reverted) is stale:
+            // retire it before it can publish the old set over this engine.
+            _recordedAudioGeneration++;
+
             var volumes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             foreach (var path in audible)
                 volumes[path] = (float)ViewModel.Model.EffectiveVolume(RecordedAudio.Classify(path));
@@ -2939,7 +2952,8 @@ public sealed partial class EditorPage
         // the pre-edit set and leak the one that superseded it.
         if (generation != _recordedAudioGeneration
             || initGeneration != _previewInitGeneration
-            || _pageUnloaded)
+            || _pageUnloaded
+            || !StillAudible(paths))
         {
             built.Dispose();
             return;
@@ -2962,6 +2976,19 @@ public sealed partial class EditorPage
     /// Returns audio file paths that are currently audible: neither muted nor turned down to
     /// silence, classified per file by <see cref="RecordedAudio.Classify"/>.
     /// </summary>
+    /// <summary>
+    /// Whether <paramref name="paths"/> is still exactly the audible recorded set. A background
+    /// engine build is only published if the mix has not moved on while it was opening.
+    /// </summary>
+    private bool StillAudible(IReadOnlyList<string> paths)
+    {
+        var project = ProjectService.Instance.CurrentProject;
+        if (project is null) return false;
+        var audible = GetUnmutedAudioPaths(project);
+        return audible.Count == paths.Count
+            && audible.SequenceEqual(paths, StringComparer.OrdinalIgnoreCase);
+    }
+
     private List<string> GetUnmutedAudioPaths(Project project)
     {
         var model = ViewModel.Model;
