@@ -153,6 +153,18 @@
                         Header="Microphone"
                         Toggled="MicToggle_Toggled"
                         ToolTipService.ToolTip="Record microphone input" />
+                    <ToggleSwitch
+                        x:Name="RecordTypedTextToggle"
+                        Header="Record typed text"
+                        Toggled="RecordTypedTextToggle_Toggled"
+                        AutomationProperties.Name="Record typed text"
+                        AutomationProperties.HelpText="Shows typed characters in the keystroke overlay. Turn off to record only shortcuts and modifier keys."
+                        ToolTipService.ToolTip="Shows typed characters in the keystroke overlay. Turn off to record only shortcuts and modifier keys (typed text, including passwords, is never saved)." />
+                    <TextBlock
+                        Text="Shows typed characters in the keystroke overlay. Turn off to record only shortcuts and modifier keys (typed text, including passwords, is never saved)."
+                        TextWrapping="Wrap"
+                        Style="{StaticResource CaptionTextBlockStyle}"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
 

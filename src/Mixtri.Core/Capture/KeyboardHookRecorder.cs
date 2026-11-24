@@ -148,6 +148,7 @@ public sealed class KeyboardHookRecorder : IDisposable
     private volatile bool _paused;
     private Thread? _hookThread;
     private uint _hookThreadId;
+    private volatile bool _abortHookThread;
     private readonly ManualResetEventSlim _hookReady = new(false);
 
     // Modifier state tracked across callbacks
@@ -176,6 +177,13 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     public bool IsRecording { get; internal set; }
 
+    /// <summary>
+    /// When false, plain character keys are never recorded (not even as redacted placeholders):
+    /// only modifier keys, shortcut combos and non-text keys survive. Set before
+    /// <see cref="StartRecording"/>. Defaults to true (record everything).
+    /// </summary>
+    public bool RecordTypedText { get; set; } = true;
+
     // ── Recording lifecycle ─────────────────────────────────────────
 
     public void StartRecording()
@@ -189,14 +197,18 @@ public sealed class KeyboardHookRecorder : IDisposable
             _events.Clear();
         }
 
-        _ctrlDown = false;
-        _altDown = false;
-        _shiftDown = false;
-        _winDown = false;
+        // No hook thread is running yet, so this cannot race the callback.
+        _typedTextFilter.Reset(altHeld: false);
+        _typedTextFilterResetPending = false;
+        _modifiers.Clear();
+        ApplyModifierSnapshot();
         _paused = false;
 
         _hookReady.Reset();
+        _abortHookThread = false;
 
+        // A previous session's id must never be the target of an abort for this one.
+        _hookThreadId = 0;
         _hookThread = new Thread(HookThreadProc)
         {
             Name = "KeyboardHookRecorder",
@@ -205,11 +217,17 @@ public sealed class KeyboardHookRecorder : IDisposable
         _hookThread.Start();
 
         if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+        {
+            AbortHookThread();
             throw new InvalidOperationException("Keyboard hook thread failed to start within 5 seconds.");
+        }
 
         if (_hookId == nint.Zero)
-            throw new InvalidOperationException(
-                $"Failed to install keyboard hook. Win32 error: {Marshal.GetLastWin32Error()}");
+        {
+            int error = Marshal.GetLastWin32Error();
+            AbortHookThread();
+            throw new InvalidOperationException($"Failed to install keyboard hook. Win32 error: {error}");
+        }
 
         IsRecording = true;
     }
@@ -225,11 +243,40 @@ public sealed class KeyboardHookRecorder : IDisposable
         _hookThread = null;
     }
 
+    /// <summary>
+    /// Tears down a hook thread that may still be starting up or running. Used when a start
+    /// fails (e.g. the install timed out) and from Dispose, so a late-installing thread can
+    /// never keep its low-level hook and message loop alive forever.
+    /// </summary>
+    private void AbortHookThread()
+    {
+        _abortHookThread = true;
+
+        var thread = _hookThread;
+        _hookThread = null;
+        if (thread is null) return;
+
+        // The thread's message queue may not exist yet, so keep re-posting WM_QUIT until it
+        // exits; the _abortHookThread check in HookThreadProc covers the not-yet-installed case.
+        var deadline = Stopwatch.GetTimestamp() + 2 * Stopwatch.Frequency;
+        while (thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        {
+            uint id = Volatile.Read(ref _hookThreadId);
+            if (id != 0)
+                HookInterop.PostThreadMessage(id, HookInterop.WM_QUIT, 0, 0);
+            if (thread.Join(TimeSpan.FromMilliseconds(100)))
+                break;
+        }
+    }
+
     public void PauseRecording()
     {
         if (!IsRecording)
             throw new InvalidOperationException("Not recording.");
         _paused = true;
+        // Releases arriving while paused are never seen, so press decisions taken before the
+        // pause go stale; the hook thread drops them on its next event.
+        _typedTextFilterResetPending = true;
     }
 
     public void ResumeRecording()
@@ -239,10 +286,13 @@ public sealed class KeyboardHookRecorder : IDisposable
 
         // Modifier keys can change while collection is paused. Rehydrate their current
         // physical state before accepting resumed events.
-        _ctrlDown = IsKeyDown(VK_CONTROL);
-        _altDown = IsKeyDown(VK_MENU);
-        _shiftDown = IsKeyDown(VK_SHIFT);
-        _winDown = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+        // The hook thread ignores events while paused, so it is not touching the tracker.
+        _modifiers.Rehydrate(IsKeyDown);
+        ApplyModifierSnapshot();
+        // Alt still held at resume may be mid-way through an Alt+hex sequence whose Num+ was
+        // pressed while paused: the reset keeps suppressing until Alt is released.
+        _resetWithAltHeld = _altDown;
+        _typedTextFilterResetPending = true;
         _paused = false;
     }
 
@@ -282,6 +332,14 @@ public sealed class KeyboardHookRecorder : IDisposable
         if (_hookId == nint.Zero)
             return;
 
+        // Start was abandoned (timeout) before the hook came up: do not pump messages.
+        if (_abortHookThread)
+        {
+            UnhookWindowsHookEx(_hookId);
+            _hookId = nint.Zero;
+            return;
+        }
+
         while (HookInterop.GetMessage(out HookInterop.MSG msg, nint.Zero, 0, 0))
         {
             HookInterop.TranslateMessage(ref msg);
@@ -300,6 +358,13 @@ public sealed class KeyboardHookRecorder : IDisposable
         {
             if (nCode >= 0 && IsRecording && !_paused)
             {
+                // Pause/resume asks for this; only the hook thread ever touches the filter.
+                if (_typedTextFilterResetPending)
+                {
+                    _typedTextFilterResetPending = false;
+                    _typedTextFilter.Reset(altHeld: _resetWithAltHeld);
+                }
+
                 var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
                 int msg = (int)wParam;
                 int vk = (int)hookData.vkCode;
@@ -307,6 +372,18 @@ public sealed class KeyboardHookRecorder : IDisposable
                 bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
 
                 UpdateModifierState(vk, isDown);
+
+                // Filter on the press; a release is recorded exactly when its press was, so
+                // presses and releases stay balanced (Ctrl+C released after Ctrl would
+                // otherwise leave a recorded "C" down with no up, and a dropped "c" press
+                // would otherwise surface as a lone release).
+                bool record = RecordTypedText
+                    || _typedTextFilter.ShouldRecord(
+                        vk, isDown, _ctrlDown, _altDown, _winDown,
+                        isExtended: (hookData.flags & LLKHF_EXTENDED) != 0);
+
+                if (!record)
+                    return HookInterop.CallNextHookEx(_hookId, nCode, wParam, lParam);
 
                 long ticks = Stopwatch.GetTimestamp();
                 string keyName = MapVirtualKeyToName(vk);
@@ -411,8 +488,47 @@ public sealed class KeyboardHookRecorder : IDisposable
             || vk is >= 0x41 and <= 0x5A
             || vk is >= 0x60 and <= 0x6F
             || vk is >= 0xBA and <= 0xC0
+            || vk is 0xC1 or 0xC2            // ABNT_C1 / ABNT_C2 (Brazilian layout: '/' and '.')
             || vk is >= 0xDB and <= 0xDF
             || vk == 0xE2; // OEM_102 (extra key on ISO layouts)
+    }
+
+    // Typed-text exclusion state (balanced press/release, Alt+hex sequences). Touched only on
+    // the hook thread; other threads ask for a reset through the volatile flag.
+    private readonly TypedTextFilter _typedTextFilter = new();
+    private volatile bool _typedTextFilterResetPending;
+    private volatile bool _resetWithAltHeld;
+
+    // Left and right modifiers tracked separately: releasing LCtrl while RCtrl is still held
+    // must not read as "Ctrl up" (AltGr on many layouts is RCtrl+Alt).
+    private readonly ModifierTracker _modifiers = new();
+    private const uint LLKHF_EXTENDED = 0x01;
+
+    /// <summary>
+    /// Filtering rule for the "Record typed text" setting. With <paramref name="recordTypedText"/>
+    /// true everything is recorded. With it false, any key that can insert text is dropped:
+    /// plain character keys (letters, digits, space, numpad, OEM punctuation; Shift does not
+    /// make one a shortcut), AltGr chords (Ctrl+Alt + character) and Alt+numpad codes.
+    /// Modifier keys, Ctrl/Alt/Win shortcut combos, and non-text keys (function, navigation,
+    /// Enter, Tab, Esc, Backspace, Delete) are kept.
+    /// </summary>
+    internal static bool ShouldRecordKey(
+        int vk, bool isCtrl, bool isAlt, bool isWin, bool recordTypedText, bool isExtended = false)
+    {
+        if (recordTypedText)
+            return true;
+
+        if (IsCharacterKey(vk, isCtrl, isAlt, isWin))
+            return false;
+
+        bool altGrChord = isCtrl && isAlt && !isWin
+            && IsCharacterKey(vk, isCtrl: false, isAlt: false, isWin: false);
+        // Only KEYPAD-originated codes enter Alt+numpad characters. The dedicated navigation
+        // cluster reports the same virtual keys (Left, Home, ...) but with the extended flag,
+        // and Alt+Left / Alt+Home there are ordinary shortcuts.
+        bool altNumpadCode = isAlt && !isCtrl && !isWin && !isExtended && IsAltCodeKey(vk);
+
+        return !altGrChord && !altNumpadCode;
     }
 
     /// <summary>
@@ -503,21 +619,16 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     private void UpdateModifierState(int vk, bool isDown)
     {
-        switch (vk)
-        {
-            case VK_LCONTROL or VK_RCONTROL or VK_CONTROL:
-                _ctrlDown = isDown;
-                break;
-            case VK_LMENU or VK_RMENU or VK_MENU:
-                _altDown = isDown;
-                break;
-            case VK_LSHIFT or VK_RSHIFT or VK_SHIFT:
-                _shiftDown = isDown;
-                break;
-            case VK_LWIN or VK_RWIN:
-                _winDown = isDown;
-                break;
-        }
+        if (_modifiers.Update(vk, isDown))
+            ApplyModifierSnapshot();
+    }
+
+    private void ApplyModifierSnapshot()
+    {
+        _ctrlDown = _modifiers.Ctrl;
+        _altDown = _modifiers.Alt;
+        _shiftDown = _modifiers.Shift;
+        _winDown = _modifiers.Win;
     }
 
     private static bool IsKeyDown(int virtualKey) =>
@@ -597,6 +708,101 @@ public sealed class KeyboardHookRecorder : IDisposable
         if (IsRecording)
             StopRecording();
 
+        // A failed or timed-out start can leave a hook thread behind with IsRecording false.
+        AbortHookThread();
+
         _hookReady.Dispose();
+    }
+}
+
+/// <summary>
+/// Stateful half of the "Record typed text = off" rule, run on the keyboard hook thread.
+/// Presses are judged by <see cref="KeyboardHookRecorder.ShouldRecordKey"/>; a release is
+/// recorded exactly when its press was, so the overlay never sees unbalanced pairs. Alt+hex
+/// input (Alt held, Num+, then hex digits on any keys, with Windows' EnableHexNumpad) types a
+/// character from keys that look like shortcuts, so from Num+ until Alt is released nothing
+/// but Alt itself is recorded.
+/// </summary>
+internal sealed class TypedTextFilter
+{
+    private const int VK_ADD = 0x6B;
+    private readonly HashSet<int> _recordedDown = new();
+    private bool _altHexActive;
+
+    /// <param name="altHeld">
+    /// Alt is down at the moment of the reset (resume). An Alt+hex sequence may have started
+    /// while events were not seen, so suppress conservatively until Alt is released.
+    /// </param>
+    public void Reset(bool altHeld = false)
+    {
+        _recordedDown.Clear();
+        _altHexActive = altHeld;
+    }
+
+    /// <param name="alt">Alt state AFTER this event's modifier update.</param>
+    public bool ShouldRecord(int vk, bool isDown, bool ctrl, bool alt, bool win, bool isExtended)
+    {
+        bool isAltKey = vk is 0x12 or 0xA4 or 0xA5; // VK_MENU, VK_LMENU, VK_RMENU
+
+        if (!isDown)
+        {
+            if (isAltKey && !alt) _altHexActive = false;
+            return _recordedDown.Remove(vk);
+        }
+
+        if (_altHexActive && !isAltKey)
+            return false;
+
+        if (alt && !ctrl && !win && vk == VK_ADD)
+        {
+            _altHexActive = true;
+            return false;
+        }
+
+        bool record = KeyboardHookRecorder.ShouldRecordKey(vk, ctrl, alt, win, recordTypedText: false, isExtended);
+        if (record) _recordedDown.Add(vk);
+        return record;
+    }
+}
+
+/// <summary>
+/// Left/right-aware modifier state for the keyboard hook. Low-level hooks report the sided
+/// virtual keys; the generic codes are treated as the left key.
+/// </summary>
+internal sealed class ModifierTracker
+{
+    private bool _lCtrl, _rCtrl, _lAlt, _rAlt, _lShift, _rShift, _lWin, _rWin;
+
+    public bool Ctrl => _lCtrl || _rCtrl;
+    public bool Alt => _lAlt || _rAlt;
+    public bool Shift => _lShift || _rShift;
+    public bool Win => _lWin || _rWin;
+
+    public void Clear() => _lCtrl = _rCtrl = _lAlt = _rAlt = _lShift = _rShift = _lWin = _rWin = false;
+
+    /// <summary>Applies a key event; returns true when <paramref name="vk"/> was a modifier.</summary>
+    public bool Update(int vk, bool isDown)
+    {
+        switch (vk)
+        {
+            case 0xA2 or 0x11: _lCtrl = isDown; return true;  // VK_LCONTROL / VK_CONTROL
+            case 0xA3: _rCtrl = isDown; return true;           // VK_RCONTROL
+            case 0xA4 or 0x12: _lAlt = isDown; return true;    // VK_LMENU / VK_MENU
+            case 0xA5: _rAlt = isDown; return true;            // VK_RMENU
+            case 0xA0 or 0x10: _lShift = isDown; return true;  // VK_LSHIFT / VK_SHIFT
+            case 0xA1: _rShift = isDown; return true;          // VK_RSHIFT
+            case 0x5B: _lWin = isDown; return true;            // VK_LWIN
+            case 0x5C: _rWin = isDown; return true;            // VK_RWIN
+            default: return false;
+        }
+    }
+
+    /// <summary>Reads the physical state of every sided modifier.</summary>
+    public void Rehydrate(Func<int, bool> isKeyDown)
+    {
+        _lCtrl = isKeyDown(0xA2); _rCtrl = isKeyDown(0xA3);
+        _lAlt = isKeyDown(0xA4); _rAlt = isKeyDown(0xA5);
+        _lShift = isKeyDown(0xA0); _rShift = isKeyDown(0xA1);
+        _lWin = isKeyDown(0x5B); _rWin = isKeyDown(0x5C);
     }
 }

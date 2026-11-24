@@ -354,7 +354,10 @@ public class RecordingSession : IDisposable, IAsyncDisposable
             _mouseRecorder = new MouseHookRecorder();
 
             // Initialize keyboard hook recorder
-            _keyboardRecorder = new KeyboardHookRecorder();
+            _keyboardRecorder = new KeyboardHookRecorder
+            {
+                RecordTypedText = AppSettings.Instance.RecordTypedText,
+            };
 
             // Initialize webcam capture engine (if enabled)
             if (_config.IsWebcamEnabled)

@@ -77,6 +77,17 @@ public static class AudioImportService
         [".mp3", ".m4a", ".wav", ".aac", ".wma", ".flac", ".ogg"];
 
     private const string AudioFileName = "audio.wav";
+
+    /// <summary>
+    /// Extra guidance for formats Windows only decodes with an optional codec. Ogg Vorbis is
+    /// offered in the picker because it works wherever Microsoft's Web Media Extensions are
+    /// installed (most Windows 10/11 machines), but stock or N editions may lack it.
+    /// </summary>
+    internal static string CodecHint(string? extension)
+        => string.Equals(extension, ".ogg", StringComparison.OrdinalIgnoreCase)
+            ? " Ogg files need Microsoft's free \"Web Media Extensions\" from the Microsoft Store; " +
+              "install it, or convert the file to MP3, M4A or WAV."
+            : string.Empty;
     private const string PartialSuffix = ".partial";
 
     /// <summary>Guard against a hung encoder leaving the UI waiting forever on a bad file.</summary>
@@ -202,7 +213,8 @@ public static class AudioImportService
         {
             CleanupImportFolder(importFolder, audioPartial);
             throw new AudioImportException(
-                "The audio could not be imported. It may be in an unsupported or damaged format.",
+                "The audio could not be imported. It may be in an unsupported or damaged format."
+                + CodecHint(Path.GetExtension(sourcePath)),
                 ex);
         }
     }
@@ -238,13 +250,15 @@ public static class AudioImportService
         catch (Exception ex)
         {
             throw new AudioImportException(
-                "The audio could not be prepared for import. Its format may be unsupported.", ex);
+                "The audio could not be prepared for import. Its format may be unsupported."
+                + CodecHint(sourceFile.FileType), ex);
         }
 
         if (!prep.CanTranscode)
         {
             throw new AudioImportException(
-                $"The audio cannot be converted for editing ({prep.FailureReason}).");
+                $"The audio cannot be converted for editing ({prep.FailureReason})."
+                + CodecHint(sourceFile.FileType));
         }
 
         var op = prep.TranscodeAsync();

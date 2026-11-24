@@ -66,6 +66,17 @@ public sealed class AppSettings
         set => Set(nameof(IsMicEnabled), value);
     }
 
+    /// <summary>
+    /// Whether typed characters are written to the recording's keystroke log. Defaults to true
+    /// (an absent stored value, as for existing installs, keeps the old behaviour). When false
+    /// only modifier keys and shortcut combos are recorded.
+    /// </summary>
+    public bool RecordTypedText
+    {
+        get => Get(nameof(RecordTypedText), true);
+        set => Set(nameof(RecordTypedText), value);
+    }
+
     public bool IsWebcamEnabled
     {
         get => Get(nameof(IsWebcamEnabled), false);

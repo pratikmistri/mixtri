@@ -88,6 +88,7 @@ public sealed class MouseHookRecorder : IDisposable
 
     private Thread? _hookThread;
     private uint _hookThreadId;
+    private volatile bool _abortHookThread;
     private readonly ManualResetEventSlim _hookReady = new(false);
 
     private Thread? _shapeThread;
@@ -130,12 +131,15 @@ public sealed class MouseHookRecorder : IDisposable
         _lastMoveTicks = 0;
         _paused = false;
         _hookReady.Reset();
+        _abortHookThread = false;
         _shapeStop.Reset();
         _startTicks = Stopwatch.GetTimestamp();
 
         // Seed the shape; the poller thread keeps it current from here on.
         _currentShape = (int)_shapeResolver.Resolve();
 
+        // A previous session's id must never be the target of an abort for this one.
+        _hookThreadId = 0;
         _hookThread = new Thread(HookThreadProc)
         {
             Name = "MouseHookRecorder",
@@ -145,11 +149,17 @@ public sealed class MouseHookRecorder : IDisposable
 
         // Wait for the hook to be installed before returning.
         if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+        {
+            AbortHookThread();
             throw new InvalidOperationException("Mouse hook thread failed to start within 5 seconds.");
+        }
 
         if (_hookId == nint.Zero)
-            throw new InvalidOperationException(
-                $"Failed to install mouse hook. Win32 error: {Marshal.GetLastWin32Error()}");
+        {
+            int error = Marshal.GetLastWin32Error();
+            AbortHookThread();
+            throw new InvalidOperationException($"Failed to install mouse hook. Win32 error: {error}");
+        }
 
         // Start the shape poller only once the hook is live, so it never outlives a
         // failed start.
@@ -176,6 +186,32 @@ public sealed class MouseHookRecorder : IDisposable
         HookInterop.PostThreadMessage(_hookThreadId, HookInterop.WM_QUIT, 0, 0);
         _hookThread?.Join(timeout: TimeSpan.FromSeconds(2));
         _hookThread = null;
+    }
+
+    /// <summary>
+    /// Tears down a hook thread that may still be starting up or running. Used when a start
+    /// fails (e.g. the install timed out) and from Dispose, so a late-installing thread can
+    /// never keep its low-level hook and message loop alive forever.
+    /// </summary>
+    private void AbortHookThread()
+    {
+        _abortHookThread = true;
+
+        var thread = _hookThread;
+        _hookThread = null;
+        if (thread is null) return;
+
+        // The thread's message queue may not exist yet, so keep re-posting WM_QUIT until it
+        // exits; the _abortHookThread check in HookThreadProc covers the not-yet-installed case.
+        var deadline = Stopwatch.GetTimestamp() + 2 * Stopwatch.Frequency;
+        while (thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+        {
+            uint id = Volatile.Read(ref _hookThreadId);
+            if (id != 0)
+                HookInterop.PostThreadMessage(id, HookInterop.WM_QUIT, 0, 0);
+            if (thread.Join(TimeSpan.FromMilliseconds(100)))
+                break;
+        }
     }
 
     private void StopShapeThread()
@@ -247,6 +283,14 @@ public sealed class MouseHookRecorder : IDisposable
 
         if (_hookId == nint.Zero)
             return;
+
+        // Start was abandoned (timeout) before the hook came up: do not pump messages.
+        if (_abortHookThread)
+        {
+            UnhookWindowsHookEx(_hookId);
+            _hookId = nint.Zero;
+            return;
+        }
 
         // Standard Win32 message pump — required for WH_MOUSE_LL delivery.
         while (HookInterop.GetMessage(out HookInterop.MSG msg, nint.Zero, 0, 0))
@@ -610,6 +654,9 @@ public sealed class MouseHookRecorder : IDisposable
             StopRecording();
         else
             StopShapeThread();
+
+        // A failed or timed-out start can leave a hook thread behind with IsRecording false.
+        AbortHookThread();
 
         _hookReady.Dispose();
         _shapeStop.Dispose();
