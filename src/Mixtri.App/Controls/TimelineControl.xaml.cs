@@ -7751,8 +7751,13 @@ public sealed partial class TimelineControl : UserControl
     private static string FormatSpokenTime(TimeSpan t)
     {
         if (t < TimeSpan.Zero) t = TimeSpan.Zero;
-        int totalSeconds = (int)Math.Floor(t.TotalSeconds);
-        return $"{totalSeconds / 60}:{totalSeconds % 60:00}";
+        // Hundredths keep one-frame nudges (33 ms at 30 fps) and short clips distinguishable;
+        // whole seconds announced "0:00" for every frame of the first second.
+        long hundredths = (long)Math.Floor(t.TotalSeconds * 100);
+        long minutes = hundredths / 6000;
+        double seconds = (hundredths % 6000) / 100.0;
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{minutes}:{seconds:00.00}");
     }
 
     private static string FormatSpokenDuration(TimeSpan d)

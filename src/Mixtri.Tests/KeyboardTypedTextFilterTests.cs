@@ -82,4 +82,34 @@ public sealed class KeyboardTypedTextFilterTests
         Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0x25, false, true, false, false, isExtended: false));
         Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0x64, false, true, false, false, isExtended: false));
     }
+
+    [TestMethod]
+    public void AltHexAcrossPauseResume_StaysSuppressedUntilAltRelease()
+    {
+        var f = new TypedTextFilter();
+        Assert.IsTrue(f.ShouldRecord(0xA4, true, false, true, false, false), "Alt press");
+        Assert.IsFalse(f.ShouldRecord(0x6B, true, false, true, false, false), "Num+ starts hex input");
+        // Pause, then resume with Alt still held.
+        f.Reset(altHeld: true);
+        Assert.IsFalse(f.ShouldRecord(0x41, true, false, true, false, false), "hex digit A after resume");
+        Assert.IsFalse(f.ShouldRecord(0x39, true, false, true, false, false), "hex digit 9 after resume");
+        Assert.IsFalse(f.ShouldRecord(0xA4, false, false, false, false, false), "Alt release (press predates the reset)");
+        Assert.IsTrue(f.ShouldRecord(0x43, true, true, false, false, false), "Ctrl+C after Alt is released");
+    }
+
+    [TestMethod]
+    public void ReleasingOneOfTwoHeldModifiers_KeepsTheModifierDown()
+    {
+        var m = new ModifierTracker();
+        m.Update(0xA2, true);  // LCtrl
+        m.Update(0xA3, true);  // RCtrl
+        m.Update(0xA4, true);  // LAlt
+        m.Update(0xA2, false); // release LCtrl only
+        Assert.IsTrue(m.Ctrl, "RCtrl is still held");
+        Assert.IsTrue(m.Alt);
+        // RCtrl+Alt+Q is AltGr+Q (inserts '@' on German layouts): must be dropped.
+        Assert.IsFalse(KeyboardHookRecorder.ShouldRecordKey(0x51, m.Ctrl, m.Alt, m.Win, false));
+        m.Update(0xA3, false);
+        Assert.IsFalse(m.Ctrl);
+    }
 }

@@ -198,12 +198,10 @@ public sealed class KeyboardHookRecorder : IDisposable
         }
 
         // No hook thread is running yet, so this cannot race the callback.
-        _typedTextFilter.Reset();
+        _typedTextFilter.Reset(altHeld: false);
         _typedTextFilterResetPending = false;
-        _ctrlDown = false;
-        _altDown = false;
-        _shiftDown = false;
-        _winDown = false;
+        _modifiers.Clear();
+        ApplyModifierSnapshot();
         _paused = false;
 
         _hookReady.Reset();
@@ -288,10 +286,12 @@ public sealed class KeyboardHookRecorder : IDisposable
 
         // Modifier keys can change while collection is paused. Rehydrate their current
         // physical state before accepting resumed events.
-        _ctrlDown = IsKeyDown(VK_CONTROL);
-        _altDown = IsKeyDown(VK_MENU);
-        _shiftDown = IsKeyDown(VK_SHIFT);
-        _winDown = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+        // The hook thread ignores events while paused, so it is not touching the tracker.
+        _modifiers.Rehydrate(IsKeyDown);
+        ApplyModifierSnapshot();
+        // Alt still held at resume may be mid-way through an Alt+hex sequence whose Num+ was
+        // pressed while paused: the reset keeps suppressing until Alt is released.
+        _resetWithAltHeld = _altDown;
         _typedTextFilterResetPending = true;
         _paused = false;
     }
@@ -362,7 +362,7 @@ public sealed class KeyboardHookRecorder : IDisposable
                 if (_typedTextFilterResetPending)
                 {
                     _typedTextFilterResetPending = false;
-                    _typedTextFilter.Reset();
+                    _typedTextFilter.Reset(altHeld: _resetWithAltHeld);
                 }
 
                 var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
@@ -497,6 +497,11 @@ public sealed class KeyboardHookRecorder : IDisposable
     // the hook thread; other threads ask for a reset through the volatile flag.
     private readonly TypedTextFilter _typedTextFilter = new();
     private volatile bool _typedTextFilterResetPending;
+    private volatile bool _resetWithAltHeld;
+
+    // Left and right modifiers tracked separately: releasing LCtrl while RCtrl is still held
+    // must not read as "Ctrl up" (AltGr on many layouts is RCtrl+Alt).
+    private readonly ModifierTracker _modifiers = new();
     private const uint LLKHF_EXTENDED = 0x01;
 
     /// <summary>
@@ -614,21 +619,16 @@ public sealed class KeyboardHookRecorder : IDisposable
 
     private void UpdateModifierState(int vk, bool isDown)
     {
-        switch (vk)
-        {
-            case VK_LCONTROL or VK_RCONTROL or VK_CONTROL:
-                _ctrlDown = isDown;
-                break;
-            case VK_LMENU or VK_RMENU or VK_MENU:
-                _altDown = isDown;
-                break;
-            case VK_LSHIFT or VK_RSHIFT or VK_SHIFT:
-                _shiftDown = isDown;
-                break;
-            case VK_LWIN or VK_RWIN:
-                _winDown = isDown;
-                break;
-        }
+        if (_modifiers.Update(vk, isDown))
+            ApplyModifierSnapshot();
+    }
+
+    private void ApplyModifierSnapshot()
+    {
+        _ctrlDown = _modifiers.Ctrl;
+        _altDown = _modifiers.Alt;
+        _shiftDown = _modifiers.Shift;
+        _winDown = _modifiers.Win;
     }
 
     private static bool IsKeyDown(int virtualKey) =>
@@ -729,10 +729,14 @@ internal sealed class TypedTextFilter
     private readonly HashSet<int> _recordedDown = new();
     private bool _altHexActive;
 
-    public void Reset()
+    /// <param name="altHeld">
+    /// Alt is down at the moment of the reset (resume). An Alt+hex sequence may have started
+    /// while events were not seen, so suppress conservatively until Alt is released.
+    /// </param>
+    public void Reset(bool altHeld = false)
     {
         _recordedDown.Clear();
-        _altHexActive = false;
+        _altHexActive = altHeld;
     }
 
     /// <param name="alt">Alt state AFTER this event's modifier update.</param>
@@ -758,5 +762,47 @@ internal sealed class TypedTextFilter
         bool record = KeyboardHookRecorder.ShouldRecordKey(vk, ctrl, alt, win, recordTypedText: false, isExtended);
         if (record) _recordedDown.Add(vk);
         return record;
+    }
+}
+
+/// <summary>
+/// Left/right-aware modifier state for the keyboard hook. Low-level hooks report the sided
+/// virtual keys; the generic codes are treated as the left key.
+/// </summary>
+internal sealed class ModifierTracker
+{
+    private bool _lCtrl, _rCtrl, _lAlt, _rAlt, _lShift, _rShift, _lWin, _rWin;
+
+    public bool Ctrl => _lCtrl || _rCtrl;
+    public bool Alt => _lAlt || _rAlt;
+    public bool Shift => _lShift || _rShift;
+    public bool Win => _lWin || _rWin;
+
+    public void Clear() => _lCtrl = _rCtrl = _lAlt = _rAlt = _lShift = _rShift = _lWin = _rWin = false;
+
+    /// <summary>Applies a key event; returns true when <paramref name="vk"/> was a modifier.</summary>
+    public bool Update(int vk, bool isDown)
+    {
+        switch (vk)
+        {
+            case 0xA2 or 0x11: _lCtrl = isDown; return true;  // VK_LCONTROL / VK_CONTROL
+            case 0xA3: _rCtrl = isDown; return true;           // VK_RCONTROL
+            case 0xA4 or 0x12: _lAlt = isDown; return true;    // VK_LMENU / VK_MENU
+            case 0xA5: _rAlt = isDown; return true;            // VK_RMENU
+            case 0xA0 or 0x10: _lShift = isDown; return true;  // VK_LSHIFT / VK_SHIFT
+            case 0xA1: _rShift = isDown; return true;          // VK_RSHIFT
+            case 0x5B: _lWin = isDown; return true;            // VK_LWIN
+            case 0x5C: _rWin = isDown; return true;            // VK_RWIN
+            default: return false;
+        }
+    }
+
+    /// <summary>Reads the physical state of every sided modifier.</summary>
+    public void Rehydrate(Func<int, bool> isKeyDown)
+    {
+        _lCtrl = isKeyDown(0xA2); _rCtrl = isKeyDown(0xA3);
+        _lAlt = isKeyDown(0xA4); _rAlt = isKeyDown(0xA5);
+        _lShift = isKeyDown(0xA0); _rShift = isKeyDown(0xA1);
+        _lWin = isKeyDown(0x5B); _rWin = isKeyDown(0x5C);
     }
 }
